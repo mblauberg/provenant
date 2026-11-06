@@ -27,6 +27,15 @@ const SEPARATOR: &str = "--";
 const ID_BYTES: usize = 64;
 const REQUEST_DIGEST: &str = "relay_request_digest";
 
+/// A document launch retains its node overrides and inline template definitions.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChildLaunch {
+    pub node: Value,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub templates: std::collections::BTreeMap<String, template::Template>,
+}
+
 /// A lane's request to add one child to its graph.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -54,6 +63,38 @@ pub struct ChildRequest {
     pub idempotency_key: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch: Option<ChildLaunch>,
+}
+
+impl ChildRequest {
+    /// An explicit worktree is an existing binding, not a request to create one.
+    pub fn needs_worktree_provisioning(&self) -> bool {
+        self.writer
+            && self
+                .launch
+                .as_ref()
+                .and_then(|launch| launch.node.get("worktree"))
+                .and_then(Value::as_str)
+                .is_none()
+    }
+
+    /// Whether this launch contains a writer, including below fan-out boundaries.
+    pub fn has_writers(&self) -> bool {
+        fn writes(node: &Value) -> bool {
+            node["access"] == "worktree_write"
+                || ["/composite/nodes", "/loop/body"].iter().any(|pointer| {
+                    node.pointer(pointer)
+                        .and_then(Value::as_array)
+                        .is_some_and(|nodes| nodes.iter().any(writes))
+                })
+        }
+        self.writer
+            || self
+                .launch
+                .as_ref()
+                .is_some_and(|launch| writes(&launch.node))
+    }
 }
 
 /// One graph frame from a lane, tagged by `op`.
@@ -143,6 +184,51 @@ pub fn historical_parent_of_attempt<'a>(
         .map(|node| node.id.as_str())
 }
 
+fn writer_worktree(graph: &str, node: &str, request: &ChildRequest) -> Option<String> {
+    request.writer.then(|| {
+        request
+            .launch
+            .as_ref()
+            .and_then(|launch| launch.node.get("worktree"))
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .unwrap_or_else(|| child_worktree(graph, node))
+    })
+}
+
+/// Honest-stop nodes continue their source's logical work. Follow recorded
+/// lineage rather than stripping a suffix that a user may legitimately name.
+fn logical_parent(checkpoint: &GraphCheckpoint, parent: &str) -> String {
+    let mut current = parent;
+    for _ in 0..checkpoint.expansions.len() {
+        let Some(expansion) = checkpoint.expansions.iter().find(|expansion| {
+            expansion.continuation && expansion.nodes.iter().any(|node| node.id == current)
+        }) else {
+            break;
+        };
+        current = &expansion.source;
+    }
+    current.to_owned()
+}
+
+fn request_key(
+    checkpoint: &GraphCheckpoint,
+    parent: &str,
+    request: &ChildRequest,
+) -> Result<String, PatchError> {
+    CanonicalV1::record_digest(
+        "graph-child-key",
+        1,
+        &(logical_parent(checkpoint, parent), &request.idempotency_key),
+    )
+    .map(|digest| format!("child:{}", digest))
+    .map_err(|error| PatchError {
+        cause: None,
+        code: "invalid",
+        message: error.to_string(),
+    })
+}
+
 /// The earlier receipt for this request's idempotency key, if any. It compares
 /// the submitted request before consulting mutable templates or moving host
 /// bindings, and does not require the parent to be running, so a receipt lost
@@ -159,20 +245,22 @@ pub fn replay_child(
         message,
     };
     let graph_id = document.graph_id.clone();
-    let node = format!("{parent}{SEPARATOR}{}", request.id);
-    let worktree = request.writer.then(|| child_worktree(&graph_id, &node));
     let digest = CanonicalV1::record_digest("fabric-relay-child", 1, request)
         .map_err(|error| invalid(error.to_string()))?
         .to_string();
+    let key = request_key(checkpoint, parent, request)?;
     let Some(record) = checkpoint
         .expansions
         .iter()
         .filter_map(|expansion| expansion.patch.as_ref())
-        .find(|record| record.key.as_deref() == Some(&request.idempotency_key))
+        .find(|record| record.key.as_deref() == Some(key.as_str()))
     else {
         return Ok(None);
     };
-    if record.parent.as_deref() != Some(parent)
+    let original_parent = record.parent.as_deref().unwrap_or_default();
+    let same_parent =
+        logical_parent(checkpoint, original_parent) == logical_parent(checkpoint, parent);
+    if !same_parent
         || record.extra.get(REQUEST_DIGEST).and_then(Value::as_str) != Some(digest.as_str())
     {
         return Err(PatchError {
@@ -181,9 +269,11 @@ pub fn replay_child(
             message: "child idempotency key was used for a different request or parent".into(),
         });
     }
+    let node = format!("{original_parent}{SEPARATOR}{}", request.id);
+    let worktree = writer_worktree(&graph_id, &node, request);
     Ok(Some(ChildReceipt {
         graph_id,
-        parent: parent.into(),
+        parent: original_parent.into(),
         node,
         revision: record.revision,
         replayed: true,
@@ -281,28 +371,39 @@ pub fn admit_child_bound(
     if let Some(receipt) = replay_child(graph.document, graph.checkpoint, parent, request)? {
         return Ok(receipt);
     }
-    let worktree = request.writer.then(|| child_worktree(&graph_id, &node));
+    let worktree = writer_worktree(&graph_id, &node, request);
     let digest = CanonicalV1::record_digest("fabric-relay-child", 1, request)
         .map_err(|error| invalid(error.to_string()))?
         .to_string();
     let mut patch = child_patch(request, worktree.as_deref(), context)?;
+    patch.idempotency_key = Some(request_key(graph.checkpoint, parent, request)?);
     if let Some((branch, commit)) = writer_base {
-        let node = patch
-            .nodes
-            .first_mut()
-            .and_then(Value::as_object_mut)
-            .ok_or_else(|| invalid("child patch requires an object node".into()))?;
-        node.insert(
-            "delivery".into(),
-            serde_json::to_value(provenant_records::run::DeliveryMode::Integrate(
-                branch.into(),
-            ))
-            .map_err(|error| invalid(error.to_string()))?,
-        );
-        node.insert(
-            "source".into(),
-            serde_json::json!({"type":"commit", "commit":commit}),
-        );
+        fn bind_writers(node: &mut Value, branch: &str, commit: &str, provision_root: bool) {
+            let mut boundary = false;
+            for pointer in ["/composite/nodes", "/loop/body"] {
+                if let Some(children) = node.pointer_mut(pointer).and_then(Value::as_array_mut) {
+                    boundary = true;
+                    for child in children {
+                        bind_writers(child, branch, commit, false);
+                    }
+                }
+            }
+            if !boundary && node["access"] == "worktree_write" {
+                if node.get("delivery").is_none_or(Value::is_null) {
+                    node["delivery"] = serde_json::json!(
+                        provenant_records::run::DeliveryMode::Integrate(branch.into())
+                    );
+                }
+                if node.get("source").is_none_or(Value::is_null)
+                    && (provision_root || node.get("worktree").and_then(Value::as_str).is_none())
+                {
+                    node["source"] = serde_json::json!({"type":"commit", "commit":commit});
+                }
+            }
+        }
+        for node in &mut patch.nodes {
+            bind_writers(node, branch, commit, request.needs_worktree_provisioning());
+        }
     }
     {
         let progress = graph
@@ -382,6 +483,47 @@ fn child_patch(
     worktree: Option<&str>,
     context: &PatchContext<'_>,
 ) -> Result<Patch, PatchError> {
+    if let Some(launch) = &request.launch {
+        let library = context
+            .library
+            .with(template::Layer::Inline, &launch.templates)
+            .map_err(|message| PatchError {
+                cause: None,
+                code: "invalid",
+                message,
+            })?;
+        let mut node = launch.node.clone();
+        node["id"] = request.id.clone().into();
+        if let Some(path) = worktree {
+            node["access"] = "worktree_write".into();
+            node["worktree"] = path.into();
+            if !request.write_scope.is_empty() {
+                node["write_scope"] = serde_json::json!(request.write_scope);
+            }
+        }
+        let mut compiled = Compiler {
+            library: &library,
+            resolvers: context.resolvers,
+        }
+        .lower(&node)
+        .map_err(|message| PatchError {
+            cause: None,
+            code: "invalid",
+            message,
+        })?;
+        inherit_child_controls(&mut compiled, request);
+        if request.detached {
+            compiled[DETACHED] = true.into();
+        }
+        return Ok(Patch {
+            schema_version: PATCH_SCHEMA_VERSION,
+            idempotency_key: Some(request.idempotency_key.clone()),
+            reason: request.reason.clone(),
+            templates: launch.templates.clone(),
+            nodes: vec![compiled],
+            ..Default::default()
+        });
+    }
     let mut node = Map::new();
     node.insert("id".into(), request.id.clone().into());
     node.insert("use".into(), request.template.clone().into());
@@ -586,15 +728,19 @@ pub fn cancel_subtree(
         .filter(|node| node.extra.get(DETACHED) == Some(&Value::Bool(true)))
         .map(|node| node.id.as_str())
         .collect();
-    let prefix = format!("{parent}{SEPARATOR}");
+    let logical = logical_parent(checkpoint, parent);
+    let prefix = format!("{logical}{SEPARATOR}");
     let mut result = SubtreeCancel::default();
     let mut changed = false;
     for progress in &mut checkpoint.nodes {
+        if progress.id == parent {
+            continue;
+        }
         let Some(rest) = progress.id.strip_prefix(&prefix) else {
             continue;
         };
         // `parent--a--b` is protected if `parent--a` or `parent--a--b` is detached.
-        let mut ancestor = parent.to_owned();
+        let mut ancestor = logical.clone();
         let protected = rest.split(SEPARATOR).any(|part| {
             ancestor.push_str(SEPARATOR);
             ancestor.push_str(part);
@@ -654,6 +800,15 @@ pub(super) fn settle_subtrees<R: AttemptOwner, J: GraphJournal>(
                 .nodes
                 .iter()
                 .any(|node| node.id == parent && node.state == NodeState::Succeeded);
+            let logical = logical_parent(checkpoint, &parent);
+            if succeeded && checkpoint.nodes.iter().any(|node| {
+                node.id != parent && !node.state.settled()
+                    && logical_parent(checkpoint, &node.id) == logical
+            }) {
+                // An honest-stop continuation owns the same logical children.
+                // Its predecessor settling must not cancel inherited work.
+                continue;
+            }
             if succeeded {
                 // Final patches deliberately schedule work after their producer
                 // completes. Only live relay children share the process lifetime.
@@ -662,7 +817,7 @@ pub(super) fn settle_subtrees<R: AttemptOwner, J: GraphJournal>(
                     .iter()
                     .filter(|expansion| {
                         expansion.patch.as_ref().is_some_and(|record| {
-                            record.parent.as_deref() == Some(parent.as_str())
+                            record.parent.as_deref().is_some_and(|source| logical_parent(checkpoint, source) == logical)
                                 && record.extra.contains_key(REQUEST_DIGEST)
                         })
                     })
@@ -752,11 +907,27 @@ pub(super) fn settle_subtrees<R: AttemptOwner, J: GraphJournal>(
 
 /// Child states visible to their parent, including terminal delivery outcomes.
 pub fn child_states(checkpoint: &GraphCheckpoint, parent: &str) -> Value {
-    let prefix = format!("{parent}--");
+    let logical = logical_parent(checkpoint, parent);
+    let roots: Vec<_> = checkpoint
+        .expansions
+        .iter()
+        .filter(|expansion| {
+            expansion
+                .patch
+                .as_ref()
+                .and_then(|record| record.parent.as_deref())
+                .is_some_and(|source| logical_parent(checkpoint, source) == logical)
+        })
+        .flat_map(|expansion| expansion.nodes.iter().map(|node| &node.id))
+        .collect();
     let children: Vec<_> = checkpoint
         .nodes
         .iter()
-        .filter(|node| node.id.starts_with(&prefix))
+        .filter(|node| {
+            roots
+                .iter()
+                .any(|root| node.id == **root || node.id.starts_with(&format!("{root}--")))
+        })
         .map(|node| {
             serde_json::json!({"node":node.id, "state":node.state,
             "settled":node.state.settled()})

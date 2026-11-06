@@ -1128,6 +1128,17 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
         self.bind_writer_worktree(path)
     }
 
+    fn provision_child_worktree(&mut self, path: &str, source: &str) -> Result<bool, Self::Error> {
+        provenant_cli::fabric::graph_relay::provision_child(
+            &self.factory.context,
+            path,
+            source,
+            self.cancel,
+        )
+        .map(|()| true)
+        .map_err(|_| FacadeError::io("provision writer worktree"))
+    }
+
     fn bound_graph_bases(
         &self,
     ) -> (

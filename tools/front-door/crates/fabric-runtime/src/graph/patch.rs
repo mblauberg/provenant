@@ -378,7 +378,7 @@ fn admit_patch_for_retry(
         parent,
         patch,
         context,
-        retry,
+        Preparation::Live { retry },
     )? {
         Prepared::Replayed(revision) => Ok(Admitted {
             revision,
@@ -482,7 +482,7 @@ fn retry_node_scope(
                 && (node.plan.is_some()
                     || graph.checkpoint.expansions.iter().any(|expansion| {
                         expansion.source == node.id
-                            && expansion.extra.get("final_result") == Some(&Value::Bool(true))
+                            && expansion.closes_producer()
                     }))
     };
     let prefix = format!("{id}--");
@@ -953,6 +953,11 @@ fn scan(patch: &Patch, context: &PatchContext<'_>) -> Result<(), PatchError> {
 
 /// Compile and check a patch against the current expansion without changing
 /// the checkpoint.
+pub(super) enum Preparation<'a> {
+    Live { retry: Option<&'a str> },
+    FinalFragment,
+}
+
 pub(super) fn prepare(
     source: &GraphDocument,
     expanded: &GraphDocument,
@@ -960,8 +965,12 @@ pub(super) fn prepare(
     parent: Option<&PlannedNode>,
     patch: &Patch,
     context: &PatchContext<'_>,
-    retry: Option<&str>,
+    mode: Preparation<'_>,
 ) -> Result<Prepared, PatchError> {
+    let retry = match mode {
+        Preparation::Live { retry } => retry,
+        Preparation::FinalFragment => None,
+    };
     if patch.schema_version != PATCH_SCHEMA_VERSION {
         return Err(PatchError::invalid(format!(
             "patch requires schema_version {PATCH_SCHEMA_VERSION}"
@@ -1017,8 +1026,12 @@ pub(super) fn prepare(
 
     // A planner's catalogue is host-authored and trusted; inline templates
     // are the author's own and get no more authority than raw nodes.
-    let planner = parent.and_then(|node| node.plan.as_ref().map(|spec| (node, spec)));
-    let catalogue: BTreeMap<String, Template> = planner
+    let catalogue_spec = parent.and_then(|node| node.plan.as_ref().map(|spec| (node, spec)));
+    let planner = match mode {
+        Preparation::Live { .. } => None,
+        Preparation::FinalFragment => catalogue_spec,
+    };
+    let catalogue: BTreeMap<String, Template> = catalogue_spec
         .map(|(_, spec)| {
             spec.templates
                 .iter()
@@ -1210,7 +1223,7 @@ pub(super) fn prepare(
     }
 
     let revision = current + 1;
-    let expansion = Expansion {
+    let mut expansion = Expansion {
         extra: Default::default(),
         source: parent.map(|node| node.id.clone()).unwrap_or_default(),
         continuation: false,
@@ -1228,6 +1241,9 @@ pub(super) fn prepare(
             journaled: false,
         }),
     };
+    if matches!(mode, Preparation::FinalFragment) {
+        expansion.extra.insert("final_result".into(), true.into());
+    }
     let mut preview = expanded.clone();
     plans::append(&mut preview, &expansion);
     let mut loop_writers = BTreeMap::new();

@@ -41,7 +41,8 @@ fn invoke(
     let result = (|| -> Result<Value, Box<dyn std::error::Error>> {
         let input = input?;
         if command == "run" && std::env::var_os(provenant_run::PARENT_ATTEMPT_ENV).is_some() {
-            let request = provenant_fabric_mcp::tools::lane_run_request(&input)?;
+            let factory = fabric::read_factory(globals, workers)?;
+            let request = provenant_fabric_runtime::graph::relay::RelayOp::Add(factory.child_request(&input)?);
             if input["explain"] == true {
                 return Ok(serde_json::to_value(request)?);
             }
