@@ -51,10 +51,28 @@ impl Factory {
             .review
             .resolve_panel(&request, None, &[], false)
             .map_err(FacadeError::invalid)?;
-        Ok(BTreeMap::from([(
-            "review-panel".into(),
-            panel.slots.into_iter().map(|slot| slot.lens).collect(),
-        )]))
+        let mut resolvers = BTreeMap::new();
+        let mut lenses = Vec::new();
+        for lens in panel.slots.iter().map(|slot| slot.lens.as_str()).chain([
+            "correctness",
+            "security",
+            "tests",
+            "contract",
+            "design",
+            "adversarial",
+        ]) {
+            let advice = if lens == "tests"
+                && matches!(request.risk_tier.as_deref(), Some("crucial" | "terminal"))
+            {
+                include_str!("../../assets/review-tests-advice.txt")
+            } else {
+                ""
+            };
+            resolvers.insert(format!("review-advice-{lens}"), vec![advice.into()]);
+        }
+        lenses.extend(panel.slots.into_iter().map(|slot| slot.lens));
+        resolvers.insert("review-panel".into(), lenses);
+        Ok(resolvers)
     }
 
     fn relay_document(

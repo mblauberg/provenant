@@ -120,10 +120,14 @@ fn swarm_over_named_areas_is_one_node() {
 #[test]
 fn over_binds_item_in_overrides_and_resolves_named_lists() {
     let library = library();
-    let resolvers = BTreeMap::from([(
-        "review-panel".to_owned(),
-        vec!["security".to_owned(), "tests".to_owned()],
-    )]);
+    let resolvers = BTreeMap::from([
+        (
+            "review-panel".to_owned(),
+            vec!["security".to_owned(), "tests".to_owned()],
+        ),
+        ("review-advice-security".to_owned(), vec![String::new()]),
+        ("review-advice-tests".to_owned(), vec![String::new()]),
+    ]);
     let compiler = Compiler {
         library: &library,
         resolvers: &resolvers,
@@ -147,6 +151,42 @@ fn over_binds_item_in_overrides_and_resolves_named_lists() {
         .compile(&json!({"id": "loose", "use": "task", "brief": "Do ${item}"}))
         .unwrap_err();
     assert!(error.contains("only inside `over`"), "{error}");
+}
+
+#[test]
+fn review_panel_binds_per_lens_resolver_values() {
+    let library = library();
+    let resolvers = BTreeMap::from([
+        (
+            "review-panel".to_owned(),
+            vec!["security".to_owned(), "tests".to_owned()],
+        ),
+        ("review-advice-security".to_owned(), vec![String::new()]),
+        (
+            "review-advice-tests".to_owned(),
+            vec!["mutation guidance".to_owned()],
+        ),
+    ]);
+    let compiler = Compiler {
+        library: &library,
+        resolvers: &resolvers,
+    };
+    let node = compiler
+        .compile(&json!({"id":"panel", "use":"review-panel"}))
+        .unwrap();
+    let panel = node.composite.unwrap();
+    let lenses = &panel.nodes[0].composite.as_ref().unwrap().nodes;
+    assert!(!lenses[0].prompt.contains("mutation guidance"));
+    assert!(lenses[1].prompt.contains("mutation guidance"));
+    let missing = BTreeMap::from([("review-panel".to_owned(), vec!["tests".to_owned()])]);
+    assert!(
+        Compiler {
+            library: &library,
+            resolvers: &missing
+        }
+        .compile(&json!({"id":"panel", "use":"review-panel"}))
+        .is_err()
+    );
 }
 
 #[test]
@@ -356,10 +396,14 @@ fn review_templates_record_the_raising_lens() {
 #[test]
 fn delivery_templates_admit_bounded_review_repairs() {
     let bundled = library();
-    let resolvers = BTreeMap::from([(
-        "review-panel".to_owned(),
-        vec!["security".to_owned(), "tests".to_owned()],
-    )]);
+    let resolvers = BTreeMap::from([
+        (
+            "review-panel".to_owned(),
+            vec!["security".to_owned(), "tests".to_owned()],
+        ),
+        ("review-advice-security".to_owned(), vec![String::new()]),
+        ("review-advice-tests".to_owned(), vec![String::new()]),
+    ]);
     let compiler = Compiler {
         library: &bundled,
         resolvers: &resolvers,

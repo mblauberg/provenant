@@ -618,7 +618,36 @@ impl<'a> Compiler<'a> {
                 ));
             }
             let template = self.library.resolve(&name)?;
-            let with = node.remove("with").unwrap_or(Value::Null);
+            let mut with = node.remove("with").unwrap_or(Value::Null);
+            if let Some(values) = with.as_object_mut() {
+                // A string parameter can bind one launch-time resolver value.
+                // Table parameters retain their literal structure.
+                for (key, value) in values.iter_mut() {
+                    if !template
+                        .parameters
+                        .get(key)
+                        .is_some_and(|parameter| parameter.kind == ParameterKind::String)
+                    {
+                        continue;
+                    }
+                    if let Some(resolver) = value
+                        .as_object()
+                        .filter(|object| object.len() == 1)
+                        .and_then(|object| object.get("resolver"))
+                        .and_then(Value::as_str)
+                    {
+                        let items = self.resolvers.get(resolver).ok_or_else(|| {
+                            format!("resolver @{resolver} is not available at this launch")
+                        })?;
+                        if items.len() != 1 {
+                            return Err(format!(
+                                "resolver @{resolver} must return one parameter value"
+                            ));
+                        }
+                        *value = Value::String(items[0].clone());
+                    }
+                }
+            }
             let mut parameters = template.bind(&name, &with)?;
             if name == "review-repair"
                 && with.get("lenses").is_none()
@@ -875,8 +904,25 @@ impl<'a> Compiler<'a> {
                     "name": "repair-slice", "brief": prompt, "access": access, "node": fix
                 }]);
                 children[2]["plan"]["wire_exports"] = Value::Bool(true);
-                children[2]["plan"]["resolvers"] =
-                    serde_json::json!({"review-panel": parameters["lenses"]});
+                let mut resolvers = self.resolvers.clone();
+                let lenses = parameters["lenses"]
+                    .as_array()
+                    .ok_or("repair lenses must be a list")?
+                    .iter()
+                    .map(|value| {
+                        value
+                            .as_str()
+                            .map(str::to_owned)
+                            .ok_or("repair lens must be a string")
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                for lens in &lenses {
+                    resolvers
+                        .entry(format!("review-advice-{lens}"))
+                        .or_insert_with(|| vec![String::new()]);
+                }
+                resolvers.insert("review-panel".into(), lenses);
+                children[2]["plan"]["resolvers"] = serde_json::json!(resolvers);
             }
             let single_review = name == "review-panel"
                 && self.library.layer(name) == Some(Layer::Bundled)

@@ -4,7 +4,7 @@
 doc = "Review through the host-selected lenses, then reconcile findings."
 exports = [{ node = "synthesis", outputs = ["result", "findings", "verdict"] }]
 nodes = [
-  { id = "lenses", use = "review", over = "@review-panel", with = { lens = "${item}" }, required_verdict = "VERDICT: PASS" },
+  { id = "lenses", use = "review", over = "@review-panel", with = { lens = "${item}", advice = { resolver = "review-advice-${item}" } }, required_verdict = "VERDICT: PASS" },
   { id = "synthesis", use = "synthesise", after = ["lenses"], require_findings = true, required_verdict = "VERDICT: PASS", inputs = [{ node = "lenses", outputs = ["result", "findings"] }] },
 ]
 
@@ -119,7 +119,7 @@ write_scope = { type = "list", default = [] }
 doc = "Collect qualified findings without treating reported defects as an execution failure."
 exports = [{ node = "synthesis", outputs = ["result", "findings", "verdict"] }]
 nodes = [
-  { id = "lenses", use = "review", over = "@review-panel", with = { lens = "${item}" } },
+  { id = "lenses", use = "review", over = "@review-panel", with = { lens = "${item}", advice = { resolver = "review-advice-${item}" } } },
   { id = "synthesis", use = "synthesise", after = ["lenses"], require_findings = true, inputs = [{ node = "lenses", outputs = ["result", "findings"] }], brief = "Reconcile every review, retaining every qualified finding with its lens, severity, location, evidence and proposed_fix. End with VERDICT: PASS only when every lens passed and no blocker remains; otherwise VERDICT: FAIL." },
 ]
 
