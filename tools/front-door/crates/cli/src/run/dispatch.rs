@@ -3,9 +3,11 @@ use super::*;
 /// The main CLI path reuses admission, managed worktrees and bounded waits.
 pub fn run(mut command: Dispatch, edge: &Edge<'_>) -> Reply {
     if std::env::var_os(run::PARENT_ATTEMPT_ENV).is_some() {
-        return run_in_lane(&command, |op, cancel, within| {
-            crate::fabric::graph_relay::from_lane(op, cancel, within)
-        });
+        return run_in_lane(
+            &command,
+            crate::fabric::graph_relay::from_lane,
+            crate::fabric::graph_relay::wait_for_children,
+        );
     }
     if let Err(fail) = require_explicit_target(&command, edge.cwd) {
         return reply("run", Err(fail));
@@ -71,6 +73,7 @@ fn run_in_lane(
         &CancelToken,
         Duration,
     ) -> Result<Value, provenant_fabric_mcp::tools::ServiceError>,
+    wait: impl FnOnce(&CancelToken, Duration) -> Result<Value, provenant_fabric_mcp::tools::ServiceError>,
 ) -> Reply {
     let result = (|| {
         let op = lane_add(command)?;
@@ -83,12 +86,18 @@ fn run_in_lane(
             ));
         }
         let cancel = CancelToken::new();
-        let value = send(
+        let mut value = send(
             &op,
             &cancel,
             Duration::from_secs(command.wait.unwrap_or(55).max(1)),
         )
         .map_err(|error| Fail::new(Status::Refused, ErrorKind::Refused, error.to_string()))?;
+        if let Some(seconds) = command.wait {
+            match wait(&cancel, Duration::from_secs(seconds)) {
+                Ok(states) => value["wait"] = states,
+                Err(error) => value["observation_error"] = json!(error.to_string()),
+            }
+        }
         let human = format!(
             "graph {} node {}\n",
             value["graph_id"].as_str().unwrap_or("?"),
@@ -3311,7 +3320,7 @@ mod graph_launch_tests {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("brief");
         std::fs::write(&path, "Implement the scoped change").unwrap();
-        let command = command(
+        let mut command = command(
             &path,
             &[
                 "--route",
@@ -3324,6 +3333,7 @@ mod graph_launch_tests {
                 "child-test",
             ],
         );
+        command.wait = None;
         let result = run_in_lane(&command, |op, _, _| {
             let provenant_fabric_runtime::graph::relay::RelayOp::Add(child) = op else {
                 panic!("add operation");
@@ -3335,10 +3345,50 @@ mod graph_launch_tests {
             assert_eq!(child.write_scope, ["src"]);
             assert_eq!(child.idempotency_key, "child-test");
             Ok(json!({"graph_id":"parent-graph", "node":"parent--child", "revision":2}))
-        });
+        }, |_, _| panic!("no wait requested"));
         assert!(result.result.error.is_none());
         assert_eq!(result.result.data["graph_id"], "parent-graph");
         assert_eq!(result.result.data["revision"], 2);
+    }
+
+    #[test]
+    fn lane_child_wait_uses_requested_budget_and_retains_admission_on_timeout() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("brief");
+        std::fs::write(&path, "Map the affected module").unwrap();
+        let command = command(&path, &["--wait", "7s"]);
+        for times_out in [false, true] {
+            let admitted = std::cell::Cell::new(false);
+            let result = run_in_lane(
+                &command,
+                |_, _, _| {
+                    admitted.set(true);
+                    Ok(json!({"graph_id":"parent-graph", "node":"parent--child", "revision":2}))
+                },
+                |_, within| {
+                    assert!(admitted.get(), "wait follows child admission");
+                    assert_eq!(within, Duration::from_secs(7));
+                    if times_out {
+                        Err(provenant_fabric_mcp::tools::ServiceError::Cli {
+                            code: "timeout".into(),
+                            message: "child wait timed out".into(),
+                            data: Value::Null,
+                        })
+                    } else {
+                        Ok(json!({"children":[{"node":"parent--child", "settled":true}]}))
+                    }
+                },
+            );
+            assert!(result.result.error.is_none());
+            assert_eq!(result.result.data["graph_id"], "parent-graph");
+            assert_eq!(result.result.data["node"], "parent--child");
+            assert_eq!(result.result.data["revision"], 2);
+            if times_out {
+                assert!(result.result.data.get("observation_error").is_some());
+            } else {
+                assert_eq!(result.result.data["wait"]["children"][0]["settled"], true);
+            }
+        }
     }
 
     #[test]
@@ -3346,8 +3396,8 @@ mod graph_launch_tests {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("brief");
         std::fs::write(&path, "Map the affected module").unwrap();
-        let command = command(&path, &["--use", "explore", "--explain"]);
-        let result = run_in_lane(&command, |_, _, _| panic!("explain must not send"));
+        let command = command(&path, &["--use", "explore", "--explain", "--wait", "7s"]);
+        let result = run_in_lane(&command, |_, _, _| panic!("explain must not send"), |_, _| panic!("explain must not wait"));
         assert!(result.result.error.is_none());
         assert_eq!(result.result.data["op"], "add");
         assert_eq!(result.result.data["use"], "explore");
