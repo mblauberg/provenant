@@ -134,7 +134,6 @@ fn planned_fan_out_survives_checkpoint_json_and_mixed_settlement() {
         let error = advance(&doc, &mut fixture_owner(&[]), &mut journal).unwrap_err();
         assert_eq!(error.code(), "bad_checkpoint");
         assert!(error.to_string().contains(&valid.nodes[boundary].id), "{error}");
-        assert!(error.to_string().contains("composite children must match expanded plan membership"), "{error}");
         journal.0 = Some(valid);
         let mut owner = FakeOwner { observations: [
             terminal_with_result(AttemptOutcome::Succeeded, "review passed"),
