@@ -1984,13 +1984,16 @@ impl RunStore {
                             ),
                             _ => unreachable!(),
                         };
-                        // A refusal that follows a cancel request is the
-                        // cancel taking effect, not a launch failure.
+                        // Cancellation decides the outcome, but an independent
+                        // preparation failure remains evidence for the chair.
                         let cancelled = self.attempt_dir(run, id, false).is_ok_and(|attempt| {
                             crate::store::cancel_requested(&attempt, Self::scope(&record))
                         });
                         let (outcome, reason) = if cancelled {
-                            (Outcome::Cancelled, "cancelled before launch".to_owned())
+                            (
+                                Outcome::Cancelled,
+                                format!("cancelled before launch; {reason}"),
+                            )
                         } else {
                             (Outcome::Rejected, reason.clone())
                         };

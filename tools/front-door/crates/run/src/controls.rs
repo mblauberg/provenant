@@ -672,6 +672,84 @@ mod reboot_tests {
     }
 
     #[test]
+    fn a_handed_off_launcher_is_not_reaped_as_an_unlaunched_attempt()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let (_temp, store, run, id) = starting_store()?;
+        let clock = crate::tests::clock();
+        let cancel = provenant_core::CancelToken::new();
+        let call = crate::tests::call(&clock, &cancel);
+        let attempt = store.attempt_dir(run, id, false)?;
+        // The launcher no longer holds writer.lock after handing custody to
+        // the guardian. Its durable launch evidence rules out prelaunch death.
+        drop(attempt.try_lock(
+            std::ffi::OsStr::new("writer.lock"),
+            provenant_os::fs::LockMode::Exclusive,
+        )?);
+        crate::artifacts::seal(&attempt, "launch.json", b"{}", RECORD_LIMIT)?;
+        assert!(!store.launcher_gone(&store.record(id, &call)?, &attempt, true, &call));
+        assert_eq!(
+            store.reap_with(&call, |_, _| panic!(
+                "handed-off launcher must not be reaped"
+            ))?,
+            0
+        );
+        assert!(matches!(
+            store.record(id, &call)?.state,
+            AttemptState::Starting { .. }
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn launcher_death_is_proved_in_its_worktree_fence()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let (_temp, store, run, id) = starting_store()?;
+        let clock = crate::tests::clock();
+        let cancel = provenant_core::CancelToken::new();
+        let call = crate::tests::call(&clock, &cancel);
+        let record = store.record(id, &call)?;
+        let attempt = store.attempt_dir(run, id, false)?;
+        let slot = store
+            .writer_registry
+            .join("worktrees")
+            .join(record.project_id.to_string())
+            .join("lane");
+        std::fs::create_dir_all(&slot)?;
+        let held = provenant_supervisor::fixture::acquire_writer(
+            provenant_os::fs::Directory::open_anchor(&slot)?,
+            RunStore::scope(&record),
+            call.lock_budget(),
+            &cancel,
+            &clock,
+        )?;
+        assert_eq!(store.writer_fences()?.len(), 1);
+        // The attempt itself has no lock; only its fenced slot can prove life.
+        assert!(!store.launcher_gone(&record, &attempt, true, &call));
+        assert_eq!(
+            store.reap_with(&call, |_, _| panic!("live fence holder must not be reaped"))?,
+            0
+        );
+        drop(held);
+        assert!(store.launcher_gone(&record, &attempt, false, &call));
+        assert_eq!(store.reap_with(&call, |_, _| Ok(()))?, 1);
+        store.reconcile_with_observer(
+            run,
+            &crate::dispatch_tests::Fake::default(),
+            &call,
+            &SystemProcessObserver,
+        )?;
+        assert!(matches!(
+            store.record(id, &call)?.state,
+            AttemptState::Terminal {
+                outcome: Outcome::Rejected,
+                ..
+            }
+        ));
+        assert!(store.writer_fences()?.is_empty());
+        Ok(())
+    }
+
+    #[test]
     fn a_running_attempt_with_no_guardian_is_stale_and_reaped()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
