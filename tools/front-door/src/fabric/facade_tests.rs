@@ -3866,7 +3866,7 @@ esac
         for (id, reference, expected) in [("review-base", "old-review", base_text.as_str()), ("empty-review-base", "", head.as_str())] {
             let path = fixture.rig.project.join(format!("{id}.json"));
             std::fs::write(&path, serde_json::to_vec(&serde_json::json!({
-                "schema_version":2, "graph_id":id, "review_base":reference,
+                "schema_version":2, "graph_id":id, "template_library":{}, "review_base":reference,
                 "nodes":[{"id":"lens","prompt":"review","access":"read_only", "source":{"type":"commit","commit":head}, "route":{"adapter":"fixture","model":"fixture/model"}}]
             }))?)?;
             let result = factory.graph(GraphInput::Run { extra: Default::default(), document: path }, budget, &cancel)?;
