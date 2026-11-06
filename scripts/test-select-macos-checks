@@ -39,7 +39,8 @@ run_selector() {
 }
 
 result=$(run_selector)
-test "$result" = 'run_macos=false'
+test "$result" = 'run_macos=false
+run_rust=true'
 grep -F 'skills/topic.md' "$tmp/log" >/dev/null
 grep -F 'Selected run_macos=false' "$tmp/log" >/dev/null
 if grep -F 'tools/front-door/main.rs' "$tmp/log" >/dev/null; then
@@ -55,7 +56,8 @@ git -C "$repo" add .
 git -C "$repo" commit -qm 'update native inventory'
 head=$(git -C "$repo" rev-parse HEAD)
 result=$(run_selector)
-test "$result" = 'run_macos=true'
+test "$result" = 'run_macos=true
+run_rust=true'
 
 # A topic change under tools/front-door/ selects macOS checks.
 mkdir -p "$repo/tools/front-door"
@@ -64,20 +66,23 @@ git -C "$repo" add .
 git -C "$repo" commit -qm 'topic changes Rust'
 head=$(git -C "$repo" rev-parse HEAD)
 result=$(run_selector)
-test "$result" = 'run_macos=true'
+test "$result" = 'run_macos=true
+run_rust=true'
 grep -F 'tools/front-door/topic.rs' "$tmp/log" >/dev/null
 
 # Main pushes always select macOS checks.
 output=$tmp/github-output
 : > "$output"
 (cd "$repo" && BASE_SHA="$base" HEAD_SHA="$head" IS_MAIN=true GITHUB_OUTPUT="$output" "$script") > "$tmp/log"
-test "$(cat "$output")" = 'run_macos=true'
+test "$(cat "$output")" = 'run_macos=true
+run_rust=true'
 
 # Missing base and unrelated histories conservatively select macOS checks.
 output=$tmp/github-output
 : > "$output"
 (cd "$repo" && BASE_SHA=missing HEAD_SHA="$head" IS_MAIN=false GITHUB_OUTPUT="$output" "$script") > "$tmp/log"
-test "$(cat "$output")" = 'run_macos=true'
+test "$(cat "$output")" = 'run_macos=true
+run_rust=true'
 
 unrelated_repo=$tmp/unrelated
 mkdir "$unrelated_repo"
@@ -92,7 +97,26 @@ git -C "$unrelated_repo" fetch -q "$repo" "$base"
 output=$tmp/github-output
 : > "$output"
 (cd "$unrelated_repo" && BASE_SHA="$base" HEAD_SHA="$unrelated" IS_MAIN=false GITHUB_OUTPUT="$output" "$script") > "$tmp/log"
-test "$(cat "$output")" = 'run_macos=true'
+test "$(cat "$output")" = 'run_macos=true
+run_rust=true'
 grep -F 'No merge base found' "$tmp/log" >/dev/null
+
+# Release-note fragments alone skip Rust; mixing in anything else keeps it.
+git -C "$repo" checkout -q --detach "$common"
+mkdir -p "$repo/docs/release-notes/next.d"
+printf '%s\n' note > "$repo/docs/release-notes/next.d/1-x.md"
+git -C "$repo" add .
+git -C "$repo" commit -qm 'fragment only'
+head=$(git -C "$repo" rev-parse HEAD)
+result=$(run_selector)
+test "$result" = 'run_macos=false
+run_rust=false'
+printf '%s\n' topic > "$repo/skills/topic.md"
+git -C "$repo" add .
+git -C "$repo" commit -qm 'fragment and skill'
+head=$(git -C "$repo" rev-parse HEAD)
+result=$(run_selector)
+test "$result" = 'run_macos=false
+run_rust=true'
 
 echo 'macOS scope selector checks passed'
