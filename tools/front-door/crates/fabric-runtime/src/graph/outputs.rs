@@ -662,7 +662,8 @@ pub(super) fn valid_compacted_findings(
     };
     if block.len() > 16 * 1024
         || !outputs.findings.is_empty()
-        || (plan.nodes[index].dispositions.is_empty() && !template::review_verifier(&plan.nodes[index]))
+        || (plan.nodes[index].dispositions.is_empty()
+            && !template::review_verifier(&plan.nodes[index]))
     {
         return false;
     }
@@ -1119,16 +1120,15 @@ pub(super) fn render_input(
         return (node.prompt.clone(), false);
     }
     let mut prompt = prefix(&node.prompt, cap).to_owned();
-    let proof_dispositions =
-        if node.dispositions.is_empty() && template::review_verifier(node) {
-            vec![
-                "upheld".to_owned(),
-                "falsified".to_owned(),
-                "unverifiable".to_owned(),
-            ]
-        } else {
-            node.dispositions.clone()
-        };
+    let proof_dispositions = if node.dispositions.is_empty() && template::review_verifier(node) {
+        vec![
+            "upheld".to_owned(),
+            "falsified".to_owned(),
+            "unverifiable".to_owned(),
+        ]
+    } else {
+        node.dispositions.clone()
+    };
     if !proof_dispositions.is_empty()
         && node.inputs.iter().any(|input| {
             input

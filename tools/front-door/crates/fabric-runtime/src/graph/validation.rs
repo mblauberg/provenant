@@ -952,20 +952,55 @@ pub(super) fn review_verification_error(
     if !template::review_verifier(node) {
         return None;
     }
-    if template::review_behaviour(node).is_some() && outputs.findings.iter().any(|finding| {
-        !upstream.iter().any(|source| source.id == finding.id)
-            && (finding.extra.get("verification").and_then(serde_json::Value::as_str) != Some("new")
-                || finding.reason.as_ref().is_none_or(|reason| reason.trim().is_empty()))
-    }) {
-        return Some(("verification_invalid", "new verifier findings need verification=new and an evidence reason".into()));
+    if template::review_behaviour(node).is_some()
+        && outputs.findings.iter().any(|finding| {
+            !upstream.iter().any(|source| source.id == finding.id)
+                && (finding
+                    .extra
+                    .get("verification")
+                    .and_then(serde_json::Value::as_str)
+                    != Some("new")
+                    || finding
+                        .reason
+                        .as_ref()
+                        .is_none_or(|reason| reason.trim().is_empty()))
+        })
+    {
+        return Some((
+            "verification_invalid",
+            "new verifier findings need verification=new and an evidence reason".into(),
+        ));
     }
     for finding in upstream {
-        let matches: Vec<_> = outputs.findings.iter().filter(|output| output.id == finding.id).collect();
-        if matches.len() != upstream.iter().filter(|source| source.id == finding.id).count() || matches.iter().any(|output| !output.extra.get("verification").and_then(serde_json::Value::as_str)
-            .is_some_and(|value| matches!(value, "upheld" | "falsified" | "unverifiable"))
-            || output.reason.as_ref().is_none_or(|reason| reason.trim().is_empty()))
+        let matches: Vec<_> = outputs
+            .findings
+            .iter()
+            .filter(|output| output.id == finding.id)
+            .collect();
+        if matches.len()
+            != upstream
+                .iter()
+                .filter(|source| source.id == finding.id)
+                .count()
+            || matches.iter().any(|output| {
+                !output
+                    .extra
+                    .get("verification")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|value| matches!(value, "upheld" | "falsified" | "unverifiable"))
+                    || output
+                        .reason
+                        .as_ref()
+                        .is_none_or(|reason| reason.trim().is_empty())
+            })
         {
-            return Some(("verification_incomplete", format!("finding {} needs exactly one verification and an evidence reason", finding.id)));
+            return Some((
+                "verification_incomplete",
+                format!(
+                    "finding {} needs exactly one verification and an evidence reason",
+                    finding.id
+                ),
+            ));
         }
     }
     None

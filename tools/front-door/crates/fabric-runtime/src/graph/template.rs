@@ -76,9 +76,15 @@ pub enum ReviewBehaviour {
 impl ReviewBehaviour {
     fn apply(self, node: &mut Map<String, Value>) {
         let instruction = match self {
-            Self::Lens => "Report concrete defects against the pinned subject and base. Include id, severity, file, line, summary, status, evidence and proposed_fix for each finding.",
-            Self::Verify => "Try to falsify every input finding against the pinned subject. Preserve its qualified id and evidence, set verification to upheld, falsified or unverifiable, and give a reason. Mark newly discovered findings verification=new.",
-            Self::Synthesis => "Reconcile every input finding by evidence. Preserve qualified ids and assign each finding disposition accepted, rejected or deferred with a non-empty reason. Never decide by majority vote.",
+            Self::Lens => {
+                "Report concrete defects against the pinned subject and base. Include id, severity, file, line, summary, status, evidence and proposed_fix for each finding."
+            }
+            Self::Verify => {
+                "Try to falsify every input finding against the pinned subject. Preserve its qualified id and evidence, set verification to upheld, falsified or unverifiable, and give a reason. Mark newly discovered findings verification=new."
+            }
+            Self::Synthesis => {
+                "Reconcile every input finding by evidence. Preserve qualified ids and assign each finding disposition accepted, rejected or deferred with a non-empty reason. Never decide by majority vote."
+            }
         };
         node.remove("role");
         node.insert("review_behaviour".into(), serde_json::json!(self));
@@ -90,7 +96,10 @@ impl ReviewBehaviour {
         }
         if self == Self::Synthesis {
             node.insert("kind".into(), "synthesise".into());
-            node.insert("dispositions".into(), serde_json::json!(["accepted", "rejected", "deferred"]));
+            node.insert(
+                "dispositions".into(),
+                serde_json::json!(["accepted", "rejected", "deferred"]),
+            );
         }
         let prompt = node.entry("prompt").or_insert_with(|| "".into());
         let brief = prompt.as_str().unwrap_or_default();
@@ -99,15 +108,21 @@ impl ReviewBehaviour {
 }
 
 pub(super) fn review_behaviour(node: &PlannedNode) -> Option<ReviewBehaviour> {
-    node.extra.get("review_behaviour").and_then(|value| serde_json::from_value(value.clone()).ok())
+    node.extra
+        .get("review_behaviour")
+        .and_then(|value| serde_json::from_value(value.clone()).ok())
 }
 
 pub(super) fn review_verifier(node: &PlannedNode) -> bool {
-    review_behaviour(node) == Some(ReviewBehaviour::Verify) || node.role.as_deref() == Some("review.verify")
+    review_behaviour(node) == Some(ReviewBehaviour::Verify)
+        || node.role.as_deref() == Some("review.verify")
 }
 
 pub(super) fn review_node(node: &PlannedNode) -> bool {
-    review_behaviour(node).is_some() || node.role.as_deref().is_some_and(|role| role == "lens" || role.starts_with("lens.") || role.starts_with("review."))
+    review_behaviour(node).is_some()
+        || node.role.as_deref().is_some_and(|role| {
+            role == "lens" || role.starts_with("lens.") || role.starts_with("review.")
+        })
 }
 
 /// One template document. A leaf sets `brief` (and usually `tier`); a
@@ -166,7 +181,9 @@ impl Template {
 
     /// Structural checks every layer shares.
     pub fn check(&self) -> Result<(), String> {
-        if self.is_composite() && (self.brief.is_some() || self.tier.is_some() || self.review.is_some()) {
+        if self.is_composite()
+            && (self.brief.is_some() || self.tier.is_some() || self.review.is_some())
+        {
             return Err("a template sets either a leaf brief and tier or nodes, not both".into());
         }
         for (name, parameter) in &self.parameters {
@@ -417,8 +434,14 @@ const BUNDLED: &[(&str, &str)] = &[
         include_str!("../../assets/templates/implement.fix.toml"),
     ),
     ("review", include_str!("../../assets/templates/review.toml")),
-    ("review.verify", include_str!("../../assets/templates/review.verify.toml")),
-    ("review.synthesis", include_str!("../../assets/templates/review.synthesis.toml")),
+    (
+        "review.verify",
+        include_str!("../../assets/templates/review.verify.toml"),
+    ),
+    (
+        "review.synthesis",
+        include_str!("../../assets/templates/review.synthesis.toml"),
+    ),
     (
         "review.security",
         include_str!("../../assets/templates/review.security.toml"),
