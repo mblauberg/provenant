@@ -739,7 +739,39 @@ pub fn render_or_publish<T: Serialize>(
     stderr: &mut impl Write,
     publish: impl FnOnce(&CommandResult<T>) -> io::Result<provenant_records::AbsolutePath>,
 ) -> Result<Outcome, RenderError> {
-    let first = if !matches!(mode, RenderMode::Json) && result.error.is_some() {
+    let launch_receipt = result.error.is_some()
+        && matches!(
+            result.command.as_str(),
+            "run" | "dispatch" | "resume" | "submit"
+        )
+        && match mode {
+            RenderMode::Human { text, .. } | RenderMode::Compact { text, .. } => !text.is_empty(),
+            RenderMode::Json => false,
+        };
+    let first = if launch_receipt {
+        // Failed launches still own a receipt. Keep it on stdout and the
+        // diagnostic on stderr, just as JSON keeps both in its envelope.
+        let receipt = CommandResult {
+            schema_version: result.schema_version,
+            command: result.command.clone(),
+            status: result.status,
+            data: &result.data,
+            error: None,
+        };
+        (|| {
+            let mut receipt_bytes = Vec::new();
+            let mut diagnostic_bytes = Vec::new();
+            render(&receipt, mode, &mut receipt_bytes)?;
+            render(result, mode, &mut diagnostic_bytes)?;
+            if receipt_bytes.len().saturating_add(diagnostic_bytes.len()) > MAX_RESULT_BYTES {
+                return Err(RenderError::TooLarge);
+            }
+            // Reuse the renderer's flush and broken-pipe policy after the
+            // complete two-stream result has passed the size checks.
+            render(&receipt, mode, writer)?;
+            render(result, mode, stderr)
+        })()
+    } else if !matches!(mode, RenderMode::Json) && result.error.is_some() {
         render(result, mode, stderr)
     } else {
         render(result, mode, writer)
@@ -803,6 +835,64 @@ pub fn render_or_publish<T: Serialize>(
 #[cfg(test)]
 mod overflow_tests {
     use super::*;
+
+    #[test]
+    fn refused_launch_keeps_its_human_receipt_and_error_on_separate_streams()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut result = CommandResult::new("run", Outcome::Refused, ());
+        result.error = Some(provenant_records::CommandError {
+            diagnostic: None,
+            code: "REFUSED".into(),
+            message: "both lanes refused".into(),
+            cause: None,
+            repair: None,
+        });
+        let receipt = "run run-id\nworktree /fixture/lane (branch)\nfirst rejected: disk floor\nsecond rejected: preparation refused\n";
+        let mut output = Vec::new();
+        let mut errors = Vec::new();
+        let status = render_or_publish(
+            &result,
+            RenderMode::Human {
+                text: receipt,
+                read_only: false,
+                summary: None,
+            },
+            &mut output,
+            &mut errors,
+            |_| unreachable!("bounded receipt does not need publication"),
+        )?;
+        assert_eq!(status, Outcome::Refused);
+        assert_eq!(String::from_utf8(output)?, receipt);
+        assert!(String::from_utf8(errors)?.contains("REFUSED: both lanes refused"));
+
+        // Encode the diagnostic before either stream escapes. An oversized
+        // error must publish the complete result without a partial receipt.
+        result.error.as_mut().ok_or("missing diagnostic")?.message = "x".repeat(MAX_RESULT_BYTES);
+        let mut output = Vec::new();
+        let mut errors = Vec::new();
+        let mut published = 0;
+        let status = render_or_publish(
+            &result,
+            RenderMode::Human {
+                text: receipt,
+                read_only: false,
+                summary: None,
+            },
+            &mut output,
+            &mut errors,
+            |_| {
+                published += 1;
+                provenant_records::AbsolutePath::new(std::path::Path::new("/fixture/result.json"))
+                    .map_err(io::Error::other)
+            },
+        )?;
+        assert_eq!(status, Outcome::Error);
+        assert_eq!(published, 1);
+        assert!(output.is_empty());
+        assert!(String::from_utf8(errors)?.contains("RESULT_TOO_LARGE"));
+        Ok(())
+    }
+
     #[test]
     fn oversize_publishes_once_or_reports_io_without_partial_output()
     -> Result<(), Box<dyn std::error::Error>> {
