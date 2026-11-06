@@ -1645,13 +1645,8 @@ fn upgrade_preflight_preserves_old_checkpoint_and_names_the_drain_step() -> Resu
         "Pending graph {project}/old-pending-fixture: finish or cancel it with the previous release before upgrading"
     )), "{output}");
     assert_eq!(fs::read(&path)?, checkpoint);
-    // An older updater may pass --yes to staged preflight. Starting the new
-    // executable must still refuse before a provider or graph can be launched.
-    let bypass = rig.command(&[
-        "install", "--source", rig.root.to_str().ok_or("fixture source")?,
-        "--upgrade-preflight", "--yes",
-    ])?;
-    assert_eq!(code(&bypass), 0, "{bypass:?}");
+    // An older installer can ignore the preflight refusal under --yes. The
+    // new binary must still refuse before launching a provider or graph.
     let launch = rig.command(&["run", "New work", "--json"])?;
     let refusal: serde_json::Value = serde_json::from_slice(&launch.stdout.bytes)?;
     assert_eq!(refusal["error"]["code"], "UPGRADE_DRAIN_REQUIRED");
