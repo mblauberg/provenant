@@ -2991,7 +2991,7 @@ pub(super) fn launch_on_host_with_wait(
             launch: Some(host),
             sealed: Some(seal_launch_task(
                 request_digest,
-                &session.store.effective_launch_task(request, task, None),
+                &session.store.effective_launch_task(request, task),
             )),
         }
         .encode()
@@ -3031,7 +3031,6 @@ pub(super) fn launch_on_host_with_wait(
                     call.clock,
                 )
             },
-            None,
             Some(request),
             call,
         )?;

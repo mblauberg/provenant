@@ -53,16 +53,6 @@ boundary = "authority"
 reason = "A continuation must match its recorded route and grant identity."
 
 [[guard]]
-site = "run/src/launch.rs#child_access_within_impl"
-boundary = "authority"
-reason = "A child cannot exceed its parent access or select another graph source."
-
-[[guard]]
-site = "run/src/launch.rs#child_access_within_impl"
-boundary = "credentials"
-reason = "Child roots may not reach credential stores, including through canonicalised paths."
-
-[[guard]]
 site = "run/src/launch.rs#applied_write_grants"
 boundary = "authority"
 reason = "Applied write grant paths must be representable so continuation and handoff use the selected attempt's actual authority."
@@ -508,8 +498,3 @@ reason = "The selected account must match the route it authorises."
 site = "run/src/launch.rs#RunStore::check_child_attempt_id"
 boundary = "authority"
 reason = "Child attempts must be host-derived members of the validated request."
-
-[[guard]]
-site = "run/src/launch.rs#RunStore::validate_child"
-boundary = "authority"
-reason = "Child parent, depth, attempts and permitted delegation must match host authority."

@@ -566,7 +566,6 @@ mod tests {
                     &|_, _| Ok(Vec::new()),
                     &acquire,
                     None,
-                    None,
                     &call,
                 )
             };

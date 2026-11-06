@@ -1219,7 +1219,6 @@ pub(super) fn start_writer(
             )
         },
         None,
-        None,
         call,
     )?)
 }

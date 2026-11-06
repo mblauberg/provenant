@@ -65,9 +65,6 @@ pub struct RunStore {
     pub(crate) root: Directory,
     pub(crate) context: ExecutionContext,
     pub(crate) writer_registry: std::path::PathBuf,
-    /// Canonical host home, used to refuse child roots that entry and compile
-    /// must both reject. Absent on stores that never validate children.
-    pub(crate) host_home: Option<std::path::PathBuf>,
     pub(crate) policy: crate::admission::AdmissionPolicy,
     pub(crate) sealed_requester: Option<ActorId>,
     pub(crate) sealed_parent_network: Option<NetworkAccess>,
@@ -75,10 +72,6 @@ pub struct RunStore {
     pub(crate) host: Option<provenant_core::HostId>,
     /// Scopes and bounded custody handles this host view handed to a guardian.
     pub(crate) launched: std::cell::RefCell<Vec<Held>>,
-    /// Host-only launch claims survive deletion or rewriting of lane rows.
-    pub(crate) launched_tasks: std::cell::RefCell<
-        std::collections::BTreeSet<(provenant_core::RunId, provenant_core::TaskId)>,
-    >,
     _owner: PhantomData<Rc<()>>,
 }
 impl RunStore {
@@ -163,12 +156,6 @@ impl RunStore {
         self.writer_registry = state.to_owned();
         self
     }
-    /// The host's canonical home, wherever it lives. Child entry checks use it
-    /// so they refuse a root that encloses it before compile would.
-    pub fn with_host_home(mut self, home: &std::path::Path) -> Self {
-        self.host_home = Some(home.to_owned());
-        self
-    }
     /// The host state root whose admission ledger and registrations this store
     /// reads, which is not its own directory inside a nested lane.
     pub fn writer_registry(&self) -> &std::path::Path {
@@ -241,13 +228,11 @@ impl RunStore {
             root,
             context: context.clone(),
             writer_registry: context.state_root.as_path().to_owned(),
-            host_home: None,
             policy: Default::default(),
             sealed_requester: None,
             sealed_parent_network: None,
             host: None,
             launched: Default::default(),
-            launched_tasks: Default::default(),
             _owner: PhantomData,
         }))
     }
@@ -262,13 +247,11 @@ impl RunStore {
             root,
             context: context.clone(),
             writer_registry: context.state_root.as_path().to_owned(),
-            host_home: None,
             policy: Default::default(),
             sealed_requester: None,
             sealed_parent_network: None,
             host: None,
             launched: Default::default(),
-            launched_tasks: Default::default(),
             _owner: PhantomData,
         };
         if schema_version < SCHEMA_VERSION {
