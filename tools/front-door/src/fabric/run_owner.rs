@@ -85,6 +85,18 @@ pub(crate) fn events_within<T: serde::Serialize>(
     Ok(events.len())
 }
 pub(crate) fn run_error(error: provenant_run::RunError) -> FacadeError {
+    if matches!(
+        &error,
+        provenant_run::RunError::Writer(provenant_confinement::worktrees::WorktreeError::Dirty(_))
+    ) {
+        return FacadeError::DispatchRefused {
+            fact: Some(
+                provenant_fabric_runtime::coordination::facade::DispatchRefusalFact::DirtyWriter,
+            ),
+            disk: None,
+            reason: String::new(),
+        };
+    }
     // The unresolvable ref is the caller's own input; name it instead of
     // collapsing to a bare "invalid input".
     if let provenant_run::RunError::InvalidBase(base) = &error {

@@ -1167,18 +1167,14 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
         branch: &str,
         base: &str,
     ) -> Result<Option<provenant_fabric_runtime::graph::WriterWorktreeBinding>, Self::Error> {
-        provenant_cli::fabric::graph_relay::provision_writer(
+        provenant_cli::fabric::graph_relay::provision_writer_checked(
             &self.factory.context,
             path,
             branch,
             base,
             self.cancel,
         )
-        .map_err(|error| FacadeError::DispatchRefused {
-            fact: None,
-            disk: None,
-            reason: error.to_string(),
-        })?;
+        .map_err(|error| run_error(error.into()))?;
         self.bind_writer_worktree(path)
     }
 

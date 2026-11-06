@@ -181,6 +181,7 @@ bounded_input! {
 #[serde(rename_all = "snake_case")]
 pub enum DispatchRefusalFact {
     DetachedWriter,
+    DirtyWriter,
     GraphSchema,
     GraphComposite,
     GraphPlan,
@@ -609,6 +610,7 @@ impl FacadeError {
             Self::DispatchRefused { fact: Some(fact), .. } => {
                 let (detail, action) = match fact {
                     DispatchRefusalFact::DetachedWriter => unreachable!(),
+                    DispatchRefusalFact::DirtyWriter => ("the writer worktree has uncommitted edits", "preserve or commit the edits before retrying"),
                     DispatchRefusalFact::GraphSchema => ("graph document schema_version is invalid", "use a schema version that supports the document fields"),
                     DispatchRefusalFact::GraphComposite => ("graph composite or loop expansion is invalid", "inspect the composite or loop definition"),
                     DispatchRefusalFact::GraphPlan => ("graph plan is invalid", "inspect the graph plan and node dependencies"),
