@@ -77,7 +77,15 @@ or pass `--yes` to `provenant upgrade` or `install.sh --upgrade` to proceed
 despite them. A failure to inspect the state stops the upgrade.
 Older installed CLI versions may invoke the installer with `--yes` themselves;
 for the first graph-cutover upgrade, run the new `install.sh --upgrade` without
-`--yes` on each host to see and act on its preflight before proceeding.
+`--yes` on each host to see and act on its preflight before proceeding:
+
+```sh
+# Use the new release's installer directly for the first graph cutover.
+sh /absolute/path/to/new-release/scripts/install.sh --upgrade
+```
+
+Do not use the already-installed `provenant upgrade` for this first cutover;
+its older wrapper can forward `--yes` and bypass the drain refusal.
 
 The core commands are `run`, `status`, `output`, `steer`, `stop`, `retry`,
 `edit`, `templates`, `land`, `quota` and `trace`. Use `run --use task` for a
