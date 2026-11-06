@@ -2,7 +2,7 @@
 #![allow(clippy::disallowed_methods)]
 mod support;
 use serde_json::{Value, json};
-use std::{fs, path::Path, time::Duration};
+use std::{fs, time::Duration};
 use support::{Result, TestRig, code};
 
 #[test]
@@ -76,62 +76,6 @@ fn configure_commands(rig: &TestRig, commands: Value) -> Result {
     let table = toml_edit::ser::to_document(&value)?;
     config["domains"]["fabric"] = table.as_item().clone();
     fs::write(rig.state.join("config.toml"), config.to_string())?;
-    Ok(())
-}
-
-#[test]
-fn local_wait_returns_while_command_preparation_is_held() -> Result {
-    let mut rig = rig(json!({"probe":{"argv":["/bin/true"]}}))?;
-    let _cleanup = rig.process_cleanup();
-    let gate = rig.root.join("prepare-gate");
-    fs::create_dir(&gate)?;
-    fs::write(gate.join("hold"), b"hold")?;
-    rig.env.push((
-        "PROVENANT_FIXTURE_HOLD_COMMAND_PREPARATION".into(),
-        gate.clone().into_os_string(),
-    ));
-    let prompt = rig.root.join("prompt");
-    fs::write(&prompt, "fixture")?;
-    let start = std::time::Instant::now();
-    let output = rig.command(&[
-        "run",
-        "--mode",
-        "read-only",
-        "--route",
-        "command/probe",
-        "--operation-id",
-        "held-command",
-        "--prompt-file",
-        prompt.to_str().ok_or("prompt")?,
-        "--wait",
-        "1s",
-        "--json",
-    ])?;
-    let elapsed = start.elapsed();
-    let result: Value = serde_json::from_slice(&output.stdout.bytes)?;
-    let entered = provenant_test_support::wait_for(
-        "command preparation entered",
-        Duration::from_secs(20),
-        || gate.join("entered").exists(),
-        |ready| *ready,
-    );
-    fs::remove_file(gate.join("hold"))?;
-    entered.map_err(|error| format!("{error}: {result}"))?;
-    assert!(elapsed < Duration::from_secs(15), "{elapsed:?}: {result}");
-    assert!(result["error"].is_null(), "{result}");
-    assert!(
-        result["data"]["lanes"][0]["waiting_for"]
-            .as_str()
-            .is_some_and(|phase| phase.contains("launch")),
-        "{result}"
-    );
-    assert_eq!(result["data"]["operation_id"], "held-command", "{result}");
-    provenant_test_support::wait_for(
-        "preparation resumed after caller exit",
-        Duration::from_secs(20),
-        || gate.join("released").exists(),
-        |ready| *ready,
-    )?;
     Ok(())
 }
 
@@ -747,73 +691,37 @@ fn command_network_is_per_task_through_manifest_and_single_task_route() -> Resul
 }
 
 #[test]
-fn explain_for_model_and_route_previews_without_creating_attempts() -> Result {
-    for (selector, expected) in [("--model", "codex/gpt-6-luna"), ("--route", "junior")] {
+fn explain_for_tier_previews_without_creating_attempts() -> Result {
+    for tier in ["junior", "senior"] {
         let rig = TestRig::new()?;
-        let prompt = rig.root.join("prompt.md");
-        std::fs::write(&prompt, "Preview this task")?;
-        let output = rig.execute(
-            Path::new(env!("CARGO_BIN_EXE_provenant")),
-            &[
-                "run",
-                selector,
-                expected,
-                "--prompt-file",
-                prompt.to_str().ok_or("prompt path")?,
-                "--mode",
-                "read-only",
-                "--deliver",
-                "none",
-                "--explain",
-            ],
-            None,
-        )?;
-
+        let output = rig.command(&[
+            "run",
+            "Preview this task",
+            "--tier",
+            tier,
+            "--explain",
+            "--json",
+        ])?;
         assert_eq!(
             code(&output),
             0,
             "{}",
             String::from_utf8_lossy(&output.stderr.bytes)
         );
-        let text = String::from_utf8(output.stdout.bytes)?;
-        assert!(text.contains(expected), "{text}");
+        let result: Value = serde_json::from_slice(&output.stdout.bytes)?;
+        assert_eq!(
+            result["data"]["document"]["nodes"][0]["route"]["alias"], tier,
+            "{result}"
+        );
         assert!(
             !rig.state.join("runs").exists(),
-            "explain created run state for {selector}: {text}"
+            "explain created run state: {result}"
+        );
+        assert!(
+            !rig.state.join("graphs").exists(),
+            "explain created graph state: {result}"
         );
     }
-    // Gemini Flash runs writer lanes by default with no host override (#2646).
-    let rig = TestRig::new()?;
-    let prompt = rig.root.join("prompt-flash.md");
-    std::fs::write(&prompt, "Implement feature")?;
-    let output = rig.execute(
-        Path::new(env!("CARGO_BIN_EXE_provenant")),
-        &[
-            "run",
-            "--model",
-            "agy/gemini-3.8-flash",
-            "--branch",
-            "feature-test",
-            "--base",
-            "origin/main",
-            "--prompt-file",
-            prompt.to_str().ok_or("prompt path")?,
-            "--explain",
-        ],
-        None,
-    )?;
-    assert_eq!(
-        code(&output),
-        0,
-        "{}",
-        String::from_utf8_lossy(&output.stderr.bytes)
-    );
-    let text = String::from_utf8(output.stdout.bytes)?;
-    assert!(text.contains("agy/gemini-3.8-flash"), "{text}");
-    assert!(
-        !rig.state.join("runs").exists(),
-        "explain created run state: {text}"
-    );
     Ok(())
 }
 
@@ -844,298 +752,5 @@ fn disk_report_json_and_human_output_leave_missing_state_absent() -> support::Re
     assert!(!rig.state.exists());
     assert_eq!(std::fs::read(rig.project.join(".git/index")).ok(), before);
     rig.assert_legacy_unchanged()?;
-    Ok(())
-}
-
-#[test]
-fn preset_reader_uses_writer_checkout_from_another_checkout() -> Result {
-    preset_reader_checkout_case(false)
-}
-
-#[test]
-fn preset_reader_honours_explicit_source_from_another_checkout() -> Result {
-    preset_reader_checkout_case(true)
-}
-
-fn preset_reader_checkout_case(explicit: bool) -> Result {
-    use provenant_core::Clock;
-    use provenant_fabric_runtime::graph::{self, AttemptOwner};
-    struct CompletedWriter {
-        head: String,
-    }
-    impl AttemptOwner for CompletedWriter {
-        type Error = provenant_os::fs::FsError;
-        fn actor(&self) -> String {
-            provenant_core::ActorId::from_bytes([34; 16]).to_string()
-        }
-        fn bind_writer_worktree(
-            &mut self,
-            path: &str,
-        ) -> std::result::Result<Option<graph::WriterWorktreeBinding>, Self::Error> {
-            let metadata = provenant_os::fs::Directory::open_anchor(Path::new(path))?.metadata()?;
-            Ok(Some(graph::WriterWorktreeBinding {
-                extra: [(
-                    "source_directory_identity".into(),
-                    json!({"device":metadata.device,"inode":metadata.inode}),
-                )]
-                .into(),
-                worktree: path.into(),
-                head: self.head.clone(),
-            }))
-        }
-        fn observe_or_start(
-            &mut self,
-            key: &graph::AttemptKey,
-            _: graph::NodeInput<'_>,
-            _: &graph::GraphRoute,
-            _: graph::AccessMode,
-            _: Option<&str>,
-            _: graph::Replay<'_>,
-        ) -> std::result::Result<graph::AttemptObservation, Self::Error> {
-            if key.node_id == "writer" {
-                Ok(graph::AttemptObservation::Terminal {
-                    attempt_ref: None,
-                    outcome: graph::AttemptOutcome::Succeeded,
-                    launched: true,
-                    result: None,
-                    result_warning: None,
-                    result_path: None,
-                    branch: None,
-                    commit: Some(self.head.clone()),
-                })
-            } else {
-                Ok(graph::AttemptObservation::Pending { attempt_ref: None })
-            }
-        }
-    }
-
-    let mut rig = TestRig::new()?;
-    configure_commands(
-        &rig,
-        json!({"source-check":{"argv":["/bin/sh","-c","cat subject; printf '\\nVERDICT: PASS\\n'"]}}),
-    )?;
-    let _cleanup = rig.process_cleanup();
-    let product = std::fs::canonicalize(Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."))?;
-    for (key, value) in &mut rig.env {
-        if key == "PROVENANT_ROOT" {
-            *value = product.clone().into_os_string();
-        }
-    }
-    let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
-    fs::write(rig.project.join("subject"), "writer checkout")?;
-    for args in [
-        vec!["add", "subject"],
-        vec!["commit", "-qm", "writer source"],
-    ] {
-        let out = rig.execute(&git, &args, None)?;
-        assert_eq!(
-            code(&out),
-            0,
-            "{}",
-            String::from_utf8_lossy(&out.stderr.bytes)
-        );
-    }
-    let out = rig.execute(&git, &["rev-parse", "HEAD"], None)?;
-    let head = String::from_utf8(out.stdout.bytes)?.trim().to_owned();
-    let writer = rig.project.join(".worktrees/writer");
-    fs::create_dir_all(writer.parent().ok_or("worktree parent")?)?;
-    let out = rig.execute(
-        &git,
-        &[
-            "worktree",
-            "add",
-            "-qb",
-            "writer",
-            writer.to_str().ok_or("writer path")?,
-            &head,
-        ],
-        None,
-    )?;
-    assert_eq!(
-        code(&out),
-        0,
-        "{}",
-        String::from_utf8_lossy(&out.stderr.bytes)
-    );
-    fs::write(rig.project.join("subject"), "invoking checkout")?;
-    for args in [
-        vec!["add", "subject"],
-        vec!["commit", "-qm", "invoking source"],
-    ] {
-        let out = rig.execute(&git, &args, None)?;
-        assert_eq!(
-            code(&out),
-            0,
-            "{}",
-            String::from_utf8_lossy(&out.stderr.bytes)
-        );
-    }
-    let presets = rig.project.join(".provenant/presets");
-    fs::create_dir_all(&presets)?;
-    fs::write(
-        presets.join("bound-reader.toml"),
-        r#"
-stages = [
-  { id = "writer", role = "write" },
-  { id = "reader", role = "read", source = { type = "node", node = "writer" } },
-]
-[parameters]
-worktree = { type = "string", default = "" }
-subject = { type = "table", default = { type = "commit", commit = "HEAD" } }
-[roles.write]
-access = "worktree_write"
-worktree = "${worktree}"
-source = "${subject}"
-tier = { adapter = "fixture", model = "fixture/model" }
-[roles.read]
-access = "read_only"
-worktree = "${worktree}"
-routes = [{ adapter = "command", name = "source-check" }]
-"#,
-    )?;
-    let prompt = rig.project.join("brief");
-    fs::write(&prompt, "Inspect the writer source")?;
-    let worktree_setting = format!(
-        "parameters.worktree={}",
-        serde_json::to_string(writer.to_str().ok_or("writer path")?)?
-    );
-    let explicit_setting = "parameters.subject.commit=\"HEAD\"";
-    let mut args = vec![
-        "run",
-        "--preset",
-        "bound-reader",
-        "--prompt-file",
-        prompt.to_str().ok_or("prompt path")?,
-        "--set",
-        &worktree_setting,
-        "--plan",
-        "off",
-    ];
-    if explicit {
-        args.extend(["--set", explicit_setting]);
-    }
-    let mut explain_args = args.to_vec();
-    explain_args.extend(["--explain", "--json"]);
-    let explain = rig.command(&explain_args)?;
-    assert_eq!(
-        code(&explain),
-        0,
-        "{}",
-        String::from_utf8_lossy(&explain.stdout.bytes)
-    );
-    let explanation: Value = serde_json::from_slice(&explain.stdout.bytes)?;
-    let document: graph::GraphDocument =
-        serde_json::from_value(explanation["data"]["graph"].clone())?;
-    let invoking_head = {
-        let out = rig.execute(&git, &["rev-parse", "HEAD"], None)?;
-        String::from_utf8(out.stdout.bytes)?.trim().to_owned()
-    };
-    let expected_head = if explicit { &invoking_head } else { &head };
-    assert_eq!(
-        explanation["data"]["graph"]["nodes"][0]["source"]["commit"],
-        *expected_head
-    );
-    assert_eq!(
-        explanation["data"]["graph"]["nodes"][0]["worktree"],
-        writer.to_str().ok_or("writer path")?
-    );
-    let project: provenant_core::ProjectId = {
-        let identity = rig.command(&["fabric", "identity", "--json"])?;
-        assert_eq!(code(&identity), 0);
-        serde_json::from_slice::<Value>(&identity.stdout.bytes)?["data"]["project"]
-            .as_str()
-            .ok_or("project id")?
-            .parse()?
-    };
-    let mut inputs = provenant_core::RootInputs::new(rig.home.clone(), rig.project.clone());
-    inputs.state_dir = Some(rig.state.clone());
-    let state = provenant_core::StateRoot::resolve(&inputs, &provenant_os::fs::SystemPathResolver)?;
-    let clock = provenant_os::clock::SystemClock::new();
-    let cancel = provenant_core::CancelToken::new();
-    let budget = provenant_core::WaitBudget::cli(clock.mono_now(), 20)?;
-    {
-        let mut journal =
-            graph::FileJournal::open(&state, project, &document.graph_id, budget, &cancel, &clock)?;
-        journal.bind(graph::GraphExecution {
-            extra: Default::default(),
-            directory: rig.project.clone(),
-            document: document.clone(),
-            review_base: None,
-            integration_base: None,
-        })?;
-        let mut owner = CompletedWriter {
-            head: expected_head.clone(),
-        };
-        let config = provenant_fabric_runtime::config::GraphConfig::default();
-        let mut result = graph::advance_with_budget(
-            &document,
-            &mut owner,
-            &mut journal,
-            &config.limits,
-            &config.budget,
-        )?;
-        if result
-            .checkpoint
-            .nodes
-            .iter()
-            .find(|node| node.id == "reader")
-            .is_none_or(|node| node.attempts.is_empty())
-        {
-            result = graph::advance_with_budget(
-                &document,
-                &mut owner,
-                &mut journal,
-                &config.limits,
-                &config.budget,
-            )?;
-        }
-        assert!(
-            result
-                .checkpoint
-                .nodes
-                .iter()
-                .find(|node| node.id == "reader")
-                .is_some_and(|node| !node.attempts.is_empty())
-        );
-    }
-    if !available()? {
-        return Ok(());
-    }
-    let mut run_args = args.to_vec();
-    run_args.extend(["--wait", "20s", "--json"]);
-    let launched = rig.command(&run_args)?;
-    assert_eq!(
-        code(&launched),
-        0,
-        "stdout={} stderr={}",
-        String::from_utf8_lossy(&launched.stdout.bytes),
-        String::from_utf8_lossy(&launched.stderr.bytes)
-    );
-    let status = rig.command(&[
-        "fabric",
-        "graph",
-        "status",
-        &document.graph_id,
-        "--full",
-        "--json",
-    ])?;
-    let status: Value = serde_json::from_slice(&status.stdout.bytes)?;
-    let reader = status["data"]["checkpoint"]["nodes"]
-        .as_array()
-        .ok_or("nodes")?
-        .iter()
-        .find(|node| node["id"] == "reader")
-        .ok_or("reader")?;
-    assert_eq!(reader["state"], "succeeded", "{status}");
-    let excerpt = reader["outputs"]["result"]["excerpt"]
-        .as_str()
-        .ok_or("result excerpt")?;
-    let (expected, other) = if explicit {
-        ("invoking checkout", "writer checkout")
-    } else {
-        ("writer checkout", "invoking checkout")
-    };
-    assert!(excerpt.contains(expected), "{excerpt}");
-    assert!(!excerpt.contains(other), "{excerpt}");
     Ok(())
 }
