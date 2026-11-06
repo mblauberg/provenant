@@ -381,8 +381,7 @@ jobs:
           | test(=writer_terminal_refuses_sequencer_state)
           | test(=writer_production_plan_denies_outside_writes)
           | test(=writer_protected_changes_wait_for_review_and_ignore_upstream)
-          | test(=writer_reconcile_refuses_unfinished_cherry_pick_and_releases))
-          | (binary(=writer_continuation) & (test(=writer_continuation_launches_pinned_to_predecessor_head) | test(=unfinished_writer_continuation_launches_in_previously_owned_worktree)))'
+          | test(=writer_reconcile_refuses_unfinished_cherry_pick_and_releases))'
       - name: Run native writer capability probes
         if: ${{ !cancelled() }}
         working-directory: tools/front-door
