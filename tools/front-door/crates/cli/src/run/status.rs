@@ -213,7 +213,7 @@ pub fn status(command: crate::Status, _json_output: bool, edge: &Edge<'_>) -> Re
 
 /// Refused dispatches have no attempt; render their durable operation records
 /// separately so they remain visible without inventing a lane identity.
-fn append_refused_operations(
+pub(super) fn append_refused_operations(
     store: &run::RunStore,
     limit: u64,
     data: &mut Value,
