@@ -853,6 +853,47 @@ mod diagnostic_projection_tests {
     use std::path::{Path, PathBuf};
 
     #[test]
+    fn launch_guard_inventory_has_valid_classifications() {
+        let inventory = include_str!("../assets/launch-guards.toml")
+            .parse::<toml_edit::DocumentMut>()
+            .expect("launch guard inventory must be valid TOML");
+        assert_eq!(inventory["schema_version"].as_integer(), Some(1));
+        let complete = inventory["complete"].as_bool().expect("completion flag");
+        let guards = inventory["guard"].as_array_of_tables().expect("guard rows");
+        assert!(!guards.is_empty());
+        for guard in guards {
+            let site = guard
+                .get("site")
+                .and_then(|v| v.as_str())
+                .expect("guard site");
+            assert!(site.contains('#'), "invalid guard site: {site}");
+            let reason = guard
+                .get("reason")
+                .and_then(|v| v.as_str())
+                .expect("guard reason");
+            assert!(!reason.trim().is_empty(), "missing reason for {site}");
+            let boundary = guard
+                .get("boundary")
+                .and_then(|v| v.as_str())
+                .expect("guard classification");
+            match boundary {
+                "lane_git" | "credentials" | "object_integrity" | "authority" | "warning" => {}
+                "configurable_default" => {
+                    assert!(
+                        guard
+                            .get("setting")
+                            .and_then(|v| v.as_str())
+                            .is_some_and(|s| !s.trim().is_empty()),
+                        "missing setting for {site}"
+                    );
+                }
+                "unclassified" if !complete => {}
+                _ => panic!("invalid or incomplete classification {boundary} at {site}"),
+            }
+        }
+    }
+
+    #[test]
     fn resource_refusals_name_limits_and_corrective_actions() {
         let inventory = include_str!("../assets/launch-guards.toml")
             .parse::<toml_edit::DocumentMut>()
