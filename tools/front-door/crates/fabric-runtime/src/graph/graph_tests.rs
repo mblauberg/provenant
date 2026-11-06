@@ -86,6 +86,8 @@ struct FakeOwner {
     review_calls: usize,
     repair_panel: Option<Vec<String>>,
     repair_panel_calls: usize,
+    repair_growth: bool,
+    repair_growth_calls: usize,
     simple_review: bool,
     review_requested_bases: Vec<Option<String>>,
     require_distinct: Vec<bool>,
@@ -117,6 +119,10 @@ fn reply(option: Option<&str>, text: Option<&str>) -> AskReply {
 
 impl AttemptOwner for FakeOwner {
     type Error = NoObservation;
+    fn detect_repair_growth(&mut self, _: &str, _: &str) -> Result<bool, String> {
+        self.repair_growth_calls += 1;
+        Ok(self.repair_growth)
+    }
     fn resolve_repair_panel(&mut self, _: &GraphDocument, _: &str) -> Result<Vec<String>, String> {
         self.repair_panel_calls += 1;
         self.repair_panel

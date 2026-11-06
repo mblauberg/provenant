@@ -297,6 +297,11 @@ pub trait AttemptOwner {
         Err("host cannot resolve @review-panel for the repaired head".into())
     }
 
+    /// Compare a repair's pinned before and after commits against its review base.
+    fn detect_repair_growth(&mut self, _before: &str, _after: &str) -> Result<bool, String> {
+        Err("host cannot assess repair scope and risk".into())
+    }
+
     /// Resolve a node-specific review base in its bound execution context.
     /// A host without Git may only accept an already pinned object ID.
     fn resolve_review_base(
@@ -1723,8 +1728,36 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                 if structural_pause.is_some() || checkpoint.pause_reason.is_some() {
                     continue;
                 }
-                let growth = repair::growth_in_round(node, &plan, &checkpoint, &positions);
                 let mut replan_error = None;
+                let reported = repair::growth_in_round(node, &plan, &checkpoint, &positions);
+                let mut growth = reported;
+                if repair::is_repair_gate(node, &plan, &positions) {
+                    if let Some(value) = checkpoint.nodes[node_index]
+                        .extra
+                        .get("repair_growth")
+                        .and_then(serde_json::Value::as_bool)
+                    {
+                        growth |= value;
+                    } else if let Some((before, after)) = repair::repair_commits(node, &checkpoint)
+                    {
+                        match owner.detect_repair_growth(before, after) {
+                            Ok(value) => {
+                                checkpoint.nodes[node_index]
+                                    .extra
+                                    .insert("repair_growth".into(), value.into());
+                                journal.save(&checkpoint).map_err(GraphError::Journal)?;
+                                growth |= value;
+                            }
+                            Err(error) if !reported => {
+                                replan_error = Some(format!("cannot assess repair growth: {error}"))
+                            }
+                            Err(_) => {}
+                        }
+                    } else if document.schema_version >= 2 && !reported {
+                        replan_error =
+                            Some("cannot assess repair growth: pinned commits unavailable".into());
+                    }
+                }
                 if growth {
                     if let Some((parent, commit)) = repair::replan_source(node, &checkpoint)
                         .map(|(parent, commit)| (parent.to_owned(), commit.to_owned()))
@@ -1803,7 +1836,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                             Some("full panel replan required: repaired commit unavailable".into());
                     }
                 }
-                let reason = if growth {
+                let reason = if growth || replan_error.is_some() {
                     replan_error
                 } else if matches!(condition, GateCondition::Ci { .. }) {
                     if observed_ci.contains(&node.id) {
