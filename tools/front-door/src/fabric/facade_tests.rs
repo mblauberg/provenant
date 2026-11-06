@@ -1436,6 +1436,61 @@ esac
     }
 
     #[test]
+    fn graph_peer_without_receipt_keeps_launch_and_cancellation_uncertain()
+    -> Result<(), Box<dyn std::error::Error>> {
+        if host_test("fabric::peer_tests::graph_peer_without_receipt_keeps_launch_and_cancellation_uncertain")? {
+            return Ok(());
+        }
+        use provenant_fabric_runtime::graph::{self, AttemptOwner};
+        let rig = crate::worktree_tests::repository()?;
+        let roots = crate::roots::child(&rig.home, &rig.project, rig.state.clone())?;
+        let factory = Factory {
+            context: Context::open(roots, &rig.home, &rig.project)?,
+            project_attribution: false, clock: SystemClock, backoff: ThreadPause,
+            executor: SystemExecutor::new(1)?, home: rig.home.clone(), cwd: rig.project.clone(),
+            assets: rig.project.clone(), host_launch: None, mcp_project: None, workers: &FreeWorkers,
+        };
+        let cancel = CancelToken::new();
+        let budget = WaitBudget::cli(factory.clock.mono_now(), 10)?;
+        let mut owner = BoundGraphOwner {
+            factory: &factory, integration_base: None, integration_branch: None,
+            network: None, capability_overrides: Default::default(), exclude: Vec::new(),
+            budget, cancel: &cancel, prices: None, tick: false,
+        };
+        let mut attempt: graph::GraphAttempt = serde_json::from_value(serde_json::json!({
+            "launched":false,
+            "key":{"graph_id":"peer-without-receipt", "node_id":"inspect", "route_index":0},
+            "route":{"alias":"junior"}, "state":"starting", "attempt_ref":null,
+            "outcome":null, "launch_actor":owner.actor()
+        }))?;
+        // Even a removed peer cannot turn missing local state into proof that
+        // the remote operation was refused or has stopped.
+        attempt.extra.insert("placement_host".into(), serde_json::json!("removed-peer"));
+        assert!(!owner.launch_accepted(&attempt)?);
+        assert!(!owner.launch_refused_before_acceptance(&attempt)?);
+        assert!(!owner.cancelled_attempt_settled(&attempt)?);
+        for placement in [
+            None,
+            Some("local".to_owned()),
+            Some(factory.context.identity.host.to_string()),
+        ] {
+            attempt.extra.remove("placement_host");
+            if let Some(placement) = placement {
+                attempt.extra.insert("placement_host".into(), serde_json::json!(placement));
+            }
+            assert!(!owner.launch_accepted(&attempt)?);
+            assert!(owner.launch_refused_before_acceptance(&attempt)?);
+            assert!(owner.cancelled_attempt_settled(&attempt)?);
+        }
+        attempt.attempt_ref = Some(format!("{}/{}",
+            provenant_core::HostId::from_bytes([7;16]),
+            provenant_core::AttemptId::from_bytes([8;16])));
+        assert!(owner.launch_accepted(&attempt)?);
+        assert!(!owner.launch_refused_before_acceptance(&attempt)?);
+        Ok(())
+    }
+
+    #[test]
     fn graph_run_controls_reach_the_sealed_attempt() -> Result<(), Box<dyn std::error::Error>> {
         if host_test("fabric::peer_tests::graph_run_controls_reach_the_sealed_attempt")? {
             return Ok(());
