@@ -157,73 +157,6 @@ fn decode_compiled_node(
     })
 }
 
-/// Raw graph nodes embedded in a leaf are not passed through `lower_leaf`;
-/// reject their undeclared fields at the same boundary.
-fn unknown_embedded_node_field(
-    node: &provenant_fabric_runtime::graph::GraphNode,
-) -> Option<String> {
-    let children = node
-        .composite
-        .iter()
-        .flat_map(|spec| &spec.nodes)
-        .chain(node.loop_body.iter().flat_map(|spec| &spec.body))
-        .chain(
-            node.plan
-                .iter()
-                .filter_map(|spec| spec.fallback.as_ref())
-                .flat_map(|spec| &spec.nodes),
-        );
-    for child in children {
-        if let Some(field) = child.extra.keys().next() {
-            return Some(format!("node {}: unknown leaf field: {field}", child.id));
-        }
-        if let Some(error) = unknown_embedded_node_field(child) {
-            return Some(error);
-        }
-    }
-    None
-}
-
-/// When a known field has the wrong type, typed decoding cannot reach nested
-/// extras. Inspect each embedded node independently on that error path.
-fn unknown_embedded_node_in_invalid_value(value: &Value) -> Option<String> {
-    for path in ["/composite/nodes", "/loop/body", "/plan/fallback/nodes"] {
-        let Some(children) = value.pointer(path).and_then(Value::as_array) else {
-            continue;
-        };
-        for child in children {
-            let id = child
-                .get("id")
-                .and_then(Value::as_str)
-                .unwrap_or("<unknown>");
-            if let Ok(node) = provenant_fabric_runtime::graph::GraphNode::deserialize(child) {
-                if let Some(field) = node.extra.keys().next() {
-                    return Some(format!("node {id}: unknown leaf field: {field}"));
-                }
-                if let Some(error) = unknown_embedded_node_field(&node) {
-                    return Some(error);
-                }
-            } else if let Some(fields) = child.as_object() {
-                for (key, value) in fields {
-                    if key == "id" || key == "access" {
-                        continue;
-                    }
-                    let probe = json!({"id": "probe", "access": "read_only", (key): value});
-                    if serde_json::from_value::<provenant_fabric_runtime::graph::GraphNode>(probe)
-                        .is_ok_and(|node| node.extra.contains_key(key))
-                    {
-                        return Some(format!("node {id}: unknown leaf field: {key}"));
-                    }
-                }
-            }
-            if let Some(error) = unknown_embedded_node_in_invalid_value(child) {
-                return Some(error);
-            }
-        }
-    }
-    None
-}
-
 impl Layers {
     #[allow(
         clippy::expect_used,
@@ -1970,56 +1903,6 @@ fn lower_leaf(
     }
     let mut node = interpolate(&profile, &effective_parameters, prompt, index)?;
     let map = node.as_object_mut().ok_or("leaf must be a table")?;
-    // Compiler-only fields are consumed below; GraphNode owns the remaining
-    // field vocabulary. Its flattened extras are retained for graph records,
-    // but a preset must not introduce an unknown node field through them.
-    let mut probe = map.clone();
-    for key in [
-        "tier",
-        "effort",
-        "outputs",
-        "prompt_file",
-        "card",
-        "references",
-        "family",
-        "family_strength",
-        "fallback_tier",
-        "purpose",
-        "retry",
-    ] {
-        probe.remove(key);
-    }
-    probe.insert("id".into(), json!(id));
-    probe.entry("access").or_insert_with(|| json!("read_only"));
-    let unknown = match serde_json::from_value::<provenant_fabric_runtime::graph::GraphNode>(
-        Value::Object(probe.clone()),
-    ) {
-        Ok(node) => {
-            if let Some(error) = unknown_embedded_node_field(&node) {
-                return Err(error);
-            }
-            node.extra.keys().next().cloned()
-        }
-        Err(_) => {
-            if let Some(error) =
-                unknown_embedded_node_in_invalid_value(&Value::Object(probe.clone()))
-            {
-                return Err(error);
-            }
-            probe.iter().find_map(|(key, value)| {
-                if key == "id" || key == "access" {
-                    return None;
-                }
-                let candidate = json!({"id": id, "access": "read_only", (key): value});
-                serde_json::from_value::<provenant_fabric_runtime::graph::GraphNode>(candidate)
-                    .ok()
-                    .and_then(|node| node.extra.contains_key(key).then(|| key.clone()))
-            })
-        }
-    };
-    if let Some(key) = unknown {
-        return Err(format!("node {id}: unknown leaf field: {key}"));
-    }
     for alias in ["goal", "brief"] {
         if let Some(value) = map.remove(alias) {
             if map.contains_key("prompt") {
@@ -2870,11 +2753,6 @@ impl StageBuilder<'_> {
         if object.contains_key("export_first") && !object.contains_key("parallel") {
             return Err("export_first requires a parallel group".into());
         }
-        if let Some(mode) = object.get("zero_minimum")
-            && (mode.as_str() != Some("all_but_one") || !object.contains_key("parallel"))
-        {
-            return Err("zero_minimum must be all_but_one on a parallel group".into());
-        }
         if object
             .get("review_lenses")
             .is_some_and(|flag| !flag.is_boolean())
@@ -3298,7 +3176,6 @@ impl StageBuilder<'_> {
                     self.deferred_review(&id, entries, &object, deps, &outputs, depth, nodes)?
                 {
                     object.remove("min_successful");
-                    object.remove("zero_minimum");
                     object.remove("reduce_verdict");
                     object.remove("export_first");
                     object.remove("exports");
@@ -3336,26 +3213,9 @@ impl StageBuilder<'_> {
                             }
                         }
                     }
-                    let all_but_one = object
-                        .remove("zero_minimum")
-                        .is_some_and(|mode| mode == "all_but_one");
                     let min_successful = object
                         .remove("min_successful")
-                        .map(|value| {
-                            if all_but_one {
-                                let requested =
-                                    interpolate(&value, &self.parameters, self.prompt, 1)?
-                                        .as_u64()
-                                        .ok_or("min_successful must be a non-negative integer")?;
-                                Ok(if requested == 0 {
-                                    ends.len().saturating_sub(1).max(1) as u64
-                                } else {
-                                    requested
-                                })
-                            } else {
-                                self.minimum_successful(&value)
-                            }
-                        })
+                        .map(|value| self.minimum_successful(&value))
                         .transpose()?;
                     let reduce_verdict = object
                         .remove("reduce_verdict")
