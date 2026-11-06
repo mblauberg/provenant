@@ -1042,6 +1042,11 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
             provenant_cli::run::output(cmd, edge)
         }),
         Command::Stop(cmd) => {
+            if provenant_cli::fabric::in_lane() {
+                return run_edge(&inv.leaf, globals, |edge| {
+                    provenant_cli::run::cancel(cmd, edge)
+                });
+            }
             if let Some(code) = fabric::unified_graph_command(
                 &fabric::target_text(&cmd.target),
                 fabric::GraphCommand::Stop {
