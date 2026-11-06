@@ -7904,7 +7904,7 @@ fn admission_lock_wait_respects_deadline() -> Result<(), Box<dyn std::error::Err
                 "--prompt-file",
                 prompt.to_str().unwrap(),
                 "--admission-timeout",
-                "100ms",
+                "1s",
             ])?;
             cmd.wait = None;
 
