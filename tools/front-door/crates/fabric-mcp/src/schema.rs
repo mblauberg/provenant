@@ -1153,6 +1153,43 @@ mod wire_parity {
             assert!(!wire.contains("/private/source"));
             assert!(!wire.contains('\u{1b}'));
         }
+
+        // CLI status, output and console all use this same lane owner. Both
+        // MCP views must preserve its terminal cause and reason as well.
+        for cause in [
+            provenant_records::run::TerminalCause::HandoffRefused,
+            provenant_records::run::TerminalCause::UnregisteredAccount,
+            provenant_records::run::TerminalCause::CommandUnavailable,
+        ] {
+            let mut record = attempt(None);
+            let mut extra = provenant_records::ExtraFields::default();
+            extra.insert(
+                "terminal_cause".into(),
+                serde_json::to_value(cause).unwrap(),
+            );
+            record.state = provenant_records::run::AttemptState::Terminal {
+                extra,
+                outcome: provenant_records::run::Outcome::Failed,
+                exit_code: None,
+                finished_at: provenant_core::WallTime::from_micros(2).unwrap(),
+                reason: Some("PROMPT_SENTINEL\u{1b}".into()),
+            };
+            let owner = provenant_records::wire::LaneRow::project(&record, Default::default());
+            for detailed in [false, true] {
+                let mut value = serde_json::to_value(RunResult::Status {
+                    extra: Default::default(),
+                    attempt: record.clone(),
+                })
+                .unwrap();
+                crate::tools::project_run(&mut value, detailed).unwrap();
+                assert_eq!(
+                    value["attempt"]["terminal_cause"],
+                    serde_json::to_value(cause).unwrap()
+                );
+                assert_eq!(value["attempt"]["reason"], serde_json::json!(owner.reason));
+                assert!(!value.to_string().contains("PROMPT_SENTINEL"));
+            }
+        }
     }
 
     #[test]
