@@ -407,6 +407,16 @@ fn delivery_templates_admit_bounded_review_repairs() {
         let delivery_limits = crate::config::GraphLimits::default();
         doc.admit(&delivery_limits).unwrap();
         let expanded = doc.expanded(&delivery_limits).unwrap();
+        let delta = expanded
+            .nodes
+            .iter()
+            .find(|node| {
+                node.id.contains("repair--cycles--r1--check--")
+                    && node.extra.contains_key("repair_lens")
+            })
+            .unwrap();
+        assert_eq!(delta.extra["repair_risk_assessment"], true);
+        assert!(delta.prompt.contains("top-level risk_tier"));
         let repair = expanded
             .nodes
             .iter()

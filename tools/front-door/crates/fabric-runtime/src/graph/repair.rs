@@ -149,6 +149,31 @@ pub(super) fn is_repair_gate(
     })
 }
 
+/// Every active delta lens must report a valid risk assessment before its
+/// verdict can establish that the repair did not expand risk.
+pub(super) fn risk_assessment_missing(
+    node: &PlannedNode,
+    plan: &PlannedGraph,
+    checkpoint: &GraphCheckpoint,
+) -> bool {
+    let Some(round) = &node.round else {
+        return false;
+    };
+    plan.nodes.iter().enumerate().any(|(index, member)| {
+        member
+            .round
+            .as_ref()
+            .is_some_and(|item| item.loop_id == round.loop_id && item.round == round.round)
+            && member.extra.get("repair_risk_assessment") == Some(&serde_json::Value::Bool(true))
+            && checkpoint.nodes[index].state != NodeState::Skipped
+            && checkpoint.nodes[index]
+                .outputs
+                .as_ref()
+                .and_then(|output| output.extra.get("risk_tier"))
+                .is_none()
+    })
+}
+
 pub(super) fn panel_expansion<'a>(
     checkpoint: &'a GraphCheckpoint,
     parent: &str,
@@ -208,15 +233,38 @@ pub(super) fn growth_in_round(
     if !is_repair_gate(node, plan, positions) {
         return false;
     }
+    let rank = |tier: &str| match tier {
+        "routine" => Some(0),
+        "substantial" => Some(1),
+        "crucial" => Some(2),
+        "terminal" => Some(3),
+        _ => None,
+    };
+    let baseline = node
+        .context
+        .as_ref()
+        .and_then(|context| context.risk_tier.as_deref())
+        .or_else(|| {
+            plan.context
+                .as_ref()
+                .and_then(|context| context.risk_tier.as_deref())
+        })
+        .and_then(rank);
     checkpoint.nodes.iter().any(|progress| {
         progress.round.as_ref().is_some_and(|member| {
             member.loop_id == round.loop_id
                 && member.round == round.round
-                && matches!(member.node_id.as_str(), "check" | "synthesis")
-        }) && progress
-            .outputs
-            .as_ref()
-            .is_some_and(|output| output.findings.iter().any(grows_review))
+                && (matches!(member.node_id.as_str(), "check" | "synthesis")
+                    || member.node_id.starts_with("check--"))
+        }) && progress.outputs.as_ref().is_some_and(|output| {
+            output.findings.iter().any(grows_review)
+                || output
+                    .extra
+                    .get("risk_tier")
+                    .and_then(serde_json::Value::as_str)
+                    .and_then(rank)
+                    .is_some_and(|current| baseline.is_none_or(|baseline| current > baseline))
+        })
     })
 }
 
