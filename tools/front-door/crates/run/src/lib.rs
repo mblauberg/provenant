@@ -718,61 +718,12 @@ impl RunError {
                 };
                 diagnostic = diagnostic.fact(DiagnosticFact::Filesystem { operation });
             }
-            Self::Admission(AdmissionError::Disk {
-                free,
-                floor,
-                origin,
-            }) => {
-                diagnostic = provenant_records::diagnostic::ResourceFact::Disk {
-                    free: *free,
-                    floor: *floor,
-                    origin: *origin,
+            Self::Admission(error) => {
+                if let Some(fact) = error.resource_fact() {
+                    diagnostic = fact
+                        .project(diagnostic)
+                        .fact(DiagnosticFact::Resource(fact));
                 }
-                .project(diagnostic);
-            }
-            Self::Admission(AdmissionError::MemoryPressure {
-                level,
-                threshold,
-                origin,
-            }) => {
-                let fact = provenant_records::diagnostic::ResourceFact::MemoryPressure {
-                    level: *level,
-                    threshold: *threshold,
-                    origin: *origin,
-                };
-                diagnostic = fact
-                    .project(diagnostic)
-                    .fact(DiagnosticFact::Resource(fact));
-            }
-            Self::Admission(AdmissionError::Processes { used, limit }) => {
-                let fact = provenant_records::diagnostic::ResourceFact::Processes {
-                    used: *used,
-                    limit: *limit,
-                    reserved: provenant_os::sys::resources::ProcessBudget {
-                        used: *used,
-                        limit: *limit,
-                    }
-                    .headroom(),
-                };
-                diagnostic = fact
-                    .project(diagnostic)
-                    .fact(DiagnosticFact::Resource(fact));
-            }
-            Self::Admission(AdmissionError::LaneCap {
-                active,
-                limit,
-                kind,
-                origin,
-            }) => {
-                let fact = provenant_records::diagnostic::ResourceFact::LaneCap {
-                    active: *active,
-                    limit: *limit,
-                    lane_limit: *kind,
-                    origin: *origin,
-                };
-                diagnostic = fact
-                    .project(diagnostic)
-                    .fact(DiagnosticFact::Resource(fact));
             }
             Self::RetainedWriterImport {
                 run,

@@ -98,6 +98,60 @@ pub enum AdmissionError {
         origin: provenant_records::diagnostic::SettingSource,
     },
 }
+impl AdmissionError {
+    /// Closed host resource facts retained by both custody handoff and guardian
+    /// admission. Operational failures carry no freely formatted safe detail.
+    pub fn resource_fact(&self) -> Option<provenant_records::diagnostic::ResourceFact> {
+        use provenant_records::diagnostic::ResourceFact;
+        match *self {
+            Self::Disk {
+                free,
+                floor,
+                origin,
+            } => Some(ResourceFact::Disk {
+                free,
+                floor,
+                origin,
+            }),
+            Self::MemoryPressure {
+                level,
+                threshold,
+                origin,
+            } => Some(ResourceFact::MemoryPressure {
+                level,
+                threshold,
+                origin,
+            }),
+            Self::LaneCap {
+                active,
+                limit,
+                kind,
+                origin,
+            } => Some(ResourceFact::LaneCap {
+                active,
+                limit,
+                lane_limit: kind,
+                origin,
+            }),
+            Self::Processes { used, limit } => Some(ResourceFact::Processes {
+                used,
+                limit,
+                reserved: provenant_os::sys::resources::ProcessBudget { used, limit }.headroom(),
+            }),
+            Self::Clock | Self::BuildSettings | Self::GuardianIdentity => None,
+        }
+    }
+}
+
+/// Only closed admission causes may publish their text. Arbitrary source
+/// errors can contain paths, prompts or credentials.
+pub(crate) fn admission_refusal(error: &CustodyError) -> String {
+    match error {
+        CustodyError::Admission(_) => error.to_string(),
+        _ => "admission refused".into(),
+    }
+}
+
 pub type Result<T> = std::result::Result<T, CustodyError>;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1175,6 +1229,16 @@ pub struct ProcessExit {
     pub omitted_warnings: u64,
 }
 impl ProcessExit {
+    /// Construct the guardian's pre-spawn admission evidence in one owner so
+    /// retaining its resource fact cannot depend on an adapter's prose.
+    pub fn admission_refused(scope: Scope, error: &CustodyError) -> Self {
+        let mut exit = Self::never_spawned(scope, None, vec![admission_refusal(error)]);
+        exit.launch_refusal = match error {
+            CustodyError::Admission(error) => error.resource_fact(),
+            _ => None,
+        };
+        exit
+    }
     pub(crate) fn never_spawned(
         scope: Scope,
         stop_reason: Option<StopReason>,

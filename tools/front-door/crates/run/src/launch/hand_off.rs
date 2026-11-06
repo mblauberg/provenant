@@ -1,28 +1,8 @@
 use super::*;
 
 fn typed_local(phase: &str, error: &RunError) -> HandOff {
-    if let RunError::Admission(AdmissionError::Disk {
-        free,
-        floor,
-        origin,
-    }) = error
-    {
-        return HandOff::Resource {
-            message: format!("{phase}: {error}"),
-            fact: provenant_records::diagnostic::ResourceFact::Disk {
-                free: *free,
-                floor: *floor,
-                origin: *origin,
-            },
-        };
-    }
-    if matches!(error, RunError::Admission(_))
-        && let Some(provenant_records::diagnostic::DiagnosticFact::Resource(fact)) = error
-            .diagnostic(provenant_records::diagnostic::Destination::Remote {
-                repository: None,
-                home: None,
-            })
-            .fact
+    if let RunError::Admission(error) = error
+        && let Some(fact) = error.resource_fact()
     {
         return HandOff::Resource {
             message: format!("{phase}: {error}"),
