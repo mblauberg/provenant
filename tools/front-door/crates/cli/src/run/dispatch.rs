@@ -734,28 +734,8 @@ pub(super) fn check_flag_capabilities_with_writes(
             }
             Ok(())
         };
-    let check_fallback = |model: &str,
-                          effort: Option<&str>,
-                          network: Option<run::NetworkAccess>|
-     -> Result<(), Fail> {
-        catalogued(model, None)?;
-        match model.split_once('/') {
-            Some((provider, _)) => check(provider, Some(model), effort, network),
-            None => Ok(()),
-        }
-    };
-    let effort_of = |route: &run::RequestedRoute| match route {
-        run::RequestedRoute::Adapter { .. } => None,
-        run::RequestedRoute::Model { effort, .. }
-        | run::RequestedRoute::Named { effort, .. }
-        | run::RequestedRoute::Review { effort, .. } => effort.clone(),
-    };
     if let Ok(route) = route {
-        let effort = effort_of(&route);
         check_route(route, flag_network)?;
-        for model in &command.route.fallback {
-            check_fallback(&model.0, effort.as_deref(), flag_network)?;
-        }
     }
     // Manifest tasks carry their own routes; read them before any worktree exists.
     // A malformed manifest is reported later by the normal path.
@@ -770,12 +750,8 @@ pub(super) fn check_flag_capabilities_with_writes(
         )
     {
         for task in manifest.tasks {
-            let effort = effort_of(&task.route);
             let network = network_access(task.network, postgres).or(flag_network);
             check_route(task.route, network)?;
-            for model in &task.fallback {
-                check_fallback(model, effort.as_deref(), network)?;
-            }
         }
     }
     Ok(())
@@ -1236,16 +1212,13 @@ pub(super) fn dispatch_inner(
             serde_json::Value::from(command.route.exclude.clone())
         ));
     }
+    if !command.route.fallback.is_empty() {
+        return unsupported("route fallback at launch");
+    }
     let flag_route = (
         command.route.model.as_ref().map(|m| m.0.clone()),
         command.route.route.clone(),
         command.route.effort.clone(),
-        command
-            .route
-            .fallback
-            .iter()
-            .map(|m| m.0.clone())
-            .collect::<Vec<_>>(),
     );
     let mut tasks = Vec::new();
     let mut flag_delivery = None;
@@ -1317,11 +1290,6 @@ pub(super) fn dispatch_inner(
                 }
             };
             let route = run::Service::route(task.route)?;
-            let fallback = if task.fallback.is_empty() {
-                flag_route.3.clone()
-            } else {
-                task.fallback
-            };
             let task_id = match task.task_id {
                 Some(id) => id,
                 None => derived_task(&command.operation_id, index)?,
@@ -1332,7 +1300,6 @@ pub(super) fn dispatch_inner(
                 task.title,
                 prompt,
                 route,
-                fallback,
                 task.delivery_id,
                 task.account,
                 task.deliver.or_else(|| flag_delivery.clone()),
@@ -1373,7 +1340,6 @@ pub(super) fn dispatch_inner(
                     flag_route.2.clone(),
                 )?
             },
-            flag_route.3.clone(),
             command.delivery_id,
             command.account.clone(),
             flag_delivery,
@@ -1398,7 +1364,6 @@ pub(super) fn dispatch_inner(
                 title,
                 prompt,
                 route,
-                fallback,
                 delivery_id,
                 account,
                 deliver,
@@ -1413,9 +1378,6 @@ pub(super) fn dispatch_inner(
             // The peer derives task IDs from the operation and has no fallback field.
             if task_id != derived_task(&command.operation_id, index)? {
                 return unsupported("an explicit task ID with --host");
-            }
-            if !fallback.is_empty() {
-                return unsupported("route fallback with --host");
             }
             if !lane_access.attachments.is_empty() {
                 use std::io::Write;
@@ -1488,7 +1450,7 @@ pub(super) fn dispatch_inner(
         .operation(&command.operation_id, &call)?
         .is_none()
     {
-        for (_, _, _, _, _, _, _, delivery, _, _, _, _, _) in &tasks {
+        for (_, _, _, _, _, _, delivery, _, _, _, _, _) in &tasks {
             if let Some(delivery) = delivery {
                 check_delivery_branch(edge.cwd, &delivery.branch)?;
             }
@@ -1513,13 +1475,12 @@ pub(super) fn dispatch_inner(
     config
         .dispatch_profile(&command.knobs)
         .map_err(|error| Fail::new(Status::Invalid, ErrorKind::Config, error.to_string()))?;
-    for (_, title, prompt, _, models, _, _, _, _, _, _, _, _) in &tasks {
+    for (_, title, prompt, _, _, _, _, _, _, _, _, _) in &tasks {
         run::Service::scan(prompt)?;
         if let Some(title) = title {
             provenant_core::validate_task_title(title)
                 .map_err(|message| Fail::new(Status::Invalid, ErrorKind::Invalid, message))?;
         }
-        fallback(models)?;
     }
 
     let configured_admission = config
@@ -1836,7 +1797,6 @@ pub(super) fn dispatch_inner(
                 title,
                 prompt,
                 route,
-                fallback,
                 delivery_id,
                 account,
                 deliver,
@@ -1877,7 +1837,6 @@ pub(super) fn dispatch_inner(
                     task_id,
                     prompt,
                     route,
-                    fallback,
                     provider_timeout: command.provider_timeout,
                     delivery_id,
                     deliver,

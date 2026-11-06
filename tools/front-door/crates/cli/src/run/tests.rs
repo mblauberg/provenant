@@ -2959,7 +2959,6 @@ fn failed_preflight_creates_no_worktree() -> Result<(), Box<dyn std::error::Erro
                 effort: None,
             },
             account: None,
-            fallback: vec![],
             profile: Default::default(),
             timeout_seconds: 10,
             delivery_id: None,
@@ -3184,7 +3183,6 @@ fn operation_replays_after_its_context_ref_moves_or_is_deleted()
                 model: "fixture/model".into(),
                 effort: None,
             },
-            fallback: vec![],
             provider_timeout: 10,
             delivery_id: None,
             deliver: None,
@@ -3325,7 +3323,6 @@ pub(super) fn trace_run(
                     effort: None,
                 },
                 account: None,
-                fallback: vec![],
                 profile: Default::default(),
                 authority_digest: provenant_core::Digest::from_bytes([5; 32]),
                 provider_timeout_seconds: 3600,
@@ -6570,7 +6567,7 @@ fn reviewer_receipts_cover_provenance_and_resolution_evidence()
         "state": {"state":"terminal","outcome":"lost","exit_code":null,"finished_at":now,"reason":null},
         "usage": {}, "prompt": {"path":{"encoding":"utf8","path":"prompt.txt"}, "digest":CanonicalV1::file_digest(b""),"bytes":0,"complete":true,"redacted":false}
     }))?;
-    let (data, line) = reviewer_receipt(&record, false, &[]).unwrap();
+    let (data, line) = reviewer_receipt(&record, false).unwrap();
     assert_eq!(data["resolved_from"], "explicit");
     assert_eq!(data["reviewer"]["provenance"], "unknown");
     assert_eq!(data["reviewer"]["actor_id"], "unknown");
@@ -6587,12 +6584,12 @@ fn reviewer_receipts_cover_provenance_and_resolution_evidence()
         )
     );
     record.verified_owner = Some(ActorId::from_bytes([6; 16]));
-    let unobserved = reviewer_receipt(&record, false, &[]).unwrap().0;
+    let unobserved = reviewer_receipt(&record, false).unwrap().0;
     assert_eq!(unobserved["reviewer"]["provenance"], "unknown");
     assert_ne!(unobserved["reviewer"]["actor_id"], "unknown");
     record.observed_route = record.applied_route.clone();
     let observed_fact = run::fact(record.clone())?.reviewer.ok_or("reviewer fact")?;
-    let observed = reviewer_receipt(&record, false, &[]).unwrap();
+    let observed = reviewer_receipt(&record, false).unwrap();
     assert_eq!(observed.0["reviewer"]["provenance"], "observed");
     assert_eq!(
         observed.0["reviewer"]["actor_id"],
@@ -6604,65 +6601,54 @@ fn reviewer_receipts_cover_provenance_and_resolution_evidence()
         observed_fact.actor_id
     )));
     record.applied_route.as_mut().unwrap().model = Some("gpt-6.1-sol".into());
-    let (writer_data, writer_line) = reviewer_receipt(&record, true, &[]).unwrap();
+    let (writer_data, writer_line) = reviewer_receipt(&record, true).unwrap();
     assert_eq!(writer_data["role"], "writer");
     assert_eq!(writer_data["family"], "openai");
     assert!(writer_line.starts_with("Writer: codex/gpt-6.1-sol@high (openai;"));
     record.applied_route.as_mut().unwrap().effort = None;
     assert!(
-        reviewer_receipt(&record, false, &[])
+        reviewer_receipt(&record, false)
             .unwrap()
             .1
             .contains("@unknown")
     );
     record.applied_route.as_mut().unwrap().model = Some("codex/uncatalogued".into());
-    let unknown_family = reviewer_receipt(&record, false, &[]).unwrap().0;
+    let unknown_family = reviewer_receipt(&record, false).unwrap().0;
     assert_eq!(unknown_family["family"], "unknown");
     assert_eq!(unknown_family["resolved_from"], "unknown");
-    // A differing legacy route does not prove fallback without canonical task evidence.
-    let fallback = record.applied_route.clone().ok_or("fallback route")?;
-    assert_eq!(
-        reviewer_receipt(&record, false, std::slice::from_ref(&fallback))
-            .unwrap()
-            .0["resolved_from"],
-        "unknown"
-    );
     record.skipped_routes.push(serde_json::from_value(
         json!({"route":"codex/gpt-6.1-sol","kind":"unavailable","detail":"unavailable"}),
     )?);
-    assert_eq!(
-        reviewer_receipt(&record, false, &[fallback]).unwrap().0["resolved_from"],
-        "fallback"
-    );
+    assert_eq!(reviewer_receipt(&record, false).unwrap().0["resolved_from"], "unknown");
     record.applied_route.as_mut().unwrap().model = Some("codex/gpt-6.1-sol".into());
     record.applied_route.as_mut().unwrap().pool_selection = Some(serde_json::from_value(
         json!({"pool":"junior","candidates":[],"roll":0,"total_weight":1,"pick":"codex/gpt-6.1-sol"}),
     )?);
     // An unavailable candidate is still a pool selection, not a fallback.
     assert_eq!(
-        reviewer_receipt(&record, false, &[]).unwrap().0["resolved_from"],
+        reviewer_receipt(&record, false).unwrap().0["resolved_from"],
         "pool junior"
     );
     record.applied_route.as_mut().unwrap().model = Some("codex/other".into());
     assert_eq!(
-        reviewer_receipt(&record, false, &[]).unwrap().0["resolved_from"],
+        reviewer_receipt(&record, false).unwrap().0["resolved_from"],
         "unknown"
     );
     record.applied_route = None;
     record.observed_route = None;
-    let unknown = reviewer_receipt(&record, false, &[]).unwrap().0;
+    let unknown = reviewer_receipt(&record, false).unwrap().0;
     for field in ["adapter", "model", "effort", "family", "resolved_from"] {
         assert_eq!(unknown[field], "unknown", "{field}");
     }
     record.applied_route = Some(Default::default());
     assert_eq!(
-        reviewer_receipt(&record, false, &[]).unwrap().0["model"],
+        reviewer_receipt(&record, false).unwrap().0["model"],
         "unknown"
     );
     record.state = run::AttemptState::Running {
         extra: Default::default(),
     };
-    let refused = reviewer_receipt(&record, false, &[]).unwrap_err();
+    let refused = reviewer_receipt(&record, false).unwrap_err();
     assert_eq!(refused.status, Status::Refused);
     assert_eq!(refused.kind, ErrorKind::Nonterminal);
     Ok(())

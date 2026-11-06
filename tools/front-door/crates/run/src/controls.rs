@@ -2095,7 +2095,6 @@ impl RunStore {
                     ),
                     route: prior.requested_route.clone(),
                     account: task.account.clone(),
-                    fallback: vec![],
                     authority_digest: prior.authority_digest,
                     writer: writer
                         .map(|(writer, _)| writer.clone())

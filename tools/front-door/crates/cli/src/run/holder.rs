@@ -265,7 +265,6 @@ mod tests {
                         effort: None,
                     },
                     account: None,
-                    fallback: vec![],
                     profile: Default::default(),
                     authority_digest: Digest::from_bytes([5; 32]),
                     provider_timeout_seconds: 3600,

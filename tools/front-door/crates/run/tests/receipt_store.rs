@@ -54,7 +54,6 @@ fn input() -> std::result::Result<PreparedRun, Box<dyn std::error::Error>> {
                     effort: None,
                 },
                 account: None,
-                fallback: vec![],
                 authority_digest: Digest::from_bytes([5; 32]),
                 provider_timeout_seconds: 3600,
                 delivery_id: None,
