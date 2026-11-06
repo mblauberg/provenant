@@ -1485,9 +1485,20 @@ esac
                 stored_ref: None, launch_actor: &actor });
         assert!(matches!(refused, Err(FacadeError::InvalidInput { .. })));
         let refused_owner = BinaryRunOwner { factory: &factory, allow_remote: false, actor: None, chair: None };
-        assert!(refused_owner.store(&cancel)?.operation(
+        let refusal = refused_owner.store(&cancel)?.operation(
             &graph_operation("graph-attempt-operation", &key)?, &refused_owner.call(&cancel),
-        )?.is_none());
+        )?.ok_or("refusal operation missing")?;
+        assert_eq!(refusal.state, provenant_run::OperationState::Refused);
+        let key: graph::AttemptKey = serde_json::from_value(serde_json::json!({
+            "graph_id":"cloud-owner", "node_id":"verify-read-only", "route_index":0
+        }))?;
+        let node = || graph::NodeInput {
+            attachments: &[], capabilities: None, capability_sources: None, attempt: Some(&spec),
+            require_skill_location: false, settlement_retries: None, prior_attempts: &[], family_peers: &[],
+            context: graph_test_context(&key), read_roots: &[], distinct_from_attempts: &[], require_distinct: false,
+            source_commit: Some(&head), review_base: None, title: "verify", prompt: "Run targeted tests",
+            required_verdict: None, deadline_seconds: None, inputs_dir: None,
+        };
         let first = graph_owner.observe_or_start(&key, node(), &route, graph::AccessMode::ReadOnly,
             None, graph::Replay { delivery: None, branch: None, fast_forward_only: false,
                 stored_ref: None, launch_actor: &actor })?;
@@ -1766,7 +1777,8 @@ esac
                     delivery: None, branch: None, fast_forward_only: false, stored_ref: None, launch_actor: &actor,
                 });
                 assert!(matches!(result, Err(FacadeError::DispatchRefused { .. })), "{name}, write={write}: {result:?}");
-                assert!(store.operation(&graph_operation("graph-attempt-operation", &key)?, &call)?.is_none());
+                let refusal = store.operation(&graph_operation("graph-attempt-operation", &key)?, &call)?.ok_or("refusal operation missing")?;
+                assert_eq!(refusal.state, provenant_run::OperationState::Refused);
             }
         }
         Ok(())
@@ -1931,7 +1943,8 @@ esac
         assert!(error.to_string().contains("lane-outside"));
         assert!(error.to_string().contains(&base));
         let binary = BinaryRunOwner { factory: &factory, allow_remote: true, actor: None, chair: None };
-        assert!(binary.store(&cancel)?.operation(&graph_operation("graph-attempt-operation", &key)?, &binary.call(&cancel))?.is_none());
+        let refusal = binary.store(&cancel)?.operation(&graph_operation("graph-attempt-operation", &key)?, &binary.call(&cancel))?.ok_or("refusal operation missing")?;
+        assert_eq!(refusal.state, provenant_run::OperationState::Refused);
         Ok(())
     }
 
