@@ -3,6 +3,16 @@ use super::*;
 const DEPENDENCY_INSTALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
 const DEPENDENCY_STDERR_TAIL: usize = 4096;
 
+pub(super) fn image_input_warning(adapter: &str, attachments: &[PathBuf]) -> Option<String> {
+    (!attachments.is_empty()
+        && !AdapterSpec::get(adapter).is_some_and(|spec| spec.launch.image_input))
+    .then(|| {
+        format!(
+            "warning: adapter {adapter} does not support image_input; attachments remain readable"
+        )
+    })
+}
+
 pub(super) fn violates_account_pin(
     selected_key: Option<&str>,
     selected_adapter: Option<&str>,
@@ -546,9 +556,17 @@ pub(super) fn prepare_candidates(
         ),
         None => None,
     };
-    let cwd = match writer.as_ref() {
+    let source = match writer.as_ref() {
         Some(writer) => writer.worktree.path().to_owned(),
-        None => canonical(registry.cwd.ok_or("working directory is unavailable")?)?,
+        None => source_cwd(registry, task)?,
+    };
+    let isolated =
+        writer.is_none() && task.access.source_root.is_some() && !task.access.source_live;
+    let cwd = if isolated {
+        super::source_tree::ensure_source_roots(&source, &task.access, assets)?;
+        super::source_tree::snapshot_source(registry, task, paths, &source, &git)?
+    } else {
+        source.clone()
     };
     // Status is evidence for both the brief and a source refusal. Failure to
     // collect it must never masquerade as a clean predecessor worktree.
@@ -570,37 +588,25 @@ pub(super) fn prepare_candidates(
             let source = source_head
                 .parse()
                 .map_err(|_| "invalid pinned writer source")?;
-            if let Err(error) = writer.require_continuation_source(&git, source, predecessor) {
-                if uncommitted.is_empty() {
-                    return Err(error.to_string().into());
-                } else {
-                    return Err(format!(
-                        "{error}; uncommitted predecessor edits: {}",
-                        uncommitted.join(", ")
-                    )
-                    .into());
-                }
+            let lineage = writer.require_continuation_source(&git, source, predecessor);
+            if !uncommitted.is_empty() {
+                let detail = lineage.err().map_or_else(
+                    || format!("writer continuation from {source} to {predecessor}"),
+                    |error| error.to_string(),
+                );
+                return Err(format!(
+                    "{detail}; uncommitted predecessor edits: {}",
+                    uncommitted.join(", ")
+                )
+                .into());
             }
+            lineage.map_err(|error| error.to_string())?;
         } else if let Some(head) = task.head.as_deref() {
             writer
                 .require_source(head.parse().map_err(|_| "invalid pinned writer source")?)
                 .map_err(|error| error.to_string())?;
         }
     }
-    let prompt_text_buf;
-    let prompt_text = if !uncommitted.is_empty() {
-        prompt_text_buf = format!(
-            "{prompt_text}\n\nUncommitted predecessor edits in worktree:\n{}",
-            uncommitted
-                .iter()
-                .map(|p| format!("- {p}"))
-                .collect::<Vec<_>>()
-                .join("\n")
-        );
-        &prompt_text_buf
-    } else {
-        prompt_text
-    };
     // Publishing is opt-in (`lanes.publish`): it hands the lane the GitHub
     // credential. Missing gh tools or configuration leave the
     // writer able to do local work without publishing credential access.
@@ -615,8 +621,8 @@ pub(super) fn prepare_candidates(
         .base
         .as_deref()
         .map(|base| match task.head.as_deref() {
-            Some(head) => run::GitContext::capture_at(&git, &cwd, base, head),
-            None => run::GitContext::capture(&git, &cwd, base),
+            Some(head) => run::GitContext::capture_at(&git, &source, base, head),
+            None => run::GitContext::capture(&git, &source, base),
         })
         .transpose()?;
     let user = provenant_os::sys::account(provenant_os::sys::Account::Current)
@@ -641,13 +647,29 @@ pub(super) fn prepare_candidates(
     };
     request.intent = route_request(task)?.intent;
     let catalogue = provenant_routing::Catalogue::bundled().map_err(|e| e.to_string())?;
-    let eligible = provenant_routing::probe_adapters(
+    let mut eligible = provenant_routing::probe_adapters(
         &request,
         &catalogue,
         &config.domains.routing,
         provider_registry,
     )
     .map_err(|e| e.to_string())?;
+    if resume.is_none()
+        && let Some(context) = task.context.as_ref()
+        && let (Some(risk), Some(kind)) =
+            (context.risk_tier.as_deref(), context.task_kind.as_deref())
+        && let Ok(now) = provenant_core::Clock::wall_now(&provenant_os::clock::SystemClock::new())
+        && let Some(model) = config
+            .domains
+            .routing
+            .preferred_model(&request, risk, kind, now)
+        && let Some(registration) = provider_registry
+            .iter()
+            .find(|entry| entry.adapter.id() == model.adapter())
+        && !eligible.contains(&registration.adapter.id())
+    {
+        eligible.push(registration.adapter.id());
+    }
     // Exclude updates during preparation when the bounded wait succeeds.
     let clock = provenant_os::clock::SystemClock::new();
     use provenant_core::Clock;
@@ -994,6 +1016,9 @@ pub(super) fn prepare_candidates(
             family_constraints,
             &rules,
             rejected,
+            task.context.as_ref().and_then(|context| {
+                Some((context.risk_tier.as_deref()?, context.task_kind.as_deref()?))
+            }),
         )
     };
     let resolved = resolve(&[]).map_err(|error| error.to_string())?;
@@ -1243,7 +1268,20 @@ pub(super) fn prepare_candidates(
                     )
                 })
                 .map_or_else(
-                    || provenant_routing::exclusion_detail(reason),
+                    || {
+                        route
+                            .extra
+                            .get("account_exclusions")
+                            .and_then(|v| v.as_array())
+                            .map(|items| {
+                                items
+                                    .iter()
+                                    .filter_map(|v| v.as_str())
+                                    .collect::<Vec<_>>()
+                                    .join("; ")
+                            })
+                            .unwrap_or_else(|| provenant_routing::exclusion_detail(reason))
+                    },
                     |error| {
                         reported_plan_errors.insert(route.adapter.clone());
                         format!("confinement plan: {error}")
@@ -1359,6 +1397,20 @@ pub(super) fn prepare_candidates(
             }
             None => prompt_text.to_owned(),
         };
+        let text = if !task.access.attachments.is_empty()
+            && !AdapterSpec::get(adapter.id()).is_some_and(|spec| spec.launch.image_input)
+        {
+            let paths = task
+                .access
+                .attachments
+                .iter()
+                .map(|path| format!("- {}", path.display()))
+                .collect::<Vec<_>>()
+                .join("\n");
+            format!("{text}\n\nAttached images (open these files if supported):\n{paths}")
+        } else {
+            text
+        };
         let text = format!(
             "{}\n{text}",
             run::lane_preamble(
@@ -1407,7 +1459,30 @@ pub(super) fn prepare_candidates(
                     )
                 })
                 .map_err(|error| error.to_string()),
-            None => read_only_plan(roots, project_id, &cwd, &git, request),
+            None => read_only_plan(
+                roots,
+                project_id,
+                &source,
+                &git,
+                request,
+                isolated,
+                task.access.source_live,
+            )
+            .and_then(|mut planned| {
+                if isolated {
+                    planned.1 = Some(
+                        task.head
+                            .as_deref()
+                            .ok_or("graph source head missing")?
+                            .parse()
+                            .map_err(|_| "invalid graph source head")?,
+                    );
+                    planned.3 = Some(cwd.join(".git"));
+                } else {
+                    require_source_head(task, planned.1)?;
+                }
+                Ok(planned)
+            }),
         }) {
             Ok(planned) => planned,
             Err(error) => {
@@ -1499,6 +1574,7 @@ pub(super) fn prepare_candidates(
         let grant_digest = task.authority_digest.to_string();
         let prepare = |provider_route: &provenant_records::ResolvedRoute| {
             adapter.prepare(PrepareInput {
+                images: &task.access.attachments,
                 command: None,
                 route: provider_route,
                 confined: &plan,
@@ -1656,6 +1732,13 @@ pub(super) fn prepare_candidates(
                 .splice(1..1, [argument.into(), scratch.as_os_str().to_owned()]);
         }
         spec.complete_tool_requirements(&plan, &home, &cwd);
+        if isolated {
+            super::source_tree::ensure_profile_isolated(&source, &spec.profile.spec)?;
+            super::source_tree::ensure_view_read_only(
+                &cwd,
+                &provenant_confinement::write_grants(plan.permissions(), &spec.profile),
+            )?;
+        }
         let transcript_account = account
             .as_ref()
             .filter(|_| adapter_spec.is_some_and(|spec| spec.transcript_account_root))
@@ -1700,6 +1783,9 @@ pub(super) fn prepare_candidates(
                 std::io::stderr().lock(),
                 "warning: OpenCode login status is unverified; the selected launch will check authentication"
             );
+        }
+        if let Some(warning) = image_input_warning(&route.adapter, &task.access.attachments) {
+            let _ = writeln!(std::io::stderr().lock(), "{warning}");
         }
         for warning in config.domains.routing.pool_effort_warnings(&catalogue) {
             let _ = writeln!(std::io::stderr().lock(), "{warning}");
@@ -1747,6 +1833,13 @@ pub(super) fn prepare_candidates(
             resume.is_some(),
             redirected || current_candidate > 0,
         );
+        if let Some(warning) = provider
+            .extra
+            .get("availability_warning")
+            .and_then(|v| v.as_str())
+        {
+            let _ = writeln!(std::io::stderr().lock(), "warning: {warning}");
+        }
         provider.extra.insert(
             "account_source".into(),
             account_source(resume.is_some(), task.account.is_some()).into(),
@@ -1896,7 +1989,21 @@ fn launch_route_record(
     } else {
         "named_route"
     };
-    RouteRecord::from_resolved(route, account_label, source)
+    let mut record = RouteRecord::from_resolved(route, account_label, source);
+    if let provenant_records::RouteReadiness::Ready { extra, .. } = &route.readiness
+        && let Some(state) = extra.get("availability_warning").and_then(|v| v.as_str())
+    {
+        let warning = format!(
+            "account {} availability is {state}; the provider will check it",
+            account_label
+                .or(route.account_key.as_deref())
+                .unwrap_or("unknown")
+        );
+        record
+            .extra
+            .insert("availability_warning".into(), warning.into());
+    }
+    record
 }
 
 #[cfg(test)]
@@ -1923,6 +2030,7 @@ mod receipt_tests {
         );
         let context = RoutingContext {
             policy_account_hint: None,
+            choice_context: None,
             catalogue: &catalogue,
             config: &config,
             registry: REGISTRY,
@@ -1955,6 +2063,20 @@ mod receipt_tests {
         assert_eq!(wire["effort"], "high");
         assert_eq!(wire["account_label"], "work");
         assert_eq!(wire["source"], "named_route");
+        let mut uncertain = resolved.clone();
+        uncertain.readiness = provenant_records::RouteReadiness::Ready {
+            extra: [("availability_warning".into(), serde_json::json!("Stale"))]
+                .into_iter()
+                .collect(),
+            availability_ref: "fixture".into(),
+            expires_unix_seconds: 99,
+        };
+        let warned = launch_route_record(&uncertain, Some("work"), &requested, false, false);
+        assert!(
+            warned.extra["availability_warning"]
+                .as_str()
+                .is_some_and(|warning| warning.contains("work") && warning.contains("Stale"))
+        );
         let pinned = run::RequestedRoute::Model {
             extra: Default::default(),
             provider: "codex".into(),
@@ -2095,5 +2217,18 @@ mod user_skills_tests {
         assert_eq!(record["exposed"], false);
         assert_eq!(record["staged_file_count"], 0);
         assert_eq!(record["source"], origin);
+    }
+}
+
+#[cfg(test)]
+mod attachment_tests {
+    use super::*;
+    #[test]
+    fn unsupported_image_input_warns_without_refusing() {
+        let images = vec![PathBuf::from("/outside/image.png")];
+        let warning = image_input_warning("cursor", &images).unwrap();
+        assert!(warning.contains("cursor") && warning.contains("image_input"));
+        assert!(image_input_warning("claude", &images).is_none());
+        assert!(image_input_warning("cursor", &[]).is_none());
     }
 }

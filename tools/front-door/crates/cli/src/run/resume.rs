@@ -591,8 +591,14 @@ pub(super) fn resume_inner(
         &call,
         !command.no_fallback,
     )?;
-    let (mut data, human, timed_out) =
-        report(&session, &run, &started, command.wait, &scoped_edge, &call)?;
+    let (mut data, human, timed_out) = report(
+        &session,
+        &run,
+        &started,
+        command.wait.map(Duration::from_secs),
+        &scoped_edge,
+        &call,
+    )?;
     data["resumed_from"] = json!(prior);
     let continuation = session.store.request(run.run_id, &call)?.fresh_continuation;
     data["continuation"] = json!(if continuation.is_some() {

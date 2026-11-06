@@ -12,6 +12,11 @@ model when the task needs one. Resolve a pool with
 `provenant route resolve NAME` also accepts a route name or an unambiguous
 model name. Unknown or ambiguous names report suggestions and examples.
 
+Writer graph previews report an advisory tier mix and warn when it is inverted;
+they do not change or refuse a route. Set the `generator-evaluator` writer
+parameter or a planned `big-batch` lane route to suit the work. See
+[writer tiers](presets.md#writer-tiers) for the defaults and counting rules.
+
 An observed expired login projects as `login_expired` for routing; it does
 not create a quota refusal. Existing scoped quota refusals retain their own
 clearing rules. `provenant quota` shows the last reading and, when the account
@@ -148,7 +153,7 @@ which independent review legs count. The bundled pools include `utility`,
 weighted choice, not an ordered model list. Explicit route lists and
 zero-weight fallbacks have their own ordering semantics.
 
-Use `provenant run --preset review-council --prompt-file brief.md --explain`
+Use `provenant run --preset review --prompt-file brief.md --explain`
 to inspect roles and sources before dispatch. Inspect the recorded separation
 and substitutions after dispatch. Different model names or requested families
 alone do not establish independent answering families. Bind the resolved
@@ -248,7 +253,7 @@ A refactor runs its shape's base lenses plus `refactor-cleanup` and
 risk tier implies `terminal`) add `security-privacy`, `concurrency-data-errors`
 and `adversarial`. A risk tier alone does not add `security-privacy` or
 `concurrency-data-errors`; pass `--risk-tag` (or the `risk_tags` parameter) for
-those. A caller-supplied `lenses` list in `review-council` keeps the caller's
+those. A caller-supplied `lenses` list in `review` keeps the caller's
 order.
 
 The bundled `review.lenses.by_paths` rules add `tests` outside the slot cap for
@@ -326,10 +331,6 @@ declaration using the [review wire grammar](../specs/fabric.md#typed-node-output
 The prompt offers approval, change request or inconclusive; it does not offer
 approval with nits. The collector uses the complete verified result stream;
 duplicate declarations, an unrecognised token or an unreadable result is `unknown`.
-For one release, retained first-line legacy outputs remain readable when there
-is no captured final verdict, exactly one declaration in the complete stream,
-and the first non-empty excerpt line is a legacy approval, change request or
-inconclusive verdict. Legacy case and Markdown emphasis remain accepted.
 JSON includes verdict counts, with planned
 but `not_submitted` reviewers counted separately. The command
 exits successfully only when every reviewer succeeds and approves; a failed,
@@ -502,6 +503,11 @@ Use `adapter/key` to disambiguate a key shared by providers. Do not configure
 multiple profiles for the same account under different names. Remove or update
 stale profile and `reset_of` references when unregistering accounts: an unknown
 or ambiguous reference prevents route resolution and dispatch for all providers.
+
+Current availability evidence is preferred. If only stale or unknown evidence
+remains for an identified account, the lane warns and lets the provider check it.
+An exhausted account remains excluded until its reset; an all-excluded route
+reports the accounts and their remedies.
 
 For example, in the selected state's `config.toml`:
 

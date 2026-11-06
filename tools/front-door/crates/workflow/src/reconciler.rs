@@ -59,6 +59,16 @@ pub struct Record {
     pub attempt: Option<Attempt>,
     pub verdict: Option<String>,
     pub intents: Vec<Intent>,
+    #[serde(default)]
+    pub history: Vec<History>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct History {
+    pub state: State,
+    pub attempt: Option<Attempt>,
+    pub verdict: Option<String>,
+    pub intents: Vec<Intent>,
 }
 
 #[derive(Debug, Error)]
@@ -85,7 +95,7 @@ pub struct Store {
 }
 impl Store {
     pub fn open(db: Connection) -> Result<Self, Error> {
-        db.execute_batch("CREATE TABLE IF NOT EXISTS pr_work (key TEXT PRIMARY KEY, repository TEXT NOT NULL, pr TEXT NOT NULL, head TEXT NOT NULL, body TEXT NOT NULL); CREATE INDEX IF NOT EXISTS pr_work_head ON pr_work(repository, pr, head);")?;
+        db.execute_batch("CREATE TABLE IF NOT EXISTS pr_work (key TEXT PRIMARY KEY, repository TEXT NOT NULL, pr TEXT NOT NULL, head TEXT NOT NULL, body TEXT NOT NULL); CREATE INDEX IF NOT EXISTS pr_work_head ON pr_work(repository, pr, head); CREATE TABLE IF NOT EXISTS pr_work_ids (key TEXT NOT NULL, kind TEXT NOT NULL, id TEXT NOT NULL, PRIMARY KEY(key, kind, id));")?;
         Ok(Self { db })
     }
     fn id(key: &Key) -> Result<String, Error> {
@@ -133,6 +143,32 @@ impl Store {
         }
         Ok(records)
     }
+    // Retain arbitrary caller-supplied IDs after their archived payload is pruned.
+    fn remember_ids(db: &Connection, record: &Record) -> Result<(), Error> {
+        let key = Self::id(&record.key)?;
+        for history in &record.history {
+            if let Some(attempt) = &history.attempt {
+                db.execute(
+                    "INSERT OR IGNORE INTO pr_work_ids VALUES (?1, 'attempt', ?2)",
+                    params![key, attempt.id],
+                )?;
+            }
+            for intent in &history.intents {
+                db.execute(
+                    "INSERT OR IGNORE INTO pr_work_ids VALUES (?1, 'intent', ?2)",
+                    params![key, intent.id],
+                )?;
+            }
+        }
+        Ok(())
+    }
+    fn used_id(db: &Connection, key: &Key, kind: &str, id: &str) -> Result<bool, Error> {
+        Ok(db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pr_work_ids WHERE key=?1 AND kind=?2 AND id=?3)",
+            params![Self::id(key)?, kind, id],
+            |row| row.get(0),
+        )?)
+    }
     /// The caller supplies an authoritative current head, not an unordered event head.
     pub fn observe_head(&mut self, key: Key) -> Result<Record, Error> {
         let tx = self
@@ -165,6 +201,7 @@ impl Store {
             attempt: None,
             verdict: None,
             intents: vec![],
+            history: vec![],
         };
         tx.execute(
             "INSERT OR IGNORE INTO pr_work(key,repository,pr,head,body) VALUES(?1,?2,?3,?4,?5)",
@@ -176,7 +213,22 @@ impl Store {
                 serde_json::to_string(&record)?
             ],
         )?;
-        let result = Self::get_from(&tx, &key)?;
+        let mut result = Self::get_from(&tx, &key)?;
+        if result.cancelled {
+            result.history.push(History {
+                state: result.state,
+                attempt: result.attempt.take(),
+                verdict: result.verdict.take(),
+                intents: std::mem::take(&mut result.intents),
+            });
+            Self::remember_ids(&tx, &result)?;
+            result
+                .history
+                .retain(|h| h.intents.iter().any(|i| i.receipt.is_none()));
+            result.state = State::NeedsReview;
+            result.cancelled = false;
+            Self::save(&tx, &result)?;
+        }
         tx.commit()?;
         Ok(result)
     }
@@ -200,13 +252,11 @@ impl Store {
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         // An old head may have published just before cancellation. Resolve that
         // outcome before dispatching work for its successor.
-        let mut stmt =
-            tx.prepare("SELECT body FROM pr_work WHERE repository=?1 AND pr=?2 AND head<>?3")?;
+        let mut stmt = tx.prepare("SELECT body FROM pr_work WHERE repository=?1 AND pr=?2")?;
         let bodies = stmt
-            .query_map(
-                params![key.repository, key.pr.to_string(), key.head],
-                |row| row.get::<_, String>(0),
-            )?
+            .query_map(params![key.repository, key.pr.to_string()], |row| {
+                row.get::<_, String>(0)
+            })?
             .collect::<Result<Vec<_>, _>>()?;
         drop(stmt);
         for body in bodies {
@@ -217,15 +267,25 @@ impl Store {
             if old
                 .intents
                 .iter()
+                .chain(old.history.iter().flat_map(|h| &h.intents))
                 .any(|i| i.receipt.is_none() && !i.retryable)
             {
                 return Err(Error::Uncertain);
             }
         }
         let mut record = Self::get_from(&tx, key)?;
+        if Self::used_id(&tx, key, "attempt", &attempt.id)? {
+            return Err(Error::Invalid);
+        }
         {
             let r = &mut record;
-            if r.cancelled || r.state != State::NeedsReview || r.attempt.is_some() {
+            if r.cancelled
+                || r.state != State::NeedsReview
+                || r.attempt.is_some()
+                || r.history
+                    .iter()
+                    .any(|h| h.attempt.as_ref().is_some_and(|a| a.id == attempt.id))
+            {
                 return Err(Error::Invalid);
             }
             if attempt.lease_until <= now || attempt.id.is_empty() || attempt.lease_owner.is_empty()
@@ -239,7 +299,7 @@ impl Store {
         tx.commit()?;
         Ok(())
     }
-    /// Reclaim the existing attempt after expiry; never create another attempt for the key.
+    /// Reclaim the current attempt after expiry rather than creating a concurrent attempt.
     pub fn renew(
         &mut self,
         key: &Key,
@@ -335,7 +395,15 @@ impl Store {
         id: String,
         effect: Effect,
     ) -> Result<(), Error> {
-        self.update(key, |r| {
+        let tx = self
+            .db
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if Self::used_id(&tx, key, "intent", &id)? {
+            return Err(Error::Invalid);
+        }
+        let mut record = Self::get_from(&tx, key)?;
+        {
+            let r = &mut record;
             Self::leased(r, attempt, owner, now)?;
             let allowed = match effect {
                 Effect::Verdict => r.state == State::Verdict,
@@ -344,6 +412,10 @@ impl Store {
             if !allowed
                 || id.is_empty()
                 || r.intents.iter().any(|i| i.effect == effect || i.id == id)
+                || r.history
+                    .iter()
+                    .flat_map(|h| &h.intents)
+                    .any(|i| i.id == id)
             {
                 return Err(Error::Invalid);
             }
@@ -357,8 +429,10 @@ impl Store {
             if effect == Effect::Merge {
                 r.state = State::Landing;
             }
-            Ok(())
-        })
+        }
+        Self::save(&tx, &record)?;
+        tx.commit()?;
+        Ok(())
     }
     /// Query remote state before deciding whether the same intent may be retried.
     pub fn reconcile_remote(
@@ -371,6 +445,7 @@ impl Store {
         let pending = record
             .intents
             .iter()
+            .chain(record.history.iter().flat_map(|h| &h.intents))
             .find(|item| item.id == intent)
             .ok_or(Error::Missing)?;
         if pending.receipt.is_some() {
@@ -388,9 +463,11 @@ impl Store {
         observation: Observation,
     ) -> Result<(), Error> {
         self.update(key, |r| {
+            let current = r.intents.iter().any(|i| i.id == intent);
             let i = r
                 .intents
                 .iter_mut()
+                .chain(r.history.iter_mut().flat_map(|h| &mut h.intents))
                 .find(|i| i.id == intent)
                 .ok_or(Error::Missing)?;
             if i.generation != generation {
@@ -405,7 +482,7 @@ impl Store {
                 Observation::Found(receipt) if !receipt.is_empty() => {
                     i.receipt = Some(receipt);
                     i.retryable = false;
-                    if i.effect == Effect::Merge {
+                    if current && i.effect == Effect::Merge {
                         r.state = State::Landed;
                     }
                 }
@@ -425,6 +502,9 @@ impl Store {
     ) -> Result<(), Error> {
         self.update(key, |r| {
             Self::leased(r, attempt, owner, now)?;
+            if matches!(r.state, State::Failed | State::Landed) {
+                return Err(Error::Invalid);
+            }
             let i = r
                 .intents
                 .iter_mut()
@@ -491,6 +571,121 @@ mod tests {
     fn landable(s: &mut Store, k: &Key) {
         published(s, k);
         s.transition(k, "a", "worker", 1, State::Landable).unwrap();
+    }
+    #[test]
+    fn failed_record_cannot_retry_absent_effect() {
+        let mut s = Store::open(Connection::open_in_memory().unwrap()).unwrap();
+        let k = key("head");
+        start(&mut s, &k);
+        verdict(&mut s, &k);
+        s.intent(&k, "a", "worker", 1, "v".into(), Effect::Verdict)
+            .unwrap();
+        s.reconcile(&k, "v", 0, Observation::Absent).unwrap();
+        s.transition(&k, "a", "worker", 1, State::Failed).unwrap();
+        assert!(s.retry(&k, "a", "worker", 1, "v").is_err());
+        assert_eq!(s.get(&k).unwrap().intents[0].generation, 0);
+    }
+
+    #[test]
+    fn returning_head_preserves_and_reconciles_previous_attempt() {
+        let mut s = Store::open(Connection::open_in_memory().unwrap()).unwrap();
+        let a = key("a");
+        let b = key("b");
+        start(&mut s, &a);
+        verdict(&mut s, &a);
+        s.intent(&a, "a", "worker", 1, "old-v".into(), Effect::Verdict)
+            .unwrap();
+        s.observe_head(b.clone()).unwrap();
+        assert!(s.start(&b, attempt(), 0).is_err());
+        let returned = s.observe_head(a.clone()).unwrap();
+        assert_eq!(returned.state, State::NeedsReview);
+        assert_eq!(returned.verdict, None);
+        assert_eq!(returned.history[0].verdict.as_deref(), Some("approved"));
+        assert!(matches!(s.start(&a, attempt(), 0), Err(Error::Uncertain)));
+        s.reconcile(&a, "old-v", 0, Observation::Absent).unwrap();
+        assert!(s.start(&a, attempt(), 0).is_err());
+        let mut next = attempt();
+        next.id = "next".into();
+        s.start(&a, next, 0).unwrap();
+        assert!(s.retry(&a, "next", "worker", 1, "old-v").is_err());
+        s.verdict(&a, "next", "worker", 1, "new verdict".into())
+            .unwrap();
+        assert!(
+            s.intent(&a, "next", "worker", 1, "old-v".into(), Effect::Verdict)
+                .is_err()
+        );
+        s.intent(&a, "next", "worker", 1, "new-v".into(), Effect::Verdict)
+            .unwrap();
+        s.reconcile(&a, "old-v", 0, Observation::Found("old receipt".into()))
+            .unwrap();
+        let record = s.get(&a).unwrap();
+        assert_eq!(
+            record.history[0].intents[0].receipt.as_deref(),
+            Some("old receipt")
+        );
+        assert_eq!(record.verdict.as_deref(), Some("new verdict"));
+        assert_eq!(record.state, State::Verdict);
+        assert_eq!(s.get(&b).unwrap().verdict, None);
+    }
+    #[test]
+    fn returning_head_prunes_settled_history_but_keeps_unresolved_intents() {
+        let mut s = Store::open(Connection::open_in_memory().unwrap()).unwrap();
+        let a = key("a");
+        let b = key("b");
+        start(&mut s, &a);
+        verdict(&mut s, &a);
+        s.intent(&a, "a", "worker", 1, "pending".into(), Effect::Verdict)
+            .unwrap();
+        s.observe_head(b.clone()).unwrap();
+        s.observe_head(a.clone()).unwrap();
+        s.reconcile(&a, "pending", 0, Observation::Absent).unwrap();
+        let initial = s.get(&a).unwrap().history.len();
+        for n in 0..20 {
+            let attempt_id = format!("attempt-{n}");
+            let intent_id = format!("intent-{n}");
+            let mut next = attempt();
+            next.id = attempt_id.clone();
+            s.start(&a, next, 0).unwrap();
+            s.verdict(&a, &attempt_id, "worker", 1, "approved".into())
+                .unwrap();
+            s.intent(
+                &a,
+                &attempt_id,
+                "worker",
+                1,
+                intent_id.clone(),
+                Effect::Verdict,
+            )
+            .unwrap();
+            s.reconcile(&a, &intent_id, 0, Observation::Found("receipt".into()))
+                .unwrap();
+            s.observe_head(b.clone()).unwrap();
+            s.observe_head(a.clone()).unwrap();
+        }
+        let record = s.get(&a).unwrap();
+        assert!(record.history.len() <= initial);
+        assert!(
+            record
+                .history
+                .iter()
+                .flat_map(|h| &h.intents)
+                .any(|i| i.id == "pending")
+        );
+        assert!(s.start(&a, attempt(), 0).is_err());
+        let mut pruned = attempt();
+        pruned.id = "attempt-0".into();
+        assert!(s.start(&a, pruned, 0).is_err());
+        let mut next = attempt();
+        next.id = "fresh".into();
+        s.start(&a, next, 0).unwrap();
+        s.verdict(&a, "fresh", "worker", 1, "approved".into())
+            .unwrap();
+        assert!(
+            s.intent(&a, "fresh", "worker", 1, "intent-0".into(), Effect::Verdict)
+                .is_err()
+        );
+        s.reconcile(&a, "pending", 0, Observation::Found("late receipt".into()))
+            .unwrap();
     }
     #[test]
     fn state_machine_and_undefined_transitions() {

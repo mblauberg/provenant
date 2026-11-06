@@ -21,12 +21,39 @@ const UNKNOWN_USAGE_TEXT_BYTES: usize = 64;
 pub(super) const REFUSAL_CODE_BYTES: usize = 64;
 /// Space for a deferred review node's expanded progress and serialized record.
 /// A prospective expansion is also checked against this reservation.
-const REVIEW_NODE_RESERVE: usize = 64 * 1024;
+const REVIEW_NODE_RESERVE: usize = 40 * 1024;
 const REVIEW_RECORD_RESERVE: usize = 256 * 1024;
 
 fn deferred_review_bound(node: &PlannedNode, review: &ReviewSpec) -> usize {
     let templates = node.extra.get("lens_templates").map_or(0, canonical_len);
-    let inherited = canonical_len(&(&node.depends_on, &node.inputs, &node.read_roots));
+    let panel_templates = node
+        .extra
+        .get("panel_templates")
+        .and_then(serde_json::Value::as_object);
+    let panel_bytes = panel_templates.map_or(0, |templates| {
+        let one = |key: &str| {
+            templates
+                .get(key)
+                .filter(|value| !value.is_null())
+                .map_or(0, canonical_len)
+        };
+        let verifiers = node
+            .extra
+            .get("panel_max_verifiers")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|count| usize::try_from(count).ok())
+            .unwrap_or(review.max_nodes)
+            .min(review.max_nodes);
+        one("frame")
+            .saturating_add(one("synthesis"))
+            .saturating_add(one("verifier").saturating_mul(verifiers))
+    });
+    let inherited = canonical_len(&(
+        &node.depends_on,
+        &node.inputs,
+        &node.read_roots,
+        &node.attachments,
+    ));
     // A custom lens can have a disposition projection or CI evidence larger
     // than an ordinary review leaf. Reserve those declared additions too.
     let template_extra = node
@@ -90,6 +117,67 @@ fn deferred_review_bound(node: &PlannedNode, review: &ReviewSpec) -> usize {
         .saturating_mul(REVIEW_NODE_RESERVE)
         .saturating_add(REVIEW_RECORD_RESERVE)
         .saturating_add(templates.saturating_mul(2))
+        // A planned review persists the captured catalogue in the review
+        // expansion and again in the planner's bounded fragment and fallback.
+        .saturating_add(
+            node.extra
+                .get("review_planner")
+                .map_or(0, |planner| canonical_len(planner).saturating_mul(4)),
+        )
+        .saturating_add(if node.extra.contains_key("review_planner") {
+            fn pattern_nodes(node: &serde_json::Value) -> usize {
+                1_usize.saturating_add(
+                    node.pointer("/composite/nodes")
+                        .and_then(serde_json::Value::as_array)
+                        .map_or(0, |children| {
+                            children.iter().fold(0_usize, |total, child| {
+                                total.saturating_add(pattern_nodes(child))
+                            })
+                        }),
+                )
+            }
+            let model_nodes = node
+                .extra
+                .get("review_planner")
+                .and_then(|planner| planner.get("max_nodes"))
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|n| usize::try_from(n).ok())
+                .unwrap_or(review.max_nodes);
+            let pattern_width = node
+                .extra
+                .get("review_planner")
+                .and_then(|planner| planner.pointer("/catalogue/patterns"))
+                .and_then(serde_json::Value::as_array)
+                .into_iter()
+                .flatten()
+                .map(|pattern| {
+                    1_usize.saturating_add(
+                        pattern
+                            .get("nodes")
+                            .and_then(serde_json::Value::as_array)
+                            .map_or(0, |nodes| {
+                                nodes.iter().fold(0_usize, |total, node| {
+                                    total.saturating_add(pattern_nodes(node))
+                                })
+                            }),
+                    )
+                })
+                .max()
+                .unwrap_or(2);
+            model_nodes
+                .saturating_add(review.max_nodes)
+                .saturating_mul(pattern_width)
+                .saturating_mul(REVIEW_NODE_RESERVE)
+        } else {
+            0
+        })
+        // Verifier templates can be instantiated more than once.
+        .saturating_add(panel_bytes.saturating_mul(2))
+        .saturating_add(if panel_templates.is_some() {
+            DISPOSITION_FINDINGS_BYTES + COMPOSITE_EXCERPT_BYTES
+        } else {
+            0
+        })
         .saturating_add(template_extra)
         .saturating_add(route_extra)
         // Explicit lens tiers can carry route lists copied into both the
@@ -148,6 +236,8 @@ pub(super) fn checkpoint_bound(
     plan: &PlannedGraph,
 ) -> usize {
     let skeleton = GraphCheckpoint {
+        bound_review_base: Some("f".repeat(64)),
+        bound_integration_base: Some("f".repeat(64)),
         extra: Default::default(),
         expansions: expansions.to_vec(),
         remaining: Some(RemainingBudgets {
@@ -284,8 +374,13 @@ fn node_bound(
         .into_iter()
         .collect(),
         children: node.composite_members.clone(),
+        source_binding: node.source.clone(),
         min_successful: node.composite.as_ref().and_then(|spec| spec.min_successful),
         source_commit: node.source.as_ref().map(|_| String::new()),
+        writer_binding: None,
+        writer_binding_pending: plans::writer(node),
+        review_base: node.extra.get("review_base").map(|_| "1".repeat(64)),
+        review_base_pending: false,
         fragment: (node.plan.is_some() && !admitted).then(String::new),
         handoff: plans::writer(node).then(String::new),
         expansion_pause: expands.then(String::new),
@@ -356,6 +451,7 @@ fn node_bound(
                 }),
                 verdict: Some(String::new()),
                 findings: Vec::new(),
+                findings_available: Some(false),
                 branch: Some(String::new()),
                 commit: Some(String::new()),
                 warnings: Vec::new(),
@@ -370,6 +466,7 @@ fn node_bound(
         }),
         attempts: Vec::new(),
         launch_retry: None,
+        last_launch_retry: None,
     };
     let mut bytes = canonical_len(&skeleton)
         + 64 // source commit
@@ -383,7 +480,7 @@ fn node_bound(
     }
     // The node's own bounded launch retry wait, kept while it is running.
     if !boundary && node.composite.is_none() && node.decide.is_none() && node.land.is_none() {
-        bytes += MAX_ADVANCE_ERROR_BYTES + 128; // launch retry reason and deadline
+        bytes += MAX_ADVANCE_ERROR_BYTES + 320; // retry reason, timing and bounded policy
     }
     if expands {
         bytes += MAX_ADVANCE_ERROR_BYTES; // expansion pause
@@ -452,6 +549,9 @@ fn node_bound(
                 .saturating_add(OUTPUT_FIELD_BYTES + 512);
         }
     }
+    if plans::writer(node) {
+        bytes = bytes.saturating_add(6 * 4096 + 256);
+    }
     if !boundary {
         let excerpt = if node.composite.is_some() {
             COMPOSITE_EXCERPT_BYTES
@@ -499,6 +599,8 @@ fn node_bound(
             outcome: Some(AttemptOutcome::AdapterUnavailable),
             launch_actor: String::new(),
             input_cap: Some(usize::MAX),
+            input_cap_source: Some(InputCapSource::EffectiveGraphLimits),
+            input_manifest: None,
             settled: u64::MAX,
             usage: Some(AttemptUsage {
                 extra: Default::default(),
@@ -510,7 +612,27 @@ fn node_bound(
                 cost_unknown_reason: Some(String::new()),
             }),
         };
-        bytes += canonical_len(&attempt) + 2 * HOST_ID_BYTES + NOTE_BYTES + 1;
+        // A manifest records at most MANIFEST_INPUT_LIMIT selected values. Each
+        // entry carries two bounded identifiers, a digest and an optional OID.
+        let selections = node
+            .inputs
+            .iter()
+            .map(|input| input.outputs.len())
+            .sum::<usize>()
+            .min(MANIFEST_INPUT_LIMIT);
+        bytes += canonical_len(&attempt)
+            + 2 * HOST_ID_BYTES
+            + NOTE_BYTES
+            + 1
+            + 1536 // fixed manifest fields, graph OIDs and four applied-route fields
+            + if node.source.is_some() || plans::writer(node) { 512 } else { 0 }
+            + node
+                .depends_on
+                .iter()
+                .take(MANIFEST_INPUT_LIMIT)
+                .map(|id| canonical_len(id) + 1)
+                .sum::<usize>()
+            + selections * 768;
         // A resolved panel can also record this route as a substitution.
         if node.access == AccessMode::ReadOnly
             && node.role.as_deref().is_some_and(|role| {

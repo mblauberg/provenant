@@ -21,6 +21,7 @@ mod fixtures;
 mod observation;
 mod preparation;
 mod project_paths;
+mod source_tree;
 
 use command::*;
 #[cfg(test)]

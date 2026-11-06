@@ -20,6 +20,8 @@ pub(super) fn prepare_command(
     provider: &str,
     name: &str,
 ) -> Result<run::PreparedLaunch, PrepareError> {
+    #[cfg(feature = "fixture")]
+    hold_command_preparation_for_fixture();
     if !AdapterSpec::get(provider)
         .is_some_and(|spec| spec.named_entry == provenant_records::NamedEntry::Command)
     {
@@ -55,7 +57,19 @@ pub(super) fn prepare_command(
         .first()
         .filter(|program| !program.is_empty())
         .ok_or("configured command has no executable")?;
-    let cwd = canonical(registry.cwd.ok_or("working directory is unavailable")?)?;
+    let source = source_cwd(registry, task)?;
+    let isolated = task.access.source_root.is_some() && !task.access.source_live;
+    let cwd = if isolated {
+        let assets = registry.assets.ok_or("product assets are unavailable")?;
+        super::source_tree::ensure_source_roots(&source, &task.access, assets)?;
+        let git = canonical(&match registry.host {
+            Some(host) => host.git.clone(),
+            None => provenant_os::git::git_executable().ok_or("Git unavailable")?,
+        })?;
+        super::source_tree::snapshot_source(registry, task, paths, &source, &git)?
+    } else {
+        source.clone()
+    };
     let invocation = if program.contains('/') {
         cwd.join(program)
     } else {
@@ -102,8 +116,27 @@ pub(super) fn prepare_command(
         provider,
         false,
     )?;
-    let (plan, observed_head, repository, worktree_gitdir) =
-        read_only_plan(roots, project, &cwd, &git, request)?;
+    let (plan, mut observed_head, repository, mut worktree_gitdir) = read_only_plan(
+        roots,
+        project,
+        &source,
+        &git,
+        request,
+        isolated,
+        task.access.source_live,
+    )?;
+    if isolated {
+        observed_head = Some(
+            task.head
+                .as_deref()
+                .ok_or("graph source head missing")?
+                .parse()
+                .map_err(|_| "invalid graph source head")?,
+        );
+        worktree_gitdir = Some(cwd.join(".git"));
+    } else {
+        require_source_head(task, observed_head)?;
+    }
     let user = provenant_os::sys::account(provenant_os::sys::Account::Current)
         .map_err(|error| error.to_string())?
         .ok_or("current user identity is unavailable")?
@@ -141,6 +174,7 @@ pub(super) fn prepare_command(
     let prompt = Prompt::new(String::new());
     let mut spec = adapter
         .prepare(PrepareInput {
+            images: &[],
             route: &route,
             command: Some(provenant_providers::command::Invocation {
                 argv: &command.argv,
@@ -175,6 +209,12 @@ pub(super) fn prepare_command(
         .map_err(|error| error.to_string())?;
     if let Some(alias) = &paths.temporary_alias {
         alias_temporary_env(&mut spec.env, &scratch, &alias.join("command"));
+    }
+    if let Some(warning) =
+        super::preparation::image_input_warning(provider, &task.access.attachments)
+    {
+        use std::io::Write;
+        let _ = writeln!(std::io::stderr().lock(), "{warning}");
     }
     apply_lane_capabilities(&mut spec.profile.spec, &task.access);
     let common_git_path = repository
@@ -216,6 +256,13 @@ pub(super) fn prepare_command(
         settings.jobs(),
     );
     spec.complete_tool_requirements(&plan, &home, &cwd);
+    if isolated {
+        super::source_tree::ensure_profile_isolated(&source, &spec.profile.spec)?;
+        super::source_tree::ensure_view_read_only(
+            &cwd,
+            &provenant_confinement::write_grants(plan.permissions(), &spec.profile),
+        )?;
+    }
     apply_setup(&spec.setup, &[&scratch, &paths.provider_state], None)?;
     let warnings: Vec<String> = spec
         .omitted_discovery
@@ -261,6 +308,25 @@ pub(super) fn prepare_command(
             state_root: roots.state.as_path().to_owned(),
         }),
     })
+}
+
+#[cfg(feature = "fixture")]
+#[allow(clippy::disallowed_methods)]
+fn hold_command_preparation_for_fixture() {
+    let Some(path) = std::env::var_os("PROVENANT_FIXTURE_HOLD_COMMAND_PREPARATION") else {
+        return;
+    };
+    let path = std::path::Path::new(&path);
+    if std::fs::write(path.join("entered"), b"entered").is_err() {
+        return;
+    }
+    let _ = provenant_test_support::wait_for(
+        "command preparation release",
+        std::time::Duration::from_secs(30),
+        || !path.join("hold").exists(),
+        |released| *released,
+    );
+    let _ = std::fs::write(path.join("released"), b"released");
 }
 
 pub(super) fn nested_policy_fallback(

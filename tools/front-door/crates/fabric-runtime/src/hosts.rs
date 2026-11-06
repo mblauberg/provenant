@@ -603,6 +603,11 @@ pub struct PeerHealth {
     pub available: bool,
     /// Readiness requires the run owner; config presence alone proves nothing.
     pub execution: Option<bool>,
+    /// Release and supported run operations, absent on older peers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_capabilities: Option<crate::runs::RunCapabilities>,
     /// Present when this peer's build reports route readiness. An older peer
     /// omits it, which is how a chair tells it cannot report readiness.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -899,6 +904,16 @@ pub struct SshTransport<'a> {
     pub executable: std::path::PathBuf,
     pub seconds: u64,
 }
+/// Encode and validate the request before any peer contact.
+pub fn encode_peer_request(request: &PeerRequest) -> Result<Vec<u8>, PeerError> {
+    let mut input = serde_json::to_vec(request).map_err(|_| PeerError::Frame)?;
+    if input.len() >= MAX_FRAME {
+        return Err(PeerError::RequestTooLarge);
+    }
+    input.push(b'\n');
+    Ok(input)
+}
+
 impl SshTransport<'_> {
     pub fn exchange_with_cap(
         &self,
@@ -953,11 +968,7 @@ impl SshTransport<'_> {
         {
             return Err(PeerError::Project);
         }
-        let mut input = serde_json::to_vec(request).map_err(|_| PeerError::Frame)?;
-        if input.len() >= MAX_FRAME {
-            return Err(PeerError::RequestTooLarge);
-        }
-        input.push(b'\n');
+        let input = encode_peer_request(request)?;
         let mut timeout =
             Duration::from_micros(budget.remaining(self.clock.mono_now()).as_micros())
                 .min(Duration::from_secs(self.seconds))
@@ -1226,6 +1237,7 @@ mod tests {
             extra: Default::default(),
         })
         .unwrap();
+        // The peer wire keeps its own tag; only the code a caller sees changed spelling.
         assert_eq!(value["data"]["error"]["code"], "launch_unknown");
         assert!(matches!(
             serde_json::from_value::<PeerResult>(value).unwrap(),
@@ -1456,6 +1468,8 @@ mod tests {
                         host: request.target_host,
                         available: true,
                         execution: None,
+                        release: None,
+                        run_capabilities: None,
                         readiness: None,
                     },
                     extra: Default::default(),
@@ -1984,6 +1998,8 @@ mod tests {
             host: HostId::from_bytes([2; 16]),
             available: true,
             execution: Some(true),
+            release: None,
+            run_capabilities: None,
             readiness: None,
         };
         let value = serde_json::to_value(health).unwrap();
@@ -1996,6 +2012,20 @@ mod tests {
         }))
         .unwrap();
         assert!(matches!(result, PeerResult::Health { .. }));
+
+        let advertised: PeerHealth = serde_json::from_value(serde_json::json!({
+            "host": HostId::from_bytes([2; 16]), "available": true, "execution": true,
+            "release": "1.6.5", "run_capabilities": {
+                "submit": false, "list": true, "status": true, "wait": true,
+                "cancel": true, "resume": true, "output": true, "events": true
+            }
+        }))
+        .unwrap();
+        assert_eq!(advertised.release.as_deref(), Some("1.6.5"));
+        assert!(!advertised.run_capabilities.unwrap().submit);
+        let wire = serde_json::to_value(advertised).unwrap();
+        assert_eq!(wire["release"], "1.6.5");
+        assert_eq!(wire["run_capabilities"]["submit"], false);
     }
 
     #[test]
@@ -2172,6 +2202,8 @@ mod tests {
             host,
             available: true,
             execution: Some(true),
+            release: None,
+            run_capabilities: None,
             readiness: Some(PeerReadiness::reporting()),
         };
         let value = serde_json::to_value(sent).unwrap();

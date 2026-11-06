@@ -1,4 +1,4 @@
-stages = [{ id = "scope", role = "scope" }]
+stages = [{ id = "scope", role = "scope", read_only_floor = true }]
 
 [pattern]
 level = "recommended"

@@ -390,7 +390,8 @@ impl HostDeliveryContext {
             .pull_request_repo
             .as_deref()
             .ok_or(RunError::Delivery(Stage::PullRequest))?;
-        if let Some(url) = host.existing_pr(project, repo, branch, head)? {
+        let base_branch = host.pr_base(project, repo)?;
+        if let Some(url) = host.existing_pr(project, repo, branch, head, &base_branch)? {
             return Ok(url);
         }
         let commits = host.commit_range_body(&writer, &format!("{base}..{head}"), body)?;
@@ -404,6 +405,8 @@ impl HostDeliveryContext {
                 repo,
                 "--head",
                 branch,
+                "--base",
+                &base_branch,
                 "--title",
                 &format!("Graph delivery {branch}"),
                 "--body-file",
@@ -1681,44 +1684,93 @@ impl HostDeliveryContext {
         }
         Ok(())
     }
+    // Bind the same default branch for lookup and creation. A failed lookup
+    // is ambiguous and must never be treated as permission to create a PR.
+    fn pr_base(&self, cwd: &Path, repo: &str) -> Result<String> {
+        let raw = self
+            .command(
+                cwd,
+                "gh",
+                &["repo", "view", repo, "--json", "defaultBranchRef"],
+                Stage::PullRequest,
+            )
+            .map_err(pr_lookup_error)?;
+        let value: serde_json::Value =
+            serde_json::from_str(&raw).map_err(|_| RunError::Delivery(Stage::PullRequest))?;
+        value["defaultBranchRef"]["name"]
+            .as_str()
+            .filter(|name| !name.is_empty())
+            .map(str::to_owned)
+            .ok_or(RunError::Delivery(Stage::PullRequest))
+    }
     fn existing_pr(
         &self,
         cwd: &Path,
         repo: &str,
         branch: &str,
         head: GitOid,
+        base: &str,
     ) -> Result<Option<String>> {
-        let Ok(raw) = self.command(
-            cwd,
-            "gh",
-            &[
-                "pr",
-                "view",
-                branch,
-                "--repo",
-                repo,
-                "--json",
-                "url,state,headRefOid",
-            ],
-            Stage::PullRequest,
-        ) else {
-            return Ok(None);
-        };
-        let value: serde_json::Value =
+        let raw = self
+            .command(
+                cwd,
+                "gh",
+                &[
+                    "pr",
+                    "list",
+                    "--repo",
+                    repo,
+                    "--head",
+                    branch,
+                    "--state",
+                    "all",
+                    "--limit",
+                    "1000",
+                    "--json",
+                    "url,state,headRefOid,baseRefName",
+                ],
+                Stage::PullRequest,
+            )
+            .map_err(pr_lookup_error)?;
+        let values: Vec<serde_json::Value> =
             serde_json::from_str(&raw).map_err(|_| RunError::Delivery(Stage::PullRequest))?;
-        if value["state"] != "OPEN" {
+        if values.is_empty() {
             return Ok(None);
         }
+        // Multiple results are ambiguous: do not choose one or create another.
+        if values.len() != 1 {
+            return Err(pr_reconciliation(
+                "multiple pull requests match the branch",
+                "inspect the branch's pull requests before retrying",
+            ));
+        }
+        let value = &values[0];
         if value["headRefOid"].as_str() != Some(head.to_string().as_str()) {
             return Err(RunError::Delivery(Stage::Verify));
         }
         let url = value["url"]
             .as_str()
-            .filter(|url| url.starts_with("https://") && url.lines().count() == 1)
+            .filter(|url| {
+                url.starts_with("https://")
+                    && !url.chars().any(char::is_whitespace)
+                    && !url.chars().any(char::is_control)
+            })
             .ok_or(RunError::Delivery(Stage::PullRequest))?;
+        if value["baseRefName"].as_str() != Some(base) {
+            return Err(pr_reconciliation(
+                "pull request base differs from the expected base",
+                &format!("inspect {url} and its base before retrying"),
+            ));
+        }
+        if !matches!(value["state"].as_str(), Some("OPEN" | "MERGED")) {
+            return Err(pr_reconciliation(
+                "pull request is not open or merged",
+                &format!("inspect {url} before retrying"),
+            ));
+        }
         Ok(Some(url.to_owned()))
     }
-    fn push(
+    pub(super) fn push(
         &self,
         writer: &WriterRequest,
         request: &WriterDeliveryRequest,
@@ -1838,7 +1890,8 @@ impl HostDeliveryContext {
                 .pull_request_repo
                 .as_deref()
                 .ok_or(RunError::Delivery(Stage::PullRequest))?;
-            if let Some(url) = self.existing_pr(cwd, repo, &request.branch, head)? {
+            let base_branch = self.pr_base(cwd, repo)?;
+            if let Some(url) = self.existing_pr(cwd, repo, &request.branch, head, &base_branch)? {
                 return Ok(Some(url));
             }
             let url = self.command_with_input(
@@ -1854,6 +1907,8 @@ impl HostDeliveryContext {
                         .ok_or(RunError::Delivery(Stage::PullRequest))?,
                     "--head",
                     &request.branch,
+                    "--base",
+                    &base_branch,
                     "--title",
                     &format!("Lane delivery {}", &head.to_string()[..12]),
                     "--body-file",
@@ -1902,6 +1957,24 @@ pub(super) fn prepare_error(step: &'static str, detail: impl std::fmt::Display) 
     }
 }
 
+fn pr_reconciliation(reason: &str, next: &str) -> RunError {
+    RunError::DeliveryReconciliation {
+        reason: reason.into(),
+        next: next.into(),
+    }
+}
+
+fn pr_lookup_error(error: RunError) -> RunError {
+    if matches!(error, RunError::Delivery(Stage::PullRequest)) {
+        pr_reconciliation(
+            "pull request lookup failed",
+            "inspect the repository and branch, then retry delivery",
+        )
+    } else {
+        error
+    }
+}
+
 /// The stdout limit for one host Git or forge call, chosen from its argv.
 /// Worktree and ref listings grow with the repository, so they get the crate's
 /// capture default; every other call keeps its bound.
@@ -1925,6 +1998,9 @@ pub(super) fn stdout_limit(commit_log: bool, args: &[&str]) -> usize {
 pub(crate) fn failed_state(error: &RunError) -> WriterDeliveryState {
     let (stage, reason) = match error {
         RunError::Delivery(stage) => (*stage, None),
+        RunError::DeliveryReconciliation { .. } => {
+            (Stage::PullRequest, Some(prepare_reason(error)))
+        }
         RunError::IntegrationHeadMoved => (Stage::Integrate, None),
         RunError::DeliveryLimit { stage, .. } => (*stage, Some(prepare_reason(error))),
         RunError::DeliveryPrepare { .. } => (Stage::Prepare, Some(prepare_reason(error))),

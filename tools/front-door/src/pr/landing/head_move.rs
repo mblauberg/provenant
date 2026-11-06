@@ -160,6 +160,40 @@ mod tests {
     }
 
     #[test]
+    fn current_merge_base_cannot_prove_the_approval_time_base() {
+        let mut repo = FakeRepo::default();
+        // The old target contained old-base; the target was then rewritten
+        // onto common. The new merge imports the rewritten target, not old-base.
+        repo.parents
+            .insert("reviewed".into(), vec!["common".into()]);
+        repo.parents
+            .insert("old-base".into(), vec!["common".into()]);
+        repo.parents.insert("target".into(), vec!["common".into()]);
+        repo.parents
+            .insert("head".into(), vec!["reviewed".into(), "target".into()]);
+        repo.trees
+            .insert("head".into(), "tree-reviewed-target".into());
+        let approval = ReviewedHead {
+            head: "reviewed".into(),
+            base: None,
+            valid: true,
+        };
+        assert!(matches!(
+            classify(&mut repo, &approval, "head", "target"),
+            Some(HeadMove::C { .. })
+        ));
+        let guessed = ReviewedHead {
+            base: Some("common".into()),
+            ..approval
+        };
+        assert!(matches!(
+            classify(&mut repo, &guessed, "head", "target"),
+            Some(HeadMove::A { .. })
+        ));
+        assert!(!repo.is_ancestor("old-base", "target").unwrap());
+    }
+
+    #[test]
     fn small_delta_needs_complete_single_file_statistics() {
         let mut repo = FakeRepo::default();
         repo.parents.insert("head".into(), vec!["reviewed".into()]);

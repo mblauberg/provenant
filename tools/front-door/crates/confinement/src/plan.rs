@@ -31,6 +31,74 @@ pub enum ExtensionPolicy {
 }
 
 impl PlanRequest {
+    /// Grant the verified Git store while the checkout itself is represented
+    /// by a separate attempt-owned source tree. Writable exceptions to the
+    /// live checkout cannot be carried into that view.
+    pub fn with_isolated_read_only_repo(
+        mut self,
+        repo: &crate::ReadOnlyRepo,
+        binding: &provenant_config::ProjectBinding,
+        policy: &ReadOnlyPolicy,
+    ) -> Result<Self, PlanError> {
+        if !matches!(self.permissions.mode, AccessMode::ReadOnly)
+            || self.scope != WorkScope::Project(binding.project_id())
+        {
+            return Err(PermissionError::InvalidReadOnlyPolicy.into());
+        }
+        let live_source = PathGrant {
+            path: repo.root_path().to_owned(),
+            scope: PathScope::Subtree,
+        };
+        if self
+            .permissions
+            .read_roots
+            .iter()
+            .chain(&self.permissions.protected_roots)
+            .chain(&self.permissions.write_roots)
+            .chain(std::iter::once(&self.permissions.scratch))
+            .chain(&self.permissions.private_state)
+            .any(|grant| grant.overlaps(&live_source))
+        {
+            return Err(PlanError::InvalidRoots);
+        }
+        let mut grants = policy.resolve(repo, binding)?;
+        if !grants.writable_paths().is_empty() {
+            return Err(PermissionError::InvalidReadOnlyPolicy.into());
+        }
+        // The view has its own detached HEAD, config and index. It needs the
+        // object database, not the live checkout's mutable refs or Git dirs.
+        grants.git_reads[0].path = repo.common_git_dir().join("objects");
+        self.permissions.read_only = Some(grants);
+        Ok(self)
+    }
+
+    /// Bind a live checkout for reading without granting writes within it.
+    pub fn with_live_read_only_repo(
+        mut self,
+        repo: &crate::ReadOnlyRepo,
+        binding: &provenant_config::ProjectBinding,
+    ) -> Result<Self, PlanError> {
+        let source = PathGrant {
+            path: repo.root_path().to_owned(),
+            scope: PathScope::Subtree,
+        };
+        if self
+            .permissions
+            .write_roots
+            .iter()
+            .chain(std::iter::once(&self.permissions.scratch))
+            .chain(&self.permissions.private_state)
+            .any(|grant| grant.overlaps(&source))
+        {
+            return Err(PlanError::InvalidRoots);
+        }
+        self = self.with_read_only_repo(repo, binding, &ReadOnlyPolicy::default())?;
+        // Provider-owned grants are resolved later. A final protected-root
+        // denial keeps any such overlapping grant from writing the checkout.
+        self.permissions.protected_roots.push(source);
+        Ok(self)
+    }
+
     /// Resolve Git and write exceptions only from the trusted host repository.
     pub fn with_read_only_repo(
         mut self,

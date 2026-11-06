@@ -549,7 +549,7 @@ pub(super) fn report(
     session: &Session,
     record: &run::RunRecord,
     started: &[run::Started],
-    wait: Option<u64>,
+    wait: Option<Duration>,
     edge: &Edge<'_>,
     call: &run::Request<'_>,
 ) -> Result<(Value, String, bool), Fail> {
@@ -559,14 +559,8 @@ pub(super) fn report(
         task: None,
         attempt: None,
     };
-    let (mut data, human, timed_out) = match wait {
-        Some(seconds) => wait_lanes(
-            session,
-            &[target],
-            Condition::All,
-            Duration::from_secs(seconds),
-            edge,
-        )?,
+    let (mut data, mut human, timed_out) = match wait {
+        Some(duration) => wait_lanes(session, &[target], Condition::All, duration, edge)?,
         None => {
             let page = session
                 .service()
@@ -609,6 +603,19 @@ pub(super) fn report(
     let unknown = launch_unknown(started);
     if !unknown.is_empty() {
         data["launch_unknown"] = json!(unknown);
+    }
+    let blocked: Vec<_> = started
+        .iter()
+        .filter_map(|item| match item {
+            run::Started::Blocked { attempt, error } => Some(format!("{attempt}: {error}")),
+            _ => None,
+        })
+        .collect();
+    if !blocked.is_empty() {
+        for reason in &blocked {
+            human.push_str(&format!("\nlaunch blocked: {reason}"));
+        }
+        data["launch_blocked"] = json!(blocked);
     }
     let capability_text = capability_sources_text(&data);
     Ok((
@@ -735,6 +742,10 @@ pub fn project_lane(
         lane.provider_silent_for_ms
             .0
             .map(run::provider_silence_reason)
+            .or_else(|| {
+                (observe_host && matches!(lane.state, run::AttemptState::Starting { .. }))
+                    .then(|| "launch preparation".to_owned())
+            })
     });
     let transcript = lane
         .applied_route

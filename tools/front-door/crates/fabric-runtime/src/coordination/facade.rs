@@ -238,6 +238,8 @@ pub enum FacadeError {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         holder: Option<AttemptId>,
     },
+    #[error("writer lock is busy")]
+    WriterLockBusy,
     #[error("writer custody is unknown")]
     WriterUnknown,
     #[error("a requested credential-root grant was refused")]
@@ -282,7 +284,7 @@ pub enum FacadeError {
         "writer base is not reachable from the peer's remotes after a fetch; push it, or check the peer's Git access"
     )]
     BaseUnreachable,
-    #[error("writer branch already exists on the peer; choose another --branch")]
+    #[error("writer branch already exists on the peer and was kept; choose another --branch")]
     BranchExists,
     #[error("artifact exceeds max_bytes; page it with an output read")]
     OutputTooLarge,
@@ -467,6 +469,7 @@ impl FacadeError {
                 }
                 projected = projected.next("wait for the current writer or lock holder to finish");
             }
+            Self::WriterLockBusy => projected = projected.next("wait for the writer lock holder to finish, then retry"),
             Self::WriterUnknown | Self::WorktreeUnregistered { .. } => projected = projected.next("inspect worktree registration and custody before selecting a checkout with --worktree"),
             Self::ConfinementRefused => projected = projected.next("inspect the requested access and confinement policy"),
             Self::CredentialRoot { access } => {
@@ -491,13 +494,14 @@ impl FacadeError {
             Self::StaleFence => "stale_fence",
             Self::HomeUnavailable => "home_unavailable",
             Self::PeerVersion | Self::PeerProtocolMismatch { .. } => "peer_version",
-            Self::LaunchUnknown { .. } => "launch_unknown",
+            Self::LaunchUnknown { .. } => "LAUNCH_UNKNOWN",
             Self::ContinuationUnsupported => "continuation_unsupported",
             Self::ProviderStateExpired => "provider_state_expired",
             Self::LaneDepth => "lane_depth",
             Self::LaneCoordinationRefused => "lane_coordination_refused",
             Self::ConfinementRefused => "confinement_refused",
             Self::WriterBusy { .. } => "writer_busy",
+            Self::WriterLockBusy => "writer_lock_busy",
             Self::WriterUnknown => "writer_unknown",
             Self::CredentialRoot { .. } => "credential_root",
             Self::DispatchRefused { .. } => "dispatch_refused",

@@ -209,8 +209,13 @@ fn filled_checkpoint(document: &GraphDocument, plan: &PlannedGraph) -> GraphChec
             NodeProgress {
                 extra: Default::default(),
                 children: node.composite_members.clone(),
+                source_binding: node.source.clone(),
                 min_successful: node.composite.as_ref().and_then(|spec| spec.min_successful),
                 source_commit: node.source.as_ref().map(|_| "1".repeat(64)),
+                writer_binding: None,
+        writer_binding_pending: plans::writer(node),
+                review_base: node.extra.get("review_base").map(|_| "1".repeat(64)),
+        review_base_pending: false,
                 fragment: node.plan.as_ref().map(|_| "\"".repeat(plans::STORED_BLOCK_BYTES / 2 - 1)),
                 handoff: plans::writer(node).then(|| "\"".repeat(plans::STORED_HANDOFF_BYTES / 2 - 1)),
                 expansion_pause: (node.plan.is_some() || plans::writer(node))
@@ -265,12 +270,14 @@ fn filled_checkpoint(document: &GraphDocument, plan: &PlannedGraph) -> GraphChec
                 skip_reason: Some("graph cancelled".into()),
                 advance_error: Some(worst(MAX_ADVANCE_ERROR_BYTES)),
                 advance_error_code: Some("c".repeat(envelope::REFUSAL_CODE_BYTES)),
-                launch_retry: (!boundary
+                launch_retry: None,
+                last_launch_retry: (!boundary
                     && node.composite.is_none()
                     && node.decide.is_none()
                     && node.land.is_none())
                 .then(|| LaunchRetry {
                     extra: Default::default(),
+                    policy: LaunchRetryPolicy::default(),
                     failures: u8::MAX,
                     deadline: Some(envelope::latest()),
                     wake_at: Some(envelope::latest()),
@@ -302,6 +309,19 @@ fn filled_checkpoint(document: &GraphDocument, plan: &PlannedGraph) -> GraphChec
                         outcome: Some(AttemptOutcome::AdapterUnavailable),
                         launch_actor: worst(HOST_ID_BYTES),
                         input_cap: Some(usize::MAX),
+                        input_cap_source: Some(InputCapSource::EffectiveGraphLimits),
+                        input_manifest: Some(AttemptInputManifest {
+                            extra: Default::default(), schema_version: 1,
+                            source_commit: node.source.as_ref().map(|_| "a".repeat(64)),
+                            source_producer: node.source.as_ref().map(|_| AttemptKey { extra: Default::default(), graph_id: plan.graph_id.clone(), node_id: "n".repeat(64), route_index: u16::MAX }),
+                            writer_head: plans::writer(node).then(|| "a".repeat(64)),
+                            review_base: node.extra.get("review_base").map(|_| "a".repeat(64)),
+                            graph_review_base: Some("a".repeat(64)), integration_base: Some("a".repeat(64)), integration_source: Some("a".repeat(64)),
+                            applied_route: Some(GraphRoute { extra: Default::default(), adapter: Some("a".repeat(256)), model: Some("m".repeat(256)), effort: Some("e".repeat(256)), account: Some("a".repeat(256)), name: None, alias: None }),
+                            dependencies: Some(node.depends_on.iter().take(MANIFEST_INPUT_LIMIT).cloned().collect()), dependencies_omitted: node.depends_on.len().saturating_sub(MANIFEST_INPUT_LIMIT),
+                            inputs: node.inputs.iter().flat_map(|input| input.outputs.iter().map(move |kind| AttemptInputEvidence { extra: Default::default(), producer_node: input.node.clone(), producer_attempt: Some(AttemptKey { extra: Default::default(), graph_id: plan.graph_id.clone(), node_id: input.node.clone(), route_index: u16::MAX }), kind: *kind, required: true, producer_result_digest: Some("a".repeat(71)), commit: Some("a".repeat(64)), delivery: InputDelivery::Delivered, file_delivery: InputDelivery::Delivered })).take(MANIFEST_INPUT_LIMIT).collect(),
+                            omitted: node.inputs.iter().map(|input| input.outputs.len()).sum::<usize>().saturating_sub(MANIFEST_INPUT_LIMIT),
+                        }),
                         settled: u64::MAX,
                         usage: Some(AttemptUsage {
                             extra: Default::default(),
@@ -318,6 +338,8 @@ fn filled_checkpoint(document: &GraphDocument, plan: &PlannedGraph) -> GraphChec
         })
         .collect();
     GraphCheckpoint {
+        bound_review_base: Some("f".repeat(64)),
+        bound_integration_base: Some("f".repeat(64)),
         extra: Default::default(),
         expansions: Vec::new(),
         remaining: Some(RemainingBudgets {
@@ -946,6 +968,24 @@ fn check_big_batch_panels(document: GraphDocument) {
     }
 }
 
+#[test]
+fn independent_review_expansions_can_retain_different_bases() {
+    let fixture: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../../assets/presets/fixtures/big-batch-five-lane-checkpoint.json"
+    )).unwrap();
+    let document: GraphDocument = serde_json::from_value(fixture).unwrap();
+    let limits = plans::generous();
+    let expanded = loops::expand(&document, &[], &limits).unwrap();
+    let sources: Vec<_> = expanded.nodes.iter().filter(|node| node.review.is_some()).take(2).cloned().collect();
+    assert_eq!(sources.len(), 2);
+    let additions: Vec<_> = sources.iter().enumerate().map(|(index, source)| {
+        let mut addition = fixture_review_expansion(source, &"1".repeat(40));
+        addition.review.as_mut().unwrap().base = (if index == 0 { "2" } else { "3" }).repeat(40).parse().unwrap();
+        addition
+    }).collect();
+    assert!(plans::expand(&document, &[], &additions, &limits).is_ok());
+}
+
 fn fixture_review_expansion(source: &GraphNode, subject: &str) -> Expansion {
     let id = source.id.clone();
     let spec = source.review.as_ref().unwrap();
@@ -1108,6 +1148,9 @@ fn five_lane_big_batch_expands_through_runtime() {
         fn actor(&self) -> String {
             "fixture".into()
         }
+        fn bind_writer_worktree(&mut self, worktree: &str) -> Result<Option<WriterWorktreeBinding>, Self::Error> {
+            Ok(Some(WriterWorktreeBinding { extra: Default::default(), worktree: if std::path::Path::new(worktree).is_absolute() { worktree.to_owned() } else { format!("/fixture/{worktree}") }, head: "1111111111111111111111111111111111111111".into() }))
+        }
         fn integration_head(&mut self) -> Result<Option<String>, Self::Error> {
             Ok(Some("1".repeat(40)))
         }
@@ -1212,4 +1255,58 @@ fn review_reservation_includes_declared_large_template_outputs() {
     let reason = document.admit(&Default::default()).unwrap_err();
     assert!(reason.contains("graph checkpoint could reach"), "{reason}");
     assert!(reason.contains("split the graph"), "{reason}");
+}
+
+#[test]
+fn whole_review_reservation_covers_frame_verifier_and_synthesis() {
+    let subject = "1".repeat(40);
+    let templates: serde_json::Map<String, serde_json::Value> = (0..10).map(|index| (format!("lens-{index}"), json!({
+        "id":format!("lens-{index}"), "access":"read_only", "prompt":"review", "routes":[{"alias":"senior"},{"alias":"senior"}]
+    }))).collect();
+    let frame = json!({"id":"frame", "access":"read_only", "prompt":"frame", "routes":[{"alias":"senior"},{"alias":"senior"}]});
+    let verify = json!({"id":"verify", "access":"read_only", "prompt":"verify", "routes":[{"alias":"senior"},{"alias":"senior"}]});
+    let synth = json!({"id":"synthesis", "kind":"synthesise", "access":"read_only", "prompt":"synthesis", "dispositions":["accepted","rejected","deferred"], "routes":[{"alias":"senior"},{"alias":"senior"}]});
+    let document: GraphDocument = serde_json::from_value(json!({"schema_version":2,"graph_id":"whole-reservation","nodes":[{
+        "id":"review","kind":"plan","access":"read_only","prompt":"review","source":{"type":"commit","commit":subject},
+        "review":{"shape":null,"risk_tier":null,"kind":null,"size":null,"lenses":[],"min_successful":1,"max_nodes":15},
+        "lens_templates":templates,"panel_templates":{"frame":frame,"verifier":verify,"synthesis":synth},
+        "panel_max_verifiers":1,"panel_shapes":{"standard":{"frame":true,"verifiers":1,"synthesis":"model"}}
+    }]})).unwrap();
+    let mut expanded = plans::expand(&document, &[], &[], &crate::config::GraphLimits::default()).unwrap();
+    let plan = validate_flat_plan(&expanded, &plans::generous()).unwrap().0;
+    let before = graph_envelope_bound(&document, &[], &[], &plan);
+    let mut nodes = vec![json!({"id":"review--r","kind":"composite","access":"read_only","composite":{"nodes":[],"exports":[{"node":"review--r--s","outputs":["result","findings","verdict","commit"]}]}}),
+        json!({"id":"review--r--f","access":"read_only","prompt":"frame","source":{"type":"commit","commit":subject},"routes":[{"alias":"senior"},{"alias":"senior"}]}),
+        json!({"id":"review--r--p","kind":"composite","access":"read_only","depends_on":["review--r--f"],"composite":{"min_successful":1,"nodes":[],"exports":(0..10).map(|index| json!({"node":format!("review--r--p--lens-{index}"),"outputs":["result","findings"]})).collect::<Vec<_>>()}})];
+    for index in 0..10 { nodes.push(json!({"id":format!("review--r--p--lens-{index}"),"access":"read_only","prompt":"review","depends_on":["review--r--f"],"inputs":[{"node":"review--r--f","outputs":["result"]}],"source":{"type":"commit","commit":subject},"routes":[{"alias":"senior"},{"alias":"senior"}]})); }
+    nodes.push(json!({"id":"review--r--v-1","access":"read_only","prompt":"verify","depends_on":["review--r--p"],"inputs":[{"node":"review--r--p","outputs":["result","findings"]}],"source":{"type":"commit","commit":subject},"routes":[{"alias":"senior"},{"alias":"senior"}]}));
+    nodes.push(json!({"id":"review--r--s","kind":"synthesise","access":"read_only","prompt":"synthesis","dispositions":["accepted","rejected","deferred"],"depends_on":["review--r--p","review--r--v-1"],"inputs":[{"node":"review--r--p","outputs":["result","findings"]},{"node":"review--r--v-1","outputs":["result","findings"]}],"source":{"type":"commit","commit":subject},"routes":[{"alias":"senior"},{"alias":"senior"}]}));
+    let addition: Expansion = serde_json::from_value(json!({"source":"review","continuation":false,"patterns":[],"review":{"subject":subject,"base":"2".repeat(40),"measured_size":"large","shape":"standard","source":"fixture"},"nodes":nodes})).unwrap();
+    plans::validate_review_addition(&expanded, &addition).unwrap();
+    let mut missing_frame = addition.clone();
+    missing_frame.nodes.iter_mut().find(|node| node.id.ends_with("--lens-0")).unwrap().depends_on.clear();
+    assert!(plans::validate_review_addition(&expanded, &missing_frame).is_err());
+    plans::append(&mut expanded, &addition);
+    let plan = validate_flat_plan(&expanded, &plans::generous()).unwrap().0;
+    let after = graph_envelope_bound(&document, &[addition], &[], &plan);
+    assert!(after <= before, "review expansion grew {before} to {after}");
+}
+
+#[test]
+fn routing_stratum_flows_from_graph_to_nodes() {
+    let mut document = mixed();
+    document.context = Some(provenant_records::run::WorkContext {
+        risk_tier: Some("substantial".into()),
+        task_kind: Some("repair".into()),
+        ..Default::default()
+    });
+    document.nodes[1].context = Some(provenant_records::run::WorkContext {
+        task_kind: Some("review".into()),
+        ..Default::default()
+    });
+    let plan = planned(&document);
+    let node = plan.nodes.iter().find(|node| node.id == "review").unwrap();
+    let context = node_context(&plan, node);
+    assert_eq!(context.risk_tier.as_deref(), Some("substantial"));
+    assert_eq!(context.task_kind.as_deref(), Some("review"));
 }

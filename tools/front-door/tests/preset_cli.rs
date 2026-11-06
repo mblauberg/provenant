@@ -4,6 +4,182 @@
 )]
 use std::{path::PathBuf, process::Command};
 
+fn graph_journal_files(path: &std::path::Path) -> std::io::Result<Vec<(PathBuf, Vec<u8>)>> {
+    let mut files = Vec::new();
+    for entry in std::fs::read_dir(path)? {
+        let entry = entry?;
+        if entry.file_type()?.is_dir() {
+            files.extend(graph_journal_files(&entry.path())?);
+        } else if entry.file_name().to_string_lossy().starts_with("graph-") {
+            files.push((entry.path(), std::fs::read(entry.path())?));
+        }
+    }
+    files.sort();
+    Ok(files)
+}
+
+#[test]
+fn preset_secret_inputs_are_refused_before_publication() -> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let project = temp.path().join("project");
+    let graphs = project.join(".provenant/scratch/graphs");
+    let state = temp.path().join("state");
+    std::fs::create_dir_all(&graphs)?;
+    std::fs::create_dir_all(&state)?;
+    std::fs::write(graphs.join("existing"), "graph sentinel")?;
+    std::fs::write(state.join("graph-existing.json"), "journal sentinel")?;
+    let prompt = temp.path().join("prompt");
+    let params = temp.path().join("params.toml");
+    let secret = format!("ghp_{}", "a1".repeat(18));
+    // TOML escapes ensure scanning operates on decoded values.
+    let encoded = secret.replacen('g', "\\u0067", 1);
+    for (source, explain) in [
+        ("prompt", false),
+        ("set", false),
+        ("file", false),
+        ("prompt", true),
+        ("set", true),
+        ("file", true),
+    ] {
+        std::fs::write(
+            &prompt,
+            if source == "prompt" {
+                &secret
+            } else {
+                "ordinary brief"
+            },
+        )?;
+        std::fs::write(
+            &params,
+            format!("branches = [{{ brief = \"{encoded}\" }}]\n"),
+        )?;
+        let mut command = fixture_cli();
+        command
+            .current_dir(&project)
+            .env("PROVENANT_ROOT", &root)
+            .env("XDG_CONFIG_HOME", temp.path().join("config"))
+            .args(["--json", "--state-dir"])
+            .arg(&state)
+            .args(["run", "--preset", "fan-out-synthesise", "--prompt-file"])
+            .arg(&prompt);
+        if source == "set" {
+            command.args([
+                "--set",
+                &format!("parameters.branches=[{{brief=\"{encoded}\"}}]"),
+            ]);
+        }
+        if source == "file" {
+            command.arg("--params-file").arg(&params);
+        }
+        if explain {
+            command.arg("--explain");
+        }
+        let output = command.output()?;
+        let result: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+        assert!(
+            !output.status.success(),
+            "{source}, explain={explain}: {result}"
+        );
+        assert_eq!(
+            result["error"]["code"], "SECRET_INPUT",
+            "{source}, explain={explain}: {result}"
+        );
+        assert!(!String::from_utf8_lossy(&output.stdout).contains(&secret));
+        assert_eq!(std::fs::read_dir(&graphs)?.count(), 1);
+        assert_eq!(std::fs::read(graphs.join("existing"))?, b"graph sentinel");
+        assert_eq!(
+            graph_journal_files(&state)?,
+            vec![(
+                state.join("graph-existing.json"),
+                b"journal sentinel".to_vec()
+            )]
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn expanded_role_and_rule_secrets_are_refused() -> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let project = temp.path().join("project");
+    let presets = project.join(".provenant/presets");
+    let graphs = project.join(".provenant/scratch/graphs");
+    let state = temp.path().join("state");
+    std::fs::create_dir_all(&presets)?;
+    std::fs::create_dir_all(&graphs)?;
+    std::fs::create_dir_all(&state)?;
+    std::fs::write(graphs.join("existing"), "sentinel")?;
+    std::fs::write(state.join("graph-existing.json"), "sentinel")?;
+    let prompt = temp.path().join("prompt");
+    std::fs::write(
+        &prompt,
+        "Acceptance criteria are explicit. Surface: the run command. Risk tier: low. Verification uses cargo test. Design decision is settled.",
+    )?;
+    let secret = format!("ghp_{}", "a1".repeat(18));
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    for source in ["role", "rule"] {
+        std::fs::write(
+            presets.join("probe.toml"),
+            "stages = [{ id = 'task', role = 'lens.house' }]\n",
+        )?;
+        std::fs::write(
+            project.join(".provenant/roles.toml"),
+            format!(
+                "[roles.\"lens.house\"]\ntier = 'senior'\ncard = '{}'\n",
+                if source == "role" {
+                    &secret
+                } else {
+                    "ordinary card"
+                }
+            ),
+        )?;
+        std::fs::write(
+            project.join(".provenant/preset-rules.toml"),
+            if source == "rule" {
+                format!(
+                    "[select]\ndefault = {{ preset = 'fan-out-synthesise', parameters = {{ branches = [{{ id = 'branch', brief = '{secret}', tier = 'senior' }}] }} }}\n"
+                )
+            } else {
+                "[select]\ndefault = { preset = 'probe' }\n".to_owned()
+            },
+        )?;
+        for explain in [false, true] {
+            let mut command = fixture_cli();
+            command
+                .current_dir(&project)
+                .env("PROVENANT_ROOT", &root)
+                .env("XDG_CONFIG_HOME", temp.path().join("config"))
+                .args(["--json", "--state-dir"])
+                .arg(&state)
+                .args(["run", "--prompt-file"])
+                .arg(&prompt);
+            if explain {
+                command.arg("--explain");
+            }
+            let output = command.output()?;
+            let result: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+            assert!(
+                !output.status.success(),
+                "{source}, explain={explain}: {result}"
+            );
+            assert_eq!(
+                result["error"]["code"], "SECRET_INPUT",
+                "{source}, explain={explain}: {result}"
+            );
+            assert!(!String::from_utf8_lossy(&output.stdout).contains(&secret));
+            assert!(!String::from_utf8_lossy(&output.stderr).contains(&secret));
+            assert_eq!(std::fs::read_dir(&graphs)?.count(), 1);
+            assert_eq!(std::fs::read(graphs.join("existing"))?, b"sentinel");
+            assert_eq!(
+                graph_journal_files(&state)?,
+                vec![(state.join("graph-existing.json"), b"sentinel".to_vec())]
+            );
+        }
+    }
+    Ok(())
+}
+
 #[test]
 fn fan_out_branch_parameters_validate_and_route_synthesis() -> Result<(), Box<dyn std::error::Error>>
 {
@@ -80,13 +256,7 @@ fn preset_explain_warns_about_every_omitted_lens() -> Result<(), Box<dyn std::er
         .current_dir(&root)
         .env("PROVENANT_ROOT", &root)
         .env("XDG_CONFIG_HOME", temp.path().join("config"))
-        .args([
-            "--json",
-            "run",
-            "--preset",
-            "review-council",
-            "--prompt-file",
-        ])
+        .args(["--json", "run", "--preset", "review", "--prompt-file"])
         .arg(&prompt)
         .args(["--explain", "--set", "parameters.risk_tier='routine'"])
         .output()?;
@@ -175,6 +345,7 @@ fn bound_worktree_default_head_subject_resolves_in_that_worktree()
     let graph = &result["data"]["graph"];
     assert_eq!(result["data"]["tier_mix"]["junior"], 1);
     assert_eq!(result["data"]["tier_mix"]["inverted"], false);
+    assert!(result["data"]["tier_mix"]["warning"].is_null());
     assert_eq!(
         result["data"]["tier_mix"]["line"],
         "tier mix: junior 1 / senior 0 / principal 0"
@@ -224,6 +395,12 @@ fn bound_worktree_default_head_subject_resolves_in_that_worktree()
         "stderr: {stderr}"
     );
     let explicit: serde_json::Value = serde_json::from_slice(&explicit.stdout)?;
+    assert_eq!(explicit["data"]["tier_mix"]["inverted"], true);
+    assert!(
+        explicit["data"]["tier_mix"]["warning"]
+            .as_str()
+            .is_some_and(|warning| warning.contains("inverted"))
+    );
     assert_eq!(
         explicit["data"]["graph"]["nodes"][0]["source"]["commit"],
         invoking_head
@@ -237,7 +414,104 @@ fn bound_worktree_default_head_subject_resolves_in_that_worktree()
 }
 
 #[test]
-fn review_council_bound_worktree_resolves_subject_and_warns_on_differing_head()
+fn big_batch_default_subject_follows_each_lane_worktree() -> Result<(), Box<dyn std::error::Error>>
+{
+    let temp = tempfile::tempdir()?;
+    let repo = temp.path().join("repo");
+    std::fs::create_dir(&repo)?;
+    let git = |directory: &std::path::Path,
+               args: &[&str]|
+     -> Result<String, Box<dyn std::error::Error>> {
+        let output = provenant_os::fixture::git_command()
+            .current_dir(directory)
+            .args(args)
+            .output()?;
+        assert!(
+            output.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        Ok(String::from_utf8(output.stdout)?.trim().to_owned())
+    };
+    git(&repo, &["init", "-q"])?;
+    git(&repo, &["commit", "--allow-empty", "-qm", "base"])?;
+    let first = temp.path().join("first");
+    let second = temp.path().join("second");
+    git(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "-qb",
+            "first",
+            first.to_str().ok_or("path")?,
+        ],
+    )?;
+    git(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "-qb",
+            "second",
+            second.to_str().ok_or("path")?,
+        ],
+    )?;
+    git(&first, &["commit", "--allow-empty", "-qm", "first"])?;
+    git(&second, &["commit", "--allow-empty", "-qm", "second"])?;
+    let first_head = git(&first, &["rev-parse", "HEAD"])?;
+    let second_head = git(&second, &["rev-parse", "HEAD"])?;
+    assert_ne!(first_head, second_head);
+    let prompt = temp.path().join("brief");
+    std::fs::write(&prompt, "Implement the batch")?;
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let lanes = format!(
+        "parameters.lanes=[{{name='one',worktree='{}',scope=['one'],spec=''}},{{name='two',worktree='{}',scope=['two'],spec=''}}]",
+        first.display(),
+        second.display()
+    );
+    let output = fixture_cli()
+        .current_dir(&repo)
+        .env("PROVENANT_ROOT", &root)
+        .env("XDG_CONFIG_HOME", temp.path().join("config"))
+        .arg("--state-dir")
+        .arg(temp.path().join("state"))
+        .args(["--json", "run", "--preset", "big-batch", "--prompt-file"])
+        .arg(&prompt)
+        .args(["--explain", "--set"])
+        .arg(lanes)
+        .output()?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+    fn find_writer<'a>(value: &'a serde_json::Value, path: &str) -> Option<&'a serde_json::Value> {
+        if value["access"] == "worktree_write" && value["worktree"] == path {
+            return Some(value);
+        }
+        match value {
+            serde_json::Value::Array(values) => values.iter().find_map(|v| find_writer(v, path)),
+            serde_json::Value::Object(values) => values.values().find_map(|v| find_writer(v, path)),
+            _ => None,
+        }
+    }
+    let graph = &result["data"]["graph"];
+    assert_eq!(
+        find_writer(graph, first.to_str().ok_or("path")?).ok_or("first writer")?["source"]["commit"],
+        first_head
+    );
+    assert_eq!(
+        find_writer(graph, second.to_str().ok_or("path")?).ok_or("second writer")?["source"]["commit"],
+        second_head
+    );
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("differs from bound worktree HEAD"));
+    Ok(())
+}
+
+#[test]
+fn review_bound_worktree_resolves_subject_and_warns_on_differing_head()
 -> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
     let invoking = temp.path().join("invoking");
@@ -281,18 +555,13 @@ fn review_council_bound_worktree_resolves_subject_and_warns_on_differing_head()
         .env("XDG_CONFIG_HOME", temp.path().join("config"))
         .arg("--state-dir")
         .arg(temp.path().join("state"))
-        .args([
-            "--json",
-            "run",
-            "--preset",
-            "review-council",
-            "--prompt-file",
-        ])
+        .args(["--json", "run", "--preset", "review", "--prompt-file"])
         .arg(&prompt)
         .arg("--read-root")
         .arg(&invoking)
         .args(["--explain", "--set"])
         .arg(format!("parameters.worktree='{}'", worktree.display()))
+        .args(["--set", "parameters.base='HEAD'"])
         .output()?;
     assert!(
         output.status.success(),
@@ -302,6 +571,15 @@ fn review_council_bound_worktree_resolves_subject_and_warns_on_differing_head()
     );
     let result: serde_json::Value = serde_json::from_slice(&output.stdout)?;
     let graph = &result["data"]["graph"];
+    // Both the subject and review base bind in the review worktree, not the invoking checkout.
+    let pinned_bases: Vec<_> = graph["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|node| node.get("review_base").and_then(serde_json::Value::as_str))
+        .collect();
+    assert!(!pinned_bases.is_empty());
+    assert!(pinned_bases.iter().all(|base| *base == worktree_head));
     // The subject lane (node 0) source equals the bound worktree HEAD (the subject commit).
     assert_eq!(graph["nodes"][0]["source"]["commit"], worktree_head);
     assert_eq!(
@@ -325,13 +603,7 @@ fn review_council_bound_worktree_resolves_subject_and_warns_on_differing_head()
         .env("XDG_CONFIG_HOME", temp.path().join("config"))
         .arg("--state-dir")
         .arg(temp.path().join("state"))
-        .args([
-            "--json",
-            "run",
-            "--preset",
-            "review-council",
-            "--prompt-file",
-        ])
+        .args(["--json", "run", "--preset", "review", "--prompt-file"])
         .arg(&prompt)
         .arg("--read-root")
         .arg(&invoking)
@@ -375,7 +647,7 @@ fn review_council_bound_worktree_resolves_subject_and_warns_on_differing_head()
         .env("XDG_CONFIG_HOME", temp.path().join("config"))
         .arg("--state-dir")
         .arg(temp.path().join("state"))
-        .args(["run", "--preset", "review-council", "--prompt-file"])
+        .args(["run", "--preset", "review", "--prompt-file"])
         .arg(&prompt)
         .arg("--read-root")
         .arg(&invoking)
@@ -402,7 +674,7 @@ fn review_council_bound_worktree_resolves_subject_and_warns_on_differing_head()
 /// runtime accepts only under schema 2. `--explain` never admitted the graph,
 /// so the mismatch surfaced only on submit, as `preset_graph: invalid input`.
 #[test]
-fn review_council_with_a_base_is_admitted_on_submit() -> Result<(), Box<dyn std::error::Error>> {
+fn review_with_a_base_is_admitted_on_submit() -> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
     let project = temp.path().join("project");
     std::fs::create_dir(&project)?;
@@ -432,7 +704,7 @@ fn review_council_with_a_base_is_admitted_on_submit() -> Result<(), Box<dyn std:
         .env("XDG_CONFIG_HOME", temp.path().join("config"))
         .args(["--json", "--state-dir"])
         .arg(temp.path().join("state"))
-        .args(["run", "--preset", "review-council", "--prompt-file"])
+        .args(["run", "--preset", "review", "--prompt-file"])
         .arg(&prompt)
         .args([
             "--set",
@@ -508,24 +780,15 @@ fn review_explain_snapshots_substantial_default_panel() -> Result<(), Box<dyn st
         String::from_utf8_lossy(&output.stderr)
     );
     let text = String::from_utf8(output.stdout)?;
-    let request = provenant_routing::ReviewRequest {
-        risk_tier: Some("substantial".into()),
-        ..Default::default()
-    };
-    let panel =
-        provenant_routing::ReviewConfig::default().resolve_panel(&request, None, &[], false)?;
-    assert!(
-        text.starts_with(&format!("review {} ({};", panel.shape, panel.source)),
-        "{text}"
-    );
-    for slot in panel.slots {
-        let pool = slot.tier.as_str().ok_or("pool")?;
-        assert!(
-            text.lines()
-                .any(|line| line.contains(&format!("lens={}", slot.lens))
-                    && line.contains(&format!("pool={pool}"))),
-            "{text}"
-        );
+    assert!(text.contains("Review shape: standard"), "{text}");
+    for lens in [
+        "correctness-spec",
+        "tests",
+        "design-fit-reuse",
+        "simplicity",
+        "reliability",
+    ] {
+        assert!(text.contains(&format!("lens-{lens}")), "{text}");
     }
     Ok(())
 }
@@ -560,27 +823,19 @@ fn review_explain_snapshots_integration_panel() -> Result<(), Box<dyn std::error
         String::from_utf8_lossy(&output.stderr)
     );
     let text = String::from_utf8(output.stdout)?;
-    let request = provenant_routing::ReviewRequest {
-        kind: Some("integration".into()),
-        risk_tier: Some("routine".into()),
-        risk_tags: vec!["security".into()],
-        ..Default::default()
-    };
-    let panel =
-        provenant_routing::ReviewConfig::default().resolve_panel(&request, None, &[], false)?;
-    assert!(
-        text.starts_with(&format!("review {} ({};", panel.shape, panel.source)),
-        "{text}"
-    );
-    assert!(text.contains("risk tags: security"), "{text}");
-    for slot in panel.slots {
-        let pool = slot.tier.as_str().ok_or("pool")?;
-        assert!(
-            text.lines()
-                .any(|line| line.contains(&format!("lens={}", slot.lens))
-                    && line.contains(&format!("pool={pool}"))),
-            "{text}"
-        );
+    assert!(text.contains("Review shape: deep"), "{text}");
+    for lens in [
+        "correctness-spec",
+        "tests",
+        "design-fit-reuse",
+        "simplicity",
+        "reliability",
+        "conventions-readability",
+        "refactor-cleanup",
+        "flexibility",
+        "security-privacy",
+    ] {
+        assert!(text.contains(&format!("lens-{lens}")), "{text}");
     }
     Ok(())
 }
@@ -965,14 +1220,10 @@ fn fresh_gives_a_rerun_a_new_graph_id_and_a_plain_rerun_the_same_one()
 }
 
 #[test]
-fn graph_retention_collects_operator_named_scratch_source() -> Result<(), Box<dyn std::error::Error>>
-{
+fn review_rerun_attaches_and_fresh_starts_a_new_graph() -> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
     let project = temp.path().join("project");
-    let home = temp.path().join("home");
-    let state = temp.path().join("state");
     std::fs::create_dir(&project)?;
-    std::fs::create_dir(&home)?;
     for args in [
         vec!["init", "-q"],
         vec!["commit", "--allow-empty", "-qm", "seed"],
@@ -981,268 +1232,61 @@ fn graph_retention_collects_operator_named_scratch_source() -> Result<(), Box<dy
             .current_dir(&project)
             .args(args)
             .output()?;
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
+        assert!(output.status.success());
     }
-    let presets = project.join(".provenant/presets");
-    std::fs::create_dir_all(&presets)?;
+    let settings = project.join(".provenant");
+    std::fs::create_dir(&settings)?;
     std::fs::write(
-        presets.join("gate-only.toml"),
-        "stages = [{ id = 'accept', kind = 'gate', condition = { type = 'budget' } }]\n",
+        settings.join("roles.toml"),
+        "[roles.\"lens.correctness-spec\"]\ntier = { adapter = 'fixture', model = 'fixture/model' }\n",
     )?;
-    let prompt = project.join("brief");
-    std::fs::write(&prompt, "complete the graph")?;
+    let brief = project.join("brief");
+    std::fs::write(&brief, "Review this commit")?;
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let preset = fixture_cli()
-        .current_dir(&project)
-        .env("HOME", &home)
-        .env("PROVENANT_ROOT", &root)
-        .env("XDG_CONFIG_HOME", temp.path().join("config"))
-        .args(["--json", "--state-dir"])
-        .arg(&state)
-        .args(["run", "--preset", "gate-only", "--prompt-file"])
-        .arg(&prompt)
-        .args(["--wait", "1s"])
-        .output()?;
-    assert!(
-        preset.status.success(),
-        "{} {}",
-        String::from_utf8_lossy(&preset.stdout),
-        String::from_utf8_lossy(&preset.stderr)
-    );
-    let preset: serde_json::Value = serde_json::from_slice(&preset.stdout)?;
-    let source = PathBuf::from(
-        preset["data"]["document"]
-            .as_str()
-            .ok_or("preset document")?,
-    );
-    let mut document: serde_json::Value = serde_json::from_slice(&std::fs::read(&source)?)?;
-    document["graph_id"] = "operator-scratch".into();
-    let operator = source
-        .parent()
-        .ok_or("scratch directory")?
-        .join("operator.json");
-    std::fs::write(&operator, serde_json::to_vec(&document)?)?;
-    document["graph_id"] = "unrelated".into();
-    let unrelated = source
-        .parent()
-        .ok_or("scratch directory")?
-        .join("unrelated.json");
-    std::fs::write(&unrelated, serde_json::to_vec(&document)?)?;
-    let graph = fixture_cli()
-        .current_dir(&project)
-        .env("HOME", &home)
-        .env("PROVENANT_ROOT", &root)
-        .env("XDG_CONFIG_HOME", temp.path().join("config"))
-        .args(["--json", "--state-dir"])
-        .arg(&state)
-        .args(["fabric", "graph", "run", "--document"])
-        .arg(&operator)
-        .output()?;
-    assert!(
-        graph.status.success(),
-        "{} {}",
-        String::from_utf8_lossy(&graph.stdout),
-        String::from_utf8_lossy(&graph.stderr)
-    );
-    let graph: serde_json::Value = serde_json::from_slice(&graph.stdout)?;
-    assert_eq!(graph["data"]["status"], "complete");
-    let graph_dir = std::fs::read_dir(state.join("fabric/graphs"))?
-        .next()
-        .ok_or("graph directory")??
-        .path();
-    let checkpoint = graph_dir.join("graph-operator-scratch.json");
-    let old = std::time::SystemTime::now() - std::time::Duration::from_secs(2 * 86_400);
-    std::fs::OpenOptions::new()
-        .write(true)
-        .open(&checkpoint)?
-        .set_times(std::fs::FileTimes::new().set_modified(old))?;
-    std::fs::write(
-        state.join("config.toml"),
-        "schema_version=1\n[gc]\nschedule=false\ngraph_checkpoint_days=1\n",
-    )?;
-    let gc = fixture_cli()
-        .current_dir(&home)
-        .env("HOME", &home)
-        .env("PROVENANT_ROOT", &root)
-        .env("XDG_CONFIG_HOME", temp.path().join("config"))
-        .arg("--state-dir")
-        .arg(&state)
-        .args(["internal", "tick-gc"])
-        .output()?;
-    assert!(
-        gc.status.success(),
-        "{} {}",
-        String::from_utf8_lossy(&gc.stdout),
-        String::from_utf8_lossy(&gc.stderr)
-    );
-    assert!(!checkpoint.exists());
-    assert!(!operator.exists());
-    assert!(unrelated.exists());
-    assert!(source.exists());
-    Ok(())
-}
-
-#[test]
-fn tick_reports_a_missing_graph_worktree_once_without_failing()
--> Result<(), Box<dyn std::error::Error>> {
-    let temp = tempfile::tempdir()?;
-    let project = temp.path().join("project");
-    let home = temp.path().join("home");
-    let state = temp.path().join("state");
-    std::fs::create_dir(&project)?;
-    std::fs::create_dir(&home)?;
-    for args in [
-        vec!["init", "-q"],
-        vec!["commit", "--allow-empty", "-qm", "seed"],
-    ] {
-        let output = provenant_os::fixture::git_command()
+    let run = |fresh: bool| -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+        let mut command = fixture_cli();
+        command
             .current_dir(&project)
-            .args(args)
-            .output()?;
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-    let graph = serde_json::json!({
-        "schema_version":1,"graph_id":"missing-worktree","decision_session":"chair-session",
-        "nodes":[{"id":"choose","kind":"decide","access":"read_only","decide":{
-            "question":"Ship?","options":[{"id":"ship","label":"Ship"},{"id":"hold","label":"Hold"}],
-            "default":"hold","timeout_seconds":3600
-        }}]
-    });
-    let document = project.join("graph.json");
-    std::fs::write(&document, serde_json::to_vec(&graph)?)?;
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let run = fixture_cli()
-        .current_dir(&project)
-        .env("HOME", &home)
-        .env("PROVENANT_ROOT", &root)
-        .env("XDG_CONFIG_HOME", temp.path().join("config"))
-        .args(["--json", "--state-dir"])
-        .arg(&state)
-        .args(["fabric", "graph", "run", "--document"])
-        .arg(&document)
-        .output()?;
-    assert!(
-        run.status.success(),
-        "{} {}",
-        String::from_utf8_lossy(&run.stdout),
-        String::from_utf8_lossy(&run.stderr)
-    );
-    let presets = project.join(".provenant/presets");
-    std::fs::create_dir_all(&presets)?;
-    std::fs::write(
-        presets.join("gate-only.toml"),
-        "stages = [{ id = 'accept', kind = 'gate', condition = { type = 'budget' } }]\n",
-    )?;
-    let prompt = project.join("brief");
-    std::fs::write(&prompt, "complete the graph")?;
-    let terminal = fixture_cli()
-        .current_dir(&project)
-        .env("HOME", &home)
-        .env("PROVENANT_ROOT", &root)
-        .env("XDG_CONFIG_HOME", temp.path().join("config"))
-        .args(["--json", "--state-dir"])
-        .arg(&state)
-        .args(["run", "--preset", "gate-only", "--prompt-file"])
-        .arg(&prompt)
-        .args(["--wait", "1s"])
-        .output()?;
-    assert!(
-        terminal.status.success(),
-        "{} {}",
-        String::from_utf8_lossy(&terminal.stdout),
-        String::from_utf8_lossy(&terminal.stderr)
-    );
-    let terminal: serde_json::Value = serde_json::from_slice(&terminal.stdout)?;
-    assert_eq!(terminal["data"]["graph"]["status"], "complete");
-    let terminal_id = terminal["data"]["graph"]["checkpoint"]["graph_id"]
-        .as_str()
-        .ok_or("terminal graph id")?;
-    let graph_dir = std::fs::read_dir(state.join("fabric/graphs"))?
-        .next()
-        .ok_or("project graph directory")??
-        .path();
-    let terminal_checkpoint = graph_dir.join(format!("graph-{terminal_id}.json"));
-    let old = std::time::SystemTime::now() - std::time::Duration::from_secs(2 * 86_400);
-    std::fs::OpenOptions::new()
-        .write(true)
-        .open(&terminal_checkpoint)?
-        .set_times(std::fs::FileTimes::new().set_modified(old))?;
-    std::fs::write(
-        state.join("config.toml"),
-        "schema_version=1\n[gc]\nschedule=false\n",
-    )?;
-    std::fs::remove_dir_all(&project)?;
-    let tick = || {
-        fixture_cli()
-            .current_dir(&home)
-            .env("HOME", &home)
             .env("PROVENANT_ROOT", &root)
             .env("XDG_CONFIG_HOME", temp.path().join("config"))
             .args(["--json", "--state-dir"])
-            .arg(&state)
-            .arg("tick")
-            .output()
+            .arg(temp.path().join("state"))
+            .args(["review", "HEAD", "--brief-file"])
+            .arg(&brief)
+            .args(["--shape", "quick", "--plan", "off", "--wait", "5s"]);
+        if fresh {
+            command.arg("--fresh");
+        }
+        let output = command.output()?;
+        Ok(serde_json::from_slice(&output.stdout)?)
     };
-    let first = tick()?;
-    assert!(
-        first.status.success(),
-        "{} {}",
-        String::from_utf8_lossy(&first.stdout),
-        String::from_utf8_lossy(&first.stderr)
-    );
-    let first: serde_json::Value = serde_json::from_slice(&first.stdout)?;
-    let warnings = first["data"]["graphs"]["warnings"]
+    let first = run(false)?;
+    let second = run(false)?;
+    let fresh = run(true)?;
+    let id = first["data"]["graph_id"]
+        .as_str()
+        .ok_or_else(|| format!("no graph: {first}"))?;
+    assert_eq!(second["data"]["graph_id"], id, "{second}");
+    let nodes = first["data"]["graph"]["checkpoint"]["nodes"]
         .as_array()
-        .ok_or("warnings")?;
-    assert_eq!(warnings.len(), 1);
-    let warning = warnings[0].as_str().ok_or("warning")?;
-    assert!(warning.contains("missing-worktree"));
-    assert!(!warning.contains("upgrade"));
-    let second = tick()?;
+        .ok_or("checkpoint nodes missing")?;
+    let attempts: usize = nodes
+        .iter()
+        .map(|node| node["attempts"].as_array().map_or(0, Vec::len))
+        .sum();
+    assert_eq!(attempts, 1, "{first}");
     assert!(
-        second.status.success(),
-        "{}",
-        String::from_utf8_lossy(&second.stdout)
+        !nodes.iter().any(|node| node["id"]
+            .as_str()
+            .is_some_and(|id| id.contains("synthesis"))),
+        "{first}"
     );
-    let second: serde_json::Value = serde_json::from_slice(&second.stdout)?;
-    assert!(
-        second["data"]["graphs"]["warnings"]
-            .as_array()
-            .ok_or("warnings")?
-            .is_empty()
+    assert_eq!(
+        second["data"]["graph"]["checkpoint"]["nodes"],
+        first["data"]["graph"]["checkpoint"]["nodes"],
+        "{second}"
     );
-    std::fs::write(
-        state.join("config.toml"),
-        "schema_version=1\n[gc]\nschedule=true\ngraph_checkpoint_days=1\n",
-    )?;
-    let gc = fixture_cli()
-        .current_dir(&home)
-        .env("HOME", &home)
-        .env("PROVENANT_ROOT", &root)
-        .env("XDG_CONFIG_HOME", temp.path().join("config"))
-        .arg("--state-dir")
-        .arg(&state)
-        .args(["internal", "tick-gc"])
-        .output()?;
-    assert!(
-        gc.status.success(),
-        "{} {}",
-        String::from_utf8_lossy(&gc.stdout),
-        String::from_utf8_lossy(&gc.stderr)
-    );
-    let result: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(state.join("tick/gc-result.json"))?)?;
-    assert_eq!(result["state"], "complete");
-    assert!(!terminal_checkpoint.exists());
-    assert!(graph_dir.join("graph-missing-worktree.json").exists());
+    assert_ne!(fresh["data"]["graph_id"], id, "{fresh}");
     Ok(())
 }
 
@@ -1357,7 +1401,7 @@ fn explain_pins_source_refs_before_hashing_without_creating_state()
             .env("XDG_CONFIG_HOME", temp.path().join("config"))
             .args(["--json", "--state-dir"])
             .arg(temp.path().join("state"))
-            .args(["run", "--preset", "review-council", "--prompt-file"])
+            .args(["run", "--preset", "review", "--prompt-file"])
             .arg(&prompt)
             .arg("--explain")
             .output()?;
@@ -1524,6 +1568,19 @@ stages = [
             format!("schema_version = 1\n[domains.fabric.graph.limits]\n{key} = 1\n"),
         )?;
         let explained = run(true)?;
+        if key == "nodes" {
+            assert!(!explained.status.success(), "{key}");
+            let explained: serde_json::Value = serde_json::from_slice(&explained.stdout)?;
+            let reason = explained["error"]["message"]
+                .as_str()
+                .ok_or("missing compile refusal reason")?;
+            assert!(reason.contains("limits.nodes=1"), "{reason}");
+            let submitted = run(false)?;
+            assert!(!submitted.status.success(), "{key}");
+            let submitted: serde_json::Value = serde_json::from_slice(&submitted.stdout)?;
+            assert_eq!(submitted["error"]["message"], reason);
+            continue;
+        }
         assert!(
             explained.status.success(),
             "{key}: {}",
@@ -1538,6 +1595,17 @@ stages = [
             .as_str()
             .ok_or("missing admission reason")?;
         assert!(reason.contains(&format!("limits.{key}")), "{key}: {reason}");
+        if key == "expansion_depth" {
+            let limits = provenant_fabric_runtime::config::GraphLimits {
+                expansion_depth: 1,
+                ..Default::default()
+            };
+            assert_eq!(
+                Some(reason),
+                limits.expansion_depth_bound().refusal(2).as_deref()
+            );
+            assert!(reason.contains("domains.fabric.graph.limits"), "{reason}");
+        }
         assert!(value["data"].get("execution").is_none());
         assert!(value["data"].get("validation_error").is_none());
         let submitted = run(false)?;
@@ -1547,6 +1615,62 @@ stages = [
             .as_str()
             .ok_or("missing submission refusal reason")?;
         assert_eq!(reason, submitted_reason, "{key}: {submitted_value}");
+    }
+    // A group compiles to the same bounded expansion admission checks. Use a
+    // valid graph as the admission input, then vary only the relevant bound or
+    // parent ID for the two CLI calls.
+    let member = "b".repeat(32);
+    std::fs::write(
+        presets.join("limits.toml"),
+        format!(
+            "stages = [{{ id = 'group', stages = [{{ id = 'inner', stages = [{{ id = '{member}', prompt = 'work' }}] }}] }}]\n"
+        ),
+    )?;
+    std::fs::write(state.join("config.toml"), "schema_version = 1\n")?;
+    let valid = run(true)?;
+    assert!(valid.status.success());
+    let valid: serde_json::Value = serde_json::from_slice(&valid.stdout)?;
+    let graph = valid["data"]["graph"].clone();
+    for case in ["nodes", "depth", "id"] {
+        let mut candidate = graph.clone();
+        let mut limits = provenant_fabric_runtime::config::GraphLimits::default();
+        if case == "nodes" {
+            limits.nodes = 1;
+            std::fs::write(
+                state.join("config.toml"),
+                "schema_version = 1\n[domains.fabric.graph.limits]\nnodes = 1\n",
+            )?;
+        } else if case == "depth" {
+            limits.expansion_depth = 1;
+            std::fs::write(
+                state.join("config.toml"),
+                "schema_version = 1\n[domains.fabric.graph.limits]\nexpansion_depth = 1\n",
+            )?;
+        } else {
+            std::fs::write(state.join("config.toml"), "schema_version = 1\n")?;
+            let parent = "a".repeat(32);
+            candidate["nodes"][0]["id"] = serde_json::json!(parent);
+            std::fs::write(
+                presets.join("limits.toml"),
+                format!(
+                    "stages = [{{ id = '{parent}', stages = [{{ id = 'inner', stages = [{{ id = '{member}', prompt = 'work' }}] }}] }}]\n"
+                ),
+            )?;
+        }
+        let document: provenant_fabric_runtime::graph::GraphDocument =
+            serde_json::from_value(candidate)?;
+        let reason = document
+            .admit(&limits)
+            .expect_err("admission must reject the composite");
+        for explain in [true, false] {
+            let output = run(explain)?;
+            assert!(!output.status.success(), "{case}, explain={explain}");
+            let result: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+            assert_eq!(
+                result["error"]["message"], reason,
+                "{case}, explain={explain}"
+            );
+        }
     }
     fn has_graph_journal(path: &std::path::Path) -> std::io::Result<bool> {
         if !path.exists() {
@@ -1928,7 +2052,7 @@ fn preset_explain_describes_the_pattern_and_creates_no_state()
         .env("XDG_CONFIG_HOME", temp.path())
         .args(["--json", "--state-dir"])
         .arg(&state)
-        .args(["preset", "explain", "review-council"])
+        .args(["preset", "explain", "review"])
         .output()?;
     assert!(
         output.status.success(),
@@ -2110,6 +2234,7 @@ fn preset_list_and_show_human_output_match_goldens() -> Result<(), Box<dyn std::
         Ok(scrub(&String::from_utf8(out.stdout)?, &root))
     };
     let list = run(&["preset", "list"])?;
+    golden_in("tests/golden", "preset-list.txt", &list)?;
     for entry in
         std::fs::read_dir(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets/presets"))?
     {
@@ -2140,10 +2265,29 @@ fn preset_list_and_show_human_output_match_goldens() -> Result<(), Box<dyn std::
 }
 
 #[test]
-fn review_council_explain_shows_lenses_tiers_families_and_the_verifier()
+fn deliver_plan_explains_launch_time_review() -> Result<(), Box<dyn std::error::Error>> {
+    let on = explain_text(
+        "deliver",
+        &["--plan", "on", "--set", "parameters.worktree=\".\""],
+    )?;
+    assert!(on.contains("review panel planned at launch"), "{on}");
+    assert!(!on.contains("lens-correctness-spec"), "{on}");
+    let off = explain_text(
+        "deliver",
+        &["--plan", "off", "--set", "parameters.worktree=\".\""],
+    )?;
+    assert!(
+        off.contains("plan: off -> off (planning turned off)"),
+        "{off}"
+    );
+    Ok(())
+}
+
+#[test]
+fn review_explain_shows_lenses_tiers_families_and_the_verifier()
 -> Result<(), Box<dyn std::error::Error>> {
     let text = explain_text(
-        "review-council",
+        "review",
         &[
             "--set",
             "parameters.worktree=\".\"",
@@ -2161,7 +2305,7 @@ fn review_council_explain_shows_lenses_tiers_families_and_the_verifier()
     assert!(lens < verify && verify < synthesis, "{text}");
     assert!(text.contains("family=cross_preferred"), "{text}");
     assert!(text.contains("family=distinct_from_writer"), "{text}");
-    golden("review-council.explain.txt", &text)?;
+    golden("review.explain.txt", &text)?;
     Ok(())
 }
 
@@ -2173,8 +2317,8 @@ fn scout_swarm_and_generator_evaluator_explain_admission_and_inspection()
         (
             "generator-evaluator",
             &["--set", "parameters.worktree=\".\""][..],
-            3,
-            3,
+            4,
+            5,
             3,
         ),
     ] {
@@ -2192,6 +2336,7 @@ fn scout_swarm_and_generator_evaluator_explain_admission_and_inspection()
         assert_eq!(inspection["nodes"], nodes, "{text}");
         assert_eq!(inspection["edges"], edges, "{text}");
         assert_eq!(inspection["max_attempts"], max_attempts, "{text}");
+        golden(&format!("{name}.explain.txt"), &text)?;
     }
     let writer = explain_text(
         "generator-evaluator",
@@ -2237,7 +2382,6 @@ fn remaining_bundled_patterns_have_explain_goldens() -> Result<(), Box<dyn std::
             assert!(explained.contains("plan: off -> off"), "{explained}");
             assert!(!explained.contains("Planner route"), "{explained}");
             assert!(explained.contains("writer worktree"), "{explained}");
-            continue;
         }
         golden(&format!("{name}.explain.txt"), &explained)?;
     }
@@ -2614,6 +2758,78 @@ impl ExperimentProject {
 const WORK_ITEM: &str = "0123456789abcdef0123456789abcdef";
 
 #[test]
+fn experiment_arm_eligibility_receives_declared_request_bindings()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = ExperimentProject::new(
+        "[domains.fabric.pipelines.experiment.trial]\ncontrol = 'gate-only'\narms = { candidate = 'gate-alt' }\nassign = 'epsilon'\nepsilon = 1.0\n",
+    )?;
+    std::fs::write(
+        fixture.project.join(".provenant/presets/gate-alt.toml"),
+        "stages = [{ id = 'task', prompt = 'risk=${priority}; kind=${category}' }]\n[parameters]\npriority = { type = 'string', bind = 'risk_tier' }\ncategory = { type = 'string', bind = 'kind' }\n",
+    )?;
+    let (document, stderr) = fixture.document(&[
+        "--task-id",
+        WORK_ITEM,
+        "--risk-tier",
+        "routine",
+        "--task-kind",
+        "docs",
+    ])?;
+    assert_eq!(
+        document["context"]["experiment_arm"], "candidate",
+        "{stderr}"
+    );
+    assert_eq!(document["nodes"][0]["prompt"], "risk=routine; kind=docs");
+    assert!(!stderr.contains("--risk-tier"), "{stderr}");
+    assert!(!stderr.contains("--task-kind"), "{stderr}");
+    Ok(())
+}
+
+#[test]
+fn parameter_file_overrides_request_binding() -> Result<(), Box<dyn std::error::Error>> {
+    let fixture = ExperimentProject::new("")?;
+    std::fs::write(
+        fixture.project.join(".provenant/presets/gate-alt.toml"),
+        "stages = [{ id = 'task', prompt = 'risk=${priority}; kind=${category}' }]\n[parameters]\npriority = { type = 'string', bind = 'risk_tier' }\ncategory = { type = 'string', bind = 'kind' }\n",
+    )?;
+    std::fs::write(
+        fixture.project.join(".provenant/preset-rules.toml"),
+        "[select]\ndefault = { preset = 'gate-alt', parameters = { priority = 'selected' } }\n",
+    )?;
+    let (selected, _) = fixture.document(&["--risk-tier", "routine", "--task-kind", "docs"])?;
+    assert_eq!(selected["nodes"][0]["prompt"], "risk=routine; kind=docs");
+    let file = fixture.project.join("params.toml");
+    std::fs::write(&file, "priority = 'from-file'\n")?;
+    let file = file.to_str().ok_or("parameter path is not UTF-8")?;
+    let args = [
+        "--preset",
+        "gate-alt",
+        "--risk-tier",
+        "routine",
+        "--task-kind",
+        "docs",
+        "--params-file",
+        file,
+    ];
+    let (document, _) = fixture.document(&args)?;
+    assert_eq!(document["nodes"][0]["prompt"], "risk=from-file; kind=docs");
+    let (document, _) = fixture.document(&[
+        "--preset",
+        "gate-alt",
+        "--risk-tier",
+        "routine",
+        "--task-kind",
+        "docs",
+        "--params-file",
+        file,
+        "--set",
+        "parameters.priority='from-set'",
+    ])?;
+    assert_eq!(document["nodes"][0]["prompt"], "risk=from-set; kind=docs");
+    Ok(())
+}
+
+#[test]
 fn task_id_assigns_the_candidate_arm_and_labels_the_run() -> Result<(), Box<dyn std::error::Error>>
 {
     let fixture = ExperimentProject::new(
@@ -2714,6 +2930,11 @@ fn explicit_preset_and_no_task_id_never_read_experiments() -> Result<(), Box<dyn
         document["context"].get("experiment_arm").is_none(),
         "{document}"
     );
+    let (document, stderr) =
+        fixture.document(&["--preset", "gate-only", "--task-id", WORK_ITEM])?;
+    assert!(!stderr.contains("broken"), "{stderr}");
+    assert_eq!(document["context"]["work_item"], WORK_ITEM);
+    assert!(document["context"].get("experiment_arm").is_none());
     let default_nodes = document["nodes"].clone();
     let (document, stderr) = fixture.document(&["--preset", "gate-alt", "--task-id", WORK_ITEM])?;
     assert!(!stderr.contains("broken"), "{stderr}");
@@ -3139,13 +3360,7 @@ fn preset_file_spec_resolves_from_checkout_subdirectory() -> Result<(), Box<dyn 
         .env("XDG_CONFIG_HOME", temp.path().join("config"))
         .arg("--state-dir")
         .arg(temp.path().join("state"))
-        .args([
-            "--json",
-            "run",
-            "--preset",
-            "review-council",
-            "--prompt-file",
-        ])
+        .args(["--json", "run", "--preset", "review", "--prompt-file"])
         .arg(&prompt)
         .args(["--explain", "--set", "parameters.spec='spec.md'"])
         .output()?;
@@ -3228,13 +3443,7 @@ fn preset_reuses_one_worktree_inventory_for_planning_and_spec()
         .env("XDG_CONFIG_HOME", temp.path().join("config"))
         .arg("--state-dir")
         .arg(temp.path().join("state"))
-        .args([
-            "--json",
-            "run",
-            "--preset",
-            "review-council",
-            "--prompt-file",
-        ])
+        .args(["--json", "run", "--preset", "review", "--prompt-file"])
         .arg(&prompt)
         .args(["--explain", "--set", "parameters.spec='spec.md'"])
         .output()?;
@@ -3286,8 +3495,8 @@ fn preset_missing_spec_warns_in_explain_and_launch() -> Result<(), Box<dyn std::
     std::fs::write(&prompt, "review")?;
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     for (preset, explain) in [
-        ("review-council", true),
-        ("review-council", false),
+        ("review", true),
+        ("review", false),
         ("big-batch", true),
         ("big-batch", false),
     ] {
@@ -3329,6 +3538,560 @@ fn preset_missing_spec_warns_in_explain_and_launch() -> Result<(), Box<dyn std::
             stderr.contains("pass an issue-number spec instead"),
             "{stderr}"
         );
+    }
+    Ok(())
+}
+
+#[test]
+fn unbound_request_values_warn_in_explain() -> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let prompt = temp.path().join("prompt");
+    std::fs::write(&prompt, "Review the bounded change")?;
+    let output = fixture_cli()
+        .current_dir(&root)
+        .env("PROVENANT_ROOT", &root)
+        .env("XDG_CONFIG_HOME", temp.path().join("config"))
+        .arg("--state-dir")
+        .arg(temp.path().join("state"))
+        .args(["--json", "run", "--preset", "single", "--prompt-file"])
+        .arg(&prompt)
+        .args([
+            "--risk-tier",
+            "routine",
+            "--task-kind",
+            "docs",
+            "--plan",
+            "off",
+            "--explain",
+        ])
+        .output()?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+    let warnings = result["data"]["graph"]["provenance"]["warnings"]
+        .as_array()
+        .ok_or("warnings missing")?;
+    for flag in ["--risk-tier", "--task-kind"] {
+        assert!(
+            warnings.iter().any(|warning| warning
+                .as_str()
+                .is_some_and(|warning| warning.contains(flag))),
+            "{warnings:?}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn copied_review_preset_binds_request_values_under_any_name()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let presets = temp.path().join("config/provenant/presets");
+    std::fs::create_dir_all(&presets)?;
+    std::fs::write(
+        presets.join("copy.toml"),
+        include_str!("../assets/presets/generator-evaluator.toml"),
+    )?;
+    let prompt = temp.path().join("prompt");
+    std::fs::write(&prompt, "Implement the bounded change")?;
+    let run = |preset: &str| -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+        let output = fixture_cli()
+            .current_dir(&root)
+            .env("PROVENANT_ROOT", &root)
+            .env("XDG_CONFIG_HOME", temp.path().join("config"))
+            .arg("--state-dir")
+            .arg(temp.path().join("state"))
+            .args(["--json", "run", "--preset", preset, "--prompt-file"])
+            .arg(&prompt)
+            .args([
+                "--risk-tier",
+                "crucial",
+                "--task-kind",
+                "docs",
+                "--plan",
+                "off",
+                "--explain",
+            ])
+            .output()?;
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        Ok(serde_json::from_slice(&output.stdout)?)
+    };
+    let bundled = run("generator-evaluator")?;
+    let copied = run("copy")?;
+    assert_eq!(
+        bundled["data"]["graph"]["nodes"],
+        copied["data"]["graph"]["nodes"]
+    );
+    let lens = copied["data"]["graph"]["nodes"]
+        .as_array()
+        .ok_or("nodes missing")?
+        .iter()
+        .find(|node| node["id"] == "lens")
+        .ok_or("lens missing")?;
+    let deferred = &lens["composite"]["nodes"][0];
+    assert_eq!(deferred["review"]["risk_tier"], "crucial");
+    assert_eq!(deferred["review"]["kind"], "docs");
+    Ok(())
+}
+
+#[test]
+fn graph_retention_collects_operator_named_scratch_source() -> Result<(), Box<dyn std::error::Error>>
+{
+    let temp = tempfile::tempdir()?;
+    let project = temp.path().join("project");
+    let home = temp.path().join("home");
+    let state = temp.path().join("state");
+    std::fs::create_dir(&project)?;
+    std::fs::create_dir(&home)?;
+    for args in [
+        vec!["init", "-q"],
+        vec!["commit", "--allow-empty", "-qm", "seed"],
+    ] {
+        let output = provenant_os::fixture::git_command()
+            .current_dir(&project)
+            .args(args)
+            .output()?;
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let presets = project.join(".provenant/presets");
+    std::fs::create_dir_all(&presets)?;
+    std::fs::write(
+        presets.join("gate-only.toml"),
+        "stages = [{ id = 'accept', kind = 'gate', condition = { type = 'budget' } }]\n",
+    )?;
+    let prompt = project.join("brief");
+    std::fs::write(&prompt, "complete the graph")?;
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let preset = fixture_cli()
+        .current_dir(&project)
+        .env("HOME", &home)
+        .env("PROVENANT_ROOT", &root)
+        .env("XDG_CONFIG_HOME", temp.path().join("config"))
+        .args(["--json", "--state-dir"])
+        .arg(&state)
+        .args(["run", "--preset", "gate-only", "--prompt-file"])
+        .arg(&prompt)
+        .args(["--wait", "1s"])
+        .output()?;
+    assert!(
+        preset.status.success(),
+        "{} {}",
+        String::from_utf8_lossy(&preset.stdout),
+        String::from_utf8_lossy(&preset.stderr)
+    );
+    let preset: serde_json::Value = serde_json::from_slice(&preset.stdout)?;
+    let source = PathBuf::from(
+        preset["data"]["document"]
+            .as_str()
+            .ok_or("preset document")?,
+    );
+    let mut document: serde_json::Value = serde_json::from_slice(&std::fs::read(&source)?)?;
+    document["graph_id"] = "operator-scratch".into();
+    let operator = source
+        .parent()
+        .ok_or("scratch directory")?
+        .join("operator.json");
+    std::fs::write(&operator, serde_json::to_vec(&document)?)?;
+    document["graph_id"] = "unrelated".into();
+    let unrelated = source
+        .parent()
+        .ok_or("scratch directory")?
+        .join("unrelated.json");
+    std::fs::write(&unrelated, serde_json::to_vec(&document)?)?;
+    let graph = fixture_cli()
+        .current_dir(&project)
+        .env("HOME", &home)
+        .env("PROVENANT_ROOT", &root)
+        .env("XDG_CONFIG_HOME", temp.path().join("config"))
+        .args(["--json", "--state-dir"])
+        .arg(&state)
+        .args(["fabric", "graph", "run", "--document"])
+        .arg(&operator)
+        .output()?;
+    assert!(
+        graph.status.success(),
+        "{} {}",
+        String::from_utf8_lossy(&graph.stdout),
+        String::from_utf8_lossy(&graph.stderr)
+    );
+    let graph: serde_json::Value = serde_json::from_slice(&graph.stdout)?;
+    assert_eq!(graph["data"]["status"], "complete");
+    let graph_dir = std::fs::read_dir(state.join("fabric/graphs"))?
+        .next()
+        .ok_or("graph directory")??
+        .path();
+    let checkpoint = graph_dir.join("graph-operator-scratch.json");
+    let old = std::time::SystemTime::now() - std::time::Duration::from_secs(2 * 86_400);
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&checkpoint)?
+        .set_times(std::fs::FileTimes::new().set_modified(old))?;
+    std::fs::write(
+        state.join("config.toml"),
+        "schema_version=1\n[gc]\nschedule=false\ngraph_checkpoint_days=1\n",
+    )?;
+    let gc = fixture_cli()
+        .current_dir(&home)
+        .env("HOME", &home)
+        .env("PROVENANT_ROOT", &root)
+        .env("XDG_CONFIG_HOME", temp.path().join("config"))
+        .arg("--state-dir")
+        .arg(&state)
+        .args(["internal", "tick-gc"])
+        .output()?;
+    assert!(
+        gc.status.success(),
+        "{} {}",
+        String::from_utf8_lossy(&gc.stdout),
+        String::from_utf8_lossy(&gc.stderr)
+    );
+    assert!(!checkpoint.exists());
+    assert!(!operator.exists());
+    assert!(unrelated.exists());
+    assert!(source.exists());
+    Ok(())
+}
+
+#[test]
+fn tick_reports_a_missing_graph_worktree_once_without_failing()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let project = temp.path().join("project");
+    let home = temp.path().join("home");
+    let state = temp.path().join("state");
+    std::fs::create_dir(&project)?;
+    std::fs::create_dir(&home)?;
+    for args in [
+        vec!["init", "-q"],
+        vec!["commit", "--allow-empty", "-qm", "seed"],
+    ] {
+        let output = provenant_os::fixture::git_command()
+            .current_dir(&project)
+            .args(args)
+            .output()?;
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let graph = serde_json::json!({
+        "schema_version":1,"graph_id":"missing-worktree","decision_session":"chair-session",
+        "nodes":[{"id":"choose","kind":"decide","access":"read_only","decide":{
+            "question":"Ship?","options":[{"id":"ship","label":"Ship"},{"id":"hold","label":"Hold"}],
+            "default":"hold","timeout_seconds":3600
+        }}]
+    });
+    let document = project.join("graph.json");
+    std::fs::write(&document, serde_json::to_vec(&graph)?)?;
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let run = fixture_cli()
+        .current_dir(&project)
+        .env("HOME", &home)
+        .env("PROVENANT_ROOT", &root)
+        .env("XDG_CONFIG_HOME", temp.path().join("config"))
+        .args(["--json", "--state-dir"])
+        .arg(&state)
+        .args(["fabric", "graph", "run", "--document"])
+        .arg(&document)
+        .output()?;
+    assert!(
+        run.status.success(),
+        "{} {}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let presets = project.join(".provenant/presets");
+    std::fs::create_dir_all(&presets)?;
+    std::fs::write(
+        presets.join("gate-only.toml"),
+        "stages = [{ id = 'accept', kind = 'gate', condition = { type = 'budget' } }]\n",
+    )?;
+    let prompt = project.join("brief");
+    std::fs::write(&prompt, "complete the graph")?;
+    let terminal = fixture_cli()
+        .current_dir(&project)
+        .env("HOME", &home)
+        .env("PROVENANT_ROOT", &root)
+        .env("XDG_CONFIG_HOME", temp.path().join("config"))
+        .args(["--json", "--state-dir"])
+        .arg(&state)
+        .args(["run", "--preset", "gate-only", "--prompt-file"])
+        .arg(&prompt)
+        .args(["--wait", "1s"])
+        .output()?;
+    assert!(
+        terminal.status.success(),
+        "{} {}",
+        String::from_utf8_lossy(&terminal.stdout),
+        String::from_utf8_lossy(&terminal.stderr)
+    );
+    let terminal: serde_json::Value = serde_json::from_slice(&terminal.stdout)?;
+    assert_eq!(terminal["data"]["graph"]["status"], "complete");
+    let terminal_id = terminal["data"]["graph"]["checkpoint"]["graph_id"]
+        .as_str()
+        .ok_or("terminal graph id")?;
+    let graph_dir = std::fs::read_dir(state.join("fabric/graphs"))?
+        .next()
+        .ok_or("project graph directory")??
+        .path();
+    let terminal_checkpoint = graph_dir.join(format!("graph-{terminal_id}.json"));
+    let old = std::time::SystemTime::now() - std::time::Duration::from_secs(2 * 86_400);
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&terminal_checkpoint)?
+        .set_times(std::fs::FileTimes::new().set_modified(old))?;
+    std::fs::write(
+        state.join("config.toml"),
+        "schema_version=1\n[gc]\nschedule=false\n",
+    )?;
+    std::fs::remove_dir_all(&project)?;
+    let tick = || {
+        fixture_cli()
+            .current_dir(&home)
+            .env("HOME", &home)
+            .env("PROVENANT_ROOT", &root)
+            .env("XDG_CONFIG_HOME", temp.path().join("config"))
+            .args(["--json", "--state-dir"])
+            .arg(&state)
+            .arg("tick")
+            .output()
+    };
+    let first = tick()?;
+    assert!(
+        first.status.success(),
+        "{} {}",
+        String::from_utf8_lossy(&first.stdout),
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let first: serde_json::Value = serde_json::from_slice(&first.stdout)?;
+    let warnings = first["data"]["graphs"]["warnings"]
+        .as_array()
+        .ok_or("warnings")?;
+    assert_eq!(warnings.len(), 1);
+    let warning = warnings[0].as_str().ok_or("warning")?;
+    assert!(warning.contains("missing-worktree"));
+    assert!(!warning.contains("upgrade"));
+    let second = tick()?;
+    assert!(
+        second.status.success(),
+        "{}",
+        String::from_utf8_lossy(&second.stdout)
+    );
+    let second: serde_json::Value = serde_json::from_slice(&second.stdout)?;
+    assert!(
+        second["data"]["graphs"]["warnings"]
+            .as_array()
+            .ok_or("warnings")?
+            .is_empty()
+    );
+    std::fs::write(
+        state.join("config.toml"),
+        "schema_version=1\n[gc]\nschedule=true\ngraph_checkpoint_days=1\n",
+    )?;
+    let gc = fixture_cli()
+        .current_dir(&home)
+        .env("HOME", &home)
+        .env("PROVENANT_ROOT", &root)
+        .env("XDG_CONFIG_HOME", temp.path().join("config"))
+        .arg("--state-dir")
+        .arg(&state)
+        .args(["internal", "tick-gc"])
+        .output()?;
+    assert!(
+        gc.status.success(),
+        "{} {}",
+        String::from_utf8_lossy(&gc.stdout),
+        String::from_utf8_lossy(&gc.stderr)
+    );
+    let result: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(state.join("tick/gc-result.json"))?)?;
+    assert_eq!(result["state"], "complete");
+    assert!(!terminal_checkpoint.exists());
+    assert!(graph_dir.join("graph-missing-worktree.json").exists());
+    Ok(())
+}
+
+#[test]
+fn deliver_spec_secret_is_not_printed_by_advice() -> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let project = temp.path().join("project");
+    std::fs::create_dir(&project)?;
+    for args in [
+        vec!["init", "-q"],
+        vec!["commit", "--allow-empty", "-qm", "seed"],
+    ] {
+        assert!(
+            provenant_os::fixture::git_command()
+                .current_dir(&project)
+                .args(args)
+                .status()?
+                .success()
+        );
+    }
+    let secret = format!("ghp_{}", "a1".repeat(18));
+    std::fs::write(project.join("spec.md"), format!("missing/{secret}#symbol"))?;
+    let prompt = temp.path().join("brief");
+    std::fs::write(&prompt, "ordinary brief")?;
+    for explain in [false, true] {
+        let mut command = fixture_cli();
+        command
+            .current_dir(&project)
+            .env(
+                "PROVENANT_ROOT",
+                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.."),
+            )
+            .env("XDG_CONFIG_HOME", temp.path().join("config"))
+            .args(["--json", "--state-dir"])
+            .arg(temp.path().join("state"))
+            .args(["run", "--preset", "deliver", "--prompt-file"])
+            .arg(&prompt)
+            .args(["--set", "parameters.spec='spec.md'"]);
+        if explain {
+            command.arg("--explain");
+        }
+        let output = command.output()?;
+        let result: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+        assert_eq!(result["error"]["code"], "SECRET_INPUT", "{result}");
+        assert!(!String::from_utf8_lossy(&output.stdout).contains(&secret));
+        assert!(!String::from_utf8_lossy(&output.stderr).contains(&secret));
+    }
+    Ok(())
+}
+
+#[test]
+fn deliver_advice_suppresses_secret_beyond_spec_excerpt() -> Result<(), Box<dyn std::error::Error>>
+{
+    let temp = tempfile::tempdir()?;
+    let project = temp.path().join("project");
+    std::fs::create_dir(&project)?;
+    for args in [
+        vec!["init", "-q"],
+        vec!["commit", "--allow-empty", "-qm", "seed"],
+    ] {
+        assert!(
+            provenant_os::fixture::git_command()
+                .current_dir(&project)
+                .args(args)
+                .status()?
+                .success()
+        );
+    }
+    let secret = format!("ghp_{}", "a1".repeat(18));
+    std::fs::write(
+        project.join("spec.md"),
+        format!("{}\nmissing/{secret}#symbol", "ordinary ".repeat(3000)),
+    )?;
+    let prompt = temp.path().join("brief");
+    std::fs::write(&prompt, "ordinary brief")?;
+    let home = temp.path().join("home");
+    std::fs::create_dir(&home)?;
+    let output = fixture_cli()
+        .current_dir(&project)
+        .env(
+            "PROVENANT_ROOT",
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.."),
+        )
+        .env("XDG_CONFIG_HOME", temp.path().join("config"))
+        .env("HOME", &home)
+        .env("PATH", "/usr/bin:/bin")
+        .args(["--json", "--state-dir"])
+        .arg(temp.path().join("state"))
+        .args(["run", "--preset", "deliver", "--prompt-file"])
+        .arg(&prompt)
+        .args(["--set", "parameters.spec='spec.md'", "--wait", "1s"])
+        .output()?;
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+    assert_ne!(result["error"]["code"], "SECRET_INPUT", "{result}");
+    assert!(!String::from_utf8_lossy(&output.stdout).contains(&secret));
+    assert!(!String::from_utf8_lossy(&output.stderr).contains(&secret));
+    Ok(())
+}
+
+#[test]
+fn preset_bound_path_is_not_a_secret_but_prompt_is() -> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let token = format!("sk-{}", "a".repeat(48));
+    let project = temp.path().join(&token);
+    std::fs::create_dir(&project)?;
+    for args in [
+        vec!["init", "-q"],
+        vec!["commit", "--allow-empty", "-qm", "seed"],
+    ] {
+        assert!(
+            provenant_os::fixture::git_command()
+                .current_dir(&project)
+                .args(args)
+                .status()?
+                .success()
+        );
+    }
+    let presets = project.join(".provenant/presets");
+    std::fs::create_dir_all(&presets)?;
+    std::fs::write(
+        presets.join("gate-only.toml"),
+        "stages = [{ id = 'task', role = 'lens.house' }]\n",
+    )?;
+    std::fs::write(
+        project.join(".provenant/roles.toml"),
+        "[roles.\"lens.house\"]\ntier = 'senior'\ncard = 'ordinary card'\n",
+    )?;
+    let home = temp.path().join("home");
+    std::fs::create_dir(&home)?;
+    let prompt = temp.path().join("brief");
+    for secret in [false, true] {
+        std::fs::write(&prompt, if secret { &token } else { "ordinary brief" })?;
+        for explain in [false, true] {
+            let mut command = fixture_cli();
+            command
+                .current_dir(&project)
+                .env(
+                    "PROVENANT_ROOT",
+                    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.."),
+                )
+                .env("XDG_CONFIG_HOME", temp.path().join("config"))
+                .env("HOME", &home)
+                .env("PATH", "/usr/bin:/bin")
+                .args(["--json", "--state-dir"])
+                .arg(temp.path().join("state"))
+                .args(["run", "--preset", "gate-only", "--prompt-file"])
+                .arg(&prompt)
+                .arg("--read-root")
+                .arg(&project);
+            if explain {
+                command.arg("--explain");
+            }
+            let output = command.output()?;
+            let result: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+            if secret {
+                assert_eq!(result["error"]["code"], "SECRET_INPUT", "{result}");
+                assert!(!String::from_utf8_lossy(&output.stdout).contains(&token));
+                assert!(!String::from_utf8_lossy(&output.stderr).contains(&token));
+            } else if explain {
+                assert!(output.status.success(), "{result}");
+            } else {
+                // The graph starts; the isolated fixture has no provider adapter.
+                assert!(result["data"]["graph_id"].is_string(), "{result}");
+                assert_eq!(
+                    result["data"]["graph"]["checkpoint"]["nodes"][0]["attempts"][0]["outcome"],
+                    "adapter_unavailable",
+                    "{result}"
+                );
+            }
+        }
     }
     Ok(())
 }

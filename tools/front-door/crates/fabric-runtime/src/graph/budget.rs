@@ -13,11 +13,10 @@ pub(super) fn structural_limit_reason(
     plan: &PlannedGraph,
     limits: &crate::config::GraphLimits,
 ) -> Option<String> {
-    let check = |key: &str, actual: usize, max: usize| {
-        let source = "domains.fabric.graph.limits";
-        (actual > max).then(|| format!("limits.{key}={max} reached ({actual}); set by {source}"))
-    };
-    check("nodes", document.nodes.len(), limits.nodes)
+    let check = |key: &str, actual: usize, max: usize| limits.bound(key, max).refusal(actual);
+    limits
+        .nodes_bound()
+        .refusal(document.nodes.len())
         .or_else(|| {
             check(
                 "edges",
@@ -75,7 +74,7 @@ pub(super) fn structural_limit_reason(
                     .map(|parent| depths[parent.as_str()] + 1)
                     .max()
                     .unwrap_or(0);
-                if let Some(reason) = check("expansion_depth", depth, limits.expansion_depth) {
+                if let Some(reason) = limits.expansion_depth_bound().refusal(depth) {
                     return Some(reason);
                 }
                 depths.insert(&node.id, depth);

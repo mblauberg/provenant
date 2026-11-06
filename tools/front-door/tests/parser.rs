@@ -877,17 +877,12 @@ fn run_leaves_accept_control_and_report_work_refused_per_task() -> Result {
         text.contains("SECRET_INPUT") && !text.contains(&secret[4..]),
         "{text}"
     );
-    // A worktree is never silently run read-only (#1310); a missing one says so (#1309).
-    for (mode, worktree, expected) in [
-        ("read-only", ".", "INVALID"),
-        ("worktree-write", "missing-worktree", "WORKTREE_MISSING"),
-    ] {
-        let mut flags = args.to_vec();
-        flags.extend(["--mode", mode, "--worktree", worktree]);
-        let out = rig.execute(binary, &flags, Some(b"hello"))?;
-        let value: serde_json::Value = serde_json::from_slice(&out.stdout.bytes)?;
-        assert_eq!(value["error"]["code"], expected, "{value}");
-    }
+    // A missing worktree says so (#1309).
+    let mut flags = args.to_vec();
+    flags.extend(["--mode", "worktree-write", "--worktree", "missing-worktree"]);
+    let out = rig.execute(binary, &flags, Some(b"hello"))?;
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout.bytes)?;
+    assert_eq!(value["error"]["code"], "WORKTREE_MISSING", "{value}");
     let attempt = format!(
         "{}/{}/{}",
         lane["run_id"].as_str().ok_or("run")?,

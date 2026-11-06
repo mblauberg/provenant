@@ -23,7 +23,19 @@ use std::{
     time::Duration,
 };
 
+/// Distinguishes a refusal before custody from a failed withdrawal after it.
+#[derive(Debug)]
+pub(crate) enum WriterCustodyError {
+    Admission(provenant_supervisor::custody::CustodyError),
+    Withdrawal {
+        admission: String,
+        release: provenant_supervisor::custody::CustodyError,
+    },
+}
+
 pub(crate) const SETUP_WAIT_LOCK: &str = "setup-wait.lock";
+/// Held while the writer's Cargo cache is seeded, so observers can name the phase.
+pub(crate) const SEED_WAIT_LOCK: &str = "seed-wait.lock";
 
 // Serialise queue changes separately from the long-lived setup lock. Each
 // ticket is itself locked, so a killed waiter can be discarded by its peers.
@@ -203,6 +215,48 @@ fn budget() -> Result<UtilityBudget> {
 pub fn resolve_writer(state: &Path, cwd: &Path, path: &Path) -> Result<WriterRequest> {
     resolve_writer_with(state, cwd, path, true)
 }
+/// Resolve a read-only graph source in the selected Git project. Unlike writer
+/// authority, a reader may use the primary checkout or a detached worktree.
+pub fn resolve_reader_source(state: &Path, cwd: &Path, path: &Path) -> Result<PathBuf> {
+    let utility = runtime(state)?;
+    let executor =
+        SystemExecutor::new(1).map_err(error("initialise source system executor", None))?;
+    let selected = utility
+        .project_location(&executor, cwd, budget()?, &CancelToken::new())
+        .map_err(error("locate source project", Some(cwd)))?;
+    let repo = selected
+        .repository
+        .ok_or(RunError::Validation("source needs a Git project"))?;
+    let project = repo
+        .common_git_dir()
+        .parent()
+        .ok_or_else(|| RunError::unsafe_path(repo.common_git_dir(), PathCheck::Containment))?;
+    let selected = project.join(path);
+    let path = canonicalize(&selected).map_err(|error| {
+        if error.is_not_found() {
+            RunError::WorktreeMissing(selected)
+        } else {
+            error.into()
+        }
+    })?;
+    // A graph may have been invoked from a subdirectory. Bind its default
+    // source to the verified repository root rather than treating that
+    // subdirectory as a separate worktree.
+    if canonicalize(cwd)? == path && path.starts_with(repo.root_path()) {
+        return Ok(repo.root_path().to_path_buf());
+    }
+    // The verified invocation root can be the primary checkout, including
+    // one with a separate Git directory. A Git directory's parent is not
+    // evidence of a checkout: it may contain unrelated host files.
+    if path == repo.root_path() {
+        return Ok(path);
+    }
+    provenant_confinement::verify_worktree(&repo, &path)
+        .map(|worktree| worktree.path().to_path_buf())
+        .map_err(worktrees::WorktreeError::from)
+        .map_err(Into::into)
+}
+
 /// A lane's writer proposal: the path is resolved but not registry-verified,
 /// because a confined lane cannot read another worktree's `.git`. The host
 /// verifies the registration in `prepare_writer` before it launches the child.
@@ -265,6 +319,11 @@ pub struct WriterLaunch {
     pub(crate) review_exempt: provenant_confinement::review_exempt::ReviewExempt,
 }
 impl WriterLaunch {
+    /// The verified branch head captured while preparing this writer.
+    pub fn source_commit(&self) -> GitOid {
+        self.base
+    }
+
     /// Bind a graph writer to its immutable source. The instruction snapshot
     /// rechecks this prepared base while holding writer custody before launch.
     pub fn require_source(&self, expected: GitOid) -> Result<()> {
@@ -570,41 +629,9 @@ impl LaunchConfinement {
         )
         .map(Some)
     }
-    pub(crate) fn command(
-        &self,
-        argv: &[OsString],
-        environment: &[(OsString, OsString)],
-        attempt: &provenant_core::AttemptId,
-        cancel: &CancelToken,
-        attempt_dir: &Directory,
-    ) -> Result<Vec<OsString>> {
-        let executor =
-            SystemExecutor::new(1).map_err(error("initialise writer system executor", None))?;
-        let config = provenant_confinement::run_config::RunConfig::read(&self.state_root)
-            .map_err(error("read launch resource limits", None))?;
-        let limits = ProfileLimits {
-            grant_limit: config.grant_limit,
-            profile_limit_bytes: config.profile_limit_bytes,
-        };
-        let backend = system_backend_with_limits(
-            &BackendContext {
-                executor: &executor,
-                cancel,
-                #[cfg(target_os = "macos")]
-                env: &[],
-            },
-            limits,
-        )
-        .map_err(RunError::Confinement)?;
+    /// Prepare the private Cargo caches while writer custody is held.
+    pub(crate) fn seed_cargo(&self, environment: &[(OsString, OsString)], attempt_dir: &Directory) {
         let writer = self.writer.as_ref().map(|w| (&w.worktree, &w.branch));
-        // Run holds writer custody here: create the derived ref parents and the
-        // private lane cache before they are anchored.
-        if let (Some((worktree, branch)), AccessMode::WorktreeWrite(authority)) =
-            (writer, &self.plan.permissions().mode)
-        {
-            prepare_writer_directories(worktree, branch, authority, &self.home)
-                .map_err(RunError::Confinement)?;
-        }
         let outcome = match &self.plan.permissions().mode {
             AccessMode::WorktreeWrite(authority) => crate::cargo_seed::seed_registry(
                 self.cargo_registry_seed,
@@ -681,6 +708,40 @@ impl LaunchConfinement {
                 std::io::stderr().lock(),
                 "warning: could not record Cargo target setup: {error}"
             );
+        }
+    }
+    pub(crate) fn command(
+        &self,
+        argv: &[OsString],
+        attempt: &provenant_core::AttemptId,
+        cancel: &CancelToken,
+    ) -> Result<Vec<OsString>> {
+        let executor =
+            SystemExecutor::new(1).map_err(error("initialise writer system executor", None))?;
+        let config = provenant_confinement::run_config::RunConfig::read(&self.state_root)
+            .map_err(error("read launch resource limits", None))?;
+        let limits = ProfileLimits {
+            grant_limit: config.grant_limit,
+            profile_limit_bytes: config.profile_limit_bytes,
+        };
+        let backend = system_backend_with_limits(
+            &BackendContext {
+                executor: &executor,
+                cancel,
+                #[cfg(target_os = "macos")]
+                env: &[],
+            },
+            limits,
+        )
+        .map_err(RunError::Confinement)?;
+        let writer = self.writer.as_ref().map(|w| (&w.worktree, &w.branch));
+        // Run holds writer custody here: create the derived ref parents and the
+        // private lane cache before they are anchored.
+        if let (Some((worktree, branch)), AccessMode::WorktreeWrite(authority)) =
+            (writer, &self.plan.permissions().mode)
+        {
+            prepare_writer_directories(worktree, branch, authority, &self.home)
+                .map_err(RunError::Confinement)?;
         }
         let directories = required_anchors(self.plan.permissions(), &self.profile, writer)
             .into_iter()
@@ -1497,6 +1558,62 @@ mod cargo_setup_tests {
                 .map_err(|_| "second preparation panicked".to_owned())??;
             Ok::<(), String>(())
         })?;
+        // Hold a real seed in its clone callback while another writer runs
+        // Git setup. The handoff helper releases the actual repository lock.
+        let cache = root.join("held-seed-cache");
+        std::fs::create_dir(&cache)?;
+        std::thread::scope(
+            |scope| -> std::result::Result<(), Box<dyn std::error::Error>> {
+                let held = prepare_writer_git(
+                    &mut writer,
+                    &state,
+                    &root,
+                    None,
+                    None,
+                    &CancelToken::new(),
+                    None,
+                )?;
+                let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+                let (release_tx, release_rx) = std::sync::mpsc::channel();
+                let root_ref = &root;
+                let cache_ref = &cache;
+                let seed = scope.spawn(move || {
+                    let mut lock = Some(held);
+                    crate::launch::hand_off::seed_without_setup_lock(&mut lock, || {
+                        crate::cargo_seed::seed_with(root_ref, cache_ref, |_, _| {
+                            entered_tx.send(()).unwrap();
+                            provenant_test_support::wait_for(
+                                "release seed",
+                                Duration::from_secs(30),
+                                || release_rx.try_recv().is_ok(),
+                                |ready| *ready,
+                            )
+                            .unwrap();
+                            Ok(())
+                        });
+                    });
+                });
+                provenant_test_support::wait_for(
+                    "seed entered",
+                    Duration::from_secs(30),
+                    || entered_rx.try_recv().is_ok(),
+                    |ready| *ready,
+                )?;
+                let result = prepare_writer_git(
+                    &mut second,
+                    &state,
+                    &root,
+                    None,
+                    None,
+                    &CancelToken::new(),
+                    None,
+                );
+                release_tx.send(())?;
+                result.map(drop)?;
+                seed.join().map_err(|_| "seed panicked")?;
+                Ok(())
+            },
+        )?;
         // A busy repository lock honours the configured bound and identifies
         // the setting that controls it, without changing the lock's inode.
         std::fs::write(
@@ -1976,9 +2093,11 @@ impl crate::RunStore {
             provenant_supervisor::custody::CustodyLease,
         >,
         call: &crate::Request<'_>,
-    ) -> provenant_supervisor::custody::Result<provenant_supervisor::custody::CustodyLease> {
-        let slot = directory.try_clone()?;
-        let lease = acquire(directory, scope, binding)?;
+    ) -> std::result::Result<provenant_supervisor::custody::CustodyLease, WriterCustodyError> {
+        let slot = directory
+            .try_clone()
+            .map_err(|e| WriterCustodyError::Admission(e.into()))?;
+        let lease = acquire(directory, scope, binding).map_err(WriterCustodyError::Admission)?;
         let mut retained_scope = None;
         let checked = (|| -> Result<()> {
             call.check()?;
@@ -2028,19 +2147,30 @@ impl crate::RunStore {
             Ok(())
         })();
         if let Err(error) = checked {
-            lease.withdraw_unlaunched()?;
-            return Err(provenant_supervisor::custody::CustodyError::Io(
-                std::io::Error::other(error.to_string()),
+            lease
+                .withdraw_unlaunched()
+                .map_err(|release| WriterCustodyError::Withdrawal {
+                    admission: error.to_string(),
+                    release,
+                })?;
+            return Err(WriterCustodyError::Admission(
+                provenant_supervisor::custody::CustodyError::Io(std::io::Error::other(
+                    error.to_string(),
+                )),
             ));
         }
         if let Some(retained) = retained_scope {
-            lease.withdraw_unlaunched()?;
-            return Err(
-                provenant_supervisor::custody::CustodyError::ImportRetained {
-                    run: retained.run,
-                    attempt: retained.attempt,
-                },
-            );
+            let admission = provenant_supervisor::custody::CustodyError::ImportRetained {
+                run: retained.run,
+                attempt: retained.attempt,
+            };
+            lease
+                .withdraw_unlaunched()
+                .map_err(|release| WriterCustodyError::Withdrawal {
+                    admission: admission.to_string(),
+                    release,
+                })?;
+            return Err(WriterCustodyError::Admission(admission));
         }
         Ok(lease)
     }
@@ -2676,4 +2806,54 @@ pub(crate) struct WriterOwnership {
     pub lane_owned: bool,
     #[serde(default)]
     pub owner: Option<worktrees::WorktreeOwner>,
+}
+
+#[cfg(test)]
+mod custody_admission_tests {
+    use super::*;
+    use crate::tests::{call, clock, context};
+    use provenant_core::{AttemptId, RunId};
+    use provenant_supervisor::custody::{self, Scope};
+
+    #[test]
+    fn failed_admission_withdrawal_retains_a_protected_error()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let clock = clock();
+        let cancel = CancelToken::new();
+        let call = call(&clock, &cancel);
+        let store = crate::RunStore::open(&context(temp.path())?, &call)?;
+        let path = temp.path().join("slot");
+        std::fs::create_dir(&path)?;
+        let scope = Scope {
+            run: RunId::from_bytes([3; 16]),
+            attempt: AttemptId::from_bytes([4; 16]),
+            generation: 1,
+        };
+        let result = store.acquire_writer_fenced(
+            Directory::open_anchor(&path)?,
+            scope,
+            WriterBinding::read_only(),
+            &|directory, scope, binding| {
+                let lease = custody::acquire_writer(
+                    directory,
+                    scope,
+                    binding,
+                    call.lock_budget(),
+                    call.cancel,
+                    call.clock,
+                )?;
+                std::fs::create_dir(path.join(scope.attempt.to_string()).join("settlement.json"))?;
+                cancel.cancel();
+                Ok(lease)
+            },
+            &call,
+        );
+        assert!(matches!(result, Err(WriterCustodyError::Withdrawal { .. })));
+        assert!(custody::reservation_present(
+            &Directory::open_anchor(&path)?,
+            scope
+        )?);
+        Ok(())
+    }
 }

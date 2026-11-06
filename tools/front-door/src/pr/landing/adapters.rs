@@ -564,7 +564,9 @@ impl Forge for GhForge {
         });
         Ok(latest.map(|(_, _, review)| super::head_move::ReviewedHead {
             head: review["commit_id"].as_str().unwrap_or_default().to_owned(),
-            // The REST review does not contain its approval-time base.
+            // REST does not record the approval-time base. A merge base with the
+            // current target cannot prove it: the target may have been rewritten
+            // since approval, so its old base need not precede the merge parent.
             base: None,
             valid: review["state"].as_str() == Some("APPROVED"),
         }))
@@ -895,6 +897,169 @@ impl<'a> GitRepo<'a> {
     }
 }
 
+impl GitRepo<'_> {
+    fn review_pair(
+        &mut self,
+        old: &str,
+        new: &str,
+    ) -> Result<super::ports::DeltaStats, LandingError> {
+        use super::ports::{DeltaFile, DeltaStats};
+        let incomplete = || DeltaStats {
+            complete: false,
+            files: Vec::new(),
+        };
+        if self.ensure(old).is_err() || self.ensure(new).is_err() {
+            return Ok(incomplete());
+        }
+        let (Ok(old), Ok(new)) = (object_id(old), object_id(new)) else {
+            return Ok(incomplete());
+        };
+        let read = |kind: &str| {
+            self.git
+                .bytes(
+                    &self.project,
+                    &[
+                        "diff",
+                        "--no-ext-diff",
+                        "--no-textconv",
+                        "--find-renames",
+                        "--no-abbrev",
+                        "-z",
+                        kind,
+                        old,
+                        new,
+                        "--",
+                    ],
+                )
+                .map_err(failed)
+        };
+        let (Ok(raw), Ok(numstat), Ok((config_status, configured))) = (
+            read("--raw"),
+            read("--numstat"),
+            self.git.bytes_status(
+                &self.project,
+                &["config", "--null", "--get-all", "provenant.reviewProtected"],
+            ),
+        ) else {
+            return Ok(incomplete());
+        };
+        let parsed = (|| {
+            if (!raw.is_empty() && !raw.ends_with(&[0]))
+                || (!numstat.is_empty() && !numstat.ends_with(&[0]))
+            {
+                return None;
+            }
+            let mut entries = raw.split(|byte| *byte == 0);
+            let mut stats = numstat.split(|byte| *byte == 0);
+            let mut files = Vec::new();
+            let mut policy = provenant_routing::ReviewPathExclusions::bundled()?;
+            match config_status {
+                1 if configured.is_empty() => {}
+                0 if configured.ends_with(&[0]) => {
+                    for pattern in configured[..configured.len() - 1].split(|byte| *byte == 0) {
+                        let pattern = std::str::from_utf8(pattern).ok()?;
+                        if pattern.is_empty() || pattern.len() > 512 {
+                            return None;
+                        }
+                        policy.patterns.push(pattern.to_owned());
+                    }
+                }
+                _ => return None,
+            }
+            loop {
+                let record = entries.next()?;
+                if record.is_empty() {
+                    break;
+                }
+                let record = std::str::from_utf8(record).ok()?.strip_prefix(':')?;
+                let fields: Vec<_> = record.split(' ').collect();
+                if fields.len() != 5 {
+                    return None;
+                }
+                let renamed = fields[4]
+                    .strip_prefix('R')
+                    .is_some_and(|score| score.parse::<u8>().is_ok_and(|value| value <= 100));
+                if !renamed && !matches!(fields[4], "M" | "A" | "D") {
+                    return None;
+                }
+                let first_path = std::str::from_utf8(entries.next()?).ok()?;
+                let path = if renamed {
+                    std::str::from_utf8(entries.next()?).ok()?
+                } else {
+                    first_path
+                };
+                if first_path.is_empty()
+                    || path.is_empty()
+                    || first_path.len() > 1024
+                    || path.len() > 1024
+                {
+                    return None;
+                }
+                let row = std::str::from_utf8(stats.next()?).ok()?;
+                let mut numbers = row.splitn(3, '\t');
+                let added = numbers.next()?;
+                let deleted = numbers.next()?;
+                let stat_path = numbers.next()?;
+                if renamed {
+                    if !stat_path.is_empty()
+                        || stats.next()? != first_path.as_bytes()
+                        || stats.next()? != path.as_bytes()
+                    {
+                        return None;
+                    }
+                } else if stat_path != path {
+                    return None;
+                }
+                let binary = added == "-" && deleted == "-";
+                let (added, deleted) = if binary {
+                    (0, 0)
+                } else {
+                    (added.parse::<u64>().ok()?, deleted.parse::<u64>().ok()?)
+                };
+                let regular = |mode: &str| matches!(mode, "100644" | "100755" | "000000");
+                let same_mode = fields[0] == fields[1] || matches!(fields[4], "A" | "D");
+                let mut eligible = regular(fields[0])
+                    && regular(fields[1])
+                    && same_mode
+                    && !binary
+                    && !renamed
+                    && !provenant_confinement::quarantine::is_instruction_path(path.as_bytes())
+                    && !policy.excludes(path);
+                // Do not trust diff attributes that force a binary blob to text.
+                if eligible {
+                    for (mode, blob) in [(fields[0], fields[2]), (fields[1], fields[3])] {
+                        object_id(blob).ok()?;
+                        if mode == "000000" {
+                            continue;
+                        }
+                        let content = self
+                            .git
+                            .bytes(&self.project, &["cat-file", "blob", blob])
+                            .ok()?;
+                        if content.contains(&0) {
+                            eligible = false;
+                        }
+                    }
+                }
+                files.push(DeltaFile {
+                    path: path.to_owned(),
+                    added,
+                    deleted,
+                    eligible,
+                });
+            }
+            if entries.any(|part| !part.is_empty()) || stats.any(|part| !part.is_empty()) {
+                return None;
+            }
+            Some(DeltaStats {
+                complete: true,
+                files,
+            })
+        })();
+        Ok(parsed.unwrap_or_else(incomplete))
+    }
+}
+
 impl Repo for GitRepo<'_> {
     fn project_path(&self) -> Option<&Path> {
         self.local.as_ref().map(|_| self.project.as_path())
@@ -1150,14 +1315,70 @@ impl Repo for GitRepo<'_> {
     }
     fn review_delta(
         &mut self,
-        _old: &str,
-        _new: &str,
+        old: &str,
+        new: &str,
     ) -> Result<super::ports::DeltaStats, LandingError> {
-        // Until all file-kind and protected-path evidence is available, the
-        // statistics are incomplete and cannot prove a small delta.
-        Ok(super::ports::DeltaStats {
+        use super::ports::DeltaStats;
+        let incomplete = || DeltaStats {
             complete: false,
             files: Vec::new(),
+        };
+        if self.ensure(old).is_err() || self.ensure(new).is_err() {
+            return Ok(incomplete());
+        }
+        let (Ok(old), Ok(new)) = (object_id(old), object_id(new)) else {
+            return Ok(incomplete());
+        };
+        let exclude = format!("^{old}");
+        let Ok(output) = self.git.bytes(
+            &self.project,
+            &["rev-list", "--reverse", "--topo-order", new, &exclude, "--"],
+        ) else {
+            return Ok(incomplete());
+        };
+        let Ok(text) = std::str::from_utf8(&output) else {
+            return Ok(incomplete());
+        };
+        if !output.is_empty() && !output.ends_with(b"\n") {
+            return Ok(incomplete());
+        }
+        let mut previous = old.to_owned();
+        let mut files = std::collections::BTreeMap::<String, super::ports::DeltaFile>::new();
+        for commit in text.lines() {
+            if object_id(commit).is_err()
+                || self.parents(commit).ok().as_deref() != Some(&[previous.clone()])
+            {
+                return Ok(incomplete());
+            }
+            let Ok(delta) = self.review_pair(&previous, commit) else {
+                return Ok(incomplete());
+            };
+            if !delta.complete {
+                return Ok(incomplete());
+            }
+            for file in delta.files {
+                if let Some(prior) = files.get_mut(&file.path) {
+                    let (Some(added), Some(deleted)) = (
+                        prior.added.checked_add(file.added),
+                        prior.deleted.checked_add(file.deleted),
+                    ) else {
+                        return Ok(incomplete());
+                    };
+                    prior.added = added;
+                    prior.deleted = deleted;
+                    prior.eligible &= file.eligible;
+                } else {
+                    files.insert(file.path.clone(), file);
+                }
+            }
+            previous = commit.to_owned();
+        }
+        if previous != new {
+            return Ok(incomplete());
+        }
+        Ok(DeltaStats {
+            complete: true,
+            files: files.into_values().collect(),
         })
     }
 }
@@ -1602,6 +1823,113 @@ esac
             work,
             bare,
             repo,
+        }
+    }
+
+    #[test]
+    fn review_delta_reads_real_git_evidence() {
+        use super::super::head_move::{HeadMove, ReviewedHead, classify};
+        for kind in [
+            "text",
+            "cumulative",
+            "custom",
+            "bad_config",
+            "forced_binary",
+            "binary",
+            "rename",
+            "mode",
+            "symlink",
+            "submodule",
+            "dependency",
+            "configuration",
+            "protected",
+        ] {
+            let mut rig = rig();
+            let name = match kind {
+                "dependency" => "Cargo.toml",
+                "configuration" => "settings.yaml",
+                "protected" => "HARNESS.md",
+                _ => "source.rs",
+            };
+            if kind == "forced_binary" {
+                commit_file(&rig.work, ".gitattributes", "source.rs diff\n");
+            }
+            let old = commit_file(&rig.work, name, "first\nsecond\n");
+            if kind == "cumulative" {
+                commit_file(&rig.work, name, &"added\n".repeat(21));
+            }
+            if matches!(kind, "custom" | "bad_config") {
+                git(
+                    &rig.work,
+                    &[
+                        "config",
+                        "--add",
+                        "provenant.reviewProtected",
+                        if kind == "custom" { "**/source.rs" } else { "" },
+                    ],
+                );
+            }
+            match kind {
+                "binary" | "forced_binary" => {
+                    std::fs::write(rig.work.join(name), b"first\0second").unwrap()
+                }
+                "rename" => {
+                    git(&rig.work, &["mv", name, "renamed.rs"]);
+                }
+                "mode" => {
+                    git(&rig.work, &["update-index", "--chmod=+x", name]);
+                }
+                "symlink" => {
+                    std::fs::remove_file(rig.work.join(name)).unwrap();
+                    std::os::unix::fs::symlink("target", rig.work.join(name)).unwrap();
+                }
+                "submodule" => {
+                    git(
+                        &rig.work,
+                        &[
+                            "update-index",
+                            "--add",
+                            "--cacheinfo",
+                            &format!("160000,{old},{name}"),
+                        ],
+                    );
+                }
+                _ => std::fs::write(rig.work.join(name), "first\nchanged\n").unwrap(),
+            }
+            if !matches!(kind, "rename" | "mode" | "submodule") {
+                git(&rig.work, &["add", name]);
+            }
+            git(&rig.work, &["commit", "-q", "-m", "change"]);
+            let head = git(&rig.work, &["rev-parse", "HEAD"]);
+            if kind == "rename" {
+                let delta = rig.repo.review_delta(&old, &head).unwrap();
+                assert!(delta.complete && delta.files.len() == 1 && !delta.files[0].eligible);
+            }
+            let approval = ReviewedHead {
+                head: old,
+                base: None,
+                valid: true,
+            };
+            let result = classify(&mut rig.repo, &approval, &head, &head);
+            if kind == "text" {
+                assert!(
+                    matches!(
+                        result,
+                        Some(HeadMove::B {
+                            added: 1,
+                            deleted: 1,
+                            delta_review_required: true,
+                            ..
+                        })
+                    ),
+                    "{kind}: {result:?}"
+                );
+            } else {
+                assert!(
+                    matches!(result, Some(HeadMove::C { .. })),
+                    "{kind}: {result:?}"
+                );
+            }
         }
     }
 

@@ -36,6 +36,9 @@ struct Owner {
     observed: Vec<(String, String)>,
     /// Whether the chair has merged by hand, which observation reports.
     chair_merged: bool,
+    /// External merge state survives a failed graph checkpoint save.
+    merged_by_policy: bool,
+    merge_requests: usize,
     outcomes: VecDeque<LandObservation>,
     policy: Option<LandChoice>,
     reply: Option<String>,
@@ -45,7 +48,9 @@ struct Owner {
     head: Option<String>,
     /// The verdict line reviewers end with; PASS when unset.
     review_verdict: Option<&'static str>,
+    equal_review_range: bool,
     wall_seconds: i64,
+    no_wall_clock: bool,
     tick: bool,
     backoff: CiPollBackoff,
 }
@@ -71,11 +76,25 @@ impl CiStatus for Owner {
 }
 impl AttemptOwner for Owner {
     type Error = Infallible;
+    fn review_range(&mut self, _: &str, _: bool) -> Result<ReviewRange, Self::Error> {
+        Ok(if self.equal_review_range {
+            ReviewRange::Resolved {
+                base: WRITE_HEAD.into(),
+                head: WRITE_HEAD.into(),
+            }
+        } else {
+            ReviewRange::Unknown
+        })
+    }
     fn actor(&self) -> String {
         "fixture".into()
     }
     fn wall_now(&self) -> Option<provenant_core::WallTime> {
-        provenant_core::WallTime::from_micros(self.wall_seconds.saturating_mul(1_000_000)).ok()
+        if self.no_wall_clock {
+            None
+        } else {
+            provenant_core::WallTime::from_micros(self.wall_seconds.saturating_mul(1_000_000)).ok()
+        }
     }
     fn respect_ci_wake(&self) -> bool {
         self.tick
@@ -100,6 +119,10 @@ impl AttemptOwner for Owner {
             .unwrap_or_else(|| crate::config::GraphLand::default().choose(None, tier))
     }
     fn land(&mut self, request: LandRequest<'_>) -> Result<LandObservation, Self::Error> {
+        if request.pull_request.is_none() {
+            return Ok(LandObservation::Identified { pull_request: 7 });
+        }
+        assert_eq!(request.pull_request, Some(7));
         let Some(authority) = request.authority else {
             self.observed
                 .push((request.branch.into(), request.head.into()));
@@ -119,13 +142,24 @@ impl AttemptOwner for Owner {
             request.head.into(),
             authority.clone(),
         ));
-        Ok(self
+        if self.merged_by_policy {
+            return Ok(LandObservation::Merged {
+                pull_request: Some(7),
+                note: None,
+            });
+        }
+        self.merge_requests += 1;
+        let observation = self
             .outcomes
             .pop_front()
             .unwrap_or(LandObservation::Merged {
                 pull_request: Some(7),
                 note: None,
-            }))
+            });
+        if matches!(observation, LandObservation::Merged { .. }) {
+            self.merged_by_policy = true;
+        }
+        Ok(observation)
     }
     fn observe_or_start(
         &mut self,
@@ -156,7 +190,7 @@ impl AttemptOwner for Owner {
             self.head = Some(commit.into());
         }
         Ok(AttemptObservation::Terminal {
-            attempt_ref: None,
+            attempt_ref: self.equal_review_range.then(|| "fixture-attempt".into()),
             outcome: AttemptOutcome::Succeeded,
             launched: true,
             result: result.map(Box::new),
@@ -303,6 +337,124 @@ fn an_auto_tier_lands_the_newest_delivered_head_through_the_host() {
     let excerpt = &outputs.result.as_ref().unwrap().excerpt;
     assert!(excerpt.contains("#7") && excerpt.contains("policy is auto (default)"));
     assert!(checkpoint.asks.is_empty());
+}
+
+#[test]
+fn land_identity_save_failure_prevents_merge() {
+    #[derive(Default)]
+    struct FailingJournal(Option<GraphCheckpoint>);
+    impl GraphJournal for FailingJournal {
+        type Error = std::io::Error;
+        fn load(&mut self, _: &str) -> Result<Option<GraphCheckpoint>, Self::Error> {
+            Ok(self.0.clone())
+        }
+        fn save(&mut self, checkpoint: &GraphCheckpoint) -> Result<(), Self::Error> {
+            if node(checkpoint, "land")
+                .land
+                .as_ref()
+                .and_then(|land| land.pull_request)
+                .is_some()
+            {
+                return Err(std::io::Error::other("injected identity save failure"));
+            }
+            self.0 = Some(checkpoint.clone());
+            Ok(())
+        }
+    }
+    let mut owner = owner();
+    let mut journal = FailingJournal::default();
+    let error = advance(&document("routine", None), &mut owner, &mut journal).unwrap_err();
+    assert!(matches!(error, GraphError::Journal(ref e) if e.to_string().contains("injected")));
+    assert_eq!(owner.merge_requests, 0);
+    let land = node(journal.0.as_ref().unwrap(), "land")
+        .land
+        .as_ref()
+        .unwrap();
+    assert_eq!(land.pull_request, None);
+}
+
+#[test]
+fn land_rejects_a_merge_observation_for_another_pr() {
+    let mut owner = owner();
+    owner.outcomes.push_back(LandObservation::Merged {
+        pull_request: Some(8),
+        note: None,
+    });
+    let mut journal = Journal::default();
+    let error = advance(&document("routine", None), &mut owner, &mut journal).unwrap_err();
+    assert!(
+        matches!(error, GraphError::Refused(ref reason) if reason.contains("saved PR identity"))
+    );
+    let saved = journal.0.as_ref().unwrap();
+    assert_eq!(node(saved, "land").state, NodeState::Running);
+    assert_eq!(
+        node(saved, "land").land.as_ref().unwrap().pull_request,
+        Some(7)
+    );
+}
+
+#[test]
+fn merged_land_is_reobserved_after_its_checkpoint_save_fails() {
+    #[derive(Default)]
+    struct FailingJournal {
+        saved: Option<GraphCheckpoint>,
+        failed: bool,
+    }
+    impl GraphJournal for FailingJournal {
+        type Error = std::io::Error;
+        fn load(&mut self, _: &str) -> Result<Option<GraphCheckpoint>, Self::Error> {
+            Ok(self.saved.clone())
+        }
+        fn save(&mut self, checkpoint: &GraphCheckpoint) -> Result<(), Self::Error> {
+            if !self.failed && node(checkpoint, "land").state == NodeState::Succeeded {
+                self.failed = true;
+                return Err(std::io::Error::other("injected checkpoint failure"));
+            }
+            self.saved = Some(checkpoint.clone());
+            Ok(())
+        }
+    }
+    let document = document("routine", None);
+    let mut owner = owner();
+    let mut journal = FailingJournal::default();
+    let error = advance(&document, &mut owner, &mut journal).unwrap_err();
+    assert!(
+        matches!(error, GraphError::Journal(ref error) if error.to_string().contains("injected"))
+    );
+    let saved = journal.saved.clone().unwrap();
+    assert_eq!(node(&saved, "land").state, NodeState::Running);
+    assert_eq!(owner.merge_requests, 1);
+    let recovered = advance(&document, &mut owner, &mut journal)
+        .unwrap()
+        .checkpoint;
+    assert_eq!(node(&recovered, "land").state, NodeState::Succeeded);
+    assert_eq!(owner.merge_requests, 1);
+    assert_eq!(
+        advance(&document, &mut owner, &mut journal)
+            .unwrap()
+            .checkpoint,
+        recovered
+    );
+    assert_eq!(owner.merge_requests, 1);
+}
+
+#[test]
+fn pending_land_without_a_wall_clock_keeps_the_prior_checkpoint() {
+    let document = document("routine", None);
+    let mut owner = owner();
+    owner.no_wall_clock = true;
+    owner.outcomes.push_back(LandObservation::Pending {
+        reason: "checks pending".into(),
+    });
+    let mut journal = Journal::default();
+    let error = advance(&document, &mut owner, &mut journal).unwrap_err();
+    assert!(matches!(error, GraphError::Refused(ref reason) if reason.contains("no wall clock")));
+    let saved = journal.0.as_ref().unwrap();
+    assert_eq!(node(saved, "land").state, NodeState::Running);
+    let record = node(saved, "land").land.as_ref().unwrap();
+    assert_eq!(record.pending_observations, 0);
+    assert!(record.note.is_none());
+    assert!(record.wake_at.is_none());
 }
 
 #[test]
@@ -567,6 +719,67 @@ fn a_failed_review_routed_to_land_never_calls_the_host() {
 }
 
 #[test]
+fn empty_review_range_cannot_pass_deliver_gate_or_land() {
+    let document: GraphDocument = serde_json::from_value(json!({
+        "schema_version": 1, "graph_id": "empty-review-land", "nodes": [
+            {"id":"write", "access":"worktree_write", "worktree":"/wt/feature", "delivery":"pr",
+             "prompt":"write it", "route":{"alias":"senior"}},
+            {"id":"review", "role":"lens.correctness-spec", "access":"read_only", "prompt":"review",
+             "depends_on":["write"], "route":{"alias":"senior"}},
+            {"id":"accepted", "kind":"gate", "access":"read_only", "depends_on":["review"],
+             "inputs":[{"node":"review", "outputs":["verdict"]}],
+             "condition":{"type":"verdict", "expected":"VERDICT: PASS", "threshold":"all"}},
+            {"id":"ci", "kind":"gate", "access":"read_only", "depends_on":["write"],
+             "condition":{"type":"ci", "target":"feature/x"}},
+            {"id":"land", "kind":"land", "access":"read_only", "depends_on":["accepted", "ci"],
+             "land":{"node":"write", "tier":"routine"}}
+        ]
+    }))
+    .unwrap();
+    let mut owner = owner();
+    owner.equal_review_range = true;
+    let checkpoint = run(&document, &mut owner, &mut Journal::default());
+    let review = node(&checkpoint, "review").outputs.as_ref().unwrap();
+    assert_eq!(review.verdict.as_deref(), Some("VERDICT: INCONCLUSIVE"));
+    assert!(!node(&checkpoint, "accepted").gate.as_ref().unwrap().passed);
+    assert!(owner.lands.is_empty());
+    assert!(node(&checkpoint, "land").land.is_none());
+}
+
+#[test]
+fn reduced_review_requires_every_counted_member_to_judge_the_land_head() {
+    for (other_head, allowed) in [(WRITE_HEAD, true), (REPAIR_HEAD, false)] {
+        let (owner, land) = land_outcome(
+            json!([
+                {"id":"write", "access":"worktree_write", "worktree":"/wt/feature", "delivery":"pr",
+                 "prompt":"write it", "route":{"alias":"senior"}},
+                {"id":"reviews", "kind":"composite", "access":"read_only", "depends_on":["write"],
+                 "composite":{"reduce_verdict":true,"min_successful":1,
+                    "nodes":[
+                        {"id":"a","access":"read_only","prompt":"review","route":{"alias":"senior"},"source":{"type":"commit","commit":WRITE_HEAD}},
+                        {"id":"b","access":"read_only","prompt":"review","route":{"alias":"senior"},"source":{"type":"commit","commit":other_head}}
+                    ],"exports":[{"node":"a","outputs":["result"]},{"node":"b","outputs":["result"]}]}},
+                {"id":"accepted", "kind":"gate", "access":"read_only", "depends_on":["reviews"],
+                 "inputs":[{"node":"reviews", "outputs":["verdict"]}],
+                 "condition":{"type":"verdict", "expected":"VERDICT: PASS", "threshold":"all"}},
+                {"id":"ci", "kind":"gate", "access":"read_only", "depends_on":["write"],
+                 "condition":{"type":"ci", "target":"feature/x"}},
+                {"id":"land", "kind":"land", "access":"read_only", "depends_on":["accepted", "ci"],
+                 "land":{"node":"write", "tier":"routine"}}
+            ]),
+            "VERDICT: PASS",
+        );
+        assert_eq!(!owner.lands.is_empty(), allowed);
+        if !allowed {
+            assert_eq!(
+                land.advance_error_code.as_deref(),
+                Some("land_review_required")
+            );
+        }
+    }
+}
+
+#[test]
 fn ci_output_never_substitutes_for_review() {
     // write, CI, a verdict gate on CI's own PASS, land: no reviewer ran.
     let (owner, land) = land_outcome(
@@ -744,6 +957,17 @@ fn a_head_source_reviews_the_newest_continuation_and_lands_it() {
     assert_eq!(
         node(&checkpoint, "review").source_commit.as_deref(),
         Some(REPAIR_HEAD)
+    );
+    assert_eq!(
+        node(&checkpoint, "review").attempts[0]
+            .input_manifest
+            .as_ref()
+            .unwrap()
+            .source_producer
+            .as_ref()
+            .unwrap()
+            .node_id,
+        "repair"
     );
     // The pinned head replays unchanged.
     assert_eq!(

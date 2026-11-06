@@ -669,6 +669,124 @@ fn explicit_read_only_from_a_linked_worktree_dispatches() -> Result<(), Box<dyn 
 }
 
 #[test]
+fn worktree_access_readers_leave_existing_writer_lease_untouched()
+-> Result<(), Box<dyn std::error::Error>> {
+    if reexec_test_in_lane(
+        "run::tests::worktree_access_readers_leave_existing_writer_lease_untouched",
+    )? {
+        return Ok(());
+    }
+    use provenant_confinement::worktrees;
+    use provenant_supervisor::custody::{self, Scope};
+    let fixture = linked_fixture()?;
+    let prompt = fixture.root.join("prompt.md");
+    std::fs::write(&prompt, "review the checkout")?;
+    with_edge(
+        &fixture.root,
+        &fixture.project,
+        |edge| -> Result<(), Box<dyn std::error::Error>> {
+            crate::fabric::private_dir(edge.roots.state.as_path(), edge.roots.state.as_path())?;
+            provenant_config::bind_project(
+                edge.roots,
+                provenant_config::ProjectLocation::new(fixture.project.join(".git"))?,
+            )?;
+            provenant_config::bind_host(edge.roots)?;
+            let clock = SystemClock::new();
+            let cancel = CancelToken::new();
+            let call = request(&clock, &cancel).map_err(|fail| fail.message)?;
+            let session = open(edge, &call).map_err(|fail| fail.message)?;
+            let held = worktrees::with_context(
+                edge.roots,
+                edge.home,
+                &fixture.project,
+                &clock,
+                &cancel,
+                |context| {
+                    let verified =
+                        provenant_confinement::verify_worktree(context.repo, &fixture.tree)?;
+                    let info = worktrees::list(context, &cancel)?
+                        .into_iter()
+                        .find(|info| info.path == fixture.tree)
+                        .ok_or(worktrees::WorktreeError::NotFound)?;
+                    worktrees::writer_custody(
+                        context.project_state,
+                        &verified,
+                        &provenant_confinement::repo::GitRefName::branch("writer")
+                            .map_err(|_| worktrees::WorktreeError::InvalidRequest)?,
+                        info.head,
+                        || {
+                            Ok(provenant_confinement::run_utility(
+                                context.executor,
+                                provenant_confinement::GitRead::WorktreeList,
+                                context.repo,
+                                context.utility,
+                                context.utility_budget,
+                                &cancel,
+                            )?
+                            .stdout
+                            .bytes)
+                        },
+                    )
+                },
+            )?;
+            let lease = custody::acquire_writer(
+                held.0,
+                Scope {
+                    run: RunId::from_bytes([7; 16]),
+                    attempt: AttemptId::from_bytes([7; 16]),
+                    generation: 1,
+                },
+                held.1,
+                provenant_core::WaitBudget::cli(clock.mono_now(), 1)?,
+                &cancel,
+                &clock,
+            )?;
+            for operation in ["reader-one", "reader-two"] {
+                let command = parsed_run(&[
+                    "--operation-id",
+                    operation,
+                    "--model",
+                    "codex/gpt-6-luna",
+                    "--mode",
+                    "read-only",
+                    "--worktree",
+                    fixture.tree.to_str().ok_or("path")?,
+                    "--prompt-file",
+                    prompt.to_str().ok_or("prompt")?,
+                ])?;
+                let reply = dispatch(command, edge);
+                assert_eq!(reply.result.status, Status::Ok, "{:?}", reply.result.error);
+                let id = reply.result.data["run_id"]
+                    .as_str()
+                    .ok_or("run id")?
+                    .parse()?;
+                let request = session.store.request(id, &call)?;
+                assert!(request.tasks[0].writer.is_none());
+                assert!(request.tasks[0].access.source_live);
+                assert_eq!(
+                    request.tasks[0].access.source_root.as_deref(),
+                    Some(fixture.tree.as_path())
+                );
+            }
+            assert!(worktrees::with_context(
+                edge.roots,
+                edge.home,
+                &fixture.project,
+                &clock,
+                &cancel,
+                |context| Ok(matches!(
+                    worktrees::cache_writer_probe(context.project_state, &fixture.tree),
+                    Err(worktrees::Occupancy::Held)
+                ))
+            )?);
+            drop(lease);
+            Ok(())
+        },
+    )??;
+    Ok(())
+}
+
+#[test]
 fn run_explain_warns_once_for_existing_brief_paths_outside_read_roots()
 -> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
@@ -4576,7 +4694,7 @@ fn cancel_and_reconcile_report_leftover_paths_and_reasons_without_terminal_contr
         .result
         .error
         .expect("failed reconcile must explain its blocker");
-    assert_eq!(error.code, "reconcile_incomplete");
+    assert_eq!(error.code, "RECONCILE_INCOMPLETE");
     assert!(error.message.contains("invalid anchor"));
 }
 
@@ -5471,6 +5589,9 @@ fn render_lanes_says_what_an_unstarted_lane_waits_for() -> Result<(), Box<dyn st
         lane_class: run::LaneClass::ReadOnly,
         waiting_for: "read-only startup spacing: 1.2 s left of 2.0 s".into(),
     };
+    let (preparing, _) =
+        render_lanes_without_cooldowns(std::slice::from_ref(&lane), &[], None, Path::new("/state"));
+    assert_eq!(preparing["lanes"][0]["waiting_for"], "launch preparation");
     let (data, human) = render_lanes_without_cooldowns(&[lane], &[wait], None, Path::new("/state"));
     assert!(
         human.contains("starting unresolved (read-only startup spacing: 1.2 s left of 2.0 s)"),
@@ -5644,6 +5765,7 @@ fn lane_access_refuses_credential_and_enclosing_roots() -> Result<(), Box<dyn st
     for root in roots {
         for (flag, read) in [("--read-root", true), ("--write-root", false)] {
             let access = crate::Access {
+                attach: Vec::new(),
                 mode: Some(Mode::ReadOnly),
                 worktree: None,
                 read_root: if read { vec![root.clone()] } else { vec![] },
@@ -5665,6 +5787,32 @@ fn lane_access_refuses_credential_and_enclosing_roots() -> Result<(), Box<dyn st
 }
 
 #[test]
+fn lane_access_canonicalises_attachment_files() -> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let image = temp.path().join("shot.png");
+    std::fs::write(&image, b"image")?;
+    let access = crate::Access {
+        attach: vec![image.clone()],
+        mode: None,
+        worktree: None,
+        read_root: vec![],
+        write_root: vec![],
+        network: None,
+        capability: vec![],
+        no_capability: vec![],
+    };
+    let granted = lane_access(
+        &access,
+        &temp.path().join("state"),
+        Path::new("/fixture/home"),
+    )
+    .map_err(|fail| fail.message)?;
+    assert_eq!(granted.attachments, vec![std::fs::canonicalize(image)?]);
+    assert!(granted.read_roots.is_empty());
+    Ok(())
+}
+
+#[test]
 fn lane_access_refuses_a_root_enclosing_an_injected_nonconventional_home()
 -> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
@@ -5680,6 +5828,7 @@ fn lane_access_refuses_a_root_enclosing_an_injected_nonconventional_home()
     let config = std::fs::canonicalize(config)?;
     let state = temp.path().join("state");
     let access = |read_root: Vec<PathBuf>, write_root: Vec<PathBuf>| crate::Access {
+        attach: Vec::new(),
         mode: Some(Mode::ReadOnly),
         worktree: None,
         read_root,
@@ -5752,6 +5901,7 @@ fn lane_access_allows_codex_standalone_read_roots() -> Result<(), Box<dyn std::e
     let state = tempfile::tempdir()?;
     let state = std::fs::canonicalize(state.path())?;
     let access = |read_root: Vec<PathBuf>, write_root: Vec<PathBuf>| crate::Access {
+        attach: Vec::new(),
         mode: Some(Mode::ReadOnly),
         worktree: None,
         read_root,
@@ -5837,6 +5987,7 @@ fn lane_access_maps_network_capability_and_roots() -> Result<(), Box<dyn std::er
     std::fs::create_dir_all(&state)?;
     std::fs::create_dir_all(&project)?;
     let access = |mode, network, capability: &[&str], write_root: Vec<PathBuf>| crate::Access {
+        attach: Vec::new(),
         mode: Some(mode),
         worktree: None,
         read_root: Vec::new(),
@@ -5921,6 +6072,7 @@ fn lane_access_refuses_write_root_overlapping_the_worktree()
     std::fs::create_dir_all(&state)?;
     std::fs::create_dir_all(&inside)?;
     let access = |read_root: Vec<PathBuf>, write_root: Vec<PathBuf>| crate::Access {
+        attach: Vec::new(),
         mode: Some(Mode::WorktreeWrite),
         worktree: Some(worktree.clone()),
         read_root,
@@ -5961,6 +6113,7 @@ fn lane_access_reads_installed_release_skills_only() -> Result<(), Box<dyn std::
     std::fs::create_dir_all(&skills)?;
     std::fs::create_dir_all(state.join("projects"))?;
     let access = |read_root: Vec<PathBuf>, write_root: Vec<PathBuf>| crate::Access {
+        attach: Vec::new(),
         mode: Some(Mode::ReadOnly),
         worktree: None,
         read_root,
@@ -7839,6 +7992,10 @@ fn worktrees_lock_contention_retries_and_admits() -> Result<(), Box<dyn std::err
         &fixture.tree,
         |edge| -> Result<(), Box<dyn std::error::Error>> {
             crate::fabric::private_dir(edge.roots.state.as_path(), edge.roots.state.as_path())?;
+            std::fs::write(
+                edge.roots.state.as_path().join("config.toml"),
+                "schema_version=1\n[gc]\nfree_floor='1B'\n",
+            )?;
             provenant_config::bind_host(edge.roots)?;
             allow_any_free_disk(edge)?;
 
@@ -7920,7 +8077,8 @@ fn worktrees_lock_contention_retries_and_admits() -> Result<(), Box<dyn std::err
                 "--admission-timeout",
                 "60s",
             ])?;
-            cmd.wait = None;
+            // A wait shorter than the contention must not refuse the lane.
+            cmd.wait = Some(1);
 
             let reply = dispatch_with_workers(cmd, edge, &Free);
             assert_eq!(reply.result.status, Status::Ok, "{:?}", reply.result.error);

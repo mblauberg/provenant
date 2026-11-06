@@ -177,7 +177,7 @@ pub fn peer(
                     PeerResult::Inbox {
                         data: InboxReply::Error {
                             extra: Default::default(),
-                            code: "owner_local_only".into(),
+                            code: "OWNER_LOCAL_ONLY".into(),
                             message: format!(
                                 "inbox owner {}: run this operation on the owner host or from the owning chair session",
                                 context.identity.host
@@ -447,6 +447,8 @@ pub fn peer(
                     host: context.identity.host,
                     available: true,
                     execution: Some(owner.capabilities().submit),
+                    release: Some(env!("CARGO_PKG_VERSION").into()),
+                    run_capabilities: Some(owner.capabilities()),
                     readiness: Some(provenant_fabric_runtime::hosts::PeerReadiness::reporting()),
                 },
                 extra: Default::default(),

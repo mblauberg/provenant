@@ -25,7 +25,7 @@ const DIRECT: &[&str] = &[
 // docs/specs/rust-workspace.md#crate-layering, without the provenant- prefix.
 const LAYERS: &[(&str, &[&str])] = &[
     ("core", &[]),
-    // Test-only helpers, reachable only through dev-dependencies.
+    // Test-only helpers, reachable through dev-dependencies or optional fixture features.
     ("test-support", &[]),
     ("records", &["core"]),
     ("config", &["core", "records", "os"]),
@@ -373,12 +373,14 @@ fn selected_test_scopes(source: &str, test_file: bool, fixtures: bool) -> Vec<&s
         if !test_only {
             continue;
         }
-        let (mut nesting, mut depth) = (0usize, 0usize);
+        let (mut nesting, mut depth, mut generics) = (0usize, 0usize, 0usize);
         for token in &tokens[end + 1..] {
             match *token {
                 "(" | "[" => nesting += 1,
+                "<" if depth == 0 => generics += 1,
+                ">" if depth == 0 && generics > 0 => generics -= 1,
                 // Leaving the enclosing group (a parameter or field attribute) ends the item.
-                ")" | "]" | "," if depth + nesting == 0 => break,
+                ")" | "]" | "," if depth + nesting + generics == 0 => break,
                 ")" | "]" => nesting -= 1,
                 ";" if depth + nesting == 0 => {
                     scopes.push(&source[offset(attribute[0])..=offset(token)]);
@@ -967,8 +969,20 @@ fn check_internal_dependencies(
                 && (internal == name
                     || internal == "test-support"
                     || (name == "fabric-mcp" && internal == "fabric-store"));
+            let fixture_exception = internal == "test-support"
+                && kind == "dependencies"
+                && declared.get("optional").and_then(Item::as_bool) == Some(true)
+                && table
+                    .get("features")
+                    .and_then(|features| features.get("fixture"))
+                    .and_then(Item::as_array)
+                    .is_some_and(|features| {
+                        features
+                            .iter()
+                            .any(|feature| feature.as_str() == Some("dep:provenant-test-support"))
+                    });
             if (internal == "cli" && name != "provenant")
-                || !(allowed.contains(&internal) || dev_exception)
+                || !(allowed.contains(&internal) || dev_exception || fixture_exception)
             {
                 return Err(format!(
                     "{name} {kind}: {alias} ({package}) is not permitted by the crate layering table"
@@ -1210,6 +1224,15 @@ fn adapter_policy_excludes_complete_test_const_arrays() {
     assert!(!scopes[0].contains("production"));
 }
 
+#[test]
+fn adapter_policy_excludes_fixture_items_but_scans_production_neighbours() {
+    let source = "#[cfg(feature = \"fixture\")] fn fixture() -> Result<(), Error> { adapter == \"codex\"; }\nfn production() { adapter == \"claude\"; }";
+    let scopes = selected_test_scopes(source, false, true);
+    assert_eq!(scopes.len(), 1);
+    assert!(scopes[0].contains("codex"));
+    assert!(!scopes[0].contains("claude"));
+}
+
 fn adapter_identity_comparison() -> Result<regex::Regex, regex::Error> {
     let names = provenant_records::ADAPTER_SPECS
         .iter()
@@ -1218,8 +1241,9 @@ fn adapter_identity_comparison() -> Result<regex::Regex, regex::Error> {
         .join("|");
     let literal = format!(r#""(?:{names})""#);
     let harness = r"Harness::[A-Za-z_][A-Za-z_0-9]*\s*\.\s*spec\s*\(\s*\)\s*\.\s*name";
+    let typed_harness = r"Harness::[A-Za-z_][A-Za-z_0-9]*";
     regex::Regex::new(&format!(
-        r"(?:(?:==|!=)\s*(?:Some\s*\(\s*)?(?:{literal}|{harness})|(?:{literal}|{harness})\s*(?:\))?\s*(?:==|!=)|{literal}\s*(?:\||=>|if\b)|matches!\s*\([^,]+,[^;{{}}\n]*(?:{literal}|{harness})|\.\s*(?:eq|ne|eq_ignore_ascii_case)\s*\(\s*(?:{literal}|{harness}))"
+        r"(?:(?:==|!=)\s*(?:Some\s*\(\s*)?(?:{literal}|{harness}|{typed_harness})|(?:{literal}|{harness}|{typed_harness})\s*(?:\))?\s*(?:==|!=)|{literal}\s*(?:\||=>|if\b)|matches!\s*\([^,]+,[^;{{}}\n]*(?:{literal}|{harness})|\.\s*(?:eq|ne|eq_ignore_ascii_case)\s*\(\s*(?:{literal}|{harness}|{typed_harness})|{typed_harness}[^,;{{}}]*=>|\blet\s+[^=;{{}}]*{typed_harness}[^=;{{}}]*=|matches!\s*\([^;{{}}]*{typed_harness})"
     ))
 }
 
@@ -1239,7 +1263,19 @@ fn adapter_policy_detects_registry_names_and_harness_comparisons() -> Result<(),
     assert!(comparison.is_match("adapter.eq_ignore_ascii_case(\"codex\")"));
     assert!(comparison.is_match("\"codex\" if ready => action()"));
     assert!(comparison.is_match("Harness::Agy.spec().name != adapter"));
+    assert!(comparison.is_match("provider == Harness::Claude"));
+    for pattern in [
+        "Harness::Claude => action()",
+        "Harness::Claude | Harness::Codex => action()",
+        "if let Some(\n    Harness::Claude\n) = client {}",
+        "if let Some(Harness::Claude) = client {}",
+        "let Some(client @ Harness::Claude) = client else {}",
+        "matches!(client, Some(Harness::Claude))",
+    ] {
+        assert!(comparison.is_match(pattern), "{pattern}");
+    }
     assert!(!comparison.is_match("default_value = Harness::Claude.spec().name"));
+    assert!(!comparison.is_match("true => Some(Harness::Codex),\nfalse => None"));
     Ok(())
 }
 
@@ -1262,19 +1298,18 @@ fn adapter_policy_uses_registry_data() -> Result<(), Box<dyn Error>> {
     rust_sources(&root.join("src"), &mut sources)?;
     let mut violations = Vec::new();
     for path in sources {
-        // The hook command table is registry data, not adapter policy.
-        if path == root.join("crates/cli/src/hooks.rs")
-            || path == root.join("crates/cli/src/run/provider/fixtures.rs")
-        {
-            continue;
-        }
         let source = fs::read_to_string(&path)?;
-        let tests = test_scopes(&source, is_test_source(&path.to_string_lossy()));
-        let checks: Vec<_> = if path.starts_with(root.join("src")) {
-            vec![&comparison]
-        } else {
-            vec![&literal, &comparison]
-        };
+        // The fixture module also contains production code. Exclude only its
+        // fixture-gated items rather than exempting the whole file.
+        let tests = selected_test_scopes(&source, is_test_source(&path.to_string_lossy()), true);
+        // Hook command literals are declarative data; comparisons still
+        // represent policy and must be checked.
+        let checks: Vec<_> =
+            if path.starts_with(root.join("src")) || path == root.join("crates/cli/src/hooks.rs") {
+                vec![&comparison]
+            } else {
+                vec![&literal, &comparison]
+            };
         for found in checks
             .into_iter()
             .flat_map(|check| check.find_iter(&source))

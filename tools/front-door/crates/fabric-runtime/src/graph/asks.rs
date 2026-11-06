@@ -611,6 +611,7 @@ fn decision_outputs(ask_id: &str, option: &str, answer: &AskAnswer) -> NodeOutpu
         }),
         verdict: Some(option.to_owned()),
         findings: Vec::new(),
+        findings_available: None,
         branch: None,
         commit: None,
         warnings: Vec::new(),

@@ -104,13 +104,22 @@ fn collect_impl(
         // An unknown writer does not make ignored output disposable. Require
         // a complete free census and writer exclusion before considering it.
         // This is independent of the policy for removing foreign worktrees.
-        if (matches!(&lane.occupancy, Occupancy::Unknown { .. })
+        let unknown_output = matches!(&lane.occupancy, Occupancy::Unknown { .. })
             || (!lane.path.starts_with(&managed)
                 && lane.is_unowned()
-                && lane.occupancy.is_available()))
-            && !policy.regenerable.is_empty()
+                && lane.occupancy.is_available());
+        if unknown_output && policy.regenerable.is_empty() {
+            if policy.dry_run {
+                report.idle_output.push(OutputEntry {
+                    path: lane.path.clone(),
+                    removed: false,
+                    reason: "no regenerable directories configured".into(),
+                });
+            }
+        } else if unknown_output
             && let Some(entry) = entries.iter().find(|entry| entry.path == lane.path)
         {
+            let before = report.idle_output.len();
             let result = prune_unknown_output(
                 context,
                 &entries,
@@ -120,12 +129,20 @@ fn collect_impl(
                 cancel,
                 &mut report.idle_output,
             );
-            if let Err(error) = result {
-                report.idle_output.push(OutputEntry {
+            match result {
+                Err(error) => report.idle_output.push(OutputEntry {
                     path: lane.path.clone(),
                     removed: false,
                     reason: error.to_string(),
-                });
+                }),
+                Ok(()) if policy.dry_run && report.idle_output.len() == before => {
+                    report.idle_output.push(OutputEntry {
+                        path: lane.path.clone(),
+                        removed: false,
+                        reason: "no eligible ignored output".into(),
+                    });
+                }
+                Ok(()) => {}
             }
         }
         if !lane.path.starts_with(&managed) && !policy.foreign_merged_clean {

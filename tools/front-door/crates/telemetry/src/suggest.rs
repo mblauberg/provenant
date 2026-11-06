@@ -110,6 +110,8 @@ pub fn rank(
             i64::from(expiry_days) * 86400,
         ))
         .map_err(|e| e.to_string())?;
+    let expires = provenant_core::WallTime::from_micros(expires.as_microsecond())
+        .map_err(|e| e.to_string())?;
     let mut arms = Vec::new();
     for dimension in ["pattern", "lens", "model"] {
         let mut groups =
@@ -273,7 +275,50 @@ pub fn rank(
                 && a.false_positive_rate.value <= b.false_positive_rate.value
                 && a.escaped_defect_rate.value <= b.escaped_defect_rate.value
             {
-                suggestions.push(Suggestion { dimension: a.dimension, risk_tier: a.risk_tier.clone(), task_kind: a.task_kind.clone(), preferred: a.choice.clone(), compared_with: b.choice.clone(), evidence: [i, j], counts: [a.samples, b.samples], interval: [ai, bi], expires: expires.to_string(), accept: None, advisory_reason: "No scheduled choice write path exists; graph node asks are not implemented." });
+                let expiry = expires.as_timestamp().to_string();
+                let valid_key = |value: &str| {
+                    !value.is_empty()
+                        && value.len() <= 64
+                        && value
+                            .bytes()
+                            .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_' | b'.'))
+                };
+                let accept = (a.dimension == "model"
+                    && valid_key(&a.risk_tier)
+                    && valid_key(&a.task_kind)
+                    && a.choice.split_once('/').is_some_and(|(adapter, id)| {
+                        valid_key(adapter)
+                            && !id.is_empty()
+                            && !id.chars().any(|c| {
+                                c.is_whitespace() || c.is_control() || matches!(c, '#' | ',')
+                            })
+                    }))
+                .then(|| {
+                    let mut table = toml_edit::InlineTable::new();
+                    table.insert("dimension", "model".into());
+                    table.insert("risk_tier", a.risk_tier.as_str().into());
+                    table.insert("task_kind", a.task_kind.as_str().into());
+                    table.insert("preferred", a.choice.as_str().into());
+                    table.insert("expires", expiry.as_str().into());
+                    format!("model_choices = [{table}]")
+                });
+                suggestions.push(Suggestion {
+                    dimension: a.dimension,
+                    risk_tier: a.risk_tier.clone(),
+                    task_kind: a.task_kind.clone(),
+                    preferred: a.choice.clone(),
+                    compared_with: b.choice.clone(),
+                    evidence: [i, j],
+                    counts: [a.samples, b.samples],
+                    interval: [ai, bi],
+                    expires: expiry,
+                    advisory_reason: if accept.is_some() {
+                        "Add this line under domains.routing, or append its row to an existing model_choices array."
+                    } else {
+                        "No scheduled choice write path exists for this suggestion."
+                    },
+                    accept,
+                });
             }
         }
     }
