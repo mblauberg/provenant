@@ -239,24 +239,6 @@ impl WorkIndex {
     }
 }
 impl RunStore {
-    /// Check a lane-local run namespace before writing host-owned indexes.
-    /// Legacy requests have no derivation and need an existing host seal.
-    pub fn check_child_run_id(
-        &self,
-        run: RunId,
-        request: &CanonicalRequest,
-        operation: &provenant_core::OperationId,
-    ) -> Result<()> {
-        if child_run_id(self.context.project_id, request, operation)?
-            .is_some_and(|expected| expected != run)
-        {
-            return Err(RunError::Validation(
-                "child run ID does not match host derivation",
-            ));
-        }
-        Ok(())
-    }
-
     pub(crate) fn seal_work(
         &self,
         record: &AttemptRecord,

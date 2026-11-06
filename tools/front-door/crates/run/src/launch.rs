@@ -511,50 +511,6 @@ pub fn access_root_allowed(root: &std::path::Path, state: &std::path::Path, read
 }
 
 impl RunStore {
-    /// Authenticate a lane-local continuation source before inheriting host
-    /// associations. A legacy request cannot prove attempt membership.
-    pub fn check_child_attempt_id(
-        &self,
-        request: &CanonicalRequest,
-        record: &AttemptRecord,
-    ) -> Result<()> {
-        if request.child_attempt_id_version.is_none() {
-            return Err(RunError::Validation("legacy child attempt identity"));
-        }
-        if let Some(reason) = self.child_attempt_reason(record.run_id, request, record)? {
-            return Err(RunError::Validation(reason));
-        }
-        Ok(())
-    }
-
-    fn child_attempt_reason(
-        &self,
-        run: RunId,
-        request: &CanonicalRequest,
-        record: &AttemptRecord,
-    ) -> Result<Option<&'static str>> {
-        self.check_child_run_id(run, request, &record.operation_id)?;
-        Ok(if record.run_id != run {
-            Some("child attempt run does not match")
-        } else if crate::correlation::child_attempt_id(
-            self.context.project_id,
-            run,
-            request,
-            record.task_id,
-        )?
-        .is_some_and(|id| id != record.attempt_id)
-        {
-            Some("child attempt ID does not match host derivation")
-        } else if !request
-            .tasks
-            .iter()
-            .any(|task| task.task_id == record.task_id)
-        {
-            Some("child attempt task missing from request")
-        } else {
-            None
-        })
-    }
     /// Refuse queued proposals without touching any launched provider.
     pub fn refuse_queued(&self, run: RunId, reason: &str, call: &Request<'_>) -> Result<()> {
         let ids: Vec<String> = {

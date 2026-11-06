@@ -2678,86 +2678,6 @@ pub(super) fn with_chair_index<T>(
         })
 }
 
-/// New lane-local associations need the same namespace proof as WorkIndex.
-/// A legacy row can be replayed, but a lane cannot create or repair one.
-#[derive(Debug)]
-pub(super) enum ChairRunError {
-    Unauthorised(Fail),
-    Other(Fail),
-}
-
-impl From<ChairRunError> for Fail {
-    fn from(error: ChairRunError) -> Self {
-        match error {
-            ChairRunError::Unauthorised(error) | ChairRunError::Other(error) => error,
-        }
-    }
-}
-
-pub(super) fn check_chair_run_id(
-    session: &Session,
-    roots: &Roots,
-    run: RunId,
-    request: &run::CanonicalRequest,
-    call: &run::Request<'_>,
-) -> Result<(), ChairRunError> {
-    session
-        .store
-        .check_child_run_id(
-            run,
-            request,
-            &session
-                .store
-                .run(run, call)
-                .map_err(Fail::from)
-                .map_err(ChairRunError::Other)?
-                .operation_id,
-        )
-        .map_err(Fail::from)
-        .map_err(ChairRunError::Other)?;
-    if request.child_attempt_id_version.is_none() {
-        let digest = request
-            .digest()
-            .map_err(run::RunError::from)
-            .map_err(Fail::from)
-            .map_err(ChairRunError::Other)?;
-        let mut identity_refused = false;
-        with_chair_index(roots, call, |index, c| {
-            match index.read(session.context.project_id, run, c)? {
-                Some(value) if value.request_digest == digest => Ok(()),
-                Some(_) => Err(provenant_fabric_runtime::chairs::Error::Conflict),
-                None => {
-                    identity_refused = true;
-                    Err(provenant_fabric_runtime::chairs::Error::Invalid(
-                        "new chair associations require host-derived child run IDs",
-                    ))
-                }
-            }
-        })
-        .map_err(|failure| {
-            if identity_refused {
-                ChairRunError::Unauthorised(failure)
-            } else {
-                ChairRunError::Other(failure)
-            }
-        })?;
-    }
-    Ok(())
-}
-
-#[derive(Debug)]
-pub(super) struct ChairSourceError;
-
-pub(super) fn check_chair_source(
-    store: &run::RunStore,
-    request: &run::CanonicalRequest,
-    parent: &run::AttemptRecord,
-) -> Result<(), ChairSourceError> {
-    store
-        .check_child_attempt_id(request, parent)
-        .map_err(|_| ChairSourceError)
-}
-
 pub(super) fn seal_launch_task(
     request_digest: provenant_core::Digest,
     task: &run::TaskRequest,
@@ -2802,48 +2722,29 @@ pub(super) fn launch_on_host_with_wait(
             fixture_state_write: false,
         },
     };
+    if session.context.state_root != edge.roots.state {
+        return Err(Fail::new(
+            Status::Refused,
+            ErrorKind::Refused,
+            "launch requires the host run store",
+        ));
+    }
     let read = session.store.request(run, call)?;
     let request = &read;
     let request_digest = request.digest().map_err(run::RunError::from)?;
     {
-        if request.parent.is_some() && session.context.state_root != edge.roots.state {
-            check_chair_run_id(session, edge.roots, run, request, call)?;
-        }
         let operation = match request.parent {
             Some(_) => Some(session.store.run(run, call)?.operation_id),
             None => None,
         };
         with_chair_index(edge.roots, call, |index, index_call| {
             if let Some(prior) = request.parent {
-                let lane_local = session.context.state_root != edge.roots.state;
-                if lane_local
-                    && let Some(sealed) = index.read(session.context.project_id, run, index_call)?
-                {
-                    return if sealed.request_digest == request_digest {
-                        Ok(())
-                    } else {
-                        Err(provenant_fabric_runtime::chairs::Error::Conflict)
-                    };
-                }
                 let parent = session.store.record(prior, call).map_err(|_| {
                     provenant_fabric_runtime::chairs::Error::Invalid("continuation parent")
                 })?;
                 let original = session.store.request(parent.run_id, call).map_err(|_| {
                     provenant_fabric_runtime::chairs::Error::Invalid("continuation request")
                 })?;
-                if lane_local {
-                    check_chair_source(&session.store, &original, &parent).map_err(|_| {
-                        provenant_fabric_runtime::chairs::Error::Invalid(
-                            "continuation source identity does not match host-derived IDs",
-                        )
-                    })?;
-                    if index
-                        .read(session.context.project_id, parent.run_id, index_call)?
-                        .is_none()
-                    {
-                        return Err(provenant_fabric_runtime::chairs::Error::NotFound);
-                    }
-                }
                 let operation =
                     operation
                         .as_ref()
@@ -2854,11 +2755,7 @@ pub(super) fn launch_on_host_with_wait(
                     session.context.project_id,
                     (parent.run_id, original.digest()?),
                     run,
-                    if lane_local {
-                        provenant_fabric_runtime::chairs::Admission::Lane(operation)
-                    } else {
-                        provenant_fabric_runtime::chairs::Admission::HostRoot(operation)
-                    },
+                    provenant_fabric_runtime::chairs::Admission::HostRoot(operation),
                     request,
                     index_call,
                 )
@@ -2869,12 +2766,7 @@ pub(super) fn launch_on_host_with_wait(
                     }
                     // Only the host root's immutable request may repair an
                     // interrupted submission, including owned-worktree replay.
-                    None if session.context.state_root == edge.roots.state => {
-                        index.submit(session.context.project_id, run, request, index_call)
-                    }
-                    None if request.chair.is_some() => {
-                        Err(provenant_fabric_runtime::chairs::Error::NotFound)
-                    }
+                    None => index.submit(session.context.project_id, run, request, index_call),
                     _ => Ok(()),
                 }
             }
