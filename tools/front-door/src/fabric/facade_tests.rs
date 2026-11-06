@@ -1989,10 +1989,13 @@ esac
             provider_timeout: factory.context.config.limits.graph_timeout_seconds,
             delivery_id: None, deliver: None, worktree: None, access: grants,
         };
-        let (accepted_run, accepted_started) = run_owner.with_edge(|edge| provenant_cli::run::submit_with_host(
+        let (accepted_run, accepted_started) = run_owner.with_edge(|edge| {
+            let submitted = provenant_cli::run::submit_with_host(
             &session, edge, provenant_cli::run::Submission { chair: None, operation_id: accepted_operation.clone(),
                 tasks: vec![accepted_task], concurrency: Some(1), knobs: vec!["routing.graph_exclude=[\"codex/gpt-6-luna\"]".into()] },
-            &run_owner.call(&cancel), None))?;
+            &run_owner.call(&cancel), None);
+            super::run_owner::recover_accepted_launch(&session, &accepted_operation, &run_owner.call(&cancel), submitted)
+        })?;
         let receipt = run_owner.receipt(&session, accepted_operation, &accepted_run, &accepted_started, &run_owner.call(&cancel))?;
         let target = receipt.targets.first().ok_or("target")?;
         // The plain lane and graph owner both lower through the same submission
@@ -2015,10 +2018,13 @@ esac
             delivery_id: None, deliver: None, worktree: None,
             access: provenant_records::run::LaneAccess { write_roots: vec![write_root.clone()], ..Default::default() },
         };
-        let (plain_run, _) = run_owner.with_edge(|edge| provenant_cli::run::submit_with_host(
-            &session, edge, provenant_cli::run::Submission { chair: None, operation_id: plain_operation,
+        let (plain_run, _) = run_owner.with_edge(|edge| {
+            let submitted = provenant_cli::run::submit_with_host(
+            &session, edge, provenant_cli::run::Submission { chair: None, operation_id: plain_operation.clone(),
                 tasks: vec![plain_task], concurrency: Some(1), knobs: vec!["routing.graph_exclude=[\"codex/gpt-6-luna\"]".into()] },
-            &run_owner.call(&cancel), None))?;
+            &run_owner.call(&cancel), None);
+            super::run_owner::recover_accepted_launch(&session, &plain_operation, &run_owner.call(&cancel), submitted)
+        })?;
         let graph_record = session.store.record(target.attempt, &run_owner.call(&cancel))?;
         let graph_request = session.store.request(graph_record.run_id, &run_owner.call(&cancel))?;
         let plain_request = session.store.request(plain_run.run_id, &run_owner.call(&cancel))?;

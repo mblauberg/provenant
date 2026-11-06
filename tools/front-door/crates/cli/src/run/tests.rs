@@ -746,8 +746,19 @@ fn operation_replays_after_its_context_ref_moves_or_is_deleted()
         concurrency: Some(1),
         knobs: vec![],
     };
-    let (first, _) =
-        submit(&session, &edge, submission("context-base"), &call).map_err(|f| f.message)?;
+    // The fake adapter refuses preparation after admission. Keep the durable
+    // operation as the replay subject even though the initial launch fails.
+    let initial = submit(&session, &edge, submission("context-base"), &call)
+        .err()
+        .ok_or("unknown fixture adapter must refuse its initial launch")?;
+    assert_eq!(initial.status, Status::Refused);
+    assert_eq!(initial.kind, ErrorKind::Refused);
+    let operation = session
+        .store
+        .operation(&OperationId::parse("context-ref-replay")?, &call)?
+        .ok_or("refused launch lost its admitted operation")?;
+    assert_eq!(operation.state, run::OperationState::Terminal);
+    let first = session.store.run(operation.run_id, &call)?;
     assert!(
         session.store.request(first.run_id, &call)?.tasks[0]
             .profile

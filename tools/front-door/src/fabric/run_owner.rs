@@ -18,6 +18,40 @@ pub(crate) struct BinaryRunOwner<'a> {
     /// Only the direct chair entry point supplies a verified origin.
     pub(crate) chair: Option<provenant_run::ChairBinding>,
 }
+/// Retain admitted preparation records when the CLI projects a launch refusal.
+/// Callers still classify the durable records with `BinaryRunOwner::receipt`.
+pub(crate) fn recover_accepted_launch(
+    session: &provenant_cli::run::Session,
+    operation_id: &provenant_core::OperationId,
+    call: &provenant_run::Request<'_>,
+    submitted: Result<
+        (provenant_run::RunRecord, Vec<provenant_run::Started>),
+        provenant_cli::run::Fail,
+    >,
+) -> Result<(provenant_run::RunRecord, Vec<provenant_run::Started>), provenant_cli::run::Fail> {
+    match submitted {
+        // The CLI reports an all-refused launch batch as an error even
+        // after admitting its terminal preparation records. The graph
+        // must observe those records, including typed fallback evidence;
+        // receipt() still rejects sealed policy refusals and custody.
+        Err(fail) if fail.kind == provenant_run::ErrorKind::Refused => {
+            match session.store.operation(operation_id, call)? {
+                Some(operation)
+                    if matches!(
+                        operation.state,
+                        provenant_run::OperationState::Accepted
+                            | provenant_run::OperationState::Terminal
+                    ) =>
+                {
+                    Ok((session.store.run(operation.run_id, call)?, Vec::new()))
+                }
+                _ => Err(fail),
+            }
+        }
+        result => result,
+    }
+}
+
 pub(crate) fn peer_result<T>(
     result: Result<T, FacadeError>,
     wrap: impl FnOnce(T) -> PeerResult,
@@ -1011,27 +1045,7 @@ impl BinaryRunOwner<'_> {
                 &call,
                 self.factory.host_launch.as_ref(),
             );
-            match submitted {
-                // The CLI reports an all-refused launch batch as an error even
-                // after admitting its terminal preparation records. The graph
-                // must observe those records, including typed fallback evidence;
-                // receipt() still rejects sealed policy refusals and custody.
-                Err(fail) if fail.kind == provenant_run::ErrorKind::Refused => {
-                    match session.store.operation(&operation_id, &call)? {
-                        Some(operation)
-                            if matches!(
-                                operation.state,
-                                provenant_run::OperationState::Accepted
-                                    | provenant_run::OperationState::Terminal
-                            ) =>
-                        {
-                            Ok((session.store.run(operation.run_id, &call)?, Vec::new()))
-                        }
-                        _ => Err(fail),
-                    }
-                }
-                result => result,
-            }
+            recover_accepted_launch(&session, &operation_id, &call, submitted)
         });
         if submission.is_err()
             && crate::settlement::post_operation_refusal(
