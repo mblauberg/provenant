@@ -238,6 +238,7 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
             "writer_reconcile_refuses_unfinished_cherry_pick_and_releases",
             "recreated_worktree_accepts_writer_after_settlement",
             "existing_branch_with_base_names_the_repair_in_json_and_human_output",
+            "create_from_remote_base_reports_ok_and_exists",
             "create_list_and_remove_a_managed_worktree",
             "gc_idle_keeps_live_and_unobservable_writers_and_removes_free_cache",
             "scheduled_gc_runs_outside_a_checkout_and_obeys_disable_and_writer_locks",
@@ -347,6 +348,7 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
                 "existing_branch_with_base_names_the_repair_in_json_and_human_output" => {
                     existing_branch_with_base_names_the_repair_in_json_and_human_output()
                 }
+                "create_from_remote_base_reports_ok_and_exists" => create_from_remote_base_reports_ok_and_exists(),
                 "create_list_and_remove_a_managed_worktree" => {
                     create_list_and_remove_a_managed_worktree()
                 }
@@ -2294,6 +2296,38 @@ fn gc_idle_keeps_live_and_unobservable_writers_and_removes_free_cache() -> Resul
         }
         rig.assert_legacy_unchanged()?;
     }
+    Ok(())
+}
+
+fn create_from_remote_base_reports_ok_and_exists() -> Result {
+    let upstream = repository()?;
+    let rig = repository()?;
+    git(
+        &rig,
+        &[
+            "remote",
+            "add",
+            "origin",
+            upstream.project.to_str().ok_or("upstream path")?,
+        ],
+    )?;
+    git(&rig, &["fetch", "origin"])?;
+    git(&rig, &["config", "worktree.useRelativePaths", "true"])?;
+    let config = fs::read(rig.project.join(".git/config"))?;
+    let created = ok(
+        &rig,
+        &[
+            "worktree",
+            "create",
+            "feature/status",
+            "--base",
+            "origin/main",
+            "--json",
+        ],
+    )?;
+    assert_eq!(created["status"], "ok");
+    assert!(rig.project.join(".worktrees/feature-status/.git").is_file());
+    assert_eq!(fs::read(rig.project.join(".git/config"))?, config);
     Ok(())
 }
 
