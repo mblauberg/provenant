@@ -1063,15 +1063,41 @@ fn graph_persists_auth_and_usage_refusals_before_fallback() -> Result {
             } => reason,
             _ => return Err("missing refusal reason".into()),
         };
-        match scenario {
-            "authority" => assert!(reason.contains("single regular file"), "{reason}"),
-            "refresh" => assert!(reason.contains("stored credential JSON"), "{reason}"),
-            "quota" => assert!(
-                reason.to_ascii_lowercase().contains("exhausted"),
-                "{reason}"
-            ),
-            _ => unreachable!(),
+        let skipped = record
+            .skipped_routes
+            .iter()
+            .find(|route| route.route.starts_with("claude/"))
+            .ok_or("missing Claude preparation refusal")?;
+        if scenario == "quota" {
+            assert_eq!(skipped.kind, provenant_records::run::SkipKind::Unavailable);
+            assert_eq!(
+                skipped.cause,
+                Some(provenant_records::RouteExclusionReason::Exhausted)
+            );
+        } else {
+            assert_eq!(skipped.kind, provenant_records::run::SkipKind::AuthRequired);
+            assert_eq!(
+                skipped.cause, None,
+                "unclassified source errors add no invented account cause"
+            );
         }
+        let diagnostic = skipped.diagnostic();
+        assert_eq!(diagnostic.code, "REFUSED");
+        assert!(
+            reason.contains(diagnostic.next.as_deref().ok_or("preparation action")?),
+            "{reason}"
+        );
+        assert!(!reason.contains("single regular file"), "{reason}");
+        assert!(!reason.contains("stored credential JSON"), "{reason}");
+        assert!(
+            !reason.contains(directory.to_str().ok_or("directory")?),
+            "{reason}"
+        );
+        assert_eq!(record.provider_launched, Some(false));
+        assert_eq!(
+            record.terminal_evidence,
+            Some(provenant_records::run::TerminalEvidence::PreLaunchRefusal)
+        );
         cleanup.disarm();
     }
     Ok(())
@@ -3833,6 +3859,7 @@ fn writer_disk_refusal_keeps_its_reason_through_graph_mcp_and_dispatch() -> Resu
 
 #[test]
 fn peer_refusal_codes_and_protocol_mismatches_reach_cli_and_mcp() -> Result {
+    use provenant_fabric_runtime::coordination::facade::FacadeError;
     let mut rig = TestRig::new()?;
     let identity = federated_identity(&mut rig)?;
     let local = provenant_core::HostId::parse(identity["data"]["host"].as_str().ok_or("host")?)?;
@@ -3914,12 +3941,26 @@ fn peer_refusal_codes_and_protocol_mismatches_reach_cli_and_mcp() -> Result {
         result["structuredContent"]["code"], "peer_version",
         "{result}"
     );
-    assert!(
-        result["content"][0]["text"]
-            .as_str()
-            .is_some_and(|m| m.contains(&expected)),
-        "{result}"
+    let projection = FacadeError::PeerProtocolMismatch {
+        peer: "workshop".into(),
+        remote: 1,
+        expected: PROTOCOL,
+    }
+    .diagnostic();
+    assert_eq!(
+        result["structuredContent"]["detail"],
+        serde_json::json!(projection.detail.as_deref())
     );
+    assert_eq!(
+        result["structuredContent"]["next"],
+        serde_json::json!(projection.next.as_deref())
+    );
+    let text = result["content"][0]["text"]
+        .as_str()
+        .ok_or("MCP error text")?;
+    assert!(text.contains(projection.detail.as_deref().ok_or("protocol detail")?));
+    assert!(text.contains(projection.next.as_deref().ok_or("protocol action")?));
+    assert!(!result.to_string().contains("workshop"), "{result}");
     let result = &replies
         .iter()
         .find(|r| r["id"] == 2)

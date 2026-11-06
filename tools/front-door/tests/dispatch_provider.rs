@@ -700,12 +700,16 @@ fn run_refuses_pacing_reserve() -> Result {
         "--json",
     ])?;
     assert_ne!(code(&output), 0, "{output:?}");
-    let response = format!(
-        "{}{}",
-        String::from_utf8_lossy(&output.stdout.bytes),
-        String::from_utf8_lossy(&output.stderr.bytes)
+    let response: Value = serde_json::from_slice(&output.stdout.bytes)?;
+    assert_eq!(response["status"], "refused", "{response}");
+    assert_eq!(response["error"]["code"], "REFUSED", "{response}");
+    let (_, next) = provenant_records::RouteExclusionReason::PacingReserve.diagnostic_parts();
+    assert!(
+        response["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains(next)),
+        "{response}"
     );
-    assert!(response.contains("PacingReserve"), "{output:?}");
     Ok(())
 }
 
@@ -4956,21 +4960,14 @@ fn agy_denial_result_stays_out_of_terminal_diagnostics() -> Result {
         assert!(!diagnostic.is_empty());
         assert!(!diagnostic.contains("RunCommand"));
     }
-    let captured = rig.command(&[
-        "output",
-        &terminal.attempt_id.to_string(),
-        "--part",
-        "stdout",
-        "--json",
-    ])?;
-    assert_eq!(code(&captured), 0);
-    let captured: Value = serde_json::from_slice(&captured.stdout.bytes)?;
-    assert!(
-        captured["data"]["bytes"]["data"]
-            .as_str()
-            .ok_or("capture")?
-            .contains("RunCommand")
-    );
+    let captured = rig
+        .state
+        .join("runs")
+        .join(terminal.run_id.to_string())
+        .join("attempts")
+        .join(terminal.attempt_id.to_string())
+        .join("stdout.log");
+    assert!(fs::read_to_string(captured)?.contains("RunCommand"));
     Ok(())
 }
 
