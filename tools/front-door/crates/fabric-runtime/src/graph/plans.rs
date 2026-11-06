@@ -345,7 +345,13 @@ pub(super) fn expand(
             addition.source.is_empty() || expanded.nodes.iter().any(|n| n.id == addition.source)
         } else {
             !addition.nodes.is_empty()
-                && sources.insert(&addition.source)
+                && sources.insert((
+                    &addition.source,
+                    addition
+                        .extra
+                        .get("retry_generation")
+                        .and_then(serde_json::Value::as_u64),
+                ))
                 && expanded.nodes.iter().any(|n| n.id == addition.source)
         };
         if !valid {
@@ -423,7 +429,7 @@ fn derive_topology(
     let fallback = addition
         .nodes
         .iter()
-        .any(|node| node.id == format!("{}--fallback", addition.source));
+        .any(|node| node.id == fallback_id(addition));
     if !fallback {
         if let Some(node) = addition.nodes.iter().find(|node| node.composite.is_some()) {
             return Err((
@@ -450,11 +456,12 @@ fn derive_topology(
             "composite topology requires a planner specification",
         )
     })?;
-    let derived = fallback_expansion(
+    let derived = fallback_expansion_for_generation(
         &addition.source,
         spec,
         document,
         planner.require_skill_location,
+        addition.extra.get("retry_generation"),
     )
     .map_err(|_| {
         (
@@ -659,7 +666,7 @@ pub(super) fn append(document: &mut GraphDocument, expansion: &Expansion) {
                     let reduced_fallback = (fallback_minimum == Some(composite.min_successful)
                         || review_minimum.is_some())
                         && exported.len() == 1
-                        && exported[0].node == format!("{}--fallback", expansion.source);
+                        && exported[0].node == fallback_id(expansion);
                     if reduced_fallback {
                         composite.min_successful = Some(1);
                     }
@@ -1164,7 +1171,7 @@ fn fragment_exports(document: &GraphDocument, expansion: &Expansion) -> Vec<Grap
         && expansion
             .nodes
             .iter()
-            .any(|node| node.id == format!("{}--fallback", expansion.source))
+            .any(|node| node.id == fallback_id(expansion))
     {
         let mut outputs = Vec::new();
         for output in fallback
@@ -1179,7 +1186,7 @@ fn fragment_exports(document: &GraphDocument, expansion: &Expansion) -> Vec<Grap
         return vec![GraphInput {
             required_outputs: Vec::new(),
             extra: Default::default(),
-            node: format!("{}--fallback", expansion.source),
+            node: fallback_id(expansion),
             outputs,
         }];
     }
@@ -1521,8 +1528,16 @@ fn fragment(
         journal: None,
         limits,
     };
-    match super::patch::prepare(source, document, checkpoint, Some(node), &patch, &context)
-        .map_err(|error| error.message)?
+    match super::patch::prepare(
+        source,
+        document,
+        checkpoint,
+        Some(node),
+        &patch,
+        &context,
+        None,
+    )
+    .map_err(|error| error.message)?
     {
         super::patch::Prepared::Ready(admission) => {
             let mut expansion = admission.expansion;
@@ -1913,7 +1928,12 @@ fn continuation(
         .find(|n| n.id == node.id)
         .cloned()
         .ok_or("continuation source missing")?;
-    child.id = format!("{}--continue", node.id);
+    let generation = checkpoint
+        .nodes
+        .iter()
+        .find(|n| n.id == node.id)
+        .and_then(|n| n.extra.get("retry_generation"));
+    child.id = format!("{}--continue", generation_namespace(&node.id, generation));
     if child.id.len() > 200 {
         return Err(format!(
             "continuation {} exceeds the node ID limit of 200 bytes; shorten the source ID",
@@ -2013,7 +2033,17 @@ pub(super) fn settle(
     PlannedGraph,
     std::collections::BTreeMap<String, usize>,
 )> {
-    if checkpoint.expansions.iter().any(|e| e.source == node.id) {
+    let generation = checkpoint
+        .nodes
+        .iter()
+        .find(|n| n.id == node.id)
+        .and_then(|n| n.extra.get("retry_generation"))
+        .cloned();
+    if checkpoint
+        .expansions
+        .iter()
+        .any(|e| e.source == node.id && e.extra.get("retry_generation") == generation.as_ref())
+    {
         return None;
     }
     if node
@@ -2032,7 +2062,18 @@ pub(super) fn settle(
             .position(|progress| progress.id == node.id)?;
         let reason = fallback_reason(&checkpoint.nodes[index]);
         let built = (|| {
-            let addition = fallback_expansion(&node.id, spec, source, node.require_skill_location)?;
+            let mut addition = fallback_expansion_for_generation(
+                &node.id,
+                spec,
+                source,
+                node.require_skill_location,
+                generation.as_ref(),
+            )?;
+            if let Some(generation) = &generation {
+                addition
+                    .extra
+                    .insert("retry_generation".into(), generation.clone());
+            }
             let mut preview = document.clone();
             append(&mut preview, &addition);
             let (plan, positions) =
@@ -2119,7 +2160,12 @@ pub(super) fn settle(
     } else {
         return None;
     };
-    let result = addition.and_then(|addition| {
+    let result = addition.and_then(|mut addition| {
+        if let Some(generation) = &generation {
+            addition
+                .extra
+                .insert("retry_generation".into(), generation.clone());
+        }
         if let Some(warnings) = addition
             .extra
             .get("floor_warnings")
@@ -2196,8 +2242,18 @@ pub(super) fn settle(
                     NOTE_BYTES,
                 );
                 let fallback = (|| {
-                    let addition =
-                        fallback_expansion(&node.id, spec, source, node.require_skill_location)?;
+                    let mut addition = fallback_expansion_for_generation(
+                        &node.id,
+                        spec,
+                        source,
+                        node.require_skill_location,
+                        generation.as_ref(),
+                    )?;
+                    if let Some(generation) = &generation {
+                        addition
+                            .extra
+                            .insert("retry_generation".into(), generation.clone());
+                    }
                     let mut preview = document.clone();
                     append(&mut preview, &addition);
                     validate_schema(&preview).map_err(str::to_owned)?;
@@ -2281,6 +2337,38 @@ pub(super) fn settle(
 /// The static stage a planner's `fallback` spec expands to in the original
 /// document. Deterministic, so `settle` appends it and checkpoint validation
 /// recomputes it to check what was persisted.
+fn generation_namespace(source: &str, generation: Option<&serde_json::Value>) -> String {
+    match generation.and_then(serde_json::Value::as_u64) {
+        Some(generation) => format!("{source}--redo-{generation}"),
+        None => source.to_owned(),
+    }
+}
+
+fn fallback_id(expansion: &Expansion) -> String {
+    format!(
+        "{}--fallback",
+        generation_namespace(&expansion.source, expansion.extra.get("retry_generation"))
+    )
+}
+
+pub(super) fn fallback_expansion_for_generation(
+    node_id: &str,
+    spec: &PlanSpec,
+    source: &GraphDocument,
+    require_skill_location: bool,
+    generation: Option<&serde_json::Value>,
+) -> Result<Expansion, String> {
+    let namespace = generation_namespace(node_id, generation);
+    let mut expansion = fallback_expansion(&namespace, spec, source, require_skill_location)?;
+    expansion.source = node_id.to_owned();
+    if let Some(generation) = generation {
+        expansion
+            .extra
+            .insert("retry_generation".into(), generation.clone());
+    }
+    Ok(expansion)
+}
+
 pub(super) fn fallback_expansion(
     node_id: &str,
     spec: &PlanSpec,

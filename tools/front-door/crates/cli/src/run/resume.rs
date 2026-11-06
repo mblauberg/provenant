@@ -636,7 +636,7 @@ pub(super) fn resume_inner(
         0,
         &call,
         !command.no_fallback,
-        command.node,
+        command.node.is_some(),
     )?;
     let (mut data, human, timed_out) = report(
         &session,

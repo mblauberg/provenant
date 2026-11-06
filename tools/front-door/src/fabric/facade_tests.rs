@@ -2882,7 +2882,7 @@ esac
                         "route":route},
                     // An unrelated writer on the same worktree that never integrates.
                     {"id":"two","prompt":"reply OK","access":"worktree_write",
-                        "worktree":fixture.worktree,"after":["one"],
+                        "worktree":fixture.worktree,"depends_on":["one"],
                         "route":route}
                 ]
             }))?,
