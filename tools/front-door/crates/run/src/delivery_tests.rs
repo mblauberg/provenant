@@ -1906,7 +1906,7 @@ fn graph_publication_recovers_a_ref_created_before_its_marker()
 }
 
 #[test]
-fn delivery_records_dirty_and_checked_out_failures_after_start()
+fn delivery_records_dirty_failure_and_checked_out_integration_after_start()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
     for dirty in [true, false] {
         let mut fixture = PrepareFixture::new()?;
@@ -1938,7 +1938,11 @@ fn delivery_records_dirty_and_checked_out_failures_after_start()
             &attempt,
             "Run fixture\nAttempt fixture",
         )?;
-        assert!(matches!(receipt.state, WriterDeliveryState::Failed { .. }));
+        if dirty {
+            assert!(matches!(receipt.state, WriterDeliveryState::Failed { .. }));
+        } else {
+            assert!(!matches!(receipt.state, WriterDeliveryState::Failed { .. }));
+        }
         let raw =
             artifacts::read_sealed(&attempt, "delivery.json", RECORD_LIMIT)?.ok_or("delivery")?;
         assert_eq!(db::decode::<WriterDeliveryReceipt>(&raw)?, receipt);
@@ -4841,6 +4845,142 @@ fn existing_pr_delivery_only_creates_after_positive_absence()
             let calls = std::fs::read_to_string(fixture.root.join("creates")).unwrap_or_default();
             assert_eq!(calls.lines().count(), creates, "{state}");
         }
+    }
+    Ok(())
+}
+
+#[test]
+fn checked_out_parent_integration_preserves_edits_and_refuses_overlap()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    for (overlap, divergent) in [(false, false), (true, false), (false, true), (true, true)] {
+        let mut fixture = PrepareFixture::new()?;
+        std::fs::write(fixture.writer.worktree.join("child"), "base")?;
+        fixture.lane_git(&["add", "child"])?;
+        fixture.commit(&fixture.writer.worktree, "baseline")?;
+        fixture.git(&["branch", "parent", "lane"])?;
+        let parent = fixture.root.join("parent with \"quotes\"");
+        fixture.git(&[
+            "worktree",
+            "add",
+            parent.to_str().ok_or("parent")?,
+            "parent",
+        ])?;
+        if divergent {
+            std::fs::write(parent.join("parent-commit"), "parent commit")?;
+            fixture.git(&[
+                "-C",
+                parent.to_str().ok_or("parent")?,
+                "add",
+                "parent-commit",
+            ])?;
+            fixture.commit(&parent, "parent commit")?;
+        }
+        fixture.request =
+            HostDeliveryContext::destination(DeliveryMode::Integrate("parent".into()), "lane")?
+                .ok_or("destination")?;
+        let host = fixture.prepare()?;
+        std::fs::write(fixture.writer.worktree.join("child"), "child work")?;
+        fixture.lane_git(&["add", "child"])?;
+        fixture.commit(&fixture.writer.worktree, "child work")?;
+        std::fs::write(parent.join("staged"), "staged parent work")?;
+        fixture.git(&["-C", parent.to_str().ok_or("parent")?, "add", "staged"])?;
+        std::fs::write(parent.join("staged"), "unstaged parent work")?;
+        std::fs::write(
+            parent.join(if overlap { "child" } else { "untracked" }),
+            "keep",
+        )?;
+        if overlap {
+            fixture.git(&["-C", parent.to_str().ok_or("parent")?, "add", "child"])?;
+        }
+        let git_dir = host.command(
+            &parent,
+            "git",
+            &[
+                "rev-parse",
+                "--resolve-git-dir",
+                parent.join(".git").to_str().ok_or("git dir")?,
+            ],
+            WriterDeliveryStage::Verify,
+        )?;
+        let observe = |args: &[&str]| {
+            host.command(
+                &parent,
+                "git",
+                &[
+                    &[
+                        "--git-dir",
+                        git_dir.as_str(),
+                        "--work-tree",
+                        parent.to_str().unwrap(),
+                    ][..],
+                    args,
+                ]
+                .concat(),
+                WriterDeliveryStage::Verify,
+            )
+        };
+        let before = observe(&["rev-parse", "HEAD"])?;
+        let head = host.head(&fixture.writer)?;
+        let index_lock = std::path::Path::new(&git_dir).join("index.lock");
+        std::fs::write(&index_lock, "held by parent")?;
+        assert!(
+            host.integrate(&fixture.writer, &fixture.request, head)
+                .is_err()
+        );
+        assert_eq!(std::fs::read_to_string(&index_lock)?, "held by parent");
+        std::fs::remove_file(&index_lock)?;
+        if !overlap {
+            let ref_lock = fixture.writer.project.join(".git/refs/heads/parent.lock");
+            std::fs::write(&ref_lock, "competing publisher")?;
+            assert!(
+                host.integrate(&fixture.writer, &fixture.request, head)
+                    .is_err()
+            );
+            assert_eq!(observe(&["rev-parse", "HEAD"])?, before);
+            assert_eq!(std::fs::read_to_string(parent.join("child"))?, "base");
+            assert_eq!(observe(&["show", ":staged"])?, "staged parent work");
+            assert_eq!(
+                std::fs::read_to_string(parent.join("staged"))?,
+                "unstaged parent work"
+            );
+            assert!(!index_lock.exists());
+            std::fs::remove_file(ref_lock)?;
+        }
+        let result = host.integrate(&fixture.writer, &fixture.request, head);
+        assert_eq!(result.is_ok(), !overlap, "{result:?}");
+        assert_eq!(
+            std::fs::read_to_string(parent.join("staged"))?,
+            "unstaged parent work"
+        );
+        assert_eq!(observe(&["show", ":staged"])?, "staged parent work");
+        let integrated = observe(&["rev-parse", "HEAD"])?;
+        if overlap {
+            assert_eq!(integrated, before);
+            assert_eq!(observe(&["show", ":child"])?, "keep");
+        } else {
+            assert_eq!(std::fs::read_to_string(parent.join("child"))?, "child work");
+            assert!(
+                observe(&[
+                    "merge-base",
+                    "--is-ancestor",
+                    &head.to_string(),
+                    &integrated
+                ])
+                .is_ok()
+            );
+            assert!(observe(&["merge-base", "--is-ancestor", &before, &integrated]).is_ok());
+            if divergent {
+                assert_eq!(
+                    std::fs::read_to_string(parent.join("parent-commit"))?,
+                    "parent commit"
+                );
+            }
+        }
+        assert_eq!(
+            std::fs::read_to_string(parent.join(if overlap { "child" } else { "untracked" }))?,
+            "keep"
+        );
+        assert_eq!(host.head(&fixture.writer)?, head);
     }
     Ok(())
 }

@@ -38,6 +38,7 @@ fn add(
     let resolvers = Default::default();
     let limits = plans::generous();
     let context = patch::PatchContext {
+        journal: None,
         library: &library,
         resolvers: &resolvers,
         scan: &|_| Ok(()),
@@ -312,6 +313,7 @@ fn detached_children_do_not_gate_their_parents_dependants() {
     let resolvers = Default::default();
     let limits = plans::generous();
     let context = patch::PatchContext {
+        journal: None,
         library: &library,
         resolvers: &resolvers,
         limits: &limits,
@@ -432,4 +434,35 @@ fn unstarted_child_cancellation_survives_checkpoint_reload() {
         progress(&run.checkpoint, "a--stop").state,
         NodeState::Skipped
     );
+}
+
+#[test]
+fn writer_child_binds_parent_branch_and_replays_original_source() {
+    let (document, mut checkpoint) = live(None);
+    let library = template::TemplateLibrary::bundled();
+    let resolvers = Default::default();
+    let limits = plans::generous();
+    let context = patch::PatchContext {
+        library: &library, resolvers: &resolvers, limits: &limits,
+        scan: &|_| Ok(()), journal: None,
+    };
+    let mut request = child("writer", "bound-writer");
+    request.writer = true;
+    let base = "1111111111111111111111111111111111111111";
+    let receipt = relay::admit_child_bound(&mut patch::LiveGraph {
+        document: &document, checkpoint: &mut checkpoint,
+    }, "a", &request, &context, Some(("parent", base))).unwrap();
+    let expanded = plans::expand(&document, &checkpoint.extensions,
+        &checkpoint.expansions, &limits).unwrap();
+    let node = expanded.nodes.iter().find(|node| node.id == receipt.node).unwrap();
+    assert_eq!(node.delivery, Some(provenant_records::run::DeliveryMode::Integrate("parent".into())));
+    assert_eq!(node.source, Some(SourceBinding::Commit { commit: base.into() }));
+    let replay = relay::admit_child_bound(&mut patch::LiveGraph {
+        document: &document, checkpoint: &mut checkpoint,
+    }, "a", &request, &context,
+        Some(("parent", "2222222222222222222222222222222222222222"))).unwrap();
+    assert!(replay.replayed);
+    assert_eq!(relay::child_states(&checkpoint, "a")["children"][0]["settled"], false);
+    checkpoint.nodes.iter_mut().find(|node| node.id == receipt.node).unwrap().state = NodeState::Succeeded;
+    assert_eq!(relay::child_states(&checkpoint, "a")["children"][0]["settled"], true);
 }
