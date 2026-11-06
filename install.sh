@@ -261,6 +261,17 @@ else
 fi
 [ -x "$release/bin/provenant" ] || die 4 'Release binary is missing'
 
+if "$upgrade"; then
+    if "$release/bin/provenant" --state-dir "$state" install --source "$release" --upgrade-preflight </dev/null; then
+        :
+    else
+        preflight_status=$?
+        [ "$preflight_status" -eq 2 ] || die "$preflight_status" 'Upgrade preflight could not inspect state'
+        if ! "$yes"; then die 2 'Upgrade stopped by preflight; resolve the findings or rerun with --yes'; fi
+        printf '%s\n' 'Proceeding despite upgrade preflight findings (--yes).' >&2
+    fi
+fi
+
 # Existing receipts always use their recorded selection, paths and hooks, and
 # every registered account directory is installed too.
 set -- --state-dir "$state" install --source "$release"

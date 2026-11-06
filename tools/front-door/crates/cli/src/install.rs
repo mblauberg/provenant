@@ -29,6 +29,9 @@ pub struct Install {
     /// Plan the install without changing anything
     #[arg(long)]
     pub dry_run: bool,
+    /// Check state before a graph cutover (installer use only)
+    #[arg(long, hide = true)]
+    pub upgrade_preflight: bool,
 }
 
 #[derive(Debug, clap::Args)]
@@ -40,6 +43,9 @@ pub struct Uninstall {
 
 #[derive(Debug, clap::Args)]
 pub struct Upgrade {
+    /// Proceed after the upgrade preflight reports work to drain or port
+    #[arg(long)]
+    pub yes: bool,
     /// Build this checkout instead of downloading the latest release
     #[arg(long, value_parser = clap::builder::PathBufValueParser::new().try_map(crate::grammar::absolute))]
     pub from_source: Option<PathBuf>,

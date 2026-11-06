@@ -1977,6 +1977,89 @@ esac
         assert!(installed_app.join("old-build").exists());
         assert!(!installed_app.join(MENU_EXECUTABLE).exists());
     }
+    // Both entry points inspect the state with the staged release before replacing it.
+    rig.env
+        .push(("PROVENANT_TEST_MISSING_APPS".into(), "1".into()));
+    let project = "11111111111111111111111111111111";
+    let markers = rig.state.join(format!("fabric/graphs/{project}/pending"));
+    fs::create_dir_all(&markers)?;
+    for path in [
+        rig.state.join("fabric"),
+        rig.state.join("fabric/graphs"),
+        rig.state.join(format!("fabric/graphs/{project}")),
+        markers.clone(),
+    ] {
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+    }
+    fs::write(markers.join("complete"), "")?;
+    fs::write(markers.join("waiting.pending"), "")?;
+    let db_path = rig.state.join("run.sqlite3");
+    let db = rusqlite::Connection::open(&db_path)?;
+    db.execute_batch("CREATE TABLE attempts (project TEXT, run TEXT, id TEXT, terminal INTEGER); INSERT INTO attempts VALUES ('project-one','run-one','lane-one',0);")?;
+    drop(db);
+    let child_store = rig.state.join("children/child-one");
+    fs::create_dir_all(&child_store)?;
+    let child_db = rusqlite::Connection::open(child_store.join("run.sqlite3"))?;
+    child_db.execute_batch("CREATE TABLE attempts (project TEXT, run TEXT, id TEXT, terminal INTEGER); INSERT INTO attempts VALUES ('project-two','run-two','child-lane',0);")?;
+    drop(child_db);
+    let preset = rig.root.join("config/provenant/presets/custom.toml");
+    fs::create_dir_all(preset.parent().ok_or("preset parent")?)?;
+    fs::write(&preset, "name = 'custom'\n")?;
+    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../install.sh");
+    let direct = rig.execute_os(
+        Path::new("/bin/sh"),
+        &[
+            script.into_os_string(),
+            "--upgrade".into(),
+            "--state-dir".into(),
+            rig.state.clone().into_os_string(),
+            "--tag".into(),
+            "v9.8.7".into(),
+        ],
+        None,
+    )?;
+    assert_ne!(code(&direct), 0);
+    let output = String::from_utf8(direct.stdout.bytes)?;
+    for expected in ["waiting", "lane-one", "child-lane", "custom.toml"] {
+        assert!(output.contains(expected), "{output}");
+    }
+    let stopped = rig.command(&["upgrade", "--json"])?;
+    let stopped_value: serde_json::Value = serde_json::from_slice(&stopped.stdout.bytes)?;
+    assert_eq!(
+        stopped_value["data"][0]["success"], false,
+        "{stopped_value}"
+    );
+    assert_eq!(stopped_value["data"].as_array().unwrap().len(), 1);
+    for expected in ["waiting", "lane-one", "child-lane", "custom.toml"] {
+        assert!(
+            stopped_value.to_string().contains(expected),
+            "{stopped_value}"
+        );
+    }
+    let forced = rig.command(&["upgrade", "--yes", "--json"])?;
+    let forced_value: serde_json::Value = serde_json::from_slice(&forced.stdout.bytes)?;
+    assert_eq!(forced_value["data"][0]["success"], true, "{forced_value}");
+    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../install.sh");
+    let direct_forced = rig.execute_os(
+        Path::new("/bin/sh"),
+        &[
+            script.into_os_string(),
+            "--upgrade".into(),
+            "--yes".into(),
+            "--state-dir".into(),
+            rig.state.clone().into_os_string(),
+            "--tag".into(),
+            "v9.8.7".into(),
+        ],
+        None,
+    )?;
+    assert_eq!(code(&direct_forced), 0, "{direct_forced:?}");
+    rig.env
+        .retain(|(key, _)| key != "PROVENANT_TEST_MISSING_APPS");
+    fs::remove_dir_all(rig.state.join("fabric/graphs"))?;
+    fs::remove_dir_all(rig.state.join("children"))?;
+    fs::remove_file(db_path)?;
+    fs::remove_file(preset)?;
     fs::write(&curl_log, "")?;
     let result = rig.command(&["upgrade", "--hosts", "all", "--json"])?;
     let value: serde_json::Value = serde_json::from_slice(&result.stdout.bytes)?;
