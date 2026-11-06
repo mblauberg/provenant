@@ -145,6 +145,78 @@ fn lane_child_joins_the_same_graph_with_an_idempotent_receipt() {
 }
 
 #[test]
+fn rich_child_attempt_controls_define_replay_identity_and_reach_the_launch() {
+    let (document, mut checkpoint) = live(None);
+    let spec = AttemptSpec {
+        host: Some("local".into()),
+        confidential: true,
+        provider_timeout: Some(42),
+        ..Default::default()
+    };
+    let mut request = child("controlled", "controlled-launch");
+    request.launch = Some(relay::ChildLaunch {
+        templates: Default::default(),
+        node: json!({
+            "id":"controlled", "kind":"task", "access":"read_only",
+            "prompt":"Inspect launch policy", "route":{"alias":"senior"},
+            "attempt":spec
+        }),
+    });
+    let receipt = add(&document, &mut checkpoint, "a", &request).unwrap();
+    // The durable request identity must survive a checkpoint reload.
+    let mut checkpoint: GraphCheckpoint =
+        serde_json::from_slice(&serde_json::to_vec(&checkpoint).unwrap()).unwrap();
+    let before = checkpoint.clone();
+    let replay = add(&document, &mut checkpoint, "a", &request).unwrap();
+    assert_eq!(replay, relay::ChildReceipt { replayed: true, ..receipt.clone() });
+    assert_eq!(checkpoint, before);
+    for (field, value) in [
+        ("host", json!("localhost")),
+        ("confidential", json!(false)),
+        ("provider_timeout", json!(43)),
+    ] {
+        let mut changed = request.clone();
+        changed.launch.as_mut().unwrap().node["attempt"][field] = value;
+        assert_eq!(
+            add(&document, &mut checkpoint, "a", &changed).unwrap_err().code,
+            "idempotency_conflict",
+            "attempt.{field}"
+        );
+        assert_eq!(checkpoint, before, "attempt.{field}");
+    }
+    let expanded = plans::expand(
+        &document,
+        &checkpoint.extensions,
+        &checkpoint.expansions,
+        &plans::generous(),
+    ).unwrap();
+    let (plan, _) = validate_flat_plan(&expanded, &plans::generous()).unwrap();
+    let child = plan.nodes.iter().find(|node| node.id == receipt.node).unwrap();
+    assert_eq!(child.attempt.as_ref(), Some(&spec));
+    let mut owner = FakeOwner {
+        observations: [
+            AttemptObservation::Pending { attempt_ref: Some("attempt-a".into()) },
+            terminal(AttemptOutcome::Succeeded),
+        ].into(),
+        ..Default::default()
+    };
+    // A live child shares its producer's lifetime: keep the producer running
+    // until the child's launch has completed, then let the graph settle.
+    let mut journal = MemoryJournal(Some(checkpoint));
+    let run = advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(progress(&run.checkpoint, "a").state, NodeState::Running);
+    assert_eq!(progress(&run.checkpoint, &receipt.node).state, NodeState::Succeeded);
+    let launched = owner.calls.iter().position(|(key, _)| key.node_id == receipt.node).unwrap();
+    assert_eq!(owner.attempt_specs[launched].as_ref(), Some(&spec));
+    owner.observations.extend([
+        terminal(AttemptOutcome::Succeeded),
+        terminal(AttemptOutcome::Succeeded),
+    ]);
+    let run = advance(&document, &mut owner, &mut journal).unwrap();
+    assert!(run.checkpoint.successful());
+}
+
+#[test]
 fn writer_children_get_their_own_worktree_and_depth_is_bounded() {
     let (document, mut checkpoint) = live(None);
     assert_eq!(child_depth(&document), relay::DEFAULT_CHILD_DEPTH);

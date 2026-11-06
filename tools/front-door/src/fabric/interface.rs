@@ -1686,6 +1686,32 @@ mod tests {
             explain(&factory, inline.clone())?,
             explain(&factory, inline)?
         );
+        // Content identity includes launch policy, even when the brief and
+        // pinned repository subject are unchanged.
+        let controlled = json!({
+            "op":"run", "explain":true,
+            "document":{"identity":"content", "brief":"Inspect launch policy",
+                "tier":"senior", "access":"read_only"},
+            "attempt":{"host":"local", "confidential":true, "provider_timeout":42}
+        });
+        let original = explain(&factory, controlled.clone())?;
+        assert_eq!(original, explain(&factory, controlled.clone())?);
+        for (field, value) in [
+            ("host", json!("localhost")),
+            ("confidential", json!(false)),
+            ("provider_timeout", json!(43)),
+        ] {
+            let mut changed = controlled.clone();
+            changed["attempt"][field] = value;
+            let expected: provenant_fabric_runtime::graph::AttemptSpec =
+                serde_json::from_value(changed["attempt"].clone())?;
+            let response = factory.graph_document(changed.clone(), budget, &cancel)?;
+            let document: GraphDocument = serde_json::from_value(response["document"].clone())?;
+            assert_ne!(document.graph_id, original, "attempt.{field}");
+            assert_eq!(document.graph_id, explain(&factory, changed)?, "attempt.{field}");
+            let expanded = document.expanded(&factory.context.config.graph.limits)?;
+            assert_eq!(expanded.nodes[0].attempt.as_ref(), Some(&expected), "attempt.{field}");
+        }
         let review = factory.graph_document(
             json!({"op":"run","use":"review","brief":"Review","explain":true}),
             budget,
