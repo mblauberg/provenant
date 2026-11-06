@@ -2027,11 +2027,14 @@ fn silence_knob_controls_capture_plan_observations() -> Result {
         rig.state.join("config.toml"),
         "schema_version=1\n[gc]\nfree_floor='1B'\n[knobs]\n'lanes.silence_seconds'=2\n",
     )?;
-    let (request, _) = submitted_policy(
+    let (request, attempt) = submitted_policy(
         &rig,
         "config-silence",
         json!({"kind":"model","provider":"codex","model":"fixture"}),
     )?;
+    let task = &request.tasks[0];
+    assert_eq!(serde_json::to_value(&task.profile)?, attempt["profile"]);
+    assert_eq!(task.profile.knobs["lanes.silence_seconds"], 2);
     let plan = provenant_run::capture_plan(
         &request.tasks[0],
         request.tasks[0].provider_timeout_seconds,
