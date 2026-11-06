@@ -3328,17 +3328,31 @@ fn child_wait_lease_cycle(block_reclaim: bool) -> TestResult {
         let mut child = lane(seed, true);
         child.request.tasks[0].build_heavy = true;
         let id = starting(&store, &child, &call)?;
-        let record = store.claim_observed(id, &clock, &call, &facts)?.ok_or("later child starved")?;
-        assert!(matches!(store.record(parent_id, &call)?.state, AttemptState::Running { .. }));
+        let record = store
+            .claim_observed(id, &clock, &call, &facts)?
+            .ok_or("later child starved")?;
+        assert!(matches!(
+            store.record(parent_id, &call)?.state,
+            AttemptState::Running { .. }
+        ));
         let dir = store.attempt_dir(child.run_id, id, false)?;
         artifacts::seal(&dir, "stdout.log", b"child work", CAPTURE_LIMIT)?;
-        let observed = ExitObservation { scope: RunStore::scope(&record), ..exit() };
+        let observed = ExitObservation {
+            scope: RunStore::scope(&record),
+            ..exit()
+        };
         seal_exit(&store, &observed)?;
-        store.publish_terminal(id, record.revision, &TerminalPublication {
-            started_at: record.started_at,
-            result: "child work",
-            ..super::tests::publication()
-        }, &observed, &call)?;
+        store.publish_terminal(
+            id,
+            record.revision,
+            &TerminalPublication {
+                started_at: record.started_at,
+                result: "child work",
+                ..super::tests::publication()
+            },
+            &observed,
+            &call,
+        )?;
         finished.push(id);
     }
     assert!(store.set_child_wait_observed(parent_id, false, &call, &facts)?);

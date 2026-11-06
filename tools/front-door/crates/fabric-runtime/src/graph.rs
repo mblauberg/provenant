@@ -934,7 +934,8 @@ pub fn mark_cancelled_nodes_without_live_attempts(checkpoint: &mut GraphCheckpoi
     let mut changed = false;
     for node in &mut checkpoint.nodes {
         if matches!(node.state, NodeState::Pending | NodeState::Running)
-            && node.extra.get(relay::DETACHED_FROM_GRAPH_CANCEL) != Some(&serde_json::Value::Bool(true))
+            && node.extra.get(relay::DETACHED_FROM_GRAPH_CANCEL)
+                != Some(&serde_json::Value::Bool(true))
             && node
                 .attempts
                 .iter()
@@ -968,7 +969,8 @@ pub fn settle_cancelled_nodes<R: AttemptOwner, J: GraphJournal>(
     for index in 0..checkpoint.nodes.len() {
         let node = &checkpoint.nodes[index];
         if node.state != NodeState::Running
-            || node.extra.get(relay::DETACHED_FROM_GRAPH_CANCEL) == Some(&serde_json::Value::Bool(true))
+            || node.extra.get(relay::DETACHED_FROM_GRAPH_CANCEL)
+                == Some(&serde_json::Value::Bool(true))
         {
             continue;
         }
@@ -1461,11 +1463,18 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
     'schedule: loop {
         plans::remaining(&mut checkpoint, &expanded, limits);
         if checkpoint.cancelled {
-            relay::fence_detached_cancellation(document, &mut checkpoint).map_err(GraphError::Refused)?;
+            relay::fence_detached_cancellation(document, &mut checkpoint)
+                .map_err(GraphError::Refused)?;
             journal.save(&checkpoint).map_err(GraphError::Journal)?;
         }
         for node in &plan.nodes {
-            if (!checkpoint.cancelled || resume || checkpoint.nodes.iter().any(|progress| progress.id == node.id && progress.extra.get(relay::DETACHED_FROM_GRAPH_CANCEL) == Some(&serde_json::Value::Bool(true))))
+            if (!checkpoint.cancelled
+                || resume
+                || checkpoint.nodes.iter().any(|progress| {
+                    progress.id == node.id
+                        && progress.extra.get(relay::DETACHED_FROM_GRAPH_CANCEL)
+                            == Some(&serde_json::Value::Bool(true))
+                }))
                 && checkpoint.nodes.iter().any(|n| {
                     n.id == node.id
                         && (n.handoff.is_some()
@@ -1527,7 +1536,9 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
             if !resume {
                 settle_cancelled_nodes(&mut checkpoint, owner, journal)?;
                 let detached_live = checkpoint.nodes.iter().any(|node| {
-                    !node.state.settled() && node.extra.get(relay::DETACHED_FROM_GRAPH_CANCEL) == Some(&serde_json::Value::Bool(true))
+                    !node.state.settled()
+                        && node.extra.get(relay::DETACHED_FROM_GRAPH_CANCEL)
+                            == Some(&serde_json::Value::Bool(true))
                 });
                 if !detached_live {
                     return Ok(GraphRun {
@@ -1551,7 +1562,12 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
             &mut stopped_children,
         )?;
         for node_index in 0..plan.nodes.len() {
-            if checkpoint.cancelled && checkpoint.nodes[node_index].extra.get(relay::DETACHED_FROM_GRAPH_CANCEL) != Some(&serde_json::Value::Bool(true)) {
+            if checkpoint.cancelled
+                && checkpoint.nodes[node_index]
+                    .extra
+                    .get(relay::DETACHED_FROM_GRAPH_CANCEL)
+                    != Some(&serde_json::Value::Bool(true))
+            {
                 continue;
             }
             if checkpoint.nodes[node_index]
@@ -2142,7 +2158,8 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         && checkpoint.nodes.iter().enumerate().any(|(index, other)| {
                             index != node_index
                                 && other.state == NodeState::Running
-                                && !(relay::yields_slot(other) && node.id.starts_with(&format!("{}--", other.id)))
+                                && !(relay::yields_slot(other)
+                                    && node.id.starts_with(&format!("{}--", other.id)))
                                 && plan.nodes.iter().any(|peer| {
                                     peer.id == other.id && plans::writers_conflict(node, peer)
                                 })
@@ -3364,7 +3381,12 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     break;
                 }
             }
-            if (!checkpoint.cancelled || resume || checkpoint.nodes[node_index].extra.get(relay::DETACHED_FROM_GRAPH_CANCEL) == Some(&serde_json::Value::Bool(true)))
+            if (!checkpoint.cancelled
+                || resume
+                || checkpoint.nodes[node_index]
+                    .extra
+                    .get(relay::DETACHED_FROM_GRAPH_CANCEL)
+                    == Some(&serde_json::Value::Bool(true)))
                 && checkpoint.nodes.iter().any(|progress| {
                     progress.id == plan.nodes[node_index].id
                         && progress.state == NodeState::Failed

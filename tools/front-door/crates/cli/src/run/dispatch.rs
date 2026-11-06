@@ -10,7 +10,14 @@ pub fn run(mut command: Dispatch, edge: &Edge<'_>) -> Reply {
         );
     }
     if command.detached {
-        return reply("run", Err(Fail::new(Status::Invalid, ErrorKind::Invalid, "--detached requires a child launch inside a lane")));
+        return reply(
+            "run",
+            Err(Fail::new(
+                Status::Invalid,
+                ErrorKind::Invalid,
+                "--detached requires a child launch inside a lane",
+            )),
+        );
     }
     if let Err(fail) = require_explicit_target(&command, edge.cwd) {
         return reply("run", Err(fail));

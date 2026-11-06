@@ -802,7 +802,11 @@ pub fn close_resolved_asks<R: AttemptOwner, J: GraphJournal>(
                 .is_none_or(|n| n.state.settled())
         });
         let protected = ask.node.as_ref().is_some_and(|id| {
-            checkpoint.nodes.iter().any(|node| &node.id == id && node.extra.get(super::relay::DETACHED_FROM_GRAPH_CANCEL) == Some(&serde_json::Value::Bool(true)))
+            checkpoint.nodes.iter().any(|node| {
+                &node.id == id
+                    && node.extra.get(super::relay::DETACHED_FROM_GRAPH_CANCEL)
+                        == Some(&serde_json::Value::Bool(true))
+            })
         });
         let gone = (checkpoint.cancelled && !protected)
             || match ask.kind {
