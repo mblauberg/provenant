@@ -4952,6 +4952,31 @@ fn host_push_delivery_refuses_a_non_fast_forward_and_leaves_the_branch()
 }
 
 #[test]
+fn delivery_retry_reconciles_remote_before_push()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let mut fixture = PrepareFixture::new()?;
+    fixture.commit(&fixture.writer.worktree, "Lane work")?;
+    let git = provenant_os::git::git_executable().ok_or("git")?;
+    let wrapper = fixture.root.join("git-wrapper");
+    let marker = fixture.root.join("refuse-push");
+    fixture.executable(&wrapper, &format!(
+        "#!/bin/sh\nfor arg in \"$@\"; do if [ \"$arg\" = push ] && [ -f '{}' ]; then exit 42; fi; done\nexec '{}' \"$@\"\n",
+        marker.display(), git.display()
+    ))?;
+    fixture
+        .environment
+        .push(("PROVENANT_GIT".into(), wrapper.into_os_string()));
+    let host = fixture.prepare()?;
+    let head = host.head(&fixture.writer)?;
+    host.push(&fixture.writer, &fixture.request, head, "fixture")?;
+    std::fs::write(marker, "")?;
+    // A second push is deliberately made to fail; reconciliation must reuse
+    // the already-published head and still complete verification.
+    host.push(&fixture.writer, &fixture.request, head, "fixture")?;
+    Ok(())
+}
+
+#[test]
 fn existing_pr_delivery_only_creates_after_positive_absence()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
     let mut fixture = PrepareFixture::new()?;

@@ -1826,20 +1826,42 @@ impl HostDeliveryContext {
         }
         let destination = format!("refs/heads/{}", request.branch);
         self.refuse_remote_symbolic_target(cwd, &bound.push_url, &request.branch, Stage::Push)?;
-        let refspec = format!("{head}:{destination}");
-        self.command(
+        // A previous push may have succeeded before its receipt was saved.
+        let advertised = self.command(
             cwd,
             "git",
-            &[
-                "push",
-                "--no-follow-tags",
-                "--recurse-submodules=no",
-                "--",
-                &bound.push_url,
-                &refspec,
-            ],
+            &["ls-remote", "--", &bound.push_url, &destination],
             Stage::Push,
         )?;
+        let already_pushed = if advertised.is_empty() {
+            false
+        } else {
+            let mut lines = advertised.lines();
+            let (oid, reference) = lines
+                .next()
+                .and_then(|line| line.split_once('\t'))
+                .ok_or(RunError::Delivery(Stage::Push))?;
+            if reference != destination || GitOid::parse(oid).is_err() || lines.next().is_some() {
+                return Err(RunError::Delivery(Stage::Push));
+            }
+            oid == head.to_string()
+        };
+        if !already_pushed {
+            let refspec = format!("{head}:{destination}");
+            self.command(
+                cwd,
+                "git",
+                &[
+                    "push",
+                    "--no-follow-tags",
+                    "--recurse-submodules=no",
+                    "--",
+                    &bound.push_url,
+                    &refspec,
+                ],
+                Stage::Push,
+            )?;
+        }
         let tracking = format!("refs/remotes/{}/{}", request.remote, request.branch);
         let fetchspec = format!("+{destination}:{tracking}");
         self.refuse_symref_destination(cwd, &tracking, Stage::Fetch)?;
