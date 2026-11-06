@@ -8300,7 +8300,7 @@ fn admission_uses_configured_gc_floor_and_reports_the_fix() -> TestResult {
             Ok(self.0)
         }
     }
-    for free in [99, 100] {
+    for (writer, free) in [(true, 99), (true, 100), (false, 99), (false, 100)] {
         let temp = tempfile::tempdir()?;
         let (clock, cancel) = (clock(), CancelToken::new());
         let call = call(&clock, &cancel);
@@ -8320,11 +8320,31 @@ fn admission_uses_configured_gc_floor_and_reports_the_fix() -> TestResult {
             admission_seconds: 1,
             ..Default::default()
         });
-        let run = lane(98, true);
+        let run = lane(98, writer);
         let id = starting(&store, &run, &call)?;
         let attempt = store.attempt_dir(run.run_id, id, false)?;
+        let record = store.record(id, &call)?;
+        let waits = store.lane_waits_with_resources(&[record], &call, &Disk(free));
+        if writer && free < 100 {
+            assert_eq!(
+                waits[0].waiting_for,
+                "host capacity: disk space: 99 bytes available; gc.free_floor is 100 bytes (source: host configuration)"
+            );
+        } else {
+            assert_eq!(
+                waits[0].waiting_for,
+                "launch preparation: preparing the lane"
+            );
+        }
         let result = store.admit(id, &attempt, &Disk(free), &clock, &cancel);
-        if free == 100 {
+        if writer && free < 100 {
+            // Status sees a healthy attempt volume, but the guardian sampled
+            // a full cwd/cache volume through its sealed LaneResources.
+            let record = store.record(id, &call)?;
+            let waits = store.lane_waits_with_resources(&[record], &call, &Disk(u64::MAX));
+            assert_eq!(waits[0].waiting_for, "host capacity: disk space: 99 bytes available; gc.free_floor is 100 bytes (source: host configuration)");
+        }
+        if !writer || free == 100 {
             assert_eq!(
                 result?.state,
                 AttemptState::Running {
@@ -8383,7 +8403,7 @@ fn admission_below_the_floor_reclaims_build_output_and_then_admits() -> TestResu
             self.helps
         }
     }
-    for helps in [true, false] {
+    for (writer, helps) in [(true, true), (true, false), (false, false)] {
         let temp = tempfile::tempdir()?;
         let (clock, cancel) = (clock(), CancelToken::new());
         let call = call(&clock, &cancel);
@@ -8399,7 +8419,7 @@ fn admission_below_the_floor_reclaims_build_output_and_then_admits() -> TestResu
             admission_seconds: 1,
             ..Default::default()
         });
-        let run = lane(102, true);
+        let run = lane(102, writer);
         let id = starting(&store, &run, &call)?;
         let attempt = store.attempt_dir(run.run_id, id, false)?;
         let disk = Disk {
@@ -8408,8 +8428,12 @@ fn admission_below_the_floor_reclaims_build_output_and_then_admits() -> TestResu
             helps,
         };
         let result = store.admit(id, &attempt, &disk, &clock, &cancel);
-        assert_eq!(disk.reclaims.get(), 1, "one attempt per refusal window");
-        if helps {
+        assert_eq!(
+            disk.reclaims.get(),
+            u32::from(writer),
+            "only writers reclaim during admission"
+        );
+        if helps || !writer {
             assert_eq!(
                 result?.state,
                 AttemptState::Running {
@@ -8469,6 +8493,16 @@ fn admission_missing_configuration_uses_the_default_host_floor() -> TestResult {
         std::fs::write(context.state_root.as_path().join("config.toml"), "[gc")?;
         let floor = provenant_config::GcSettings::default().free_floor_bytes(&registry)?;
         let free = floor - u64::from(below);
+        if below {
+            let record = store.record(id, &call)?;
+            let waits = store.lane_waits_with_resources(&[record], &call, &Disk(free));
+            assert_eq!(
+                waits[0].waiting_for,
+                format!(
+                    "host capacity: disk space: {free} bytes available; gc.free_floor is {floor} bytes (source: shipped default)"
+                )
+            );
+        }
         let result = store.admit(id, &attempt, &Disk(free), &clock, &cancel);
         if below {
             assert!(
