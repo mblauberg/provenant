@@ -132,12 +132,15 @@ to census observations too.
 A new writer may reuse a registered worktree from a terminal lane when the tree is clean and
 writer custody is free. Dirty trees, held locks and retained import fences still refuse. When
 `--base` is supplied for a branch that already exists, Provenant accepts the branch only when
-it already contains that base (reusing its existing worktree or creating one); otherwise the refusal
-names the branch head and the base, and says to omit `--base` to reuse it.
+it already contains that base; otherwise the refusal names the branch head and
+the base. A branch checked out elsewhere must be selected with `--worktree`.
 If a linked checkout has no Provenant lane-owner record, the worktree list
 shows that fact separately from its observed writer state. It may have been
 created outside Provenant. Inspect custody and use `--worktree <path>` to select
-the checkout explicitly; unknown custody remains refused until checked.
+the checkout explicitly; unknown custody remains refused until checked. When a
+local `--branch` launch finds that branch in a clean unowned linked checkout,
+the refusal and local graph status and output show a shell-quoted absolute path
+for `--worktree`. The checkout is rechecked under the ordinary custody rules.
 
 Use `provenant worktree doctor PATH` after a worktree refusal. It reports the
 checkout's state, the reason and one suggested command for dirty, stale

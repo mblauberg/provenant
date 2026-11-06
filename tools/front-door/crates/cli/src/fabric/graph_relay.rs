@@ -510,6 +510,18 @@ pub fn provision_writer(
     source: &str,
     cancel: &CancelToken,
 ) -> Result<(), ServiceError> {
+    provision_writer_checked(context, path, branch, source, cancel)
+        .map_err(|error| refused("writer_worktree", error.to_string()))
+}
+
+/// Preserve the typed worktree failure for the graph launch owner.
+pub fn provision_writer_checked(
+    context: &Context,
+    path: &str,
+    branch: &str,
+    source: &str,
+    cancel: &CancelToken,
+) -> Result<(), provenant_confinement::worktrees::WorktreeError> {
     use provenant_confinement::worktrees;
     worktrees::with_context(
         &context.roots,
@@ -519,7 +531,6 @@ pub fn provision_writer(
         cancel,
         |worktree_context| provision_in_context(worktree_context, path, branch, source, cancel),
     )
-    .map_err(|error| refused("writer_worktree", error.to_string()))
 }
 
 fn provision_in_context(

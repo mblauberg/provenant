@@ -45,6 +45,92 @@ fn malformed_graph_reports_safe_output_field_and_action() -> Result {
     Ok(())
 }
 
+#[test]
+fn existing_git_worktree_with_spaces_has_a_followable_branch_remedy() -> Result {
+    let rig = GraphProject::new()?;
+    let checkout = rig.temp.path().join("external writer's checkout");
+    let git = provenant_os::fixture::git_command()
+        .current_dir(&rig.project)
+        .args(["worktree", "add", "-b", "topic/remedy"])
+        .arg(&checkout)
+        .arg("HEAD")
+        .output()?;
+    assert!(git.status.success(), "{git:?}");
+    let (output, refusal) = rig.run(&[
+        "run",
+        "inspect",
+        "--branch",
+        "topic/remedy",
+        "--base",
+        "HEAD",
+        "--write-scope",
+        ".",
+        "--wait=10s",
+    ])?;
+    if refusal.to_string().contains("ProbeFailed") {
+        provenant_test_support::skip_sandbox_dependent_test("native confinement probe failed")?;
+        return Ok(());
+    }
+    assert!(!output.status.success(), "{refusal}");
+    let action = refusal["data"]["local_worktree_remedy"]
+        .as_str()
+        .ok_or_else(|| format!("missing local remedy: {refusal}"))?;
+    let quoted = provenant_records::diagnostic::shell_path(
+        &checkout.canonicalize()?,
+        provenant_records::diagnostic::Destination::Local,
+    )
+    .ok_or("path not shell-safe")?;
+    assert!(action.contains(&format!("--worktree {quoted}")), "{action}");
+    let quoted_argument = action
+        .split_once("--worktree ")
+        .ok_or("missing worktree flag")?
+        .1;
+    let resolved = Command::new("sh")
+        .args([
+            "-c",
+            &format!("set -- {quoted_argument}; printf '%s' \"$1\""),
+        ])
+        .output()?;
+    assert!(resolved.status.success(), "{resolved:?}");
+    let selected = String::from_utf8(resolved.stdout)?;
+    assert_eq!(Path::new(&selected), checkout.canonicalize()?);
+    let graph = refusal["data"]["checkpoint"]["graph_id"]
+        .as_str()
+        .ok_or("missing graph id")?;
+    let (_, status) = rig.run(&["status", graph])?;
+    assert!(
+        status["data"]["rows"]
+            .as_array()
+            .is_some_and(|rows| rows.iter().any(|row| row["next"]
+                .as_str()
+                .is_some_and(|next| next.contains(&format!("--worktree {quoted}"))))),
+        "{status}"
+    );
+    let (_, graph_output) = rig.run(&["output", graph])?;
+    assert!(
+        graph_output["data"]["graph_failures"]
+            .as_array()
+            .is_some_and(|rows| rows.iter().any(|row| row["next"]
+                .as_str()
+                .is_some_and(|next| next.contains(&format!("--worktree {quoted}"))))),
+        "{graph_output}"
+    );
+    let output = rig
+        .command()
+        .args(["run", "inspect", "--worktree"])
+        .arg(&selected)
+        .args(["--write-scope", ".", "--wait=10s"])
+        .output()?;
+    let followed: Value = serde_json::from_slice(&output.stdout)?;
+    assert!(
+        followed["data"]["checkpoint"]["nodes"]
+            .as_array()
+            .is_some_and(|nodes| nodes.iter().any(|node| !node["writer_binding"].is_null())),
+        "{followed}"
+    );
+    Ok(())
+}
+
 fn fixture_cli() -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_provenant"));
     provenant_os::fixture::scrub_git_env(&mut command);
@@ -490,6 +576,17 @@ fn invalid_template_documents_are_refused_by_list_and_show() -> Result {
         let (output, _) = rig.run(&args)?;
         assert!(!output.status.success());
     }
+    let (output, refusal) = rig.run(&["run", "--use", "broken", "inspect"])?;
+    assert!(!output.status.success(), "{refusal}");
+    assert_eq!(refusal["error"]["code"], "invalid_input", "{refusal}");
+    assert!(refusal["error"]["repair"].is_string(), "{refusal}");
+    let detail = refusal["error"]["message"]
+        .as_str()
+        .ok_or("missing template reason")?;
+    assert!(
+        detail.contains("templates") && detail.contains("validated"),
+        "{refusal}"
+    );
     assert!(graph_records(&rig.state())?.is_empty());
     Ok(())
 }
@@ -631,6 +728,184 @@ fn steer_graph_and_node_refuse_ambiguous_live_attempts_before_reading_stdin() ->
                 .is_some_and(|message| message.contains("several live attempts")),
             "{value}"
         );
+    }
+    Ok(())
+}
+
+#[test]
+fn unreadable_graph_file_is_refused_by_real_cli_before_admission() -> Result {
+    use std::os::unix::fs::PermissionsExt;
+    if provenant_os::fs::effective_uid() == 0 {
+        return Ok(());
+    }
+    let rig = GraphProject::new()?;
+    let path = rig.document(&json!({"schema_version":1,"graph_id":"unreadable","nodes":[]}))?;
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000))?;
+    let output = rig.command().args(["run", "--file"]).arg(&path).output()?;
+    assert!(!output.status.success(), "{output:?}");
+    let value: Value = serde_json::from_slice(&output.stdout)?;
+    assert_eq!(value["error"]["code"], "invalid_input", "{value}");
+    assert!(
+        value["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("input could not be read"),
+        "{value}"
+    );
+    let human = fixture_cli()
+        .current_dir(&rig.project)
+        .env("PROVENANT_ROOT", &rig.root)
+        .env("XDG_CONFIG_HOME", rig.temp.path().join("config"))
+        .arg("--state-dir")
+        .arg(rig.state())
+        .args(["run", "--file"])
+        .arg(&path)
+        .output()?;
+    assert!(!human.status.success(), "{human:?}");
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&human.stdout),
+        String::from_utf8_lossy(&human.stderr)
+    );
+    assert!(text.contains("input could not be read"), "{text}");
+    assert!(graph_records(&rig.state())?.is_empty());
+    Ok(())
+}
+
+#[test]
+fn fake_launch_owner_refusal_reaches_real_graph_status() -> Result {
+    use provenant_core::{CancelToken, Clock, RootInputs, StateRoot, WaitBudget};
+    use provenant_fabric_runtime::coordination::facade::{FacadeError, InvalidInputDetail};
+    use provenant_fabric_runtime::graph::{
+        self, AccessMode, AttemptKey, AttemptObservation, AttemptOwner, FileJournal, GraphDocument,
+        GraphExecution, GraphRoute, NodeInput, Replay,
+    };
+
+    struct RefusingOwner(Option<InvalidInputDetail>);
+    impl AttemptOwner for RefusingOwner {
+        type Error = FacadeError;
+        fn actor(&self) -> String {
+            "actor".into()
+        }
+        fn observe_or_start(
+            &mut self,
+            _: &AttemptKey,
+            _: NodeInput<'_>,
+            _: &GraphRoute,
+            _: AccessMode,
+            _: Option<&str>,
+            _: Replay<'_>,
+        ) -> std::result::Result<AttemptObservation, Self::Error> {
+            Err(FacadeError::InvalidInput {
+                detail: self.0.clone(),
+            })
+        }
+    }
+    let rig = GraphProject::new()?;
+    let seed = rig.document(&json!({"schema_version":1,"graph_id":"seed","nodes":[{"id":"accept","kind":"gate","access":"read_only","condition":{"type":"budget"}}]}))?;
+    let output = rig
+        .command()
+        .args(["run", "--file"])
+        .arg(seed)
+        .arg("--wait=10s")
+        .output()?;
+    assert!(output.status.success(), "{output:?}");
+    let checkpoint = graph_records(&rig.state())?
+        .into_iter()
+        .find(|p| p.file_name().is_some_and(|n| n == "graph-seed.json"))
+        .ok_or("seed checkpoint")?;
+    let project = checkpoint
+        .parent()
+        .and_then(Path::file_name)
+        .and_then(|n| n.to_str())
+        .ok_or("project id")?
+        .parse()?;
+    let mut inputs = RootInputs::new(rig.temp.path().to_path_buf(), rig.root.clone());
+    inputs.state_dir = Some(rig.state());
+    let state = StateRoot::resolve(&inputs, &provenant_os::fs::SystemPathResolver)?;
+    let clock = provenant_os::clock::SystemClock::new();
+    let cancel = CancelToken::new();
+    for (id, fact, expected) in [
+        (
+            "schema-refusal",
+            Some(InvalidInputDetail::Schema),
+            "schema_version",
+        ),
+        ("code-only-refusal", None, "invalid_input"),
+    ] {
+        let document: GraphDocument = serde_json::from_value(
+            json!({"schema_version":1,"graph_id":id,"nodes":[{"id":"one","prompt":"fixture","access":"read_only","route":{"adapter":"fixture","model":"fixture/model"}}]}),
+        )?;
+        let mut journal = FileJournal::open(
+            &state,
+            project,
+            id,
+            WaitBudget::cli(clock.mono_now(), 5)?,
+            &cancel,
+            &clock,
+        )?;
+        journal.bind(GraphExecution {
+            review_base: None,
+            extra: Default::default(),
+            integration_base: None,
+            directory: rig.project.clone(),
+            document: document.clone(),
+        })?;
+        let run = graph::advance_with_budget(
+            &document,
+            &mut RefusingOwner(fact),
+            &mut journal,
+            &provenant_fabric_runtime::config::GraphLimits::default(),
+            &provenant_fabric_runtime::config::GraphBudget::default(),
+        )?;
+        assert_eq!(
+            run.checkpoint.nodes[0].advance_error_code.as_deref(),
+            Some("launch_refused")
+        );
+        assert_eq!(
+            run.checkpoint.nodes[0].advance_owner_code.as_deref(),
+            Some("invalid_input")
+        );
+        assert!(
+            run.checkpoint.nodes[0]
+                .advance_error
+                .as_deref()
+                .unwrap()
+                .contains(expected)
+        );
+        drop(journal);
+        let (_, machine) = rig.run(&["status", id])?;
+        let rows = machine["data"]["rows"].as_array().ok_or("status rows")?;
+        let row = rows
+            .iter()
+            .find(|row| row["kind"] == "node")
+            .ok_or("node row")?;
+        assert_eq!(row["cause_code"], "invalid_input", "{machine}");
+        assert!(
+            row["reason"].as_str().unwrap().contains("invalid_input"),
+            "{machine}"
+        );
+        assert!(
+            row["reason"].as_str().unwrap().contains(expected),
+            "{machine}"
+        );
+        assert!(row["next"].as_str().unwrap().contains("check"), "{machine}");
+        let (_, output) = rig.run(&["output", id])?;
+        let failure = &output["data"]["graph_failures"][0];
+        assert_eq!(failure["cause_code"], row["cause_code"], "{output}");
+        assert_eq!(failure["reason"], row["reason"], "{output}");
+        assert_eq!(failure["next"], row["next"], "{output}");
+        let human = fixture_cli()
+            .current_dir(&rig.project)
+            .env("PROVENANT_ROOT", &rig.root)
+            .env("XDG_CONFIG_HOME", rig.temp.path().join("config"))
+            .arg("--state-dir")
+            .arg(rig.state())
+            .args(["status", id, "--full"])
+            .output()?;
+        assert!(human.status.success(), "{human:?}");
+        let text = String::from_utf8(human.stdout)?;
+        assert!(text.contains(expected) && text.contains("check"), "{text}");
     }
     Ok(())
 }

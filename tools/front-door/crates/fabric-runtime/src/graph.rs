@@ -1265,6 +1265,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         skip_reason: None,
                         advance_error: None,
                         advance_error_code: None,
+                        advance_owner_code: None,
                         launch_retry: None,
                         last_launch_retry: None,
                         outputs: None,
@@ -1317,10 +1318,8 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                                 progress.state = NodeState::Failed;
                                 progress.advance_error_code =
                                     Some("writer_binding_unavailable".into());
-                                progress.advance_error = Some(bounded(
-                                    &format!("node {}: cannot bind writer: {error}", node.id),
-                                    MAX_ADVANCE_ERROR_BYTES,
-                                ));
+                                progress.advance_error =
+                                    Some(next_attempt::writer_binding_reason(&node.id, &error));
                                 continue;
                             }
                         };
@@ -2328,10 +2327,8 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                             let progress = &mut checkpoint.nodes[node_index];
                             progress.state = NodeState::Failed;
                             progress.advance_error_code = Some("writer_binding_unavailable".into());
-                            progress.advance_error = Some(bounded(
-                                &format!("node {}: cannot bind writer: {error}", node.id),
-                                MAX_ADVANCE_ERROR_BYTES,
-                            ));
+                            progress.advance_error =
+                                Some(next_attempt::writer_binding_reason(&node.id, &error));
                             journal.save(&checkpoint).map_err(GraphError::Journal)?;
                             break;
                         }
@@ -3539,6 +3536,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                                     progress.outputs = None;
                                     progress.advance_error = None;
                                     progress.advance_error_code = None;
+                                    progress.advance_owner_code = None;
                                     progress.state = NodeState::Running;
                                     true
                                 }

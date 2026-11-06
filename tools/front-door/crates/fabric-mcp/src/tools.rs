@@ -1312,96 +1312,68 @@ impl ServiceError {
         }
     }
 
+    /// Project MCP-owned failures at their typed owner. Delegated failures
+    /// retain their owner's projection; raw source messages never become facts.
+    pub fn diagnostic(&self) -> provenant_records::diagnostic::Diagnostic {
+        use provenant_records::diagnostic::Diagnostic;
+        match self {
+            Self::Mutation { source, .. } => source.diagnostic(),
+            Self::Invalid(error) => error.diagnostic(),
+            Self::Coordination(error) => error.diagnostic(),
+            Self::Facade(error) => error.diagnostic(),
+            Self::Time(_) => Diagnostic::new(self.code())
+                .next("Check the argument path and tool schema, then retry."),
+            Self::ResultTooLarge => {
+                Diagnostic::new(self.code()).next("Request a smaller page or output chunk.")
+            }
+            _ => Diagnostic::new(self.code())
+                .next("Inspect the current state and retry when the cause is resolved."),
+        }
+    }
+
     /// Stable structured error data. Uncertain mutations carry their
     /// idempotency key; prompts, tokens and raw source errors are omitted.
     pub fn structured_error(&self) -> Value {
-        if let Self::Invalid(error) = self {
-            let projection = error.diagnostic();
-            let mut value = serde_json::to_value(&projection)
-                .unwrap_or_else(|_| serde_json::json!({"code": error.code()}));
-            value["path"] = serde_json::json!(error.safe_path());
-            value["message"] =
-                serde_json::json!(projection.detail.as_deref().unwrap_or(error.code()));
-            value["hint"] = serde_json::json!(
-                projection
-                    .next
-                    .as_deref()
-                    .unwrap_or("check the input and retry")
-            );
-            return value;
-        }
-        let projection = match self {
-            Self::Facade(error) => Some(error.diagnostic()),
-            Self::Coordination(error) => Some(error.diagnostic()),
-            _ => None,
-        };
-        if let Some(projection) = projection {
-            let mut value = serde_json::to_value(&projection)
-                .unwrap_or_else(|_| serde_json::json!({"code": self.code()}));
-            value["message"] = Value::String(
-                projection
-                    .detail
-                    .clone()
-                    .unwrap_or_else(|| projection.code.clone()),
-            );
-            value["hint"] = Value::String(
-                projection
-                    .next
-                    .clone()
-                    .unwrap_or_else(|| "Inspect the current state before retrying.".into()),
-            );
-            // These are envelope fields, not independent diagnostic decisions.
-            match self {
-                Self::Facade(FacadeError::LaunchUnknown { operation_id })
-                | Self::Coordination(CoordinationError::Peer(
-                    provenant_fabric_runtime::hosts::PeerError::Unknown { operation_id },
-                )) => value["operation_id"] = serde_json::json!(operation_id),
-                Self::Facade(FacadeError::GenerationConflict { current_generation }) => {
-                    value["current_generation"] = serde_json::json!(current_generation);
-                }
-                Self::Coordination(CoordinationError::Store(
-                    provenant_fabric_runtime::StoreError::Invalid(field),
-                )) => {
-                    value["field"] =
-                        serde_json::json!(provenant_records::diagnostic::safe_text(field))
-                }
-                Self::Coordination(CoordinationError::Input(error)) => {
-                    value["path"] = serde_json::json!(error.safe_path());
-                }
-                _ => {}
-            }
-            let facade = match self {
-                Self::Facade(error) => Some(error.clone()),
-                Self::Coordination(error) => Some(FacadeError::from(error)),
-                _ => None,
-            };
-            if let Some(FacadeError::Io { operation, .. }) = facade
-                && operation == "access Fabric store"
-            {
-                value["operation"] = Value::String(operation);
-            }
-            if self.code() == "busy" {
-                value["retryable"] = Value::Bool(true);
-            }
-            return value;
-        }
         if let Self::Mutation {
             operation_id,
             source,
         } = self
         {
-            let mut detail = source.structured_error();
-            detail["operation_id"] = serde_json::json!(operation_id);
-            return detail;
+            let mut value = source.structured_error();
+            value["operation_id"] = serde_json::json!(operation_id);
+            return value;
         }
-        let mut detail = match self {
+        let projection = self.diagnostic();
+        let mut value = serde_json::to_value(&projection)
+            .unwrap_or_else(|_| serde_json::json!({"code": self.code()}));
+        value["message"] =
+            serde_json::json!(projection.detail.as_deref().unwrap_or(&projection.code));
+        value["hint"] = serde_json::json!(projection.next);
+        // Preserve transport metadata without deciding causes or remedies here.
+        match self {
+            Self::Invalid(error) | Self::Coordination(CoordinationError::Input(error)) => {
+                value["path"] = serde_json::json!(error.safe_path());
+            }
+            Self::Facade(FacadeError::LaunchUnknown { operation_id })
+            | Self::Coordination(CoordinationError::Peer(
+                provenant_fabric_runtime::hosts::PeerError::Unknown { operation_id },
+            )) => value["operation_id"] = serde_json::json!(operation_id),
+            Self::Facade(FacadeError::GenerationConflict { current_generation }) => {
+                value["current_generation"] = serde_json::json!(current_generation);
+            }
+            Self::Coordination(CoordinationError::Store(
+                provenant_fabric_runtime::StoreError::Invalid(field),
+            )) => {
+                value["field"] = serde_json::json!(provenant_records::diagnostic::safe_text(field))
+            }
+            Self::Inbox(InboxError::Invalid(field)) => {
+                value["field"] = serde_json::json!(field);
+            }
             Self::Cli { data, .. } => {
-                let mut value = serde_json::json!({"code":self.code()});
-                if let Some(revision) = data.get("revision").and_then(Value::as_u64) {
-                    value["revision"] = revision.into();
-                }
-                if let Some(revision) = data.get("current_revision").and_then(Value::as_u64) {
-                    value["current_revision"] = revision.into();
+                for key in ["revision", "current_revision"] {
+                    if let Some(revision) = data.get(key).and_then(Value::as_u64) {
+                        value[key] = revision.into();
+                    }
                 }
                 if self.code() == CONTROL_UNSUPPORTED
                     && let Ok(receipt) = serde_json::from_value::<
@@ -1412,32 +1384,23 @@ impl ServiceError {
                     value["state"] = serde_json::json!(receipt.state);
                     value["operation_id"] = serde_json::json!(receipt.operation_id);
                 }
-                value
             }
-            Self::Inbox(InboxError::Invalid(field)) => {
-                serde_json::json!({"code":self.code(),"field":field})
-            }
-            _ => serde_json::json!({"code":self.code()}),
-        };
-        detail["code"] = Value::String(self.code().into());
-        if self.code() == "busy" {
-            detail["retryable"] = Value::Bool(true);
+            _ => {}
         }
-        detail["message"] = Value::String(self.code().to_owned());
-        detail["hint"] = Value::String(
-            match self {
-                Self::Invalid(_) | Self::Time(_) => {
-                    "Check the argument path and tool schema, then retry."
-                }
-                Self::Facade(FacadeError::LaunchUnknown { .. }) => {
-                    "Check status before retrying with the same operation ID."
-                }
-                Self::ResultTooLarge => "Request a smaller page or output chunk.",
-                _ => "Inspect the current state and retry when the cause is resolved.",
-            }
-            .into(),
-        );
-        detail
+        let facade = match self {
+            Self::Facade(error) => Some(error.clone()),
+            Self::Coordination(error) => Some(FacadeError::from(error)),
+            _ => None,
+        };
+        if let Some(FacadeError::Io { operation, .. }) = facade
+            && operation == "access Fabric store"
+        {
+            value["operation"] = Value::String(operation);
+        }
+        if self.code() == "busy" {
+            value["retryable"] = Value::Bool(true);
+        }
+        value
     }
 }
 

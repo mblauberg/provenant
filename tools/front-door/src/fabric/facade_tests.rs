@@ -324,6 +324,28 @@ fn prompt_limit_refusal_keeps_safe_field_and_existing_code() {
 }
 
 #[test]
+fn dirty_writer_refusal_keeps_safe_cause_and_action_on_the_wire() {
+    let error = run_error(provenant_run::RunError::Writer(
+        provenant_confinement::worktrees::WorktreeError::Dirty("TOKEN_SENTINEL".into()),
+    ));
+    let decoded: FacadeError = serde_json::from_slice(&serde_json::to_vec(&error).unwrap()).unwrap();
+    let diagnostic = decoded.diagnostic();
+    assert!(diagnostic.detail.as_deref().unwrap().contains("uncommitted"));
+    assert!(diagnostic.next.as_deref().unwrap().contains("commit"));
+    assert!(!serde_json::to_string(&diagnostic).unwrap().contains("TOKEN_SENTINEL"));
+
+    let error = run_error(provenant_run::RunError::Writer(
+        provenant_confinement::worktrees::WorktreeError::CheckedOut,
+    ));
+    let decoded: FacadeError = serde_json::from_slice(&serde_json::to_vec(&error).unwrap()).unwrap();
+    let diagnostic = decoded.diagnostic();
+    assert!(diagnostic.detail.as_deref().unwrap().contains("checked out"));
+    let next = diagnostic.next.as_deref().unwrap();
+    assert!(next.contains("provenant worktree list"));
+    assert!(next.contains("--worktree"));
+}
+
+#[test]
 fn memory_pressure_refusal_keeps_source_and_resource_action() {
     use provenant_records::diagnostic::{PressureLevel, PressureThreshold, SettingSource};
     let error = run_error(provenant_run::RunError::Admission(

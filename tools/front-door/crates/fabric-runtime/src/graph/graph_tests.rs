@@ -9392,6 +9392,7 @@ fn at(seconds: i64) -> provenant_core::WallTime {
 #[derive(Default)]
 struct ErrorLauncher {
     errors: std::collections::BTreeMap<usize, crate::coordination::facade::FacadeError>,
+    binding_error: Option<crate::coordination::facade::FacadeError>,
     observations: VecDeque<AttemptObservation>,
     calls: Vec<AttemptKey>,
     stored_refs: Vec<Option<String>>,
@@ -9408,6 +9409,15 @@ impl AttemptOwner for ErrorLauncher {
 
     fn actor(&self) -> String {
         "actor".into()
+    }
+    fn bind_writer_worktree(
+        &mut self,
+        _path: &str,
+    ) -> Result<Option<WriterWorktreeBinding>, Self::Error> {
+        match self.binding_error.take() {
+            Some(error) => Err(error),
+            None => Ok(None),
+        }
     }
     fn wall_now(&self) -> Option<provenant_core::WallTime> {
         self.now
@@ -10912,6 +10922,20 @@ fn admitted_invalid_launch_projects_safe_schema_reason_and_action() {
     assert!(reason.contains("check the named input field"));
     assert!(!reason.contains("TOKEN_SENTINEL"));
     assert!(!reason.chars().any(char::is_control));
+
+    let mut owner = ErrorLauncher {
+        now: Some(at(0)),
+        errors: [(
+            1,
+            crate::coordination::facade::FacadeError::InvalidInput { detail: None },
+        )]
+        .into(),
+        ..Default::default()
+    };
+    let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
+    let reason = run.checkpoint.nodes[0].advance_error.as_deref().unwrap();
+    assert!(reason.contains("invalid_input"));
+    assert!(reason.contains("check the input"));
 }
 
 #[test]
@@ -11130,6 +11154,59 @@ fn launch_projection_omits_untrusted_error_sources() {
         assert!(!reason.chars().any(char::is_control));
         assert!(reason.len() <= MAX_ADVANCE_ERROR_BYTES);
     }
+}
+
+#[test]
+fn writer_binding_failure_persists_only_the_safe_projection() {
+    use crate::coordination::facade::FacadeError;
+    let mut writer = node("writer", route("first"));
+    writer.access = AccessMode::WorktreeWrite;
+    writer.worktree = Some("/fixture/worktree".into());
+    let mut owner = ErrorLauncher {
+        binding_error: Some(FacadeError::Io {
+            operation: format!("TOKEN_SENTINEL\u{1b}{}", "é".repeat(2048)),
+            path: Some("/private/host".into()),
+            delivery_limit: None,
+            delivery_stage: None,
+            resource: None,
+            input_failure: None,
+        }),
+        ..Default::default()
+    };
+    let run = advance(
+        &graph(vec![writer]),
+        &mut owner,
+        &mut MemoryJournal::default(),
+    )
+    .unwrap();
+    let reason = run.checkpoint.nodes[0].advance_error.as_deref().unwrap();
+    assert!(reason.contains("io"));
+    assert!(!reason.contains("TOKEN_SENTINEL"));
+    assert!(!reason.contains("/private/host"));
+    assert!(!reason.chars().any(char::is_control));
+    assert!(reason.len() <= MAX_ADVANCE_ERROR_BYTES);
+
+    let mut writer = node("writer", route("first"));
+    writer.access = AccessMode::WorktreeWrite;
+    writer.worktree = Some("/fixture/worktree".into());
+    let mut owner = ErrorLauncher {
+        binding_error: Some(FacadeError::DispatchRefused {
+            fact: Some(crate::coordination::facade::DispatchRefusalFact::DirtyWriter),
+            reason: "TOKEN_SENTINEL".into(),
+            disk: None,
+        }),
+        ..Default::default()
+    };
+    let run = advance(
+        &graph(vec![writer]),
+        &mut owner,
+        &mut MemoryJournal::default(),
+    )
+    .unwrap();
+    let reason = run.checkpoint.nodes[0].advance_error.as_deref().unwrap();
+    assert!(reason.contains("uncommitted"));
+    assert!(reason.contains("commit"));
+    assert!(!reason.contains("TOKEN_SENTINEL"));
 }
 
 #[test]

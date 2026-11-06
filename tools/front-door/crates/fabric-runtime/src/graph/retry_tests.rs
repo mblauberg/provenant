@@ -1227,6 +1227,11 @@ fn retry_of_explicit_launch_refusal_preserves_pending_siblings_and_rejects_uncer
     .unwrap();
     let mut checkpoint: GraphCheckpoint =
         serde_json::from_value(serde_json::to_value(checkpoint).unwrap()).unwrap();
+    assert_eq!(checkpoint.nodes[0].advance_error_code.as_deref(), Some("launch_refused"));
+    assert_eq!(checkpoint.nodes[0].advance_owner_code.as_deref(), Some("invalid_input"));
+    let wait = graph_waits(&checkpoint).into_iter().find(|wait| wait.node == "work").unwrap();
+    assert_eq!(wait.code, "invalid_input");
+    assert_eq!(wait.cause.as_deref(), Some("invalid_input"));
     assert_eq!(
         checkpoint.nodes[0].attempts[0]
             .extra
@@ -1349,6 +1354,7 @@ fn retry_of_explicit_launch_refusal_preserves_pending_siblings_and_rejects_uncer
     retry(&document, &mut checkpoint, None, &|_| Ok(()), None).unwrap();
     assert!(!checkpoint.cancelled);
     assert_eq!(checkpoint.nodes[0].state, NodeState::Pending);
+    assert_eq!(checkpoint.nodes[0].advance_owner_code, None);
     assert_eq!(checkpoint.nodes[0].previous_attempts, vec![prior]);
     assert_eq!(checkpoint.nodes[1], sibling);
     let mut owner = FakeOwner {

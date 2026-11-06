@@ -7,9 +7,9 @@ use provenant_records::{CommandResult, Outcome};
 use serde_json::{Value, json};
 use std::path::Path;
 
-fn document(path: &Path) -> Result<Value, String> {
-    let text = std::fs::read_to_string(path).map_err(|error| error.to_string())?;
-    decode(&text)
+fn document(path: &Path) -> Result<Value, provenant_records::diagnostic::Diagnostic> {
+    let text = std::fs::read_to_string(path).map_err(|_| file_input_error(path))?;
+    decode(&text).map_err(|_| cli_input_error("graph document is invalid"))
 }
 fn decode(text: &str) -> Result<Value, String> {
     serde_json::from_str(text)
@@ -32,21 +32,47 @@ fn response_outcome(command: &str, data: &Value) -> Outcome {
     Outcome::Ok
 }
 
-fn input_diagnostic(error: impl std::fmt::Display) -> provenant_records::diagnostic::Diagnostic {
-    provenant_fabric_runtime::coordination::facade::FacadeError::invalid(
-        provenant_fabric_runtime::coordination::facade::InvalidInputDetail::graph_reason(error),
-    )
-    .diagnostic()
+fn cli_input_error(detail: &str) -> provenant_records::diagnostic::Diagnostic {
+    provenant_records::diagnostic::Diagnostic::new("invalid_input")
+        .detail(detail)
+        .next("check the named input field and retry")
+}
+
+fn file_input_error(path: &Path) -> provenant_records::diagnostic::Diagnostic {
+    let path = provenant_records::diagnostic::safe_path(
+        path,
+        provenant_records::diagnostic::Destination::Local,
+    );
+    cli_input_error(&format!(
+        "--file {}: input could not be read",
+        path.as_deref().unwrap_or("input")
+    ))
 }
 
 fn invoke(
     command: &str,
-    input: Result<Value, String>,
+    input: Result<Value, provenant_records::diagnostic::Diagnostic>,
     globals: &Globals,
     workers: &'static dyn WorkerObserver,
 ) -> u8 {
+    let input = match input {
+        Ok(input) => input,
+        Err(projection) => {
+            let mut result = CommandResult::new(command, Outcome::Invalid, Value::Null);
+            result.error = Some(provenant_records::CommandError {
+                diagnostic: Some((&projection).into()),
+                code: projection.code.clone(),
+                message: projection
+                    .detail
+                    .clone()
+                    .unwrap_or_else(|| "graph input could not be processed".into()),
+                cause: None,
+                repair: projection.next,
+            });
+            return crate::emit(&result, globals, "", false);
+        }
+    };
     let result = (|| -> Result<Value, Box<dyn std::error::Error>> {
-        let input = input?;
         if command == "run" && std::env::var_os(provenant_run::PARENT_ATTEMPT_ENV).is_some() {
             let factory = fabric::read_factory(globals, workers)?;
             let wait_seconds = input["wait_seconds"].as_u64().unwrap_or(55).max(55);
@@ -61,7 +87,24 @@ fn invoke(
             };
         let wait_seconds = input["wait_seconds"].as_u64().unwrap_or(55);
         let budget = WaitBudget::cli(factory.clock.mono_now(), wait_seconds)?;
-        Ok(factory.graph_document(input, budget, &CancelToken::new())?)
+        let local_branch = (command == "run" && input["host"].is_null())
+            .then(|| input["branch"].as_str().map(str::to_owned))
+            .flatten();
+        let mut result = factory.graph_document(input, budget, &CancelToken::new())?;
+        if let Some(branch) = local_branch.as_deref()
+            && result["checkpoint"]["nodes"]
+                .as_array()
+                .is_some_and(|nodes| {
+                    nodes.iter().any(|node| {
+                        node["state"] == "failed"
+                            && node["advance_error_code"] == "writer_binding_unavailable"
+                    })
+                })
+            && let Some(action) = local_branch_action(&factory, branch)
+        {
+            result["local_worktree_remedy"] = json!(action);
+        }
+        Ok(result)
     })();
     match result {
         Ok(data) => {
@@ -82,7 +125,7 @@ fn invoke(
                         .downcast_ref::<provenant_cli::fabric::EdgeError>()
                         .and_then(provenant_cli::fabric::edge_diagnostic)
                 })
-                .unwrap_or_else(|| input_diagnostic(&error));
+                .unwrap_or_else(|| cli_input_error("graph input could not be processed"));
             let outcome = error
                 .downcast_ref::<provenant_fabric_runtime::coordination::facade::FacadeError>()
                 .map_or(
@@ -104,6 +147,37 @@ fn invoke(
         }
     }
 }
+
+/// Observe a local checkout only after graph admission has reported a writer
+/// binding failure. This advisory reading never changes replay or custody.
+pub(crate) fn local_branch_action(factory: &fabric::Factory, branch: &str) -> Option<String> {
+    use provenant_confinement::worktrees::{self, WorktreeCondition};
+    let reference = provenant_confinement::repo::GitRefName::branch(branch).ok()?;
+    let cancel = CancelToken::new();
+    let path = worktrees::with_context_using_workers(
+        &factory.context.roots,
+        &factory.home,
+        &factory.cwd,
+        &factory.clock,
+        &cancel,
+        factory.workers,
+        |context| {
+            Ok(worktrees::list(context, &cancel)?
+                .into_iter()
+                .find(|entry| {
+                    entry.is_unowned()
+                        && entry.dirty == WorktreeCondition::Clean
+                        && entry.branch.as_deref() == Some(reference.as_str())
+                        && entry.path.is_absolute()
+                })
+                .map(|entry| entry.path))
+        },
+    )
+    .ok()??;
+    provenant_run::RunError::Writer(worktrees::WorktreeError::UnknownWriterAt { path })
+        .diagnostic(provenant_records::diagnostic::Destination::Local)
+        .next
+}
 pub(crate) fn run(
     request: GraphRunArgs,
     globals: &Globals,
@@ -112,7 +186,7 @@ pub(crate) fn run(
     invoke("run", run_input(request), globals, workers)
 }
 
-fn run_input(request: GraphRunArgs) -> Result<Value, String> {
+fn run_input(request: GraphRunArgs) -> Result<Value, provenant_records::diagnostic::Diagnostic> {
     (|| {
         let mut input = json!({"op":"run","explain":request.explain,"detached":request.detached});
         for (field, value) in [
@@ -164,11 +238,11 @@ fn run_input(request: GraphRunArgs) -> Result<Value, String> {
         for item in request.set {
             let (key, value) = item
                 .split_once('=')
-                .ok_or("--set expects NAME=TOML_VALUE")?;
+                .ok_or_else(|| cli_input_error("--set expects NAME=TOML_VALUE"))?;
             let parsed: Value = toml_edit::de::from_str(&format!("value = {value}"))
-                .map_err(|error| error.to_string())?;
+                .map_err(|_| cli_input_error("--set value is not valid TOML"))?;
             if key.is_empty() {
-                return Err("--set parameter name is empty".into());
+                return Err(cli_input_error("--set parameter name is empty"));
             }
             parameters[key] = parsed["value"].clone();
         }
@@ -177,8 +251,7 @@ fn run_input(request: GraphRunArgs) -> Result<Value, String> {
             input["brief"] = json!(brief);
         }
         if let Some(path) = request.file {
-            let text = std::fs::read_to_string(&path)
-                .map_err(|error| format!("--file {}: {error}", path.display()))?;
+            let text = std::fs::read_to_string(&path).map_err(|_| file_input_error(&path))?;
             match decode(&text) {
                 Ok(value) if value.is_object() => input["document"] = value,
                 Ok(_)
@@ -186,14 +259,14 @@ fn run_input(request: GraphRunArgs) -> Result<Value, String> {
                         .extension()
                         .is_some_and(|ext| ext == "json" || ext == "toml") =>
                 {
-                    return Err("graph document must be an object".into());
+                    return Err(cli_input_error("graph document must be an object"));
                 }
-                Err(error)
+                Err(_)
                     if path
                         .extension()
                         .is_some_and(|ext| ext == "json" || ext == "toml") =>
                 {
-                    return Err(error);
+                    return Err(cli_input_error("graph document is invalid"));
                 }
                 _ => input["brief"] = json!(text),
             }
@@ -289,7 +362,7 @@ mod tests {
             let mut request = run_request();
             request.set.push(setting.into());
             let error = run_input(request).err().ok_or("invalid set was accepted")?;
-            let diagnostic = input_diagnostic(error);
+            let diagnostic = error;
             assert_eq!(diagnostic.code, "invalid_input");
             assert!(
                 diagnostic
@@ -298,13 +371,17 @@ mod tests {
                     .is_some_and(|text| text.contains(detail))
             );
         }
+        let mut request = run_request();
+        request.set.push("x='PROMPT_SENTINEL".into());
+        let diagnostic = run_input(request).unwrap_err();
+        assert!(!serde_json::to_string(&diagnostic)?.contains("PROMPT_SENTINEL"));
         let directory = tempfile::tempdir()?;
         let mut request = run_request();
         request.file = Some(directory.path().join("missing.json"));
         let error = run_input(request)
             .err()
             .ok_or("missing file was accepted")?;
-        let diagnostic = input_diagnostic(error);
+        let diagnostic = error;
         assert_eq!(diagnostic.code, "invalid_input");
         assert!(
             diagnostic

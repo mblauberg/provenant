@@ -63,6 +63,23 @@ pub(crate) fn launch_diagnostic(
         .unwrap_or_else(|| provenant_records::diagnostic::Diagnostic::new("launch_failed"))
 }
 
+pub(crate) fn writer_binding_reason(id: &str, error: &(dyn Error + 'static)) -> String {
+    let diagnostic = launch_diagnostic(error);
+    bounded(
+        &format!(
+            "node {}: cannot bind writer [{}]: {}; {}",
+            provenant_records::diagnostic::safe_text(id),
+            diagnostic.code,
+            diagnostic
+                .next
+                .as_deref()
+                .unwrap_or("inspect writer custody before retrying"),
+            diagnostic.detail.as_deref().unwrap_or(&diagnostic.code)
+        ),
+        MAX_ADVANCE_ERROR_BYTES,
+    )
+}
+
 /// Pure transition: callers persist the resulting checkpoint before reporting it.
 pub(crate) fn apply_launch_disposition(
     checkpoint: &mut GraphCheckpoint,
@@ -147,6 +164,7 @@ pub(crate) fn apply_launch_disposition(
     };
     progress.advance_error_code = Some(code.into());
     let projected = launch_diagnostic(error);
+    progress.advance_owner_code = Some(projected.code.clone());
     let detail = projected.detail.as_deref().unwrap_or(&projected.code);
     let action = projected
         .next
@@ -183,7 +201,7 @@ pub(crate) fn apply_launch_disposition(
     };
     progress.advance_error = Some(bounded(
         &format!(
-            "node {}: the launch failed [{}]: {detail}; {action}{recovery}",
+            "node {}: the launch failed [{}]: {action}; {detail}{recovery}",
             provenant_records::diagnostic::safe_text(id),
             projected.code
         ),
@@ -598,6 +616,7 @@ pub(super) fn fail_node(
     progress.state = NodeState::Failed;
     if code.is_some() {
         progress.advance_error_code = code;
+        progress.advance_owner_code = None;
     }
     if message.is_some() {
         progress.advance_error = message;
