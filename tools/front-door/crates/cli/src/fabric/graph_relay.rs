@@ -57,7 +57,7 @@ pub fn serve(
                 .ok()
                 .flatten()
                 .is_some_and(|checkpoint| {
-                    relay::parent_of_attempt(&checkpoint, &reference).is_some()
+                    relay::historical_parent_of_attempt(&checkpoint, &reference).is_some()
                 })
         })
         .ok_or_else(not_a_node)?;
@@ -71,12 +71,31 @@ pub fn serve(
         .map_err(journal_error)?
         .ok_or_else(not_a_node)?
         .document;
-    // Checked again under the lock: the parent may have settled meanwhile.
-    let parent = relay::parent_of_attempt(&checkpoint, &reference)
-        .ok_or_else(not_a_node)?
-        .to_owned();
+    // Finish provisioning fenced by an earlier crashed call before anything else.
+    recover_provisioning(context, &mut journal, &mut checkpoint, cancel)?;
+    // A settled parent or superseded attempt may only replay an earlier receipt.
+    let live = relay::parent_of_attempt(&checkpoint, &reference).map(str::to_owned);
+    let parent = match (&live, &op) {
+        (Some(parent), _) => parent.clone(),
+        (None, RelayOp::Add(request)) => {
+            let historical = relay::historical_parent_of_attempt(&checkpoint, &reference)
+                .ok_or_else(not_a_node)?;
+            return match relay::replay_child(&document, &checkpoint, historical, request)
+                .map_err(|error| refused(error.code, error.message))?
+            {
+                Some(receipt) => Ok(serde_json::to_value(receipt)?),
+                None => Err(not_a_node()),
+            };
+        }
+        (None, _) => return Err(not_a_node()),
+    };
     let value = match op {
         RelayOp::Add(request) => {
+            if let Some(receipt) = relay::replay_child(&document, &checkpoint, &parent, &request)
+                .map_err(|error| refused(error.code, error.message))?
+            {
+                return Ok(serde_json::to_value(receipt)?);
+            }
             let library = template_library(&context.home, &context.cwd)
                 .map_err(|error| refused("invalid_template", error))?;
             let config =
@@ -150,7 +169,12 @@ pub fn serve(
                 )
                 .map_err(|error| refused("invalid_graph", error))?
                 .ok_or_else(|| refused("invalid_graph", "writer child has no source"))?;
+                // Checkpoint the fence before any Git effect; a crash after
+                // this point is finished by `recover_provisioning`.
+                relay::fence_provisioning(&mut checkpoint, &receipt.node, path, &source);
+                journal.save(&checkpoint).map_err(journal_error)?;
                 provision_child(context, path, &source, cancel)?;
+                relay::clear_provisioning(&mut checkpoint, &receipt.node);
             }
             serde_json::to_value(receipt)?
         }
@@ -164,6 +188,24 @@ pub fn serve(
     };
     journal.save(&checkpoint).map_err(journal_error)?;
     Ok(value)
+}
+
+/// Redo every fenced provisioning, then save the cleared fences.
+fn recover_provisioning(
+    context: &Context,
+    journal: &mut FileJournal,
+    checkpoint: &mut provenant_fabric_runtime::graph::GraphCheckpoint,
+    cancel: &CancelToken,
+) -> Result<(), ServiceError> {
+    let pending = relay::pending_provisioning(checkpoint);
+    if pending.is_empty() {
+        return Ok(());
+    }
+    for (node, path, source) in pending {
+        provision_child(context, &path, &source, cancel)?;
+        relay::clear_provisioning(checkpoint, &node);
+    }
+    journal.save(checkpoint).map_err(journal_error)
 }
 
 /// Resolve dynamic panels at the host, using the graph's declared review risk.
@@ -571,6 +613,69 @@ mod provisioning_tests {
             std::fs::read_to_string(project.join(path).join("parent-work"))?,
             "preserve"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn crash_after_the_fence_is_recovered_by_the_next_serve()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_fabric_runtime::graph::{GraphCheckpoint, GraphExecution};
+        let root = tempfile::tempdir()?;
+        let home = root.path().join("home");
+        let project = home.join("project");
+        std::fs::create_dir_all(&project)?;
+        let git = |args: &[&str]| -> Result<String, Box<dyn std::error::Error>> {
+            let output = provenant_os::fixture::git_command()
+                .current_dir(&project)
+                .args(args)
+                .output()?;
+            assert!(output.status.success());
+            Ok(String::from_utf8(output.stdout)?.trim().to_owned())
+        };
+        git(&["init", "-q"])?;
+        git(&["commit", "--allow-empty", "-qm", "base"])?;
+        let source = git(&["rev-parse", "HEAD"])?;
+        let mut inputs = provenant_core::RootInputs::new(home.clone(), project.clone());
+        inputs.state_dir = Some(root.path().join("state"));
+        let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+        let context = Context::open(roots, &home, &project)?;
+        let cancel = CancelToken::new();
+        let clock = provenant_os::clock::SystemClock::new();
+        let budget = WaitBudget::cli(clock.mono_now(), 5)?;
+        let mut journal = FileJournal::open(
+            &context.roots.state,
+            context.identity.project,
+            "g-crash",
+            budget,
+            &cancel,
+            &clock,
+        )?;
+        let document = serde_json::from_value(json!({
+            "schema_version":1, "graph_id":"g-crash",
+            "nodes":[{"id":"a","access":"read_only","prompt":"Go"}]
+        }))?;
+        journal.bind(GraphExecution {
+            review_base: None,
+            extra: Default::default(),
+            integration_base: None,
+            directory: project.clone(),
+            document,
+        })?;
+        // The crash: the fence was checkpointed, then the process died before
+        // any Git effect.
+        let path = ".worktrees/g-crash-a--w";
+        let mut checkpoint: GraphCheckpoint =
+            serde_json::from_value(json!({"schema_version":1, "graph_id":"g-crash", "nodes":[]}))?;
+        relay::fence_provisioning(&mut checkpoint, "a--w", path, &source);
+        journal.save(&checkpoint)?;
+        assert!(!project.join(path).exists());
+        // The next serve reloads the checkpoint and finishes the provisioning.
+        let mut reloaded = journal.load("g-crash")?.expect("checkpoint");
+        recover_provisioning(&context, &mut journal, &mut reloaded, &cancel)?;
+        assert_eq!(git(&["-C", path, "rev-parse", "HEAD"])?, source);
+        assert!(relay::pending_provisioning(&reloaded).is_empty());
+        let saved = journal.load("g-crash")?.expect("checkpoint");
+        assert!(relay::pending_provisioning(&saved).is_empty());
         Ok(())
     }
 }
