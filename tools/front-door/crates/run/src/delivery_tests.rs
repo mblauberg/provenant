@@ -3870,12 +3870,21 @@ fn worktree_listing_over_the_capture_default_is_refused_at_every_stage()
             )
             .expect_err("an oversized listing must be refused");
         assert!(
-            matches!(error, RunError::DeliveryLimit { .. }),
+            matches!(
+                error,
+                RunError::DeliveryFact {
+                    source: provenant_confinement::worktrees::WorktreeError::Utility(
+                        provenant_confinement::utility::UtilityError::Truncated {
+                            stream: "stdout"
+                        }
+                    ),
+                    ..
+                }
+            ),
             "{stage:?}: {error:?}"
         );
         let message = error.to_string();
-        assert!(message.contains("worktree list"), "{message}");
-        assert!(message.contains(&limit.to_string()), "{message}");
+        assert!(message.contains("stdout"), "{message}");
     }
     Ok(())
 }
@@ -3945,43 +3954,28 @@ fn host_forge_output_over_its_bound_names_gh_not_git()
 }
 
 #[test]
-fn worktree_listing_keeps_the_raised_limit_and_others_keep_theirs() {
-    let listing = stdout_limit(false, &["worktree", "list", "--porcelain"]);
-    assert!(listing >= provenant_os::exec::DEFAULT_CAPTURE_LIMIT);
-    for (forge, args) in [
-        (false, &["for-each-ref", "--format=%(refname)"][..]),
-        (
-            false,
-            &[
-                "--git-dir",
-                "repo.git",
-                "--work-tree",
-                "tree",
-                "for-each-ref",
-            ],
-        ),
-        (
-            false,
-            &[
-                "-c",
-                "remote.origin.uploadpack=git-upload-pack",
-                "ls-remote",
-                "origin",
-            ],
-        ),
-        (
-            false,
-            &["--git-dir=repo.git", "worktree", "list", "--porcelain"],
-        ),
-        (false, &["remote"]),
-        (true, &["log"]),
+fn non_fact_host_commands_keep_their_limits() {
+    let listing = provenant_os::exec::DEFAULT_CAPTURE_LIMIT;
+    for args in [
+        &["for-each-ref", "--format=%(refname)"][..],
+        &[
+            "--git-dir",
+            "repo.git",
+            "--work-tree",
+            "tree",
+            "for-each-ref",
+        ],
+        &[
+            "-c",
+            "remote.origin.uploadpack=git-upload-pack",
+            "ls-remote",
+            "origin",
+        ],
     ] {
-        let limit = stdout_limit(forge, args);
-        assert!(
-            limit > 0 && limit <= listing,
-            "{args:?}: {limit} > {listing}"
-        );
+        assert_eq!(stdout_limit(false, args), listing, "{args:?}");
     }
+    assert_eq!(stdout_limit(false, &["remote"]), 16 * 1024);
+    assert_eq!(stdout_limit(true, &["log"]), 56_000);
 }
 
 #[test]
@@ -5144,5 +5138,95 @@ fn writer_preparation_preserves_command_repository_fact_caps()
         execution.state_root.as_path(),
         execution.project_id,
     )?;
+    Ok(())
+}
+
+#[test]
+fn host_delivery_repository_facts_use_command_caps()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    use provenant_confinement::{
+        utility::UtilityError,
+        worktrees::{RepoFacts, WorktreeError},
+    };
+    let fixture = PrepareFixture::new()?;
+    let host = fixture.prepare()?;
+    let inventory = RepoFacts::with_limits(1, provenant_os::git::REPO_FACT_SCALAR_LIMIT)?;
+    let scalar = RepoFacts::with_limits(provenant_os::exec::DEFAULT_CAPTURE_LIMIT, 1)?;
+    let truncated = |error: RunError| {
+        matches!(
+            error,
+            RunError::DeliveryFact {
+                source: WorktreeError::Utility(UtilityError::Truncated { stream: "stdout" }),
+                ..
+            }
+        )
+    };
+    assert!(truncated(
+        host.clone()
+            .with_repo_facts(&inventory)
+            .command(
+                &fixture.writer.worktree,
+                "git",
+                &["worktree", "list", "--porcelain"],
+                WriterDeliveryStage::Integrate
+            )
+            .unwrap_err()
+    ));
+    for args in [
+        &["rev-parse", "--absolute-git-dir"][..],
+        &["rev-parse", "--verify", "HEAD"],
+        &["rev-parse", "--verify", "HEAD~0"],
+    ] {
+        assert!(truncated(
+            host.clone()
+                .with_repo_facts(&scalar)
+                .command(
+                    &fixture.writer.worktree,
+                    "git",
+                    args,
+                    WriterDeliveryStage::Head
+                )
+                .unwrap_err()
+        ));
+    }
+    for facts in [&scalar, &inventory] {
+        assert!(truncated(
+            HostDeliveryContext::new(fixture.environment.clone())
+                .with_repo_facts(facts)
+                .prepare(&fixture.writer, &fixture.request)
+                .unwrap_err()
+        ));
+    }
+    assert!(truncated(
+        HostDeliveryContext::new(fixture.environment.clone())
+            .with_repo_facts(&inventory)
+            .check_delivery_branch_with_facts(&fixture.writer.project, "unprotected")
+            .unwrap_err()
+    ));
+    let head = host.head(&fixture.writer)?;
+    let error = host
+        .clone()
+        .with_repo_facts(&inventory)
+        .integrate(&fixture.writer, &fixture.request, head)
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        RunError::DeliveryFact {
+            stage: WriterDeliveryStage::Integrate,
+            ..
+        }
+    ));
+    assert!(truncated(error));
+    assert!(truncated(
+        HostDeliveryContext::new(fixture.environment.clone())
+            .with_repo_facts(&inventory)
+            .deliver_graph_pr(&fixture.writer.project, "unprotected", head, "body")
+            .unwrap_err()
+    ));
+    assert!(truncated(
+        host.with_repo_facts(&scalar)
+            .head(&fixture.writer)
+            .unwrap_err()
+    ));
     Ok(())
 }

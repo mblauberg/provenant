@@ -540,8 +540,20 @@ pub(super) fn operation_reply(reply: &mut Reply, id: &OperationId) {
     }
 }
 
+#[cfg(test)]
 pub(super) fn check_delivery_branch(project: &Path, branch: &str) -> Result<(), Fail> {
     run::HostDeliveryContext::check_delivery_branch(project, branch)
+        .map_err(|error| Fail::new(Status::Refused, ErrorKind::Refused, error.to_string()))
+}
+
+fn check_delivery_branch_with_facts(
+    project: &Path,
+    branch: &str,
+    facts: &provenant_confinement::worktrees::RepoFacts,
+) -> Result<(), Fail> {
+    run::HostDeliveryContext::capture()
+        .with_repo_facts(facts)
+        .check_delivery_branch_with_facts(project, branch)
         .map_err(|error| Fail::new(Status::Refused, ErrorKind::Refused, error.to_string()))
 }
 
@@ -1155,7 +1167,7 @@ pub(super) fn dispatch_inner(
         if let Some(mode) = &command.deliver
             && let Some(delivery) = run::HostDeliveryContext::destination(mode.clone(), &branch)?
         {
-            check_delivery_branch(edge.cwd, &delivery.branch)?;
+            check_delivery_branch_with_facts(edge.cwd, &delivery.branch, facts)?;
         }
         let host = provenant_config::bind_host(edge.roots)
             .map_err(|error| Fail::new(Status::Error, ErrorKind::Config, error.to_string()))?;
@@ -1490,7 +1502,7 @@ pub(super) fn dispatch_inner(
     {
         for (_, _, _, _, _, _, _, delivery, _, _, _, _, _) in &tasks {
             if let Some(delivery) = delivery {
-                check_delivery_branch(edge.cwd, &delivery.branch)?;
+                check_delivery_branch_with_facts(edge.cwd, &delivery.branch, facts)?;
             }
         }
     }
