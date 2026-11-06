@@ -1,4 +1,5 @@
 use super::*;
+use provenant_fabric_runtime::runs::SubmissionReceipt;
 
 struct SubmissionPolicy {
     access: provenant_records::run::LaneAccess,
