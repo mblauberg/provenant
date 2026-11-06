@@ -2214,6 +2214,7 @@ mod retry_allowance_tests {
 }
 
 #[cfg(test)]
+#[allow(unused_imports, dead_code)] // Included by the custom worktree driver without a test harness.
 mod provisioned_writer_submission_tests {
     use super::*;
     use provenant_confinement::worktrees::{Occupancy, WorkerObserver};
@@ -2293,7 +2294,13 @@ mod provisioned_writer_submission_tests {
         let mut journal = Journal::default();
         // Persist the real sealed attempt without launching a provider process.
         let result = provenant_cli::run::with_deferred_provider_launch(|| {
-            graph::advance(&document, &mut owner, &mut journal)
+            graph::advance_with_budget(
+                &document,
+                &mut owner,
+                &mut journal,
+                &provenant_fabric_runtime::config::GraphLimits::default(),
+                &provenant_fabric_runtime::config::GraphBudget::default(),
+            )
         })?;
         let progress = &result.checkpoint.nodes[0];
         assert_eq!(progress.source_commit.as_deref(), Some(head.as_str()));
