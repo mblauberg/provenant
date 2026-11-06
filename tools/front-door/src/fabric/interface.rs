@@ -328,8 +328,9 @@ impl Factory {
                         .map_err(|error| FacadeError::invalid(error.to_string()))?,
                     ..Default::default()
                 };
-                let mut document = patch::submit(id, &patch, &context)
-                    .map_err(|error| FacadeError::invalid(error.to_string()))?;
+                let mut document =
+                    patch::submit(id, &patch, &context, raw["integration_branch"].as_str())
+                        .map_err(|error| FacadeError::invalid(error.to_string()))?;
                 // Graph-wide settings belong to the document rather than a node.
                 let mut compiled = encode(&document)?;
                 for key in [
@@ -378,6 +379,18 @@ impl Factory {
                 node.as_object_mut().unwrap().remove("brief");
                 node.as_object_mut().unwrap().remove("tier");
             }
+            let integration_branch = (node["use"] == "batch"
+                && library.layer("batch") == Some(Layer::Bundled))
+            .then(|| {
+                parameters.get("integration_branch").cloned().or_else(|| {
+                    template
+                        .parameters
+                        .get("integration_branch")?
+                        .default
+                        .clone()
+                })
+            })
+            .flatten();
             node["with"] = parameters;
             patch::submit(
                 id,
@@ -387,6 +400,7 @@ impl Factory {
                     ..Default::default()
                 },
                 &context,
+                integration_branch.as_ref().and_then(Value::as_str),
             )
             .map_err(|error| FacadeError::invalid(error.to_string()))?
         };

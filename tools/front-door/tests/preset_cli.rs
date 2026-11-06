@@ -222,19 +222,69 @@ fn every_bundled_template_is_listed_shown_and_explained() -> Result {
     let (output, value) = rig.run(&["templates"])?;
     assert!(output.status.success(), "{value}");
     let listed = value["data"]["templates"].as_array().ok_or("templates")?;
-    assert!(!listed.is_empty());
+    let names: Vec<_> = listed
+        .iter()
+        .filter_map(|entry| entry["name"].as_str())
+        .collect();
+    let library = provenant_fabric_runtime::graph::TemplateLibrary::bundled();
+    assert_eq!(names, library.names().collect::<Vec<_>>());
     for entry in listed {
         let name = entry["name"].as_str().ok_or("template name")?;
         let (output, shown) = rig.run(&["templates", name])?;
         assert!(output.status.success(), "{name}: {shown}");
         assert_eq!(shown["data"]["templates"][0], *entry, "{name}");
-        let mut args = vec!["run", "--use", name, "--explain"];
-        if name == "review-repair" {
-            args.extend(["--set", "write_scope=['.']"]);
+        let template = &entry["template"];
+        let mut node = json!({"id":"exercise", "use":name});
+        if name == "repair" {
+            node["repeat"] = json!({"until":"accepted", "max_rounds":1, "review_repair":true});
         }
-        let (output, explained) = rig.run(&args)?;
+        let mut parameters = json!({});
+        if template["parameters"].get("worktree").is_some() {
+            parameters["worktree"] = json!(rig.project);
+        } else if template["access"] == "worktree_write" {
+            node["worktree"] = json!(rig.project);
+            node["write_scope"] = json!(["."]);
+        }
+        if template["parameters"].get("write_scope").is_some() {
+            parameters["write_scope"] = json!(["."]);
+        }
+        node["with"] = parameters;
+        let mut nodes = Vec::new();
+        if name == "synthesise" {
+            nodes.push(json!({"id":"source", "use":"task"}));
+            node["after"] = json!(["source"]);
+            node["inputs"] = json!([{"node":"source", "outputs":["result"]}]);
+        }
+        nodes.push(node);
+        let path =
+            rig.document(&json!({"nodes":nodes, "integration_branch":"batch/integration"}))?;
+        let output = rig
+            .command()
+            .args(["run", "--file"])
+            .arg(path)
+            .arg("--explain")
+            .output()?;
+        let explained: Value = serde_json::from_slice(&output.stdout)?;
         assert!(output.status.success(), "{name}: {explained}");
     }
+    let worktree = format!("worktree='{}'", rig.project.display());
+    let (output, explained) = rig.run(&[
+        "run",
+        "--use",
+        "batch",
+        "--set",
+        &worktree,
+        "--set",
+        "write_scope=['.']",
+        "--set",
+        "integration_branch='batch/example'",
+        "--explain",
+    ])?;
+    assert!(output.status.success(), "{explained}");
+    assert_eq!(
+        explained["data"]["document"]["integration_branch"],
+        "batch/example"
+    );
     Ok(())
 }
 
