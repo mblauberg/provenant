@@ -1624,7 +1624,9 @@ fn run_error(error: provenant_run::RunError) -> FacadeError {
     // collapsing to a bare "invalid input".
     if let provenant_run::RunError::InvalidBase(base) = &error {
         return FacadeError::invalid(
-            provenant_fabric_runtime::coordination::facade::InvalidInputDetail::UnresolvableBase(base.clone()),
+            provenant_fabric_runtime::coordination::facade::InvalidInputDetail::UnresolvableBase(
+                base.clone(),
+            ),
         );
     }
     fail_error(error.into())
