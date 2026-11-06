@@ -6659,7 +6659,12 @@ fn lanes_read_git_global_ignore_and_attributes_only_when_present()
     for access in [Access::ReadOnly, Access::WorktreeWrite] {
         let mut paths = granted(access)?;
         paths.sort();
-        assert_eq!(paths, [git.join("attributes"), git.join("ignore")]);
+        let mut expected = vec![git.join("attributes"), git.join("ignore")];
+        if access == Access::WorktreeWrite {
+            expected.push(git.join("config"));
+            expected.sort();
+        }
+        assert_eq!(paths, expected);
     }
     Ok(())
 }

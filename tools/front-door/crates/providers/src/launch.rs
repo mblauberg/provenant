@@ -550,7 +550,30 @@ pub(crate) fn private_git_objects(
         .iter()
         .filter(|(key, _)| matches!(key.to_str(), Some("GIT_AUTHOR_NAME" | "GIT_AUTHOR_EMAIL")))
         .collect::<Vec<_>>();
-    let mut config_text = String::from("[user]\n\tuseConfigOnly = true\n");
+    // Git normally reads the XDG file before ~/.gitconfig. An explicit host
+    // override replaces both, just as it does for Git itself.
+    let globals = if let Some(path) = (input.host_var)("GIT_CONFIG_GLOBAL") {
+        vec![PathBuf::from(path)]
+    } else {
+        let xdg = (input.host_var)("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .filter(|path| path.is_absolute())
+            .unwrap_or_else(|| input.home.join(".config"));
+        vec![xdg.join("git/config"), input.home.join(".gitconfig")]
+    };
+    let mut config_text = String::new();
+    for path in globals.iter().filter(|path| path.is_file()) {
+        let value = path.to_str().ok_or(ProviderError::InvalidPath)?;
+        if value.chars().any(char::is_control) {
+            return Err(ProviderError::InvalidPath);
+        }
+        config_text.push_str(&format!(
+            "[include]\n\tpath = {}\n",
+            git_config_quote(value)
+        ));
+        spec.profile.spec.runtime_reads.push(exact(path));
+    }
+    config_text.push_str("[user]\n\tuseConfigOnly = true\n");
     for (key, value) in &identity {
         let name = match key.to_str() {
             Some("GIT_AUTHOR_NAME") => "name",
@@ -564,15 +587,16 @@ pub(crate) fn private_git_objects(
         path: config.clone(),
         bytes: config_text.into_bytes(),
     });
-    for (key, value) in [
-        ("GIT_CONFIG_GLOBAL", config.as_os_str()),
-        ("GIT_CONFIG_NOSYSTEM", std::ffi::OsStr::new("1")),
-    ] {
-        if let Some((_, current)) = spec.env.iter_mut().find(|(name, _)| name == key) {
-            *current = value.to_owned();
-        } else {
-            spec.env.push((key.into(), value.to_owned()));
-        }
+    spec.env.retain(|(key, _)| key != "GIT_CONFIG_NOSYSTEM");
+    if let Some((_, current)) = spec
+        .env
+        .iter_mut()
+        .find(|(name, _)| name == "GIT_CONFIG_GLOBAL")
+    {
+        *current = config.as_os_str().to_owned();
+    } else {
+        spec.env
+            .push(("GIT_CONFIG_GLOBAL".into(), config.as_os_str().to_owned()));
     }
     // The repository binding and explicit identity variables stay out of the
     // ambient environment. Git's private global config carries the host
@@ -634,14 +658,8 @@ fn git_config_quote(value: &str) -> String {
             '"' => quoted.push_str("\\\""),
             '\n' => quoted.push_str("\\n"),
             '\t' => quoted.push_str("\\t"),
-            '\r' => quoted.push_str("\\r"),
             '\u{0008}' => quoted.push_str("\\b"),
-            '\u{000c}' => quoted.push_str("\\f"),
-            control if control.is_control() => {
-                for byte in control.to_string().bytes() {
-                    quoted.push_str(&format!("\\x{byte:02x}"));
-                }
-            }
+            control if control.is_control() => {}
             character => quoted.push(character),
         }
     }
@@ -1378,4 +1396,25 @@ pub(crate) fn uuid_v4(mut bytes: [u8; 16]) -> String {
         &hex[16..20],
         &hex[20..32]
     )
+}
+
+#[cfg(test)]
+mod git_config_quote_tests {
+    #[test]
+    #[allow(clippy::disallowed_methods)]
+    fn unsupported_controls_are_stripped_and_git_accepts_value() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config");
+        let value = super::git_config_quote("A\rB\u{000c}C\u{0001}D");
+        std::fs::write(&config, format!("[user]\n name = {value}\n")).unwrap();
+        let git = provenant_os::git::git_executable().unwrap();
+        let output = std::process::Command::new(git)
+            .args(["config", "--file"])
+            .arg(config)
+            .args(["--get", "user.name"])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"ABCD\n");
+    }
 }

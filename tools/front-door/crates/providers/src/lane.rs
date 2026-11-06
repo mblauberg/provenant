@@ -252,11 +252,11 @@ pub(crate) fn git_wrapper(git: &Path, options: &GitWrapper) -> Result<Vec<u8>, P
             "'/dev/null'".to_owned()
         };
         bytes.extend_from_slice(
-            format!(
-                "GIT_CONFIG_GLOBAL={global}\nGIT_CONFIG_NOSYSTEM=1\nexport GIT_CONFIG_GLOBAL GIT_CONFIG_NOSYSTEM\n"
-            )
-            .as_bytes(),
+            format!("GIT_CONFIG_GLOBAL={global}\nexport GIT_CONFIG_GLOBAL\n").as_bytes(),
         );
+        if options.identity_config.is_none() {
+            bytes.extend_from_slice(b"GIT_CONFIG_NOSYSTEM=1\nexport GIT_CONFIG_NOSYSTEM\n");
+        }
         if let Some(bound) = &options.bound {
             bytes.extend_from_slice(bound_exports(bound)?.as_bytes());
         }
@@ -904,7 +904,7 @@ mod tests {
         let host_config = fs::read(repo.join(".git/config"))?;
         fs::write(
             home.join(".gitconfig"),
-            "[user]\n name = Host Name\n email = host@example.com\n[fixture]\n poison = yes\n",
+            "[user]\n name = Host Name\n email = host@example.com\n[url \"https://rewritten.example/\"]\n insteadOf = fixture://\n",
         )?;
         let marker = root.join("pinned-called");
         let git = root.join("selected-git");
@@ -954,6 +954,7 @@ mod tests {
             (adapter == "claude").then_some(&token),
         );
         input.provenant.git = &git;
+        input.home = &home;
         let mut spec = registration.adapter.prepare(input)?;
         let bound = &mut spec.git_wrapper.bound.as_mut().ok_or("bound")?.env;
         bound.retain(|(key, _)| {
@@ -1018,18 +1019,24 @@ mod tests {
                 .envs(spec.env.iter().cloned())
                 .output()
         };
+        let rewrite = absolute(
+            &["ls-remote", "--get-url", "fixture://project"],
+            &absolute_repo,
+        )?;
+        assert!(rewrite.status.success());
+        assert_eq!(rewrite.stdout, b"https://rewritten.example/project\n");
         assert!(absolute(&["init", "-q"], &absolute_repo)?.status.success());
         fs::write(nested.join("file"), "absolute Git identity")?;
         assert!(absolute(&["add", "file"], &nested)?.status.success());
         let host_name = Command::new(&real_git)
             .args(["config", "--file"])
             .arg(&identity_config)
-            .args(["--get", "user.name"])
+            .args(["--includes", "--get", "user.name"])
             .output()?;
         let host_email = Command::new(&real_git)
             .args(["config", "--file"])
             .arg(&identity_config)
-            .args(["--get", "user.email"])
+            .args(["--includes", "--get", "user.email"])
             .output()?;
         let host_commit = absolute(&["commit", "-m", "absolute Git"], &nested)?;
         let host_commit_identity = absolute(&["log", "-1", "--format=%an <%ae>"], &nested)?;
