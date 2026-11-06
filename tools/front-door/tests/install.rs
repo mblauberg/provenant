@@ -1614,7 +1614,11 @@ fn upgrade_preflight_preserves_old_checkpoint_and_names_the_drain_step() -> Resu
     let project = "11111111111111111111111111111111";
     let directory = rig.state.join(format!("fabric/graphs/{project}"));
     fs::create_dir_all(&directory)?;
-    for path in [rig.state.join("fabric"), rig.state.join("fabric/graphs"), directory.clone()] {
+    for path in [
+        rig.state.join("fabric"),
+        rig.state.join("fabric/graphs"),
+        directory.clone(),
+    ] {
         fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
     }
     let checkpoint = include_bytes!("fixtures/install/old-pending-checkpoint.json");
@@ -2016,7 +2020,10 @@ esac
     }
     fs::write(markers.join("complete"), "")?;
     let old_checkpoint = include_bytes!("fixtures/install/old-pending-checkpoint.json");
-    let checkpoint_path = markers.parent().ok_or("graph directory")?.join("graph-old-pending-fixture.json");
+    let checkpoint_path = markers
+        .parent()
+        .ok_or("graph directory")?
+        .join("graph-old-pending-fixture.json");
     fs::write(&checkpoint_path, old_checkpoint)?;
     fs::set_permissions(&checkpoint_path, fs::Permissions::from_mode(0o600))?;
     fs::write(markers.join("old-pending-fixture.pending"), "")?;
@@ -2050,7 +2057,13 @@ esac
     assert_eq!(code(&direct), 2, "{direct:?}");
     assert_eq!(fs::read(&checkpoint_path)?, old_checkpoint);
     let output = String::from_utf8(direct.stdout.bytes)?;
-    for expected in ["old-pending-fixture", "finish or cancel it with the previous release before upgrading", "lane-one", "child-lane", "custom.toml"] {
+    for expected in [
+        "old-pending-fixture",
+        "finish or cancel it with the previous release before upgrading",
+        "lane-one",
+        "child-lane",
+        "custom.toml",
+    ] {
         assert!(output.contains(expected), "{output}");
     }
     let stopped = rig.command(&["upgrade", "--json"])?;
@@ -2060,7 +2073,13 @@ esac
         "{stopped_value}"
     );
     assert_eq!(stopped_value["data"].as_array().unwrap().len(), 1);
-    for expected in ["old-pending-fixture", "finish or cancel it with the previous release before upgrading", "lane-one", "child-lane", "custom.toml"] {
+    for expected in [
+        "old-pending-fixture",
+        "finish or cancel it with the previous release before upgrading",
+        "lane-one",
+        "child-lane",
+        "custom.toml",
+    ] {
         assert!(
             stopped_value.to_string().contains(expected),
             "{stopped_value}"
