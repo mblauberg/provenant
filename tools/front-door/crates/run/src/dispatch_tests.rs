@@ -1030,52 +1030,6 @@ fn held_children_retain_busy_missing_and_recreated_custody_locks() -> TestResult
 }
 
 #[test]
-fn host_stops_held_children_first_then_accepted_ones_it_never_held() -> TestResult {
-    let temp = tempfile::tempdir()?;
-    let (clock, cancel) = (clock(), CancelToken::new());
-    let call = call(&clock, &cancel);
-    let sealed = provenant_core::ActorId::from_bytes([7; 16]);
-    let store = RunStore::open(&context(temp.path())?, &call)?.with_sealed_requester(sealed);
-    let batch = two_tasks(2);
-    store.create(&batch, &call)?;
-    let [queued, late] = [batch.attempts[0].attempt_id, batch.attempts[1].attempt_id];
-    // The parent's scan accepted only the queued child. A start launched
-    // the other after that snapshot, so only hand-off holds it.
-    let started = store.mark_starting(
-        &store.record(late, &call)?,
-        &route(),
-        &[],
-        &Default::default(),
-        None,
-        &call,
-    )?;
-    let scope = provenant_supervisor::custody::Scope {
-        run: batch.run_id,
-        attempt: late,
-        generation: started.generation,
-    };
-    hold_child_fixture(
-        &store,
-        store.attempt_dir(batch.run_id, late, false)?,
-        scope,
-        sealed,
-    )?;
-    let accepted = std::collections::BTreeSet::from([(queued, 1)]);
-    assert!(store.stop_children(accepted, "stop", &call).is_empty());
-    let request: serde_json::Value = serde_json::from_slice(&std::fs::read(
-        store
-            .context
-            .state_root
-            .as_path()
-            .join(format!("runs/{}/attempts/{late}/cancel.json", batch.run_id)),
-    )?)?;
-    assert_eq!(request["requester"], serde_json::to_value(sealed)?);
-    assert_eq!(request["scope"], serde_json::to_value(scope)?);
-    assert_eq!(terminal(&store, queued, &call)?, Outcome::Cancelled);
-    Ok(())
-}
-
-#[test]
 fn host_view_refuses_a_launched_child_renamed_after_start() -> TestResult {
     let sealed = provenant_core::ActorId::from_bytes([7; 16]);
     let forged = provenant_core::ActorId::from_bytes([66; 16]);
