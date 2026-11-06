@@ -105,7 +105,7 @@ impl Snapshot {
                 let mut lanes: Vec<_> = rows
                     .iter()
                     .map(|row| {
-                        let lane = provenant_cli::run::project_lane(row, &[], edge.roots.state.as_path(), &Default::default(), None, false);
+                        let lane = provenant_cli::run::project_lane(row, &[], edge.roots.state.as_path(), None, false);
                         let value = json!({"id": lane.attempt_id, "kind": "attempt", "graph_id": null, "node_id": lane.task_id, "attempt_id": lane.attempt_id, "state": lane.state, "reason": lane.reason});
                         value
                     })

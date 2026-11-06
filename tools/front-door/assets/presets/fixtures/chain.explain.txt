@@ -1,9 +1,0 @@
-Graph <id>
-Admission: {"status":"admitted"}
-Inspection: {"dependency_depth":1,"edges":1,"limit_reason":null,"max_attempts":4,"nodes":2,"prompt_bytes":20}
-tier mix: junior 0 / senior 0 / principal 0
-Preset selection: chain (override)
-Pending "route_readiness": "Route readiness and quota are checked before launch."
-first  role=- tier=senior family=any kind=- access=read_only worktree=-
-second  role=- tier=senior family=any kind=- access=read_only worktree=-
-  inputs: [{"node":"first","outputs":["result"]}]
