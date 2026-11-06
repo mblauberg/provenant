@@ -917,6 +917,14 @@ pub(crate) mod peer_tests {
         Ok(())
     }
 
+    fn graph_test_context(key: &provenant_fabric_runtime::graph::AttemptKey) -> provenant_records::run::WorkContext {
+        provenant_records::run::WorkContext {
+            graph_id: Some(key.graph_id.clone()),
+            node_id: Some(key.node_id.clone()),
+            ..Default::default()
+        }
+    }
+
     pub(super) fn host_test(name: &str) -> Result<bool, Box<dyn std::error::Error>> {
         if !provenant_cli::fabric::in_lane() {
             return Ok(false);
@@ -1373,7 +1381,7 @@ esac
         let node = || graph::NodeInput {
             attachments: &[], capabilities: None, capability_sources: None, attempt: Some(&spec),
             require_skill_location: false, settlement_retries: None, prior_attempts: &[], family_peers: &[],
-            context: Default::default(), read_roots: &[], distinct_from_attempts: &[], require_distinct: false,
+            context: graph_test_context(&key), read_roots: &[], distinct_from_attempts: &[], require_distinct: false,
             source_commit: Some(&head), review_base: None, title: "verify", prompt: "Run targeted tests",
             required_verdict: None, deadline_seconds: None, inputs_dir: None,
         };
@@ -1466,7 +1474,7 @@ esac
             let key: graph::AttemptKey = serde_json::from_value(serde_json::json!({"graph_id":"review-pins", "node_id":name, "route_index":0}))?;
             let observation = graph_owner.observe_or_start(&key, graph::NodeInput {
             attachments: &[], capabilities: None, capability_sources: None, attempt: None, require_skill_location: false, settlement_retries: Some(1), prior_attempts: &[], family_peers: &[],
-                context: Default::default(), read_roots: &[], distinct_from_attempts: &[], require_distinct: false,
+                context: graph_test_context(&key), read_roots: &[], distinct_from_attempts: &[], require_distinct: false,
                 source_commit: Some(&head), review_base, title: name, prompt: "review",
                 required_verdict: None, deadline_seconds: None, inputs_dir: None,
             }, &route, graph::AccessMode::ReadOnly, None, graph::Replay {
@@ -1532,7 +1540,7 @@ esac
         std::fs::create_dir(&write_root)?;
         let attempt_spec = graph::AttemptSpec { build_heavy: true, write_roots: vec![write_root.to_string_lossy().into_owned()], ..Default::default() };
         let node = || graph::NodeInput {
-            attachments: &[], capabilities: None, capability_sources: None, attempt: Some(&attempt_spec), require_skill_location: false, settlement_retries: None, prior_attempts: &[], family_peers: &[], context: Default::default(),
+            attachments: &[], capabilities: None, capability_sources: None, attempt: Some(&attempt_spec), require_skill_location: false, settlement_retries: None, prior_attempts: &[], family_peers: &[], context: graph_test_context(&key),
             read_roots: &source_roots, distinct_from_attempts: &[], require_distinct: false, source_commit: Some(&head),
             review_base: Some(&pinned), title: "review", prompt: "review", required_verdict: None, deadline_seconds: None, inputs_dir: None };
         let first = owner.observe_or_start(&key, node(), &route, graph::AccessMode::ReadOnly, Some(rig.project.to_str().ok_or("source path")?),
@@ -1639,7 +1647,7 @@ esac
             attachments: &[],
             capabilities: None,
             capability_sources: None, attempt: None,
-            require_skill_location: false, settlement_retries: None, prior_attempts: &[], family_peers: &[], context: Default::default(),
+            require_skill_location: false, settlement_retries: None, prior_attempts: &[], family_peers: &[], context: graph_test_context(&key),
             read_roots: &[], distinct_from_attempts: &[], require_distinct: false,
             source_commit: Some(&unrelated), review_base: None, title: "lane", prompt: "write",
             required_verdict: None, deadline_seconds: None, inputs_dir: None,
@@ -1711,8 +1719,33 @@ esac
             ..Default::default()
         };
         let accepted = graph::AttemptSpec { build_heavy: true, ..Default::default() };
-        let receipt = run_owner.submit_with_access(input, budget, &cancel, grants, None, Some(accepted))
-            .map_err(|error| format!("accept fixture launch: {error:?}"))?;
+        let execution_store = rig.state.join("run.sqlite3");
+        assert!(!execution_store.exists());
+        assert!(matches!(
+            run_owner.submit_with_access(input, budget, &cancel, grants.clone(), None, Some(accepted)),
+            Err(FacadeError::InvalidInput { .. })
+        ));
+        assert!(!execution_store.exists());
+        // Seed a retained pre-cutover launch below the new graph-only boundary.
+        // Recovery must preserve its absent context without reopening graphless submission.
+        let session = run_owner.session(&cancel)?;
+        let accepted_operation = graph_operation("graph-attempt-operation", &key)?;
+        let accepted_task = provenant_cli::run::Submitted {
+            attempt: graph::AttemptSpec { build_heavy: true, ..Default::default() },
+            require_skill_location: false, settlement_retry_limit: None, context: None,
+            title: Some("inspect".into()),
+            task_id: provenant_cli::run::derived_task(&accepted_operation, 0).map_err(|_| "retained task id")?,
+            prompt: replay_prompt.clone(), base: Some(original_head.clone()), pinned_base: None,
+            head: Some(successor_head.clone()), source_head: Some(original_head.clone()),
+            route: serde_json::from_value(serde_json::json!({"kind":"model", "provider":"fixture", "model":"fixture/model"}))?,
+            provider_timeout: factory.context.config.limits.graph_timeout_seconds,
+            delivery_id: None, deliver: None, worktree: None, access: grants,
+        };
+        let (accepted_run, accepted_started) = run_owner.with_edge(|edge| provenant_cli::run::submit_with_host(
+            &session, edge, provenant_cli::run::Submission { chair: None, operation_id: accepted_operation.clone(),
+                tasks: vec![accepted_task], concurrency: Some(1), knobs: vec!["routing.graph_exclude=[\"codex/gpt-6-luna\"]".into()] },
+            &run_owner.call(&cancel), None))?;
+        let receipt = run_owner.receipt(&session, accepted_operation, &accepted_run, &accepted_started, &run_owner.call(&cancel))?;
         let target = receipt.targets.first().ok_or("target")?;
         // The plain lane and graph owner both lower through the same submission
         // boundary; compare their durable launch fields, excluding identities.
@@ -3071,7 +3104,7 @@ esac
             }))?;
             bound.observe_or_start(&key, graph::NodeInput {
             attachments: &[], capabilities: None, capability_sources: None, attempt: None, require_skill_location: false, settlement_retries: None, review_base: None,
-                prior_attempts: prior, family_peers: peers, context: Default::default(), read_roots: &[],
+                prior_attempts: prior, family_peers: peers, context: graph_test_context(&key), read_roots: &[],
                 distinct_from_attempts: distinct, require_distinct: require, source_commit: None,
                 title: "lens", prompt: "review", required_verdict: None, deadline_seconds: None,
                 inputs_dir: None,
@@ -3615,7 +3648,7 @@ esac
         let actor = bound.actor();
         bound.observe_or_start(&key, graph::NodeInput {
             attachments: &[], capabilities: None, capability_sources: None, attempt: None, require_skill_location: false, settlement_retries: None, review_base: None,
-            prior_attempts: &[], family_peers: &[], context: Default::default(), read_roots: &[],
+            prior_attempts: &[], family_peers: &[], context: graph_test_context(&key), read_roots: &[],
             distinct_from_attempts: &[], require_distinct: false, source_commit: Some(&head),
             title: "later lens", prompt: "review", required_verdict: None, deadline_seconds: None,
             inputs_dir: None,
@@ -3639,7 +3672,7 @@ esac
         let actor = bound.actor();
         bound.observe_or_start(&second, graph::NodeInput {
             attachments: &[], capabilities: None, capability_sources: None, attempt: None, require_skill_location: false, settlement_retries: None, review_base: None,
-            prior_attempts: &[], family_peers: &[], context: Default::default(), read_roots: &[],
+            prior_attempts: &[], family_peers: &[], context: graph_test_context(&second), read_roots: &[],
             distinct_from_attempts: &[], require_distinct: false, source_commit: Some(&head),
             title: "second lens", prompt: "review", required_verdict: None, deadline_seconds: None,
             inputs_dir: None,

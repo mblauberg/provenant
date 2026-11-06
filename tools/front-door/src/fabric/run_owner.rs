@@ -593,9 +593,19 @@ impl BinaryRunOwner<'_> {
                 .as_ref()
                 .is_none_or(|context| context.graph_id.is_none() || context.node_id.is_none())
         }) {
-            return Err(FacadeError::invalid(InvalidInputDetail::Field(
-                "graph context".into(),
-            )));
+            let invalid = || FacadeError::invalid(InvalidInputDetail::Field("graph context".into()));
+            let session = match self.read_session(cancel) {
+                Ok(session) => session,
+                Err(FacadeError::NotFound) => return Err(invalid()),
+                Err(error) => return Err(error),
+            };
+            let call = self.call(cancel);
+            let retained = session.store.operation(&operation_id, &call).map_err(run_error)?;
+            if retained.is_none_or(|operation| matches!(operation.state, provenant_run::OperationState::Prepared)) {
+                return Err(invalid());
+            }
+            // An accepted pre-cutover operation may have no context. The sealed
+            // request digest below still rejects any change to its launch inputs.
         }
         // Graph worktree and placement are resolved before the sealed attempt reaches this owner.
         if host.is_some_and(|host| host != self.factory.context.identity.host)
@@ -1153,7 +1163,21 @@ impl BinaryRunOwner<'_> {
                 {
                     return Err(FacadeError::OwnerUnavailable);
                 }
-                let store = self.read_session(cancel)?.store;
+                let store = match self.read_session(cancel) {
+                    Ok(session) => session.store,
+                    Err(FacadeError::NotFound) if after.is_none() => {
+                        return Ok(RunResult::List {
+                            extra: Default::default(),
+                            page: AttemptPage {
+                                extra: Default::default(),
+                                items: Vec::new(),
+                                next_after: None,
+                                truncated: false,
+                            },
+                        });
+                    }
+                    Err(error) => return Err(error),
+                };
                 let call = self.call(cancel);
                 let after_sequence = after
                     .as_ref()
@@ -1209,7 +1233,20 @@ impl BinaryRunOwner<'_> {
         if !(1..=64).contains(&limit) {
             return Err(FacadeError::InvalidInput { detail: None });
         }
-        let store = self.read_session(cancel)?.store;
+        let store = match self.read_session(cancel) {
+            Ok(session) => session.store,
+            // Coordination can have events before the first graph is launched.
+            // Reading them must neither require nor create an execution store.
+            Err(FacadeError::NotFound) => {
+                return Ok(RunEventsPage {
+                    extra: Default::default(),
+                    items: Vec::new(),
+                    cursor: after,
+                    truncated: false,
+                });
+            }
+            Err(error) => return Err(error),
+        };
         let call = provenant_run::Request {
             clock: &self.factory.clock,
             cancel,
