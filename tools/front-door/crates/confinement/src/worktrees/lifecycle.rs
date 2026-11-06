@@ -382,16 +382,7 @@ pub fn create(
     } else if let Some(base) = request.base.as_deref() {
         pin_revision(context, facts, base, cancel)?
     } else {
-        let head = GitRevision::new("HEAD").map_err(|_| WorktreeError::InvalidRequest)?;
-        facts
-            .resolve_revision(context, head, cancel)
-            .map_err(|error| {
-                if matches!(error, WorktreeError::NotFound) {
-                    WorktreeError::InvalidOutput
-                } else {
-                    error
-                }
-            })?
+        default_creation_base(context, facts, cancel)?
     };
     let worktree_root = match context
         .repo
@@ -502,6 +493,57 @@ pub fn create(
         primary: false,
         occupancy: combine_occupancy(&target, Occupancy::Available, writer),
     })
+}
+
+fn default_creation_base(
+    context: &WorktreeContext<'_>,
+    facts: &RepoFacts,
+    cancel: &CancelToken,
+) -> Result<GitOid, WorktreeError> {
+    match crate::utility::fetch_missing_remote_branch(
+        context.executor,
+        context.repo,
+        context.utility,
+        context.home,
+        "origin/HEAD",
+        context.mutation_budget,
+        cancel,
+    ) {
+        Ok(crate::utility::RemoteBase::Found(oid)) => {
+            let revision =
+                GitRevision::new(&oid.to_string()).map_err(|_| WorktreeError::InvalidOutput)?;
+            if let Ok(pinned) = facts.resolve_revision(context, revision, cancel) {
+                return Ok(pinned);
+            }
+        }
+        Err(crate::utility::UtilityError::Cancelled)
+        | Err(crate::utility::UtilityError::Execution(provenant_os::exec::ExecError::Cancelled)) => {
+            return Err(crate::utility::UtilityError::Cancelled.into());
+        }
+        _ => {}
+    }
+    let head = GitRevision::new("HEAD").map_err(|_| WorktreeError::InvalidRequest)?;
+    let oid = facts
+        .resolve_revision(context, head, cancel)
+        .map_err(|error| {
+            if matches!(error, WorktreeError::NotFound) {
+                WorktreeError::InvalidOutput
+            } else {
+                error
+            }
+        })?;
+    let _ = write_default_base_warning(&mut std::io::stderr().lock(), oid);
+    Ok(oid)
+}
+
+pub(super) fn write_default_base_warning(
+    output: &mut impl std::io::Write,
+    oid: GitOid,
+) -> std::io::Result<()> {
+    writeln!(
+        output,
+        "warning: could not fetch origin's default branch; using local HEAD {oid}"
+    )
 }
 
 /// Undo a `worktree add` that failed or was killed part-way. Only what this
