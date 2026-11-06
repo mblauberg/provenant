@@ -47,11 +47,14 @@ Set these in `[domains.run]` in the host configuration. Omit a key for its defau
 | Key | Default | Effect |
 |---|---|---|
 | `profile_limit_bytes` | 524288 | Maximum rendered macOS sandbox profile size. Increase for lanes with many grants; profiles pass through argv and may still hit OS limits. (1 or more bytes). |
-| `writer_token_budget` | 500000 | Tokens a writer attempt may use, from the fresh usage its provider reports, before it is ended with its work committed and pushed for a continuation. 0 turns the budget off. Cache reads do not count. Enforced for Claude from live usage. Codex exec reports usage only at turn.completed, so its budget is not enforced; other providers without live usage are also not enforced. Launch warnings or receipt notes say so. Current lane adapters cannot receive a live steer: the 90% warning records an unsupported control receipt. After custody is absent the host attempts a bounded commit; an in-progress merge is preserved for stopped-merge handling, and a commit failure is reported without replacing the budget outcome. Time queued for a build slot does not count towards the wall-clock deadline, up to lanes.slot_wait_seconds in total. The source (run, project, host or default) is shown with the budget. (0 or more tokens). |
+| `writer_token_budget` | 500000 | Tokens a writer attempt may use, from the fresh usage its provider reports, before it is ended so a continuation can pick it up. The host then attempts to commit and publish the lane's work; it does not when custody is not absent, when a merge, cherry-pick, revert or rebase is in progress, or when the commit fails, and settlement notes say which. 0 turns the budget off. Cache reads do not count. Enforced for Claude from live usage. The budget does not stop Codex writers: codex exec reports usage only at its final turn.completed frame, with no further turn to stop. Other providers without live usage are also not enforced. Launch warnings or receipt notes say so. Current lane adapters cannot receive a live steer: the 90% warning records an unsupported control receipt. After custody is absent the host attempts a bounded commit; an in-progress merge is preserved for stopped-merge handling, a cherry-pick, revert or rebase in progress is left uncommitted, and a skipped or failed commit is reported without replacing the budget outcome. Time queued for a build slot does not count towards the wall-clock deadline, up to lanes.slot_wait_seconds in total. The source (run, project, host or default) is shown with the budget. (0 or more tokens). |
 | `projects.{project}.writer_token_budget` | host writer_token_budget | Replace the host writer token budget for this project. (0 or more tokens). |
 | `grant_limit` | 128 | Maximum total plan roots and entries in each provider profile family; authentication and native-control families retain minimum caps of 16 and 64. Increase for lanes needing more roots. (1 or more). |
 | `write_grant_limit_bytes` | 262144 | Maximum encoded bytes of applied write grants recorded for a lane. Increase when an otherwise valid grant ledger exceeds the default; terminal records retain bounded headroom. (1 to 8388608 bytes). |
 | `argv_prompt_limit_bytes` | 65536 | Maximum prompt bytes passed directly to argv adapters. Larger top-level prompts spill to an attempt-owned file; nested attempts refuse rather than use a parent-writable spill. The overall 1 MiB prompt bound and operating-system argument limits still apply. (1 or more bytes). |
+| `continuation_copy_limit_bytes` | 4294967296 | Maximum retained provider state bytes copied into a continuation. Available disk space may lower the effective copy budget. Refusals report the setting and source; raise it or reduce state before retrying. (1 or more bytes). |
+| `continuation_copy_entries` | 100000 | Maximum entries searched or copied from retained provider state for a continuation. Refusals report the setting and source; raise it or reduce state before retrying. (1 to 4294967295 entries). |
+| `continuation_copy_depth` | 32 | Maximum directory depth searched or copied from retained provider state for a continuation. Raising it does not relax credential, hard-link, filesystem or worktree-overlap guards. (1 to 4294967295 directories). |
 | `projects.{project}.writer_writes` | host writer_writes | Replace the host writer_writes list for this project; an empty list grants no host-configured writer roots. Origin: host configuration [domains.run.projects.<project ID>]. (up to 16 absolute, safe directory paths outside credential roots). |
 
 ## Host land settings
@@ -310,6 +313,18 @@ Set the cap in `[domains.quota]`; set prices per account as shown.
 | `strict` | `true` |
 | `trade_off` | `"Off keeps switching manual; on opens a new chair pane when an explicitly allowed account has headroom."` |
 | `type` | `"bool"` |
+
+## `chair.refusal_notice`
+
+| Field | Value |
+|---|---|
+| `default` | `"inbox"` |
+| `effect` | `"Send the bound chair a notice when a dispatch is refused before admission."` |
+| `reader` | `"tools/front-door/src/settlement.rs"` |
+| `status` | `"wired"` |
+| `trade_off` | `"Off keeps the inbox quiet; inbox makes refusals visible to the chair."` |
+| `type` | `"enum"` |
+| `values` | `["inbox", "off"]` |
 
 ## `chair.switch_accounts`
 
