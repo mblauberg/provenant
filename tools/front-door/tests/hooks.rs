@@ -654,7 +654,16 @@ fn hook_recovers_committed_offers_and_advances_past_an_oversized_head_page() -> 
             "console",
         ],
     )?;
-    let denied = hook("rm -rf /")?;
+    // A malformed event must not consume queued answers. Shell command
+    // policy is owned by confinement, so a valid command is not a denial probe.
+    let denied = rig.execute(
+        Path::new(env!("CARGO_BIN_EXE_provenant")),
+        &["hook", "claude", "pre-tool-use"],
+        Some(&serde_json::to_vec(&json!({
+            "hook_event_name":"PreToolUse", "tool_name":"Bash",
+            "tool_input":{"command":null}, "session_id":"chair", "cwd":rig.project,
+        }))?),
+    )?;
     assert_eq!(code(&denied), 0);
     let denial: serde_json::Value = serde_json::from_slice(&denied.stdout.bytes)?;
     assert_eq!(denial["hookSpecificOutput"]["permissionDecision"], "deny");
