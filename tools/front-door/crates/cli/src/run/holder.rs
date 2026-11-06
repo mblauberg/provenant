@@ -102,12 +102,14 @@ fn live_graph_children(
 ) -> Result<bool, Box<dyn std::error::Error>> {
     use provenant_fabric_runtime::graph::{FileJournal, NodeState, relay};
     for id in FileJournal::pending_graph_ids(state, project)? {
-        let checkpoint = FileJournal::read_checkpoint(state, project, &id)?
-            .ok_or("missing graph checkpoint")?;
+        let checkpoint =
+            FileJournal::read_checkpoint(state, project, &id)?.ok_or("missing graph checkpoint")?;
         if let Some(parent) = relay::historical_parent_of_attempt(&checkpoint, reference) {
             let prefix = format!("{parent}--");
-            if checkpoint.nodes.iter().any(|node| node.id.starts_with(&prefix)
-                && matches!(node.state, NodeState::Pending | NodeState::Running)) {
+            if checkpoint.nodes.iter().any(|node| {
+                node.id.starts_with(&prefix)
+                    && matches!(node.state, NodeState::Pending | NodeState::Running)
+            }) {
                 return Ok(true);
             }
         }
@@ -119,8 +121,13 @@ impl Holder for HostHolder<'_> {
     fn has_live_children(&self, raw: &[u8]) -> custody::Result<bool> {
         let read = || -> Result<bool, Box<dyn std::error::Error>> {
             let context: run::HolderContext = serde_json::from_slice(raw)?;
-            let Some(launch) = &context.launch else { return Ok(false); };
-            let mut inputs = provenant_core::RootInputs::new(context.roots.home.clone(), context.roots.checkout.clone());
+            let Some(launch) = &context.launch else {
+                return Ok(false);
+            };
+            let mut inputs = provenant_core::RootInputs::new(
+                context.roots.home.clone(),
+                context.roots.checkout.clone(),
+            );
             inputs.state_dir = Some(launch.configuration_root.clone());
             let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
             let ctx = crate::fabric::Context::open(roots, &context.roots.home, &launch.cwd)?;
@@ -209,8 +216,11 @@ mod tests {
     use provenant_records::CanonicalV1;
 
     #[test]
-    fn custody_reads_live_graph_children_after_parent_exit() -> Result<(), Box<dyn std::error::Error>> {
-        use provenant_fabric_runtime::graph::{FileJournal, GraphCheckpoint, GraphDocument, GraphExecution, GraphJournal};
+    fn custody_reads_live_graph_children_after_parent_exit()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_fabric_runtime::graph::{
+            FileJournal, GraphCheckpoint, GraphDocument, GraphExecution, GraphJournal,
+        };
         use serde_json::json;
         let temp = tempfile::tempdir()?;
         let clock = SystemClock::new();
@@ -226,10 +236,20 @@ mod tests {
             "nodes":[{"id":"parent","access":"read_only","prompt":"Go","route":{"alias":"senior"}}]
         }))?;
         journal.bind(GraphExecution {
-            review_base: None, extra: Default::default(), integration_base: None,
-            directory: temp.path().to_path_buf(), document,
+            review_base: None,
+            extra: Default::default(),
+            integration_base: None,
+            directory: temp.path().to_path_buf(),
+            document,
         })?;
-        for status in ["pending", "running", "succeeded", "failed", "blocked", "skipped"] {
+        for status in [
+            "pending",
+            "running",
+            "succeeded",
+            "failed",
+            "blocked",
+            "skipped",
+        ] {
             let checkpoint: GraphCheckpoint = serde_json::from_value(json!({
                 "schema_version":1,"graph_id":"custody","plan_digest":"fixture",
                 "nodes":[{"id":"parent","state":"succeeded","attempts":[{
@@ -240,11 +260,22 @@ mod tests {
                 {"id":"parental--other","state":"running"}]
             }))?;
             journal.save(&checkpoint)?;
-            assert_eq!(live_graph_children(state, project, "host/parent-attempt")?, matches!(status, "pending" | "running"), "{status}");
+            assert_eq!(
+                live_graph_children(state, project, "host/parent-attempt")?,
+                matches!(status, "pending" | "running"),
+                "{status}"
+            );
             assert!(!live_graph_children(state, project, "host/other-attempt")?);
         }
         drop(journal);
-        std::fs::write(state.as_path().join("fabric/graphs").join(project.to_string()).join("graph-custody.json"), b"broken checkpoint")?;
+        std::fs::write(
+            state
+                .as_path()
+                .join("fabric/graphs")
+                .join(project.to_string())
+                .join("graph-custody.json"),
+            b"broken checkpoint",
+        )?;
         assert!(live_graph_children(state, project, "host/parent-attempt").is_err());
         Ok(())
     }

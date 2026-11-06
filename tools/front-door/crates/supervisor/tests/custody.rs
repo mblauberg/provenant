@@ -1474,9 +1474,19 @@ fn escapee_is_ended_beside_an_unprovable_nested_owner_without_repeated_failures(
 /// Host graph-child evidence at the production custody seam.
 struct GraphChildrenHolder(PathBuf);
 impl provenant_supervisor::Holder for GraphChildrenHolder {
-    fn admit(&self, _: &[u8], _: &Directory) -> std::result::Result<(), CustodyError> { Ok(()) }
-    fn has_live_children(&self, _: &[u8]) -> std::result::Result<bool, CustodyError> { Ok(self.0.join("live-graph-children").try_exists()?) }
-    fn terminal(&self, context: &[u8], attempt: &Directory, exit: &ExitObservation, recovery: &Recovery) -> std::result::Result<(), CustodyError> {
+    fn admit(&self, _: &[u8], _: &Directory) -> std::result::Result<(), CustodyError> {
+        Ok(())
+    }
+    fn has_live_children(&self, _: &[u8]) -> std::result::Result<bool, CustodyError> {
+        Ok(self.0.join("live-graph-children").try_exists()?)
+    }
+    fn terminal(
+        &self,
+        context: &[u8],
+        attempt: &Directory,
+        exit: &ExitObservation,
+        recovery: &Recovery,
+    ) -> std::result::Result<(), CustodyError> {
         RefusingHolder { clock: false }.terminal(context, attempt, exit, recovery)
     }
 }
@@ -3067,7 +3077,10 @@ fn main() -> Result<()> {
                 holder: refusal
                     .as_ref()
                     .map(|holder| holder as &dyn provenant_supervisor::Holder)
-                    .or_else(|| production_shape.then_some(&graph_children as &dyn provenant_supervisor::Holder)),
+                    .or_else(|| {
+                        production_shape
+                            .then_some(&graph_children as &dyn provenant_supervisor::Holder)
+                    }),
                 children: (!production_shape).then_some(&registry as &dyn ChildRegistry),
                 observer: Some(&observer),
                 wall_clock: jump
