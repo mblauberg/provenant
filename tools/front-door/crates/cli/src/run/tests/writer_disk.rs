@@ -51,17 +51,18 @@ fn policy_refusal_preserves_uncertain_sibling_handoff() -> Result<(), String> {
         .ok_or("policy refusal was ignored")?;
     assert_eq!(error.status, Status::Refused);
     assert_eq!(error.kind, ErrorKind::Refused);
-    // Unavailable routes still return their normal per-attempt receipts.
+    // All refusal kinds fail when no sibling can progress.
     for kind in [
         run::RefusalKind::PriorityUnavailable,
         run::RefusalKind::Preparation,
     ] {
-        check_launch_policy(&[run::Started::Refused {
+        let error = check_launch_policy(&[run::Started::Refused {
             attempt: AttemptId::from_bytes([3; 16]),
             kind,
             reason: "codex/model: UnknownAvailability".into(),
         }])
-        .map_err(|error| error.message)?;
+        .expect_err("all-refused batch must fail");
+        assert_eq!(error.status, Status::Refused);
     }
     // The typed cause promotes pacing without interpreting candidate prose.
     let pacing = || run::Started::Refused {

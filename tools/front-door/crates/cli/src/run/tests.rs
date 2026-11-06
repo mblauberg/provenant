@@ -4375,6 +4375,46 @@ fn trace_store(
 }
 
 #[test]
+fn refused_operations_are_rendered_without_an_attempt() -> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let call = run::Request {
+        clock: &clock,
+        cancel: &cancel,
+    };
+    let store = trace_store(&temp, &call)?;
+    let input = trace_run(
+        30,
+        AttemptId::from_bytes([2; 16]),
+        now(&clock).map_err(|e| e.message)?,
+    )?;
+    store.record_refusal(
+        &input,
+        ErrorKind::Unsupported.diagnostic(),
+        Some("writer".into()),
+        &call,
+    )?;
+    let mut data = json!({"lanes": []});
+    let mut human = String::new();
+    assert!(
+        status::append_refused_operations(&store, 20, &mut data, &mut human, &call)
+            .map_err(|e| e.message)?
+    );
+    assert_eq!(
+        data["refused_operations"][0]["operation_id"],
+        input.operation_id.as_str()
+    );
+    assert_eq!(
+        data["refused_operations"][0]["refusal"]["code"],
+        "UNSUPPORTED"
+    );
+    assert!(human.contains(input.operation_id.as_str()));
+    assert!(data["lanes"].as_array().is_some_and(Vec::is_empty));
+    Ok(())
+}
+
+#[test]
 fn cloud_job_survives_reopening_owned_attempt() -> Result<(), Box<dyn std::error::Error>> {
     use provenant_providers::cloud::{
         CloudProvider, CloudResult, CloudSubmission, RemoteJob, RemoteState,
