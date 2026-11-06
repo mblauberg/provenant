@@ -368,17 +368,109 @@ pub fn peer(
                 }
             }
             PeerAction::Run { input, .. } => {
-                peer_result(owner.run(input.clone(), budget, &cancel), |value| {
-                    PeerResult::Run {
-                        data: Box::new(value),
-                        extra: Default::default(),
-                    }
+                let observed = owner
+                    .run(input.clone(), budget, &cancel)
+                    .and_then(|mut value| {
+                        if let provenant_fabric_runtime::runs::RunResult::Status { attempt, .. } =
+                            &mut value
+                            && matches!(
+                                attempt.state,
+                                provenant_records::run::AttemptState::Terminal { .. }
+                            )
+                        {
+                            let store = owner.store(&cancel)?;
+                            let call = owner.call(&cancel);
+                            let released =
+                                store.custody_released(attempt, &call).map_err(run_error)?;
+                            attempt.extra.insert(
+                                "graph_custody_released".into(),
+                                serde_json::json!(released),
+                            );
+                        }
+                        Ok(value)
+                    });
+                peer_result(observed, |value| PeerResult::Run {
+                    data: Box::new(value),
+                    extra: Default::default(),
                 })
             }
-            PeerAction::Submit { .. } => peer_result(
-                Err::<provenant_fabric_runtime::runs::SubmissionReceipt, _>(FacadeError::invalid(
-                    InvalidInputDetail::Field("submit".into()),
-                )),
+            PeerAction::Submit { input, extra } => peer_result(
+                (|| {
+                    let actor = extra
+                        .get("graph_launch_actor")
+                        .and_then(serde_json::Value::as_str)
+                        .and_then(|value| value.parse::<provenant_core::ActorId>().ok())
+                        .ok_or(FacadeError::StateCorrupt)?;
+                    if request.agent != format!("graph-{actor}") {
+                        return Err(FacadeError::ConfinementRefused { resource: None });
+                    }
+                    let attempt = extra.get("graph_attempt").cloned().ok_or_else(|| {
+                        FacadeError::invalid(InvalidInputDetail::Field("graph context".into()))
+                    })?;
+                    let attempt: provenant_fabric_runtime::graph::AttemptSpec =
+                        serde_json::from_value(attempt)
+                            .map_err(|_| FacadeError::InvalidInput { detail: None })?;
+                    if attempt.host.is_some()
+                        || attempt.placement.is_some()
+                        || attempt.new_worktree.is_some()
+                        || !attempt.write_roots.is_empty()
+                        || !attempt.capabilities.is_empty()
+                    {
+                        return Err(FacadeError::ConfinementRefused { resource: None });
+                    }
+                    let SubmitInput::Submit { tasks, host, .. } = input;
+                    if host.is_some()
+                        || tasks.iter().any(|task| {
+                            task.access != provenant_fabric_runtime::graph::AccessMode::ReadOnly
+                                || task.worktree.is_some()
+                                || task.new_worktree.is_some()
+                        })
+                    {
+                        return Err(FacadeError::ConfinementRefused { resource: None });
+                    }
+                    let retry = extra
+                        .get("graph_retry_limit")
+                        .cloned()
+                        .map(serde_json::from_value)
+                        .transpose()
+                        .map_err(|_| FacadeError::InvalidInput { detail: None })?
+                        .flatten();
+                    let network = extra
+                        .get("graph_network")
+                        .cloned()
+                        .map(serde_json::from_value)
+                        .transpose()
+                        .map_err(|_| FacadeError::InvalidInput { detail: None })?
+                        .flatten();
+                    let source = provenant_run::resolve_reader_source(
+                        context.roots.state.as_path(),
+                        &cwd,
+                        &cwd,
+                    )
+                    .map_err(run_error)?;
+                    let directory = provenant_os::fs::Directory::open_anchor(&source)
+                        .map_err(|_| FacadeError::ConfinementRefused { resource: None })?;
+                    let metadata = directory
+                        .metadata()
+                        .map_err(|_| FacadeError::ConfinementRefused { resource: None })?;
+                    let access = provenant_records::run::LaneAccess {
+                        network,
+                        source_root: Some(source),
+                        source_identity: Some(provenant_records::run::SourceIdentity {
+                            device: metadata.device,
+                            inode: metadata.inode,
+                        }),
+                        ..Default::default()
+                    };
+                    owner.submit_with_access(
+                        input.clone(),
+                        budget,
+                        &cancel,
+                        access,
+                        retry,
+                        Some(attempt),
+                    )
+                })(),
                 |data| PeerResult::Submitted {
                     data,
                     extra: Default::default(),

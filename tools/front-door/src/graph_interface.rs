@@ -70,7 +70,7 @@ fn invoke(
             } else {
                 fabric::factory(globals, workers)?
             };
-        let wait_seconds = input["wait_seconds"].as_u64().unwrap_or(55).max(55);
+        let wait_seconds = input["wait_seconds"].as_u64().unwrap_or(55);
         let budget = WaitBudget::cli(factory.clock.mono_now(), wait_seconds)?;
         Ok(factory.graph_document(input, budget, &CancelToken::new())?)
     })();
@@ -122,8 +122,26 @@ pub(crate) fn run(
     globals: &Globals,
     workers: &'static dyn WorkerObserver,
 ) -> u8 {
-    let input = (|| {
+    invoke("run", run_input(request), globals, workers)
+}
+
+fn run_input(request: GraphRunArgs) -> Result<Value, String> {
+    (|| {
         let mut input = json!({"op":"run","explain":request.explain,"detached":request.detached});
+        for (field, value) in [
+            ("host", request.host),
+            ("model", request.model),
+            ("effort", request.effort),
+            ("account", request.account),
+            (
+                "operation_id",
+                request.operation_id.map(|id| id.to_string()),
+            ),
+        ] {
+            if let Some(value) = value {
+                input[field] = json!(value);
+            }
+        }
         if let Some(mode) = request.mode {
             input["access"] = json!(mode.replace('-', "_"));
         }
@@ -193,8 +211,7 @@ pub(crate) fn run(
             }
         }
         Ok(input)
-    })();
-    invoke("run", input, globals, workers)
+    })()
 }
 pub(crate) fn edit(request: Edit, globals: &Globals, workers: &'static dyn WorkerObserver) -> u8 {
     invoke(
@@ -244,6 +261,50 @@ pub(crate) fn stats(
 )]
 mod tests {
     use super::*;
+
+    #[test]
+    fn run_flags_and_attempt_settings_reach_the_graph_request() {
+        let provenant_cli::ParseOutcome::Invocation(invocation) = provenant_cli::parse(
+            [
+                "run",
+                "Inspect",
+                "--host",
+                "workshop",
+                "--model",
+                "codex/gpt-6-luna",
+                "--effort",
+                "high",
+                "--account",
+                "work",
+                "--operation-id",
+                "host-run",
+                "--set",
+                "attempt.build_heavy=true",
+                "--set",
+                "attempt.confidential=true",
+                "--set",
+                "attempt.provider_timeout=42",
+                "--set",
+                "attempt.host='other'",
+            ]
+            .map(std::ffi::OsString::from),
+        ) else {
+            panic!("run should parse");
+        };
+        let provenant_cli::Command::Run(request) = invocation.command else {
+            panic!("run command");
+        };
+        let input = run_input(*request).unwrap();
+        assert_eq!(input["host"], "workshop");
+        assert_eq!(input["model"], "codex/gpt-6-luna");
+        assert_eq!(input["effort"], "high");
+        assert_eq!(input["account"], "work");
+        assert_eq!(input["operation_id"], "host-run");
+        assert_eq!(input["set"]["attempt.build_heavy"], true);
+        assert_eq!(input["set"]["attempt.confidential"], true);
+        assert_eq!(input["set"]["attempt.provider_timeout"], 42);
+        assert_eq!(input["set"]["attempt.host"], "other");
+    }
 
     #[test]
     fn run_reports_the_graph_outcome_and_status_reads_remain_successful() {

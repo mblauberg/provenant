@@ -2189,6 +2189,11 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 
 | Argument | Contract |
 |---|---|
+| `--host` | `{"description": "Place attempts on this peer name or host ID", "name": "host"}` |
+| `--model` | `{"conflicts": ["tier"], "description": "Use this exact adapter/model instead of a route tier", "name": "model"}` |
+| `--effort` | `{"description": "Override model reasoning effort", "name": "effort"}` |
+| `--account` | `{"description": "Account label for routing and quota accounting", "name": "account"}` |
+| `--operation-id` | `{"description": "Stable operation identity for replay", "name": "operation_id"}` |
 | `brief` | `{"description": "Brief for the selected template", "name": "brief", "positional": true}` |
 | `--use` | `{"description": "Select a layered template [default: task]", "name": "template"}` |
 | `--tier` | `{"description": "Override the template's route tier", "name": "tier"}` |
@@ -2198,7 +2203,7 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 | `--base` | `{"description": "Git base for a new writer branch", "name": "base"}` |
 | `--write-scope` | `{"description": "Paths the writer may change, relative to its worktree; repeatable", "name": "write_scope", "repeatable": true}` |
 | `--over` | `{"description": "Copy the node over named items, or a resolver such as @review-panel", "name": "over", "repeatable": true}` |
-| `--set` | `{"description": "Bind a template parameter (NAME=TOML_VALUE); repeatable", "name": "set", "repeatable": true}` |
+| `--set` | `{"description": "Bind a template parameter or attempt.FIELD (NAME=TOML_VALUE); repeatable", "name": "set", "repeatable": true}` |
 | `--file` | `{"description": "Read a graph document (JSON or TOML), or a plain text brief", "name": "file"}` |
 | `--detached` | `{"defaults": ["false"], "description": "Let this child outlive parent and graph cancellation (inside a lane only)", "name": "detached", "values": ["true", "false"]}` |
 | `--explain` | `{"defaults": ["false"], "description": "Explain the compiled graph without starting work", "name": "explain", "values": ["true", "false"]}` |
@@ -2218,6 +2223,11 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
   "groups": [
     {
       "arguments": [
+        "host",
+        "model",
+        "effort",
+        "account",
+        "operation_id",
         "brief",
         "template",
         "tier",

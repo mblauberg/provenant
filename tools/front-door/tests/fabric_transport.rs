@@ -2124,6 +2124,333 @@ fn json_command(rig: &TestRig, args: &[&str]) -> Result<(i64, Value)> {
     Ok((code(&output), value))
 }
 
+// Adapted from the pre-graph peer dispatch regressions. Placement and replay
+// now travel through the graph attempt owner, then the existing peer protocol.
+#[test]
+fn peer_dispatch_recovers_receipt_when_probes_fail() -> Result {
+    let mut rig = TestRig::new()?;
+    let cleanup = rig.process_cleanup();
+    let peer = loopback_peer(&mut rig)?;
+    let ssh = rig.root.join("ssh");
+    let real = rig.root.join("ssh-real");
+    std::fs::rename(&ssh, &real)?;
+    let lost = rig.root.join("lost-submit");
+    std::fs::write(
+        &ssh,
+        format!(
+            "#!/bin/sh\nrequest=$(cat)\ncase \"$request\" in\n  *'\"action\":\"health\"'*) exit 1;;\n  *'\"action\":\"submit\"'*) if [ -f '{}' ]; then printf '%s\\n' \"$request\" | '{}' >/dev/null; rm '{}'; exit 1; fi;;\nesac\nprintf '%s\\n' \"$request\" | '{}'\n",
+            lost.display(),
+            real.display(),
+            lost.display(),
+            real.display()
+        ),
+    )?;
+    std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o700))?;
+    let launch = |rig: &TestRig, operation| {
+        json_command(
+            rig,
+            &[
+                "run",
+                "fixture",
+                "--host",
+                "workshop",
+                "--model",
+                "codex/gpt-6-luna",
+                "--operation-id",
+                operation,
+                "--wait=15s",
+                "--json",
+            ],
+        )
+    };
+    let (_, success) = launch(&rig, "probe-failure-success")?;
+    let reference = success["data"]["checkpoint"]["nodes"][0]["attempts"][0]["attempt_ref"]
+        .as_str()
+        .ok_or_else(|| format!("missing peer attempt: {success}"))?;
+    assert!(reference.starts_with(&format!("{peer}/")), "{success}");
+    let runs = rig.root.join("peer-state/runs");
+    let existing: std::collections::HashSet<_> = std::fs::read_dir(&runs)?
+        .map(|entry| entry.map(|entry| entry.file_name()))
+        .collect::<std::io::Result<_>>()?;
+    std::fs::write(&lost, "")?;
+    let (_, unknown) = launch(&rig, "probe-failure-retry")?;
+    assert!(unknown.to_string().contains("LAUNCH_UNKNOWN"), "{unknown}");
+    let after_loss: std::collections::HashSet<_> = std::fs::read_dir(&runs)?
+        .map(|entry| entry.map(|entry| entry.file_name()))
+        .collect::<std::io::Result<_>>()?;
+    assert_eq!(after_loss.difference(&existing).count(), 1, "{unknown}");
+    rig.env.retain(|(key, _)| key != "PROVENANT_AGENT_LABEL");
+    rig.env
+        .push(("PROVENANT_AGENT_LABEL".into(), "replacement-runner".into()));
+    let (_, recovered) = launch(&rig, "probe-failure-retry")?;
+    let reference = recovered["data"]["checkpoint"]["nodes"][0]["attempts"][0]["attempt_ref"]
+        .as_str()
+        .ok_or_else(|| format!("missing recovered peer attempt: {recovered}"))?;
+    assert!(reference.starts_with(&format!("{peer}/")), "{recovered}");
+    let after: std::collections::HashSet<_> = std::fs::read_dir(&runs)?
+        .map(|entry| entry.map(|entry| entry.file_name()))
+        .collect::<std::io::Result<_>>()?;
+    assert_eq!(after.difference(&existing).count(), 1, "{recovered}");
+    let (_, replay) = launch(&rig, "probe-failure-retry")?;
+    assert_eq!(
+        replay["data"]["checkpoint"]["nodes"][0]["attempts"][0]["attempt_ref"],
+        reference
+    );
+    let replayed: std::collections::HashSet<_> = std::fs::read_dir(&runs)?
+        .map(|entry| entry.map(|entry| entry.file_name()))
+        .collect::<std::io::Result<_>>()?;
+    assert_eq!(replayed, after);
+    rig.assert_legacy_unchanged()?;
+    cleanup.disarm();
+    Ok(())
+}
+
+#[test]
+fn peer_dispatch_set_host_reaches_the_peer_attempt() -> Result {
+    let mut rig = TestRig::new()?;
+    let cleanup = rig.process_cleanup();
+    let peer = loopback_peer(&mut rig)?;
+    let (_, placed) = json_command(
+        &rig,
+        &[
+            "run",
+            "fixture",
+            "--set",
+            "attempt.host=\"workshop\"",
+            "--model",
+            "codex/gpt-6-luna",
+            "--wait=15s",
+            "--json",
+        ],
+    )?;
+    let reference = placed["data"]["checkpoint"]["nodes"][0]["attempts"][0]["attempt_ref"]
+        .as_str()
+        .ok_or_else(|| format!("missing peer attempt: {placed}"))?;
+    assert!(reference.starts_with(&format!("{peer}/")), "{placed}");
+    assert_eq!(
+        std::fs::read_dir(rig.root.join("peer-state/runs"))?.count(),
+        1
+    );
+    rig.assert_legacy_unchanged()?;
+    cleanup.disarm();
+    Ok(())
+}
+
+#[test]
+fn peer_dispatch_refuses_an_oversized_frame_before_contact() -> Result {
+    let mut rig = TestRig::new()?;
+    loopback_peer(&mut rig)?;
+    let prompt = rig.root.join("prompt.txt");
+    // Raise the node limit so this regression reaches the peer frame check.
+    let config = rig.state.join("config.toml");
+    let mut settings: toml_edit::DocumentMut = std::fs::read_to_string(&config)?.parse()?;
+    settings["domains"]["fabric"]["graph"]["limits"]["node_prompt_bytes"] =
+        toml_edit::value(1024 * 1024);
+    std::fs::write(config, settings.to_string())?;
+    // JSON escaping exceeds the peer frame cap although the brief itself fits.
+    std::fs::write(&prompt, "\"".repeat(600 * 1024))?;
+    for _ in 0..2 {
+        let (status, refused) = json_command(
+            &rig,
+            &[
+                "run",
+                "--host",
+                "workshop",
+                "--model",
+                "agy/gemini-3.8-flash",
+                "--operation-id",
+                "peer-frame-limit",
+                "--file",
+                prompt.to_str().ok_or("prompt")?,
+                "--json",
+            ],
+        )?;
+        assert_ne!(status, 0, "{refused}");
+        assert_eq!(
+            refused["data"]["checkpoint"]["nodes"][0]["advance_error_code"], "launch_refused",
+            "{refused}"
+        );
+        assert!(
+            refused["data"]["advance_error"]
+                .as_str()
+                .is_some_and(|message| message.contains("[invalid_input]")),
+            "{refused}"
+        );
+    }
+    assert!(!rig.root.join("peer-stderr").exists());
+    assert!(!rig.root.join("peer-state/runs").exists());
+    rig.assert_legacy_unchanged()
+}
+
+#[test]
+fn peer_dispatch_refuses_misplaced_writers_and_unknown_hosts_before_contact() -> Result {
+    let mut rig = TestRig::new()?;
+    loopback_peer(&mut rig)?;
+    let contacted = rig.root.join("contacted");
+    std::fs::write(
+        rig.root.join("ssh"),
+        format!("#!/bin/sh\ntouch '{}'\nexit 97\n", contacted.display()),
+    )?;
+    let worktree = rig.project.to_str().ok_or("worktree")?;
+    let (_, refused) = json_command(
+        &rig,
+        &[
+            "run",
+            "fixture",
+            "--host",
+            "workshop",
+            "--mode",
+            "worktree-write",
+            "--worktree",
+            worktree,
+            "--model",
+            "codex/gpt-6-luna",
+            "--json",
+        ],
+    )?;
+    assert!(
+        refused.to_string().contains("WORKTREE_NOT_APPLICABLE"),
+        "{refused}"
+    );
+    for host in ["nowhere", "laptop"] {
+        let (_, unknown) = json_command(
+            &rig,
+            &[
+                "run",
+                "fixture",
+                "--host",
+                host,
+                "--model",
+                "codex/gpt-6-luna",
+                "--json",
+            ],
+        )?;
+        assert!(unknown.to_string().contains("UNKNOWN_HOST"), "{unknown}");
+    }
+    assert!(!contacted.exists());
+    assert!(!rig.root.join("peer-state/runs").exists());
+    rig.assert_legacy_unchanged()
+}
+
+#[test]
+#[allow(clippy::disallowed_methods)] // Exercise the real wait deadline.
+fn peer_dispatch_wait_bounds_unanswered_submission() -> Result {
+    let mut rig = TestRig::new()?;
+    loopback_peer(&mut rig)?;
+    std::fs::write(
+        rig.root.join("ssh"),
+        "#!/bin/sh\nexec /usr/bin/tail -f /dev/null\n",
+    )?;
+    let start = std::time::Instant::now();
+    let (_, result) = json_command(
+        &rig,
+        &[
+            "run",
+            "fixture",
+            "--host",
+            "workshop",
+            "--model",
+            "codex/gpt-6-luna",
+            "--operation-id",
+            "held-submit",
+            "--wait=1s",
+            "--json",
+        ],
+    )?;
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(6),
+        "{result}"
+    );
+    assert!(result.to_string().contains("LAUNCH_UNKNOWN"), "{result}");
+    assert!(!rig.root.join("peer-state/runs").exists());
+    Ok(())
+}
+
+#[test]
+fn peer_dispatch_launches_a_large_argv_prompt() -> Result {
+    let mut rig = TestRig::new()?;
+    let cleanup = rig.process_cleanup();
+    let executor = provenant_os::exec::SystemExecutor::new(1)?;
+    let cancel = provenant_core::CancelToken::new();
+    if let Err(error) = provenant_confinement::permissions::system_backend(
+        &provenant_confinement::permissions::BackendContext {
+            executor: &executor,
+            cancel: &cancel,
+            #[cfg(target_os = "macos")]
+            env: &[],
+        },
+    ) {
+        provenant_test_support::skip_sandbox_dependent_test(error.to_string())?;
+        return Ok(());
+    }
+    let bin = rig.root.join("provider/bin");
+    std::fs::create_dir_all(&bin)?;
+    std::fs::write(
+        bin.join("agy"),
+        "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 'agy 1.0.0'; exit 0; fi\n\
+         while [ \"$#\" -gt 0 ] && [ \"$1\" != --print ]; do shift; done\n\
+         [ \"$#\" -gt 1 ] || exit 2\nshift\n\
+         task=${1#Read the file at }\n\
+         task=${task% first and treat its full contents as your task instructions.}\n\
+         [ \"$(wc -c <\"$task\")\" -gt 119808 ] || exit 3\n\
+         echo launched >>\"$HOME/launch-count\"\necho 'peer large prompt fixture' >&2\n",
+    )?;
+    std::fs::set_permissions(bin.join("agy"), std::fs::Permissions::from_mode(0o755))?;
+    std::fs::create_dir_all(rig.home.join("Library/Keychains"))?;
+    std::fs::write(
+        rig.home.join("Library/Keychains/login.keychain-db"),
+        "fixture",
+    )?;
+    rig.env.retain(|(key, _)| key != "PATH");
+    rig.env.push((
+        "PATH".into(),
+        format!("{}:/usr/bin:/bin", bin.display()).into(),
+    ));
+    let peer = loopback_peer(&mut rig)?;
+    let prompt = rig.root.join("prompt.txt");
+    let text = "x".repeat(117 * 1024);
+    std::fs::write(&prompt, &text)?;
+    let args = [
+        "run",
+        "--host",
+        "workshop",
+        "--model",
+        "agy/gemini-3.8-flash",
+        "--effort",
+        "high",
+        "--operation-id",
+        "peer-large-prompt",
+        "--file",
+        prompt.to_str().ok_or("prompt")?,
+        "--wait=30s",
+        "--json",
+    ];
+    let (_, placed) = json_command(&rig, &args)?;
+    let node = &placed["data"]["checkpoint"]["nodes"][0];
+    let reference = node["attempts"][0]["attempt_ref"]
+        .as_str()
+        .ok_or_else(|| format!("missing peer attempt: {placed}"))?;
+    let (host, attempt) = reference.split_once('/').ok_or("attempt reference")?;
+    assert_eq!(host, peer.to_string());
+    assert_eq!(node["state"], "succeeded", "{placed}");
+    let runs = rig.root.join("peer-state/runs");
+    let run = std::fs::read_dir(&runs)?.next().ok_or("peer run")??.path();
+    let directory = run.join("attempts").join(attempt);
+    assert!(std::fs::read_to_string(directory.join("prompt.md"))?.ends_with(&text));
+    assert_eq!(
+        std::fs::read_to_string(directory.join("provider-state/candidate-0/launch-count"))?,
+        "launched\n"
+    );
+    let (_, replay) = json_command(&rig, &args)?;
+    assert_eq!(
+        replay["data"]["checkpoint"]["nodes"][0]["attempts"][0]["attempt_ref"],
+        reference
+    );
+    rig.assert_legacy_unchanged()?;
+    cleanup.disarm();
+    Ok(())
+}
+
 #[test]
 fn inbox_all_projects_reads_and_answers_through_peers() -> Result {
     let mut rig = TestRig::new()?;

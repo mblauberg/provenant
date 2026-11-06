@@ -178,6 +178,15 @@ impl Eq for TopologyPresence {}
 /// Execution specification for an attempt, carrying what a plain lane expresses.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AttemptSpec {
+    /// Peer name or host ID; omitted means local execution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+    /// Require a confidential-safe route.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub confidential: bool,
+    /// Provider execution timeout in seconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_timeout: Option<u64>,
     #[serde(flatten)]
     pub extra: provenant_records::ExtraFields,
     /// Placement override for cloud execution.
@@ -202,7 +211,10 @@ pub struct AttemptSpec {
 
 impl AttemptSpec {
     pub fn is_empty(&self) -> bool {
-        self.placement.is_none()
+        self.host.is_none()
+            && !self.confidential
+            && self.provider_timeout.is_none()
+            && self.placement.is_none()
             && self.new_worktree.is_none()
             && self.account.is_none()
             && self.capabilities.is_empty()

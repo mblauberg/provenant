@@ -513,6 +513,9 @@ fn graph(nodes: Vec<GraphNode>) -> GraphDocument {
 #[test]
 fn node_attempt_spec_reaches_the_launch() {
     let spec = AttemptSpec {
+        host: Some("workshop".into()),
+        confidential: true,
+        provider_timeout: Some(42),
         account: Some("work".into()),
         placement: Some(provenant_records::run::CloudPlacement {
             target: "cloud".into(),
@@ -535,12 +538,16 @@ fn node_attempt_spec_reaches_the_launch() {
         observations: [terminal(AttemptOutcome::Succeeded)].into(),
         ..Default::default()
     };
-    advance(
+    let run = advance(
         &graph(vec![lane]),
         &mut owner,
         &mut MemoryJournal::default(),
     )
     .unwrap();
+    assert_eq!(
+        run.checkpoint.nodes[0].attempts[0].extra["placement_host"],
+        "workshop"
+    );
     assert_eq!(owner.attempt_specs, vec![Some(spec)]);
     assert_eq!(owner.capabilities, vec![Some(vec!["postgres".into()])]);
 

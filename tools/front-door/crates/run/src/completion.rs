@@ -114,7 +114,8 @@ impl RunStore {
     }
 }
 
-pub(crate) fn sanitise_handoff(handoff: &Handoff) -> Result<Handoff> {
+/// Redact decoded handoff values before a graph consumes local or peer output.
+pub fn sanitise_handoff(handoff: &Handoff) -> Result<Handoff> {
     transform_handoff(handoff, |text| {
         let safe = provenant_confinement::redact::known_shapes(text.as_bytes())
             .map_err(|_| RunError::Validation("handoff redaction failed"))?;

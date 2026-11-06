@@ -1436,6 +1436,128 @@ esac
     }
 
     #[test]
+    fn graph_peer_without_receipt_keeps_launch_and_cancellation_uncertain()
+    -> Result<(), Box<dyn std::error::Error>> {
+        if host_test("fabric::peer_tests::graph_peer_without_receipt_keeps_launch_and_cancellation_uncertain")? {
+            return Ok(());
+        }
+        use provenant_fabric_runtime::graph::{self, AttemptOwner};
+        let rig = crate::worktree_tests::repository()?;
+        let roots = crate::roots::child(&rig.home, &rig.project, rig.state.clone())?;
+        let factory = Factory {
+            context: Context::open(roots, &rig.home, &rig.project)?,
+            project_attribution: false, clock: SystemClock, backoff: ThreadPause,
+            executor: SystemExecutor::new(1)?, home: rig.home.clone(), cwd: rig.project.clone(),
+            assets: rig.project.clone(), host_launch: None, mcp_project: None, workers: &FreeWorkers,
+        };
+        let cancel = CancelToken::new();
+        let budget = WaitBudget::cli(factory.clock.mono_now(), 10)?;
+        let mut owner = BoundGraphOwner {
+            factory: &factory, integration_base: None, integration_branch: None,
+            network: None, capability_overrides: Default::default(), exclude: Vec::new(),
+            budget, cancel: &cancel, prices: None, tick: false,
+        };
+        let mut attempt: graph::GraphAttempt = serde_json::from_value(serde_json::json!({
+            "launched":false,
+            "key":{"graph_id":"peer-without-receipt", "node_id":"inspect", "route_index":0},
+            "route":{"alias":"junior"}, "state":"starting", "attempt_ref":null,
+            "outcome":null, "launch_actor":owner.actor()
+        }))?;
+        // Even a removed peer cannot turn missing local state into proof that
+        // the remote operation was refused or has stopped.
+        attempt.extra.insert("placement_host".into(), serde_json::json!("removed-peer"));
+        assert!(!owner.launch_accepted(&attempt)?);
+        assert!(!owner.launch_refused_before_acceptance(&attempt)?);
+        assert!(!owner.cancelled_attempt_settled(&attempt)?);
+        for placement in [
+            None,
+            Some("local".to_owned()),
+            Some(factory.context.identity.host.to_string()),
+        ] {
+            attempt.extra.remove("placement_host");
+            if let Some(placement) = placement {
+                attempt.extra.insert("placement_host".into(), serde_json::json!(placement));
+            }
+            assert!(!owner.launch_accepted(&attempt)?);
+            assert!(owner.launch_refused_before_acceptance(&attempt)?);
+            assert!(owner.cancelled_attempt_settled(&attempt)?);
+        }
+        attempt.attempt_ref = Some(format!("{}/{}",
+            provenant_core::HostId::from_bytes([7;16]),
+            provenant_core::AttemptId::from_bytes([8;16])));
+        assert!(owner.launch_accepted(&attempt)?);
+        assert!(!owner.launch_refused_before_acceptance(&attempt)?);
+        Ok(())
+    }
+
+    #[test]
+    fn graph_run_controls_reach_the_sealed_attempt() -> Result<(), Box<dyn std::error::Error>> {
+        if host_test("fabric::peer_tests::graph_run_controls_reach_the_sealed_attempt")? {
+            return Ok(());
+        }
+        let rig = crate::worktree_tests::repository()?;
+        let roots = crate::roots::child(&rig.home, &rig.project, rig.state.clone())?;
+        let factory = Factory {
+            context: Context::open(roots, &rig.home, &rig.project)?,
+            project_attribution: false,
+            clock: SystemClock,
+            backoff: ThreadPause,
+            executor: SystemExecutor::new(1)?,
+            home: rig.home.clone(),
+            cwd: rig.project.clone(),
+            assets: rig.project.clone(),
+            host_launch: None,
+            mcp_project: None,
+            workers: &FreeWorkers,
+        };
+        let cancel = CancelToken::new();
+        let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
+        let input = serde_json::json!({
+            "op":"run", "brief":"Inspect the parser", "model":"fixture/model",
+            "effort":"high", "account":"fixture-account", "host":"local",
+            "operation_id":"graph-run-controls",
+            "set":{
+                "attempt.build_heavy":true,
+                "attempt.confidential":true,
+                "attempt.provider_timeout":42
+            }
+        });
+        let preview = factory.graph_document({
+            let mut preview = input.clone();
+            preview["explain"] = serde_json::json!(true);
+            preview
+        }, budget, &cancel)?;
+        assert_eq!(preview["document"]["graph_id"], "g-graph-run-controls");
+        let node = &preview["document"]["nodes"][0];
+        assert_eq!(node["attempt"]["host"], "local");
+        assert_eq!(node["attempt"]["build_heavy"], true);
+        assert_eq!(node["attempt"]["confidential"], true);
+        assert_eq!(node["attempt"]["provider_timeout"], 42);
+        let launched = factory.graph_document(input.clone(), budget, &cancel)?;
+        let key = serde_json::from_value(launched["checkpoint"]["nodes"][0]["attempts"][0]["key"].clone())?;
+        let owner = BinaryRunOwner { factory: &factory, allow_remote: true, actor: None, chair: None };
+        let store = owner.store(&cancel)?;
+        let call = owner.call(&cancel);
+        let operation = store.operation(&graph_operation("graph-attempt-operation", &key)?, &call)?
+            .ok_or("launch operation missing")?;
+        let request = store.request(operation.run_id, &call)?;
+        let task = request.tasks.first().ok_or("sealed task missing")?;
+        assert_eq!(task.route, serde_json::from_value(serde_json::json!({
+            "kind":"model", "provider":"fixture", "model":"fixture/model", "effort":"high"
+        }))?);
+        assert_eq!(task.account.as_deref(), Some("fixture-account"));
+        assert!(task.build_heavy);
+        assert_eq!(task.provider_timeout_seconds, 42);
+        assert_eq!(task.profile.extra.get("confidential"), Some(&serde_json::json!(true)));
+        let replay = factory.graph_document(input, budget, &cancel)?;
+        let replay_key = serde_json::from_value(replay["checkpoint"]["nodes"][0]["attempts"][0]["key"].clone())?;
+        let replay_operation = store.operation(&graph_operation("graph-attempt-operation", &replay_key)?, &call)?
+            .ok_or("replayed operation missing")?;
+        assert_eq!(replay_operation.run_id, operation.run_id);
+        Ok(())
+    }
+
+    #[test]
     fn graph_review_launch_submits_pinned_source_and_base() -> Result<(), Box<dyn std::error::Error>> {
         if host_test("fabric::peer_tests::graph_review_launch_submits_pinned_source_and_base")? { return Ok(()); }
         use provenant_fabric_runtime::graph::{self, AttemptOwner};

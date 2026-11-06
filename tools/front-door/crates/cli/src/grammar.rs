@@ -642,6 +642,21 @@ impl Access {
 }
 #[derive(Debug, Args)]
 pub struct GraphRunArgs {
+    /// Place attempts on this peer name or host ID
+    #[arg(long)]
+    pub host: Option<String>,
+    /// Use this exact adapter/model instead of a route tier
+    #[arg(long, conflicts_with = "tier")]
+    pub model: Option<String>,
+    /// Override model reasoning effort
+    #[arg(long)]
+    pub effort: Option<String>,
+    /// Account label for routing and quota accounting
+    #[arg(long)]
+    pub account: Option<String>,
+    /// Stable operation identity for replay
+    #[arg(long, hide = true, value_parser = explicit_operation_id)]
+    pub operation_id: Option<OperationId>,
     /// Brief for the selected template
     pub brief: Option<String>,
     /// Select a layered template [default: task]
@@ -668,7 +683,7 @@ pub struct GraphRunArgs {
     /// Copy the node over named items, or a resolver such as @review-panel
     #[arg(long, value_delimiter = ',')]
     pub over: Vec<String>,
-    /// Bind a template parameter (NAME=TOML_VALUE); repeatable
+    /// Bind a template parameter or attempt.FIELD (NAME=TOML_VALUE); repeatable
     #[arg(long = "set")]
     pub set: Vec<String>,
     /// Read a graph document (JSON or TOML), or a plain text brief
