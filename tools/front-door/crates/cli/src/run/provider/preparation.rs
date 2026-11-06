@@ -27,6 +27,22 @@ fn uniform_candidate_resource(
     facts.all(|fact| fact == first).then_some(first)
 }
 
+fn attach_candidate_guard_facts(
+    reasons: &mut [SkippedRoute],
+    boundaries: &std::collections::BTreeMap<usize, provenant_records::diagnostic::BoundaryClass>,
+    resources: &std::collections::BTreeMap<usize, provenant_records::diagnostic::ResourceFact>,
+) -> Result<(), PrepareError> {
+    for (index, reason) in reasons.iter_mut().enumerate() {
+        reason
+            .set_guard_facts(
+                boundaries.get(&index).copied(),
+                resources.get(&index).copied(),
+            )
+            .map_err(|error| PrepareError::Other(error.to_string()))?;
+    }
+    Ok(())
+}
+
 pub(super) fn image_input_warning(adapter: &str, attachments: &[PathBuf]) -> Option<String> {
     (!attachments.is_empty()
         && !AdapterSpec::get(adapter).is_some_and(|spec| spec.launch.image_input))
@@ -667,6 +683,46 @@ fn dependency_preparation_retains_setting_source_without_source_error() {
             Some(ResourceFact::DependencyPreparation { configured })
         );
     }
+}
+
+#[test]
+fn mixed_candidate_guard_facts_survive_fallback_without_source_text()
+-> Result<(), Box<dyn std::error::Error>> {
+    use provenant_records::diagnostic::{BoundaryClass, ResourceFact, SettingSource};
+    let mut reasons = vec![
+        skip("a", SkipKind::Refused, "TOKEN_SENTINEL"),
+        skip("b", SkipKind::Refused, "TOKEN_SENTINEL"),
+    ];
+    let boundaries = [(0, BoundaryClass::Credentials)].into_iter().collect();
+    let resources = [(
+        1,
+        ResourceFact::ArgvPromptLimit {
+            limit: 3,
+            origin: SettingSource::Configuration,
+        },
+    )]
+    .into_iter()
+    .collect();
+    attach_candidate_guard_facts(&mut reasons, &boundaries, &resources)?;
+    assert_eq!(reasons[0].extra["guard_boundary"], "credentials");
+    assert!(
+        reasons[0]
+            .diagnostic()
+            .detail
+            .as_deref()
+            .is_none_or(|text| !text.contains("TOKEN_SENTINEL"))
+    );
+    let persisted = serde_json::to_vec(&reasons)?;
+    let restored: Vec<SkippedRoute> = serde_json::from_slice(&persisted)?;
+    let projected = restored[1].diagnostic();
+    assert_eq!(projected.code, "REFUSED");
+    let detail = projected.detail.ok_or("missing resource detail")?;
+    assert!(detail.contains("domains.run.argv_prompt_limit_bytes"));
+    assert!(detail.contains("host configuration"));
+    assert!(!detail.contains("TOKEN_SENTINEL"));
+    assert!(uniform_candidate_boundary(2, &boundaries).is_none());
+    assert!(uniform_candidate_resource(2, &resources).is_none());
+    Ok(())
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -2773,6 +2829,7 @@ pub(super) fn prepare_candidates(
                 super::gh_auth::codex_shell_environment(&spec.env, &mut spec.argv);
             }
         }
+        attach_candidate_guard_facts(&mut reasons, &reason_boundaries, &reason_resources)?;
         return Ok(run::PreparedLaunch {
             skipped_routes: reasons,
             argv: spec.argv,
@@ -2793,6 +2850,7 @@ pub(super) fn prepare_candidates(
             }),
         });
     }
+    attach_candidate_guard_facts(&mut reasons, &reason_boundaries, &reason_resources)?;
     let candidate_boundary = uniform_candidate_boundary(reasons.len(), &reason_boundaries);
     let candidate_resource = uniform_candidate_resource(reasons.len(), &reason_resources);
     Err(PrepareError::Candidates {

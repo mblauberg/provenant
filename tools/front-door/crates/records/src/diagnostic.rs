@@ -554,6 +554,13 @@ mod tests {
         assert!(route.detail.contains("provenant quota tick"));
         assert!(!route.detail.contains("TOKEN_SENTINEL"));
         assert!(route.detail.len() <= 2 * MAX_DIAGNOSTIC_BYTES + 2);
+        route.extra.insert(
+            "guard_resource".into(),
+            serde_json::json!({"kind": "TOKEN_SENTINEL", "detail": "/private/source"}),
+        );
+        let invalid = serde_json::to_string(&route.diagnostic()).unwrap();
+        assert!(!invalid.contains("TOKEN_SENTINEL"));
+        assert!(!invalid.contains("/private/source"));
     }
 
     #[test]
