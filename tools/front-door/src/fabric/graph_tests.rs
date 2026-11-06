@@ -227,7 +227,11 @@ mod graph_writer_admission_tests {
         let now = factory.clock.wall_now()?;
         let delay = u64::try_from(wake.as_micros().saturating_sub(now.as_micros()))?;
         factory.clock.wait_until(factory.clock.mono_now().checked_add(provenant_core::DurationMicros::from_micros(delay))?)?;
-        let second = advance(&document, &mut owner, &mut journal)?;
+        // This test owns registry admission and its durable attempt target;
+        // native provider preparation is exercised by the provider fixtures.
+        let second = provenant_cli::run::with_deferred_provider_launch(|| {
+            advance(&document, &mut owner, &mut journal)
+        })?;
         assert_ne!(second.checkpoint.nodes[0].state, NodeState::Blocked, "{:?}", second.checkpoint.nodes[0].advance_error);
         assert!(second.checkpoint.nodes[0].attempts[0].attempt_ref.is_some(), "graph must submit the writer");
         Ok(())
@@ -274,6 +278,127 @@ mod graph_writer_admission_tests {
             assert_eq!(owner.calls, 1);
         }
     }
+    #[test]
+    fn graph_records_preparation_refusal_without_accepting_a_launch()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_confinement::worktrees::{Occupancy, WorkerObserver};
+        use provenant_fabric_runtime::graph::{self, GraphJournal, NodeState};
+        if super::peer_tests::host_test("fabric::graph_writer_admission_tests::graph_records_preparation_refusal_without_accepting_a_launch")? {
+            return Ok(());
+        }
+        struct Free;
+        impl WorkerObserver for Free {
+            fn observe_roots(&self, roots: &[PathBuf]) -> std::collections::BTreeMap<PathBuf, Occupancy> {
+                roots.iter().cloned().map(|root| (root, Occupancy::Available)).collect()
+            }
+        }
+        let rig = crate::worktree_tests::support::TestRig::new()?;
+        let roots = crate::roots::child(&rig.home, &rig.project, rig.state.clone())?;
+        let factory = Factory {
+            context: Context::open(roots.clone(), &rig.home, &rig.project)?,
+            project_attribution: false, clock: SystemClock, backoff: ThreadPause,
+            executor: SystemExecutor::new(1)?, home: rig.home.clone(), cwd: rig.project.clone(),
+            assets: rig.project.clone(), host_launch: None, mcp_project: None, workers: &Free,
+        };
+        let cancel = CancelToken::new();
+        let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
+        let project = factory.context.identity.project;
+        let document: graph::GraphDocument = serde_json::from_value(serde_json::json!({
+            "schema_version":1, "graph_id":"refused-preparation", "nodes":[{
+                "id":"worker", "prompt":"review the fixture", "access":"read_only",
+                "route":{"adapter":"codex","model":"codex/gpt-6-luna","account":"unregistered-fixture"}
+            }]
+        }))?;
+        let mut journal = graph::FileJournal::open(&roots.state, project, &document.graph_id, budget, &cancel, &factory.clock)?;
+        journal.bind(graph::GraphExecution {
+            extra: Default::default(), review_base:None, integration_base:None,
+            directory:rig.project.clone(), document:document.clone(),
+        })?;
+        let mut owner = BoundGraphOwner {
+            repo_facts:Default::default(), factory:&factory, integration_base:None,
+            integration_branch:None, network:None, capability_overrides:Default::default(),
+            exclude:Vec::new(), budget, cancel:&cancel, prices:None, tick:false,
+        };
+        let first = advance(&document, &mut owner, &mut journal)?;
+        let node = &first.checkpoint.nodes[0];
+        assert_eq!(node.state, NodeState::Blocked);
+        assert_eq!(node.advance_error_code.as_deref(), Some("launch_refused"));
+        assert!(node.launch_retry.is_none());
+        // The graph seals dispatch intent before calling the owner. Provider
+        // execution is proved separately by the durable run-lane record.
+        assert!(node.attempts.iter().all(|attempt| attempt.launched && attempt.attempt_ref.is_none()));
+        drop(journal);
+        let saved = graph::FileJournal::read_checkpoint(&roots.state, project, &document.graph_id)?.ok_or("checkpoint")?;
+        assert_eq!(saved.nodes[0].state, NodeState::Blocked);
+        assert_eq!(saved.nodes[0].advance_error_code, node.advance_error_code);
+        let operation_id = graph_operation("graph-attempt-operation", &node.attempts[0].key)?;
+        let binary = BinaryRunOwner { factory:&factory, allow_remote:true, actor:None, chair:None };
+        let session = binary.session(&cancel)?;
+        let call = binary.call(&cancel);
+        let operation = session.store.operation(&operation_id, &call)?.ok_or("durable operation")?;
+        let run = session.store.run(operation.run_id, &call)?;
+        // start() skips this saved terminal attempt, so an identical replay
+        // has an empty Started batch and must still refuse by durable evidence.
+        let replayed = binary.with_edge(|edge| provenant_cli::run::launch(&session, run.run_id, edge, &call))?;
+        assert!(replayed.is_empty());
+        assert!(matches!(binary.receipt(&session, operation_id.clone(), &run, &replayed, &call), Err(FacadeError::DispatchRefused { .. })));
+        let lanes = session.service().lanes(&provenant_run::LaneQuery {
+            targets:vec![provenant_run::LaneTarget {run:run.run_id,task:None,attempt:None}],
+            all:true,limit:100,after:0,newest_first:false,owner:None,unseen_after:None,
+        }, &call)?.lanes;
+        assert!(durable_launch_refusal(&lanes).is_some());
+        assert!(lanes.iter().all(|lane| lane.provider_launched == Some(false)));
+        let mut launched_failure = lanes[0].clone();
+        launched_failure.provider_launched = Some(true);
+        if let provenant_records::run::AttemptState::Terminal { outcome, .. } = &mut launched_failure.state {
+            *outcome = provenant_records::run::Outcome::Failed;
+        }
+        launched_failure.settlement_reason = Some(provenant_records::run::SettlementReason::Failed);
+        assert!(durable_launch_refusal(&[launched_failure.clone()]).is_none());
+        assert!(durable_launch_refusal(&[lanes[0].clone(), launched_failure]).is_none());
+        let attempt = provenant_core::AttemptId::from_bytes([7;16]);
+        for kind in [
+            provenant_run::RefusalKind::Policy,
+            provenant_run::RefusalKind::PacingReserve,
+            provenant_run::RefusalKind::RetainedImport { run:run.run_id, attempt, worktree:rig.project.clone() },
+        ] {
+            let started = [provenant_run::Started::Refused { attempt, reason:"typed refusal".into(), kind }];
+            assert!(matches!(binary.receipt(&session, operation_id.clone(), &run, &started, &call), Err(FacadeError::DispatchRefused { .. })));
+        }
+        let blocked = [provenant_run::Started::Blocked { attempt, error:"custody retained".into() }];
+        assert!(matches!(binary.receipt(&session, operation_id.clone(), &run, &blocked, &call), Err(FacadeError::DispatchRefused { .. })));
+        let mixed = [
+            provenant_run::Started::Refused { attempt, reason:"policy refused".into(), kind:provenant_run::RefusalKind::Policy },
+            provenant_run::Started::Launched(provenant_core::AttemptId::from_bytes([8;16])),
+        ];
+        let receipt = binary.receipt(&session, operation_id.clone(), &run, &mixed, &call)?;
+        assert_eq!(receipt.operation_id, operation_id);
+        assert!(!receipt.targets.is_empty());
+        // A blocked operation can precede terminal lane publication. Its
+        // queued row alone must never turn a replay into an accepted receipt.
+        let blocked_operation: provenant_core::OperationId = "blocked-replay-fixture".parse()?;
+        let input: SubmitInput = serde_json::from_value(serde_json::json!({
+            "op":"submit", "operation_id":blocked_operation,
+            "tasks":[{"prompt":"review the fixture", "access":"read_only",
+                "timeout_seconds":factory.context.config.limits.graph_timeout_seconds, "route":{
+                "kind":"model", "provider":"codex", "model":"codex/gpt-6-luna"
+            }}], "concurrency":1
+        }))?;
+        let mut queued_owner = BinaryRunOwner {factory:&factory,allow_remote:true,actor:None,chair:None};
+        let queued_receipt = provenant_cli::run::with_deferred_provider_launch(|| queued_owner.submit(input, budget, &cancel))?;
+        assert!(!queued_receipt.targets.is_empty());
+        let mut saved = session.store.operation(&blocked_operation, &call)?.ok_or("queued operation")?;
+        let queued_run = session.store.run(saved.run_id, &call)?;
+        saved.state = provenant_run::OperationState::Blocked;
+        saved.blocked_reason = Some("fixture custody release pending".into());
+        let database = rusqlite::Connection::open(roots.state.as_path().join("run.sqlite3"))?;
+        database.execute("UPDATE operations SET record=?1 WHERE run=?2", rusqlite::params![
+            provenant_records::CanonicalV1::bytes(&saved)?.as_bytes(), saved.run_id.to_string()
+        ])?;
+        assert!(matches!(binary.receipt(&session, blocked_operation, &queued_run, &[], &call), Err(FacadeError::DispatchRefused { .. })));
+        Ok(())
+    }
+
 }
 
 #[cfg(test)]

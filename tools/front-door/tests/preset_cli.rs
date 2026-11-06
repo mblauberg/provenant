@@ -4190,13 +4190,33 @@ fn preset_bound_path_is_not_a_secret_but_prompt_is() -> Result<(), Box<dyn std::
             } else if explain {
                 assert!(output.status.success(), "{result}");
             } else {
-                // The graph starts; the isolated fixture has no provider adapter.
+                // The isolated fixture refuses preparation before accepting
+                // a launch; the graph must retain that durable launch refusal.
                 assert!(result["data"]["graph_id"].is_string(), "{result}");
-                assert_eq!(
-                    result["data"]["graph"]["checkpoint"]["nodes"][0]["attempts"][0]["outcome"],
-                    "adapter_unavailable",
-                    "{result}"
-                );
+                let node = &result["data"]["graph"]["checkpoint"]["nodes"][0];
+                assert_eq!(node["state"], "blocked", "{result}");
+                assert_eq!(node["advance_error_code"], "launch_refused", "{result}");
+                assert!(node["attempts"][0]["attempt_ref"].is_null(), "{result}");
+                // Graph `launched` seals dispatch intent before owner entry;
+                // the lane's durable evidence decides whether a provider ran.
+                assert_eq!(node["attempts"][0]["launched"], true, "{result}");
+                let database = rusqlite::Connection::open_with_flags(
+                    temp.path().join("state/run.sqlite3"),
+                    rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+                )?;
+                let mut statement = database.prepare("SELECT record FROM attempts")?;
+                let records = statement
+                    .query_map([], |row| row.get::<_, Vec<u8>>(0))?
+                    .collect::<Result<Vec<_>, _>>()?;
+                assert!(!records.is_empty());
+                for raw in records {
+                    let lane: provenant_records::run::AttemptRecord = serde_json::from_slice(&raw)?;
+                    assert_eq!(lane.provider_launched, Some(false));
+                    assert_eq!(
+                        lane.settlement_reason,
+                        Some(provenant_records::run::SettlementReason::PreLaunchRefusal)
+                    );
+                }
             }
         }
     }

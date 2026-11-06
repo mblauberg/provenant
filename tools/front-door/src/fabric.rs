@@ -2019,6 +2019,20 @@ fn facade_error_for_kind(kind: provenant_run::ErrorKind) -> FacadeError {
         _ => FacadeError::io("run operation"),
     }
 }
+/// Only positive sealed evidence of a pre-launch refusal can reject a replay.
+fn durable_launch_refusal(
+    lanes: &[provenant_run::AttemptRecord],
+) -> Option<provenant_core::AttemptId> {
+    use provenant_records::run::{AttemptState, SettlementReason};
+    (!lanes.is_empty()
+        && lanes.iter().all(|lane| {
+            lane.provider_launched == Some(false)
+                && lane.settlement_reason == Some(SettlementReason::PreLaunchRefusal)
+                && matches!(lane.state, AttemptState::Terminal { .. })
+        }))
+    .then(|| lanes[0].attempt_id)
+}
+
 impl BinaryRunOwner<'_> {
     fn call<'a>(&'a self, cancel: &'a CancelToken) -> provenant_run::Request<'a> {
         provenant_run::Request {
@@ -2094,31 +2108,68 @@ impl BinaryRunOwner<'_> {
         {
             return Err(FacadeError::LaunchUnknown { operation_id });
         }
-        let page = session
-            .service()
-            .lanes(
-                &provenant_run::LaneQuery {
-                    targets: vec![provenant_run::LaneTarget {
-                        run: run.run_id,
-                        task: None,
-                        attempt: None,
-                    }],
-                    all: true,
-                    limit: 100,
-                    after: 0,
-                    newest_first: false,
-                    owner: None,
-                    unseen_after: None,
-                },
-                call,
-            )
-            .map_err(run_error)?;
+        provenant_cli::run::check_launch_policy(started).map_err(dispatch_refused)?;
+        let mut lanes = Vec::new();
+        let mut after = 0;
+        loop {
+            let page = session
+                .service()
+                .lanes(
+                    &provenant_run::LaneQuery {
+                        targets: vec![provenant_run::LaneTarget {
+                            run: run.run_id,
+                            task: None,
+                            attempt: None,
+                        }],
+                        all: true,
+                        limit: 100,
+                        after,
+                        newest_first: false,
+                        owner: None,
+                        unseen_after: None,
+                    },
+                    call,
+                )
+                .map_err(run_error)?;
+            lanes.extend(page.lanes);
+            match page.next {
+                Some(next) => after = next,
+                None => break,
+            }
+        }
+        if started.is_empty()
+            && session
+                .store
+                .operation(&operation_id, call)
+                .map_err(run_error)?
+                .is_some_and(|operation| operation.state == provenant_run::OperationState::Blocked)
+        {
+            return Err(FacadeError::DispatchRefused {
+                fact: None,
+                disk: None,
+                reason: "dispatch remains blocked by retained custody; reconcile before retrying"
+                    .into(),
+            });
+        }
+        // A replay has no new queued attempt to start. Its sealed pre-launch
+        // evidence must still refuse; a provider's ordinary terminal failure
+        // remains an accepted launch and is observed by its existing target.
+        if started.is_empty()
+            && let Some(attempt) = durable_launch_refusal(&lanes)
+        {
+            return Err(FacadeError::DispatchRefused {
+                fact: None,
+                disk: None,
+                reason: format!(
+                    "{attempt}: dispatch refused before provider launch; inspect the durable lane receipt"
+                ),
+            });
+        }
         Ok(SubmissionReceipt {
             extra: Default::default(),
             worktree: None,
             operation_id,
-            targets: page
-                .lanes
+            targets: lanes
                 .iter()
                 .map(|lane| AttemptTarget {
                     extra: Default::default(),
