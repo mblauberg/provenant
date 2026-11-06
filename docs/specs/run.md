@@ -898,7 +898,8 @@ GitHub login. The host asks `gh auth token` outside confinement, including
 keychain-backed logins, and passes the result only in the live child
 environment; no token enters setup files, prompts, receipts or logs.
 Shell here-documents use the attempt scratch directory through `TMPDIR` and
-`TMPPREFIX`. Denial hints retain the path and reported operation without
+`TMPPREFIX`. Apple’s `/bin/bash` 3.2 ignores `TMPDIR` for here-documents, so
+profiles also allow its `/private/var/tmp/sh-thd*` files. Denial hints retain the path and reported operation without
 claiming which sandbox or filesystem rule caused the refusal.
 
 Read-only runs use their bound repository with its Git metadata read-only.

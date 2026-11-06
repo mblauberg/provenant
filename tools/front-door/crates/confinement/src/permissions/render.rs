@@ -83,6 +83,8 @@ pub(super) const RUNTIME_BASELINE_RULES: &str = r#"(allow sysctl-read)
   (global-name "com.apple.networkd"))
 (allow network-outbound (remote unix-socket (path-literal "/private/var/run/mDNSResponder")))
 (allow file-read* file-write-data (literal "/dev/null"))
+(allow file-read-metadata file-write-data (literal "/private/var/tmp"))
+(allow file-read* file-write* (regex #"^/private/var/tmp/sh-thd[^/]*$"))
 (allow file-read* (literal "/dev/urandom") (literal "/dev/random"))
 (allow file-read* (literal "/dev/fd"))
 (allow file-read* (subpath "/usr/share") (subpath "/private/var/db/timezone") (literal "/private/etc/localtime"))
@@ -598,7 +600,7 @@ pub(super) fn verify_private_scratch(
     Ok(())
 }
 
-#[cfg(all(test, target_os = "macos"))]
+#[cfg(all(test, any(target_os = "macos", feature = "snapshot")))]
 pub(super) fn render_profile(
     plan: &PlanPermissions,
     profile: &ProviderProfile,

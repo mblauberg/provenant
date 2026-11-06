@@ -374,9 +374,9 @@ pub struct WriteGrant {
     pub scope: PathScope,
 }
 
-/// List explicit write allowances in rendering order. Baseline `/dev/null`
-/// access and concrete worktree/Git paths are omitted; writer records carry
-/// the existing Git grants digest instead. This list grants no authority.
+/// List explicit write allowances in rendering order. Baseline `/dev/null` and
+/// here-document access are omitted, as are concrete worktree/Git paths; writer
+/// records carry the existing Git grants digest instead. This list grants no authority.
 pub fn write_grants(plan: &PlanPermissions, profile: &ProviderProfile) -> Vec<WriteGrant> {
     let mut grants = Vec::new();
     let mut push = |source, grant: &PathGrant, scope| {

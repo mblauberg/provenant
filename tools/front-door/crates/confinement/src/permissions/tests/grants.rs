@@ -151,7 +151,7 @@ fn writer_grants_do_not_include_shared_branch_paths() {
     assert_ne!(grants.digest(&cache), other.digest(&cache));
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", feature = "snapshot"))]
 pub(super) fn worktree_grants_fixture() -> WorktreeWriteGrants {
     WorktreeWriteGrants::from_paths(
         Path::new("/fixture/repo"),
@@ -257,7 +257,7 @@ fn writer_test_grants_stay_within_the_attempt_and_mode() -> Result<(), Box<dyn s
     Ok(())
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", feature = "snapshot"))]
 #[test]
 fn write_grants_cover_every_rendered_file_write() -> Result<(), Box<dyn std::error::Error>> {
     let (mut plan, profile) = write_grants_fixture();
@@ -285,12 +285,23 @@ fn write_grants_cover_every_rendered_file_write() -> Result<(), Box<dyn std::err
             writer.then_some(&git),
             Path::new("/fixture/home"),
         )?)?;
+        let baseline_writes = [
+            r#"(allow file-read* file-write-data (literal "/dev/null"))"#,
+            r#"(allow file-read-metadata file-write-data (literal "/private/var/tmp"))"#,
+            r##"(allow file-read* file-write* (regex #"^/private/var/tmp/sh-thd[^/]*$"))"##,
+        ];
+        for baseline in baseline_writes {
+            assert!(rendered.lines().any(|line| line == baseline), "{baseline}");
+        }
         let grants = write_grants(&plan, &profile);
         let mut checked = 0;
         for line in rendered.lines().filter(|line| {
             line.starts_with("(allow ")
                 && (line.contains("file-write*") || line.contains("file-write-data"))
         }) {
+            if baseline_writes.contains(&line) {
+                continue;
+            }
             let (scope, tail) = if let Some((_, tail)) = line.split_once("(subpath \"") {
                 (PathScope::Subtree, tail)
             } else if let Some((_, tail)) = line.split_once("(literal \"") {
@@ -299,7 +310,7 @@ fn write_grants_cover_every_rendered_file_write() -> Result<(), Box<dyn std::err
                 return Err(format!("unrecognised write rule: {line}").into());
             };
             let path = Path::new(tail.split('"').next().ok_or("write rule path")?);
-            if path == Path::new("/dev/null") || writer && git.iter().any(|g| g.path == path) {
+            if writer && git.iter().any(|g| g.path == path) {
                 continue;
             }
             assert!(
