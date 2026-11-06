@@ -106,13 +106,7 @@ impl Snapshot {
                     .iter()
                     .map(|row| {
                         let lane = provenant_cli::run::project_lane(row, &[], edge.roots.state.as_path(), &Default::default(), None, false);
-                        let mut value = json!({"run_id": lane.run_id, "task_id": lane.task_id, "attempt_id": lane.attempt_id, "state": lane.state, "reason": lane.reason, "cause": lane.cause, "retry_of": lane.retry_of, "superseded_by": lane.superseded_by});
-                        if let Some(cloud) = lane.cloud {
-                            value["cloud"] = cloud;
-                        }
-                        if let Some(state) = lane.cloud_state {
-                            value["cloud_state"] = json!(state);
-                        }
+                        let value = json!({"id": lane.attempt_id, "kind": "attempt", "graph_id": null, "node_id": lane.task_id, "attempt_id": lane.attempt_id, "state": lane.state, "reason": lane.reason});
                         value
                     })
                     .collect();
@@ -120,50 +114,49 @@ impl Snapshot {
                 Ok(Self {
                     terminal,
                     notable,
-                    data: json!({"lanes": lanes}),
+                    data: json!({"rows": lanes}),
                 })
             }
             Target::Graph(id) | Target::Auto(id) => {
-                let reply = provenant_cli::run::status(
-                    provenant_cli::Status {
-                        id: Some(id.clone()),
-                        wait: None,
-                        target: Vec::new(),
-                        until: Condition::Any,
-                        follow: false,
-                        limit: 100,
-                        cursor: None,
-                        all: false,
-                    },
-                    true,
-                    edge,
-                );
-                if let Some(error) = reply.result.error {
-                    return Err(ReadFailure {
-                        retry: error.code == provenant_run::ErrorKind::Contention.code(),
-                        message: error.message,
-                    });
+                let rows =
+                    crate::fabric::read_status_rows(id, edge).map_err(|error| ReadFailure {
+                        retry: false,
+                        message: error.to_string(),
+                    })?;
+                let Some(rows) = rows else {
+                    if matches!(target, Target::Auto(_)) {
+                        return Self::read(
+                            &Target::Lane(id.parse().map_err(str::to_owned)?),
+                            edge,
+                            left,
+                            pr_read_timeout,
+                            cancel,
+                        );
+                    }
+                    return Err("graph checkpoint not found".into());
+                };
+                if rows.is_empty() {
+                    return Err("named graph selection is empty".into());
                 }
-                let data = reply.result.data;
-                if data.get("graph_id").is_none() && matches!(target, Target::Auto(_)) {
-                    return Self::read(
-                        &Target::Lane(id.parse().map_err(str::to_owned)?),
-                        edge,
-                        left,
-                        pr_read_timeout,
-                        cancel,
-                    );
-                }
-                let state = data["status"]
-                    .as_str()
-                    .ok_or("graph checkpoint not found")?;
-                let nodes: Vec<_> = data["checkpoint"]["nodes"].as_array().into_iter().flatten().map(|node| {
-                    json!({"id": node["id"], "state": node["state"], "ci": node["ci"]["state"], "pause": node["expansion_pause"]})
-                }).collect();
+                let terminal = rows.iter().all(|row| {
+                    matches!(
+                        row["state"].as_str(),
+                        Some(
+                            "complete"
+                                | "cancelled"
+                                | "succeeded"
+                                | "failed"
+                                | "blocked"
+                                | "skipped"
+                                | "terminal"
+                        )
+                    )
+                });
+                let notable = terminal || rows.iter().any(|row| row["state"] == "paused");
                 Ok(Self {
-                    terminal: matches!(state, "complete" | "cancelled"),
-                    notable: matches!(state, "paused" | "complete" | "cancelled"),
-                    data: json!({"status": state, "pause_reason": data["pause_reason"], "nodes": nodes}),
+                    terminal,
+                    notable,
+                    data: json!({"rows":rows}),
                 })
             }
             Target::Pr(number) => {

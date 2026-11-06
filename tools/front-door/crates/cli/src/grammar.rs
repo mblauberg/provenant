@@ -103,7 +103,7 @@ pub enum Command {
     Run(Box<Dispatch>),
     /// Dispatch and collect a configured review shape
     Review(Review),
-    /// Show lanes or wait on lanes, graphs and PRs
+    /// Show graph, node and attempt status
     #[command(add = crate::metadata::CoreCommand(1, "provenant status"))]
     Status(Status),
     /// Merge on green CI and prune the merged worktree
@@ -137,12 +137,16 @@ pub enum Command {
     /// Start a provider lane or manifest of lanes
     Dispatch(Box<Dispatch>),
     /// List lanes or wait on their state
+    #[command(skip)]
     Lanes(Lanes),
-    /// Read a lane attempt's output
+    /// Read graph, node or attempt output
+    #[command(add = crate::metadata::CoreCommand(4, "provenant output ID"))]
     Output(Output),
-    /// Cancel a run, task or attempt
+    /// Stop a graph, node or attempt subtree
+    #[command(name = "stop", add = crate::metadata::CoreCommand(6, "provenant stop ID"))]
     Cancel(Cancel),
-    /// Resume an attempt with a new prompt
+    /// Retry a graph, node or attempt
+    #[command(name = "retry", add = crate::metadata::CoreCommand(5, "provenant retry ID"))]
     Resume(Resume),
     /// Queue a steering message for a lane when its provider supports control
     Steer(crate::inbox::Steer),
@@ -793,6 +797,29 @@ impl FromStr for Target {
     type Err = &'static str;
     fn from_str(text: &str) -> Result<Self, Self::Err> {
         let parts: Vec<_> = text.split('/').collect();
+        // Graph and node names are resolved by the graph owner before lane IDs.
+        if parts.len() <= 2
+            && parts.iter().all(|part| {
+                !part.is_empty()
+                    && part.len() <= 200
+                    && part.bytes().all(|byte| {
+                        byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.')
+                    })
+            })
+            && parts.iter().any(|part| {
+                part.len() < 8
+                    || part.len() > 32
+                    || part.bytes().any(|byte| byte.is_ascii_uppercase())
+                    || !part.bytes().all(|byte| byte.is_ascii_hexdigit())
+            })
+        {
+            return Ok(Self {
+                selection: Some(text.to_owned()),
+                run: None,
+                task: None,
+                attempt: None,
+            });
+        }
         if parts.len() > 3
             || parts.iter().any(|part| {
                 !(8..=32).contains(&part.len())
@@ -805,7 +832,7 @@ impl FromStr for Target {
         }
         if parts.iter().any(|part| part.len() < 32) {
             return Ok(Self {
-                selection: Some(text.to_ascii_lowercase()),
+                selection: Some(text.to_owned()),
                 run: None,
                 task: None,
                 attempt: None,
@@ -1028,7 +1055,7 @@ pub enum Part {
     /// The provider's own transcript, tailed in place
     Transcript,
 }
-#[derive(Debug, Args)]
+#[derive(Debug, Clone, Args)]
 pub struct Output {
     /// Attempt ID, RUN/ATTEMPT, HOST/ATTEMPT or RUN/TASK/ATTEMPT; a RUN or RUN/TASK reads its newest settled attempt, and receipt needs exactly one
     pub attempt: Attempt,
@@ -1072,7 +1099,7 @@ pub struct Cancel {
     pub wait: Option<u64>,
 }
 #[derive(Debug, Args)]
-#[group(id = "resume_prompt", required = true, multiple = false)]
+#[group(id = "resume_prompt", multiple = false)]
 pub struct Prompt {
     /// Read the prompt from this file
     #[arg(long)]
@@ -1083,6 +1110,15 @@ pub struct Prompt {
 }
 #[derive(Debug, Args)]
 pub struct Resume {
+    /// Retry only the named node rather than recovering its graph
+    #[arg(long, conflicts_with = "no_fallback")]
+    pub node: bool,
+    /// Replace the target brief
+    #[arg(long, conflicts_with_all = ["prompt_file", "prompt_stdin"])]
+    pub brief: Option<String>,
+    /// Raise a graph limit or budget (KEY=VALUE); may be repeated
+    #[arg(long, value_name = "KEY=VALUE")]
+    pub extend: Vec<String>,
     /// Attempt ID, or RUN/ATTEMPT or RUN/TASK/ATTEMPT
     pub attempt: Attempt,
     /// Caller-chosen ID that makes retries idempotent

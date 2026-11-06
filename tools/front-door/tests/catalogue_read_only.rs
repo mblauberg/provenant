@@ -36,6 +36,15 @@ fn snapshot(path: &Path) -> Result<Vec<(PathBuf, Vec<u8>)>> {
 }
 
 #[test]
+fn status_reads_an_unregistered_project_without_creating_state() -> Result {
+    let empty = TestRig::new()?.without_state()?;
+    let status = call(&empty, &["status"], 0)?;
+    assert_eq!(status["data"]["rows"], serde_json::json!([]));
+    assert!(!empty.state.exists());
+    Ok(())
+}
+
+#[test]
 fn board_read_only() -> Result {
     use provenant_core::{
         ActorId, AttemptId, CancelToken, Clock, Digest, OperationId, ProjectId, RootInputs, RunId,
