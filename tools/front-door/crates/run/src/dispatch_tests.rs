@@ -3246,11 +3246,13 @@ fn child_wait_lease_cycle(block_reclaim: bool) -> TestResult {
     });
     std::fs::write(
         store.writer_registry.join("config.toml"),
-        "schema_version=1\n[domains.fabric.lanes]\nmax_writer_lanes=1\nmax_project_writer_lanes=1\n",
+        "schema_version=1\n[domains.fabric.lanes]\nmax_writer_lanes=1\nmax_project_writer_lanes=1\nmax_concurrent_builds=1\n",
     )?;
     let facts = HostFacts::new(100);
-    let parent = lane(121, true);
-    let child = lane(122, true);
+    let mut parent = lane(121, true);
+    parent.request.tasks[0].build_heavy = true;
+    let mut child = lane(122, true);
+    child.request.tasks[0].build_heavy = true;
     let parent_id = starting(&store, &parent, &call)?;
     let parent_record = store
         .claim_observed(parent_id, &clock, &call, &facts)?
@@ -3319,6 +3321,26 @@ fn child_wait_lease_cycle(block_reclaim: bool) -> TestResult {
         &child_exit,
         &call,
     )?;
+    // More build-heavy writer children than the host's single writer/build
+    // slot must drain while their parent remains alive and waiting.
+    let mut finished = vec![parent_id, child_id];
+    for seed in 123..126 {
+        let mut child = lane(seed, true);
+        child.request.tasks[0].build_heavy = true;
+        let id = starting(&store, &child, &call)?;
+        let record = store.claim_observed(id, &clock, &call, &facts)?.ok_or("later child starved")?;
+        assert!(matches!(store.record(parent_id, &call)?.state, AttemptState::Running { .. }));
+        let dir = store.attempt_dir(child.run_id, id, false)?;
+        artifacts::seal(&dir, "stdout.log", b"child work", CAPTURE_LIMIT)?;
+        let observed = ExitObservation { scope: RunStore::scope(&record), ..exit() };
+        seal_exit(&store, &observed)?;
+        store.publish_terminal(id, record.revision, &TerminalPublication {
+            started_at: record.started_at,
+            result: "child work",
+            ..super::tests::publication()
+        }, &observed, &call)?;
+        finished.push(id);
+    }
     assert!(store.set_child_wait_observed(parent_id, false, &call, &facts)?);
     let resumed = store.record(parent_id, &call)?;
     assert_eq!(resumed.started_at, parent_record.started_at);
@@ -3344,7 +3366,7 @@ fn child_wait_lease_cycle(block_reclaim: bool) -> TestResult {
         &parent_exit,
         &call,
     )?;
-    for id in [parent_id, child_id] {
+    for id in finished {
         assert!(matches!(
             store.record(id, &call)?.state,
             AttemptState::Terminal {
