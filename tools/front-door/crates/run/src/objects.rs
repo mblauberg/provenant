@@ -18,7 +18,8 @@ use view::object_binding;
 #[cfg(test)]
 pub(crate) use view::{bind, prepare_refs};
 pub(crate) use view::{
-    bound_source, merge_head, merge_objects, prepare_bound, private_tip, restore_index, set_private_tip,
+    bound_source, merge_head, merge_objects, prepare_bound, private_tip, restore_index,
+    set_private_tip,
 };
 
 fn invalid() -> RunError {
@@ -51,6 +52,7 @@ fn execute(
 pub(crate) struct Execution<'a> {
     pub(crate) object_directory: Option<&'a Path>,
     pub(crate) index_file: Option<&'a Path>,
+    pub(crate) alternate_directory: Option<&'a Path>,
     pub(crate) timeout: Duration,
     pub(crate) discard: bool,
     pub(crate) input: Option<&'a [u8]>,
@@ -62,6 +64,7 @@ impl Default for Execution<'_> {
         Self {
             object_directory: None,
             index_file: None,
+            alternate_directory: None,
             timeout: Duration::from_secs(120),
             discard: false,
             input: None,
@@ -86,7 +89,6 @@ pub(crate) fn execute_bounded(
         ("GIT_NO_REPLACE_OBJECTS", "1"),
         ("GIT_GRAFT_FILE", "/dev/null"),
         ("GIT_NO_LAZY_FETCH", "1"),
-        ("GIT_ALTERNATE_OBJECT_DIRECTORIES", ""),
         ("GIT_TERMINAL_PROMPT", "0"),
         ("LC_ALL", "C"),
     ]
@@ -94,11 +96,22 @@ pub(crate) fn execute_bounded(
     .map(|(k, v)| (k.into(), v.into()))
     .collect();
     if let Some(objects) = settings.object_directory {
-        env.push(("GIT_OBJECT_DIRECTORY".into(), objects.as_os_str().to_owned()));
+        env.push((
+            "GIT_OBJECT_DIRECTORY".into(),
+            objects.as_os_str().to_owned(),
+        ));
     }
     if let Some(index) = settings.index_file {
         env.push(("GIT_INDEX_FILE".into(), index.as_os_str().to_owned()));
     }
+    env.push((
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES".into(),
+        settings
+            .alternate_directory
+            .map(quote_alternate)
+            .unwrap_or_default()
+            .into(),
+    ));
     // argv confines GIT_DIR to the sender; receive-pack opens the destination.
     let argv: Vec<OsString> = std::iter::once(git.into())
         .chain([OsString::from("--git-dir"), git_dir.into()])
@@ -410,6 +423,16 @@ fn sanitise_source(source: &Directory, repo: &VerifiedRepo) -> Result<u64> {
     object_bytes(source, 0)
 }
 
+/// Apply the existing import checks before budget Git writes any lane objects.
+pub(crate) fn prepare_budget_objects(
+    source: &Directory,
+    repo: &VerifiedRepo,
+) -> Result<std::path::PathBuf> {
+    let path = source_path(source, repo)?;
+    sanitise_source(source, repo)?;
+    Ok(path)
+}
+
 // Git needs a pathname for alternates. Reopen it without following a final
 // symlink and compare the held identity before giving Git access. Custody must
 // remain absent while Git uses it. Never sanitise the shared store as a source.
@@ -519,7 +542,10 @@ fn sweep_stale(repo: &VerifiedRepo) -> Result<()> {
 
 /// Reuse the host-owned Git view for operations that must never load lane config.
 pub(crate) fn with_clean_view<T>(
-    git: &Path, repo: &VerifiedRepo, head: GitOid, cancel: Option<&CancelToken>,
+    git: &Path,
+    repo: &VerifiedRepo,
+    head: GitOid,
+    cancel: Option<&CancelToken>,
     operation: impl FnOnce(&Directory, &Path) -> Result<T>,
 ) -> Result<T> {
     sweep_stale(repo)?;

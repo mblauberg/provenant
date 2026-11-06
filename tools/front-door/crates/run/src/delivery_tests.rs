@@ -3437,8 +3437,9 @@ fn budget_stop_preserves_a_stopped_merge_without_committing_conflict_markers()
     stopped_merge_is_restored(true)
 }
 
-fn stopped_merge_is_restored(budget_stop: bool)
--> std::result::Result<(), Box<dyn std::error::Error>> {
+fn stopped_merge_is_restored(
+    budget_stop: bool,
+) -> std::result::Result<(), Box<dyn std::error::Error>> {
     use provenant_confinement::{UtilityBudget, UtilityRuntime};
     use provenant_core::CancelToken;
     let fixture = PrepareFixture::new()?;
@@ -3507,14 +3508,32 @@ fn stopped_merge_is_restored(budget_stop: bool)
     assert!(fixture.root.join("attempt/merge-restored.json").is_file());
     if budget_stop {
         let note: serde_json::Value = serde_json::from_slice(&std::fs::read(
-            fixture.root.join("attempt/budget-commit.json"))?)?;
-        assert!(note["note"].as_str().ok_or("note")?.contains("in-progress merge preserved"));
+            fixture.root.join("attempt/budget-commit.json"),
+        )?)?;
+        assert!(
+            note["note"]
+                .as_str()
+                .ok_or("note")?
+                .contains("in-progress merge preserved")
+        );
         let head = provenant_os::fixture::git_command_at(&git)
-            .env_clear().envs(fixture.environment.iter().map(|(k,v)| (k,v)))
-            .current_dir(&fixture.writer.worktree).args(["log", "-1", "--pretty=%s"]).output()?;
+            .env_clear()
+            .envs(fixture.environment.iter().map(|(k, v)| (k, v)))
+            .current_dir(&fixture.writer.worktree)
+            .args(["log", "-1", "--pretty=%s"])
+            .output()?;
         assert!(head.status.success());
         assert_eq!(head.stdout, b"ours\n");
-        assert_eq!(std::fs::read_to_string(fixture.writer.project.join(".git/worktrees/lane/MERGE_HEAD"))?.trim(), theirs);
+        assert_eq!(
+            std::fs::read_to_string(
+                fixture
+                    .writer
+                    .project
+                    .join(".git/worktrees/lane/MERGE_HEAD")
+            )?
+            .trim(),
+            theirs
+        );
     }
     let output = provenant_os::fixture::git_command_at(&git)
         .env_clear()
@@ -5030,20 +5049,34 @@ fn budget_commit_uses_bounded_git_without_running_hooks()
     let fixture = PrepareFixture::new()?;
     let sentinel = fixture.root.join("hook-ran");
     let hooks = fixture.writer.project.join(".git/hooks");
-    fixture.git(&["config", "core.hooksPath", hooks.to_str().ok_or("hook path")?])?;
+    fixture.git(&[
+        "config",
+        "core.hooksPath",
+        hooks.to_str().ok_or("hook path")?,
+    ])?;
     fixture.terminal_via_inner("origin", None, false, false, true, || {
         std::fs::write(fixture.writer.worktree.join("budget.txt"), "saved\n")?;
         let hook = fixture.writer.project.join(".git/hooks/pre-commit");
-        std::fs::write(&hook, format!("#!/bin/sh\ntouch '{}'\nexit 1\n", sentinel.display()))?;
+        std::fs::write(
+            &hook,
+            format!("#!/bin/sh\ntouch '{}'\nexit 1\n", sentinel.display()),
+        )?;
         std::fs::set_permissions(hook, std::fs::Permissions::from_mode(0o700))?;
         Ok(())
     })?;
     assert!(!sentinel.exists());
     let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
     let output = provenant_os::fixture::git_command_at(&git)
-        .env_clear().envs(fixture.environment.iter().map(|(k,v)| (k,v)))
-        .current_dir(&fixture.writer.worktree).args(["show", "HEAD:budget.txt"]).output()?;
-    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        .env_clear()
+        .envs(fixture.environment.iter().map(|(k, v)| (k, v)))
+        .current_dir(&fixture.writer.worktree)
+        .args(["show", "HEAD:budget.txt"])
+        .output()?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert_eq!(output.stdout, b"saved\n");
     Ok(())
 }

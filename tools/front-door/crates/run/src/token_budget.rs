@@ -121,8 +121,14 @@ mod tests {
     fn budget_capture_disables_completion_only_usage_for_the_applied_provider() {
         let input = crate::tests::input();
         let task = &input.request.tasks[0];
-        assert_eq!(crate::launch::capture_plan(task, 60, 500, "codex").token_budget, 0);
-        assert_eq!(crate::launch::capture_plan(task, 60, 500, "claude").token_budget, 500);
+        assert_eq!(
+            crate::launch::capture_plan(task, 60, 500, "codex").token_budget,
+            0
+        );
+        assert_eq!(
+            crate::launch::capture_plan(task, 60, 500, "claude").token_budget,
+            500
+        );
     }
 
     #[test]

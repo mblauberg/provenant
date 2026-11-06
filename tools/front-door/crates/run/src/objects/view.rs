@@ -200,8 +200,13 @@ pub(crate) fn set_private_tip(source: &ObjectSource, branch: &str, tip: GitOid) 
     for component in parent.split('/') {
         held = directory(&held, OsStr::new(component))?;
     }
-    held.atomic_write(OsStr::new(leaf), ".budget-", format!("{tip}\n").as_bytes(), PublishMode::Replace)?
-        .require_durable()?;
+    held.atomic_write(
+        OsStr::new(leaf),
+        ".budget-",
+        format!("{tip}\n").as_bytes(),
+        PublishMode::Replace,
+    )?
+    .require_durable()?;
     Ok(())
 }
 
