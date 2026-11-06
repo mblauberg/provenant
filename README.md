@@ -208,10 +208,9 @@ flowchart LR
    tokens and cost go into the run record.
 3. **Deliver.** For a writer, the host fetches before launch and, afterwards,
    verifies the final commit and pushes it with its own Git authority.
-   `--deliver pr` opens a pull request. `provenant pr status` watches CI, and
-   `provenant land` checks CI and merges the verified head. How much review a
-   change gets is set by the [review ladder](HARNESS.md) and the `review.*`
-   knobs.
+   `provenant lane deliver ATTEMPT --deliver pr` opens a pull request.
+   `provenant pr status` watches CI, and `provenant land` checks CI and merges
+   the verified head. The [review ladder](HARNESS.md) sets review coverage.
 
 Fabric runs alongside this path. Sessions on one machine, or on peer hosts,
 exchange messages, share tasks and claim work, so two harnesses can split a job
@@ -225,7 +224,7 @@ state root (`~/.local/share/provenant/v1` by default), and the CLI edits it.
 
 ```sh
 provenant config set profile economy                    # balanced or economy
-provenant config set lanes.max_concurrency 4            # or override per run with --knob
+provenant config set lanes.max_concurrency 4
 provenant route set senior claude/claude-sonnet-5-5 --weight 6
 provenant route pacing codex spend                      # pace, spend or max
 provenant route reset senior                            # back to the bundled pool

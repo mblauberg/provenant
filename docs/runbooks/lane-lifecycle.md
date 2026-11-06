@@ -162,7 +162,8 @@ waits up to 60 seconds and serialises only upstream configuration writes; origin
 repository verification, branch creation and provider launch run outside it.
 The lock is released before provider launch and custody confirmation.
 
-Choose `--deliver none`, `push`, `integrate:integration` or `pr`. Push and PR
+Use `provenant lane deliver ATTEMPT --deliver` with `none`, `push`,
+`integrate:integration` or `pr`. Push and PR
 use origin and the lane branch. Integration targets must already exist;
 `integrate:origin/integration` selects a remote branch. Local targets must be
 checked out nowhere, including the delivering lane's own worktree. Integration
@@ -189,8 +190,7 @@ paths and keychain-only logins are not mirrored. Hosts without gh or
 `~/.config/gh` continue local work without publishing setup. Merge through `provenant land N --wait`, or hand the merge to the chair. Landing
 verifies green CI at the PR's current head; add `--head SHA` to pin a reviewed
 head. Enable publishing with
-`--knob lanes.publish=true`, Fabric `knobs: ["lanes.publish=true"]`, or host
-configuration `[knobs] "lanes.publish" = true`. Read-only lanes retain their
+Fabric `knobs: ["lanes.publish=true"]` or host configuration `[knobs] "lanes.publish" = true`. Read-only lanes retain their
 existing open-network gh read access.
 
 For a project, the host can configure an advisory GitHub CLI deny list in

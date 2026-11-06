@@ -124,8 +124,7 @@ prefers them while they are eligible and available. Exact IDs and user-configure
 pools can use them too. Change result checks or lane restrictions for one account,
 including with an expiring rule.
 
-Use `provenant run --route junior --read-heavy ...` for surveys and triage.
-The equivalent knob is `routing.workload`, with values `general`, `read_heavy`,
+Set the `routing.workload` knob for surveys and triage. Its values are `general`, `read_heavy`,
 `edit_heavy` and `review`. Review dispatches identify themselves automatically.
 `route resolve --read-heavy` shows the preference in the candidate receipt;
 `--writes` previews write eligibility. The preference applies only to models
