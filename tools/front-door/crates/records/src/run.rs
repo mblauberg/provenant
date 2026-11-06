@@ -672,6 +672,8 @@ pub enum OperationState {
     Prepared,
     Accepted,
     Terminal,
+    /// Dispatch was refused before a run was admitted.
+    Refused,
     LaunchUnknown,
     /// Launch preparation failed and custody could not be released.
     Blocked,
@@ -697,6 +699,14 @@ pub struct OperationRecord {
     pub state: OperationState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blocked_reason: Option<String>,
+    /// Safe diagnostic retained for a pre-admission refusal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refusal: Option<crate::diagnostic::Diagnostic>,
+    /// Worktree identifier, not an absolute host path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refused_at: Option<WallTime>,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

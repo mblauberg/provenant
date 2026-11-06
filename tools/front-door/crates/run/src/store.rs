@@ -88,6 +88,76 @@ pub(crate) struct Withdrawal<'a> {
 }
 
 impl RunStore {
+    /// Persist a refusal against the same request digest used for admission.
+    /// A competing or replayed operation cannot replace its first outcome.
+    pub fn record_refusal(
+        &self,
+        input: &PreparedRun,
+        diagnostic: provenant_records::diagnostic::Diagnostic,
+        worktree: Option<String>,
+        call: &Request<'_>,
+    ) -> Result<OperationRecord> {
+        if worktree.as_ref().is_some_and(|name| {
+            name.is_empty()
+                || name.len() > 1024
+                || name.contains('/')
+                || name.chars().any(char::is_control)
+        }) {
+            return Err(RunError::Validation("worktree identifier"));
+        }
+        let digest = input.request.digest()?;
+        let operation = OperationRecord {
+            extra: Default::default(),
+            schema_version: 1,
+            project_id: self.context.project_id,
+            actor_id: self.context.actor_id,
+            operation_id: input.operation_id.clone(),
+            kind: if input.request.parent.is_some() {
+                OperationKind::Resume
+            } else {
+                OperationKind::Dispatch
+            },
+            request_digest: digest,
+            run_id: input.run_id,
+            state: OperationState::Refused,
+            blocked_reason: None,
+            refusal: Some(diagnostic),
+            worktree,
+            refused_at: Some(input.created_at),
+        };
+        self.write(call, |tx| {
+            let prior: Option<Vec<u8>> = tx
+                .query_row(
+                    "SELECT record FROM operations WHERE project=?1 AND actor=?2 AND operation=?3",
+                    params![
+                        self.context.project_id.to_string(),
+                        self.context.actor_id.to_string(),
+                        input.operation_id.as_str()
+                    ],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if let Some(prior) = prior {
+                let prior: OperationRecord = decode(&prior)?;
+                if prior.request_digest != digest {
+                    return Err(RunError::OperationConflict);
+                }
+                return Ok(prior);
+            }
+            tx.execute(
+                "INSERT INTO operations VALUES (?1,?2,?3,?4,?5,?6)",
+                params![
+                    self.context.project_id.to_string(),
+                    self.context.actor_id.to_string(),
+                    input.operation_id.as_str(),
+                    digest.to_string(),
+                    input.run_id.to_string(),
+                    bytes(&operation)?
+                ],
+            )?;
+            Ok(operation.clone())
+        })
+    }
     /// A sealed decision is not a certificate that an unfinished import can
     /// relinquish its reservation or private object inputs: the import must
     /// finish first, unless it was refused for good. The terminal receipts are
@@ -517,15 +587,19 @@ impl RunStore {
         })
     }
     fn create_exact(&self, input: &PreparedRun, call: &Request<'_>) -> Result<RunRecord> {
-        // Configuration and volume probes happen before the store transaction.
-        let disk_floor_bytes = provenant_config::GcSettings::read(&self.writer_registry)?
-            .free_floor_bytes(&self.writer_registry)?;
         let digest = input.request.digest()?;
         let context = &self.context;
         let existing = self.operation(&input.operation_id, call)?;
         if let Some(op) = &existing {
             if op.request_digest != digest {
                 return Err(RunError::OperationConflict);
+            }
+            if op.state == OperationState::Refused {
+                return Err(RunError::RecordedRefusal(
+                    op.refusal
+                        .clone()
+                        .ok_or(RunError::Validation("refusal diagnostic missing"))?,
+                ));
             }
             if op.state != OperationState::Prepared {
                 return self.run(op.run_id, call);
@@ -534,6 +608,10 @@ impl RunStore {
                 return Err(RunError::Conflict);
             }
         }
+        // Configuration and volume probes happen before the store transaction,
+        // but a stored refusal replays without depending on current host state.
+        let disk_floor_bytes = provenant_config::GcSettings::read(&self.writer_registry)?
+            .free_floor_bytes(&self.writer_registry)?;
         let run = RunRecord {
             extra: Default::default(),
             schema_version: 1,
@@ -567,6 +645,9 @@ impl RunStore {
             run_id: input.run_id,
             state: OperationState::Prepared,
             blocked_reason: None,
+            refusal: None,
+            worktree: None,
+            refused_at: None,
         };
         let dir = self.run_dir(input.run_id, true)?;
         let _writer = dir.lock(
@@ -580,6 +661,12 @@ impl RunStore {
             if op.request_digest != digest {
                 return Err(RunError::OperationConflict);
             }
+            if op.state == OperationState::Refused {
+                return Err(RunError::RecordedRefusal(
+                    op.refusal
+                        .ok_or(RunError::Validation("refusal diagnostic missing"))?,
+                ));
+            }
             if op.state != OperationState::Prepared {
                 return self.run(op.run_id, call);
             }
@@ -589,6 +676,9 @@ impl RunStore {
             if let Some(prior) = prior {
                 let prior: OperationRecord = decode(&prior)?;
                 if prior.request_digest != digest { return Err(RunError::OperationConflict); }
+                if prior.state == OperationState::Refused {
+                    return Err(RunError::RecordedRefusal(prior.refusal.ok_or(RunError::Validation("refusal diagnostic missing"))?));
+                }
                 if prior.run_id != input.run_id { return Err(RunError::Conflict); }
                 return Ok(());
             }

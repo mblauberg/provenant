@@ -402,6 +402,38 @@ pub(super) fn input() -> PreparedRun {
         }],
     }
 }
+
+#[test]
+fn refused_operation_is_durable_and_replay_checks_request_identity() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let context = context(temp.path())?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let input = input();
+    let diagnostic = provenant_records::diagnostic::Diagnostic::new("QUEUE_FULL")
+        .category("refused")
+        .detail("admission queue is full");
+    let store = RunStore::open(&context, &call)?;
+    let saved = store.record_refusal(&input, diagnostic.clone(), Some("lane".into()), &call)?;
+    assert_eq!(saved.refused_at, Some(input.created_at));
+    drop(store);
+    let store = RunStore::open(&context, &call)?;
+    let replayed = store
+        .operation(&input.operation_id, &call)?
+        .ok_or("missing refusal")?;
+    assert_eq!(replayed.refusal, Some(diagnostic.clone()));
+    assert_eq!(replayed.worktree.as_deref(), Some("lane"));
+    assert!(
+        matches!(store.create(&input, &call), Err(RunError::RecordedRefusal(saved)) if saved == diagnostic)
+    );
+    let mut changed = input;
+    changed.request.concurrency = 2;
+    assert!(matches!(
+        store.create(&changed, &call),
+        Err(RunError::OperationConflict)
+    ));
+    Ok(())
+}
 pub(super) fn route() -> RouteRecord {
     RouteRecord {
         provider: Some("fixture".into()),

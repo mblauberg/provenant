@@ -65,6 +65,7 @@ impl<'a> Service<'a> {
         // the same operation must work even after its caller-supplied ref vanishes.
         let operation = self.store.operation(&input.operation_id, call)?;
         let previous = match &operation {
+            Some(operation) if operation.state == OperationState::Refused => None,
             Some(operation) => match self.store.request(operation.run_id, call) {
                 Ok(request) => Some(request),
                 // A prepared operation may have crashed before request publication;
@@ -788,6 +789,11 @@ impl From<&RunError> for ErrorKind {
             ) => Self::CredentialRoot,
             RunError::Confinement(_) => Self::Confinement,
             RunError::Refused => Self::Refused,
+            RunError::RecordedRefusal(diagnostic) => Self::ALL
+                .iter()
+                .copied()
+                .find(|kind| kind.code() == diagnostic.code)
+                .unwrap_or(Self::Refused),
             RunError::Admission(AdmissionError::Disk { .. }) => Self::DiskFloor,
             RunError::Admission(AdmissionError::MemoryPressure { .. }) => Self::MemoryPressure,
             RunError::Admission(AdmissionError::Processes { .. }) => Self::Processes,
