@@ -2102,9 +2102,13 @@ impl Factory {
                 {
                     local
                 } else {
-                    self.context
-                        .peer_host(name)
-                        .ok_or(FacadeError::UnknownHost)?
+                    match self.context.peer_host(name) {
+                        Some(host) => host,
+                        // An older checkpoint may retain only a removed alias.
+                        // Missing routing is uncertainty, never proof of drainage.
+                        None if !stop => return Ok(Some(false)),
+                        None => return Err(FacadeError::UnknownHost),
+                    }
                 },
             )
         } else {
@@ -2140,9 +2144,14 @@ impl Factory {
             },
             budget,
             cancel,
-        )? {
-            PeerResult::SubmissionCancelled { settled, .. } => Ok(Some(settled)),
-            _ => Err(FacadeError::StateCorrupt),
+        ) {
+            Ok(PeerResult::SubmissionCancelled { settled, .. }) => Ok(Some(settled)),
+            // Pre-cutover peers admitted direct run attempts without a receiver
+            // graph. Only a retained target and definite absence permit using
+            // the existing by-reference cancellation and observation contract.
+            Err(FacadeError::NotFound) if attempt.attempt_ref.is_some() => Ok(None),
+            Err(error) => Err(error),
+            Ok(_) => Err(FacadeError::StateCorrupt),
         }
     }
 

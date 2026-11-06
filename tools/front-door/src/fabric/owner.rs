@@ -1636,6 +1636,11 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                 }
             }
             let record = owner.snapshot(target, self.budget, self.cancel)?;
+            if record.extra.get("peer_subtree").is_some_and(|subtree| {
+                matches!(subtree["status"].as_str(), Some("pending" | "paused"))
+            }) {
+                return Ok(false);
+            }
             return Ok(matches!(
                 record.state,
                 provenant_records::run::AttemptState::Terminal { .. }
