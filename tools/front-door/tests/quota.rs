@@ -1,11 +1,12 @@
 mod support;
+#[path = "support/terminal_run.rs"]
+mod terminal_run;
 use support::{Result, TestRig, code};
 
 #[test]
 fn usage_reads_terminal_lanes_across_projects_and_keeps_unknown_accounts() -> Result {
     let mut rig = TestRig::new()?;
     let original = rig.project.clone();
-    let binary = std::path::Path::new(env!("CARGO_BIN_EXE_provenant"));
     for (project, operation) in [
         (original.clone(), "first"),
         (rig.root.join("second"), "second"),
@@ -14,25 +15,7 @@ fn usage_reads_terminal_lanes_across_projects_and_keeps_unknown_accounts() -> Re
         rig.project = project;
         let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
         assert_eq!(code(&rig.execute(&git, &["init", "-q"], None)?), 0);
-        let output = rig.execute(
-            binary,
-            &[
-                "dispatch",
-                "--prompt-stdin",
-                "--model",
-                "codex/gpt-6-luna",
-                "--operation-id",
-                operation,
-                "--json",
-            ],
-            Some(b"private fixture prompt"),
-        )?;
-        assert_eq!(
-            code(&output),
-            0,
-            "{}",
-            String::from_utf8_lossy(&output.stdout.bytes)
-        );
+        terminal_run::seed(&rig, operation, &[serde_json::Value::Null])?;
     }
     rig.project = original;
     let output = rig.command(&["quota", "usage", "--json"])?;
