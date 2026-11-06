@@ -800,6 +800,7 @@ impl From<&RunError> for ErrorKind {
             RunError::GitUnavailable => Self::Git,
             RunError::ObjectImportLimit(_) => Self::ObjectImportLimit,
             RunError::Validation(_)
+            | RunError::WriterLineage(_)
             | RunError::WriterHeadNotLaneBranch
             | RunError::WriterSourceMismatch { .. }
             | RunError::ReviewAcceptanceRequired

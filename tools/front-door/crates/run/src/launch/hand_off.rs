@@ -213,7 +213,16 @@ impl RunStore {
                 .and_then(|plan| plan.writer.as_ref())
             && let Err(error) = self.check_writer_lineage(record, &writer.worktree, call)
         {
-            local_or_withdraw!(Err::<(), _>(typed_local("writer lineage", &error)));
+            let refusal = if matches!(error, RunError::Nonterminal) {
+                HandOff::Boundary {
+                    message: format!("writer lineage: {error}"),
+                    class: provenant_records::diagnostic::BoundaryClass::Authority,
+                    cause: None,
+                }
+            } else {
+                typed_local("writer lineage", &error)
+            };
+            local_or_withdraw!(Err::<(), _>(refusal));
         }
         if task.source_head.is_some()
             && let Some(writer) = plan

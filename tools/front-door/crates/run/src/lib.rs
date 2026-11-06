@@ -403,6 +403,8 @@ pub enum RunError {
     AttemptReservationRetained,
     #[error("invalid run record: {0}")]
     Validation(&'static str),
+    #[error("invalid run record: {0}")]
+    WriterLineage(&'static str),
     #[error("invalid run record: writer HEAD is not the lane branch")]
     WriterHeadNotLaneBranch,
     #[error(
@@ -512,6 +514,7 @@ impl RunError {
         use provenant_records::diagnostic::BoundaryClass as B;
         match self {
             Self::WriterHeadNotLaneBranch | Self::WriterSourceMismatch { .. } => B::LaneGit,
+            Self::WriterLineage(_) => B::Authority,
             Self::Confinement(error) => error.boundary_class(),
             Self::Plan(provenant_confinement::PlanError::Permission(error)) => {
                 error.boundary_class()
@@ -908,6 +911,13 @@ mod diagnostic_projection_tests {
         assert_eq!(
             RunError::WriterHeadNotLaneBranch.boundary_class(),
             BoundaryClass::LaneGit
+        );
+        let lineage = RunError::WriterLineage("continuation worktree belongs to another lane");
+        assert_eq!(lineage.boundary_class(), BoundaryClass::Authority);
+        assert_eq!(ErrorKind::from(&lineage), ErrorKind::Invalid);
+        assert_eq!(
+            lineage.to_string(),
+            "invalid run record: continuation worktree belongs to another lane"
         );
         assert_eq!(
             RefusalKind::HandoffBoundary(BoundaryClass::Authority).boundary_class(),

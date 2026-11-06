@@ -210,6 +210,11 @@ boundary = "authority"
 reason = "A handoff must use the selected worktree and held custody binding; fenced, unknown or invalid custody cannot be granted to another attempt."
 
 [[guard]]
+site = "run/src/controls.rs#RunStore::check_writer_lineage"
+boundary = "authority"
+reason = "A continuation must retain its recorded worktree ownership and cannot take custody from a nonterminal predecessor."
+
+[[guard]]
 site = "run/src/launch.rs#RunStore::start_inner"
 boundary = "unclassified"
 reason = "Mixed or untyped candidate failures remain combined in RefusalKind::Preparation. Typed run errors, nested argv prompt guards, protected host stores, and uniformly classified plan failures retain their boundaries."

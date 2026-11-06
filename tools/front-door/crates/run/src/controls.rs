@@ -2002,15 +2002,17 @@ impl RunStore {
         let mut initial_owner = None;
         loop {
             if !seen.insert(current.attempt_id) || seen.len() > 128 {
-                return Err(RunError::Validation("continuation parent chain"));
+                return Err(RunError::WriterLineage("continuation parent chain"));
             }
             if lane.is_some_and(|owner| {
                 owner.attempt_id == Some(current.attempt_id)
                     || owner.operation_id.as_ref() == Some(&current.operation_id)
             }) {
-                let owner_id = lane
-                    .and_then(|owner| owner.attempt_id)
-                    .ok_or(RunError::Validation("continuation owner attempt missing"))?;
+                let owner_id =
+                    lane.and_then(|owner| owner.attempt_id)
+                        .ok_or(RunError::WriterLineage(
+                            "continuation owner attempt missing",
+                        ))?;
                 if owner_id != record.attempt_id && !self.writer_owner_terminal(owner_id, call)? {
                     return Err(RunError::Nonterminal);
                 }
@@ -2028,9 +2030,11 @@ impl RunStore {
                         .as_ref()
                         .is_some_and(|saved| Some(saved) == lane)
                 {
-                    let owner_id = lane
-                        .and_then(|owner| owner.attempt_id)
-                        .ok_or(RunError::Validation("continuation owner attempt missing"))?;
+                    let owner_id =
+                        lane.and_then(|owner| owner.attempt_id)
+                            .ok_or(RunError::WriterLineage(
+                                "continuation owner attempt missing",
+                            ))?;
                     if !self.writer_owner_terminal(owner_id, call)? {
                         return Err(RunError::Nonterminal);
                     }
@@ -2051,12 +2055,12 @@ impl RunStore {
             return Ok(owner);
         }
         if lane.is_some() {
-            return Err(RunError::Validation(
+            return Err(RunError::WriterLineage(
                 "continuation worktree belongs to another lane",
             ));
         }
         if was_owned {
-            return Err(RunError::Validation(
+            return Err(RunError::WriterLineage(
                 "continuation worktree has no lane owner",
             ));
         }
