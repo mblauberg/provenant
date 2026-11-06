@@ -1179,19 +1179,28 @@ impl BinaryRunOwner<'_> {
     ) -> Result<RunResult, FacadeError> {
         match input {
             RunInput::Status { target, .. } => {
-                if let Some(response) = self.remote(&target, PeerAction::Run {
-                    extra: Default::default(),
-                    input: RunInput::Status { extra: Default::default(), target: target.clone() },
-                }, budget, cancel)? {
+                if let Some(response) = self.remote(
+                    &target,
+                    PeerAction::Run {
+                        extra: Default::default(),
+                        input: RunInput::Status {
+                            extra: Default::default(),
+                            target: target.clone(),
+                        },
+                    },
+                    budget,
+                    cancel,
+                )? {
                     return match response {
                         PeerResult::Run { data, .. } => {
                             if matches!(&*data, RunResult::Status { attempt, .. }
-                                if attempt.attempt_id == target.attempt) {
+                                if attempt.attempt_id == target.attempt)
+                            {
                                 Ok(*data)
                             } else {
                                 Err(FacadeError::StateCorrupt)
                             }
-                        },
+                        }
                         _ => Err(FacadeError::StateCorrupt),
                     };
                 }
@@ -1199,9 +1208,12 @@ impl BinaryRunOwner<'_> {
                 let store = self.store(cancel)?;
                 let waits = store.lane_waits(std::slice::from_ref(&attempt), &self.call(cancel));
                 let mut extra = provenant_records::ExtraFields::default();
-                extra.insert("lane_waits".into(), serde_json::to_value(waits).map_err(|_| FacadeError::StateCorrupt)?);
+                extra.insert(
+                    "lane_waits".into(),
+                    serde_json::to_value(waits).map_err(|_| FacadeError::StateCorrupt)?,
+                );
                 Ok(RunResult::Status { extra, attempt })
-            },
+            }
             RunInput::Wait {
                 targets,
                 condition,

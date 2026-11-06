@@ -11206,7 +11206,6 @@ fn quota_alias_redraw_uses_graph_retry_keeps_spent_models_and_is_bounded() {
     }
 }
 
-
 #[test]
 fn quota_alias_redraw_retains_partial_writer_work_and_predecessor() {
     let mut alias = route("first");
@@ -11221,7 +11220,12 @@ fn quota_alias_redraw_retains_partial_writer_work_and_predecessor() {
     let head = "1".repeat(40);
     let partial_commit = "2".repeat(40);
     let mut quota = terminal_with_result(AttemptOutcome::UsageLimited, "Partial implementation");
-    if let AttemptObservation::Terminal { attempt_ref, commit, .. } = &mut quota {
+    if let AttemptObservation::Terminal {
+        attempt_ref,
+        commit,
+        ..
+    } = &mut quota
+    {
         *attempt_ref = Some("host/partial".into());
         *commit = Some(partial_commit.clone());
     }
@@ -11238,14 +11242,26 @@ fn quota_alias_redraw_retains_partial_writer_work_and_predecessor() {
     assert_eq!(progress.state, NodeState::Succeeded);
     assert_eq!(owner.implicit_bindings, 1);
     assert_eq!(progress.writer_binding.as_ref().unwrap().head, head);
-    assert_eq!(progress.writer_binding.as_ref().unwrap().worktree, "/fixture/lane");
-    assert_eq!(owner.permissions, vec![
-        (AccessMode::WorktreeWrite, Some("/fixture/lane".into())),
-        (AccessMode::WorktreeWrite, Some("/fixture/lane".into())),
-    ]);
+    assert_eq!(
+        progress.writer_binding.as_ref().unwrap().worktree,
+        "/fixture/lane"
+    );
+    assert_eq!(
+        owner.permissions,
+        vec![
+            (AccessMode::WorktreeWrite, Some("/fixture/lane".into())),
+            (AccessMode::WorktreeWrite, Some("/fixture/lane".into())),
+        ]
+    );
     assert_eq!(progress.previous_attempts.len(), 1);
-    assert_eq!(progress.previous_attempts[0].attempt_ref.as_deref(), Some("host/partial"));
-    assert_eq!(owner.calls[1].0.extra["previous_attempt_ref"], "host/partial");
+    assert_eq!(
+        progress.previous_attempts[0].attempt_ref.as_deref(),
+        Some("host/partial")
+    );
+    assert_eq!(
+        owner.calls[1].0.extra["previous_attempt_ref"],
+        "host/partial"
+    );
     assert_eq!(owner.prior_attempts[1], vec!["codex/one"]);
     assert_ne!(owner.calls[0].0, owner.calls[1].0);
 }

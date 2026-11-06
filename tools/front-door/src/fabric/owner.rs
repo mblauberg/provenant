@@ -924,7 +924,10 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
         // Main 4c52d7f28 deliberately permits partial output and writer commits.
         // The checks above prove identity, typed quota, named alias, an applied
         // member, and released custody; the kernel separately bounds redraws.
-        Ok(matches!(record.requested_route, RequestedRoute::Named { .. }))
+        Ok(matches!(
+            record.requested_route,
+            RequestedRoute::Named { .. }
+        ))
     }
 
     fn preparation_refusal_cause(
@@ -1600,10 +1603,16 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                 {
                     return Err(FacadeError::Conflict);
                 }
-                if matches!(previous.requested_route, provenant_records::run::RequestedRoute::Named { .. })
-                    && matches!(previous.state, provenant_records::run::AttemptState::Terminal {
-                    outcome: provenant_records::run::Outcome::QuotaLimited, ..
-                }) {
+                if matches!(
+                    previous.requested_route,
+                    provenant_records::run::RequestedRoute::Named { .. }
+                ) && matches!(
+                    previous.state,
+                    provenant_records::run::AttemptState::Terminal {
+                        outcome: provenant_records::run::Outcome::QuotaLimited,
+                        ..
+                    }
+                ) {
                     submission_prompt.push_str("\n\nThe previous member stopped on quota. Inspect the retained worktree and any commits, then continue the original task from that work rather than restart. Use another eligible member of the same alias.");
                 }
                 let request = store.request(previous.run_id, &call).map_err(run_error)?;
@@ -1642,24 +1651,45 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                         if accepted {
                             use provenant_run::{AttemptFilter, AttemptReader};
                             let session = owner.session(self.cancel)?;
-                            let mut attempts = session.store.attempts(AttemptFilter {
-                                run_id: Some(operation.run_id), task_id: Some(task.task_id),
-                            }, &call).map_err(run_error)?;
-                            let attempt = attempts.next().ok_or(FacadeError::StateCorrupt)?
+                            let mut attempts = session
+                                .store
+                                .attempts(
+                                    AttemptFilter {
+                                        run_id: Some(operation.run_id),
+                                        task_id: Some(task.task_id),
+                                    },
+                                    &call,
+                                )
                                 .map_err(run_error)?;
-                            let record = session.store.record(attempt.attempt_id, &call).map_err(run_error)?;
+                            let attempt = attempts
+                                .next()
+                                .ok_or(FacadeError::StateCorrupt)?
+                                .map_err(run_error)?;
+                            let record = session
+                                .store
+                                .record(attempt.attempt_id, &call)
+                                .map_err(run_error)?;
                             if record.prompt.bytes > provenant_records::run::RECORD_LIMIT {
                                 return Err(FacadeError::StateCorrupt);
                             }
                             let mut bytes = Vec::new();
                             loop {
                                 let offset = bytes.len() as u64;
-                                let prompt = session.store.read_output(
-                                    attempt.attempt_id, provenant_run::ArtifactPart::Prompt,
-                                    provenant_run::ByteRange { offset, ..Default::default() },
-                                    &session.context, &call,
-                                ).map_err(run_error)?;
-                                if !prompt.complete || prompt.len != record.prompt.bytes
+                                let prompt = session
+                                    .store
+                                    .read_output(
+                                        attempt.attempt_id,
+                                        provenant_run::ArtifactPart::Prompt,
+                                        provenant_run::ByteRange {
+                                            offset,
+                                            ..Default::default()
+                                        },
+                                        &session.context,
+                                        &call,
+                                    )
+                                    .map_err(run_error)?;
+                                if !prompt.complete
+                                    || prompt.len != record.prompt.bytes
                                     || prompt.digest != task.prompt_digest
                                     || prompt.offset != offset
                                     || prompt.next_offset != offset + prompt.bytes.len() as u64
@@ -1670,10 +1700,12 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                                     return Err(FacadeError::StateCorrupt);
                                 }
                                 bytes.extend(prompt.bytes);
-                                if prompt.eof { break; }
+                                if prompt.eof {
+                                    break;
+                                }
                             }
-                            submission_prompt = String::from_utf8(bytes)
-                                .map_err(|_| FacadeError::StateCorrupt)?;
+                            submission_prompt =
+                                String::from_utf8(bytes).map_err(|_| FacadeError::StateCorrupt)?;
                             source_head = task.source_head.clone();
                             successor_head = task.head.clone();
                             accepted_knobs = Some(task.profile.overrides.clone());
