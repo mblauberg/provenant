@@ -142,6 +142,7 @@ pub fn ingest_native(
             provider,
             since,
             deadline,
+            incremental: deadline.is_some(),
         },
     )
     .map_err(|error| error.to_string())
@@ -151,8 +152,8 @@ pub fn ingest_native(
 /// timeout with room for the chair's own work.
 const HOOK_INGEST_BUDGET: std::time::Duration = std::time::Duration::from_secs(3);
 
-/// Best-effort ingest after the chair's SessionStart hook records its session.
-/// The hook has a five-second host timeout, so only the last day is read, the
+/// Best-effort ingest at chair session start and turn end.
+/// The hook has a five-second host timeout, so only files modified in the last day are read; the
 /// read stops at a three-second wall deadline, and the rows read so far are
 /// still written. Every failure is ignored: a slow transcript must never stop
 /// the chair.
@@ -216,6 +217,93 @@ pub fn ingest(cmd: &provenant_cli::Ingest, globals: &Globals) -> u8 {
             &message,
             globals,
         ),
+    }
+}
+
+/// Record only native attempt identifiers and routing metadata.
+pub fn native(cmd: provenant_cli::Native, globals: &Globals) -> u8 {
+    use provenant_core::Clock;
+    use provenant_telemetry::native_attempts::{self, Attempt, End, Settlement};
+    let settling = matches!(&cmd, provenant_cli::Native::End { .. });
+    let action = match &cmd {
+        provenant_cli::Native::Start { .. } => "native start",
+        provenant_cli::Native::End { .. } => "native end",
+    };
+    let result = (|| -> Result<(), String> {
+        let resolved = roots::resolve(globals, Workspace::Directory, Product::Optional)
+            .map_err(|error| error.to_string())?;
+        use std::os::unix::fs::DirBuilderExt;
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(resolved.roots.state.as_path())
+            .map_err(|error| error.to_string())?;
+        let config = native_attempts::config_key(
+            &resolved
+                .claude_config
+                .unwrap_or_else(|| resolved.home.join(".claude")),
+        );
+        let now = provenant_os::clock::SystemClock::new()
+            .wall_now()
+            .map_err(|error| error.to_string())?
+            .as_timestamp()
+            .to_string();
+        match cmd {
+            provenant_cli::Native::Start {
+                id,
+                session,
+                alias,
+                model,
+                effort,
+            } => native_attempts::start(
+                &resolved.roots,
+                Attempt {
+                    id,
+                    session,
+                    alias,
+                    model,
+                    effort,
+                    config,
+                    started_at: now,
+                    ended_at: None,
+                    settlement: None,
+                    agent_id: None,
+                },
+            ),
+            provenant_cli::Native::End {
+                id,
+                session,
+                agent,
+                settlement,
+            } => native_attempts::end(
+                &resolved.roots,
+                End {
+                    config: &config,
+                    session: &session,
+                    id: &id,
+                    ended_at: &now,
+                    settlement: match settlement {
+                        provenant_cli::NativeSettlement::Succeeded => Settlement::Succeeded,
+                        provenant_cli::NativeSettlement::Failed => Settlement::Failed,
+                        provenant_cli::NativeSettlement::Cancelled => Settlement::Cancelled,
+                    },
+                    agent_id: agent.as_deref(),
+                },
+            ),
+        }
+        .map_err(|error| error.to_string())
+    })();
+    if settling && result.is_ok() {
+        ingest_after_chair_hook(globals);
+    }
+    match result {
+        Ok(()) => crate::emit(
+            &CommandResult::new(action, Outcome::Ok, serde_json::json!({"recorded": true})),
+            globals,
+            "recorded\n",
+            false,
+        ),
+        Err(error) => crate::fail(action, Outcome::Error, "NATIVE_ATTEMPT", &error, globals),
     }
 }
 

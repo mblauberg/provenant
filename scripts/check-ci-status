@@ -6,13 +6,16 @@ import sys
 
 REQUIRED = frozenset({"macos-scope", "generated-reference", "rust-lint", "rust", "rust-macos-tests", "rust-macos-release", "rust-dependencies", "generic-checks"})
 MACOS = frozenset({"rust-macos-tests", "rust-macos-release"})
+# Skipped only for docs-only changes (scripts/select-macos-checks run_rust=false).
+RUST = frozenset({"rust-lint", "rust", "rust-dependencies"})
 
 
-def failures(needs, run_macos):
+def failures(needs, run_macos, run_rust="true"):
     errors = []
     for name in sorted(REQUIRED | needs.keys()):
         result = needs.get(name, {}).get("result", "absent")
-        if result != "success" and not (name in MACOS and result == "skipped" and run_macos == "false"):
+        skippable = (name in MACOS and run_macos == "false") or (name in RUST and run_rust == "false")
+        if result != "success" and not (skippable and result == "skipped"):
             errors.append(f"{name}={result}")
     return errors
 
@@ -21,9 +24,10 @@ def main():
     try:
         needs = json.loads(os.environ["NEEDS_JSON"])
         run_macos = os.environ["RUN_MACOS"]
-        if not isinstance(needs, dict) or run_macos not in ("true", "false"):
+        run_rust = os.environ.get("RUN_RUST", "true")
+        if not isinstance(needs, dict) or run_macos not in ("true", "false") or run_rust not in ("true", "false"):
             raise ValueError("invalid needs or macOS selection")
-        errors = failures(needs, run_macos)
+        errors = failures(needs, run_macos, run_rust)
     except (KeyError, ValueError, TypeError) as error:
         print(f"Invalid CI status input: {error}", file=sys.stderr)
         return 1

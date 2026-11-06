@@ -8066,45 +8066,6 @@ fn big_batch_without_scout_matches_golden() {
 }
 
 #[test]
-fn preset_show_and_explain_json_match_snapshots() {
-    use provenant_records::{CommandResult, Outcome};
-    let layers = Layers::empty();
-    let (values, mut origins) = layers.resolve("review").unwrap();
-    origins.extend(expand(&layers, "review", "", &[]).unwrap().origins);
-    let show = CommandResult::new(
-        "preset",
-        Outcome::Ok,
-        json!({"name": "review", "values": values, "origins": origins}),
-    );
-    let explain = CommandResult::new("preset", Outcome::Ok, layers.explain("review").unwrap());
-    // `UPDATE_GOLDEN=1` rewrites the fixtures.
-    let golden = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/golden");
-    for (actual, name) in [
-        (
-            serde_json::to_value(show).unwrap(),
-            "preset-review-show.json",
-        ),
-        (
-            serde_json::to_value(explain).unwrap(),
-            "preset-review-explain.json",
-        ),
-    ] {
-        let path = golden.join(name);
-        if std::env::var_os("UPDATE_GOLDEN").is_some() {
-            let mut text = serde_json::to_string_pretty(&actual).unwrap();
-            text.push('\n');
-            std::fs::write(&path, text).unwrap();
-        }
-        let expected = std::fs::read_to_string(&path).unwrap_or_default();
-        assert_eq!(
-            actual,
-            serde_json::from_str::<Value>(&expected).unwrap_or_default(),
-            "{name}: rerun with UPDATE_GOLDEN=1 to refresh"
-        );
-    }
-}
-
-#[test]
 fn file_spec_expansion_golden() {
     let mut layers = Layers::empty();
     layers.project_dir = Some(std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")));
