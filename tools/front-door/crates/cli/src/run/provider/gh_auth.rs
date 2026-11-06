@@ -10,7 +10,7 @@ pub(super) fn inject(
     cancel: &provenant_core::CancelToken,
     environment: &mut Vec<(OsString, OsString)>,
 ) {
-    if let Some(token) = token(executor, gh, home, cancel) {
+    if let Some(token) = token(executor, gh, home, cancel, std::env::var_os("GH_TOKEN")) {
         environment.retain(|(key, _)| key != "GH_TOKEN");
         environment.push(("GH_TOKEN".into(), token));
     }
@@ -46,7 +46,18 @@ fn token(
     gh: &Path,
     home: &Path,
     cancel: &provenant_core::CancelToken,
+    host_token: Option<OsString>,
 ) -> Option<OsString> {
+    // `gh auth token` reads the persisted login and does not return GH_TOKEN.
+    // Honour the host token first, with the same bounds as captured output.
+    if let Some(value) = host_token
+        && let Some(text) = value.to_str()
+        && !text.is_empty()
+        && text.len() <= 16 * 1024
+        && text.bytes().all(|b| b.is_ascii_graphic())
+    {
+        return Some(value);
+    }
     let argv = [gh.as_os_str().to_owned(), "auth".into(), "token".into()];
     let mut options = ExecOptions::new(&argv, home, Duration::from_secs(10));
     options.cancel = Some(cancel);
@@ -144,7 +155,8 @@ mod tests {
                 &Login(true),
                 Path::new("/fixture/gh"),
                 Path::new("/fixture/home"),
-                &cancel
+                &cancel,
+                None
             ),
             Some("fixture-secret".into())
         );
@@ -153,7 +165,8 @@ mod tests {
                 &Login(false),
                 Path::new("/fixture/gh"),
                 Path::new("/fixture/home"),
-                &cancel
+                &cancel,
+                None
             ),
             None
         );

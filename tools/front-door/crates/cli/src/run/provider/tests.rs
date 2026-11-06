@@ -2095,6 +2095,21 @@ fn writer_plan_stages_scratch_in_private_temporary_directory()
         time::Duration,
     };
 
+    // Isolate the host token from other parallel tests while exercising the
+    // same process environment that production preparation reads.
+    const CHILD: &str = "PROVENANT_TEST_WRITER_TOKEN_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let status = std::process::Command::new(std::env::current_exe()?)
+            .arg("writer_plan_stages_scratch_in_private_temporary_directory")
+            .env(CHILD, "1")
+            .env("GH_TOKEN", "fixture-host-token")
+            .env_remove("GIT_CONFIG_GLOBAL")
+            .env_remove("XDG_CONFIG_HOME")
+            .status()?;
+        assert!(status.success());
+        return Ok(());
+    }
+
     let temp = tempfile::tempdir()?;
     let base = temp.path().canonicalize()?;
     let home = base.join("home");
@@ -2871,13 +2886,21 @@ printf 'agy 1.0.0\n'
     // generated shim, with a fake gh so no GitHub access is needed.
     std::fs::create_dir_all(home.join(".config/gh"))?;
     let gh = assets.join("gh");
-    std::fs::write(&gh, b"#!/bin/sh\nprintf 'forwarded\\n'\n")?;
+    std::fs::write(&gh, b"#!/bin/sh\nif [ \"$1\" = auth ] && [ \"$2\" = token ]; then exit 1; fi\nprintf 'forwarded\\n'\n")?;
     std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o700))?;
     let policy_dir = state
         .join("projects")
         .join(binding.project_id().to_string());
     std::fs::create_dir_all(&policy_dir)?;
     std::fs::write(policy_dir.join("github.json"), r#"{"deny_labels":["ci"]}"#)?;
+    // Both a linked global file and an XDG config beneath a linked directory
+    // must survive preparation and the launcher's canonical anchor checks.
+    let dotfiles = base.join("dotfiles");
+    std::fs::create_dir_all(dotfiles.join("xdg/git"))?;
+    std::fs::write(dotfiles.join("global"), "[fixture]\n global = true\n")?;
+    std::fs::write(dotfiles.join("xdg/git/config"), "[fixture]\n xdg = true\n")?;
+    std::os::unix::fs::symlink(dotfiles.join("global"), home.join(".gitconfig"))?;
+    std::os::unix::fs::symlink(dotfiles.join("xdg/git"), home.join(".config/git"))?;
     let publishing_paths = run::LaunchPaths {
         attempt_id: paths.attempt_id,
         operation_id: paths.operation_id.clone(),
@@ -2917,6 +2940,33 @@ printf 'agy 1.0.0\n'
         },
         None,
     )?;
+    assert!(
+        publishing
+            .environment
+            .iter()
+            .any(|(key, value)| key == "GH_TOKEN" && value == "fixture-host-token")
+    );
+    assert!(!launch.environment.iter().any(|(key, _)| key == "GH_TOKEN"));
+    let profile = &publishing
+        .confinement
+        .as_ref()
+        .ok_or("confinement")?
+        .profile;
+    let config = std::fs::read_to_string(publishing_paths.temporary.join("candidate-0/gitconfig"))?;
+    for target in [dotfiles.join("global"), dotfiles.join("xdg/git/config")] {
+        let target = target.canonicalize()?;
+        assert!(config.contains(target.to_str().ok_or("config path")?));
+        assert!(
+            profile
+                .spec
+                .runtime_reads
+                .iter()
+                .any(|grant| grant.path == target)
+        );
+        provenant_confinement::permissions::AnchoredDirectory::open_canonical(
+            target.parent().ok_or("config parent")?,
+        )?;
+    }
     let worktree = &publishing_task
         .writer
         .as_ref()
@@ -2960,6 +3010,34 @@ printf 'agy 1.0.0\n'
         b"publishing private object fixture\n",
     )?;
     let git_shim = publishing_paths.temporary.join("candidate-0/bin/git");
+    let mut credential = std::process::Command::new(&git_shim)
+        .args(["credential", "fill"])
+        .current_dir(worktree)
+        .env_clear()
+        .envs(
+            publishing
+                .environment
+                .iter()
+                .map(|(key, value)| (key, value)),
+        )
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()?;
+    use std::io::Write as _;
+    credential
+        .stdin
+        .take()
+        .ok_or("credential stdin")?
+        .write_all(b"protocol=https\nhost=github.com\n\n")?;
+    let credential = credential.wait_with_output()?;
+    assert!(credential.status.success());
+    assert!(
+        credential
+            .stdout
+            .windows(b"password=fixture-host-token".len())
+            .any(|window| window == b"password=fixture-host-token")
+    );
     let env = [
         ("HOME".into(), git_home.as_os_str().to_owned()),
         ("PATH".into(), "/usr/bin:/bin".into()),
