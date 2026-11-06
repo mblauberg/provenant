@@ -361,9 +361,7 @@ pub fn decide(
         PlanMode::Auto => {
             let size = if catalogue.get("by_size").and_then(Value::as_bool) == Some(true) {
                 with_builder(layers, name, config, origins, brief, |builder| {
-                    Ok(builder
-                        .shape_hint(builder.defers_review_size())?
-                        .and_then(|hint| hint.size))
+                    Ok(builder.shape_hint()?.and_then(|hint| hint.size))
                 })?
             } else {
                 None
@@ -562,7 +560,7 @@ pub fn apply(
         }) {
         with_builder(layers, name, config, origins, brief, |builder| {
             Ok(builder
-                .shape_hint(false)?
+                .shape_hint()?
                 .map(|hint| {
                     (
                         hint.required_floor_lenses,
@@ -790,63 +788,6 @@ fn bind_item(value: &Value, item: &Value) -> Value {
         ),
         other => other.clone(),
     }
-}
-
-/// Lower the review catalogue before its subject is known. The launch host
-/// narrows it to the measured panel and binds its leaves to the pinned commit.
-pub(super) fn deferred_review_catalogue(
-    builder: &StageBuilder<'_>,
-    names: &[String],
-) -> Result<Value, String> {
-    let (config, _) = builder.layers.resolve(builder.name)?;
-    let catalogue = config
-        .get("plan")
-        .ok_or("review preset needs a plan catalogue")?;
-    let patterns = catalogue
-        .get("patterns")
-        .and_then(Value::as_array)
-        .ok_or("review plan needs patterns")?;
-    let mut values = builder.parameters.clone();
-    values["subject"] = json!({"type":"commit", "commit":"HEAD"});
-    let mut lowered = Vec::new();
-    for pattern in patterns {
-        if pattern.get("for_each").and_then(Value::as_str) != Some("lenses") {
-            return Err("deferred review patterns must iterate lenses".into());
-        }
-        for name in names {
-            let item = json!({"name": name, "tier": "senior"});
-            let mut entry = bind_item(pattern, &item);
-            let map = entry
-                .as_object_mut()
-                .ok_or("review pattern must be a table")?;
-            map.remove("for_each");
-            for node in map
-                .get_mut("nodes")
-                .and_then(Value::as_array_mut)
-                .into_iter()
-                .flatten()
-            {
-                node.as_object_mut()
-                    .ok_or("review pattern node must be a table")?
-                    .entry("item")
-                    .or_insert_with(|| item.clone());
-            }
-            lowered.push(lower_pattern(
-                builder.layers,
-                builder.roles,
-                &values,
-                builder.prompt,
-                &entry,
-            )?);
-        }
-    }
-    for name in names {
-        let expected = format!("lens-{name}");
-        if !lowered.iter().any(|pattern| pattern["name"] == expected) {
-            return Err(format!("review catalogue lacks {expected}"));
-        }
-    }
-    Ok(json!({"patterns":lowered,"guidance":catalogue.get("guidance")}))
 }
 
 /// One catalogue entry per item of `list`. The `lenses` list is first narrowed

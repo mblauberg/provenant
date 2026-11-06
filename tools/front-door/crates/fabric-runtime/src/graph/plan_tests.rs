@@ -1608,76 +1608,6 @@ fn pattern_read_roots_must_be_the_bare_placeholder_over_clean_absolute_values() 
     assert!(closed(json!(["${label}"]), &["/repo/a", ""]).is_err());
 }
 
-#[test]
-fn planned_big_batch_expands_to_its_static_composite_and_records_the_patterns() {
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../assets/presets/fixtures/big-batch.plan.json");
-    // The CLI pins `HEAD` to a commit before a graph runs; do the same here.
-    let text = std::fs::read_to_string(&path)
-        .unwrap()
-        .replace("\"commit\": \"HEAD\"", "\"commit\": \"0123456789abcdef0123456789abcdef01234567\"");
-    let mut doc: GraphDocument = serde_json::from_str(&text).unwrap();
-    // Run the planner node alone, ahead of one consumer.
-    doc.nodes.retain(|node| node.id == "plan");
-    doc.nodes[0].depends_on.clear();
-    doc.nodes[0].inputs.clear();
-    let pattern = &mut doc.nodes[0].plan.as_mut().unwrap().templates[0];
-    let review = pattern.nodes.iter_mut().find(|node| node["id"] == "review").unwrap();
-    let deferred = &mut review["composite"]["nodes"][0];
-    deferred["panel_shapes"] = json!({"quick":{"frame":false,"verifiers":0,"synthesis":"reduce"}});
-    deferred["review"]["min_successful"] = json!(1);
-    doc.nodes.push(serde_json::from_value(json!({
-        "id":"after", "access":"read_only", "prompt":"Check all slices",
-        "depends_on":["plan"], "route":{"alias":"senior"}
-    })).unwrap());
-
-    let lane = |id: &str, tree: &str, scope: &str, extra: Value| {
-        let mut instance = json!({"id":id, "pattern":"writer-lane", "parameters":{
-            "lane":id, "worktree":tree, "scope":[scope], "acceptance":[format!("{id} works")],
-            "route":"junior", "budget_seconds":1800}});
-        instance.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
-        instance
-    };
-    let instances = vec![
-        lane("a", "/repo/lane1", "src/a", json!({})),
-        lane("b", "/repo/lane2", "src/b", json!({})),
-        json!({"id":"barrier", "pattern":"wave-barrier", "parameters":{"wave":"one"},
-               "depends_on":["a","b"],
-               "inputs":[{"node":"a","outputs":["commit"]},{"node":"b","outputs":["commit"]}]}),
-        lane("c", "/repo/lane1", "src/a", json!({"depends_on":["barrier"]})),
-    ];
-    let fragment = format!("```fragment\n{}\n```", json!({"schema_version":1,"nodes":[],"patterns":instances}));
-    // Every lane runs a writer, two lens legs and an evaluator, then the barrier and consumer.
-    let mut results = vec![fragment.as_str()];
-    results.extend(std::iter::repeat_n("done\n```findings\n{\"schema_version\":1,\"findings\":[]}\n```\nVERDICT: PASS", 40));
-    let mut owner = fixture_owner(&results);
-    owner.simple_review = true;
-    for observation in owner.observations.iter_mut().skip(1) {
-        if let AttemptObservation::Terminal { commit, branch, attempt_ref, .. } = observation {
-            *commit = Some("1".repeat(40));
-            *branch = Some("batch/graph".into());
-            *attempt_ref = Some("fixture/review".into());
-        }
-    }
-    let run = advance(&doc, &mut owner, &mut MemoryJournal::default()).unwrap();
-    assert_eq!(run.status, GraphStatus::Complete, "{:?}", run.checkpoint.pause_reason);
-    assert!(run.checkpoint.successful(), "{:?}", run.checkpoint.nodes.iter().filter(|node| node.state != NodeState::Succeeded).map(|node| (&node.id, node.state, &node.advance_error)).collect::<Vec<_>>());
-    let expansion = &run.checkpoint.expansions[0];
-    let recorded: Vec<_> = expansion.uses.iter().map(|p| (p.id.as_str(), p.name.as_str())).collect();
-    assert_eq!(recorded, [("plan--a", "writer-lane"), ("plan--b", "writer-lane"), ("plan--barrier", "wave-barrier"), ("plan--c", "writer-lane")]);
-    assert_eq!(expansion.uses[0].parameters["budget_seconds"], 1800);
-    assert_eq!(expansion.uses[0].parameters["route"], "junior");
-    assert_eq!(expansion.uses[2].parameters, json!({"wave":"one"}));
-
-    // Each lane runs its nested review before its evaluator.
-    for lane in ["a", "b", "c"] {
-        let review = format!("plan--{lane}--review--lenses");
-        let evaluate = format!("plan--{lane}--evaluate");
-        assert!(run.checkpoint.expansions.iter().any(|item| item.source == review));
-        assert!(owner.calls.iter().any(|(key, _)| key.node_id == evaluate));
-    }
-}
-
 /// A preset planner with a static fallback refuses an invalid fragment by
 /// running the fallback and naming the refusal, never by trusting it.
 fn assert_refused_into_fallback(run: &GraphRun) {
@@ -1749,35 +1679,6 @@ fn single_planned_review_records_rationale_before_lens() {
     let lens_call = owner.calls.iter().position(|(key, _)| key.node_id == "plan--correctness--lens").unwrap();
     assert!(planner_call < lens_call);
     assert_eq!(run.checkpoint.expansions[0].uses.len(), 1);
-}
-
-#[test]
-fn review_catalogue_binds_every_lens_to_the_pinned_commit() {
-    let mut doc = planned_fixture("review");
-    let spec = doc.nodes.iter_mut().find(|node| node.id == "plan").unwrap().plan.as_mut().unwrap();
-    let head = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-    spec.pin_review_subject(head).unwrap();
-    for pattern in &spec.templates {
-        for lens in &pattern.nodes {
-            assert_eq!(lens["source"], json!({"type":"commit", "commit":head}));
-        }
-    }
-    let output = pattern_result(json!({"id":"correctness", "pattern":"lens-correctness-spec"}));
-    let mut owner = fixture_owner(&["framed", &output, "done\nVERDICT: PASS", "done\nVERDICT: PASS", "done\nVERDICT: PASS"]);
-    let run = advance(&doc, &mut owner, &mut MemoryJournal::default()).unwrap();
-    assert_eq!(run.status, GraphStatus::Complete, "{:?}", run.checkpoint.pause_reason);
-    let lens = run.checkpoint.expansions[0].nodes.iter().find(|node| node.id == "plan--correctness--lens").unwrap();
-    assert_eq!(lens.source, Some(SourceBinding::Commit { commit: head.into() }));
-}
-
-#[test]
-fn review_catalogue_pins_nested_pattern_leaves() {
-    let mut doc = planner(1);
-    let plan = doc.nodes[0].plan.as_mut().unwrap();
-    plan.templates.push(serde_json::from_value(json!({"name":"nested","nodes":[{"id":"group","composite":{"nodes":[{"id":"lens","source":{"type":"head","node":"writer"}}],"exports":[{"node":"lens","outputs":["result"]}]}}],"exports":[{"node":"group","outputs":["result"]}]})).unwrap());
-    let head = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-    plan.pin_review_subject(head).unwrap();
-    assert_eq!(plan.templates[0].nodes[0]["composite"]["nodes"][0]["source"], json!({"type":"commit","commit":head}));
 }
 
 #[test]

@@ -1,7 +1,6 @@
 //! Review panel selection for pipeline presets: the shape a review stage
 //! selects, and the lenses that fill it.
 use super::StageBuilder;
-use provenant_fabric_runtime::graph::{ReviewLens, ReviewSpec};
 use provenant_routing::{LensPlan, ReviewConfig, ReviewReviewer, ReviewSynthesis, tier_is_set};
 use serde_json::{Value, json};
 use std::path::PathBuf;
@@ -23,9 +22,6 @@ pub struct ShapeQuery<'a> {
     pub head: Option<&'a str>,
     /// Worktree to measure in; the project directory when absent.
     pub worktree: Option<&'a str>,
-    /// The host measures the change when the review launches, so expansion
-    /// leaves the size unknown and does not read the change.
-    pub defer: bool,
 }
 
 /// Picks a review shape for a review stage. The host owns routing, so it
@@ -158,9 +154,7 @@ fn review_selector_with_git(
             .or(query.base)
             .map(str::to_owned)
             .or_else(|| default_base(&run_git, &cwd));
-        // A deferred review is measured against its pinned commit by the host;
-        // the expansion-time working tree says nothing about it.
-        if let Some(base) = base.as_deref().filter(|_| !query.defer) {
+        if let Some(base) = base.as_deref() {
             let tip = range_head.or(query.head).unwrap_or("HEAD");
             let range = query
                 .range
@@ -190,15 +184,11 @@ fn review_selector_with_git(
                 Err(error) => warnings.push(format!("cannot scan test markers: {error}")),
             }
         }
-        if base.is_none() && !query.defer {
+        if base.is_none() {
             paths_unreadable = true;
             warnings.push("cannot resolve review base; applying highest configured floor and all required floor lenses".into());
         }
-        let size = match (
-            query.size,
-            query.shape,
-            base.as_deref().filter(|_| !query.defer),
-        ) {
+        let size = match (query.size, query.shape, base.as_deref()) {
             (Some(size), _, _) => {
                 if !["small", "medium", "large"].contains(&size) {
                     return Err(format!("unknown review size '{size}'"));
@@ -277,8 +267,8 @@ fn review_selector_with_git(
                 } else {
                     format!("; lenses={}", lens_reason.join(","))
                 },
-                if query.defer { "pending".to_owned() } else if paths_unreadable { format!("unreadable (highest configured floor: {})", floors.classes.join(",")) } else if floors.classes.is_empty() { "none".to_owned() } else { floors.classes.join(",") },
-                size_text(size, query.defer),
+                if paths_unreadable { format!("unreadable (highest configured floor: {})", floors.classes.join(",")) } else if floors.classes.is_empty() { "none".to_owned() } else { floors.classes.join(",") },
+                size.unwrap_or("unknown"),
                 kind.unwrap_or("unknown"),
                 query.risk.unwrap_or("unknown")
             ),
@@ -379,7 +369,7 @@ fn git(cwd: &std::path::Path, args: &[&str]) -> Result<String, String> {
 
 impl StageBuilder<'_> {
     /// The shape this stage's final parameters select, if shapes are configured.
-    pub(super) fn shape_hint(&self, defer: bool) -> Result<Option<ShapeHint>, String> {
+    pub(super) fn shape_hint(&self) -> Result<Option<ShapeHint>, String> {
         let Some(select) = &self.layers.review else {
             return Ok(None);
         };
@@ -413,7 +403,6 @@ impl StageBuilder<'_> {
             range: text("selection_range"),
             head,
             worktree: text("worktree"),
-            defer,
         })?;
         let mut warnings = self.layers.warnings.borrow_mut();
         for warning in &hint.warnings {
@@ -446,7 +435,7 @@ impl StageBuilder<'_> {
         if self.parameters.get("risk_tier").and_then(Value::as_str) == Some("terminal") {
             tags.push("terminal");
         }
-        let hint = self.shape_hint(false)?;
+        let hint = self.shape_hint()?;
         let shape = hint.as_ref();
         let plan = shape.map(|shape| &shape.plan);
         let caller_supplied = !list.is_empty()
@@ -586,66 +575,10 @@ impl StageBuilder<'_> {
         Ok(selected)
     }
 
-    /// Whether this stage's review is resolved when the subject is pinned: a
-    /// `head` or `node` subject with no explicit size or shape. Explicit commit
-    /// subjects, an explicit size or shape, and integration councils expand
-    /// statically.
-    pub(super) fn defers_review_size(&self) -> bool {
-        let subject_type = self
-            .parameters
-            .get("subject")
-            .and_then(|subject| subject.get("type"))
-            .and_then(Value::as_str);
-        self.layers.review.is_some() && matches!(subject_type, Some("head" | "node"))
-    }
-
-    fn review_is_deferred(
-        &self,
-        entries: &[Value],
-        object: &serde_json::Map<String, Value>,
-        nodes: &[Value],
-    ) -> bool {
-        let source = object.get("source");
-        if !matches!(entries, [entry] if super::selects_review_lenses(entry))
-            || source.and_then(|source| source["type"].as_str()) != Some("node")
-        {
-            return false;
-        }
-        // Lenses over a writer review output that does not exist until it runs,
-        // whatever commit the preset's own subject names.
-        let writes = source
-            .and_then(|source| source["node"].as_str())
-            .is_some_and(|id| {
-                nodes.iter().any(|node| {
-                    node["id"] == id && node["access"].as_str() == Some("worktree_write")
-                })
-            });
-        self.layers.review.is_some() && (writes || self.defers_review_size())
-    }
-
-    /// The deferred node that replaces a lens stage: a read-only plan node that
-    /// carries the `ReviewSpec` and one lowered lens per candidate. The host
-    /// picks the panel when the subject is pinned and builds the lens members
-    /// from these. `None` when the stage expands statically.
-    #[allow(
-        clippy::too_many_arguments,
-        reason = "the stage entry shares its bounded state"
-    )]
-    pub(super) fn deferred_review(
-        &mut self,
-        id: &str,
-        entries: &[Value],
-        object: &serde_json::Map<String, Value>,
-        deps: &[String],
-        outputs: &Value,
-        depth: usize,
-        nodes: &[Value],
-    ) -> Result<Option<Value>, String> {
-        // Static and deferred review stages alike record the requested base.
-        let is_review = self.layers.review.is_some()
-            && matches!(entries, [entry] if super::selects_review_lenses(entry));
+    /// Record the base a review stage requests, so the host can pin it.
+    pub(super) fn note_review_base(&self, entries: &[Value]) {
         if let Some(base) = self.parameters.get("base").and_then(Value::as_str)
-            && is_review
+            && matches!(entries, [entry] if super::selects_review_panel(entry))
             && !base.is_empty()
         {
             self.layers
@@ -653,263 +586,7 @@ impl StageBuilder<'_> {
                 .borrow_mut()
                 .insert(base.to_owned());
         }
-        if !self.review_is_deferred(entries, object, nodes) {
-            return Ok(None);
-        }
-        let spec = self.review_spec(object)?;
-        let names = self.review_candidates(&spec.lenses)?;
-        let planned = if let Some(context) = self.layers.plan.as_ref().filter(|context| {
-            context.mode == provenant_fabric_runtime::config::PlanMode::On
-                && context.unavailable.is_none()
-                && self.layers.delegated_plan_stage.borrow().as_deref() == Some(self.scope)
-        }) {
-            let capture = (|| -> Result<Value, String> {
-                let catalogue = super::planner::deferred_review_catalogue(self, &names)?;
-                let mut values = self.parameters.clone();
-                values["plan_max_nodes"] = json!(context.max_nodes);
-                values["plan_lane_deadline_seconds"] = json!(context.lane_deadline_seconds);
-                values["plan_routes"] = json!(
-                    self.layers
-                        .known_routes
-                        .as_ref()
-                        .map(|routes| routes.iter().cloned().collect::<Vec<_>>().join(", "))
-                        .unwrap_or_default()
-                );
-                values["plan_worktrees"] = json!("none registered");
-                values["plan_guidance"] = catalogue
-                    .get("guidance")
-                    .filter(|guidance| !guidance.is_null())
-                    .cloned()
-                    .unwrap_or_else(|| json!(""));
-                let entry =
-                    json!({"role":"plan.shape", "tier":context.route, "access":"read_only"});
-                let planner = super::lower_leaf(
-                    self.layers,
-                    entry.as_object().ok_or("invalid planner template")?,
-                    self.roles,
-                    &values,
-                    self.prompt,
-                    1,
-                    "plan",
-                    &[],
-                )?;
-                Ok(
-                    json!({"template":planner, "catalogue":catalogue, "max_nodes":context.max_nodes}),
-                )
-            })();
-            match capture {
-                Ok(captured) => Some(captured),
-                Err(error) => {
-                    self.layers.warnings.borrow_mut().push(format!(
-                        "review planner unavailable ({error}); using the deterministic panel"
-                    ));
-                    None
-                }
-            }
-        } else {
-            None
-        };
-        let items: Vec<Value> = names
-            .iter()
-            .map(|name| json!({"name": name, "tier": "senior"}))
-            .collect();
-        let mut lens_entry = entries[0]
-            .as_object()
-            .cloned()
-            .ok_or("stage entries must be tables")?;
-        // Templates cover every candidate; selection happens when the head is pinned.
-        lens_entry.remove("review_lenses");
-        lens_entry.insert("for_each".into(), Value::Array(items));
-        let mut leaves = Vec::new();
-        self.entry(
-            &Value::Object(lens_entry),
-            "p1",
-            &[],
-            &mut leaves,
-            depth + 1,
-        )?;
-        if leaves.len() != names.len() {
-            return Err("a deferred review lens stage must lower one node per lens".into());
-        }
-        let mut read_roots = None;
-        let mut templates = serde_json::Map::new();
-        for (name, mut leaf) in names.into_iter().zip(leaves) {
-            let map = leaf.as_object_mut().ok_or("lens must be a table")?;
-            // The host assigns the route, dependencies and read roots.
-            let effort = ["route", "routes"]
-                .iter()
-                .find_map(|key| map.remove(*key))
-                .and_then(|route| {
-                    route
-                        .get("effort")
-                        .or_else(|| route.get(0).and_then(|first| first.get("effort")))
-                        .cloned()
-                });
-            if let Some(effort) = effort {
-                map.insert("effort".into(), effort);
-            }
-            map.remove("depends_on");
-            map.remove("inputs");
-            if let Some(roots) = map.remove("read_roots") {
-                read_roots.get_or_insert(roots);
-            }
-            templates.insert(name, leaf);
-        }
-        let mut node = json!({
-            "id": id,
-            "kind": "plan",
-            "access": "read_only",
-            "depends_on": deps,
-            "prompt": "Resolve the review panel for the pinned subject.",
-            "review": spec,
-            "lens_templates": templates,
-        });
-        if let Some(planned) = planned {
-            node["review_planner"] = planned;
-        }
-        if !deps.is_empty() {
-            node["inputs"] = super::selected_inputs(deps, outputs);
-        }
-        if let Some(roots) = read_roots {
-            node["read_roots"] = roots;
-        }
-        Ok(Some(node))
     }
-
-    /// Every lens a launch can run: the stage's own or the default lenses, and
-    /// every lens the change kind, a changed-path rule or a test marker may add.
-    fn review_candidates(&self, lenses: &[ReviewLens]) -> Result<Vec<String>, String> {
-        let mut names: Vec<String> = lenses.iter().map(|lens| lens.name.clone()).collect();
-        if let Some(hint) = self.shape_hint(true)? {
-            if names.is_empty() {
-                names.extend(hint.default_lenses);
-            }
-            names.extend(hint.plan.add);
-            names.extend(hint.possible_additions);
-        }
-        names.sort_unstable();
-        names.dedup();
-        Ok(names)
-    }
-
-    /// The `ReviewSpec` this stage hands to launch-time resolution. Only what the
-    /// stage states goes in: a size is recorded when the stage overrides it,
-    /// and otherwise the host measures it when the review launches.
-    pub fn review_spec(
-        &self,
-        group: &serde_json::Map<String, Value>,
-    ) -> Result<ReviewSpec, String> {
-        let text = |key: &str| {
-            self.parameters
-                .get(key)
-                .and_then(Value::as_str)
-                .filter(|value| !value.is_empty())
-                .map(str::to_owned)
-        };
-        let subject_type = self
-            .parameters
-            .get("subject")
-            .and_then(|subject| subject.get("type"))
-            .and_then(Value::as_str);
-        let kind = if subject_type == Some("integration") {
-            Some("integration".to_owned())
-        } else {
-            text("kind")
-        };
-        let risk_tags = self
-            .parameters
-            .get("risk_tags")
-            .and_then(Value::as_array)
-            .map(|tags| {
-                tags.iter()
-                    .filter_map(Value::as_str)
-                    .map(str::to_owned)
-                    .collect()
-            })
-            .unwrap_or_default();
-        let mut lenses = Vec::new();
-        // Initial-layer lists are defaults; later overrides are requests.
-        let caller_supplied = self
-            .origins
-            .get("parameters.lenses")
-            .is_some_and(|origin| !self.layers.is_initial_origin(self.name, "lenses", origin));
-        for lens in self
-            .parameters
-            .get("lenses")
-            .and_then(Value::as_array)
-            .filter(|_| caller_supplied)
-            .into_iter()
-            .flatten()
-        {
-            let name = lens
-                .get("name")
-                .and_then(Value::as_str)
-                .ok_or("review lens needs a name")?;
-            lenses.push(ReviewLens {
-                name: name.to_owned(),
-                when: lens
-                    .get("when")
-                    .and_then(Value::as_str)
-                    .filter(|when| !when.is_empty())
-                    .map(str::to_owned),
-                tier: lens
-                    .get("tier")
-                    .filter(|tier| tier_is_set(tier))
-                    .cloned()
-                    .unwrap_or(Value::Null),
-            });
-        }
-        // Bound the composite root and every lens a launch can run.
-        let names = self.review_candidates(&lenses)?;
-        Ok(ReviewSpec {
-            shape: text("review_shape"),
-            risk_tier: text("risk_tier"),
-            kind,
-            size: text("size"),
-            risk_tags,
-            worktree: text("worktree"),
-            lenses,
-            min_successful: group
-                .get("min_successful")
-                .map(|value| {
-                    let count = self.minimum_successful(value)?;
-                    usize::try_from(count).map_err(|_| "min_successful is too large".to_owned())
-                })
-                .transpose()?,
-            reduce_verdict: group
-                .get("reduce_verdict")
-                .map(|value| {
-                    super::interpolate(value, &self.parameters, self.prompt, 1)?
-                        .as_bool()
-                        .ok_or_else(|| "reduce_verdict must be a boolean".to_owned())
-                })
-                .transpose()?
-                .unwrap_or(false),
-            export_first: group
-                .get("export_first")
-                .map(|value| {
-                    let value = super::interpolate(value, &self.parameters, self.prompt, 1)?;
-                    serde_json::from_value(value).map_err(|error| format!("export_first: {error}"))
-                })
-                .transpose()?
-                .unwrap_or_default(),
-            max_nodes: names.len().saturating_add(1).max(2),
-        })
-    }
-}
-
-/// The size text when the review measures its change at launch rather than
-/// at expansion. Explain output shows it in place of `unknown`.
-pub const PENDING_REVIEW_SIZE: &str = "pending (measured at review launch)";
-
-/// How explain output names a review size: the size itself, the pending text
-/// when launch measures it, else `unknown`.
-fn size_text(size: Option<&str>, pending: bool) -> &str {
-    size.unwrap_or(if pending {
-        PENDING_REVIEW_SIZE
-    } else {
-        "unknown"
-    })
 }
 
 /// The `family_group` for a reviewer group: siblings in it avoid each other's

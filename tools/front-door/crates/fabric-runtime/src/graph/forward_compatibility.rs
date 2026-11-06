@@ -222,7 +222,7 @@ fn review_schema_versions_and_stored_digests() {
     );
 
     let mut value = fixture["execution"]["document"].clone();
-    value["nodes"][0]["review"] = json!({"max_nodes": 4});
+    value["nodes"][0]["review_base"] = json!("main");
     let v1: GraphDocument = serde_json::from_value(value.clone()).unwrap();
     assert!(validate_plan_with_limits(&v1, &Default::default()).is_err());
     value["schema_version"] = json!(2);

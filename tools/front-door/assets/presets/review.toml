@@ -2,7 +2,7 @@ shape_stages = { frame = "subject", panel = "lenses", verifier = "verify", synth
 stages = [
   { id = "subject", role = "plan.review" },
   { id = "lenses", min_successful = "${min_reviews}", parallel = [
-    { id = "lens", for_each = "${lenses}", review_lenses = true, role = "lens.${item.name}", require_findings = true },
+    { id = "lens", for_each = "${lenses}", role = "lens.${item.name}", require_findings = true },
   ], source = { type = "node", node = "subject" } },
   { id = "verify", role = "review.verify", count = "${verifiers}", source = { type = "node", node = "subject" } },
   { id = "synthesis", role = "review.synthesis", depends_on = ["lenses"] },
