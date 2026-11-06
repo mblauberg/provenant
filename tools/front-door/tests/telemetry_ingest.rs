@@ -1,6 +1,8 @@
 // Integration fixtures use real UTC timestamps in their filesystem records.
 #![allow(clippy::disallowed_methods)]
 mod support;
+#[path = "support/terminal_run.rs"]
+mod terminal_run;
 use serde_json::{Value, json};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -181,31 +183,13 @@ fn assert_group(rig: &TestRig, by: &str, value: &str, graph: Option<&str>) -> Re
 }
 
 #[test]
-fn manifest_submission_retains_optional_work_context() -> Result {
+fn settled_attempt_retains_optional_work_context() -> Result {
     let rig = rig()?;
-    let manifest = rig.project.join("tasks.json");
-    std::fs::write(
-        &manifest,
-        serde_json::to_vec(&json!({
-            "schema_version": 1,
-            "tasks": [{
-                "prompt": "Review the bounded slice",
-                "context": {"graph_id":"manifest-graph", "node_id":"review", "pattern":"council"},
-                "route": {"kind":"model", "provider":"codex", "model":"gpt-6-luna"}
-            }]
-        }))?,
-    )?;
-    // An unavailable provider account settles locally and supplies an attempt fact.
-    let output = rig.command(&[
-        "dispatch",
-        "--manifest",
-        manifest.to_str().ok_or("manifest path")?,
-        "--operation-id",
+    terminal_run::seed(
+        &rig,
         "manifest-context",
-        "--json",
-    ])?;
-    let value: Value = serde_json::from_slice(&output.stdout.bytes)?;
-    assert!(value["data"]["run_id"].is_string(), "{value}");
+        &[json!({"graph_id":"manifest-graph", "node_id":"review", "pattern":"council"})],
+    )?;
     assert_group(&rig, "node", "review", None)?;
     assert_group(&rig, "pattern", "council", None)?;
     Ok(())
@@ -228,10 +212,8 @@ fn submitted_graph_node_is_grouped_by_node_and_pattern() -> Result {
         }))?,
     )?;
     let output = rig.command(&[
-        "fabric",
-        "graph",
         "run",
-        "--document",
+        "--file",
         document.to_str().ok_or("graph path")?,
         "--json",
     ])?;
@@ -270,24 +252,7 @@ fn route_stats_golden(actual: &str) -> Result {
 #[test]
 fn route_stats_human_output_matches_golden() -> Result {
     let rig = rig()?;
-    let manifest = rig.project.join("tasks.json");
-    fs::write(
-        &manifest,
-        serde_json::to_vec(&json!({
-            "schema_version": 1, "tasks": [{"prompt": "fixture", "route": {
-                "kind": "model", "provider": "codex", "model": "gpt-6-luna"}}]
-        }))?,
-    )?;
-    let output = rig.command(&[
-        "dispatch",
-        "--manifest",
-        manifest.to_str().ok_or("manifest")?,
-        "--operation-id",
-        "route-golden",
-        "--json",
-    ])?;
-    let value: Value = serde_json::from_slice(&output.stdout.bytes)?;
-    assert!(value["data"]["run_id"].is_string(), "{value}");
+    terminal_run::seed(&rig, "route-golden", &[Value::Null])?;
     // Seed a settled receipt into the locally rejected attempt, without launching a provider.
     let db = rusqlite::Connection::open(rig.state.join("run.sqlite3"))?;
     db.execute_batch("DROP TRIGGER immutable_terminal_update")?;
@@ -355,17 +320,24 @@ fn native_attempt_is_visible_in_status_and_linked_usage() -> Result {
     let status = rig.command(&["status", "--json"])?;
     assert_eq!(code(&status), 0, "{status:?}");
     let status: Value = serde_json::from_slice(&status.stdout.bytes)?;
-    assert_eq!(status["data"]["native_attempts"][0]["alias"], "reviewer");
-    assert_eq!(
-        status["data"]["native_attempts"][0]["model"],
-        "claude-opus-5-5"
-    );
+    let rows = status["data"]["rows"].as_array().ok_or("status rows")?;
+    let row = rows
+        .iter()
+        .find(|row| row["id"] == "tool-1")
+        .ok_or("native status row")?;
+    assert_eq!(row["kind"], "attempt");
+    assert_eq!(row["attempt_id"], "tool-1");
+    assert_eq!(row["state"], "settled");
     let stats = rig.command(&["telemetry", "stats", "--json"])?;
     assert_eq!(code(&stats), 0, "{stats:?}");
     let stats: Value = serde_json::from_slice(&stats.stdout.bytes)?;
     assert_eq!(
         stats["data"]["native_subagents"]["attempts"][0]["attempt"]["alias"],
         "reviewer"
+    );
+    assert_eq!(
+        stats["data"]["native_subagents"]["attempts"][0]["attempt"]["model"],
+        "claude-opus-5-5"
     );
     assert_eq!(
         stats["data"]["native_subagents"]["attempts"][0]["buckets"][4],
