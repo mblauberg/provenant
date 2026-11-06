@@ -3524,3 +3524,43 @@ fn lane_graph_mutations_fail_closed_without_host_submission() -> Result {
     assert!(!rig.state.join("runs").exists());
     rig.assert_legacy_unchanged()
 }
+
+#[test]
+fn run_lane_document_with_overrides_at_cli_edge() -> Result {
+    let rig = TestRig::new()?;
+    let document = rig.root.join("lane.toml");
+    // A composite template receives both a named parameter and each item.
+    std::fs::write(
+        &document,
+        r#"
+nodes = [{ id = "inspect", use = "task", brief = "Inspect ${subject}: ${item}" }]
+[parameters.subject]
+type = "string"
+"#,
+    )?;
+    let path = document.to_str().ok_or("document path")?;
+    let output = rig.command(&[
+        "run",
+        "--file",
+        path,
+        "--set",
+        "subject='code'",
+        "--over",
+        "one",
+        "--over",
+        "two",
+        "--explain",
+        "--json",
+    ])?;
+    assert_eq!(
+        code(&output),
+        0,
+        "{}",
+        String::from_utf8_lossy(&output.stderr.bytes)
+    );
+    let value: Value = serde_json::from_slice(&output.stdout.bytes)?;
+    let text = value["data"]["document"].to_string();
+    assert!(text.contains("Inspect code: one"), "{text}");
+    assert!(text.contains("Inspect code: two"), "{text}");
+    Ok(())
+}

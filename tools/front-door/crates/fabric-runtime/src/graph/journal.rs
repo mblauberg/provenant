@@ -311,6 +311,31 @@ impl FileJournal {
         Ok(ids)
     }
 
+    /// Discover retained event logs, including graphs whose checkpoints were collected.
+    pub fn event_graph_ids(
+        root: &StateRoot,
+        project: ProjectId,
+    ) -> Result<Vec<String>, JournalError> {
+        let directory = match graph_directory(root, project) {
+            Ok(directory) => directory,
+            Err(error) if error.is_not_found() => return Ok(Vec::new()),
+            Err(error) => return Err(error.into()),
+        };
+        let mut ids = Vec::new();
+        for entry in directory.entries()? {
+            let name = entry?;
+            if let Some(id) = name
+                .to_str()
+                .and_then(|name| name.strip_suffix(".events.jsonl"))
+                && valid_identifier(id)
+            {
+                ids.push(id.to_owned());
+            }
+        }
+        ids.sort();
+        Ok(ids)
+    }
+
     /// Discover the derived pending set, rebuilding it when its sentinel is absent.
     pub fn pending_graph_ids(
         root: &StateRoot,
@@ -773,6 +798,7 @@ impl GraphJournal for FileJournal {
             &self.graph_id,
             previous.as_ref().map(|stored| &stored.checkpoint),
             checkpoint,
+            Some(&execution.document),
         )?;
         let markers = open_or_create(&self.directory, OsStr::new("pending"))?;
         let pending = stored_pending(&stored);
