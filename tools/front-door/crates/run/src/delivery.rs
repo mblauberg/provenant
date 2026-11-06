@@ -1159,6 +1159,28 @@ impl HostDeliveryContext {
         stage: Stage,
         input: &[u8],
     ) -> Result<String> {
+        if tool == "git" && git_subcommand(args) == "worktree list" {
+            let bytes = self.facts.cached_worktree_listing(cwd, || {
+                self.command_with_input_uncached(cwd, tool, args, stage, input)
+                    .map(String::into_bytes)
+            })?;
+            return String::from_utf8(bytes)
+                .map_err(|_| RunError::DeliveryFact {
+                    stage,
+                    source: provenant_confinement::worktrees::WorktreeError::InvalidOutput,
+                });
+        }
+        self.command_with_input_uncached(cwd, tool, args, stage, input)
+    }
+
+    fn command_with_input_uncached(
+        &self,
+        cwd: &Path,
+        tool: &str,
+        args: &[&str],
+        stage: Stage,
+        input: &[u8],
+    ) -> Result<String> {
         let failure = |reason: String| {
             if stage == Stage::Prepare {
                 let step = match args.first().copied() {
@@ -1281,6 +1303,20 @@ impl HostDeliveryContext {
                 },
             )
             .map_err(|error: RunError| match error {
+                RunError::Writer(
+                    provenant_confinement::worktrees::WorktreeError::Utility(
+                        provenant_confinement::utility::UtilityError::Truncated {
+                            stream: "stdout",
+                        },
+                    ),
+                ) if tool == "git" && git_subcommand(args) == "worktree list" => {
+                    RunError::DeliveryLimit {
+                        stage,
+                        tool: "git",
+                        command: "worktree list".into(),
+                        limit: self.facts.inventory_limit(),
+                    }
+                }
                 RunError::Writer(source) => RunError::DeliveryFact { stage, source },
                 other => other,
             })?;
@@ -2238,6 +2274,17 @@ pub(super) fn git_subcommand(args: &[&str]) -> String {
 
 fn delivery_stage_error(error: RunError, stage: Stage) -> RunError {
     match error {
+        RunError::DeliveryLimit {
+            tool,
+            command,
+            limit,
+            ..
+        } => RunError::DeliveryLimit {
+            stage,
+            tool,
+            command,
+            limit,
+        },
         RunError::DeliveryFact { source, .. } => RunError::DeliveryFact { stage, source },
         _ => RunError::Delivery(stage),
     }
