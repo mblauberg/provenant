@@ -157,6 +157,107 @@ fn events(bytes: &[u8]) -> Result<Vec<Value>> {
         .map(|line| serde_json::from_slice(line).map_err(Into::into))
         .collect()
 }
+
+#[test]
+fn refused_operation_wait_returns_immediately_with_nonzero_status() -> Result {
+    let rig = TestRig::new()?;
+    let identity = rig.command(&["fabric", "identity", "--json"])?;
+    let identity: Value = serde_json::from_slice(&identity.stdout.bytes)?;
+    let mut inputs = RootInputs::new(rig.home.clone(), rig.project.clone());
+    inputs.state_dir = Some(rig.state.clone());
+    let context = ExecutionContext {
+        state_root: inputs.resolve(&provenant_os::fs::SystemPathResolver)?.state,
+        project_id: identity["data"]["project"]
+            .as_str()
+            .ok_or("project")?
+            .parse()?,
+        actor_id: identity["data"]["inbox"]["actor"]
+            .as_str()
+            .ok_or("actor")?
+            .parse()?,
+        read_prompts: false,
+    };
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let call = Request {
+        clock: &clock,
+        cancel: &cancel,
+    };
+    let task = TaskId::from_bytes([3; 16]);
+    let request: CanonicalRequest = serde_json::from_value(json!({"schema_version":1,"tasks":[{
+        "task_id":task,"prompt_digest":provenant_records::CanonicalV1::file_digest(b"refused fixture"),
+        "route":{"kind":"model","provider":"fixture","model":"fixture/model","effort":null},
+        "fallback":[],"authority_digest":Digest::from_bytes([5;32]),"provider_timeout_seconds":30,"delivery_id":null}],"concurrency":1,"parent":null}))?;
+    let store = RunStore::open(&context, &call)?;
+    store.record_refusal(
+        &PreparedRun {
+            run_id: RunId::from_bytes([6; 16]),
+            operation_id: OperationId::parse("refused-fixture")?,
+            created_at: clock.wall_now()?,
+            request,
+            attempts: vec![NewAttempt {
+                task_id: task,
+                attempt_id: AttemptId::from_bytes([4; 16]),
+                prompt: "refused fixture".into(),
+            }],
+        },
+        provenant_records::diagnostic::Diagnostic::new("UNSUPPORTED").category("refused"),
+        None,
+        &call,
+    )?;
+    let started = Instant::now();
+    let output = rig.command(&[
+        "status",
+        "operation:refused-fixture",
+        "--wait=30s",
+        "--json",
+    ])?;
+    assert_eq!(output.termination, provenant_os::exec::Termination::Exit(1));
+    assert!(started.elapsed() < Duration::from_secs(10));
+    let result: Value = serde_json::from_slice(&output.stdout.bytes)?;
+    assert_eq!(
+        result["data"]["operation"]["refusal"]["code"],
+        "UNSUPPORTED"
+    );
+    assert_eq!(result["data"]["condition_met"], true);
+    assert_eq!(result["data"]["timed_out"], false);
+    let output = rig.command(&[
+        "status",
+        "--wait=30s",
+        "--target",
+        "operation:refused-fixture",
+        "--json",
+    ])?;
+    assert_eq!(output.termination, provenant_os::exec::Termination::Exit(1));
+    let lines = events(&output.stdout.bytes)?;
+    assert_eq!(
+        lines[0]["data"]["operation"]["refusal"]["code"],
+        "UNSUPPORTED"
+    );
+    assert_eq!(lines.last().ok_or("end")?["condition_met"], true);
+    graph(&rig, true)?;
+    let output = rig.command(&[
+        "status",
+        "--wait=30s",
+        "--until",
+        "all",
+        "--target",
+        "operation:refused-fixture",
+        "--target",
+        "graph:fixture",
+        "--json",
+    ])?;
+    assert_eq!(output.termination, provenant_os::exec::Termination::Exit(1));
+    let lines = events(&output.stdout.bytes)?;
+    assert!(
+        lines
+            .iter()
+            .any(|line| line["target"] == "operation:refused-fixture")
+    );
+    assert!(lines.iter().any(|line| line["target"] == "graph:fixture"));
+    assert_eq!(lines.last().ok_or("end")?["condition_met"], true);
+    Ok(())
+}
 #[test]
 fn mixed_status_wait_returns_on_fake_lane_while_pr_read_is_blocked() -> Result {
     let mut rig = TestRig::new()?;

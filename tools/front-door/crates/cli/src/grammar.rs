@@ -1669,7 +1669,7 @@ pub struct Status {
     /// Wait for mixed targets (no value uses domains.wait.timeout_seconds)
     #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "configured", catalog_status_wait(), conflicts_with_all = ["all", "cursor"])]
     pub wait: Option<u64>,
-    /// Observe lane:ID, graph:ID, pr:NUMBER or land:NUMBER (repeatable; land only observes)
+    /// Observe lane:ID, graph:ID, operation:ID, pr:NUMBER or land:NUMBER (repeatable)
     #[arg(long, catalog_requires = "wait")]
     pub target: Vec<String>,
     /// Return on any transition or when all targets are terminal

@@ -340,8 +340,9 @@ when a merge is authorised.
 
 For a stored refused operation, use `provenant status operation:OPERATION_ID`
 to inspect its diagnostic. `provenant status operation:OPERATION_ID --wait`
-returns immediately with exit 1. This form observes one operation and does not
-combine with `--target`. Unsupported adapter capabilities refused by the run
+returns immediately with exit 1. Use `--target operation:OPERATION_ID` to
+include it in a mixed wait; a completed wait that observes a refusal exits 1.
+Unsupported adapter capabilities refused by the run
 service have such a record; other pre-admission refusals may not yet have one.
 
 The default `--until any` returns on the first observed semantic transition,
