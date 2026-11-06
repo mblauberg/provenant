@@ -1949,9 +1949,17 @@ impl Factory {
             }
             checkpoint.cancelled = true;
             let detached = provenant_fabric_runtime::graph::relay::fence_detached_cancellation(
-                &FileJournal::execution(&self.context.roots.state, self.context.identity.project, id)
-                    .map_err(graph_journal_error)?.ok_or(FacadeError::NotFound)?.document, &mut checkpoint,
-            ).map_err(|_| FacadeError::InvalidInput { detail: None })?;
+                &FileJournal::execution(
+                    &self.context.roots.state,
+                    self.context.identity.project,
+                    id,
+                )
+                .map_err(graph_journal_error)?
+                .ok_or(FacadeError::NotFound)?
+                .document,
+                &mut checkpoint,
+            )
+            .map_err(|_| FacadeError::InvalidInput { detail: None })?;
             provenant_fabric_runtime::graph::mark_cancelled_nodes_without_live_attempts(
                 &mut checkpoint,
             );

@@ -231,8 +231,12 @@ pub fn serve(
         RelayOp::Stop { node } => {
             let selected = stop_target(&graph_id, &parent, &node)?;
             let subtree = provenant_fabric_runtime::graph::cancel_node_subtree(
-                &document, &mut checkpoint, selected, Some("stopped by parent lane"),
-            ).map_err(|error| refused("invalid_input", error))?;
+                &document,
+                &mut checkpoint,
+                selected,
+                Some("stopped by parent lane"),
+            )
+            .map_err(|error| refused("invalid_input", error))?;
             // The graph owner observes this durable fence and stops attempts.
             json!({"graph_id":graph_id,"node":selected,"requested":true,
                 "running":subtree.running,"skipped":subtree.skipped,"detached":subtree.detached})
@@ -275,7 +279,10 @@ pub fn serve(
 fn stop_target<'a>(graph: &str, parent: &str, target: &'a str) -> Result<&'a str, ServiceError> {
     let selected = target.strip_prefix(&format!("{graph}/")).unwrap_or(target);
     if selected != parent && !selected.starts_with(&format!("{parent}--")) {
-        return Err(refused("confinement_refused", "a lane may stop only its own subtree"));
+        return Err(refused(
+            "confinement_refused",
+            "a lane may stop only its own subtree",
+        ));
     }
     Ok(selected)
 }
@@ -605,7 +612,13 @@ mod wait_tests {
         for target in ["parent", "parent--child", "graph/parent--child--grandchild"] {
             assert!(stop_target("graph", "parent", target).is_ok());
         }
-        for target in ["graph", "other", "parental", "other/parent--child", "parent--sibling"] {
+        for target in [
+            "graph",
+            "other",
+            "parental",
+            "other/parent--child",
+            "parent--sibling",
+        ] {
             assert!(stop_target("graph", "parent--child", target).is_err());
         }
     }

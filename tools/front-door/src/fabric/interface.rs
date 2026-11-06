@@ -82,7 +82,10 @@ impl Factory {
             timeout_seconds: None,
             writer: false,
             write_scope: vec![],
-            detached: input.get("detached").and_then(Value::as_bool).unwrap_or(false),
+            detached: input
+                .get("detached")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
             idempotency_key: key,
             reason: Some("run".into()),
         };
@@ -251,10 +254,12 @@ impl Factory {
             }
             "run" => {
                 if input["detached"] == true {
-                    return Err(FacadeError::invalid(InvalidInputDetail::Field("detached".into())));
+                    return Err(FacadeError::invalid(InvalidInputDetail::Field(
+                        "detached".into(),
+                    )));
                 }
                 self.submit_document(&input, budget, cancel)
-            },
+            }
             "edit" => self.edit_document(&input, budget, cancel),
             "trace" => self.graph_trace(required(&input, "id")?),
             "output" if input["trace"] == true => self.graph_trace(required(&input, "id")?),
@@ -1069,7 +1074,11 @@ mod tests {
         let cancel = CancelToken::new();
         let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
         let input = json!({"op":"run","brief":"Inspect","detached":true,"explain":true});
-        assert!(factory.graph_document(input.clone(), budget, &cancel).is_err());
+        assert!(
+            factory
+                .graph_document(input.clone(), budget, &cancel)
+                .is_err()
+        );
         factory.context.in_lane = true;
         let preview = factory.graph_document(input, budget, &cancel)?;
         assert_eq!(preview["detached"], true);

@@ -1619,15 +1619,19 @@ impl HostDeliveryContext {
             {
                 return Err(RunError::Delivery(stage));
             }
-            let tree = self.command(
-                &writer.worktree,
-                "git",
-                &["merge-tree", "--write-tree", &expected, &head.to_string()],
-                stage,
-            ).map_err(|error| match error {
-                RunError::Delivery(Stage::Integrate) => RunError::IntegrationConflict { child_head: head },
-                error => error,
-            })?;
+            let tree = self
+                .command(
+                    &writer.worktree,
+                    "git",
+                    &["merge-tree", "--write-tree", &expected, &head.to_string()],
+                    stage,
+                )
+                .map_err(|error| match error {
+                    RunError::Delivery(Stage::Integrate) => {
+                        RunError::IntegrationConflict { child_head: head }
+                    }
+                    error => error,
+                })?;
             let tree = GitOid::parse(tree.lines().next().unwrap_or_default())
                 .map_err(|_| RunError::Delivery(stage))?;
             let commit = self.command(
