@@ -755,8 +755,9 @@ fn worktree_access_readers_leave_existing_writer_lease_untouched()
                     prompt.to_str().ok_or("prompt")?,
                 ])?;
                 let reply =
-                    super::submit::with_deferred_provider_launch(|| dispatch(command, edge));
+                    super::submit::with_cancelled_provider_launch(|| dispatch(command, edge));
                 assert_eq!(reply.result.status, Status::Ok, "{:?}", reply.result.error);
+                assert_eq!(reply.result.data["lanes"][0]["state"], "cancelled");
                 let id = reply.result.data["run_id"]
                     .as_str()
                     .ok_or("run id")?
@@ -8593,10 +8594,11 @@ fn dispatch_restart_honours_saved_admission_wake_and_deadline()
             let workers = Counting(AtomicUsize::new(0));
             let start = clock.mono_now();
             let command = make("restart-wake")?;
-            let reply = super::submit::with_deferred_provider_launch(|| {
+            let reply = super::submit::with_cancelled_provider_launch(|| {
                 dispatch_with_workers(command, edge, &workers)
             });
             assert_eq!(reply.result.status, Status::Ok, "{:?}", reply.result.error);
+            assert_eq!(reply.result.data["lanes"][0]["state"], "cancelled");
             assert!(
                 clock
                     .mono_now()

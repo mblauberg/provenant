@@ -1867,8 +1867,9 @@ mod tests {
             assert!(output.status.success());
             String::from_utf8(output.stdout).unwrap()
         };
-        let bound = |args: &str| format!("/private/it's|Lane||{args}\n");
-        let unbound = |args: &str| format!("|||{args}\n");
+        let prefix = format!("-c credential.https://github.com.helper={TOKEN_HELPER}");
+        let bound = |args: &str| format!("/private/it's|Lane||{prefix} {args}\n");
+        let unbound = |args: &str| format!("|||{prefix} {args}\n");
         assert_eq!(run(&worktree, &["status"]), bound("status"));
         assert_eq!(run(&nested, &["status"]), bound("status"));
         for cwd in [&outside, &sibling] {
@@ -1959,13 +1960,26 @@ mod tests {
             .windows(5)
             .position(|bytes| bytes == b"exec ")
             .ok_or("missing exec")?;
-        script.splice(position..position + 5, b"printf '%s' ".iter().copied());
+        script.splice(position..position + 5, b"printf '%s\\000' ".iter().copied());
         let wrapper = dir.path().join("git-wrapper");
         std::fs::write(&wrapper, script)?;
         std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700))?;
-        let output = std::process::Command::new(wrapper).output()?;
+        let output = std::process::Command::new(wrapper)
+            .args(["status", "argument with spaces"])
+            .output()?;
         assert!(output.status.success());
-        assert_eq!(output.stdout, git.as_os_str().as_bytes());
+        let helper = format!("credential.https://github.com.helper={TOKEN_HELPER}");
+        let expected = [
+            git.as_os_str().as_bytes(),
+            b"-c",
+            helper.as_bytes(),
+            b"status",
+            b"argument with spaces",
+        ]
+        .into_iter()
+        .flat_map(|arg| arg.iter().copied().chain(std::iter::once(0)))
+        .collect::<Vec<_>>();
+        assert_eq!(output.stdout, expected);
         Ok(())
     }
 
