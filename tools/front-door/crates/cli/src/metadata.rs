@@ -25,6 +25,7 @@ pub(crate) trait CatalogueArg {
     fn catalog_i64_range(self, range: impl RangeBounds<i64>) -> Self;
     fn catalog_requires(self, id: &'static str) -> Self;
     fn catalog_requires_all(self, ids: impl IntoIterator<Item = &'static str>) -> Self;
+    #[cfg(test)]
     fn catalog_clear_requires(self) -> Self;
 }
 fn unsigned_bounds(range: &impl RangeBounds<u64>) -> (u64, u64) {
@@ -95,6 +96,7 @@ impl CatalogueArg for Arg {
         requirements.0.extend(ids.iter().map(|id| (*id).to_owned()));
         self.requires_all(ids).add(requirements)
     }
+    #[cfg(test)]
     fn catalog_clear_requires(self) -> Self {
         self.requires(clap::builder::Resettable::Reset)
             .add(Requirements::default())

@@ -10,6 +10,8 @@ pub enum ProviderError {
     PromptTooLarge,
     #[error("provider protocol is malformed")]
     Malformed,
+    #[error("provider protocol is malformed: {0}")]
+    MalformedResult(String),
     #[error("provider stream exceeds its size bound")]
     Overflow,
     #[error("provider/session/account/host/model/controls or grant changed")]

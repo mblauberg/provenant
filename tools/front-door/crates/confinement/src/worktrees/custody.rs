@@ -175,6 +175,28 @@ pub(super) fn worktree_cleanliness_at(
     }
 }
 
+/// Recheck that a verified worktree is clean while the caller holds writer
+/// custody. This probes the worktree's Git configuration before running status.
+pub fn require_clean_worktree(
+    context: &WorktreeContext<'_>,
+    worktree: &mut VerifiedWorktree,
+    cancel: &CancelToken,
+) -> Result<(), WorktreeError> {
+    context
+        .utility
+        .probe_worktree(context.executor, worktree, context.utility_budget, cancel)?;
+    match worktree_cleanliness_at(context, worktree.repo(), cancel)? {
+        WorktreeCleanliness::Clean => Ok(()),
+        WorktreeCleanliness::Ignored => Err(WorktreeError::IgnoredPaths(String::new())),
+        WorktreeCleanliness::Dirty(paths) => Err(WorktreeError::Dirty(paths)),
+        WorktreeCleanliness::GitOperationInProgress => Err(WorktreeError::GitOperationInProgress),
+        WorktreeCleanliness::Unknown => Err(WorktreeError::UnknownOccupancy {
+            path: worktree.path().to_path_buf(),
+            detail: "worktree cleanliness could not be verified".into(),
+        }),
+    }
+}
+
 pub(super) fn worktree_dirty_at(
     context: &WorktreeContext<'_>,
     repo: &VerifiedRepo,
@@ -280,10 +302,7 @@ pub(super) fn lock_worktree(
     }
     let verified = verify_probed_worktree(context, &entry.path, cancel)?;
     let writer = if preview {
-        cache_writer_probe(context.project_state, verified.path()).map_err(|state| match state {
-            WorkerState::Busy => WorktreeError::LockBusy,
-            _ => WorktreeError::UnknownWriter,
-        })?
+        cache_writer_probe(context.project_state, verified.path()).map_err(custody_refusal)?
     } else {
         let state = writer_directory(context.project_state, verified.path())?;
         let writer = match state.lock(
@@ -299,9 +318,19 @@ pub(super) fn lock_worktree(
             Err(_) => return Err(WorktreeError::UnknownWriter),
         };
         match retained_import(&state) {
-            Ok(true) => return Err(WorktreeError::LockBusy),
+            Ok(true) => {
+                return Err(WorktreeError::UnknownOccupancy {
+                    path: verified.path().to_path_buf(),
+                    detail: "unresolved retained import fence".into(),
+                });
+            }
             Ok(false) => {}
-            Err(_) => return Err(WorktreeError::UnknownWriter),
+            Err(detail) => {
+                return Err(WorktreeError::UnknownOccupancy {
+                    path: verified.path().to_path_buf(),
+                    detail,
+                });
+            }
         }
         Some(writer)
     };
@@ -317,22 +346,26 @@ pub(super) fn lock_worktree(
     // observation of a live process refuses. Landing also needs this root
     // observed free, which a process the kernel refuses to describe does not
     // prevent.
-    match observations
-        .get(&canonical)
-        .copied()
-        .unwrap_or(WorkerState::Unknown)
-    {
-        WorkerState::Unknown if context.workers.requires_complete_census() => {
+    match observations.get(&canonical) {
+        Some(Occupancy::Unknown { evidence, .. }) if context.workers.requires_complete_census() => {
             Err(WorktreeError::IncompleteCensus {
                 detail: details
                     .get(&canonical)
                     .cloned()
-                    .unwrap_or_else(|| context.workers.incomplete_census_detail()),
+                    .unwrap_or_else(|| evidence.clone()),
             })
         }
-        WorkerState::Free | WorkerState::Unknown => Ok(LockedWorktree { verified, writer }),
-        WorkerState::Live => Err(live_refusal(context.workers, &canonical)),
-        WorkerState::Busy => Err(WorktreeError::LockBusy),
+        Some(Occupancy::Available | Occupancy::Unknown { .. }) => {
+            Ok(LockedWorktree { verified, writer })
+        }
+        Some(Occupancy::Observed { .. }) => Err(live_refusal(context.workers, &canonical)),
+        Some(Occupancy::Held) => Err(WorktreeError::LockBusy),
+        None if context.workers.requires_complete_census() => {
+            Err(WorktreeError::IncompleteCensus {
+                detail: context.workers.incomplete_census_detail(),
+            })
+        }
+        None => Ok(LockedWorktree { verified, writer }),
     }
 }
 
@@ -363,22 +396,54 @@ pub(super) fn validate_binding(context: &WorktreeContext<'_>) -> Result<(), Work
     Ok(())
 }
 
-pub(crate) fn combine_worker_state(state: WorkerState, native: WorkerState) -> WriterState {
+pub(crate) fn combine_occupancy(path: &Path, state: Occupancy, native: Occupancy) -> Occupancy {
     match (state, native) {
-        // A held lease is authoritative even when the census also sees a
-        // process. Preserve contention so callers can name the lease holder.
-        (WorkerState::Busy, _) => WriterState::Busy,
-        (WorkerState::Live, _) | (_, WorkerState::Live) => WriterState::Live,
-        (_, WorkerState::Busy) => WriterState::Busy,
-        (WorkerState::Unknown, _) | (_, WorkerState::Unknown) => WriterState::Unknown,
-        (WorkerState::Free, WorkerState::Free) => WriterState::Free,
+        (Occupancy::Held, _) => Occupancy::Held,
+        (unknown @ Occupancy::Unknown { .. }, _) => unknown,
+        (observed @ Occupancy::Observed { .. }, _) => observed,
+        (Occupancy::Available, Occupancy::Observed { process }) => Occupancy::Observed { process },
+        (Occupancy::Available, Occupancy::Held) => Occupancy::census_unknown(
+            path.to_path_buf(),
+            "census reported contention without a held writer lease",
+        ),
+        (Occupancy::Available, Occupancy::Unknown { evidence, .. }) => {
+            Occupancy::census_unknown(path.to_path_buf(), evidence)
+        }
+        (Occupancy::Available, Occupancy::Available) => Occupancy::Available,
     }
 }
 
+/// Convert a failed custody probe into the corresponding worktree refusal.
+pub fn custody_refusal(state: Occupancy) -> WorktreeError {
+    match state {
+        Occupancy::Held => WorktreeError::LockBusy,
+        Occupancy::Unknown {
+            scope, evidence, ..
+        } => WorktreeError::UnknownOccupancy {
+            path: scope,
+            detail: evidence,
+        },
+        Occupancy::Observed { .. } => WorktreeError::LiveWriter,
+        Occupancy::Available => WorktreeError::UnknownWriter,
+    }
+}
+
+/// Identify the attempt recorded in the held writer slot, when unambiguous.
+pub fn writer_holder(project_state: &Directory, path: &Path) -> Option<provenant_core::AttemptId> {
+    let slot = PathBuf::from(state_dir_name(path));
+    let listing = provenant_supervisor::custody::list_writer_reservations(project_state).ok()?;
+    let mut matches = listing
+        .reservations
+        .iter()
+        .filter(|record| record.custody_directory() == Some(slot.as_path()));
+    let holder = matches.next()?.scope.attempt;
+    matches.next().is_none().then_some(holder)
+}
+
 /// Observe exclusion without creating state during listing or disk reports.
-pub(crate) fn disk_writer_state(project_state: &Directory, path: &Path) -> WorkerState {
+pub(crate) fn disk_writer_state(project_state: &Directory, path: &Path) -> Occupancy {
     match cache_writer_probe(project_state, path) {
-        Ok(_) => WorkerState::Free,
+        Ok(_) => Occupancy::Available,
         Err(state) => state,
     }
 }
@@ -387,20 +452,25 @@ pub(crate) fn disk_writer_state(project_state: &Directory, path: &Path) -> Worke
 pub fn cache_writer_probe(
     project_state: &Directory,
     path: &Path,
-) -> Result<Option<LockGuard>, WorkerState> {
+) -> Result<Option<LockGuard>, Occupancy> {
+    let unknown = |detail: String| Occupancy::custody_unknown(path.to_path_buf(), detail);
     let directory = match project_state.open_verified_directory(&state_dir_name(path)) {
         Ok(directory) => directory,
         Err(error) if error.is_not_found() => return Ok(None),
-        Err(_) => return Err(WorkerState::Unknown),
+        Err(error) => return Err(unknown(format!("writer slot could not be opened: {error}"))),
     };
     let guard = match directory.try_lock_existing(OsStr::new(WRITER_LOCK), LockMode::Exclusive) {
         Ok(guard) => Some(guard),
         Err(error) if error.is_not_found() => None,
-        Err(FsError::LockTimeout { .. }) => return Err(WorkerState::Busy),
-        Err(_) => return Err(WorkerState::Unknown),
+        Err(FsError::LockTimeout { .. }) => return Err(Occupancy::Held),
+        Err(error) => {
+            return Err(unknown(format!(
+                "writer lock could not be checked: {error}"
+            )));
+        }
     };
-    if retained_import(&directory)? {
-        return Err(WorkerState::Busy);
+    if retained_import(&directory).map_err(unknown)? {
+        return Err(unknown("unresolved retained import fence".into()));
     }
     Ok(guard)
 }
@@ -408,12 +478,12 @@ pub fn cache_writer_probe(
 // An interrupted import retains both its reservation and marker after the
 // process releases writer.lock. A resolved import may leave the marker as
 // historical evidence, so only the pair fences the slot.
-fn retained_import(slot: &Directory) -> Result<bool, WorkerState> {
-    fn exists(dir: &Directory, name: &str) -> Result<bool, WorkerState> {
+fn retained_import(slot: &Directory) -> Result<bool, String> {
+    fn exists(dir: &Directory, name: &str) -> Result<bool, String> {
         match dir.metadata_at(OsStr::new(name), false) {
             Ok(_) => Ok(true),
             Err(error) if error.is_not_found() => Ok(false),
-            Err(_) => Err(WorkerState::Unknown),
+            Err(error) => Err(format!("retained fence could not be checked: {error}")),
         }
     }
     if exists(slot, "reservation.json")? && exists(slot, "import-retained.json")? {
@@ -421,22 +491,23 @@ fn retained_import(slot: &Directory) -> Result<bool, WorkerState> {
     }
     for (index, name) in slot
         .entries()
-        .map_err(|_| WorkerState::Unknown)?
+        .map_err(|error| format!("retained fences could not be listed: {error}"))?
         .enumerate()
     {
         if index >= 10_000 {
-            return Err(WorkerState::Unknown);
+            return Err("retained fence scan exceeded its entry limit".into());
         }
-        let name = name.map_err(|_| WorkerState::Unknown)?;
+        let name =
+            name.map_err(|error| format!("retained fence entry could not be read: {error}"))?;
         let metadata = slot
             .metadata_at(&name, false)
-            .map_err(|_| WorkerState::Unknown)?;
+            .map_err(|error| format!("retained fence entry could not be checked: {error}"))?;
         if metadata.kind != provenant_os::fs::FileKind::Directory {
             continue;
         }
         let attempt = slot
             .open_verified_directory(&name)
-            .map_err(|_| WorkerState::Unknown)?;
+            .map_err(|error| format!("retained fence directory could not be opened: {error}"))?;
         if exists(&attempt, "reservation.json")? && exists(&attempt, "import-retained.json")? {
             return Ok(true);
         }
@@ -446,19 +517,18 @@ fn retained_import(slot: &Directory) -> Result<bool, WorkerState> {
 
 /// Hold writer exclusion for cache mutation. Membership comes from the
 /// caller's Git inventory; the slot supplies only exclusion.
-pub fn cache_writer_guard(
-    project_state: &Directory,
-    path: &Path,
-) -> Result<LockGuard, WorkerState> {
-    let directory = writer_directory(project_state, path).map_err(|_| WorkerState::Unknown)?;
+pub fn cache_writer_guard(project_state: &Directory, path: &Path) -> Result<LockGuard, Occupancy> {
+    let unknown = |detail: String| Occupancy::custody_unknown(path.to_path_buf(), detail);
+    let directory = writer_directory(project_state, path)
+        .map_err(|error| unknown(format!("writer slot could not be opened: {error}")))?;
     let guard = directory
         .try_lock(OsStr::new(WRITER_LOCK), LockMode::Exclusive)
         .map_err(|error| match error {
-            FsError::LockTimeout { .. } => WorkerState::Busy,
-            _ => WorkerState::Unknown,
+            FsError::LockTimeout { .. } => Occupancy::Held,
+            error => unknown(format!("writer lock could not be acquired: {error}")),
         })?;
-    if retained_import(&directory)? {
-        return Err(WorkerState::Busy);
+    if retained_import(&directory).map_err(unknown)? {
+        return Err(unknown("unresolved retained import fence".into()));
     }
     Ok(guard)
 }

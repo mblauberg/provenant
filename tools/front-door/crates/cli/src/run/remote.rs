@@ -831,6 +831,7 @@ fn submitted_task(
             None
         },
         head: task.head,
+        source_head: None,
         account: task.account,
         access: if new_worktree.is_some() {
             AccessMode::WorktreeWrite

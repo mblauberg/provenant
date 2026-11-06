@@ -21,7 +21,12 @@ fn reexec_test_in_lane(name: &str) -> Result<bool, Box<dyn std::error::Error>> {
         .filter(|(key, _)| !removed.contains(&key.as_os_str()))
         .collect();
     let cwd = std::env::current_dir()?;
-    let mut options = ExecOptions::new(&argv, &cwd, Duration::from_secs(30));
+    let timeout = match name {
+        "run::tests::wait_handles_a_stale_default_cursor" => 300,
+        "run::tests::dispatch_reuses_only_free_lane_or_unowned_worktree" => 90,
+        _ => 30,
+    };
+    let mut options = ExecOptions::new(&argv, &cwd, Duration::from_secs(timeout));
     options.env = Some(&env);
     options.stdout = StreamPolicy::Capture { limit: 65_536 };
     options.stderr = StreamPolicy::Capture { limit: 65_536 };
@@ -281,7 +286,7 @@ fn project_default_dispatch_renders_ipc_only_for_writer() -> Result<(), Box<dyn 
         AccessMode, NetworkAccess, PathGrant, PathScope, PlanPermissions, ProviderProfile,
         ProviderProfileSpec, WorktreeWriteAuthority,
     };
-    use provenant_confinement::worktrees::{WorkerObserver, WorkerState};
+    use provenant_confinement::worktrees::{Occupancy, WorkerObserver};
     use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination};
     use std::os::unix::fs::DirBuilderExt;
     const MARKER: &str = "PROVENANT_TEST_CAPABILITY_DISPATCH";
@@ -343,11 +348,11 @@ fn project_default_dispatch_renders_ipc_only_for_writer() -> Result<(), Box<dyn 
         fn observe_roots(
             &self,
             roots: &[PathBuf],
-        ) -> std::collections::BTreeMap<PathBuf, WorkerState> {
+        ) -> std::collections::BTreeMap<PathBuf, Occupancy> {
             roots
                 .iter()
                 .cloned()
-                .map(|root| (root, WorkerState::Free))
+                .map(|root| (root, Occupancy::Available))
                 .collect()
         }
     }
@@ -463,17 +468,17 @@ fn project_default_branch_dispatch_renders_database_ipc() -> Result<(), Box<dyn 
         AccessMode, NetworkAccess, PathGrant, PathScope, PlanPermissions, ProviderProfile,
         ProviderProfileSpec, WorktreeWriteAuthority,
     };
-    use provenant_confinement::worktrees::{WorkerObserver, WorkerState};
+    use provenant_confinement::worktrees::{Occupancy, WorkerObserver};
     struct Free;
     impl WorkerObserver for Free {
         fn observe_roots(
             &self,
             roots: &[PathBuf],
-        ) -> std::collections::BTreeMap<PathBuf, WorkerState> {
+        ) -> std::collections::BTreeMap<PathBuf, Occupancy> {
             roots
                 .iter()
                 .cloned()
-                .map(|root| (root, WorkerState::Free))
+                .map(|root| (root, Occupancy::Available))
                 .collect()
         }
     }
@@ -788,7 +793,7 @@ fn worktree_access_readers_leave_existing_writer_lease_untouched()
                 &cancel,
                 |context| Ok(matches!(
                     worktrees::cache_writer_probe(context.project_state, &fixture.tree),
-                    Err(worktrees::WorkerState::Busy)
+                    Err(worktrees::Occupancy::Held)
                 ))
             )?);
             drop(lease);
@@ -1309,6 +1314,36 @@ fn host_delivery_limit_keeps_its_text_as_typed_io_detail() {
         Some(provenant_records::diagnostic::DiagnosticFact::DeliveryStage(_))
     ));
     assert_eq!(detail.detail.as_deref(), Some(failure.message.as_str()));
+}
+
+#[test]
+fn cli_io_projection_omits_untrusted_sources_in_both_formats()
+-> Result<(), Box<dyn std::error::Error>> {
+    for source in [
+        "TOKEN_SENTINEL\u{1b}".to_owned(),
+        format!("TOKEN_SENTINEL{}", "é".repeat(2048)),
+    ] {
+        let failure = super::Fail::from(run::RunError::Io(std::io::Error::other(source)));
+        let reply = super::reply("run", Err(failure));
+        for mode in [
+            crate::render::RenderMode::Human {
+                text: &reply.human,
+                summary: None,
+                read_only: false,
+            },
+            crate::render::RenderMode::Json,
+        ] {
+            let mut output = Vec::new();
+            crate::render::render(&reply.result, mode, &mut output)?;
+            let text = String::from_utf8(output)?;
+            assert!(text.contains("IO"));
+            assert!(!text.contains("TOKEN_SENTINEL"));
+            assert!(!text.chars().any(|c| c.is_control() && c != '\n'));
+            assert!(text.len() < 4096);
+        }
+        assert!(reply.result.error.as_ref().unwrap().repair.is_some());
+    }
+    Ok(())
 }
 
 #[test]
@@ -1852,7 +1887,7 @@ fn dispatch_existing_worktree_checks_custody_and_replays() -> Result<(), Box<dyn
                     worktrees::save_owner(
                         &verified,
                         &WorktreeOwner {
-                            attempt_id: Some(holder),
+                            attempt_id: Some(AttemptId::from_bytes([8; 16])),
                             operation_id: Some("holder".parse().unwrap()),
                             branch: "writer".into(),
                             base: info.head.to_string(),
@@ -1912,7 +1947,7 @@ fn dispatch_existing_worktree_checks_custody_and_replays() -> Result<(), Box<dyn
 #[test]
 fn dispatch_reuses_only_free_lane_or_unowned_worktree() -> Result<(), Box<dyn std::error::Error>> {
     use provenant_confinement::worktrees::{
-        self, WorkerObserver, WorkerState, WorktreeCreate, WorktreeOrigin, WorktreeOwner,
+        self, Occupancy, WorkerObserver, WorktreeCreate, WorktreeOrigin, WorktreeOwner,
     };
     use provenant_core::RootInputs;
     use provenant_os::fixture::run_git;
@@ -1922,11 +1957,11 @@ fn dispatch_reuses_only_free_lane_or_unowned_worktree() -> Result<(), Box<dyn st
         fn observe_roots(
             &self,
             roots: &[PathBuf],
-        ) -> std::collections::BTreeMap<PathBuf, WorkerState> {
+        ) -> std::collections::BTreeMap<PathBuf, Occupancy> {
             roots
                 .iter()
                 .cloned()
-                .map(|root| (root, WorkerState::Free))
+                .map(|root| (root, Occupancy::Available))
                 .collect()
         }
     }
@@ -1935,11 +1970,16 @@ fn dispatch_reuses_only_free_lane_or_unowned_worktree() -> Result<(), Box<dyn st
         fn observe_roots(
             &self,
             roots: &[PathBuf],
-        ) -> std::collections::BTreeMap<PathBuf, WorkerState> {
+        ) -> std::collections::BTreeMap<PathBuf, Occupancy> {
             roots
                 .iter()
                 .cloned()
-                .map(|root| (root, WorkerState::Unknown))
+                .map(|root| {
+                    (
+                        root.clone(),
+                        Occupancy::census_unknown(root, "fixture census unavailable"),
+                    )
+                })
                 .collect()
         }
     }
@@ -2102,6 +2142,12 @@ fn dispatch_reuses_only_free_lane_or_unowned_worktree() -> Result<(), Box<dyn st
             "HEAD",
         ],
     )?;
+    // A census gap is advisory; a locked Git registration is real custody
+    // uncertainty and must refuse reuse until the operator repairs it.
+    run_git(
+        &project,
+        &["worktree", "lock", native_path.to_str().ok_or("path")?],
+    )?;
     let refused = super::own_worktree(
         &super::OwnedWorktree {
             branch: "native-branch".into(),
@@ -2131,6 +2177,73 @@ fn dispatch_reuses_only_free_lane_or_unowned_worktree() -> Result<(), Box<dyn st
     );
     let writer = run::resolve_writer(roots.state.as_path(), &project, &native_path)?;
     assert_eq!(writer.worktree, native_path);
+
+    // Exercise the actual CLI branch refusal and follow its shell-quoted
+    // remedy through the normal worktree admission and custody checks.
+    allow_any_free_disk(&edge)?;
+    let mut branch_command = parsed_run(&[
+        "--branch",
+        "native-branch",
+        "--base",
+        "HEAD",
+        "--model",
+        "codex/gpt-6-luna",
+        "--prompt-file",
+        prompt.to_str().ok_or("prompt")?,
+    ])?;
+    branch_command.wait = None;
+    let branch_reply = super::submit::with_deferred_provider_launch(|| {
+        dispatch_with_workers(branch_command, &edge, &Unknown)
+    });
+    let branch_error = branch_reply.result.error.as_ref().ok_or("branch refusal")?;
+    let remedy = branch_error.repair.as_deref().ok_or("branch remedy")?;
+    let (_, quoted) = remedy
+        .rsplit_once("--worktree ")
+        .ok_or("worktree argument")?;
+    use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination};
+    let argv = [
+        OsString::from("/bin/sh"),
+        OsString::from("-c"),
+        format!("set -- {quoted}; printf '%s' \"$1\"").into(),
+    ];
+    let mut options = ExecOptions::new(&argv, &project, Duration::from_secs(10));
+    options.stdout = StreamPolicy::Capture { limit: 4096 };
+    let output = SystemExecutor::new(1)?.execute(options)?;
+    assert_eq!(output.termination, Termination::Exit(0), "{remedy}");
+    let selected = String::from_utf8(output.stdout.bytes)?;
+    assert_eq!(std::path::Path::new(&selected), native_path);
+    run_git(
+        &project,
+        &["worktree", "unlock", native_path.to_str().ok_or("path")?],
+    )?;
+    let mut worktree_command = parsed_run(&[
+        "--worktree",
+        &selected,
+        "--model",
+        "codex/gpt-6-luna",
+        "--prompt-file",
+        prompt.to_str().ok_or("prompt")?,
+    ])?;
+    worktree_command.wait = None;
+    let accepted = super::submit::with_deferred_provider_launch(|| {
+        dispatch_with_workers(worktree_command, &edge, &Free)
+    });
+    assert_eq!(
+        accepted.result.status,
+        Status::Ok,
+        "{:?}",
+        accepted.result.error
+    );
+    let run_id = accepted.result.data["run_id"]
+        .as_str()
+        .ok_or("run id")?
+        .parse()?;
+    let request = _session.store.request(run_id, &call)?;
+    assert_eq!(
+        request.tasks[0].writer.as_ref().ok_or("writer")?.worktree,
+        native_path
+    );
+
     for origin in [
         None,
         Some(WorktreeOrigin::Lane),
@@ -2322,10 +2435,10 @@ fn dispatch_reuses_only_free_lane_or_unowned_worktree() -> Result<(), Box<dyn st
 }
 
 #[test]
-fn own_worktree_refuses_live_writer_naming_live_process_not_stale_owner()
+fn own_worktree_pending_reservation_takes_precedence_over_census()
 -> Result<(), Box<dyn std::error::Error>> {
     use provenant_confinement::worktrees::{
-        self, ObservedProcess, WorkerObserver, WorkerState, WorktreeCreate, WorktreeOrigin,
+        self, ObservedProcess, Occupancy, WorkerObserver, WorktreeCreate, WorktreeOrigin,
         WorktreeOwner,
     };
     use provenant_core::RootInputs;
@@ -2334,10 +2447,10 @@ fn own_worktree_refuses_live_writer_naming_live_process_not_stale_owner()
         fn observe_roots(
             &self,
             roots: &[PathBuf],
-        ) -> std::collections::BTreeMap<PathBuf, WorkerState> {
+        ) -> std::collections::BTreeMap<PathBuf, Occupancy> {
             roots
                 .iter()
-                .map(|root| (root.clone(), WorkerState::Live))
+                .map(|root| (root.clone(), Occupancy::Observed { process: None }))
                 .collect()
         }
 
@@ -2352,7 +2465,7 @@ fn own_worktree_refuses_live_writer_naming_live_process_not_stale_owner()
                 states: roots
                     .iter()
                     .cloned()
-                    .map(|root| (root, WorkerState::Live))
+                    .map(|root| (root, Occupancy::Observed { process: None }))
                     .collect(),
                 holders: roots
                     .iter()
@@ -2387,10 +2500,10 @@ fn own_worktree_refuses_live_writer_naming_live_process_not_stale_owner()
         fn observe_roots(
             &self,
             roots: &[PathBuf],
-        ) -> std::collections::BTreeMap<PathBuf, WorkerState> {
+        ) -> std::collections::BTreeMap<PathBuf, Occupancy> {
             roots
                 .iter()
-                .map(|root| (root.clone(), WorkerState::Free))
+                .map(|root| (root.clone(), Occupancy::Available))
                 .collect()
         }
     }
@@ -2399,11 +2512,16 @@ fn own_worktree_refuses_live_writer_naming_live_process_not_stale_owner()
         fn observe_roots(
             &self,
             roots: &[PathBuf],
-        ) -> std::collections::BTreeMap<PathBuf, WorkerState> {
+        ) -> std::collections::BTreeMap<PathBuf, Occupancy> {
             roots
                 .iter()
                 .cloned()
-                .map(|root| (root, WorkerState::Unknown))
+                .map(|root| {
+                    (
+                        root.clone(),
+                        Occupancy::census_unknown(root, "fixture census unavailable"),
+                    )
+                })
                 .collect()
         }
 
@@ -2415,7 +2533,12 @@ fn own_worktree_refuses_live_writer_naming_live_process_not_stale_owner()
             (
                 roots
                     .iter()
-                    .map(|root| (root.clone(), WorkerState::Unknown))
+                    .map(|root| {
+                        (
+                            root.clone(),
+                            Occupancy::census_unknown(root.clone(), "fixture census unavailable"),
+                        )
+                    })
                     .collect(),
                 roots
                     .iter()
@@ -2490,6 +2613,52 @@ fn own_worktree_refuses_live_writer_naming_live_process_not_stale_owner()
         Ok((info.path, info.head))
     })?;
 
+    let holder = provenant_core::AttemptId::from_bytes([42; 16]);
+    let held = worktrees::with_context(&roots, &home, &project, &clock, &cancel, |context| {
+        drop(
+            worktrees::cache_writer_guard(context.project_state, &path)
+                .map_err(|_| worktrees::WorktreeError::UnknownWriter)?,
+        );
+        let slot = context
+            .project_state
+            .open_verified_directory(&worktrees::state_dir_name(&path))?;
+        provenant_supervisor::fixture::acquire_writer(
+            slot,
+            provenant_supervisor::custody::Scope {
+                run: provenant_core::RunId::from_bytes([41; 16]),
+                attempt: holder,
+                generation: 1,
+            },
+            provenant_core::WaitBudget::nonblocking(clock.mono_now()),
+            &cancel,
+            &clock,
+        )
+        .map_err(|_| worktrees::WorktreeError::UnknownWriter)
+    })?;
+    let busy = super::own_worktree(
+        &super::OwnedWorktree {
+            branch: branch.into(),
+            host,
+            created_at: WallTime::from_micros(2)?,
+        },
+        None,
+        &OperationId::parse("second-writer")?,
+        &edge,
+        &Free,
+        |attempt| attempt == prior_attempt,
+        &mut None,
+        &clock,
+        &cancel,
+        None,
+    );
+    assert!(matches!(
+        busy,
+        Err(super::OwnWorktreeError::Other(run::RunError::Writer(
+            worktrees::WorktreeError::WriterBusy { holder: Some(holder) }
+        ))) if holder == provenant_core::AttemptId::from_bytes([42; 16])
+    ));
+    drop(held);
+
     // Exercise the actual owned-run admission boundary for an existing,
     // unowned tree whose registration and on-disk custody are known but whose
     // process census is incomplete.
@@ -2511,7 +2680,7 @@ fn own_worktree_refuses_live_writer_naming_live_process_not_stale_owner()
     })?;
     let counted = CountedUnknown(std::sync::atomic::AtomicUsize::new(0));
     let session = worktrees::CensusSession::new(&counted, &clock);
-    let census_error = super::own_worktree(
+    let (census_admitted, _) = super::own_worktree(
         &super::OwnedWorktree {
             branch: census_branch.into(),
             host,
@@ -2526,13 +2695,28 @@ fn own_worktree_refuses_live_writer_naming_live_process_not_stale_owner()
         &clock,
         &cancel,
         None,
+    )?;
+    assert_eq!(
+        census_admitted.branch.as_deref(),
+        Some("refs/heads/census-refusal-branch")
     );
-    match census_error {
-        Err(super::OwnWorktreeError::Other(run::RunError::Writer(
-            provenant_confinement::worktrees::WorktreeError::CensusUnknown { detail, .. },
-        ))) => assert_eq!(detail, "injected census incomplete"),
-        other => panic!("expected typed census refusal, got {other:?}"),
-    }
+    let (replay, _) = super::own_worktree(
+        &super::OwnedWorktree {
+            branch: census_branch.into(),
+            host,
+            created_at: WallTime::from_micros(2)?,
+        },
+        None,
+        &OperationId::parse("census-op")?,
+        &edge,
+        &session,
+        |_| false,
+        &mut None,
+        &clock,
+        &cancel,
+        None,
+    )?;
+    assert_eq!(replay.path, census_admitted.path);
     assert_eq!(counted.0.load(std::sync::atomic::Ordering::SeqCst), 1);
     let census_unknown = worktrees::WorktreeError::CensusUnknown {
         path: path.clone(),
@@ -2546,9 +2730,22 @@ fn own_worktree_refuses_live_writer_naming_live_process_not_stale_owner()
         census_unknown.to_string(),
         worktrees::WorktreeError::UnknownWriter.to_string()
     );
-    let refusal = super::Fail::from(run::RunError::Writer(census_unknown));
+    let error = run::RunError::Writer(census_unknown);
+    let remote = error.diagnostic(provenant_records::diagnostic::Destination::Remote {
+        repository: None,
+        home: None,
+    });
+    assert!(!serde_json::to_string(&remote)?.contains("injected census incomplete"));
+    let refusal = super::Fail::from(error);
     assert!(refusal.message.contains(&path.display().to_string()));
     assert!(refusal.message.contains("injected census incomplete"));
+    assert!(
+        refusal
+            .projection
+            .as_ref()
+            .and_then(|diagnostic| diagnostic.next.as_ref())
+            .is_some()
+    );
 
     let observer = LiveObserver(path.clone(), std::sync::atomic::AtomicUsize::new(0));
     let live_policy = worktrees::CensusPolicyWorkers::for_run(&observer, &roots)?;
@@ -2569,19 +2766,89 @@ fn own_worktree_refuses_live_writer_naming_live_process_not_stale_owner()
         &cancel,
         None,
     );
-    match err {
+    assert!(matches!(
+        err,
         Err(super::OwnWorktreeError::Other(run::RunError::Writer(
-            provenant_confinement::worktrees::WorktreeError::LiveProcess(proc),
-        ))) => {
-            assert_eq!(proc.pid, 54321);
-            assert_eq!(proc.command.as_deref(), Some("foreign-writer"));
-            assert_eq!(proc.cwd.as_ref(), Some(&path));
-            let msg = proc.to_string();
-            assert!(!msg.contains(&prior_attempt.to_string()));
-        }
-        other => panic!("expected LiveProcess, got {other:?}"),
-    }
+            worktrees::WorktreeError::WriterBusy { holder: Some(holder) }
+        ))) if holder == prior_attempt
+    ));
     assert_eq!(observer.1.load(std::sync::atomic::Ordering::SeqCst), 1);
+    let unknown = super::own_worktree(
+        &super::OwnedWorktree {
+            branch: branch.into(),
+            host,
+            created_at: WallTime::from_micros(3)?,
+        },
+        None,
+        &OperationId::parse("nonterminal-with-incomplete-census")?,
+        &edge,
+        &session,
+        |_| false,
+        &mut None,
+        &clock,
+        &cancel,
+        None,
+    );
+    assert!(matches!(
+        unknown,
+        Err(super::OwnWorktreeError::Other(run::RunError::Writer(
+            worktrees::WorktreeError::WriterBusy { holder: Some(holder) }
+        ))) if holder == prior_attempt
+    ));
+    let (admitted, _) = super::own_worktree(
+        &super::OwnedWorktree {
+            branch: branch.into(),
+            host,
+            created_at: WallTime::from_micros(3)?,
+        },
+        None,
+        &OperationId::parse("terminal-with-incomplete-census")?,
+        &edge,
+        &session,
+        |id| id == prior_attempt,
+        &mut None,
+        &clock,
+        &cancel,
+        None,
+    )?;
+    assert_eq!(admitted.path, path);
+    Ok(())
+}
+
+#[test]
+fn worktree_census_warning_includes_scope_and_evidence() -> Result<(), Box<dyn std::error::Error>> {
+    let mut output = Vec::new();
+    super::worktree::write_worktree_census_warning(
+        &mut output,
+        Path::new("/repo/worktree"),
+        "census incomplete for pid 42",
+    )?;
+    let warning = String::from_utf8(output)?;
+    assert!(warning.contains("/repo/worktree"));
+    assert!(warning.contains("census incomplete for pid 42"));
+    use provenant_confinement::worktrees::{Occupancy, OccupancyUnknownSource, WorktreeError};
+    let scope = PathBuf::from("/repo/worktree");
+    super::worktree::warn_advisory_occupancy(&scope, &Occupancy::Observed { process: None })?;
+    super::worktree::warn_advisory_occupancy(
+        &scope,
+        &Occupancy::Unknown {
+            scope: scope.clone(),
+            evidence: "census incomplete".into(),
+            source: OccupancyUnknownSource::Census,
+        },
+    )?;
+    assert!(matches!(
+        super::worktree::warn_advisory_occupancy(
+            &scope,
+            &Occupancy::Unknown {
+                scope: scope.clone(),
+                evidence: "owner unreadable".into(),
+                source: OccupancyUnknownSource::Custody,
+            },
+        ),
+        Err(WorktreeError::UnknownOccupancy { path, detail })
+            if path == scope && detail == "owner unreadable"
+    ));
     Ok(())
 }
 
@@ -2589,7 +2856,7 @@ fn own_worktree_refuses_live_writer_naming_live_process_not_stale_owner()
 fn own_worktree_admits_from_inside_target_worktree_with_no_other_live_writer()
 -> Result<(), Box<dyn std::error::Error>> {
     use provenant_confinement::worktrees::{
-        self, CensusPolicyWorkers, ObservedProcess, WorkerObserver, WorkerState, WorktreeCreate,
+        self, CensusPolicyWorkers, ObservedProcess, Occupancy, WorkerObserver, WorktreeCreate,
     };
     use provenant_core::RootInputs;
     struct ControlledObserver {
@@ -2599,16 +2866,16 @@ fn own_worktree_admits_from_inside_target_worktree_with_no_other_live_writer()
         fn observe_roots(
             &self,
             roots: &[PathBuf],
-        ) -> std::collections::BTreeMap<PathBuf, WorkerState> {
+        ) -> std::collections::BTreeMap<PathBuf, Occupancy> {
             roots
                 .iter()
                 .map(|root| {
                     (
                         root.clone(),
                         if root == &self.target {
-                            WorkerState::Live
+                            Occupancy::Observed { process: None }
                         } else {
-                            WorkerState::Free
+                            Occupancy::Available
                         },
                     )
                 })
@@ -2618,10 +2885,10 @@ fn own_worktree_admits_from_inside_target_worktree_with_no_other_live_writer()
         fn observe_roots_for_land(
             &self,
             roots: &[PathBuf],
-        ) -> std::collections::BTreeMap<PathBuf, WorkerState> {
+        ) -> std::collections::BTreeMap<PathBuf, Occupancy> {
             roots
                 .iter()
-                .map(|root| (root.clone(), WorkerState::Free))
+                .map(|root| (root.clone(), Occupancy::Available))
                 .collect()
         }
 
@@ -2643,10 +2910,10 @@ fn own_worktree_admits_from_inside_target_worktree_with_no_other_live_writer()
         fn observe_roots(
             &self,
             roots: &[PathBuf],
-        ) -> std::collections::BTreeMap<PathBuf, WorkerState> {
+        ) -> std::collections::BTreeMap<PathBuf, Occupancy> {
             roots
                 .iter()
-                .map(|root| (root.clone(), WorkerState::Free))
+                .map(|root| (root.clone(), Occupancy::Available))
                 .collect()
         }
     }
@@ -2701,17 +2968,77 @@ fn own_worktree_admits_from_inside_target_worktree_with_no_other_live_writer()
         target: path.clone(),
     };
 
-    // Ordinary policy without run ancestor exclusion refuses admission because
-    // the inside process is observed live:
+    // A bystander in an unowned worktree is advisory when custody is free.
     let ordinary = CensusPolicyWorkers::from_roots(&observer, &roots)?;
-    let refused = super::own_worktree(
+    let held = worktrees::with_context(&roots, &home, &project, &clock, &cancel, |context| {
+        worktrees::cache_writer_guard(context.project_state, &path)
+            .map_err(|_| worktrees::WorktreeError::UnknownWriter)
+    })?;
+    let claim_time = WallTime::from_micros(2)?;
+    let claim_operation = OperationId::parse("inside-op")?;
+    let attempt_claim = || {
+        super::own_worktree(
+            &super::OwnedWorktree {
+                branch: branch.into(),
+                host,
+                created_at: claim_time,
+            },
+            None,
+            &claim_operation,
+            &edge_inside,
+            &ordinary,
+            |_| false,
+            &mut None,
+            &clock,
+            &cancel,
+            None,
+        )
+    };
+    assert!(matches!(
+        attempt_claim(),
+        Err(super::OwnWorktreeError::Other(run::RunError::Writer(
+            worktrees::WorktreeError::WriterBusy { .. }
+        )))
+    ));
+    drop(held);
+    let path_text = path.to_str().ok_or("worktree path is not UTF-8")?;
+    provenant_os::fixture::run_git(&project, &["worktree", "lock", path_text])?;
+    assert!(matches!(
+        attempt_claim(),
+        Err(super::OwnWorktreeError::Other(run::RunError::Writer(
+            worktrees::WorktreeError::UnknownOccupancy { path: scope, detail }
+        ))) if scope == path && detail.contains("Git marks the worktree locked")
+    ));
+    provenant_os::fixture::run_git(&project, &["worktree", "unlock", path_text])?;
+    std::fs::write(path.join("uncommitted"), "keep")?;
+    assert!(matches!(
+        attempt_claim(),
+        Err(super::OwnWorktreeError::Other(run::RunError::Writer(
+            worktrees::WorktreeError::Dirty(_)
+        )))
+    ));
+    std::fs::remove_file(path.join("uncommitted"))?;
+    let git_dir = worktrees::with_context(&roots, &home, &project, &clock, &cancel, |context| {
+        let tree = provenant_confinement::verify_worktree(context.repo, &path)?;
+        Ok(tree.repo().private_git_dir().to_path_buf())
+    })?;
+    std::fs::write(git_dir.join("MERGE_HEAD"), format!("{head}\n"))?;
+    assert!(matches!(
+        attempt_claim(),
+        Err(super::OwnWorktreeError::Other(run::RunError::Writer(
+            worktrees::WorktreeError::GitOperationInProgress
+        )))
+    ));
+    assert!(git_dir.join("MERGE_HEAD").exists());
+    std::fs::remove_file(git_dir.join("MERGE_HEAD"))?;
+    let admitted = super::own_worktree(
         &super::OwnedWorktree {
             branch: branch.into(),
             host,
             created_at: WallTime::from_micros(2)?,
         },
         None,
-        &OperationId::parse("inside-op-refused")?,
+        &OperationId::parse("inside-op")?,
         &edge_inside,
         &ordinary,
         |_| false,
@@ -2719,21 +3046,45 @@ fn own_worktree_admits_from_inside_target_worktree_with_no_other_live_writer()
         &clock,
         &cancel,
         None,
-    );
-    match refused {
+    )?;
+    assert_eq!(admitted.0.path, path);
+    assert_eq!(admitted.0.head, head);
+    let held = worktrees::with_context(&roots, &home, &project, &clock, &cancel, |context| {
+        worktrees::cache_writer_guard(context.project_state, &path)
+            .map_err(|_| worktrees::WorktreeError::UnknownWriter)
+    })?;
+    assert!(matches!(
+        attempt_claim(),
         Err(super::OwnWorktreeError::Other(run::RunError::Writer(
-            provenant_confinement::worktrees::WorktreeError::LiveProcess(proc),
-        ))) => {
-            assert_eq!(proc.pid, 24680);
-            assert_eq!(proc.command.as_deref(), Some("ancestor-shell"));
-            assert_eq!(proc.cwd.as_ref(), Some(&path));
-        }
-        other => panic!("expected LiveProcess refusal without ancestor exclusion, got {other:?}"),
-    }
-
-    // Real run policy applies ancestor exclusion, so admission succeeds:
+            worktrees::WorktreeError::WriterBusy { .. }
+        )))
+    ));
+    drop(held);
+    let replay_with_bystander = attempt_claim()?;
+    assert_eq!(replay_with_bystander.0.path, path);
+    let owner_path = git_dir.join("provenant-owner.json");
+    let saved_owner = std::fs::read(&owner_path)?;
+    std::fs::write(&owner_path, b"invalid owner record")?;
+    assert!(matches!(
+        attempt_claim(),
+        Err(super::OwnWorktreeError::Other(run::RunError::Writer(
+            worktrees::WorktreeError::UnknownOccupancy { path: scope, detail }
+        ))) if scope == path && detail.contains("owner record could not be read")
+    ));
+    let held = worktrees::with_context(&roots, &home, &project, &clock, &cancel, |context| {
+        worktrees::cache_writer_guard(context.project_state, &path)
+            .map_err(|_| worktrees::WorktreeError::UnknownWriter)
+    })?;
+    assert!(matches!(
+        attempt_claim(),
+        Err(super::OwnWorktreeError::Other(run::RunError::Writer(
+            worktrees::WorktreeError::WriterBusy { holder: None }
+        )))
+    ));
+    drop(held);
+    std::fs::write(&owner_path, saved_owner)?;
     let run_policy = CensusPolicyWorkers::for_run(&observer, &roots)?;
-    let admitted = super::own_worktree(
+    let replay = super::own_worktree(
         &super::OwnedWorktree {
             branch: branch.into(),
             host,
@@ -2749,14 +3100,39 @@ fn own_worktree_admits_from_inside_target_worktree_with_no_other_live_writer()
         &cancel,
         None,
     )?;
-    assert_eq!(admitted.0.path, path);
-    assert_eq!(admitted.0.head, head);
+    assert_eq!(replay.0.path, path);
+
+    let attempt = provenant_core::AttemptId::from_bytes([42; 16]);
+    worktrees::with_context(&roots, &home, &project, &clock, &cancel, |context| {
+        let tree = provenant_confinement::verify_worktree(context.repo, &path)?;
+        let mut owner =
+            worktrees::load_owner(&tree)?.ok_or(worktrees::WorktreeError::UnknownWriter)?;
+        owner.attempt_id = Some(attempt);
+        worktrees::save_owner(&tree, &owner)
+    })?;
+    let admitted_after_terminal = super::own_worktree(
+        &super::OwnedWorktree {
+            branch: branch.into(),
+            host,
+            created_at: WallTime::from_micros(3)?,
+        },
+        None,
+        &OperationId::parse("after-terminal")?,
+        &edge_inside,
+        &ordinary,
+        |id| id == attempt,
+        &mut None,
+        &clock,
+        &cancel,
+        None,
+    )?;
+    assert_eq!(admitted_after_terminal.0.path, path);
     Ok(())
 }
 
 #[test]
 fn failed_preflight_creates_no_worktree() -> Result<(), Box<dyn std::error::Error>> {
-    use provenant_confinement::worktrees::{WorkerObserver, WorkerState};
+    use provenant_confinement::worktrees::{Occupancy, WorkerObserver};
     use provenant_core::RootInputs;
     use std::ffi::OsString;
     // A census that cannot clear any tree: cleanup after a late failure
@@ -2766,11 +3142,16 @@ fn failed_preflight_creates_no_worktree() -> Result<(), Box<dyn std::error::Erro
         fn observe_roots(
             &self,
             roots: &[PathBuf],
-        ) -> std::collections::BTreeMap<PathBuf, WorkerState> {
+        ) -> std::collections::BTreeMap<PathBuf, Occupancy> {
             roots
                 .iter()
                 .cloned()
-                .map(|root| (root, WorkerState::Unknown))
+                .map(|root| {
+                    (
+                        root.clone(),
+                        Occupancy::census_unknown(root, "fixture census unavailable"),
+                    )
+                })
                 .collect()
         }
     }
@@ -2868,7 +3249,7 @@ fn failed_preflight_creates_no_worktree() -> Result<(), Box<dyn std::error::Erro
         fn observe_roots(
             &self,
             roots: &[PathBuf],
-        ) -> std::collections::BTreeMap<PathBuf, provenant_confinement::worktrees::WorkerState>
+        ) -> std::collections::BTreeMap<PathBuf, provenant_confinement::worktrees::Occupancy>
         {
             if !self.moved.swap(true, std::sync::atomic::Ordering::SeqCst) {
                 provenant_os::fixture::run_git(
@@ -2880,7 +3261,7 @@ fn failed_preflight_creates_no_worktree() -> Result<(), Box<dyn std::error::Erro
             roots
                 .iter()
                 .cloned()
-                .map(|root| (root, provenant_confinement::worktrees::WorkerState::Free))
+                .map(|root| (root, provenant_confinement::worktrees::Occupancy::Available))
                 .collect()
         }
     }
@@ -2952,6 +3333,7 @@ fn failed_preflight_creates_no_worktree() -> Result<(), Box<dyn std::error::Erro
             base: Some(base.into()),
             pinned_base: Some(pinned),
             head: None,
+            source_head: None,
             route: run::RequestedRoute::Model {
                 extra: Default::default(),
                 provider: "fixture".into(),
@@ -3177,6 +3559,7 @@ fn operation_replays_after_its_context_ref_moves_or_is_deleted()
             base: Some(base.into()),
             pinned_base: None,
             head: None,
+            source_head: None,
             route: run::RequestedRoute::Model {
                 extra: Default::default(),
                 provider: "fixture".into(),
@@ -4263,7 +4646,7 @@ fn delivery_state_text_retains_known_details_without_extensions() {
 fn render_lanes_removes_peer_terminal_controls() -> Result<(), Box<dyn std::error::Error>> {
     let reason = "\x1b[31mreason\x1b[0m";
     let account = "\x1b]0;account\x07";
-    let detail = "skip\n\r\t\u{0008}\u{202e}detail";
+    let detail = "TOKEN_SENTINEL /private/source\n\r\t\u{0008}\u{202e}detail";
     let remote = "or\x1bigin";
     let branch = "main\u{009b}line";
     let now = WallTime::from_micros(100)?;
@@ -4300,10 +4683,30 @@ fn render_lanes_removes_peer_terminal_controls() -> Result<(), Box<dyn std::erro
     }))?;
     let (data, human) =
         render_lanes_without_cooldowns(std::slice::from_ref(&lane), &[], None, Path::new("/state"));
+    let mut stale = lane.clone();
+    stale.skipped_routes[0].cause =
+        Some(provenant_records::RouteExclusionReason::StaleAvailability);
+    let (stale_data, stale_human) = render_lanes_without_cooldowns(
+        std::slice::from_ref(&stale),
+        &[],
+        None,
+        Path::new("/state"),
+    );
+    let stale_skip = &stale_data["lanes"][0]["skipped_routes"][0];
+    assert!(stale_skip["detail"].as_str().unwrap().contains("stale"));
+    assert!(
+        stale_skip["next"]
+            .as_str()
+            .unwrap()
+            .contains("provenant quota tick")
+    );
+    assert!(stale_human.contains("stale"));
+    assert!(!stale_skip.to_string().contains("TOKEN_SENTINEL"));
+    assert!(!stale_human.contains("/private/source"));
     assert_eq!(
         human,
         format!(
-            "{}/{}/{} Reviewchanges failed fixture/[32mmodel account=]0;account ([31mreason[0m)\n  skipped fixture/[33mfallback Unavailable: skipdetail\n  delivery origin:mainline NotAttempted head=unknown\n",
+            "{}/{}/{} Reviewchanges failed fixture/[32mmodel account=]0;account (the lane failed; inspect its result and local evidence)\n  skipped fixture/[33mfallback Unavailable: the selected route is unavailable; check route readiness with `provenant quota tick`\n  delivery origin:mainline NotAttempted head=unknown\n",
             RunId::from_bytes([2; 16]),
             TaskId::from_bytes([4; 16]),
             AttemptId::from_bytes([1; 16])
@@ -4320,7 +4723,18 @@ fn render_lanes_removes_peer_terminal_controls() -> Result<(), Box<dyn std::erro
         render_lanes_without_cooldowns(std::slice::from_ref(&lane), &[], None, Path::new("/state"));
     assert_eq!(different["lanes"][0]["priority"], 15);
     assert_eq!(different["lanes"][0]["requested_priority"], 10);
-    assert_eq!(data["lanes"][0]["reason"], json!(reason));
+    assert!(
+        data["lanes"][0]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("lane failed")
+    );
+    assert!(
+        !data["lanes"][0]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("reason")
+    );
     assert_eq!(data["lanes"][0]["write_grants"][0]["source"], "write_root");
     assert_eq!(data["lanes"][0]["write_grants"][0]["scope"], "subtree");
     assert_eq!(
@@ -4336,10 +4750,20 @@ fn render_lanes_removes_peer_terminal_controls() -> Result<(), Box<dyn std::erro
         json!(provenant_core::Digest::from_bytes([6; 32]))
     );
     assert_eq!(data["lanes"][0]["account"], json!(account));
-    assert_eq!(
-        data["lanes"][0]["skipped_routes"][0]["detail"],
-        json!(detail)
+    let skipped = &data["lanes"][0]["skipped_routes"][0];
+    assert_eq!(skipped["code"], "REFUSED");
+    assert!(skipped["detail"].as_str().unwrap().contains("unavailable"));
+    assert!(
+        skipped["next"]
+            .as_str()
+            .unwrap()
+            .contains("provenant quota tick")
     );
+    let skipped_wire = skipped.to_string();
+    for text in [human.as_str(), skipped_wire.as_str()] {
+        assert!(!text.contains("TOKEN_SENTINEL"));
+        assert!(!text.contains("/private/source"));
+    }
     assert_eq!(data["lanes"][0]["delivery"]["remote"], json!(remote));
     assert_eq!(data["lanes"][0]["delivery"]["branch"], json!(branch));
     assert_eq!(
@@ -4358,7 +4782,8 @@ fn render_lanes_removes_peer_terminal_controls() -> Result<(), Box<dyn std::erro
     let (data, human) =
         render_lanes_without_cooldowns(std::slice::from_ref(&lane), &[], None, Path::new("/state"));
     assert_eq!(data["lanes"][0]["state"], "model_unavailable");
-    assert!(human.contains("(provider capacity: Selected model is at capacity)"));
+    assert!(human.contains("the model is unavailable"));
+    assert!(!human.contains("Selected model is at capacity"));
     assert!(human.contains(&format!(
         "continue: provenant retry {} --prompt-file PROMPT",
         lane.attempt_id
@@ -4521,11 +4946,12 @@ fn lanes_render_retry_lineage() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(
         human,
         format!(
-            "{}/{}/{} failed → retrying ({}) unresolved\n{}/{}/{} queued (retry of {}) unresolved\n",
+            "{}/{}/{} failed → retrying ({}) unresolved ({})\n{}/{}/{} queued (retry of {}) unresolved\n",
             failed.run_id,
             failed.task_id,
             failed.attempt_id,
             retry.attempt_id,
+            run::Outcome::Failed.diagnostic_reason(),
             retry.run_id,
             retry.task_id,
             retry.attempt_id,
@@ -4558,7 +4984,16 @@ fn lanes_give_a_settled_lane_its_settlement_reason() -> Result<(), Box<dyn std::
     )?;
     let (data, _) =
         render_lanes_without_cooldowns(&[failed, queued], &[], None, Path::new("/state"));
-    assert_eq!(data["lanes"][0]["settlement"]["reason"], "provider failed");
+    assert_eq!(
+        data["lanes"][0]["settlement"]["reason"],
+        run::Outcome::Failed.diagnostic_reason()
+    );
+    assert!(
+        !data["lanes"][0]["settlement"]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("provider failed")
+    );
     assert_eq!(data["lanes"][1]["settlement"], Value::Null);
     assert_eq!(data["lanes"][1]["reason"], Value::Null);
     Ok(())
@@ -4592,12 +5027,15 @@ fn lanes_distinguish_exhausted_continuations_from_a_retry() -> Result<(), Box<dy
         &successors,
     );
     assert_eq!(data["lanes"][0]["superseded_by"], json!(next));
+    assert_eq!(data["lanes"][1]["state"], "failed");
+    assert!(data["lanes"][1]["superseded_by"].is_null());
     assert_eq!(
         data["lanes"][1]["reason"],
-        "model reported unfinished work; continuations exhausted"
+        run::Outcome::Failed.diagnostic_reason()
     );
     assert!(human.contains("retrying"));
-    assert!(human.contains("continuations exhausted"));
+    assert!(!human.contains("model reported unfinished work"));
+    assert!(!human.contains("continuations exhausted"));
     Ok(())
 }
 
@@ -4746,14 +5184,19 @@ fn render_lanes_omits_account_when_unresolved() -> Result<(), Box<dyn std::error
             "{}/{}/{} rejected unresolved ({reason})\n",
             RunId::from_bytes([2; 16]),
             TaskId::from_bytes([4; 16]),
-            AttemptId::from_bytes([1; 16])
+            AttemptId::from_bytes([1; 16]),
+            reason = run::Outcome::Rejected.diagnostic_reason(),
         )
     );
     assert!(!human.contains("account="));
     assert!(data["lanes"][0].get("title").is_none());
     assert!(data["lanes"][0]["account"].is_null());
     assert_eq!(data["lanes"][0]["state"], "rejected");
-    assert_eq!(data["lanes"][0]["reason"], json!(reason));
+    assert_eq!(
+        data["lanes"][0]["reason"],
+        json!(run::Outcome::Rejected.diagnostic_reason())
+    );
+    assert!(!human.contains(reason));
     assert!(data["lanes"][0]["applied_route"].is_null());
     Ok(())
 }
@@ -5070,7 +5513,8 @@ fn render_lanes_surfaces_provider_silence_while_running() -> Result<(), Box<dyn 
     Ok(())
 }
 #[test]
-fn render_lanes_shows_uncommitted_with_its_dirty_paths() -> Result<(), Box<dyn std::error::Error>> {
+fn render_lanes_reports_uncommitted_without_echoing_dirty_path_prose()
+-> Result<(), Box<dyn std::error::Error>> {
     let reason = "writer left uncommitted edits and no new commit: src/a.rs, b.txt";
     let now = WallTime::from_micros(100)?;
     let lane: run::AttemptRecord = serde_json::from_value(json!({
@@ -5105,11 +5549,20 @@ fn render_lanes_shows_uncommitted_with_its_dirty_paths() -> Result<(), Box<dyn s
     assert_eq!(settled(&lane.state), (true, false));
     let (data, human) = render_lanes_without_cooldowns(&[lane], &[], None, Path::new("/state"));
     assert!(
-        human.contains(&format!(" uncommitted unresolved ({reason})\n")),
+        human.contains(&format!(
+            " uncommitted unresolved ({})\n",
+            run::Outcome::Uncommitted.diagnostic_reason()
+        )),
         "{human}"
     );
     assert_eq!(data["lanes"][0]["state"], "uncommitted");
-    assert_eq!(data["lanes"][0]["reason"], json!(reason));
+    assert_eq!(
+        data["lanes"][0]["reason"],
+        json!(run::Outcome::Uncommitted.diagnostic_reason())
+    );
+    assert!(!human.contains("src/a.rs"));
+    assert!(!human.contains("b.txt"));
+    assert!(!serde_json::to_string(&data)?.contains(reason));
     Ok(())
 }
 #[test]
@@ -5608,7 +6061,7 @@ fn paged_output_never_splits_a_character() {
     assert_eq!(chunk.encoding, "utf8");
 }
 #[test]
-fn quota_reason_uses_provider_message_without_exposing_known_secret_shapes() {
+fn quota_reason_uses_safe_fact_without_provider_message() {
     let exit = ExitObservation {
         publication: PublicationState::Durable,
         scope: Scope {
@@ -5649,13 +6102,13 @@ fn quota_reason_uses_provider_message_without_exposing_known_secret_shapes() {
         host: None,
         cancel: None,
     };
-    for (message, expected) in [
+    for (message, _expected) in [
         (
             "Free allowance exhausted. See https://opencode.ai/go\\quota",
             "Free allowance exhausted. See https://opencode.ai/go\\quota",
         ),
         (
-            "Free allowance exhausted for ghp_abcdefghijklmnopqrstuvwxyz0123456789",
+            "Free allowance exhausted TOKEN_SENTINEL /private/source \u{1b} ghp_abcdefghijklmnopqrstuvwxyz0123456789",
             "Free allowance exhausted for [REDACTED]",
         ),
     ] {
@@ -5669,7 +6122,18 @@ fn quota_reason_uses_provider_message_without_exposing_known_secret_shapes() {
             )
             .unwrap();
         assert_eq!(decoded.outcome, run::Outcome::QuotaLimited);
-        assert_eq!(decoded.reason.as_deref(), Some(format!("{expected}; free tier exhausted; use a paid route or wait for its allowance reset").as_str()));
+        assert_eq!(
+            decoded.terminal_cause,
+            Some(run::TerminalCause::FreePoolQuota)
+        );
+        let reason = decoded.reason.as_deref().unwrap();
+        assert!(reason.contains("free tier exhausted"));
+        assert!(reason.contains("wait"));
+        assert!(!reason.contains(message));
+        assert!(!reason.contains("ghp_"));
+        assert!(!reason.contains("TOKEN_SENTINEL"));
+        assert!(!reason.contains("/private/source"));
+        assert!(!reason.contains('\u{1b}'));
     }
     let event = json!({"type":"provider.quota","message":"☀".repeat(300_000)});
     let decoded = registry
@@ -5686,7 +6150,9 @@ fn quota_reason_uses_provider_message_without_exposing_known_secret_shapes() {
         reason.len() <= 8192,
         "reason must leave room in the terminal record"
     );
-    assert!(reason.ends_with('☀'));
+    assert!(!reason.contains('☀'));
+    assert!(reason.contains("quota"));
+    assert!(reason.contains("wait"));
 }
 
 fn clean_exit() -> ExitObservation {
@@ -5855,11 +6321,8 @@ fn opencode_unavailable_model_reaches_the_decoded_outcome() {
         .unwrap();
     assert_eq!(decoded.outcome, run::Outcome::ModelUnavailable);
     let reason = decoded.reason.as_deref().unwrap();
-    assert!(
-        reason
-            .starts_with("provider model unavailable: Model unavailable: opencode/misspelt-free;"),
-        "{reason}"
-    );
+    assert!(reason.starts_with("provider model unavailable"), "{reason}");
+    assert!(!reason.contains("opencode/misspelt-free"), "{reason}");
     assert!(reason.contains("nearest catalogued IDs:"));
     assert!(decoded.observed_route.is_none());
 }
@@ -5897,7 +6360,7 @@ fn codex_capacity_reaches_the_decoded_outcome() {
     let stream = format!(
         "{}\n{}\n",
         json!({"type":"thread.started","thread_id":"01234567-89ab-cdef-0123-456789abcdef"}),
-        json!({"type":"turn.failed","error":{"message":"Selected model is at capacity. Please try a different model.","codex_error_info":"server_overloaded"}})
+        json!({"type":"turn.failed","error":{"message":"Selected model is at capacity. TOKEN_SENTINEL /private/source","codex_error_info":"server_overloaded"}})
     );
     let decoded = Registry::default()
         .decode(&route, stream.as_bytes(), &exit, Path::new("/nonexistent"))
@@ -5905,7 +6368,9 @@ fn codex_capacity_reaches_the_decoded_outcome() {
     assert_eq!(decoded.outcome, run::Outcome::ModelUnavailable);
     assert_eq!(
         decoded.reason.as_deref(),
-        Some("provider capacity: Selected model is at capacity. Please try a different model.")
+        Some(
+            "provider capacity: the selected model is overloaded; wait or choose an eligible route"
+        )
     );
     assert_eq!(
         decoded.session.as_deref(),
@@ -5967,7 +6432,9 @@ fn capacity_store_failure_does_not_change_settlement() -> Result<(), Box<dyn std
     assert_eq!(decoded.outcome, run::Outcome::ModelUnavailable);
     assert_eq!(
         decoded.reason.as_deref(),
-        Some("provider capacity: at capacity")
+        Some(
+            "provider capacity: the selected model is overloaded; wait or choose an eligible route"
+        )
     );
     Ok(())
 }
@@ -6027,7 +6494,9 @@ fn nested_capacity_settlement_does_not_write_shared_cooldown()
     assert_eq!(decoded.outcome, run::Outcome::ModelUnavailable);
     assert_eq!(
         decoded.reason.as_deref(),
-        Some("provider capacity: at capacity")
+        Some(
+            "provider capacity: the selected model is overloaded; wait or choose an eligible route"
+        )
     );
     assert!(!roots.state.as_path().join("quota").exists());
     Ok(())
@@ -6347,7 +6816,9 @@ fn capacity_guardian_context_records_and_reports_config_failure()
     let disabled = decode()?;
     assert_eq!(
         disabled.reason.as_deref(),
-        Some("provider capacity: at capacity")
+        Some(
+            "provider capacity: the selected model is overloaded; wait or choose an eligible route"
+        )
     );
     assert!(!state.join("quota").exists());
     std::fs::remove_file(state.join("config.toml"))?;
@@ -6414,7 +6885,7 @@ fn claude_and_opencode_overload_reach_the_decoded_outcome() {
                 .reason
                 .as_deref()
                 .unwrap()
-                .starts_with("provider capacity: Overloaded")
+                .starts_with("provider capacity: the selected model is overloaded")
         );
         assert!(decoded.session.is_some());
     }
@@ -6430,13 +6901,13 @@ fn codex_rate_limit_reaches_the_decoded_outcome() {
         ..Default::default()
     };
     let registry = Registry::default();
-    for (message, expected) in [
+    for (message, _expected) in [
         (
             "exceeded retry limit, last status: 429 Too Many Requests".to_owned(),
             "exceeded retry limit, last status: 429 Too Many Requests".to_owned(),
         ),
         (
-            "429 Too Many Requests for ghp_abcdefghijklmnopqrstuvwxyz0123456789".into(),
+            "429 Too Many Requests TOKEN_SENTINEL /private/source \u{1b} ghp_abcdefghijklmnopqrstuvwxyz0123456789".into(),
             "429 Too Many Requests for [REDACTED]".into(),
         ),
         (
@@ -6455,8 +6926,15 @@ fn codex_rate_limit_reaches_the_decoded_outcome() {
             .decode(&route, stream.as_bytes(), &exit, Path::new("/nonexistent"))
             .unwrap();
         assert_eq!(decoded.outcome, run::Outcome::RateLimited);
-        assert_eq!(decoded.reason.as_deref(), Some(expected.as_str()));
-        assert!(decoded.reason.unwrap().len() <= 8192);
+        let reason = decoded.reason.as_deref().unwrap();
+        assert!(reason.contains("rate limited"));
+        assert!(reason.contains("wait"));
+        assert!(!reason.contains(&message));
+        assert!(!reason.contains("ghp_"));
+        assert!(!reason.contains("TOKEN_SENTINEL"));
+        assert!(!reason.contains("/private/source"));
+        assert!(!reason.contains('\u{1b}'));
+        assert!(reason.len() <= 1024);
     }
 }
 
@@ -6467,7 +6945,8 @@ fn agy_denials_preserve_answers_and_prior_failures() {
         model: Some("agy/gemini-3.8-flash".into()),
         ..Default::default()
     };
-    let fixture = include_str!("../../../../tests/fixtures/providers/agy/denied-result.jsonl");
+    let fixture = include_str!("../../../../tests/fixtures/providers/agy/denied-result.jsonl")
+        .replace("RunCommand", "TOKEN_SENTINEL/private/source");
     let recovered = fixture.replace("\"response\":\"\"", "\"response\":\"Recovered answer\"");
     let registry = Registry::default();
     let decoded = registry
@@ -6482,7 +6961,7 @@ fn agy_denials_preserve_answers_and_prior_failures() {
     assert_eq!(decoded.result, "Recovered answer");
     assert_eq!(
         decoded.reason.as_deref(),
-        Some("provider denied: RunCommand")
+        Some("provider denied an action; check account access and inspect the result")
     );
     let decoded = registry
         .decode(
@@ -6495,7 +6974,7 @@ fn agy_denials_preserve_answers_and_prior_failures() {
     assert_eq!(decoded.outcome, run::Outcome::Failed);
     assert_eq!(
         decoded.reason.as_deref(),
-        Some("provider denied: RunCommand")
+        Some("provider denied an action; check account access and inspect the result")
     );
     let mut failed_exit = clean_exit();
     failed_exit.termination = Some(provenant_os::exec::Termination::Exit(1));
@@ -6548,7 +7027,7 @@ fn codex_rollout_error_reaches_the_decoded_reason() {
     assert!(decoded.observed_route.is_none());
     assert_eq!(
         decoded.reason.as_deref(),
-        Some("Codex rollout identity: provider continuation identity is unknown")
+        Some("Codex rollout identity could not be verified; inspect the local session evidence")
     );
 }
 
@@ -6683,7 +7162,7 @@ fn opencode_without_a_session_record_observes_no_model() {
     assert!(decoded.observed_route.is_none());
     assert_eq!(
         decoded.reason.as_deref(),
-        Some("OpenCode session identity: provider continuation identity is unknown")
+        Some("OpenCode session identity could not be verified; inspect the local session evidence")
     );
 }
 
@@ -6829,7 +7308,7 @@ fn a_claude_success_that_hit_its_token_limit_is_flagged_not_failed() {
     assert_eq!(decoded.partial_signals, [run::PartialSignal::ProviderStop]);
     assert_eq!(
         decoded.reason.as_deref(),
-        Some("provider stopped early: stop_reason max_tokens")
+        Some("provider stopped early; inspect the result and resume if needed")
     );
     assert_ne!(decoded.outcome, run::Outcome::Failed);
 }
@@ -7206,7 +7685,7 @@ fn admission_window_deadline_is_preserved_on_restart() -> Result<(), Box<dyn std
 fn foreign_writer_and_dirty_tree_refusals_remain_fail_closed()
 -> Result<(), Box<dyn std::error::Error>> {
     use provenant_confinement::worktrees::{
-        self, WorkerObserver, WorkerState, WorktreeOrigin, WorktreeOwner,
+        self, Occupancy, WorkerObserver, WorktreeOrigin, WorktreeOwner,
     };
 
     struct Free;
@@ -7214,11 +7693,11 @@ fn foreign_writer_and_dirty_tree_refusals_remain_fail_closed()
         fn observe_roots(
             &self,
             roots: &[PathBuf],
-        ) -> std::collections::BTreeMap<PathBuf, WorkerState> {
+        ) -> std::collections::BTreeMap<PathBuf, Occupancy> {
             roots
                 .iter()
                 .cloned()
-                .map(|root| (root, WorkerState::Free))
+                .map(|root| (root, Occupancy::Available))
                 .collect()
         }
     }
@@ -7340,7 +7819,7 @@ fn foreign_writer_and_dirty_tree_refusals_remain_fail_closed()
 
 #[test]
 fn worktrees_lock_contention_retries_and_admits() -> Result<(), Box<dyn std::error::Error>> {
-    use provenant_confinement::worktrees::{WorkerObserver, WorkerState};
+    use provenant_confinement::worktrees::{Occupancy, WorkerObserver};
     use provenant_os::fs::{Directory, LockMode};
 
     struct Free;
@@ -7348,11 +7827,11 @@ fn worktrees_lock_contention_retries_and_admits() -> Result<(), Box<dyn std::err
         fn observe_roots(
             &self,
             roots: &[PathBuf],
-        ) -> std::collections::BTreeMap<PathBuf, WorkerState> {
+        ) -> std::collections::BTreeMap<PathBuf, Occupancy> {
             roots
                 .iter()
                 .cloned()
-                .map(|root| (root, WorkerState::Free))
+                .map(|root| (root, Occupancy::Available))
                 .collect()
         }
     }
@@ -7479,7 +7958,7 @@ fn worktrees_lock_contention_retries_and_admits() -> Result<(), Box<dyn std::err
 
 #[test]
 fn admission_lock_wait_respects_deadline() -> Result<(), Box<dyn std::error::Error>> {
-    use provenant_confinement::worktrees::{WorkerObserver, WorkerState};
+    use provenant_confinement::worktrees::{Occupancy, WorkerObserver};
     use provenant_os::fs::{Directory, LockMode};
 
     struct Free;
@@ -7487,11 +7966,11 @@ fn admission_lock_wait_respects_deadline() -> Result<(), Box<dyn std::error::Err
         fn observe_roots(
             &self,
             roots: &[PathBuf],
-        ) -> std::collections::BTreeMap<PathBuf, WorkerState> {
+        ) -> std::collections::BTreeMap<PathBuf, Occupancy> {
             roots
                 .iter()
                 .cloned()
-                .map(|root| (root, WorkerState::Free))
+                .map(|root| (root, Occupancy::Available))
                 .collect()
         }
     }
@@ -7595,19 +8074,19 @@ fn admission_lock_wait_respects_deadline() -> Result<(), Box<dyn std::error::Err
 #[test]
 fn dispatch_restart_honours_saved_admission_wake_and_deadline()
 -> Result<(), Box<dyn std::error::Error>> {
-    use provenant_confinement::worktrees::{WorkerObserver, WorkerState};
+    use provenant_confinement::worktrees::{Occupancy, WorkerObserver};
     use std::sync::atomic::{AtomicUsize, Ordering};
     struct Counting(AtomicUsize);
     impl WorkerObserver for Counting {
         fn observe_roots(
             &self,
             roots: &[PathBuf],
-        ) -> std::collections::BTreeMap<PathBuf, WorkerState> {
+        ) -> std::collections::BTreeMap<PathBuf, Occupancy> {
             self.0.fetch_add(1, Ordering::SeqCst);
             roots
                 .iter()
                 .cloned()
-                .map(|root| (root, WorkerState::Free))
+                .map(|root| (root, Occupancy::Available))
                 .collect()
         }
     }
@@ -7729,7 +8208,7 @@ fn every_adapter_sign_in_failure_settles_auth_required() -> Result<(), Box<dyn s
                 .reason
                 .as_deref()
                 .unwrap()
-                .contains("account-specific login remedy unavailable")
+                .contains("provenant quota tick")
         );
     }
     Ok(())
@@ -7772,14 +8251,8 @@ fn settled_auth_uses_only_the_selected_registered_account() -> Result<(), Box<dy
     assert_eq!(decoded.outcome, run::Outcome::AuthRequired);
     let reason = decoded.reason.unwrap();
     assert!(reason.contains("work [codex]"), "{reason}");
-    assert!(
-        reason.contains("CODEX_HOME='/fixture/work' codex login"),
-        "{reason}"
-    );
-    assert!(
-        reason.contains("last successful observation unknown"),
-        "{reason}"
-    );
+    assert!(reason.contains("codex login"), "{reason}");
+    assert!(reason.contains("/fixture/work"), "{reason}");
     Ok(())
 }
 
@@ -7913,6 +8386,8 @@ fn reconcile_reports_publish_error_and_explicitly_abandons_a_writer_fence()
                     id,
                     session.store.record(id, &call)?.revision,
                     &run::TerminalPublication {
+                        terminal_cause: None,
+                        terminal_note: None,
                         outcome: run::Outcome::Unsettled,
                         finished_at: clock.wall_now()?,
                         started_at: None,
@@ -8129,4 +8604,37 @@ fn projected_cli_error_omits_unsafe_source_and_keeps_bounded_fields() {
             .unwrap()
             .contains("TOKEN_SENTINEL")
     );
+}
+
+#[test]
+fn malformed_claude_result_preserves_provider_error_in_settlement() {
+    let route = run::RouteRecord {
+        provider: Some("claude".into()),
+        model: Some("claude/fixture".into()),
+        ..Default::default()
+    };
+    let message = "Permission mode forced to default — CLAUDE_CODE_SUBPROCESS_ENV_SCRUB is set";
+    let result =
+        serde_json::json!({"type":"result", "is_error":true, "errors":[message]}).to_string();
+    let earlier = r#"{"type":"result","session_id":"s","subtype":"success","is_error":false,"result":"earlier answer"}"#;
+    for (result, reason) in [
+        (
+            result.as_str(),
+            format!("provider protocol is malformed: {message}"),
+        ),
+        ("{", "provider protocol is malformed".into()),
+    ] {
+        for suffix in ["", "\n"] {
+            let decoded = Registry::default()
+                .decode(
+                    &route,
+                    format!("{earlier}\n{result}{suffix}").as_bytes(),
+                    &clean_exit(),
+                    Path::new("/unused"),
+                )
+                .unwrap();
+            assert_eq!(decoded.outcome, run::Outcome::Failed);
+            assert_eq!(decoded.reason.as_deref(), Some(reason.as_str()));
+        }
+    }
 }

@@ -8,7 +8,9 @@ description: "Use for template graphs, composites, parallel work, review panels 
 Use `task` for one bounded assignment, `plan` when the shape is unsettled,
 `batch` for parallel implementation and `deliver` for implementation through
 landing. A composite is a template containing nodes; dotted names select
-flavours such as `review.security` and `implement.fix`.
+flavours such as `review.security` and `implement.fix`. Slice larger work into
+lanes of about three acceptance items each, merged into one integration branch.
+Keep long lanes for coupled work that cannot be split.
 
 ```sh
 provenant run --use plan --file brief.md --explain
@@ -29,7 +31,8 @@ owns the hand-off. Keep coupled writes with one owner.
 
 Use `provenant status` to orient and `provenant output TARGET` to collect.
 Use `steer` for a message, `stop` for a subtree, `retry` for unfinished work,
-and `edit` for a graph patch. Inside a worker, `run --use TEMPLATE` adds a child
+and `edit` for a graph patch. Launch by a requested tier such as `senior`;
+the attempt receipt records the resolved `adapter/model@effort`. Inside a worker, `run --use TEMPLATE` adds a child
 to the same graph, sharing budget, stopping and trace. Any agent may return a
 patch; started attempts stay immutable.
 

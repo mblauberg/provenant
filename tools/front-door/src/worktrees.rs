@@ -80,7 +80,27 @@ fn warn_fetch(error: &Error) {
     eprintln!("warning: {error}; using the current integration resolution");
 }
 
+pub(crate) fn local_worktree_message(error: &WorktreeError) -> String {
+    use provenant_records::diagnostic::{Destination, safe_path, safe_text};
+    match error {
+        WorktreeError::CensusUnknown { path, detail }
+        | WorktreeError::UnknownOccupancy { path, detail } => {
+            let scope = safe_path(path, Destination::Local)
+                .unwrap_or_else(|| "the requested worktree".into());
+            format!("{error}: {scope}: {}", safe_text(detail))
+        }
+        _ => error.to_string(),
+    }
+}
+
 impl Error {
+    fn local_message(&self) -> String {
+        match self {
+            Self::Worktree(error) => local_worktree_message(error),
+            _ => self.to_string(),
+        }
+    }
+
     fn repair(&self) -> Option<&'static str> {
         match self {
             Self::Worktree(error) => error.repair(),
@@ -110,6 +130,7 @@ impl Error {
                 | WorktreeError::LiveWriter
                 | WorktreeError::LiveProcess(_)
                 | WorktreeError::UnknownWriter
+                | WorktreeError::UnknownOccupancy { .. }
                 | WorktreeError::GitEntryHeld { .. }
                 | WorktreeError::IncompleteCensus { .. }
                 | WorktreeError::Primary
@@ -126,7 +147,7 @@ impl Error {
 #[serde(untagged)]
 enum Data {
     SeedBuilt(String),
-    Created(worktrees::WorktreeInfo),
+    Created(Box<worktrees::WorktreeInfo>),
     Listed(Vec<worktrees::WorktreeInfo>),
     Removed(worktrees::RemoveOutcome),
 }
@@ -167,7 +188,7 @@ pub fn run(command: Worktree, globals: &Globals, workers: &dyn WorkerObserver) -
             } else {
                 "WORKTREE"
             },
-            &error.to_string(),
+            &error.local_message(),
             error.repair(),
             globals,
         ),
@@ -223,6 +244,7 @@ fn execute(
             .map_err(|error| Error::SeedBuild(error.to_string()))?;
         return Ok(Data::SeedBuilt(generation));
     }
+    let facts = worktrees::RepoFacts::default();
     with_context(
         roots,
         home,
@@ -230,20 +252,24 @@ fn execute(
         MUTATION_TIMEOUT,
         workers,
         |context, cancel| {
+            let context = &WorktreeContext {
+                facts: &facts,
+                ..*context
+            };
             Ok(match command {
                 Worktree::SeedBuild => unreachable!(),
-                Worktree::Create { branch, base } => Data::Created(worktrees::create(
+                Worktree::Create { branch, base } => Data::Created(Box::new(worktrees::create(
                     context,
                     WorktreeCreate { branch, base },
                     cancel,
-                )?),
+                )?)),
                 Worktree::List => Data::Listed(worktrees::list(context, cancel)?),
                 Worktree::SessionList => unreachable!(),
                 Worktree::Remove(mut args) => {
                     let upstream = if args.discard {
                         None
                     } else {
-                        match crate::gc_support::fetch_default(context) {
+                        match crate::gc_support::fetch_default(context, cancel) {
                             Ok(upstream) => upstream,
                             Err(error) => {
                                 warn_fetch(&error);
@@ -394,7 +420,7 @@ pub(crate) fn scheduled_gc(
         apply: true,
         idle_days,
     };
-    let data = gc(&command, globals, workers).map_err(|error| error.to_string())?;
+    let data = gc(&command, globals, workers).map_err(|error| error.local_message())?;
     if !data.provider_state.errors.is_empty() || !data.chair_logs.errors.is_empty() {
         return Err("retention incomplete; next: provenant gc --apply".into());
     }
@@ -457,7 +483,14 @@ pub fn run_gc(command: Gc, globals: &Globals, workers: &dyn WorkerObserver) -> u
             let result = gc_failure(&data, &failure, globals.json);
             emit(&result, globals, "", command.dry_run)
         }
-        Err(error) => fail("gc", error.outcome(), "GC", &error.to_string(), globals),
+        Err(error) => crate::fail_with_repair(
+            "gc",
+            error.outcome(),
+            "GC",
+            &error.local_message(),
+            Some(GC_REPAIR),
+            globals,
+        ),
     }
 }
 
@@ -683,6 +716,7 @@ fn gc_project(
     home: &Path,
     project: &Path,
     workers: &dyn WorkerObserver,
+    facts: &worktrees::RepoFacts,
     read_only: bool,
 ) -> Result<GcProject, Error> {
     with_context_mode(
@@ -693,8 +727,14 @@ fn gc_project(
         workers,
         read_only,
         |context, cancel| {
-            if gc_primary_checkout(context.repo, context.executor, context.utility, cancel)?
-                != context.repo.root_path()
+            let context = &WorktreeContext { facts, ..*context };
+            if gc_primary_checkout(
+                context.repo,
+                context.executor,
+                context.utility,
+                facts,
+                cancel,
+            )? != context.repo.root_path()
             {
                 return Err(Error::GcObservation("GC requires the primary checkout"));
             }
@@ -718,18 +758,16 @@ fn gc_primary_checkout<'a>(
     repo: &'a provenant_confinement::repo::VerifiedRepo,
     executor: &dyn provenant_os::exec::Executor,
     runtime: &UtilityRuntime,
+    facts: &worktrees::RepoFacts,
     cancel: &CancelToken,
 ) -> Result<&'a Path, Error> {
-    let bare = provenant_confinement::utility::run_utility(
-        executor,
-        provenant_confinement::utility::GitRead::LocalBare,
+    if facts.bare_setting(
         repo,
+        executor,
         runtime,
         UtilityBudget::bounded(Duration::from_secs(5))?,
         cancel,
-    )?;
-    if bare.termination != provenant_os::exec::Termination::Exit(0)
-        || bare.stdout.bytes != b"false\n"
+    )? != Some(false)
     {
         return Err(Error::GcObservation(
             "GC cannot select a primary checkout for a bare repository or unknown repository configuration",
@@ -834,8 +872,8 @@ pub(crate) fn land_cleanup(
                 .workers
                 .observe_roots_with_details(std::slice::from_ref(&lane.path));
             match observations.get(&lane.path) {
-                Some(worktrees::WorkerState::Free) => {}
-                Some(worktrees::WorkerState::Live) => {
+                Some(worktrees::Occupancy::Available) => {}
+                Some(worktrees::Occupancy::Observed { .. }) => {
                     landed.kept =
                         Some(worktrees::live_refusal(context.workers, &lane.path).to_string());
                     return Ok(landed);
@@ -926,7 +964,14 @@ pub(crate) fn land_cleanup(
                         format!("branch {} kept: {:?}{detail}", kept.branch, kept.reason)
                     });
                 }
-                Err(error) => landed.kept = Some(error.with_repair()),
+                Err(error) => {
+                    let mut message = local_worktree_message(&error);
+                    if let Some(repair) = error.repair() {
+                        message.push_str("; ");
+                        message.push_str(repair);
+                    }
+                    landed.kept = Some(message);
+                }
             }
             Ok(landed)
         },
@@ -974,7 +1019,6 @@ fn collection_lock_for(
 
 fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<GcData, Error> {
     use provenant_confinement::cache::{CacheGcPolicy, gc_worktree_cargo_caches_with_writer_guard};
-    use provenant_confinement::worktrees::{WorkerState, WriterState};
 
     let workspace = if command.scheduled {
         roots::Workspace::Home
@@ -993,6 +1037,7 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
     } else {
         Some(collection_lock(&roots)?)
     };
+    let facts = worktrees::RepoFacts::default();
     let mut projects = Vec::new();
     let mut project_ids = Vec::new();
     let mut unobserved_projects = Vec::new();
@@ -1024,7 +1069,7 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
             } else {
                 common
             };
-            match gc_project(&roots, &home, path, workers, command.dry_run) {
+            match gc_project(&roots, &home, path, workers, &facts, command.dry_run) {
                 Ok(project) => {
                     project_ids.push(project.binding.project_id());
                     projects.push(project);
@@ -1058,8 +1103,8 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
                 ..Default::default()
             });
         }
-        let primary = gc_primary_checkout(&repo, &executor, &runtime, &CancelToken::new())?;
-        let selected = gc_project(&roots, &home, primary, workers, command.dry_run)?;
+        let primary = gc_primary_checkout(&repo, &executor, &runtime, &facts, &CancelToken::new())?;
+        let selected = gc_project(&roots, &home, primary, workers, &facts, command.dry_run)?;
         project_ids.push(selected.binding.project_id());
         projects.push(selected);
     }
@@ -1090,12 +1135,16 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
             workers,
             command.dry_run,
             |context, cancel| {
+                let context = &WorktreeContext {
+                    facts: &facts,
+                    ..*context
+                };
                 // A failed fetch cannot grant removal authority. Output pruning
                 // still has its independent terminal-state proof.
                 let (upstream, upstream_error) = if command.pressure {
                     (None, None)
                 } else {
-                    match crate::gc_support::fetch_default(context) {
+                    match crate::gc_support::fetch_default(context, cancel) {
                         Ok(upstream) => (upstream, None),
                         Err(error) => (None, Some(error.to_string())),
                     }
@@ -1187,8 +1236,8 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
         dry_run: command.dry_run,
         protected_owners: lanes
             .iter()
-            .filter(|info| info.writer != WriterState::Free)
-            .map(|info| (info.path.clone(), info.writer))
+            .filter(|info| !info.occupancy.is_available())
+            .map(|info| (info.path.clone(), info.occupancy.clone()))
             .collect(),
         project_owners: lanes.iter().map(|info| info.path.clone()).collect(),
         selected_only: command.pressure && !command.scheduled,
@@ -1203,7 +1252,10 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
                 };
             }
         }
-        Err(WorkerState::Unknown)
+        Err(worktrees::Occupancy::custody_unknown(
+            path.to_path_buf(),
+            "writer registration was not observed",
+        ))
     });
     let provider_state = if command.pressure {
         crate::provider_retention::collect_pressure(
@@ -1425,6 +1477,7 @@ fn with_context_mode<T>(
     let clock = SystemClock;
     let policy_workers = worktrees::CensusPolicyWorkers::from_roots(workers, roots)?;
     let workers = worktrees::CensusSession::new(&policy_workers, &clock);
+    let facts = worktrees::RepoFacts::default();
     let context = WorktreeContext {
         home,
         repo: &repo,
@@ -1432,6 +1485,7 @@ fn with_context_mode<T>(
         project_state: &project_state,
         executor: &executor,
         utility: &runtime,
+        facts: &facts,
         workers: &workers,
         clock: &clock,
         utility_budget: budget,
@@ -1461,6 +1515,37 @@ mod human_tests {
     #[allow(unused_imports)] // Also compiled by the harness=false worktree driver.
     use super::*;
 
+    #[test]
+    fn local_unknown_occupancy_refusal_preserves_scope_and_evidence() {
+        for error in [
+            WorktreeError::UnknownOccupancy {
+                path: PathBuf::from("/project/lane"),
+                detail: "owner unreadable\nretry".into(),
+            },
+            WorktreeError::CensusUnknown {
+                path: PathBuf::from("/project/lane"),
+                detail: "census incomplete\nretry".into(),
+            },
+        ] {
+            let message = local_worktree_message(&error);
+            assert!(message.contains("/project/lane"));
+            assert!(message.contains("\\nretry"));
+            assert!(!message.contains('\n'));
+            assert!(!error.to_string().contains("/project/lane"));
+            if matches!(error, WorktreeError::UnknownOccupancy { .. }) {
+                assert!(matches!(
+                    Error::Worktree(WorktreeError::UnknownOccupancy {
+                        path: "/lane".into(),
+                        detail: "fence".into()
+                    })
+                    .outcome(),
+                    Outcome::Refused
+                ));
+            }
+            assert_eq!(Error::Worktree(error).local_message(), message);
+        }
+    }
+
     #[allow(dead_code)] // The harness=false driver compiles only the helpers.
     fn info(path: &str) -> Result<worktrees::WorktreeInfo, Box<dyn std::error::Error>> {
         Ok(worktrees::WorktreeInfo {
@@ -1468,8 +1553,9 @@ mod human_tests {
             branch: Some("refs/heads/master".into()),
             head: GitOid::parse(&"4a".repeat(20))?,
             dirty: worktrees::WorktreeCondition::Dirty,
-            writer: worktrees::WriterState::Live,
-            owner: worktrees::OwnerStatus::Unknown,
+            occupancy: worktrees::Occupancy::Observed { process: None },
+            owner: Err("worktree registration was not observed".into()),
+            primary: false,
         })
     }
 
@@ -1515,8 +1601,8 @@ mod human_tests {
     #[test]
     fn worktree_list_distinguishes_unowned_from_uncertain_custody() -> Check {
         let mut tree = info("/repo/native checkout")?;
-        tree.owner = worktrees::OwnerStatus::Unowned;
-        tree.writer = worktrees::WriterState::Unknown;
+        tree.owner = Ok(None);
+        tree.occupancy = worktrees::Occupancy::custody_unknown(tree.path.clone(), "fixture");
         let value = serde_json::to_value(&tree)?;
         assert_eq!(value["owner"], "unowned");
         assert_eq!(value["writer"], "unknown");
@@ -1524,9 +1610,12 @@ mod human_tests {
         assert!(
             human(serde_json::to_value(Data::Listed(vec![tree.clone()]))?).contains("--worktree")
         );
-        tree.owner = worktrees::OwnerStatus::Unknown;
+        tree.owner = Err("worktree registration was not observed".into());
         assert!(serde_json::to_value(&tree)?.get("next").is_none());
-        assert_eq!(tree.writer, worktrees::WriterState::Unknown);
+        assert!(matches!(
+            tree.occupancy,
+            worktrees::Occupancy::Unknown { .. }
+        ));
         Ok(())
     }
 }

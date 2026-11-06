@@ -302,6 +302,7 @@ impl DomainConfig for PrSettings {
         let mut check = |invalid, field: &str, code| {
             if invalid {
                 errors.push(SectionError {
+                    detail: None,
                     field: field.into(),
                     code,
                 });
@@ -380,6 +381,7 @@ impl DomainConfig for PrSettings {
                 ] {
                     if invalid {
                         errors.push(SectionError {
+                            detail: None,
                             field: format!("{prefix}.{field}"),
                             code: "range",
                         });
@@ -391,6 +393,7 @@ impl DomainConfig for PrSettings {
                     .is_some_and(|prefix| !valid_candidate_ref_prefix(prefix))
                 {
                     errors.push(SectionError {
+                        detail: None,
                         field: format!("{prefix}.candidate_ref_prefix"),
                         code: "invalid",
                     });

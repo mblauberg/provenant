@@ -8,16 +8,23 @@ use provenant_records::run::RequestedRoute;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InputError {
     pub path: String,
+    cause: Option<super::facade::InvalidInputDetail>,
 }
 
 impl std::fmt::Display for InputError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "invalid input field `{}`", self.path)?;
-        if self.path.starts_with("tasks[") && self.path.ends_with("].title") {
+        if matches!(
+            self.cause,
+            Some(super::facade::InvalidInputDetail::FieldTitle(_))
+        ) {
             write!(
                 f,
                 ": task title must be 1 to 256 bytes and contain no control characters"
             )?;
+        }
+        if let Some(super::facade::InvalidInputDetail::FieldTooLarge { limit, .. }) = &self.cause {
+            write!(f, ": exceeds {limit} bytes")?;
         }
         Ok(())
     }
@@ -31,8 +38,44 @@ impl InputError {
         super::facade::FacadeError::InvalidInput { detail: None }.code()
     }
 
-    pub(crate) fn new(path: impl Into<String>) -> Self {
-        Self { path: path.into() }
+    /// A bounded schema field path safe for diagnostic envelopes.
+    pub fn safe_path(&self) -> Option<&str> {
+        super::facade::safe_input_field(&self.path)
+    }
+
+    pub fn new(path: impl Into<String>) -> Self {
+        Self {
+            path: path.into(),
+            cause: None,
+        }
+    }
+
+    fn with_cause(path: &str, cause: super::facade::InvalidInputDetail) -> Self {
+        Self {
+            path: path.to_owned(),
+            cause: Some(cause),
+        }
+    }
+
+    pub(super) fn diagnostic_detail(&self) -> Option<super::facade::InvalidInputDetail> {
+        use super::facade::InvalidInputDetail;
+        let path = self.safe_path()?;
+        match self.cause.as_ref() {
+            Some(cause @ InvalidInputDetail::FieldTooLarge { field, .. })
+            | Some(cause @ InvalidInputDetail::FieldTitle(field))
+                if field == path =>
+            {
+                Some(cause.clone())
+            }
+            _ => Some(InvalidInputDetail::Field(path.to_owned())),
+        }
+    }
+
+    pub fn diagnostic(&self) -> provenant_records::diagnostic::Diagnostic {
+        super::facade::FacadeError::InvalidInput {
+            detail: self.diagnostic_detail(),
+        }
+        .diagnostic()
     }
 }
 
@@ -79,6 +122,19 @@ macro_rules! bounded_input {
             }
         }
 
+        impl $name {
+            /// Decode and validate for a transport while retaining the typed
+            /// validation cause separately from structural decoding errors.
+            pub fn decode_for_transport(
+                value: serde_json::Value,
+                transport: provenant_core::WaitTransport,
+            ) -> Result<Result<Self, crate::coordination::input::InputError>, serde_json::Error> {
+                let input = Self::from(serde_json::from_value::<$wire>(value)?);
+                Ok(crate::coordination::input::ValidateInput::validate_input(&input, transport)
+                    .map(|()| input))
+            }
+        }
+
         impl<'de> serde::Deserialize<'de> for $name {
             fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
             where
@@ -117,7 +173,16 @@ fn mail_session(session: Option<&str>) -> Result<(), InputError> {
 }
 
 fn bounded_text(value: &str, path: &str, max: usize) -> Result<(), InputError> {
-    if value.is_empty() || value.len() > max || value.contains('\0') {
+    if value.len() > max {
+        return Err(InputError::with_cause(
+            path,
+            super::facade::InvalidInputDetail::FieldTooLarge {
+                field: path.to_owned(),
+                limit: max,
+            },
+        ));
+    }
+    if value.is_empty() || value.contains('\0') {
         return Err(field(path));
     }
     Ok(())
@@ -464,8 +529,13 @@ impl ValidateInput for SubmitInput {
                     };
                     bounded_text(&task.prompt, &format!("{path}.prompt"), prompt_limit)?;
                     if let Some(title) = &task.title {
-                        provenant_core::validate_task_title(title)
-                            .map_err(|_| field(&format!("{path}.title")))?;
+                        provenant_core::validate_task_title(title).map_err(|_| {
+                            let field = format!("{path}.title");
+                            InputError::with_cause(
+                                &field,
+                                super::facade::InvalidInputDetail::FieldTitle(field.clone()),
+                            )
+                        })?;
                     }
                     optional_text(
                         task.base.as_deref(),
@@ -473,6 +543,7 @@ impl ValidateInput for SubmitInput {
                         MAX_REFERENCE_BYTES,
                     )?;
                     optional_text(task.head.as_deref(), &format!("{path}.head"), 64)?;
+                    optional_text(task.source_head.as_deref(), &format!("{path}.source_head"), 64)?;
                     optional_text(task.account.as_deref(), &format!("{path}.account"), 64)?;
                     optional_text(
                         task.worktree.as_deref(),
@@ -677,7 +748,19 @@ mod tests {
             if bytes <= 65_536 {
                 assert!(mcp.is_ok());
             } else {
-                assert_eq!(mcp.unwrap_err().path, "tasks[0].prompt");
+                let error = mcp.unwrap_err();
+                assert_eq!(error.path, "tasks[0].prompt");
+                let projection = error.diagnostic();
+                let detail = projection.detail.as_deref().unwrap();
+                assert!(detail.contains("tasks[0].prompt"));
+                assert!(detail.contains("65536"));
+                assert!(projection.next.is_some());
+                let facade = super::super::facade::FacadeError::from(
+                    &super::super::CoordinationError::Input(error),
+                );
+                let received: super::super::facade::FacadeError =
+                    serde_json::from_value(serde_json::to_value(&facade).unwrap()).unwrap();
+                assert_eq!(received.diagnostic(), facade.diagnostic());
             }
         }
         for prompt in [String::new(), "x\0y".into(), "x".repeat(1_048_577)] {

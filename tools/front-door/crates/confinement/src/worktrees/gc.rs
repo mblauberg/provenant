@@ -67,7 +67,18 @@ fn collect_impl(
     // the inventory under custody before mutation.
     let entries = {
         let _repository = repository_lock(context, LockMode::Shared, cancel)?;
-        read_worktrees(context, cancel)?
+        context.repo.revalidate()?;
+        let snapshot = lazy_cleanliness
+            .then(|| context.facts.take_inventory(context))
+            .flatten();
+        if policy.dry_run {
+            match snapshot {
+                Some(entries) => entries,
+                None => context.facts.read_inventory(context, cancel)?,
+            }
+        } else {
+            context.facts.read_inventory(context, cancel)?
+        }
     };
     // Preview all candidates against one census snapshot. Applying still
     // refreshes under custody immediately before each mutation.
@@ -93,10 +104,10 @@ fn collect_impl(
         // An unknown writer does not make ignored output disposable. Require
         // a complete free census and writer exclusion before considering it.
         // This is independent of the policy for removing foreign worktrees.
-        let unknown_output = lane.writer == WriterState::Unknown
+        let unknown_output = matches!(&lane.occupancy, Occupancy::Unknown { .. })
             || (!lane.path.starts_with(&managed)
-                && lane.owner == OwnerStatus::Unowned
-                && lane.writer == WriterState::Free);
+                && lane.is_unowned()
+                && lane.occupancy.is_available());
         if unknown_output && policy.regenerable.is_empty() {
             if policy.dry_run {
                 report.idle_output.push(OutputEntry {
@@ -162,7 +173,9 @@ fn collect_impl(
             continue;
         }
         let foreign = policy.foreign_merged_clean && !(policy.terminal)(&lane.path);
-        if foreign || (policy.foreign_merged_clean && lane.writer == WriterState::Unknown) {
+        if foreign
+            || (policy.foreign_merged_clean && matches!(&lane.occupancy, Occupancy::Unknown { .. }))
+        {
             // The fallback proves ancestry and a free census, not that a managed
             // lane is finished: keep a fresh tree at the tip or on its first parent.
             if lane.path.starts_with(&managed)
@@ -204,10 +217,10 @@ fn collect_impl(
             }
             continue;
         }
-        if lane.writer != WriterState::Free {
-            let reason = match lane.writer {
-                WriterState::Busy => RetainReason::LockBusy,
-                WriterState::Live => RetainReason::LiveWriter,
+        if !lane.occupancy.is_available() {
+            let reason = match &lane.occupancy {
+                Occupancy::Held => RetainReason::LockBusy,
+                Occupancy::Observed { .. } => RetainReason::LiveWriter,
                 _ => RetainReason::UnknownWriter,
             };
             if reason == RetainReason::UnknownWriter
@@ -417,7 +430,11 @@ fn prune_unknown_output(
         if policy.dry_run {
             tree_unchanged(preview_entries, entry, lane.head)?;
         } else {
-            tree_unchanged(&read_worktrees(context, cancel)?, entry, lane.head)?;
+            tree_unchanged(
+                &context.facts.read_inventory(context, cancel)?,
+                entry,
+                lane.head,
+            )?;
         }
     }
     if policy.dry_run {
@@ -533,7 +550,13 @@ fn census_refusal_detail(context: &WorktreeContext<'_>, path: &Path) -> Option<S
         .workers
         .observe_roots_with_details(std::slice::from_ref(&path.to_path_buf()));
     match states.get(path) {
-        Some(WorkerState::Free) => None,
+        Some(Occupancy::Available) => None,
+        Some(Occupancy::Unknown { evidence, .. }) => Some(
+            details
+                .get(path)
+                .cloned()
+                .unwrap_or_else(|| evidence.clone()),
+        ),
         Some(_) => Some(
             details
                 .get(path)
@@ -1179,10 +1202,7 @@ fn preview_foreign(
     // A missing slot means no writer has ever held this tree.
     let writer = {
         let _repository = repository_lock(context, LockMode::Shared, cancel)?;
-        cache_writer_probe(context.project_state, &lane.path).map_err(|state| match state {
-            WorkerState::Busy => WorktreeError::LockBusy,
-            _ => WorktreeError::UnknownWriter,
-        })?
+        cache_writer_probe(context.project_state, &lane.path).map_err(custody_refusal)?
     };
     let recheck = || -> Result<WorktreeCondition, WorktreeError> {
         verified.repo().revalidate()?;

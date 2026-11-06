@@ -887,6 +887,7 @@ fn request_correlation_edges_verify_host_seals_and_refuse_mismatches() -> Result
                 prompt: "fixture".into(),
                 base: None,
                 pinned_base: None,
+                source_head: None,
                 head: None,
                 route: RequestedRoute::Named {
                     extra: Default::default(),

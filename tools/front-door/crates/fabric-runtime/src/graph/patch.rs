@@ -188,6 +188,9 @@ impl From<String> for PatchError {
     }
 }
 
+/// Journal callback run before a graph patch commits.
+pub type PatchJournal<'a> = dyn Fn(&PatchRecord) -> Result<(), String> + 'a;
+
 /// Everything a patch is compiled and checked against, apart from the graph.
 pub struct PatchContext<'a> {
     pub library: &'a TemplateLibrary,
@@ -196,7 +199,7 @@ pub struct PatchContext<'a> {
     pub scan: &'a dyn Fn(&str) -> Result<(), String>,
     /// Writes an admitted patch to the graph's journal. `admit_patch` calls it
     /// before the admission is committed, so a failed write admits nothing.
-    pub journal: Option<&'a dyn Fn(&PatchRecord) -> Result<(), String>>,
+    pub journal: Option<&'a PatchJournal<'a>>,
     pub limits: &'a crate::config::GraphLimits,
 }
 
@@ -355,7 +358,7 @@ fn admit_patch_for_retry(
         &graph.checkpoint.expansions,
         context.limits,
     )?;
-    let (plan, _) = validate_flat_plan(&expanded, &plans::generous()).map_err(str::to_owned)?;
+    let (plan, _) = validate_flat_plan(&expanded, &plans::generous()).map_err(|error| error.to_string())?;
     let parent = match parent {
         Some(id) => Some(
             plan.nodes
@@ -524,7 +527,7 @@ pub fn retry_node(
             {
                 let mut value =
                     serde_json::to_value(prior).map_err(|e| PatchError::invalid(e.to_string()))?;
-                let fields = value.as_object_mut().unwrap();
+                let fields = value.as_object_mut().ok_or_else(|| PatchError::invalid("node snapshot must be an object"))?;
                 fields.remove("settled_dependency_snapshots");
                 fields.remove("previous_attempts");
                 snapshots.entry(prior.id.clone()).or_insert(value);
@@ -625,7 +628,7 @@ fn reset_progress(old: &NodeProgress, container: bool) -> Result<NodeProgress, P
     let mut previous = old.previous_attempts.clone();
     previous.extend(old.attempts.iter().cloned());
     let mut reset = serde_json::to_value(old).map_err(|e| PatchError::invalid(e.to_string()))?;
-    let fields = reset.as_object_mut().unwrap();
+    let fields = reset.as_object_mut().ok_or_else(|| PatchError::invalid("node snapshot must be an object"))?;
     fields.retain(|key, _| {
         matches!(
             key.as_str(),
@@ -642,7 +645,7 @@ fn reset_progress(old: &NodeProgress, container: bool) -> Result<NodeProgress, P
     fields.insert("attempts".into(), serde_json::json!([]));
     fields.insert(
         "previous_attempts".into(),
-        serde_json::to_value(previous).unwrap(),
+        serde_json::to_value(previous).map_err(|error| PatchError::invalid(error.to_string()))?,
     );
     fields.insert("retry_generation".into(), generation.into());
     if container {
@@ -816,7 +819,7 @@ pub fn submit(
         nodes,
     };
     document.schema_version = u64::from(minimum_schema_version(&document));
-    document.admit(context.limits).map_err(classify)?;
+    document.admit(context.limits).map_err(|error| classify(error.to_string()))?;
     Ok(document)
 }
 
@@ -1131,10 +1134,10 @@ pub(super) fn prepare(
             ));
         }
     }
-    validate_schema(&preview).map_err(str::to_owned)?;
+    validate_schema(&preview).map_err(|error| PatchError::invalid(error.to_string()))?;
     let (plan, _) = validate_flat_plan(&preview, &plans::generous())
-        .map_err(|reason| classify(reason.into()))?;
-    validate_output_kinds(&preview)?;
+        .map_err(|reason| classify(reason.to_string()))?;
+    validate_output_kinds(&preview).map_err(|error| PatchError::invalid(error.to_string()))?;
     if let Some(reason) = structural_limit_reason(&preview, &plan, context.limits) {
         return Err(PatchError::invalid(reason));
     }

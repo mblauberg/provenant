@@ -987,6 +987,7 @@ pub(super) fn read_checkpoint_bytes(
     Ok(Some(bytes))
 }
 
+#[cfg(test)]
 pub(super) fn decode_checkpoint(
     bytes: &[u8],
     graph_id: &str,

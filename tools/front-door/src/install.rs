@@ -128,8 +128,12 @@ pub(crate) fn shared_settings(
     accounts: &provenant_providers::accounts::Settings,
     home: &Path,
 ) -> Result<Option<SharedSettings>, InstallError> {
-    if let Some(code) = accounts.settings_error() {
-        return Err(InstallError::InvalidConfig(code));
+    if let Some((message, code)) = accounts.settings_error() {
+        return Err(if code.is_some() {
+            InstallError::SharedSettingsNeverSynced(message)
+        } else {
+            InstallError::InvalidConfig(message)
+        });
     }
     let configured = accounts
         .shared_settings
@@ -163,11 +167,16 @@ pub(crate) fn shared_settings(
             for key in &keys {
                 if let Some(value) = object.get(key) {
                     provenant_config::shared_settings::check_value(key, value).map_err(|reason| {
-                        InstallError::InvalidConfig(provenant_config::shared_settings::interned(
+                        let message = provenant_config::shared_settings::interned(
                             format!(
                                 "shared settings source: {reason}; remove it or drop `{key}` from `keys`"
                             ),
-                        ))
+                        );
+                        if reason.code().is_some() {
+                            InstallError::SharedSettingsNeverSynced(message)
+                        } else {
+                            InstallError::InvalidConfig(message)
+                        }
                     })?;
                     source.insert(key.clone(), value.clone());
                 }
@@ -359,6 +368,9 @@ impl InstallData {
 fn error_class(error: &InstallError) -> (Outcome, &'static str) {
     match error {
         InstallError::HooksUnavailable => (Outcome::Refused, "HOOKS_UNAVAILABLE"),
+        InstallError::SharedSettingsNeverSynced(_) => {
+            (Outcome::Invalid, "SHARED_SETTINGS_NEVER_SYNCED")
+        }
         InstallError::Conflict(_)
         | InstallError::PeerAgentConflict(_)
         | InstallError::Drift(_)
@@ -368,6 +380,12 @@ fn error_class(error: &InstallError) -> (Outcome, &'static str) {
         InstallError::Config(provenant_config::ConfigError::Read { .. }) => {
             (Outcome::Error, "INSTALL_ERROR")
         }
+        InstallError::Config(error) if error.refusal_code().is_some() => (
+            Outcome::Invalid,
+            error
+                .refusal_code()
+                .unwrap_or(provenant_config::shared_settings::NEVER_SYNCED_CODE),
+        ),
         InstallError::Config(_) => (Outcome::Invalid, "INSTALL_INVALID"),
         InstallError::Path(_)
         | InstallError::Manifest(_)
@@ -391,17 +409,42 @@ pub(super) fn install_error(command: &str, error: &InstallError, globals: &cli::
 }
 fn install_error_result(command: &str, error: &InstallError) -> CommandResult<InstallData> {
     let (status, code) = error_class(error);
+    let projection = (code == provenant_config::shared_settings::NEVER_SYNCED_CODE)
+        .then(provenant_config::shared_settings::never_synced_diagnostic);
     let mut result = CommandResult::new(command, status, InstallData::failure(error));
     result.error = Some(CommandError {
-        diagnostic: None,
+        diagnostic: projection.as_ref().map(Into::into),
         code: code.into(),
         message: error.to_string(),
         cause: None,
-        repair: matches!(error, InstallError::Partial { .. })
-            .then(|| "Resolve the failure and re-apply the same install command".into()),
+        repair: projection
+            .and_then(|projection| projection.next)
+            .or_else(|| {
+                matches!(error, InstallError::Partial { .. })
+                    .then(|| "Resolve the failure and re-apply the same install command".into())
+            }),
     });
     result
 }
+const HOME_REPAIR: &str =
+    "Set HOME to your absolute home directory, then rerun `provenant install`.";
+
+fn home_error_result(command: &str, message: &str) -> CommandResult<()> {
+    let mut result = CommandResult::new(command, Outcome::Invalid, ());
+    result.error = Some(CommandError {
+        diagnostic: None,
+        code: "HOME".into(),
+        message: message.into(),
+        cause: None,
+        repair: Some(HOME_REPAIR.into()),
+    });
+    result
+}
+
+pub(super) fn home_error(command: &str, message: &str, globals: &cli::Globals) -> u8 {
+    super::emit(&home_error_result(command, message), globals, "", false)
+}
+
 fn edge_error(command: &str, error: EdgeError, globals: &cli::Globals) -> u8 {
     match error {
         EdgeError::Install(error) => install_error(command, &error, globals),
@@ -419,13 +462,7 @@ fn edge_error(command: &str, error: EdgeError, globals: &cli::Globals) -> u8 {
             &error.to_string(),
             globals,
         ),
-        EdgeError::Home => super::fail(
-            command,
-            Outcome::Invalid,
-            "HOME",
-            "HOME must be an absolute directory",
-            globals,
-        ),
+        EdgeError::Home => home_error(command, "HOME must be an absolute directory", globals),
     }
 }
 
@@ -1752,6 +1789,14 @@ pub(super) fn run_uninstall(args: cli::Uninstall, globals: &cli::Globals) -> u8 
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn home_refusal_has_install_repair() {
+        let result = super::home_error_result("install", "HOME must be absolute");
+        let error = result.error.unwrap();
+        assert_eq!(error.code, "HOME");
+        assert!(error.repair.unwrap().contains("provenant install"));
+    }
+
     #[test]
     fn orphan_detection_keeps_default_environment_and_registered_targets()
     -> Result<(), Box<dyn std::error::Error>> {

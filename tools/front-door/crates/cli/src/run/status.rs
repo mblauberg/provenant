@@ -246,14 +246,24 @@ fn status_rows(data: &Value) -> Vec<Value> {
             "reason": data["cancel_reason"].as_str().or(data["pause_reason"].as_str())})];
     }
     data["lanes"].as_array().into_iter().flatten().map(|lane| {
-        json!({"id": lane["attempt_id"], "kind": "attempt",
-            "graph_id": lane["graph_id"], "node_id": lane["task_id"],
-            "attempt_id": lane["attempt_id"], "state": lane["state"],
-            "reason": lane["reason"]})
+        // The common row envelope augments the owner's projection: terminal
+        // causes, settlement evidence and retry lineage remain observable.
+        let mut row = lane.clone();
+        row["id"] = lane["attempt_id"].clone();
+        row["kind"] = "attempt".into();
+        row["graph_id"] = lane["graph_id"].clone();
+        row["node_id"] = lane["task_id"].clone();
+        row["reason"] = lane["reason"].clone();
+        row
     }).chain(data["native_attempts"].as_array().into_iter().flatten().map(|attempt| {
-        json!({"id": attempt["id"], "kind": "attempt", "graph_id": null,
-            "node_id": null, "attempt_id": attempt["id"],
-            "state": if attempt["ended_at"].is_null() { "running" } else { "settled" }, "reason": null})
+        let mut row = attempt.clone();
+        row["kind"] = "attempt".into();
+        row["graph_id"] = Value::Null;
+        row["node_id"] = Value::Null;
+        row["attempt_id"] = attempt["id"].clone();
+        row["state"] = if attempt["ended_at"].is_null() { "running" } else { "settled" }.into();
+        row["reason"] = Value::Null;
+        row
     })).collect()
 }
 
@@ -407,17 +417,21 @@ fn paused_graph_reply(
 #[cfg(test)]
 mod graph_status_tests {
     #[test]
-    fn unified_status_rows_have_the_same_fields_for_graphs_and_attempts() {
+    fn unified_status_rows_preserve_common_envelope_and_owner_evidence() {
         let graph = super::status_rows(&serde_json::json!({
             "graph_id": "g", "status": "paused", "pause_reason": "budget"
         }));
         let attempts = super::status_rows(&serde_json::json!({"lanes": [{
-            "attempt_id": "a", "task_id": "n", "state": "running"
+            "attempt_id": "a", "task_id": "n", "state": "running",
+            "terminal_cause": {"code": "quota"}, "retry_of": "previous",
+            "settlement": {"complete": true}
         }]}));
-        assert_eq!(
-            graph[0].as_object().unwrap().keys().collect::<Vec<_>>(),
-            attempts[0].as_object().unwrap().keys().collect::<Vec<_>>()
-        );
+        for key in graph[0].as_object().unwrap().keys() {
+            assert!(attempts[0].get(key).is_some(), "missing common field {key}");
+        }
+        assert_eq!(attempts[0]["terminal_cause"], serde_json::json!({"code": "quota"}));
+        assert_eq!(attempts[0]["retry_of"], "previous");
+        assert_eq!(attempts[0]["settlement"], serde_json::json!({"complete": true}));
         assert_eq!(graph[0]["reason"], "budget");
         assert_eq!(attempts[0]["kind"], "attempt");
         assert_eq!(attempts[0]["state"], "running");
@@ -1026,7 +1040,14 @@ pub(super) fn render_lanes_with_view(
                     ..
                 }
             ) {
-                let capacity = reason.as_deref().is_some_and(capacity_reason);
+                // Preserve the existing capacity presentation decision while
+                // the displayed reason comes from the safe typed projection.
+                let capacity = match &lane.state {
+                    run::AttemptState::Terminal { reason, .. } => {
+                        reason.as_deref().is_some_and(capacity_reason)
+                    }
+                    _ => false,
+                };
                 if capacity
                     && lane
                         .session
@@ -1044,11 +1065,16 @@ pub(super) fn render_lanes_with_view(
                 }
             }
             for skipped in &lane.skipped_routes {
+                let diagnostic = skipped.diagnostic();
                 human.push_str(&format!(
-                    "  skipped {} {:?}: {}\n",
+                    "  skipped {} {:?}: {}; {}\n",
                     plain_text(&skipped.route, usize::MAX),
                     skipped.kind,
-                    plain_text(&skipped.detail, usize::MAX)
+                    diagnostic.detail.as_deref().unwrap_or(&diagnostic.code),
+                    diagnostic
+                        .next
+                        .as_deref()
+                        .unwrap_or("inspect the current state")
                 ));
             }
             let review_required = matches!(

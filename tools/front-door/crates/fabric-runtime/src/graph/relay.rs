@@ -134,8 +134,7 @@ pub fn historical_parent_of_attempt<'a>(
         .nodes
         .iter()
         .find(|node| {
-            node.attempts
-                .iter()
+            node.recorded_attempts()
                 .any(|row| row.attempt_ref.as_deref() == Some(attempt))
         })
         .map(|node| node.id.as_str())
@@ -282,13 +281,13 @@ pub fn admit_child_bound(
         .to_string();
     let mut patch = child_patch(request, worktree.as_deref(), context)?;
     if let Some((branch, commit)) = writer_base {
-        let node = patch.nodes[0].as_object_mut().unwrap();
+        let node = patch.nodes.first_mut().and_then(Value::as_object_mut).ok_or_else(|| invalid("child patch requires an object node".into()))?;
         node.insert(
             "delivery".into(),
             serde_json::to_value(provenant_records::run::DeliveryMode::Integrate(
                 branch.into(),
             ))
-            .unwrap(),
+            .map_err(|error| invalid(error.to_string()))?,
         );
         node.insert(
             "source".into(),
@@ -341,10 +340,8 @@ pub fn admit_child_bound(
         .checkpoint
         .expansions
         .last_mut()
-        .unwrap()
-        .patch
-        .as_mut()
-        .unwrap();
+        .and_then(|expansion| expansion.patch.as_mut())
+        .ok_or_else(|| invalid("admitted child patch record missing".into()))?;
     record.extra.insert(REQUEST_DIGEST.into(), digest.into());
     record.journaled = context.journal.is_some();
     Ok(ChildReceipt {
@@ -468,15 +465,13 @@ fn inherit_child_controls(node: &mut Value, request: &ChildRequest) {
         node["deadline_seconds"] = seconds.into();
     }
     // Deterministic actions retain their executor and access policy.
-    if node.get("kind").is_none()
-        || matches!(node["kind"].as_str(), Some("task" | "plan" | "synthesise"))
-    {
-        if let Some(tier) = &request.tier {
+    if (node.get("kind").is_none()
+        || matches!(node["kind"].as_str(), Some("task" | "plan" | "synthesise")))
+        && let Some(tier) = &request.tier {
             node["route"] = serde_json::json!({"alias": tier});
             if let Some(object) = node.as_object_mut() {
                 object.remove("routes");
             }
-        }
     }
 }
 
@@ -601,7 +596,7 @@ pub(super) fn settle_subtrees<R: AttemptOwner, J: GraphJournal>(
                 .nodes
                 .iter_mut()
                 .find(|node| node.id == parent)
-                .unwrap()
+                .ok_or_else(|| GraphError::Refused("cancelled parent missing from checkpoint".into()))?
                 .extra
                 .insert("children_cancelled".into(), true.into());
         }
@@ -634,10 +629,9 @@ pub(super) fn settle_subtrees<R: AttemptOwner, J: GraphJournal>(
                     if let Err(error) = observed {
                         first_error.get_or_insert(error);
                     }
-                    if stopped.insert((attempt.key.node_id.clone(), attempt.key.route_index)) {
-                        if let Err(error) = owner.stop_cancelled_attempt(attempt) {
+                    if stopped.insert((attempt.key.node_id.clone(), attempt.key.route_index))
+                        && let Err(error) = owner.stop_cancelled_attempt(attempt) {
                             first_error.get_or_insert(error);
-                        }
                     }
                 }
             }

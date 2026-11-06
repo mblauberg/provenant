@@ -56,6 +56,10 @@ pub struct PreparedRun {
 /// composition edge, after secret scanning. This storage API never launches.
 #[derive(Clone)]
 pub struct TerminalPublication<'a> {
+    pub terminal_cause: Option<TerminalCause>,
+    /// A bounded sentence Provenant composed from fixed text and typed values,
+    /// such as a retry decision. It is never provider output.
+    pub terminal_note: Option<String>,
     pub outcome: Outcome,
     pub finished_at: WallTime,
     pub started_at: Option<WallTime>,
@@ -74,6 +78,8 @@ pub struct TerminalPublication<'a> {
     pub partial_signals: Vec<PartialSignal>,
 }
 pub(crate) struct Withdrawal<'a> {
+    pub terminal_cause: Option<TerminalCause>,
+    pub terminal_note: Option<String>,
     pub expected: AttemptState,
     pub outcome: Outcome,
     pub reason: &'a str,
@@ -848,6 +854,8 @@ impl RunStore {
                 reason,
                 finished_at,
                 failure: None,
+                terminal_cause: None,
+                terminal_note: None,
             },
             call,
         )
@@ -866,6 +874,8 @@ impl RunStore {
             reason,
             finished_at,
             failure,
+            terminal_cause,
+            terminal_note,
         } = withdrawal;
         if failure.is_some() && !matches!(expected, AttemptState::Queued { .. }) {
             return Err(RunError::Validation(
@@ -904,50 +914,63 @@ impl RunStore {
         let attempt_dir = self.attempt_dir(old.run_id, id, true)?;
         // An interrupted withdrawal resumes its own sealed facts, so a retry
         // never renders a second finished_at or reason.
-        let (outcome, finished_at, reason, preparation_failure) = match read_sealed(
-            &attempt_dir,
-            AttemptFile::TerminalPending.name(),
-            TERMINAL_RECORD_LIMIT,
-        )? {
-            Some(raw) => {
-                let saved: AttemptRecord = crate::db::decode_attempt(&raw)?;
-                super::reader::validate_attempt(&saved)?;
-                match saved.state {
-                    AttemptState::Terminal {
-                        outcome:
-                            saved_outcome @ (Outcome::Rejected
-                            | Outcome::Cancelled
-                            | Outcome::AuthRequired),
-                        exit_code: None,
-                        finished_at,
-                        reason,
-                        ..
-                    } if saved.attempt_id == id
-                        && saved.run_id == old.run_id
-                        && saved.generation == old.generation
-                        && saved.exit_evidence.is_none()
-                        && saved.provider_launched == Some(false)
-                        && Some(saved.revision) == revision.checked_add(1) =>
-                    {
-                        (
-                            saved_outcome,
+        let (outcome, finished_at, reason, preparation_failure, terminal_cause, terminal_note) =
+            match read_sealed(
+                &attempt_dir,
+                AttemptFile::TerminalPending.name(),
+                TERMINAL_RECORD_LIMIT,
+            )? {
+                Some(raw) => {
+                    let saved: AttemptRecord = crate::db::decode_attempt(&raw)?;
+                    super::reader::validate_attempt(&saved)?;
+                    match saved.state {
+                        AttemptState::Terminal {
+                            outcome:
+                                saved_outcome @ (Outcome::Rejected
+                                | Outcome::Cancelled
+                                | Outcome::AuthRequired),
+                            exit_code: None,
                             finished_at,
                             reason,
-                            saved.preparation_failure,
-                        )
+                            extra,
+                            ..
+                        } if saved.attempt_id == id
+                            && saved.run_id == old.run_id
+                            && saved.generation == old.generation
+                            && saved.exit_evidence.is_none()
+                            && saved.provider_launched == Some(false)
+                            && Some(saved.revision) == revision.checked_add(1) =>
+                        {
+                            (
+                                saved_outcome,
+                                finished_at,
+                                reason,
+                                saved.preparation_failure,
+                                extra
+                                    .get("terminal_cause")
+                                    .and_then(|value| serde_json::from_value(value.clone()).ok()),
+                                extra
+                                    .get("terminal_note")
+                                    .and_then(|value| value.as_str())
+                                    .map(str::to_owned),
+                            )
+                        }
+                        _ => return Err(RunError::TerminalRecoveryRequired),
                     }
-                    _ => return Err(RunError::TerminalRecoveryRequired),
                 }
-            }
-            None => (
-                outcome,
-                finished_at,
-                Some(reason.chars().take(256).collect()),
-                failure,
-            ),
-        };
+                None => (
+                    outcome,
+                    finished_at,
+                    Some(reason.chars().take(256).collect()),
+                    failure,
+                    terminal_cause,
+                    terminal_note,
+                ),
+            };
         old.preparation_failure = preparation_failure;
         let publication = TerminalPublication {
+            terminal_cause,
+            terminal_note,
             outcome,
             finished_at,
             started_at: None,
@@ -1113,8 +1136,22 @@ impl RunStore {
             complete: publication.complete,
             redacted: publication.redacted,
         });
+        let mut terminal_extra = provenant_records::ExtraFields::default();
+        if let Some(cause) = publication.terminal_cause {
+            terminal_extra.insert(
+                "terminal_cause".into(),
+                serde_json::to_value(cause)
+                    .map_err(|_| RunError::Validation("terminal cause could not be encoded"))?,
+            );
+        }
+        if let Some(note) = publication.terminal_note.as_deref() {
+            terminal_extra.insert(
+                "terminal_note".into(),
+                serde_json::Value::String(provenant_records::diagnostic::safe_text(note)),
+            );
+        }
         next.state = AttemptState::Terminal {
-            extra: Default::default(),
+            extra: terminal_extra,
             outcome: publication.outcome,
             exit_code: outcome_exit,
             finished_at: publication.finished_at,
@@ -1694,7 +1731,15 @@ fn validate_request(input: &PreparedRun) -> Result<()> {
         prompt_bytes += new.prompt.len() as u64;
     }
     if prompt_bytes > RECORD_LIMIT {
-        return Err(RunError::TooLarge {
+        let task_index = input.request.tasks.iter().position(|task| {
+            input
+                .attempts
+                .iter()
+                .find(|attempt| attempt.task_id == task.task_id)
+                .is_some_and(|attempt| attempt.prompt.len() as u64 > RECORD_LIMIT)
+        });
+        return Err(RunError::PromptTooLarge {
+            task_index,
             limit: RECORD_LIMIT,
         });
     }

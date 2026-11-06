@@ -6,7 +6,7 @@ fn retry(
     checkpoint: &mut GraphCheckpoint,
     brief: Option<&str>,
     scan: &dyn Fn(&str) -> Result<(), String>,
-    journal: Option<&dyn Fn(&patch::PatchRecord) -> Result<(), String>>,
+    journal: Option<&patch::PatchJournal<'_>>,
 ) -> Result<patch::Admitted, patch::PatchError> {
     retry_id(document, checkpoint, "work", brief, scan, journal)
 }
@@ -17,7 +17,7 @@ fn retry_id(
     id: &str,
     brief: Option<&str>,
     scan: &dyn Fn(&str) -> Result<(), String>,
-    journal: Option<&dyn Fn(&patch::PatchRecord) -> Result<(), String>>,
+    journal: Option<&patch::PatchJournal<'_>>,
 ) -> Result<patch::Admitted, patch::PatchError> {
     patch::retry_node(
         &mut patch::LiveGraph {

@@ -1,6 +1,7 @@
 //! Review panel selection for pipeline presets: the shape a review stage
 //! selects, and the lenses that fill it.
 use super::StageBuilder;
+use crate::graph_support::format_family_group;
 use provenant_fabric_runtime::graph::{ReviewLens, ReviewSpec};
 use provenant_routing::{LensPlan, ReviewConfig, ReviewReviewer, ReviewSynthesis, tier_is_set};
 use serde_json::{Value, json};
@@ -914,10 +915,6 @@ fn size_text(size: Option<&str>, pending: bool) -> &str {
 
 /// The `family_group` for a reviewer group: siblings in it avoid each other's
 /// model families where the pool allows.
-pub(crate) fn format_family_group(group_index: usize) -> String {
-    format!("group-{group_index}")
-}
-
 fn append_plan_additions(list: &mut Vec<Value>, additions: &[String]) {
     for name in additions {
         if !list.iter().any(|item| item["name"] == *name) {

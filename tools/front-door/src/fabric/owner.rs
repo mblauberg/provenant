@@ -349,14 +349,14 @@ pub(crate) fn decode_graph_document(
         ..Default::default()
     };
     let header: Header = provenant_records::decode(bytes, limits)
-        .map_err(|_| FacadeError::invalid("graph document is not a valid record"))?;
+        .map_err(|_| FacadeError::InvalidInput { detail: None })?;
     match header
         .schema_version
         .as_ref()
         .and_then(serde_json::Value::as_u64)
     {
         Some(1 | 2) => provenant_records::decode(bytes, limits)
-            .map_err(|error| FacadeError::invalid(format!("graph document: {error}"))),
+            .map_err(|_| FacadeError::InvalidInput { detail: None }),
         Some(version) if version > 2 => Err(FacadeError::UpgradeRequired {
             reader_release: env!("CARGO_PKG_VERSION").into(),
             writer_release: "unknown".into(),
@@ -364,7 +364,7 @@ pub(crate) fn decode_graph_document(
             version,
         }),
         _ => Err(FacadeError::invalid(
-            "graph document schema_version must be 1 or 2",
+            provenant_fabric_runtime::coordination::facade::InvalidInputDetail::Schema,
         )),
     }
 }
@@ -756,7 +756,7 @@ impl BoundGraphOwner<'_> {
             let effort = map.remove("effort");
             let read_only = map.get("access").is_none_or(|access| access == "read_only");
             let (key, route) =
-                crate::preset::tier_route(&local, &slot.tier, effort.as_ref(), read_only)
+                crate::graph_support::tier_route(&local, &slot.tier, effort.as_ref(), read_only)
                     .map_err(failed)?;
             map.insert(key.into(), route);
             map.insert(
@@ -793,7 +793,7 @@ impl BoundGraphOwner<'_> {
             if slot.distinct_families {
                 map.insert(
                     "family_group".into(),
-                    serde_json::json!(crate::preset::format_family_group(slot.group_index)),
+                    serde_json::json!(crate::graph_support::format_family_group(slot.group_index)),
                 );
             }
             let member: GraphNode = serde_json::from_value(template)
@@ -830,7 +830,7 @@ impl BoundGraphOwner<'_> {
                 if slot.distinct_families {
                     for leaf in pattern["nodes"].as_array_mut().into_iter().flatten() {
                         leaf["family_group"] =
-                            serde_json::json!(crate::preset::format_family_group(slot.group_index));
+                            serde_json::json!(crate::graph_support::format_family_group(slot.group_index));
                     }
                 }
                 if let Some(base) = node.extra.get("review_base") {
@@ -1158,6 +1158,31 @@ pub(crate) fn writer_source_identity_matches(
         })
 }
 
+/// A quota refusal may redraw an alias only when there is no generated work.
+fn quota_alias_has_no_work(
+    result: &str,
+    usage: &provenant_records::run::UsageRecord,
+    writer: bool,
+    session: Option<&str>,
+) -> bool {
+    result.trim().is_empty()
+        && usage.output_excluding_reasoning.unwrap_or(0) == 0
+        && usage.reasoning.unwrap_or(0) == 0
+        && (!writer
+            || usage.output_excluding_reasoning == Some(0)
+            || session.is_none_or(str::is_empty))
+}
+
+pub(crate) fn unanimous_preparation_cause(
+    skipped: &[provenant_records::run::SkippedRoute],
+) -> Option<provenant_records::RouteExclusionReason> {
+    let mut causes = skipped.iter().map(|route| route.cause.as_ref());
+    let first = causes.next()??;
+    causes
+        .all(|cause| cause == Some(first))
+        .then(|| first.clone())
+}
+
 impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
     fn input_cap_source(&self) -> provenant_fabric_runtime::graph::InputCapSource {
         self.factory.context.graph_prompt_limit_source
@@ -1293,6 +1318,89 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                 custody_released,
             }
         }))
+    }
+
+    fn quota_alias_redraw(
+        &mut self,
+        key: &provenant_fabric_runtime::graph::AttemptKey,
+        reference: &str,
+    ) -> Result<bool, Self::Error> {
+        use provenant_records::run::{AttemptState, Outcome, RequestedRoute};
+        let (host, attempt) = reference.split_once('/').ok_or(FacadeError::StateCorrupt)?;
+        // Only the owning host can prove terminal custody and the sealed output.
+        if host != self.factory.context.identity.host.to_string() {
+            return Ok(false);
+        }
+        let owner = BinaryRunOwner {
+            factory: self.factory,
+            allow_remote: false,
+            actor: None,
+            chair: None,
+        };
+        let store = owner.store(self.cancel)?;
+        let call = owner.call(self.cancel);
+        let record = store.record(attempt.parse().map_err(|_| FacadeError::StateCorrupt)?, &call)
+            .map_err(run_error)?;
+        if record.operation_id != graph_operation("graph-attempt-operation", key)?
+            || record.context.as_ref().is_none_or(|context| {
+                context.graph_id.as_deref() != Some(key.graph_id.as_str())
+                    || context.node_id.as_deref() != Some(key.node_id.as_str())
+            })
+            || !matches!(record.state, AttemptState::Terminal { outcome: Outcome::QuotaLimited, .. })
+            || !matches!(record.requested_route, RequestedRoute::Named { .. })
+            || record.applied_route.as_ref().and_then(|route| route.model.as_ref()).is_none()
+            || !store.custody_released(&record, &call).map_err(run_error)?
+        {
+            return Ok(false);
+        }
+        let request = store.request(record.run_id, &call).map_err(run_error)?;
+        let task = request.tasks.iter().find(|task| task.task_id == record.task_id)
+            .ok_or(FacadeError::StateCorrupt)?;
+        let result = match store.stream_result(record.attempt_id, &call, None) {
+            Ok(result) if !result.truncated && !result.source_truncated => result,
+            Ok(_) | Err(provenant_run::RunError::NotFound) => return Ok(false),
+            Err(error) => return Err(run_error(error)),
+        };
+        Ok(quota_alias_has_no_work(
+            &result.excerpt,
+            &record.usage,
+            task.writer.is_some(),
+            record.session.as_deref(),
+        ))
+    }
+
+    fn preparation_refusal_cause(
+        &mut self,
+        key: &provenant_fabric_runtime::graph::AttemptKey,
+        reference: &str,
+    ) -> Result<Option<provenant_records::RouteExclusionReason>, Self::Error> {
+        let (host, attempt) = reference.split_once('/').ok_or(FacadeError::StateCorrupt)?;
+        if host != self.factory.context.identity.host.to_string() {
+            return Ok(None);
+        }
+        let owner = BinaryRunOwner {
+            factory: self.factory,
+            allow_remote: false,
+            actor: None,
+            chair: None,
+        };
+        let store = owner.store(self.cancel)?;
+        let call = owner.call(self.cancel);
+        let record = store
+            .record(
+                attempt.parse().map_err(|_| FacadeError::StateCorrupt)?,
+                &call,
+            )
+            .map_err(run_error)?;
+        if record.operation_id != graph_operation("graph-attempt-operation", key)?
+            || record.context.as_ref().is_none_or(|context| {
+                context.graph_id.as_deref() != Some(key.graph_id.as_str())
+                    || context.node_id.as_deref() != Some(key.node_id.as_str())
+            })
+        {
+            return Ok(None);
+        }
+        Ok(unanimous_preparation_cause(&record.skipped_routes))
     }
 
     fn resolve_review(
@@ -1874,7 +1982,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                     ),
                     true,
                 )
-                .map_err(|error| FacadeError::invalid(&error))?
+                .map_err(|_| FacadeError::InvalidInput { detail: None })?
                 {
                     return Ok(matches!(
                         observation,
@@ -1927,7 +2035,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                         ),
                         true,
                     )
-                    .map_err(|error| FacadeError::invalid(&error))?
+                    .map_err(|_| FacadeError::InvalidInput { detail: None })?
                     {
                         if matches!(
                             observation,
@@ -1995,9 +2103,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             .is_some()
             && access != provenant_fabric_runtime::graph::AccessMode::ReadOnly
         {
-            return Err(FacadeError::invalid(
-                "cloud verification nodes require read-only access",
-            ));
+            return Err(FacadeError::invalid(InvalidInputDetail::Field("node".into())));
         }
         let mut owner = BinaryRunOwner {
             factory: self.factory,
@@ -2052,6 +2158,38 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             let accepted = operation.as_ref().is_some_and(|operation| {
                 operation.state != provenant_run::OperationState::Prepared
             });
+            // A graph retry is a new attempt, but retains the predecessor's
+            // original source pin and terminal writer head. Mark continuations
+            // even when both heads agree so preparation checks dirty remnants.
+            let (mut source_head, mut successor_head) = if !accepted
+                && access == provenant_fabric_runtime::graph::AccessMode::WorktreeWrite
+                && let Some(previous) = key.extra.get("previous_attempt_ref").and_then(serde_json::Value::as_str)
+            {
+                let (host, previous) = previous.split_once('/').ok_or(FacadeError::StateCorrupt)?;
+                if host != self.factory.context.identity.host.to_string() {
+                    return Err(FacadeError::OwnerUnavailable);
+                }
+                let previous = store.record(previous.parse().map_err(|_| FacadeError::StateCorrupt)?, &call)
+                    .map_err(run_error)?;
+                if previous.context.as_ref().is_none_or(|context| {
+                    context.graph_id.as_deref() != Some(key.graph_id.as_str())
+                        || context.node_id.as_deref() != Some(key.node_id.as_str())
+                }) || !matches!(previous.state, provenant_records::run::AttemptState::Terminal { .. })
+                    || !store.custody_released(&previous, &call).map_err(run_error)?
+                {
+                    return Err(FacadeError::Conflict);
+                }
+                let request = store.request(previous.run_id, &call).map_err(run_error)?;
+                let previous_task = request.tasks.iter().find(|task| task.task_id == previous.task_id)
+                    .ok_or(FacadeError::StateCorrupt)?;
+                let original = previous_task.source_head.as_ref().or(previous_task.head.as_ref())
+                    .cloned().or_else(|| node.source_commit.map(str::to_owned));
+                let current = previous.head.map(|head| head.to_string()).or_else(|| previous_task.head.clone());
+                (original, current)
+            } else {
+                (None, None)
+            };
+
             // A crash can leave an accepted operation without a checkpoint
             // reference. Preserve its immutable labels, including legacy None.
             let mut accepted_knobs = None;
@@ -2065,6 +2203,8 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                     Ok(request) => {
                         let task = request.tasks.first().ok_or(FacadeError::StateCorrupt)?;
                         if accepted {
+                            source_head = task.source_head.clone();
+                            successor_head = task.head.clone();
                             accepted_knobs = Some(task.profile.overrides.clone());
                             accepted_route = Some(task.route.clone());
                             accepted_retry_limit = Some(task.profile.settlement_retry_limit);
@@ -2088,6 +2228,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                 },
                 None => Some(node.context),
             };
+            let source_commit = successor_head.as_deref().or(node.source_commit);
             let excluded_families = self.writer_families(node.distinct_from_attempts)?;
             // An exact route cannot be substituted, so required separation is
             // decided here, before any worktree advance or submission. An
@@ -2153,7 +2294,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                 )
                 && let (Some(base), Some(commit)) = (
                     self.integration_base.and_then(|bases| bases.integration),
-                    node.source_commit,
+                    source_commit,
                 )
             {
                 let head = commit
@@ -2188,7 +2329,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             }
             if !accepted
                 && access == provenant_fabric_runtime::graph::AccessMode::WorktreeWrite
-                && let (Some(path), Some(commit)) = (worktree, node.source_commit)
+                && let (Some(path), Some(commit)) = (worktree, source_commit)
             {
                 let head = commit
                     .parse()
@@ -2291,7 +2432,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                     .base_ref
                     .clone()
             } else if access == provenant_fabric_runtime::graph::AccessMode::ReadOnly
-                && node.source_commit.is_some()
+                && source_commit.is_some()
             {
                 node.review_base
                     .map(str::to_owned)
@@ -2304,9 +2445,9 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                             .map(|base| base.to_string())
                     })
                     // Preserve the prior fallback without requiring origin/HEAD.
-                    .or_else(|| node.source_commit.map(str::to_owned))
+                    .or_else(|| source_commit.map(str::to_owned))
             } else {
-                node.source_commit.map(|head| {
+                source_commit.map(|head| {
                     self.integration_base
                         .and_then(|bases| bases.integration)
                         .map_or_else(|| head.to_owned(), |base| base.to_string())
@@ -2322,7 +2463,8 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                     extra: Default::default(),
                     build_heavy: node.attempt.is_some_and(|spec| spec.build_heavy),
                     base,
-                    head: node.source_commit.map(str::to_owned),
+                    head: source_commit.map(str::to_owned),
+                    source_head,
                     account: route
                         .account
                         .clone()
@@ -2527,7 +2669,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             if !accepted {
                 grants.inputs_root = node.inputs_dir.map(Path::to_path_buf);
                 if access == provenant_fabric_runtime::graph::AccessMode::ReadOnly
-                    && node.source_commit.is_some()
+                    && source_commit.is_some()
                 {
                     grants.source_root = {
                         let path = worktree.map_or(self.factory.cwd.as_path(), Path::new);
@@ -2544,10 +2686,10 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                                     .into(),
                         })?;
                         let directory = provenant_os::fs::Directory::open_anchor(&source)
-                            .map_err(|_| FacadeError::ConfinementRefused)?;
+                            .map_err(|_| FacadeError::ConfinementRefused { resource: None })?;
                         let identity = directory
                             .metadata()
-                            .map_err(|_| FacadeError::ConfinementRefused)?;
+                            .map_err(|_| FacadeError::ConfinementRefused { resource: None })?;
                         let source_identity = provenant_records::run::SourceIdentity {
                             device: identity.device,
                             inode: identity.inode,
@@ -2638,7 +2780,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                 ),
                 false,
             )
-            .map_err(|error| FacadeError::invalid(&error))?
+            .map_err(|_| FacadeError::InvalidInput { detail: None })?
             {
                 return Ok(observation);
             }
@@ -2718,6 +2860,13 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                             Outcome::RateLimited | Outcome::QuotaLimited => {
                                 AttemptOutcome::UsageLimited
                             }
+                            Outcome::TimedOut if matches!(
+                                &attempt.state,
+                                AttemptState::Terminal { extra, .. }
+                                    if extra.get("terminal_cause").cloned()
+                                        .and_then(|value| serde_json::from_value::<provenant_records::run::TerminalCause>(value).ok())
+                                        == Some(provenant_records::run::TerminalCause::TokenBudget)
+                            ) => AttemptOutcome::OtherFailure,
                             Outcome::TimedOut if node.deadline_seconds.is_some() => {
                                 AttemptOutcome::DeadlineExceeded
                             }
@@ -2915,6 +3064,23 @@ pub(crate) fn restore_scratch_source(
 
 #[cfg(test)]
 mod journal_error_tests {
+    #[test]
+    fn quota_alias_redraw_requires_no_generated_work() {
+        use super::quota_alias_has_no_work;
+        let mut usage = provenant_records::run::UsageRecord::default();
+        assert!(quota_alias_has_no_work(" ", &usage, false, Some("startup")));
+        assert!(quota_alias_has_no_work("", &usage, true, None));
+        assert!(!quota_alias_has_no_work("", &usage, true, Some("writer-session")));
+        usage.output_excluding_reasoning = Some(0);
+        assert!(quota_alias_has_no_work("", &usage, true, Some("writer-session")));
+        assert!(!quota_alias_has_no_work("completed work", &usage, false, None));
+        usage.output_excluding_reasoning = Some(1);
+        assert!(!quota_alias_has_no_work("", &usage, false, None));
+        usage.output_excluding_reasoning = Some(0);
+        usage.reasoning = Some(1);
+        assert!(!quota_alias_has_no_work("", &usage, false, None));
+    }
+
     #[test]
     fn unreadable_graph_journal_preserves_the_cause() {
         use super::{FacadeError, graph_journal_error};

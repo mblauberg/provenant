@@ -217,6 +217,93 @@ pub enum RouteExclusionReason {
     InvalidAccountEvidence,
 }
 impl RouteExclusionReason {
+    /// The typed owner's safe cause and next action for this exclusion.
+    pub fn diagnostic_parts(&self) -> (&'static str, &'static str) {
+        use crate::diagnostic::ProviderFailureFact;
+        match self {
+            Self::Disabled => (
+                "the selected route is disabled",
+                "enable an eligible route in the host configuration",
+            ),
+            Self::MissingExecutable => (
+                "the selected adapter executable is unavailable",
+                "install the adapter or select an available route",
+            ),
+            Self::UnknownAvailability => (
+                "the selected account's readiness has not been verified",
+                "run `provenant quota tick` or check the account login",
+            ),
+            Self::StaleAvailability => (
+                "the selected account's provider availability observation is stale",
+                "re-probe the selected account; if it remains unavailable, run `provenant quota tick` or check its login",
+            ),
+            Self::UnknownAccount => (
+                "the selected account is not registered",
+                "run `provenant accounts list` and select a registered account",
+            ),
+            Self::DisclosureDenied => (
+                "the route cannot receive the requested data",
+                "select a route permitted by the disclosure policy",
+            ),
+            Self::ConfinementUnavailable => (
+                "the requested confinement is unavailable",
+                "repair the host confinement setup before retrying",
+            ),
+            Self::UnsupportedEffort => (
+                "the selected route does not support the requested effort",
+                "choose a supported effort or another route",
+            ),
+            Self::Exhausted => (
+                "the selected account's allowance is exhausted",
+                "wait for the allowance to reset or select an eligible route",
+            ),
+            Self::PacingReserve => (
+                "the selected account is held by its pacing reserve",
+                "wait for the pacing window or adjust the configured reserve",
+            ),
+            Self::UnknownPartialHeadroom => (
+                "partial usage does not establish available headroom",
+                "refresh quota evidence or wait for the allowance to reset",
+            ),
+            Self::AuthRequired => (
+                "the selected account requires login",
+                ProviderFailureFact::AuthRequired.reason(),
+            ),
+            Self::LoginExpired => (
+                "the selected account's login expired",
+                ProviderFailureFact::AuthRequired.reason(),
+            ),
+            Self::UnverifiedModel => (
+                "the selected model is not verified for this route",
+                "select a verified model or refresh the catalogue",
+            ),
+            Self::AccountMismatch => (
+                "the signed-in account differs from registration",
+                "account mismatch; re-register the selected account",
+            ),
+            Self::FreeTierRefused => (
+                "the provider refused the free tier",
+                "free tier exhausted; use a paid route or wait for its allowance reset",
+            ),
+            Self::ProviderRefused => (
+                "the provider refused this route or pool",
+                "scoped provider refusal; wait or select an eligible route",
+            ),
+            Self::InvalidAccountEvidence => (
+                "persisted account evidence is invalid",
+                "repair or re-register the account before retrying",
+            ),
+        }
+    }
+
+    pub fn diagnostic(&self, code: &str) -> crate::diagnostic::Diagnostic {
+        let (detail, next) = self.diagnostic_parts();
+        crate::diagnostic::Diagnostic::new(code)
+            .category("refused")
+            .detail(detail)
+            .next(next)
+    }
+
     /// Whether persisted account evidence (mismatch, refusal or malformed
     /// records) excluded the route, as opposed to readiness, access or pacing.
     pub fn is_account_block(&self) -> bool {

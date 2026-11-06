@@ -1,6 +1,6 @@
 //! Read and control graph targets through the public command surface.
 use super::*;
-use provenant_fabric_runtime::graph::{AttemptState, FileJournal, GraphRun, NodeState};
+use provenant_fabric_runtime::graph::{AttemptState, FileJournal, GraphRun};
 use serde_json::{Value, json};
 
 #[derive(Clone, Debug)]
@@ -78,7 +78,7 @@ impl Factory {
             parent,
             reason.as_deref(),
         )
-        .map_err(FacadeError::invalid)?;
+        .map_err(|_| FacadeError::InvalidInput { detail: None })?;
         // Persist the subtree fence before stopping any external process.
         journal.save(&checkpoint).map_err(graph_journal_error)?;
         let mut owner = BinaryRunOwner {
@@ -114,13 +114,13 @@ impl Factory {
             prices: None,
             tick: false,
         };
-        if let Err(error) = provenant_fabric_runtime::graph::settle_stopped_subtrees(
+        if let Err(_error) = provenant_fabric_runtime::graph::settle_stopped_subtrees(
             &execution.document,
             &mut checkpoint,
             &mut graph_owner,
             &mut journal,
         ) {
-            first_error.get_or_insert_with(|| FacadeError::invalid(error.to_string()));
+            first_error.get_or_insert_with(|| FacadeError::InvalidInput { detail: None });
         }
         if let Some(error) = first_error {
             return Err(error);
@@ -197,6 +197,75 @@ pub(crate) fn status_rows(run: &GraphRun, target: &GraphTarget) -> Vec<Value> {
     rows
 }
 
+/// Enrich graph attempt rows from identity-checked host records. Checkpoint
+/// rows describe graph progress; the run owner retains typed terminal causes.
+pub(crate) fn enrich_status_rows(
+    rows: &mut [Value],
+    context: &Context,
+    clock: &SystemClock,
+    cancel: &CancelToken,
+) -> Result<(), FacadeError> {
+    let execution = provenant_run::ExecutionContext {
+        state_root: context.roots.state.clone(),
+        project_id: context.identity.project,
+        actor_id: context.identity.inbox.actor,
+        read_prompts: false,
+    };
+    let call = provenant_run::Request { clock, cancel };
+    let store = provenant_run::RunStore::open_read_only(&execution, &call).map_err(run_error)?;
+    let peer_budget = WaitBudget::cli(clock.mono_now(), 30).map_err(|_| FacadeError::Timeout)?;
+    let mut peer_executor = None;
+    for row in rows {
+        if row["kind"] != "attempt" { continue; }
+        let Some((host, attempt)) = row["attempt_id"].as_str().and_then(|id| id.split_once('/')) else { continue; };
+        let host = host.parse().map_err(|_| FacadeError::StateCorrupt)?;
+        let attempt = attempt.parse().map_err(|_| FacadeError::StateCorrupt)?;
+        let record = if host == context.identity.host {
+            let Some(store) = &store else { continue; };
+            match store.record(attempt, &call) {
+                Ok(record) => record,
+                // A collected run leaves the retained graph's own row readable.
+                Err(provenant_run::RunError::NotFound) => continue,
+                Err(error) => return Err(run_error(error)),
+            }
+        } else {
+            let executor = match &peer_executor {
+                Some(executor) => executor,
+                None => peer_executor.insert(SystemExecutor::new(1).map_err(|_| FacadeError::io("create peer status executor"))?),
+            };
+            let response = context.peer_with(executor, clock, host, PeerAction::Run {
+                extra: Default::default(),
+                input: RunInput::Status { extra: Default::default(), target: AttemptTarget {
+                    extra: Default::default(), host: Some(host), attempt,
+                } },
+            }, peer_budget, cancel).map_err(|failure| failure.error)?;
+            match response {
+                PeerResult::Run { data, .. } => match *data {
+                    RunResult::Status { attempt: record, .. } if record.attempt_id == attempt => record,
+                    _ => return Err(FacadeError::StateCorrupt),
+                },
+                _ => return Err(FacadeError::StateCorrupt),
+            }
+        };
+        if record.context.as_ref().is_none_or(|context| {
+            context.graph_id.as_deref() != row["graph_id"].as_str()
+                || context.node_id.as_deref() != row["node_id"].as_str()
+        }) { return Err(FacadeError::StateCorrupt); }
+        let projected = provenant_cli::run::project_lane(
+            &record, &[], context.roots.state.as_path(), &Default::default(),
+            clock.wall_now().ok(), false,
+        );
+        let fields = serde_json::to_value(projected).map_err(|_| FacadeError::StateCorrupt)?;
+        let reference = row["attempt_id"].clone();
+        let graph_state = row["state"].clone();
+        row.as_object_mut().ok_or(FacadeError::StateCorrupt)?
+            .extend(fields.as_object().ok_or(FacadeError::StateCorrupt)?.clone());
+        row["attempt_id"] = reference;
+        row["graph_state"] = graph_state;
+    }
+    Ok(())
+}
+
 pub(crate) enum GraphCommand<'a> {
     Status {
         wait: Option<u64>,
@@ -246,7 +315,7 @@ pub(crate) fn unified_graph_command(
                 .as_deref()
                 .is_some_and(|selected| selected != *id)
             {
-                return Err(FacadeError::invalid("node selector conflicts with --node").into());
+                return Err(FacadeError::invalid(InvalidInputDetail::Field("node".into())).into());
             }
             target.node = Some((*id).to_owned());
         }
@@ -274,12 +343,10 @@ pub(crate) fn unified_graph_command(
                 wait,
             } => {
                 if *legacy_prompt || *no_fallback {
-                    return Err(FacadeError::invalid("graph retry accepts --extend, --node and --brief; prompt source and provider continuation options apply only to attempts").into());
+                    return Err(FacadeError::invalid(InvalidInputDetail::Field("node".into())).into());
                 }
                 if !extend.is_empty() && (node.is_some() || brief.is_some()) {
-                    return Err(FacadeError::invalid(
-                        "apply --extend separately before redoing a node",
-                    )
+                    return Err(FacadeError::invalid(InvalidInputDetail::Field("node".into()))
                     .into());
                 }
                 input["extend"] = json!(extend);
@@ -366,7 +433,7 @@ pub(crate) fn unified_graph_steer(
             .filter(|reference| target.attempt.as_ref().is_none_or(|id| id == *reference))
             .collect::<Vec<_>>();
         if references.is_empty() {
-            return Err(FacadeError::invalid("target has no live attempt to steer").into());
+            return Err(FacadeError::invalid(InvalidInputDetail::Field("target".into())).into());
         }
         let text = provenant_os::sys::hook_io::read_stdin(
             4096,
@@ -451,7 +518,9 @@ pub(crate) fn append_graph_status(
                 &graph,
             ) {
                 Ok(Some(checkpoint)) => {
-                    rows.extend(status_rows(&graph_snapshot(checkpoint), &target))
+                    let mut graph_rows = status_rows(&graph_snapshot(checkpoint), &target);
+                    enrich_status_rows(&mut graph_rows, &factory.context, &factory.clock, &CancelToken::new())?;
+                    rows.extend(graph_rows);
                 }
                 Ok(None) => {}
                 Err(error) if error.is_unreadable() => rows.push(row(
@@ -594,7 +663,7 @@ pub(crate) fn unified_graph_output(
         // ranges, paths and destination writes.
         if references.len() == 1 {
             let mut selected = command.clone();
-            selected.attempt = references[0].parse().map_err(FacadeError::invalid)?;
+            selected.attempt = references[0].parse().map_err(|_| FacadeError::InvalidInput { detail: None })?;
             return Ok(Some(provenant_cli::run::output(selected, edge)));
         }
         let mut outputs = Vec::new();
@@ -604,13 +673,11 @@ pub(crate) fn unified_graph_output(
         for reference in references {
             let mut selected = command.clone();
             selected.to = None;
-            selected.attempt = reference.parse().map_err(FacadeError::invalid)?;
+            selected.attempt = reference.parse().map_err(|_| FacadeError::InvalidInput { detail: None })?;
             let reply = provenant_cli::run::output(selected, edge);
             if reply.result.status != provenant_records::Outcome::Ok {
                 if command.to.is_some() {
-                    return Err(FacadeError::invalid(
-                        "selected output could not be read; destination was preserved",
-                    )
+                    return Err(FacadeError::invalid(InvalidInputDetail::Field("target".into()))
                     .into());
                 }
                 outcome = reply.result.status;
@@ -624,9 +691,7 @@ pub(crate) fn unified_graph_output(
                         .ok_or(FacadeError::StateCorrupt)?,
                 ),
                 _ if command.to.is_some() => {
-                    return Err(FacadeError::invalid(
-                        "--to requires byte output; destination was preserved",
-                    )
+                    return Err(FacadeError::invalid(InvalidInputDetail::Field("target".into()))
                     .into());
                 }
                 _ => {}
@@ -732,12 +797,16 @@ pub(crate) fn read_status_rows(
     )
     .map_err(graph_journal_error)?
     .ok_or(FacadeError::NotFound)?;
-    Ok(Some(status_rows(&graph_snapshot(checkpoint), &target)))
+    let mut rows = status_rows(&graph_snapshot(checkpoint), &target);
+    enrich_status_rows(&mut rows, &context, &SystemClock::new(), &CancelToken::new())?;
+    Ok(Some(rows))
 }
 
 #[cfg(test)]
+#[allow(dead_code, unused_imports, reason = "the custom worktree driver omits libtest functions")]
 mod tests {
     use super::*;
+    use provenant_fabric_runtime::graph::NodeState;
     use provenant_fabric_runtime::graph::{
         GraphCheckpoint, GraphDocument, GraphExecution, GraphJournal,
     };
@@ -799,12 +868,12 @@ mod tests {
             fn observe_roots(
                 &self,
                 roots: &[PathBuf],
-            ) -> std::collections::BTreeMap<PathBuf, provenant_confinement::worktrees::WorkerState>
+            ) -> std::collections::BTreeMap<PathBuf, provenant_confinement::worktrees::Occupancy>
             {
                 roots
                     .iter()
                     .cloned()
-                    .map(|path| (path, provenant_confinement::worktrees::WorkerState::Free))
+                    .map(|path| (path, provenant_confinement::worktrees::Occupancy::Available))
                     .collect()
             }
         }

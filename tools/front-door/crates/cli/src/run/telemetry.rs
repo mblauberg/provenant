@@ -212,7 +212,7 @@ pub(super) fn stats_inner(
         .unwrap_or_default();
     let unfinished = unfinished_attempts(store.as_ref(), selected_run, &call)?;
     let config = provenant_config::read_with_domains(edge.roots, &crate::domains::SECTIONS)
-        .map_err(|error| Fail::new(Status::Invalid, ErrorKind::Config, error.to_string()))?;
+        .map_err(|error| Fail::config(Status::Invalid, error))?;
     let selected: Vec<_> = facts
         .iter()
         .filter(|fact| {

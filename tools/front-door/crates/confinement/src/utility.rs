@@ -148,6 +148,28 @@ impl UtilityBudget {
         })
     }
 
+    /// Restrict stdout for a specific read without widening the caller's budget.
+    pub(crate) fn with_stdout_cap(self, cap: usize) -> Result<Self, UtilityError> {
+        if cap == 0 || cap > MAX_STREAM_LIMIT {
+            return Err(UtilityError::InvalidBudget);
+        }
+        Ok(Self {
+            stdout_limit: self.stdout_limit.min(cap),
+            ..self
+        })
+    }
+
+    /// Restrict a utility read to the remaining command deadline.
+    pub fn with_timeout_cap(self, cap: Duration) -> Result<Self, UtilityError> {
+        if cap.is_zero() {
+            return Err(UtilityError::InvalidBudget);
+        }
+        Ok(Self {
+            timeout: self.timeout.min(cap),
+            ..self
+        })
+    }
+
     pub fn bounded(timeout: Duration) -> Result<Self, UtilityError> {
         Self::new(
             timeout,
@@ -197,6 +219,10 @@ pub enum GitRead {
     ResolveRefOid {
         name: GitRefName,
     },
+    /// Resolve the tree of an already identified commit.
+    ResolveCommitTree {
+        oid: GitOid,
+    },
     ResolveRevision {
         revision: GitRevision,
     },
@@ -231,8 +257,10 @@ pub enum GitRead {
         limit: u64,
     },
     WorktreeList,
-    /// Read repository config, excluding the utility's core.bare override.
-    LocalBare,
+    /// List registrations with the verified common repository's bare setting.
+    WorktreeListBare,
+    /// Read local bare settings with their include origins.
+    LocalBareOrigins,
     BranchTips,
     /// Read remote-tracking refs for branch-name collision checks.
     RemoteBranchTips,
@@ -1074,6 +1102,12 @@ pub(crate) fn validate_outcome(outcome: ExecOutcome) -> Result<ExecOutcome, Util
     if outcome.cancelled {
         return Err(UtilityError::Cancelled);
     }
+    if outcome.stdout.truncated {
+        return Err(UtilityError::Truncated { stream: "stdout" });
+    }
+    if outcome.stderr.truncated {
+        return Err(UtilityError::Truncated { stream: "stderr" });
+    }
     if let Termination::Signal(signal) = outcome.termination {
         return Err(UtilityError::Signalled { signal });
     }
@@ -1095,12 +1129,6 @@ pub(crate) fn validate_outcome(outcome: ExecOutcome) -> Result<ExecOutcome, Util
         || outcome.stderr.total_bytes != outcome.stderr.bytes.len() as u64
     {
         return Err(UtilityError::Incomplete);
-    }
-    if outcome.stdout.truncated {
-        return Err(UtilityError::Truncated { stream: "stdout" });
-    }
-    if outcome.stderr.truncated {
-        return Err(UtilityError::Truncated { stream: "stderr" });
     }
     Ok(outcome)
 }
@@ -1176,6 +1204,12 @@ fn git_args(
             "--verify".into(),
             "--end-of-options".into(),
             format!("{}^{{commit}}", name.as_str()).into(),
+        ],
+        GitRead::ResolveCommitTree { oid } => vec![
+            "rev-parse".into(),
+            "--verify".into(),
+            "--end-of-options".into(),
+            format!("{oid}^{{tree}}").into(),
         ],
         GitRead::ResolveRevision { revision } => vec![
             "rev-parse".into(),
@@ -1315,12 +1349,22 @@ fn git_args(
             "--porcelain".into(),
             "-z".into(),
         ],
-        GitRead::LocalBare => [
+        GitRead::WorktreeListBare => vec![
+            "-c".into(),
+            "core.bare=true".into(),
+            "worktree".into(),
+            "list".into(),
+            "--porcelain".into(),
+            "-z".into(),
+        ],
+        GitRead::LocalBareOrigins => [
             "config",
             "--local",
-            "--no-includes",
+            "--includes",
+            "--show-origin",
+            "-z",
             "--bool",
-            "--get",
+            "--get-all",
             "core.bare",
         ]
         .into_iter()
@@ -1634,6 +1678,7 @@ struct ConfigScan {
     overrides: Vec<(String, String)>,
     files: Vec<PathBuf>,
     head_sensitive: bool,
+    lane_files: BTreeSet<PathBuf>,
 }
 
 /// Keys that cannot affect a utility command. Its argv is fixed, with
@@ -1857,7 +1902,74 @@ fn scan_configuration(
         overrides: overrides.into_iter().collect(),
         files: files.into_iter().collect(),
         head_sensitive,
+        lane_files,
     })
+}
+
+pub(crate) fn lane_configuration_files(
+    executor: &dyn Executor,
+    repo: &VerifiedRepo,
+    runtime: &UtilityRuntime,
+    budget: UtilityBudget,
+    cancel: &CancelToken,
+) -> Result<BTreeSet<PathBuf>, UtilityError> {
+    let scan = scan_configuration(executor, repo, runtime, budget, cancel)?;
+    let mut files = scan.lane_files;
+    let roots = runtime.lane_roots(repo);
+    // An include may be named inside a lane even when Git reports the
+    // resolved target as its origin. Seed the graph with the declared path.
+    for entry in &scan.entries {
+        if let (Some(file), Some(value)) = (entry.file(repo.root_path()), &entry.value)
+            && transport::is_include_directive(&entry.key)
+        {
+            let target = transport::include_target(&file, value, runtime.home.path.as_path());
+            if roots.contains(&target) {
+                files.insert(target);
+            }
+        }
+    }
+    // A worktree's private configuration can be changed independently of the
+    // common configuration, including when the common file includes it.
+    files.insert(crate::transport::normalise(
+        &repo.private_git_dir().join("config.worktree"),
+    ));
+    let mut resolved: BTreeSet<PathBuf> = files
+        .iter()
+        .filter_map(|path| std::fs::canonicalize(path).ok())
+        .collect();
+    loop {
+        let before = (files.len(), resolved.len());
+        for entry in &scan.entries {
+            if let (Some(file), Some(value)) = (entry.file(repo.root_path()), &entry.value)
+                && transport::is_include_directive(&entry.key)
+                && (files.contains(&file)
+                    || std::fs::canonicalize(&file)
+                        .ok()
+                        .is_some_and(|path| resolved.contains(&path)))
+            {
+                let target = transport::include_target(&file, value, runtime.home.path.as_path());
+                if let Ok(path) = std::fs::canonicalize(&target) {
+                    resolved.insert(path);
+                }
+                files.insert(target);
+            }
+        }
+        if (files.len(), resolved.len()) == before {
+            break;
+        }
+    }
+    // Git can print the same included file through a different path than its
+    // include directive, including a symlinked temporary or worktree root.
+    for entry in &scan.entries {
+        if let Some(file) = entry.file(repo.root_path())
+            && std::fs::canonicalize(&file)
+                .ok()
+                .is_some_and(|path| resolved.contains(&path))
+        {
+            files.insert(file);
+        }
+    }
+    Ok(files)
 }
 
 /// Read one config file directly, without following its includes. `None` when
@@ -2024,7 +2136,14 @@ fn mutation_args(mutation: GitMutation) -> Result<(Vec<OsString>, Option<Vec<u8>
             create_branch,
         } => {
             let path = validate_absolute_mutation_path(&path)?;
-            args.extend(["worktree".into(), "add".into()]);
+            // Relative worktree paths can make Git upgrade the shared repository
+            // format during add, invalidating the configuration we verified.
+            args.extend([
+                "-c".into(),
+                "worktree.useRelativePaths=false".into(),
+                "worktree".into(),
+                "add".into(),
+            ]);
             if create_branch {
                 args.push("-b".into());
                 args.push(branch.short_name().into());
@@ -2707,6 +2826,18 @@ File exists\nfatal: could not lock config file .git/config: File exists\n";
         outcome.stderr.bytes = stderr.as_bytes().to_vec();
         outcome.stderr.total_bytes = stderr.len() as u64;
         outcome
+    }
+
+    #[test]
+    fn output_cap_reports_truncation_when_the_child_is_stopped() {
+        let mut outcome = exit_outcome(0, "");
+        outcome.termination = Termination::Signal(15);
+        outcome.stdout.truncated = true;
+        outcome.overflow_stopped = true;
+        assert!(matches!(
+            validate_outcome(outcome),
+            Err(UtilityError::Truncated { stream: "stdout" })
+        ));
     }
 
     /// Answers every config spawn with the next scripted outcome instead of

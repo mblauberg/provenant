@@ -27,6 +27,8 @@ Projected fields escape terminal controls and are limited to 1,024 UTF-8 bytes.
 Local CLI projections may name absolute paths. Remote and MCP projections
 disclose only paths relative to an explicitly supplied repository or home
 anchor; otherwise they identify the grant or inspection action instead.
+MCP argument paths disclose catalogue field names and array indices, but not
+unknown object keys supplied by a caller. Suggestions may name known fields.
 Run error codes and their typed confinement causes declare the ADR 0035
 boundary class; a generic code alone cannot classify an ambiguous guard.
 

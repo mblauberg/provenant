@@ -282,7 +282,7 @@ fn recover_provisioning(
 }
 
 /// Resolve dynamic panels at the host, using the graph's declared review risk.
-fn launch_resolvers(
+pub fn launch_resolvers(
     review: &provenant_routing::ReviewConfig,
     document: &provenant_fabric_runtime::graph::GraphDocument,
 ) -> Result<std::collections::BTreeMap<String, Vec<String>>, String> {
@@ -299,10 +299,41 @@ fn launch_resolvers(
         request.kind = request.kind.or_else(|| context.task_kind.clone());
     }
     let panel = review.resolve_panel(&request, None, &[], false)?;
-    Ok(std::collections::BTreeMap::from([(
+    let mut resolvers = std::collections::BTreeMap::new();
+    let single = panel.slots.len() == 1;
+    let frame = !single && panel.frame;
+    let verifiers = if single { 0 } else { panel.verifiers };
+    let synthesis = !single && panel.synthesis == provenant_routing::ReviewSynthesis::Model;
+    resolvers.insert(
+        "review-topology".into(),
+        vec![format!(
+            "f{}-v{}-s{}",
+            u8::from(frame),
+            u8::from(verifiers > 0),
+            u8::from(synthesis)
+        )],
+    );
+    resolvers.insert(
+        "review-verifiers".into(),
+        (1..=verifiers.max(1)).map(|number| number.to_string()).collect(),
+    );
+    for lens in panel.slots.iter().map(|slot| slot.lens.as_str()).chain([
+        "correctness", "security", "tests", "contract", "design", "adversarial",
+    ]) {
+        let advice = if lens == "tests"
+            && matches!(request.risk_tier.as_deref(), Some("crucial" | "terminal"))
+        {
+            include_str!("../../../../assets/review-tests-advice.txt")
+        } else {
+            ""
+        };
+        resolvers.insert(format!("review-advice-{lens}"), vec![advice.into()]);
+    }
+    resolvers.insert(
         "review-panel".into(),
         panel.slots.into_iter().map(|slot| slot.lens).collect(),
-    )]))
+    );
+    Ok(resolvers)
 }
 
 fn provision_child(
@@ -338,14 +369,44 @@ fn provision_in_context(
         .into_iter()
         .find(|entry| entry.path == expected)
     {
-        if existing.branch.as_deref() == Some(format!("refs/heads/{branch}").as_str())
-            && existing.head.to_string() == source
-            && existing.dirty == worktrees::WorktreeCondition::Clean
-            && existing.writer == worktrees::WriterState::Free
+        if existing.branch.as_deref() != Some(format!("refs/heads/{branch}").as_str())
+            || existing.head.to_string() != source
         {
-            return Ok(());
+            return Err(WorktreeError::InvalidRequest);
         }
-        return Err(WorktreeError::InvalidRequest);
+        // Process census is advisory. Reclaim an already provisioned tree only
+        // under the writer lease and with terminal custody verified.
+        if matches!(
+            existing.occupancy,
+            worktrees::Occupancy::Unknown {
+                source: worktrees::OccupancyUnknownSource::Custody, ..
+            }
+        ) {
+            return Err(worktrees::custody_refusal(existing.occupancy));
+        }
+        let mut tree = provenant_confinement::verify_worktree(context.repo, &existing.path)
+            .map_err(|error| WorktreeError::UnknownOccupancy {
+                path: existing.path.clone(),
+                detail: format!("worktree registration could not be verified: {error}"),
+            })?;
+        let _writer = worktrees::cache_writer_guard(context.project_state, tree.path())
+            .map_err(|occupancy| match occupancy {
+                worktrees::Occupancy::Held => WorktreeError::WriterBusy {
+                    holder: worktrees::load_owner(&tree).ok().flatten().and_then(|owner| owner.attempt_id),
+                },
+                other => worktrees::custody_refusal(other),
+            })?;
+        worktrees::check_writer_terminal(tree.repo())?;
+        let reference = provenant_confinement::repo::GitRefName::new(format!("refs/heads/{branch}"))
+            .map_err(|_| WorktreeError::IdentityChanged)?;
+        let head = tree.repo().private_dir().read_stable(std::ffi::OsStr::new("HEAD"), 4096)?;
+        if head != format!("ref: {}\n", reference.as_str()).as_bytes()
+            || context.facts.resolve_commit(context, reference, cancel)?.to_string() != source
+        {
+            return Err(WorktreeError::IdentityChanged);
+        }
+        worktrees::require_clean_worktree(context, &mut tree, cancel)?;
+        return Ok(());
     }
     worktrees::create(
         context,
@@ -685,22 +746,23 @@ mod provisioning_tests {
             .output()?;
         assert!(output.status.success());
         assert_eq!(String::from_utf8(output.stdout)?.trim(), source);
-        struct Free;
-        impl provenant_confinement::worktrees::WorkerObserver for Free {
+        struct Census(provenant_confinement::worktrees::Occupancy);
+        impl provenant_confinement::worktrees::WorkerObserver for Census {
             fn observe_roots(
                 &self,
                 roots: &[std::path::PathBuf],
             ) -> std::collections::BTreeMap<
                 std::path::PathBuf,
-                provenant_confinement::worktrees::WorkerState,
+                provenant_confinement::worktrees::Occupancy,
             > {
                 roots
                     .iter()
                     .cloned()
-                    .map(|root| (root, provenant_confinement::worktrees::WorkerState::Free))
+                    .map(|root| (root, self.0.clone()))
                     .collect()
             }
         }
+        let census = Census(provenant_confinement::worktrees::Occupancy::Available);
         let provision = || {
             provenant_confinement::worktrees::with_context_using_workers(
                 &context.roots,
@@ -708,11 +770,32 @@ mod provisioning_tests {
                 &context.cwd,
                 &provenant_os::clock::SystemClock::new(),
                 &cancel,
-                &Free,
+                &census,
                 |ctx| provision_in_context(ctx, path, &source, &cancel),
             )
         };
         provision()?;
+        for occupancy in [
+            provenant_confinement::worktrees::Occupancy::Observed { process: None },
+            provenant_confinement::worktrees::Occupancy::census_unknown(project.join(path), "fixture incomplete census"),
+        ] {
+            provenant_confinement::worktrees::with_context_using_workers(
+                &context.roots, &context.home, &context.cwd,
+                &provenant_os::clock::SystemClock::new(), &cancel, &Census(occupancy),
+                |ctx| {
+                    provision_in_context(ctx, path, &source, &cancel)?;
+                    let _held = provenant_confinement::worktrees::cache_writer_guard(
+                        ctx.project_state, &project.join(path),
+                    ).map_err(provenant_confinement::worktrees::custody_refusal)?;
+                    let held = provision_in_context(ctx, path, &source, &cancel);
+                    assert!(matches!(
+                        held,
+                        Err(provenant_confinement::worktrees::WorktreeError::WriterBusy { .. })
+                    ), "held custody must refuse reuse: {held:?}");
+                    Ok(())
+                },
+            )?;
+        }
         std::fs::write(project.join(path).join("parent-work"), "preserve")?;
         assert!(provision().is_err());
         assert_eq!(
@@ -771,7 +854,7 @@ mod provisioning_tests {
         // any Git effect.
         let path = ".worktrees/g-crash-a--w";
         let mut checkpoint: GraphCheckpoint =
-            serde_json::from_value(json!({"schema_version":1, "graph_id":"g-crash", "nodes":[]}))?;
+            serde_json::from_value(json!({"schema_version":1, "graph_id":"g-crash", "plan_digest":"fixture", "nodes":[]}))?;
         relay::fence_provisioning(&mut checkpoint, "a--w", path, &source);
         journal.save(&checkpoint)?;
         assert!(!project.join(path).exists());
@@ -795,7 +878,8 @@ mod panel_tests {
         let review = provenant_routing::RoutingConfig::default().review;
         let mut document: provenant_fabric_runtime::graph::GraphDocument =
             serde_json::from_value(json!({
-                "schema_version": 1, "graph_id": "panel-risk", "nodes": [],
+                "schema_version": 1, "graph_id": "panel-risk",
+                "nodes": [{"id": "anchor", "access": "read_only", "prompt": "Graph task", "route": {"alias": "senior"}}],
                 "context": {"risk_tier": "routine"},
             }))
             .unwrap();
@@ -817,5 +901,29 @@ mod panel_tests {
                 .iter()
                 .any(|lens| lens == "security-privacy")
         );
+        let library = TemplateLibrary::bundled();
+        let limits = provenant_fabric_runtime::config::GraphLimits::default();
+        let mut checkpoint: provenant_fabric_runtime::graph::GraphCheckpoint =
+            serde_json::from_value(json!({
+                "schema_version": 1, "graph_id": "panel-risk", "plan_digest": "fixture", "nodes": [],
+            })).unwrap();
+        let patch = serde_json::from_value(json!({
+            "schema_version": 1,
+            "expected_revision": 0,
+            "idempotency_key": "review-child",
+            "nodes": [{"id": "review", "use": "review-panel"}],
+        })).unwrap();
+        provenant_fabric_runtime::graph::patch::admit_patch(
+            &mut LiveGraph { document: &document, checkpoint: &mut checkpoint },
+            None,
+            &patch,
+            &PatchContext {
+                library: &library,
+                resolvers: &crucial,
+                limits: &limits,
+                scan: &|_| Ok(()),
+                journal: None,
+            },
+        ).expect("relay resolvers expand the complete review composite");
     }
 }

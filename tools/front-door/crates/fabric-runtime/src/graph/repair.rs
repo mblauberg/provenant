@@ -168,33 +168,6 @@ pub(super) fn inactive_round(
     })
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    fn finding(id: &str, lens: &str) -> Finding {
-        serde_json::from_value(serde_json::json!({"id":id,"lens":lens,"severity":"high", "file":"a.rs", "summary":"constraint", "status":"open", "evidence":"counterexample"})).unwrap()
-    }
-    #[test]
-    fn recurring_identity_keeps_lens_and_location() {
-        assert!(same_finding(
-            &finding("review:security:F1", "security"),
-            &finding("repair:check:F1", "security")
-        ));
-        assert!(!same_finding(
-            &finding("review:F1", "security"),
-            &finding("repair:F1", "tests")
-        ));
-    }
-    #[test]
-    fn design_escalation_needs_concrete_evidence() {
-        let mut item = finding("F1", "design");
-        assert!(!design_defect(&item));
-        item.extra.insert("design_defect".into(), true.into());
-        assert!(design_defect(&item));
-        item.extra.insert("evidence".into(), "".into());
-        assert!(!design_defect(&item));
-    }
-}
 
 /// A delta reviewer is inactive only when complete findings identify other
 /// lenses. Unknown lens metadata keeps the reviewer active.
@@ -288,4 +261,32 @@ pub(super) fn terminal_outputs(
         outputs.warnings.clone_from(&latest.warnings);
     }
     outputs
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn finding(id: &str, lens: &str) -> Finding {
+        serde_json::from_value(serde_json::json!({"id":id,"lens":lens,"severity":"high", "file":"a.rs", "summary":"constraint", "status":"open", "evidence":"counterexample"})).unwrap()
+    }
+    #[test]
+    fn recurring_identity_keeps_lens_and_location() {
+        assert!(same_finding(
+            &finding("review:security:F1", "security"),
+            &finding("repair:check:F1", "security")
+        ));
+        assert!(!same_finding(
+            &finding("review:F1", "security"),
+            &finding("repair:F1", "tests")
+        ));
+    }
+    #[test]
+    fn design_escalation_needs_concrete_evidence() {
+        let mut item = finding("F1", "design");
+        assert!(!design_defect(&item));
+        item.extra.insert("design_defect".into(), true.into());
+        assert!(design_defect(&item));
+        item.extra.insert("evidence".into(), "".into());
+        assert!(!design_defect(&item));
+    }
 }

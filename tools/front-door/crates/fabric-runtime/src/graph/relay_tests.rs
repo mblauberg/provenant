@@ -805,6 +805,20 @@ fn receipt_replays_for_a_historical_attempt_after_the_parent_settles() {
         add(&document, &mut checkpoint, "a", &fresh).unwrap_err().code,
         "parent_settled"
     );
+    // A graph retry archives the settled generation. Its endpoint may still
+    // replay a lost acknowledgement, without acquiring fresh lane authority.
+    let node = checkpoint.nodes.iter_mut().find(|node| node.id == "a").unwrap();
+    node.previous_attempts.append(&mut node.attempts);
+    node.state = NodeState::Pending;
+    let checkpoint: GraphCheckpoint = serde_json::from_slice(&serde_json::to_vec(&checkpoint).unwrap()).unwrap();
+    assert_eq!(parent_of_attempt(&checkpoint, "attempt-a"), None);
+    let parent = relay::historical_parent_of_attempt(&checkpoint, "attempt-a").unwrap();
+    assert_eq!(parent, "a");
+    let replay = relay::replay_child(&document, &checkpoint, parent, &request).unwrap().unwrap();
+    assert!(replay.replayed);
+    assert_eq!(replay.node, receipt.node);
+    assert_eq!(replay.revision, receipt.revision);
+
 }
 
 #[test]

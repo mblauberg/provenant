@@ -1,4 +1,5 @@
 mod graph_interface;
+mod graph_support;
 // The process edge composes typed owners and owns ordinary result delivery.
 // `main.rs` parses and calls `dispatch`; the worktree driver includes this
 // file and dispatches with its fixture seams. Plain comments only: `include!`
@@ -13,6 +14,7 @@ mod console;
 mod disk;
 mod disk_guard;
 pub mod event_intake;
+#[cfg(test)]
 mod experiment;
 mod fabric;
 mod tick;
@@ -32,6 +34,7 @@ mod overflow;
 mod pr;
 #[cfg(test)]
 mod pr_land_tests;
+#[cfg(test)]
 mod preset;
 #[cfg(test)]
 #[allow(
@@ -40,7 +43,9 @@ mod preset;
     reason = "the custom worktree test driver includes this library without the test harness"
 )]
 mod preset_deliver_tests;
+#[cfg(test)]
 mod preset_roles;
+#[cfg(test)]
 mod preset_select;
 #[cfg(test)]
 #[allow(
@@ -236,31 +241,7 @@ fn fail_with_repair(
         cause: None,
         repair: repair.map(Into::into),
     });
-    if let Some(error) = &mut result.error {
-        apply_repair(command, error, globals.json);
-    }
     emit(&result, globals, "", false)
-}
-fn apply_repair(command: &str, error: &mut CommandError, json: bool) {
-    if error.repair.is_some() {
-        return;
-    }
-    error.repair = match (command, error.code.as_str()) {
-        ("install", "HOME") => Some("Set HOME to your absolute home directory, then rerun `provenant install`.".into()),
-        ("gc", "GC") => Some("Run `provenant gc --apply --json` to inspect failed paths and retry incomplete collection.".into()),
-        (_, _) if error.message.starts_with("insufficient disk space") => {
-            // The CLI owner still renders its old floor override. Keep the
-            // observed volume and floor, and give the actionable command here.
-            if let Some((figures, _)) = error.message.split_once("; run `") {
-                error.message = format!("{figures}; run `provenant gc --apply`");
-            }
-            Some("Run `provenant gc --apply`, then retry when free space reaches gc.free_floor.".into())
-        }
-        _ => None,
-    };
-    if !json && let Some(repair) = &error.repair {
-        error.message.push_str(&format!("; {repair}"));
-    }
 }
 /// Resolve Run's composition paths, then emit the owner's reply.
 fn run_edge(
@@ -278,15 +259,12 @@ fn run_edge_workspace(
 ) -> u8 {
     match roots::resolve(globals, workspace, Product::Required) {
         Ok(resolved) => {
-            let mut reply = action(&provenant_cli::run::Edge {
+            let reply = action(&provenant_cli::run::Edge {
                 roots: &resolved.roots,
                 home: &resolved.home,
                 assets: &resolved.assets,
                 cwd: &resolved.project,
             });
-            if let Some(error) = &mut reply.result.error {
-                apply_repair(leaf, error, globals.json);
-            }
             emit_summarised(
                 &reply.result,
                 globals,
@@ -502,8 +480,23 @@ fn config_command(command: &str, action: ConfigAction, globals: &provenant_cli::
             };
             let code = match error.downcast_ref::<provenant_config::ConfigError>() {
                 Some(provenant_config::ConfigError::StaleRevision { .. }) => "STALE_REVISION",
+                Some(error) if error.refusal_code().is_some() => error
+                    .refusal_code()
+                    .unwrap_or(provenant_config::shared_settings::NEVER_SYNCED_CODE),
                 _ => "CONFIG",
             };
+            if code == provenant_config::shared_settings::NEVER_SYNCED_CODE {
+                let projection = provenant_config::shared_settings::never_synced_diagnostic();
+                let mut result = CommandResult::new(command, status, ());
+                result.error = Some(CommandError {
+                    diagnostic: Some((&projection).into()),
+                    code: projection.code.clone(),
+                    message: error.to_string(),
+                    cause: projection.detail.clone(),
+                    repair: projection.next.clone(),
+                });
+                return emit(&result, globals, "", false);
+            }
             fail(command, status, code, &error.to_string(), globals)
         }
     }
@@ -664,6 +657,9 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
         } else {
             error.code()
         };
+        if matches!(error, roots::RootError::Home) && inv.leaf == "install" {
+            return install::home_error(&inv.leaf, &error.to_string(), globals);
+        }
         return fail(&inv.leaf, status, code, &error.to_string(), globals);
     }
     match command {
@@ -716,18 +712,19 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
                         }
                         reply
                     }
-                    Err(message) => {
+                    Err((kind, message)) => {
                         let mut result = CommandResult::new(
                             &inv.leaf,
                             Outcome::Refused,
                             serde_json::Value::Null,
                         );
+                        let projection = kind.map(|kind| kind.diagnostic());
                         result.error = Some(CommandError {
-                            diagnostic: None,
-                            code: "ACCOUNT".into(),
+                            diagnostic: projection.as_ref().map(Into::into),
+                            code: kind.map_or("ACCOUNT", |kind| kind.code()).into(),
                             message,
                             cause: None,
-                            repair: None,
+                            repair: projection.and_then(|diagnostic| diagnostic.next),
                         });
                         provenant_cli::run::Reply {
                             result,

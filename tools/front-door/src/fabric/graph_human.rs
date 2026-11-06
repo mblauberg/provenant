@@ -1,8 +1,12 @@
+#[cfg(test)]
+#[allow(dead_code, reason = "the custom worktree driver omits libtest functions")]
+mod test_presentation {
+    use super::*;
 pub(crate) fn graph_human(run: &provenant_fabric_runtime::graph::GraphRun) -> String {
     graph_human_view(run, false)
 }
 
-pub(super) fn graph_human_full(run: &provenant_fabric_runtime::graph::GraphRun) -> String {
+pub(crate) fn graph_human_full(run: &provenant_fabric_runtime::graph::GraphRun) -> String {
     graph_human_view(run, true)
 }
 
@@ -231,6 +235,12 @@ fn graph_human_view(run: &provenant_fabric_runtime::graph::GraphRun, full: bool)
     }
     human
 }
+
+
+}
+#[cfg(test)]
+#[allow(unused_imports, reason = "the custom worktree driver omits libtest functions")]
+pub(crate) use test_presentation::{graph_human, graph_human_full};
 
 pub(super) fn graph_ci_waiting<'a>(
     elapsed_seconds: u64,

@@ -9,6 +9,30 @@ use std::{
 };
 type Result<T = (), E = Box<dyn std::error::Error>> = std::result::Result<T, E>;
 
+#[test]
+fn malformed_graph_reports_safe_output_field_and_action() -> Result {
+    let rig = GraphProject::new()?;
+    let path = rig.document(&json!({
+        "schema_version": 2,
+        "graph_id": "malformed-exports",
+        "nodes": [{
+            "id": "inner", "kind": "composite", "access": "read_only",
+            "composite": {
+                "nodes": [{"id":"look", "prompt":"PROMPT_SENTINEL", "access":"read_only", "route":{"alias":"senior"}}],
+                "exports": [{"node":"look", "outputs":["result", "commit"]}]
+            }
+        }]
+    }))?;
+    let output = rig.command().args(["run", "--file"]).arg(path).output()?;
+    assert!(!output.status.success());
+    let value: Value = serde_json::from_slice(&output.stdout)?;
+    assert_eq!(value["error"]["code"], "dispatch_refused", "{value}");
+    assert!(value["error"]["message"].as_str().unwrap().contains("composite.exports[].outputs"), "{value}");
+    assert!(value["error"]["repair"].as_str().unwrap().contains("output"), "{value}");
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("PROMPT_SENTINEL"));
+    Ok(())
+}
+
 fn fixture_cli() -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_provenant"));
     provenant_os::fixture::scrub_git_env(&mut command);

@@ -578,59 +578,6 @@ fn policy_codex_fixture() -> Result<TestRig> {
     Ok(rig)
 }
 
-/// `settled` is the exit `run` gives when the whole retry chain settles
-/// inside its own wait; otherwise it returns `waiting` (0) and `lanes` waits on.
-/// Which one happens depends on host speed, so both are accepted. A wait that
-/// starts while a successor is still pending counts only that successor, so
-/// once the chain has settled the run is read again: a wholly settled named
-/// selection returns every terminal row.
-fn settled_policy_lanes(
-    rig: &TestRig,
-    output: provenant_os::exec::ExecOutcome,
-    settled: i64,
-) -> Result<Value> {
-    assert!(code(&output) == settled || code(&output) == 0, "{output:?}");
-    let output: Value = serde_json::from_slice(&output.stdout.bytes)?;
-    let run_id = output["data"]["run_id"].as_str().ok_or("run ID")?;
-    // Keep each command below the rig's ten-second watchdog while allowing
-    // sequential guardians to settle and launch their successor.
-    for _ in 0..6 {
-        let lanes = rig.command(&["lanes", "--id", run_id, "--all", "--wait=5s", "--json"])?;
-        if code(&lanes) != 124 {
-            assert_eq!(code(&lanes), 0, "{lanes:?}");
-            let lanes: Value = serde_json::from_slice(&lanes.stdout.bytes)?;
-            if lanes["data"]["ignored_settled"].is_null() {
-                return Ok(lanes);
-            }
-            let all = rig.command(&["lanes", "--id", run_id, "--all", "--wait=5s", "--json"])?;
-            assert_eq!(code(&all), 0, "{all:?}");
-            let all: Value = serde_json::from_slice(&all.stdout.bytes)?;
-            assert!(all["data"]["ignored_settled"].is_null(), "{all}");
-            return Ok(all);
-        }
-    }
-    Err("policy successors did not settle within the fixture budget".into())
-}
-
-fn handoff_recovered(lanes: &Value) -> bool {
-    let Some(rows) = lanes["data"]["lanes"].as_array() else {
-        return false;
-    };
-    rows.iter()
-        .any(|row| row["attempt_number"] == 1 && row["state"] == "quota_limited")
-        && rows.iter().any(|row| {
-            row["attempt_number"] == 2
-                && row["continuation"] == "policy_fallback"
-                && !matches!(
-                    row["state"].as_str(),
-                    None | Some("queued" | "starting" | "running" | "settling")
-                )
-        })
-}
-
-/// Confined synthetic accounts exercise real launch, holder settlement and
-/// fresh retry routing without contacting a live provider service.
-
 /// Medium: injected lifecycle ticks and real durable attempt settlement; no sleeps.
 fn opencode_usage_limit_settlement_is_bounded() -> Result {
     use provenant_os::capture::{FrameDecoder, FrameEvent};
@@ -681,6 +628,113 @@ fn opencode_usage_limit_settlement_is_bounded() -> Result {
 /// Medium: real attempt settlement with a synthetic provider that never exits.
 
 /// Real stderr-only refusal and incidental text through the guardian.
+
+fn opencode_dispatch_observes_v2_wal_session() -> Result {
+    if !graph_fixture_available()? {
+        return Ok(());
+    }
+    for custom_data_home in [false, true] {
+        let mut rig = TestRig::new()?;
+        let cleanup = rig.process_cleanup();
+        let data_home = if custom_data_home {
+            let path = rig.root.join("custom-data");
+            rig.env
+                .push(("XDG_DATA_HOME".into(), path.clone().into_os_string()));
+            path
+        } else {
+            rig.home.join(".local/share")
+        };
+        let data = data_home.join("opencode");
+        fs::create_dir_all(&data)?;
+        let db = rusqlite::Connection::open(data.join("opencode.db"))?;
+        // Keep the writer open and disable checkpoints: the assistant row is
+        // committed in the WAL when the guardian's read-only connection opens.
+        db.execute_batch(
+            r#"PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0;
+            CREATE TABLE session_message (session_id TEXT, type TEXT, data TEXT);
+            INSERT INTO session_message VALUES ('ses_x', 'assistant',
+            '{"model":{"providerID":"opencode-go","id":"beam-free"},"finish":"stop"}');"#,
+        )?;
+        assert!(fs::metadata(data.join("opencode.db-wal"))?.len() > 0);
+        let bin = rig.root.join("provider/bin");
+        fs::create_dir_all(&bin)?;
+        rig.copy_executable(&std::env::current_exe()?, &bin.join("opencode"))?;
+        rig.env.retain(|(key, _)| key != "PATH");
+        rig.env.push((
+            "PATH".into(),
+            format!("{}:/usr/bin:/bin", bin.display()).into(),
+        ));
+        for (operation, text, expected) in [
+            ("opencode-success", "reply OK", "succeeded"),
+            ("opencode-zen", "reply OK", "succeeded"),
+            (
+                "opencode-unavailable",
+                "model unavailable",
+                "model_unavailable",
+            ),
+            ("opencode-limit", "free limit", "quota_limited"),
+        ] {
+            let (model, provider, session_model) = if expected == "model_unavailable" {
+                (
+                    "opencode/opencode/deepseek-v4.1-flash-free",
+                    "opencode",
+                    "misspelt-free",
+                )
+            } else if operation == "opencode-zen" {
+                (
+                    "opencode/opencode/glm-5.3-flash-free",
+                    "opencode",
+                    "glm-5.3-flash-free",
+                )
+            } else {
+                (
+                    "opencode/opencode-go/glm-5.3-flash",
+                    "opencode-go",
+                    "glm-5.3-flash",
+                )
+            };
+            db.execute("UPDATE session_message SET data = ?1", [
+                serde_json::to_string(&json!({"model": {"providerID": provider, "id": session_model}, "finish": "stop"}))?
+            ])?;
+            let lane = run_graph_provider(&rig, operation, json!({
+                "id":"provider", "prompt":text, "access":"read_only", "route":{"adapter":"opencode", "model":model}
+            }))?;
+            assert_eq!(lane["state"], expected, "{lane}");
+            let account = if provider == "opencode-go" {
+                "go"
+            } else {
+                "zen"
+            };
+            assert_eq!(lane["account"], account, "{lane}");
+            assert_eq!(lane["applied_route"]["account_label"], account, "{lane}");
+            assert_eq!(lane["applied_route"]["account_key"], account, "{lane}");
+            if expected == "succeeded" {
+                assert_eq!(lane["transcript"]["session"], "ses_x");
+                assert_eq!(lane["observed_route"]["model"], model);
+                assert_eq!(lane["observed_route"]["source"], "opencode_session");
+            } else if expected == "quota_limited" {
+                assert!(
+                    lane["reason"]
+                        .as_str()
+                        .is_some_and(|reason| reason.starts_with("provider quota exhausted; ")),
+                    "{lane}"
+                );
+            } else {
+                // The provider's own message is not projected; the typed
+                // outcome and its fixed sentence are.
+                assert_eq!(lane["state"], "model_unavailable", "{lane}");
+                assert_eq!(
+                    lane["reason"],
+                    "the model is unavailable; check the selected model or wait for capacity"
+                );
+                assert!(!lane["reason"].to_string().contains("misspelt"), "{lane}");
+            }
+        }
+        rig.assert_legacy_unchanged()?;
+        cleanup.disarm();
+    }
+    Ok(())
+}
 
 fn claude_fixture() -> Result<TestRig> {
     let mut rig = TestRig::new()?;
@@ -806,10 +860,8 @@ fn host_native_preparation_uses_the_provider_contract() -> Result {
         provenant_run::Providers::prepare(&registry, &absent, "fixture host-native", &paths, None)
             .err()
             .ok_or("unconfigured host-native entry was accepted")?;
-    assert_eq!(
-        error.to_string(),
-        "host-native absent is not configured in domains.fabric.host_native"
-    );
+    assert!(error.to_string().contains("domains.fabric.host_native"));
+    assert!(!error.to_string().contains("absent"));
     assert_eq!(
         error.fallback_outcome,
         Some(provenant_records::run::PreparationFailure::AdapterUnavailable)
@@ -991,12 +1043,10 @@ fn claude_dispatch(host_native: bool, pool: bool) -> Result {
     )?;
     if !cfg!(target_os = "macos") {
         assert_eq!(lane["state"], "rejected", "{lane}");
-        assert!(
-            lane["reason"]
-                .as_str()
-                .is_some_and(|r| r.contains("UnsupportedPlatform")),
-            "{lane}"
-        );
+        assert_eq!(lane["cause"], "pre_launch_refusal", "{lane}");
+        assert_eq!(lane["terminal_cause"], "unsupported_platform", "{lane}");
+        assert!(lane["started_at"].is_null(), "{lane}");
+        assert!(lane["applied_route"].is_null(), "{lane}");
         assert!(account.join("refreshed").exists());
         rig.assert_legacy_unchanged()?;
         cleanup.disarm();
@@ -1130,71 +1180,77 @@ fn graph_fixture_available() -> Result<bool> {
 
 /// The preferred fake vanishes after its version probe. Its pool peer stays
 /// available, so a successful writer must actually start that peer.
-fn writer_pool_redraw_fixture() -> Result<TestRig> {
-    let mut rig = TestRig::new()?;
-    let bin = rig.root.join("provider/bin");
-    fs::create_dir_all(&bin)?;
-    let cursor = bin.join("cursor-agent");
-    fs::write(
-        &cursor,
-        "#!/bin/sh\nif [ \"$1\" = --version ]; then /bin/rm \"$0\"; printf 'cursor fixture 1.0\\n'; exit 0; fi\nexit 1\n",
-    )?;
-    fs::set_permissions(&cursor, fs::Permissions::from_mode(0o700))?;
-    rig.copy_executable(&std::env::current_exe()?, &bin.join("opencode"))?;
-    // The fake stream reports ses_x; model identity comes from the session DB.
-    let data = rig.home.join(".local/share/opencode");
-    fs::create_dir_all(&data)?;
-    let db = rusqlite::Connection::open(data.join("opencode.db"))?;
-    db.execute_batch(
-        r#"CREATE TABLE session_message (session_id TEXT, type TEXT, data TEXT);
-        INSERT INTO session_message VALUES ('ses_x', 'assistant',
-        '{"model":{"providerID":"opencode-go","id":"deepseek-v4.1-flash"},"finish":"stop"}');"#,
-    )?;
-    rig.env.retain(|(key, _)| key != "PATH");
-    rig.env.push((
-        "PATH".into(),
-        format!("{}:/usr/bin:/bin", bin.display()).into(),
-    ));
-    writeln!(
-        OpenOptions::new()
-            .append(true)
-            .open(rig.state.join("config.toml"))?,
-        "\n[domains.routing]\nsettlement_retries=1\n[domains.routing.pools]\nwriter-redraw=[{{model='cursor/gpt-5.3-codex-low',weight=1}},{{model='opencode/opencode-go/deepseek-v4.1-flash',weight=0}}]"
-    )?;
-    let git = provenant_os::git::git_executable().ok_or("git")?;
-    let commit = rig.execute(&git, &["commit", "--allow-empty", "-qm", "base"], None)?;
-    assert_eq!(code(&commit), 0, "{commit:?}");
-    Ok(rig)
-}
 
-fn assert_writer_pool_peer_launched(lanes: &Value) -> Result {
-    let rows = lanes["data"]["lanes"].as_array().ok_or("lanes")?;
-    let lane = rows
-        .iter()
-        .find(|row| row["applied_route"]["provider"] == "opencode")
-        .ok_or_else(|| format!("second pool member did not launch: {lanes}"))?;
-    assert_eq!(lane["state"], "succeeded", "{lanes}");
-    assert_eq!(
-        lane["observed_route"]["model"], "opencode/opencode-go/deepseek-v4.1-flash",
-        "{lanes}"
-    );
-    assert_eq!(
-        lane["observed_route"]["source"], "opencode_session",
-        "{lanes}"
-    );
-    let skipped = lane["skipped_routes"].as_array().ok_or("skipped routes")?;
-    assert!(
-        skipped.iter().any(|row| row["route"]
-            .as_str()
-            .is_some_and(|route| route.starts_with("cursor/"))),
-        "{lanes}"
-    );
-    Ok(())
-}
 
 /// A node whose upstream result is far past the excerpt budget reads the whole
 /// of it from the file the host materialised in its own inputs directory, and
 /// nothing else beside it.
+
+fn graph_read_only_alias_retries_another_member_after_empty_launch_quota() -> Result {
+    if !graph_fixture_available()? {
+        return Ok(());
+    }
+    let rig = policy_codex_fixture()?;
+    let cleanup = rig.process_cleanup();
+    fs::write(
+        rig.state.join("config.toml"),
+        "schema_version=1\n[gc]\nfree_floor='1B'\n[domains.routing.pools]\nretry-test=[{model='codex/gpt-6-luna',weight=1,effort='low'},{model='codex/gpt-6.1-terra',weight=0,effort='low'}]\n",
+    )?;
+    for (label, account) in [("one", "fixture-one"), ("two", "fixture-two")] {
+        let directory = rig.root.join(format!("codex-{label}"));
+        fs::create_dir_all(&directory)?;
+        let auth = serde_json::to_vec(&json!({"tokens":{"account_id":account}}))?;
+        fs::write(directory.join("auth.json"), &auth)?;
+        let key = provenant_providers::identity::codex_account(&auth).ok_or("account key")?;
+        support::register_account(&rig, "codex", label, &key, &directory)?;
+    }
+    fs::write(
+        rig.project.join("graph.json"),
+        serde_json::to_vec(&json!({
+            "schema_version":1,"graph_id":"quota-redraw","nodes":[{
+                "id":"read","prompt":"fixture graph redraw","access":"read_only","route":{"alias":"retry-test"}
+            }]
+        }))?,
+    )?;
+    let started = rig.command(&["run", "--file", "graph.json", "--wait=30s", "--json"])?;
+    assert_eq!(code(&started), 0, "{started:?}");
+    let status: Value = serde_json::from_slice(&started.stdout.bytes)?;
+    assert_eq!(status["data"]["status"], "complete", "{status}");
+    assert_eq!(status["data"]["checkpoint"]["nodes"][0]["state"], "succeeded", "{status}");
+    // The graph never redraws: one attempt. The lane layer retries the alias
+    // once, because the quota stop came before any work was done.
+    let attempts = status["data"]["checkpoint"]["nodes"][0]["attempts"]
+        .as_array()
+        .ok_or("attempts")?;
+    assert_eq!(attempts.len(), 1, "{status}");
+    let lanes = rig.command(&["status", "--all", "--json"])?;
+    assert_eq!(code(&lanes), 0, "{lanes:?}");
+    let lanes: Value = serde_json::from_slice(&lanes.stdout.bytes)?;
+    let rows = lanes["data"]["rows"].as_array().ok_or("lanes")?;
+    assert_eq!(rows.len(), 2, "{lanes}");
+    let first = rows
+        .iter()
+        .find(|row| row["attempt_number"] == 1)
+        .ok_or("first attempt")?;
+    let second = rows
+        .iter()
+        .find(|row| row["attempt_number"] == 2)
+        .ok_or("retry attempt")?;
+    assert_eq!(first["state"], "quota_limited", "{lanes}");
+    assert_eq!(
+        first["applied_route"]["model"], "codex/gpt-6-luna",
+        "{lanes}"
+    );
+    assert_eq!(first["superseded_by"], second["attempt_id"], "{lanes}");
+    assert_eq!(second["retry_of"], first["attempt_id"], "{lanes}");
+    assert_eq!(second["state"], "succeeded", "{lanes}");
+    assert_eq!(
+        second["applied_route"]["model"], "codex/gpt-6.1-terra",
+        "the spent member is excluded: {lanes}"
+    );
+    cleanup.disarm();
+    Ok(())
+}
 
 fn codex_capacity_settles_without_quota_refusal() -> Result {
     let message = "Selected model is at capacity. Please try a different model.";
@@ -1220,10 +1276,13 @@ fn codex_capacity_settles_without_quota_refusal() -> Result {
             ..
         }
     ));
-    // A staged settlement retry appends its note after the typed reason.
-    assert!(
-        matches!(&terminal.state, provenant_run::AttemptState::Terminal { reason: Some(reason), .. } if reason.starts_with(&format!("provider capacity: {message}")))
-    );
+    // A staged settlement retry appends its note after the safe owner reason.
+    assert!(matches!(
+        &terminal.state,
+        provenant_run::AttemptState::Terminal { reason: Some(reason), .. }
+            if reason.starts_with(provenant_records::diagnostic::ProviderFailureFact::Capacity.reason())
+                && !reason.contains(message)
+    ));
     let record = provenant_quota::AccountRecord::decode(&fs::read(
         rig.state.join("quota/codex-fixture/codex.json"),
     )?)?;
@@ -1628,6 +1687,8 @@ fn persisted_attempt_with(
             attempt_id,
             running.revision,
             &provenant_run::TerminalPublication {
+                terminal_cause: None,
+                terminal_note: None,
                 outcome: provenant_run::Outcome::Succeeded,
                 finished_at: clock.wall_now()?,
                 started_at: running.started_at,
@@ -1694,7 +1755,19 @@ fn cancel_wait_settles_stalled_import_with_durable_exit() -> Result {
     let lanes: Value = serde_json::from_slice(&lanes.stdout.bytes)?;
     let lane = &lanes["data"]["rows"][0];
     assert_eq!(lane["state"], "cancelled", "{lanes}");
-    assert_eq!(lane["reason"], "cancelled during Git import", "{lanes}");
+    assert_eq!(lane["cause"], "cancelled", "{lanes}");
+    assert_eq!(lane["exit_code"], 0, "{lanes}");
+    let database = rusqlite::Connection::open(rig.state.join("run.sqlite3"))?;
+    let retained: Vec<u8> = database.query_row(
+        "SELECT record FROM attempts WHERE id=?1",
+        [running.attempt_id.to_string()],
+        |row| row.get(0),
+    )?;
+    let retained: provenant_run::AttemptRecord = serde_json::from_slice(&retained)?;
+    assert_eq!(
+        retained.terminal_evidence,
+        Some(provenant_run::TerminalEvidence::ImportCancellation)
+    );
     Ok(())
 }
 
@@ -1961,7 +2034,7 @@ fn receipt_output_reports_unknown_route_for_settled_lost_attempt() -> Result {
     Ok(())
 }
 
-fn agy_denial_result_reaches_terminal_reason() -> Result {
+fn agy_denial_result_stays_out_of_terminal_diagnostics() -> Result {
     let (rig, terminal) = persisted_attempt(
         "agy",
         "agy/gemini-3.8-flash",
@@ -1985,14 +2058,26 @@ fn agy_denial_result_reaches_terminal_reason() -> Result {
     ])?;
     assert_eq!(code(&lanes), 0, "{:?}", lanes.stderr.bytes);
     let lanes: Value = serde_json::from_slice(&lanes.stdout.bytes)?;
-    assert_eq!(
-        lanes["data"]["rows"][0]["reason"],
-        "provider denied: RunCommand"
-    );
+    let lane = &lanes["data"]["rows"][0];
+    assert_eq!(lane["state"], "failed");
+    assert_eq!(lane["cause"], "failed");
+    for diagnostic in [&lane["reason"], &lane["settlement"]["reason"]] {
+        let diagnostic = diagnostic.as_str().ok_or("failure diagnostic")?;
+        assert!(!diagnostic.is_empty());
+        assert!(!diagnostic.contains("RunCommand"));
+    }
+    let captured = rig
+        .state
+        .join("runs")
+        .join(terminal.run_id.to_string())
+        .join("attempts")
+        .join(terminal.attempt_id.to_string())
+        .join("stdout.log");
+    assert!(fs::read_to_string(captured)?.contains("RunCommand"));
     Ok(())
 }
 
-fn agy_denied_command_reaches_result_and_terminal_reason() -> Result {
+fn agy_denied_command_reaches_result_without_entering_terminal_diagnostics() -> Result {
     let denial = include_bytes!("fixtures/providers/agy/command-denied.stderr");
     // Synthetic partial stdout and the real stderr-only failure case.
     let partial = br#"{"event":"step_update","step_update":{"conversation_id":"fixture-session","step_type":"agent_response","text_delta":"I verified part of the claim."}}"#;
@@ -2025,10 +2110,15 @@ fn agy_denied_command_reaches_result_and_terminal_reason() -> Result {
         ])?;
         assert_eq!(code(&lanes), 0, "{:?}", lanes.stderr.bytes);
         let lanes: Value = serde_json::from_slice(&lanes.stdout.bytes)?;
-        let reason = lanes["data"]["rows"][0]["reason"]
-            .as_str()
-            .ok_or("terminal reason")?;
-        assert!(reason.contains(r#""command" permission"#), "{lanes}");
+        let lane = &lanes["data"]["rows"][0];
+        assert_eq!(lane["state"], "failed");
+        assert_eq!(lane["cause"], "failed");
+        for diagnostic in [&lane["reason"], &lane["settlement"]["reason"]] {
+            let diagnostic = diagnostic.as_str().ok_or("failure diagnostic")?;
+            assert!(!diagnostic.is_empty());
+            assert!(!diagnostic.contains(r#""command" permission"#), "{lanes}");
+            assert!(!diagnostic.contains("jetski:"), "{lanes}");
+        }
         let output = rig.command(&["output", &terminal.attempt_id.to_string(), "--json"])?;
         assert_eq!(code(&output), 0, "{:?}", output.stderr.bytes);
         let output: Value = serde_json::from_slice(&output.stdout.bytes)?;
@@ -2123,9 +2213,8 @@ fn opencode_free_pool_cools_second_model() -> Result {
             pools: &pools,
         }
         .check(&second),
-        Err(provenant_quota::QuotaError::Refused(
-            "free tier exhausted; use a paid route or wait for its allowance reset"
-        ))
+        Err(provenant_quota::QuotaError::Refused(reason))
+            if reason == provenant_quota::AccountBlock::FreeTierRefusal.repair()
     ));
     Ok(())
 }
@@ -2189,9 +2278,8 @@ fn opencode_free_reset_cools_pool_until_reset_and_restores() -> Result {
         for route in [&first, &second] {
             assert!(matches!(
                 admit(route, at),
-                Err(provenant_quota::QuotaError::Refused(
-                    "free tier exhausted; use a paid route or wait for its allowance reset"
-                ))
+                Err(provenant_quota::QuotaError::Refused(reason))
+                    if reason == provenant_quota::AccountBlock::FreeTierRefusal.repair()
             ));
         }
     }
@@ -2301,9 +2389,8 @@ fn agy_individual_quota_cools_model_until_reset() -> Result {
     for at in [now, now + 3600, resets - 1] {
         assert!(matches!(
             admit(&route, at),
-            Err(provenant_quota::QuotaError::Refused(
-                "scoped provider refusal"
-            ))
+            Err(provenant_quota::QuotaError::Refused(reason))
+                if reason == provenant_quota::AccountBlock::ScopedRefusal.repair()
         ));
     }
     admit(&route, resets)?;
@@ -3024,11 +3111,13 @@ fn main() -> ExitCode {
                 "receipt_output_classifies_writers_and_refuses_ambiguous_or_running_attempts",
                 "opencode_usage_limit_settlement_is_bounded",
                 "host_native_preparation_uses_the_provider_contract",
+                "graph_read_only_alias_retries_another_member_after_empty_launch_quota",
+                "opencode_dispatch_observes_v2_wal_session",
                 "opencode_free_pool_cools_second_model",
                 "opencode_free_reset_cools_pool_until_reset_and_restores",
                 "agy_individual_quota_cools_model_until_reset",
-                "agy_denied_command_reaches_result_and_terminal_reason",
-                "agy_denial_result_reaches_terminal_reason",
+                "agy_denied_command_reaches_result_without_entering_terminal_diagnostics",
+                "agy_denial_result_stays_out_of_terminal_diagnostics",
                 "codex_capacity_settles_without_quota_refusal",
             ],
             |name| {
@@ -3065,6 +3154,8 @@ fn main() -> ExitCode {
                         host_native_preparation_uses_the_provider_contract()
                     }
 
+                    "graph_read_only_alias_retries_another_member_after_empty_launch_quota" => graph_read_only_alias_retries_another_member_after_empty_launch_quota(),
+                    "opencode_dispatch_observes_v2_wal_session" => opencode_dispatch_observes_v2_wal_session(),
                     "opencode_free_pool_cools_second_model" => {
                         opencode_free_pool_cools_second_model()
                     }
@@ -3074,11 +3165,11 @@ fn main() -> ExitCode {
                     "agy_individual_quota_cools_model_until_reset" => {
                         agy_individual_quota_cools_model_until_reset()
                     }
-                    "agy_denied_command_reaches_result_and_terminal_reason" => {
-                        agy_denied_command_reaches_result_and_terminal_reason()
+                    "agy_denied_command_reaches_result_without_entering_terminal_diagnostics" => {
+                        agy_denied_command_reaches_result_without_entering_terminal_diagnostics()
                     }
-                    "agy_denial_result_reaches_terminal_reason" => {
-                        agy_denial_result_reaches_terminal_reason()
+                    "agy_denial_result_stays_out_of_terminal_diagnostics" => {
+                        agy_denial_result_stays_out_of_terminal_diagnostics()
                     }
                     "codex_capacity_settles_without_quota_refusal" => {
                         codex_capacity_settles_without_quota_refusal()

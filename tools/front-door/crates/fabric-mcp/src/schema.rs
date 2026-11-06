@@ -242,7 +242,7 @@ fn build_strict() -> Vec<Value> {
         (
             "Run template briefs or graph documents, edit graphs, inspect templates and report status or trace. Documents and patches are JSON objects, never file paths. Attempt submissions and observations use the run service.",
             json!({
-                "submit":{"operation_id?":reference("OperationId"),"wait_seconds?":wait.clone(),"detail?":{"type":"boolean"},"tasks":array(object(json!({"context?":nullable(reference("WorkContext")),"build_heavy?":{"type":"boolean"},"prompt":text(MAX_TEXT_BYTES),"title?":nullable(text(256)),"base?":nullable(text(1024)),"head?":nullable(text(64)),"account?":nullable(text(64)),"access?":choices(&["read_only","worktree_write"]),"capabilities?":nullable(array(text(64),0,16)),"worktree?":nullable(text(MAX_ARTIFACT_PATH_BYTES)),"route":reference("Route"),"timeout_seconds":integer(1,provenant_core::MAX_LANE_RUNTIME_SECONDS),"delivery_id?":nullable(reference("Id")),"deliver?":nullable(object(json!({"remote":text(64),"branch":text(1024),"open_pr?":{"type":"boolean"}})))})),1,64),"concurrency?":nullable(integer(1,16)),"knobs?":array(text(256),0,64),"host?":nullable(reference("Id"))},
+                "submit":{"operation_id?":reference("OperationId"),"wait_seconds?":wait.clone(),"detail?":{"type":"boolean"},"tasks":array(object(json!({"context?":nullable(reference("WorkContext")),"build_heavy?":{"type":"boolean"},"prompt":text(MAX_TEXT_BYTES),"title?":nullable(text(256)),"base?":nullable(text(1024)),"head?":nullable(text(64)),"source_head?":nullable(text(64)),"account?":nullable(text(64)),"access?":choices(&["read_only","worktree_write"]),"capabilities?":nullable(array(text(64),0,16)),"worktree?":nullable(text(MAX_ARTIFACT_PATH_BYTES)),"route":reference("Route"),"timeout_seconds":integer(1,provenant_core::MAX_LANE_RUNTIME_SECONDS),"delivery_id?":nullable(reference("Id")),"deliver?":nullable(object(json!({"remote":text(64),"branch":text(1024),"open_pr?":{"type":"boolean"}})))})),1,64),"concurrency?":nullable(integer(1,16)),"knobs?":array(text(256),0,64),"host?":nullable(reference("Id"))},
                 "list":{"after?":nullable(reference("AttemptTarget")),"limit?":page},"status":{"target":reference("AttemptTarget"),"detail?":{"type":"boolean"}},
                 "wait":{"targets":array(reference("AttemptTarget"),1,100),"condition":choices(&["any","all"]),"wait_seconds":wait,"detail?":{"type":"boolean"}},
                 "cancel":{"target":reference("AttemptTarget"),"operation_id?":reference("OperationId"),"detail?":{"type":"boolean"}},
@@ -678,6 +678,9 @@ fn settle<'a>(root: &'a Value, mut schema: &'a Value, current: &Value) -> &'a Va
 /// The lone closest candidate, when it is within a small edit distance after
 /// case and separator folding. A tie refuses to guess.
 fn nearest<'a>(given: &str, candidates: impl Iterator<Item = &'a str>) -> Option<&'a str> {
+    if given.len() > 128 || given.chars().any(char::is_control) {
+        return None;
+    }
     let given = fold(given);
     let mut best: Option<(usize, &'a str)> = None;
     let mut tied = false;
@@ -711,6 +714,52 @@ pub fn invalid_path(name: &str, value: &Value) -> Option<String> {
         .iter()
         .find(|tool| tool["name"] == name)?["inputSchema"];
     structural_path(root, root, value, "arguments")
+}
+
+/// Project only catalogue-owned field names and array indices. Unknown object
+/// keys can contain arbitrary caller data and must not enter an error envelope.
+pub(crate) fn safe_argument_path(name: &str, value: &Value, path: &str) -> String {
+    let Some(root) = strict_catalogue()
+        .iter()
+        .find(|tool| tool["name"] == name)
+        .map(|tool| &tool["inputSchema"])
+    else {
+        return "arguments".into();
+    };
+    let normalised = path.replace('[', ".").replace(']', "");
+    let mut schema = root;
+    let mut current = value;
+    let mut safe = String::from("arguments");
+    for segment in normalised.split('.').skip(1) {
+        schema = settle(root, schema, current);
+        if let Ok(index) = segment.parse::<usize>() {
+            if !current.is_array() {
+                break;
+            }
+            safe.push_str(&format!("[{index}]"));
+            current = current.get(index).unwrap_or(&Value::Null);
+            schema = &schema["items"];
+        } else if let Some(field) = schema["properties"].get(segment) {
+            safe.push('.');
+            safe.push_str(segment);
+            current = current.get(segment).unwrap_or(&Value::Null);
+            schema = field;
+        } else if matches!(segment, "op" | "kind" | "scope")
+            && schema["oneOf"].as_array().is_some_and(|variants| {
+                variants
+                    .iter()
+                    .any(|variant| variant["properties"].get(segment).is_some())
+            })
+        {
+            safe.push('.');
+            safe.push_str(segment);
+            break;
+        } else {
+            safe.push_str(".<unknown>");
+            break;
+        }
+    }
+    provenant_records::diagnostic::safe_text(&safe)
 }
 
 /// Describe the schema constraint at a rejected argument path, without echoing input.
@@ -789,6 +838,11 @@ pub fn expected(name: &str, value: &Value, path: &str) -> String {
     }
     if let Some(value) = schema.get("const") {
         return format!("{value}");
+    }
+    if let Some(max) = schema["x-provenant-maxUtf8Bytes"].as_u64()
+        && current.as_str().is_some_and(|text| text.len() as u64 > max)
+    {
+        return format!("a string of at most {max} UTF-8 bytes");
     }
     match schema["type"].as_str() {
         Some("integer") => format!(
@@ -1059,6 +1113,61 @@ mod wire_parity {
             .unwrap();
             crate::tools::project_run(&mut cancelled, true).unwrap();
             check("fabric_run", &cancelled);
+        }
+    }
+
+    #[test]
+    fn run_refusal_projects_safe_skipped_route_for_both_mcp_views() {
+        use provenant_records::{
+            RouteExclusionReason,
+            run::{SkipKind, SkippedRoute},
+        };
+        let mut record = attempt(None);
+        record.skipped_routes.push(SkippedRoute {
+            extra: Default::default(),
+            route: "fixture/model".into(),
+            kind: SkipKind::Unavailable,
+            cause: Some(RouteExclusionReason::StaleAvailability),
+            detail: format!("TOKEN_SENTINEL /private/source \u{1b} {}", "é".repeat(2048)),
+        });
+        record.state = provenant_records::run::AttemptState::Terminal {
+            extra: Default::default(),
+            outcome: provenant_records::run::Outcome::Unsettled,
+            exit_code: None,
+            finished_at: provenant_core::WallTime::from_micros(2).unwrap(),
+            reason: Some("TOKEN_SENTINEL /private/source \u{1b}".into()),
+        };
+        for detailed in [false, true] {
+            let mut value = serde_json::to_value(RunResult::Status {
+                extra: Default::default(),
+                attempt: record.clone(),
+            })
+            .unwrap();
+            crate::tools::project_run(&mut value, detailed).unwrap();
+            let reason = value["attempt"]["reason"].as_str().unwrap();
+            assert!(reason.contains("wire-parity"));
+            assert!(!reason.contains("TOKEN_SENTINEL"));
+            assert!(!reason.contains("/private/source"));
+            assert!(
+                !value["attempt"]["settlement"]["reason"]
+                    .as_str()
+                    .unwrap()
+                    .contains("TOKEN_SENTINEL")
+            );
+            let skipped = &value["attempt"]["skipped_routes"][0];
+            assert_eq!(skipped["code"], "REFUSED");
+            assert!(skipped["detail"].as_str().unwrap().contains("stale"));
+            assert!(
+                skipped["next"]
+                    .as_str()
+                    .unwrap()
+                    .contains("provenant quota tick")
+            );
+            let wire = skipped.to_string();
+            assert!(wire.len() < 4096);
+            assert!(!wire.contains("TOKEN_SENTINEL"));
+            assert!(!wire.contains("/private/source"));
+            assert!(!wire.contains('\u{1b}'));
         }
     }
 

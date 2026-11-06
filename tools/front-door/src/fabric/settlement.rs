@@ -489,7 +489,7 @@ pub(crate) fn settle_owned_worktree(
                     // Retained lanes can resume with fresh caches. Restrict this
                     // pass to their owner, including detached remnants, and prove
                     // terminal state again while acquiring writer exclusion.
-                    if lane.writer == worktrees::WriterState::Free {
+                    if lane.occupancy.is_available() {
                         provenant_confinement::cache::gc_worktree_cargo_caches_with_writer_guard(
                             &settled.roots.home,
                             &provenant_confinement::cache::CacheGcPolicy {
@@ -502,7 +502,10 @@ pub(crate) fn settle_owned_worktree(
                                 let guard =
                                     worktrees::cache_writer_guard(context.project_state, path)?;
                                 if !terminal(path) || !no_live(path) {
-                                    return Err(worktrees::WorkerState::Unknown);
+                                    return Err(worktrees::Occupancy::custody_unknown(
+                                        path.to_path_buf(),
+                                        "lane settlement could not be verified",
+                                    ));
                                 }
                                 Ok(Some(guard))
                             },

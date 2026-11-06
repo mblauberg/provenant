@@ -40,7 +40,32 @@ pub fn runtime_seconds(task: &TaskRequest, cap: Option<u64>) -> u64 {
     })
 }
 
-pub fn capture_plan(task: &TaskRequest, runtime_seconds: u64) -> CapturePlan {
+/// The token budget of one lane: a writer's, resolved from host configuration
+/// with the project, and 0 (none) for any other lane. Each fresh read keeps a
+/// setting changed between lanes in effect for the next one.
+pub fn token_budget(
+    task: &TaskRequest,
+    state_root: &std::path::Path,
+    project: &str,
+) -> provenant_confinement::run_config::TokenBudget {
+    use provenant_confinement::run_config::{RunConfig, TokenBudget, TokenBudgetSource};
+    if task.writer.is_none() {
+        return TokenBudget {
+            tokens: 0,
+            source: TokenBudgetSource::Default,
+        };
+    }
+    RunConfig::read(state_root)
+        .unwrap_or_default()
+        .writer_token_budget_for(project, None)
+}
+
+pub fn capture_plan(
+    task: &TaskRequest,
+    runtime_seconds: u64,
+    token_budget: u64,
+    provider: &str,
+) -> CapturePlan {
     CapturePlan {
         stdout: if matches!(&task.route, crate::RequestedRoute::Adapter { provider, .. } if provider == "command")
         {
@@ -56,6 +81,18 @@ pub fn capture_plan(task: &TaskRequest, runtime_seconds: u64) -> CapturePlan {
             .knob_u64("lanes.silence_seconds")
             .unwrap_or(1800)
             .saturating_mul(1000),
+        token_budget: if crate::token_budget::enforces(provider) {
+            token_budget
+        } else {
+            0
+        },
+        slot_wait_ms: task
+            .profile
+            .knob_u64("lanes.slot_wait_seconds")
+            .map_or_else(
+                provenant_supervisor::custody::default_slot_wait_ms,
+                |seconds| seconds.saturating_mul(1000),
+            ),
         ..CapturePlan::default()
     }
 }
@@ -133,6 +170,7 @@ fn applied_write_grants(
 }
 /// Provider-decoded facts from a completed capture.
 pub struct Decoded {
+    pub terminal_cause: Option<TerminalCause>,
     pub outcome: Outcome,
     pub result: String,
     pub complete: bool,
@@ -148,11 +186,24 @@ pub struct Decoded {
 #[derive(Debug, thiserror::Error)]
 #[error("{message}")]
 pub struct PrepareRefusal {
+    pub terminal_cause: Option<TerminalCause>,
+    /// Fixed-form text naming a configured value, never captured output.
+    pub terminal_note: Option<String>,
     pub message: String,
     pub skipped_routes: Vec<SkippedRoute>,
     pub fallback_outcome: Option<provenant_records::run::PreparationFailure>,
 }
 impl PrepareRefusal {
+    fn kind(&self) -> RefusalKind {
+        if self.skipped_routes.iter().any(|route| {
+            route.cause == Some(provenant_records::RouteExclusionReason::PacingReserve)
+        }) {
+            RefusalKind::PacingReserve
+        } else {
+            RefusalKind::Preparation
+        }
+    }
+
     pub fn auth_required(&self) -> bool {
         !self.skipped_routes.is_empty()
             && self
@@ -165,6 +216,8 @@ impl From<String> for PrepareRefusal {
     fn from(message: String) -> Self {
         Self {
             message,
+            terminal_cause: None,
+            terminal_note: None,
             skipped_routes: Vec::new(),
             fallback_outcome: None,
         }
@@ -333,22 +386,31 @@ impl RunStore {
         let prompt = output_prompt(&base, &attempt.prompt);
         let plan = providers
             .check_policy(task)
+            .map_err(|message| RunError::Input {
+                kind: ErrorKind::ContinuationUnsupported,
+                message,
+            })
             .and_then(|()| {
                 providers
                     .prepare(task, &prompt, &paths, None)
-                    .map_err(|error| error.to_string())
+                    .map_err(|error| match error.terminal_cause {
+                        Some(cause) => RunError::ContinuationRefused { cause },
+                        None => RunError::Input {
+                            kind: ErrorKind::ContinuationUnsupported,
+                            message: error.to_string(),
+                        },
+                    })
             })
             .and_then(|mut plan| {
                 let limit = providers.write_grant_limit().checked();
-                applied_write_grants(&plan, limit).map_err(|error| error.to_string())?;
+                applied_write_grants(&plan, limit).map_err(|error| RunError::Input {
+                    kind: ErrorKind::ContinuationUnsupported,
+                    message: error.to_string(),
+                })?;
                 plan.route
                     .extra
                     .insert("write_grant_limit".into(), limit.receipt());
                 Ok(plan)
-            })
-            .map_err(|message| RunError::Input {
-                kind: ErrorKind::ContinuationUnsupported,
-                message: format!("fresh fallback refused before admission: {message}"),
             })?;
         *ready.plan.get_mut() = Some(plan);
         Ok(ready)
@@ -453,6 +515,10 @@ pub trait Providers {
 enum HandOff {
     /// Failed before anything was sent to a guardian.
     Local(String),
+    TypedLocal {
+        message: String,
+        cause: TerminalCause,
+    },
     Busy,
     /// No guardian was contacted, but custody remains protected.
     Protected(String),
@@ -487,6 +553,7 @@ pub enum Started {
 pub enum RefusalKind {
     Policy,
     Preparation,
+    PacingReserve,
     WorktreeBusy,
     PriorityUnavailable,
     StoredPromptUnreadable,
@@ -795,12 +862,12 @@ impl RunStore {
             let prepared = providers
                 .check_policy(task)
                 .map(|()| priority)
-                .map_err(|reason| (RefusalKind::Policy, PrepareRefusal::from(reason)))
+                .map_err(|reason| (RefusalKind::Policy, Box::new(PrepareRefusal::from(reason))))
                 .and_then(|priority| {
                     providers
                         .prepare(task, &prompt, &paths, resume.as_ref())
                         .map(|plan| (plan, priority))
-                        .map_err(|reason| (RefusalKind::Preparation, reason))
+                        .map_err(|reason| (reason.kind(), Box::new(reason)))
                 });
             let (mut plan, priority) = match prepared {
                 Ok(prepared) => prepared,
@@ -824,6 +891,8 @@ impl RunStore {
                             reason: &reason,
                             finished_at: now()?,
                             failure: refusal.fallback_outcome,
+                            terminal_cause: refusal.terminal_cause,
+                            terminal_note: refusal.terminal_note,
                         },
                         call,
                     ) {
@@ -926,12 +995,18 @@ impl RunStore {
                     Ok(()) => Started::Launched(id),
                     // Nothing reached a guardian: the attempt ends here.
                     Err(
-                        error
-                        @ (HandOff::Local(_) | HandOff::Busy | HandOff::RetainedImport { .. }),
+                        error @ (HandOff::Local(_)
+                        | HandOff::TypedLocal { .. }
+                        | HandOff::Busy
+                        | HandOff::RetainedImport { .. }),
                     ) => {
+                        let terminal_cause = match &error {
+                            HandOff::TypedLocal { cause, .. } => Some(*cause),
+                            _ => None,
+                        };
                         let (reason, kind) = match error {
                             HandOff::Busy => ("worktree is busy".into(), RefusalKind::WorktreeBusy),
-                            HandOff::Local(error) => (
+                            HandOff::Local(error) | HandOff::TypedLocal { message: error, .. } => (
                                 format!("launch preparation failed: {error}"),
                                 RefusalKind::Handoff,
                             ),
@@ -954,14 +1029,19 @@ impl RunStore {
                             ),
                             _ => unreachable!(),
                         };
-                        self.withdraw(
+                        self.withdraw_with_preparation_failure(
                             id,
-                            AttemptState::Starting {
-                                extra: Default::default(),
+                            crate::store::Withdrawal {
+                                expected: AttemptState::Starting {
+                                    extra: Default::default(),
+                                },
+                                outcome: Outcome::Rejected,
+                                reason: &reason,
+                                finished_at: now()?,
+                                failure: None,
+                                terminal_cause,
+                                terminal_note: None,
                             },
-                            Outcome::Rejected,
-                            &reason,
-                            now()?,
                             call,
                         )?;
                         Started::Refused {

@@ -48,14 +48,7 @@ pub fn run(mut command: Dispatch, edge: &Edge<'_>) -> Reply {
             match provenant_config::read_with_domains(edge.roots, &crate::domains::SECTIONS) {
                 Ok(config) => config,
                 Err(error) => {
-                    return reply(
-                        "run",
-                        Err(Fail::new(
-                            Status::Error,
-                            ErrorKind::Config,
-                            error.to_string(),
-                        )),
-                    );
+                    return reply("run", Err(Fail::config(Status::Error, error)));
                 }
             };
         if let Ok(catalogue) = provenant_routing::Catalogue::bundled() {
@@ -519,7 +512,7 @@ pub(super) fn dispatch_with_workers(
                         .find(|tree| tree.path == path)
                         .ok_or(worktrees::WorktreeError::NotFound)?;
                     if info.dirty != worktrees::WorktreeCondition::Clean
-                        || info.writer != worktrees::WriterState::Free
+                        || !info.occupancy.is_available()
                     {
                         return Err(worktrees::WorktreeError::Dirty(String::new()));
                     }
@@ -530,14 +523,11 @@ pub(super) fn dispatch_with_workers(
                     }) {
                         return Err(worktrees::WorktreeError::UnknownWriter);
                     }
-                    worktrees::remove(
+                    worktrees::remove_created_by_operation(
                         context,
-                        worktrees::WorktreeRemove::Name {
-                            name: branch,
-                            discard: false,
-                            integration: None,
-                            expected_head: Some(info.head),
-                        },
+                        branch,
+                        info.head,
+                        &operation_id,
                         &cancel,
                     )?;
                     Ok(())
@@ -778,6 +768,7 @@ impl WorktreeAdmissionError {
                     | WorktreeError::LockBusy
                     | WorktreeError::UnknownWriter
                     | WorktreeError::UnknownWriterAt { .. }
+                    | WorktreeError::UnknownOccupancy { .. }
             ),
             _ => false,
         }
@@ -795,6 +786,10 @@ mod admission_retry_tests {
             |error| WorktreeAdmissionError::Run(run::RunError::Writer(error)).is_transient();
         assert!(retry(WorktreeError::LockBusy));
         assert!(retry(WorktreeError::UnknownWriter));
+        assert!(retry(WorktreeError::UnknownOccupancy {
+            path: "lane".into(),
+            detail: "registration race".into()
+        }));
         assert!(!retry(WorktreeError::LiveWriter));
         assert!(!retry(WorktreeError::Dirty(String::new())));
     }
@@ -821,7 +816,7 @@ pub(super) fn dispatch_inner(
     // see the same effective capabilities as the provider.
     let explicit = command.access.capability.clone();
     let settings = provenant_config::read_with_domains(edge.roots, &crate::domains::SECTIONS)
-        .map_err(|error| Fail::new(Status::Error, ErrorKind::Config, error.to_string()))?;
+        .map_err(|error| Fail::config(Status::Error, error))?;
     let project = if settings.domains.lanes.projects.is_empty() {
         None
     } else {
@@ -925,6 +920,32 @@ pub(super) fn dispatch_inner(
                     "admission timeout: {}s ({})\n",
                     effective_admission.seconds, effective_admission.origin
                 ));
+                if matches!(command.access.mode(), Mode::WorktreeWrite) {
+                    let budget = run_config.writer_token_budget_for(
+                        &project.as_ref().map(ToString::to_string).unwrap_or_default(),
+                        None,
+                    );
+                    let enforced: Vec<&str> = provenant_providers::REGISTRY
+                        .iter()
+                        .filter(|entry| provenant_run::token_budget::enforces(entry.adapter.id()))
+                        .map(|entry| entry.adapter.id())
+                        .collect();
+                    data["token_budget"] = json!({
+                        "tokens": budget.tokens,
+                        "source": budget.source.as_str(),
+                        "enforced_for": enforced,
+                    });
+                    if budget.tokens == 0 {
+                        text.push_str("token budget: off\n");
+                    } else {
+                        text.push_str(&format!(
+                            "token budget: {} tokens ({}); enforced for {}, which report usage while running; not enforced for other providers\n",
+                            budget.tokens,
+                            budget.source.as_str(),
+                            enforced.join(", ")
+                        ));
+                    }
+                }
                 record_warnings(&mut data, warnings);
                 text.push_str(&warnings_text(&data));
                 (data, text, false)
@@ -1471,7 +1492,7 @@ pub(super) fn dispatch_inner(
     };
     // Validate deterministic admission inputs before creating or claiming a tree.
     let config = provenant_config::read_with_domains(edge.roots, &crate::domains::SECTIONS)
-        .map_err(|error| Fail::new(Status::Invalid, ErrorKind::Config, error.to_string()))?;
+        .map_err(|error| Fail::config(Status::Invalid, error))?;
     config
         .dispatch_profile(&command.knobs)
         .map_err(|error| Fail::new(Status::Invalid, ErrorKind::Config, error.to_string()))?;
@@ -1684,39 +1705,36 @@ pub(super) fn dispatch_inner(
                                 lock_budget,
                                 ..*context
                             };
-                            let info = worktrees::list(context, &cancel)?
+                            let observation = worktrees::list(context, &cancel)?
                                 .into_iter()
                                 .find(|tree| tree.path == writer.worktree)
                                 .ok_or(worktrees::WorktreeError::NotFound)?;
+                            let info = observation;
                             let branch =
                                 info.branch
                                     .ok_or(worktrees::WorktreeError::DetachedWorktree {
                                         head: info.head,
                                     })?;
                             if !replay {
+                                super::worktree::warn_advisory_occupancy(
+                                    &info.path,
+                                    &info.occupancy,
+                                )?;
                                 match worktrees::cache_writer_probe(
                                     context.project_state,
                                     &info.path,
                                 ) {
                                     Ok(_) => {}
-                                    Err(worktrees::WorkerState::Busy) => {
-                                        let tree = provenant_confinement::verify_worktree(
-                                            context.repo,
+                                    Err(worktrees::Occupancy::Held) => {
+                                        let holder = worktrees::writer_holder(
+                                            context.project_state,
                                             &info.path,
-                                        )?;
-                                        let holder = worktrees::load_owner(&tree)?
-                                            .and_then(|owner| owner.attempt_id);
+                                        );
                                         return Err(worktrees::WorktreeError::WriterBusy {
                                             holder,
                                         });
                                     }
-                                    Err(worktrees::WorkerState::Live) => {
-                                        return Err(worktrees::live_refusal(
-                                            context.workers,
-                                            &info.path,
-                                        ));
-                                    }
-                                    Err(_) => return Err(worktrees::WorktreeError::UnknownWriter),
+                                    Err(other) => return Err(worktrees::custody_refusal(other)),
                                 }
                             }
                             Ok(json!({
@@ -1834,6 +1852,7 @@ pub(super) fn dispatch_inner(
                     base,
                     pinned_base,
                     head: command.head.clone(),
+                    source_head: None,
                     task_id,
                     prompt,
                     route,
@@ -1881,6 +1900,35 @@ pub(super) fn dispatch_inner(
         })
         .collect();
     brief_warnings.extend(capability_warnings);
+    if matches!(command.access.mode(), Mode::WorktreeWrite) {
+        let budget = config
+            .domains
+            .run
+            .writer_token_budget_for(&session.context.project_id.to_string(), None);
+        if budget.tokens > 0 {
+            let enforced: Vec<&str> = provenant_providers::REGISTRY
+                .iter()
+                .filter(|entry| provenant_run::token_budget::enforces(entry.adapter.id()))
+                .map(|entry| entry.adapter.id())
+                .collect();
+            for task in &tasks {
+                let provider = match &task.route {
+                    provenant_records::run::RequestedRoute::Adapter { provider, .. }
+                    | provenant_records::run::RequestedRoute::Model { provider, .. } => {
+                        Some(provider.as_str())
+                    }
+                    _ => None,
+                };
+                if let Some(p) = provider
+                    && !enforced.contains(&p)
+                {
+                    brief_warnings.push(format!(
+                        "token budget is not enforced for provider {p}: mid-turn usage is not reported"
+                    ));
+                }
+            }
+        }
+    }
     // Admission has its own budget. Start the launch and observation budget
     // only once the run is ready to submit.
     let deadline = command
@@ -2187,7 +2235,7 @@ pub fn nested_dispatch_context(roots: &Roots) -> Result<(u64, Option<AttemptId>)
     let parent_depth = environment_text(run::LANE_DEPTH_ENV)?;
     let parent_attempt = environment_text(run::PARENT_ATTEMPT_ENV)?;
     let config = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)
-        .map_err(|error| Fail::new(Status::Error, ErrorKind::Config, error.to_string()))?;
+        .map_err(|error| Fail::config(Status::Error, error))?;
     let max_depth = config
         .knobs
         .get("lanes.max_depth")
@@ -2261,7 +2309,7 @@ pub(super) fn replay_owned_dispatch(
         None => None,
     };
     let config = provenant_config::read_with_domains(edge.roots, &crate::domains::SECTIONS)
-        .map_err(|error| Fail::new(Status::Invalid, ErrorKind::Config, error.to_string()))?;
+        .map_err(|error| Fail::config(Status::Invalid, error))?;
     let mut profile = config
         .dispatch_profile(&command.knobs)
         .map_err(|error| Fail::new(Status::Invalid, ErrorKind::Config, error.to_string()))?;
@@ -2817,9 +2865,16 @@ pub(super) fn launch_on_host_with_wait(
                         && (owner.operation_id.as_ref() == Some(&attempt.operation_id)
                             || owner.attempt_id.is_some() && owner.attempt_id == attempt.retry_of)
                     {
+                        let expected = owner.clone();
                         owner.attempt_id = Some(attempt.attempt_id);
                         owner.operation_id = Some(attempt.operation_id.clone());
-                        worktrees::save_owner(&tree, &owner)?;
+                        worktrees::update_owner_when_unchanged(
+                            context,
+                            &tree,
+                            &expected,
+                            &owner,
+                            call.cancel,
+                        )?;
                     }
                     Ok(())
                 },
@@ -2956,26 +3011,14 @@ pub(super) fn check_launch_policy(started: &[run::Started]) -> Result<(), Fail> 
         }
         .into());
     }
-    // Candidate preparation reports route exclusions as `route: detail` entries.
-    // Promote pacing specifically; other preparation refusals remain in the receipt.
+    // Promote policy and typed pacing refusals; other preparation refusals
+    // remain in the per-attempt receipt.
     if let Some((attempt, reason)) = started.iter().find_map(|started| match started {
         run::Started::Refused {
             attempt,
             reason,
-            kind: run::RefusalKind::Policy,
+            kind: run::RefusalKind::Policy | run::RefusalKind::PacingReserve,
         } => Some((attempt, reason)),
-        run::Started::Refused {
-            attempt,
-            reason,
-            kind: run::RefusalKind::Preparation,
-        } if reason.split("; ").any(|entry| {
-            entry
-                .rsplit_once(": ")
-                .is_some_and(|(_, detail)| detail == "PacingReserve")
-        }) =>
-        {
-            Some((attempt, reason))
-        }
         _ => None,
     }) {
         return Err(Fail::new(

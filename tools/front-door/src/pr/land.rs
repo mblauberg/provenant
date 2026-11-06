@@ -270,9 +270,8 @@ fn checkouts(git: &Git, project: &Path) -> Result<Vec<Checkout>> {
 }
 
 fn discover_checkouts(git: &Git, project: &Path) -> Result<Vec<Checkout>> {
-    let listing = git
-        .full(project, &["worktree", "list", "--porcelain", "-z"])?
-        .ok_or("cannot list worktrees")?;
+    let listing = git.worktrees(project)?;
+    let listing = String::from_utf8_lossy(&listing);
     let mut checkouts: Vec<Checkout> = Vec::new();
     for field in listing.split('\0') {
         if let Some(path) = field.strip_prefix("worktree ") {
@@ -291,27 +290,20 @@ fn discover_checkouts(git: &Git, project: &Path) -> Result<Vec<Checkout>> {
                 .branch = Some(branch.to_owned());
         }
     }
-    let common =
-        provenant_os::git::repository_path(project, provenant_os::git::RepositoryPath::CommonDir)
-            .map_err(|error| format!("cannot find the common Git directory: {error}"))?;
+    let (_, _, common) = git
+        .repository_paths(project)
+        .map_err(|error| format!("cannot find the common Git directory: {error}"))?;
     let primary = &checkouts.first().ok_or("no primary checkout")?.path;
-    let valid =
-        |candidate: &Path| -> Result<bool> {
-            if roots::selected_project(Some(candidate), true)
-                .ok()
-                .as_deref()
-                != Some(candidate)
-            {
-                return Ok(false);
+    let valid = |candidate: &Path| -> Result<bool> {
+        match fs::symlink_metadata(candidate.join(".git")) {
+            Ok(_) => {
+                let (root, private, _) = git.repository_paths(candidate)?;
+                Ok(root == candidate && private == common)
             }
-            Ok(provenant_os::git::repository_path(
-                candidate,
-                provenant_os::git::RepositoryPath::GitDir,
-            )
-            .ok()
-            .as_deref()
-                == Some(&common))
-        };
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(error.into()),
+        }
+    };
     if valid(primary)? {
         return Ok(checkouts);
     }
@@ -396,7 +388,7 @@ impl WorkerObserver for LandWorkers<'_> {
     fn observe_roots(
         &self,
         roots: &[PathBuf],
-    ) -> std::collections::BTreeMap<PathBuf, provenant_confinement::worktrees::WorkerState> {
+    ) -> std::collections::BTreeMap<PathBuf, provenant_confinement::worktrees::Occupancy> {
         self.0.observe_roots_for_land(roots)
     }
 
@@ -432,10 +424,10 @@ enum Use {
 /// missing, unmounted or unreadable still holds its branch there. A missing
 /// state file means not held; any other read error or an unparseable entry is
 /// an error, which refuses the deletion.
-fn holder_of(project: &Path, branch: &str) -> Result<Option<(String, Use)>> {
-    let common =
-        provenant_os::git::repository_path(project, provenant_os::git::RepositoryPath::CommonDir)
-            .map_err(|error| format!("cannot find the common Git directory: {error}"))?;
+fn holder_of(git: &Git, project: &Path, branch: &str) -> Result<Option<(String, Use)>> {
+    let (_, _, common) = git
+        .repository_paths(project)
+        .map_err(|error| format!("cannot find the common Git directory: {error}"))?;
     for dir in administrative_dirs(&common)? {
         if let Some(how) = use_in(&dir, branch)? {
             return Ok(Some((checkout_path(&dir, &common), how)));
@@ -555,13 +547,13 @@ fn checkout_path(dir: &Path, common: &Path) -> String {
 }
 
 fn follow_up(
+    git: &Git,
     project: &Path,
     pull: &Pull,
     merged: GitOid,
     globals: &mut provenant_cli::Globals,
     workers: &dyn WorkerObserver,
 ) -> Result<Vec<Step>> {
-    let git = Git::new()?;
     let (base, branch) = (pull.base.as_str(), pull.branch.as_str());
     if !plain_ref(base) || !plain_ref(branch) {
         return Err("pull request branch names are not plain Git names".into());
@@ -610,12 +602,12 @@ fn follow_up(
         format!("{upstream} updated"),
     ));
 
-    let checkouts = checkouts(&git, project)?;
+    let checkouts = checkouts(git, project)?;
     steps.push(fast_forward(
-        &git, project, base, &remote, &upstream, &checkouts,
+        git, project, base, &remote, &upstream, &checkouts,
     )?);
 
-    match cleanup_target(&git, project, pull, pinned, &upstream)? {
+    match cleanup_target(git, project, pull, pinned, &upstream)? {
         Cleanup::Skip(status, why) => {
             for name in ["worktree", "branch"] {
                 steps.push(Step::new(name, status, why.as_str()));
@@ -651,7 +643,7 @@ fn follow_up(
                 ));
             } else {
                 steps.push(delete_branch(
-                    &git,
+                    git,
                     cleanup_project,
                     branch,
                     base,
@@ -745,6 +737,7 @@ pub(super) fn batch_track(
 
 /// Run the existing local cleanup owner for a proven batch landing.
 pub(super) fn batch_follow_up(
+    git: &Git,
     project: &Path,
     number: u64,
     head: GitOid,
@@ -756,7 +749,7 @@ pub(super) fn batch_follow_up(
         tracking.view.state == "MERGED"
             && (tracking.view.cross_repository || tracking.tracker.is_some())
     }) {
-        let steps = follow_up(project, &tracking.view, head, globals, workers)?;
+        let steps = follow_up(git, project, &tracking.view, head, globals, workers)?;
         return Ok(serde_json::to_value(steps)?);
     }
     let rest = super::rest_pull(
@@ -779,7 +772,7 @@ pub(super) fn batch_follow_up(
             super::contributions::warn(Some(number), &error);
         }
     }
-    let steps = follow_up(project, &pull, head, globals, workers)?;
+    let steps = follow_up(git, project, &pull, head, globals, workers)?;
     Ok(serde_json::to_value(steps)?)
 }
 
@@ -813,12 +806,9 @@ fn cleanup_target(
             ),
         ));
     }
-    let local = format!("refs/heads/{branch}^{{commit}}");
-    let (exists, tip) = git.run(project, &["rev-parse", "--verify", "--quiet", &local])?;
-    if !exists {
+    let Some(tip) = git.branch_commit(project, branch)? else {
         return Ok(Cleanup::Skip(Status::Skipped, "no local branch".into()));
-    }
-    let tip = GitOid::parse(&tip)?;
+    };
     let (contained, _) = git.run(
         project,
         &["merge-base", "--is-ancestor", &tip.to_string(), upstream],
@@ -898,9 +888,7 @@ fn fast_forward(
     upstream: &str,
     checkouts: &[Checkout],
 ) -> Result<Step> {
-    let local = format!("refs/heads/{base}");
-    let (exists, _) = git.run(project, &["rev-parse", "--verify", "--quiet", &local])?;
-    if !exists {
+    if git.branch_ref(project, base)?.is_none() {
         return Ok(Step::new(
             "fast_forward",
             Status::Skipped,
@@ -965,8 +953,7 @@ fn delete_branch(
         ));
     }
     let local = format!("refs/heads/{branch}");
-    let (exists, _) = git.run(project, &["rev-parse", "--verify", "--quiet", &local])?;
-    if !exists {
+    if git.branch_ref(project, branch)?.is_none() {
         return Ok(Step::new("branch", Status::Skipped, "no local branch"));
     }
     let (contained, _) = git.run(project, &["merge-base", "--is-ancestor", &local, upstream])?;
@@ -981,7 +968,7 @@ fn delete_branch(
     // is rebasing or is bisecting, but it deletes whatever the branch holds by
     // then. Keep that refusal here and make the deletion itself conditional on
     // the merged head.
-    let holder = match holder_of(project, branch) {
+    let holder = match holder_of(git, project, branch) {
         Ok(holder) => holder,
         Err(error) => {
             return Ok(Step::new(
@@ -1009,8 +996,7 @@ fn delete_branch(
             (true, _) => {
                 // Like `git branch -d`, drop the branch's tracking settings, but
                 // only when no other process has recreated the branch meanwhile.
-                let (recreated, _) =
-                    git.run(project, &["rev-parse", "--verify", "--quiet", &local])?;
+                let recreated = git.branch_ref(project, branch)?.is_some();
                 if !recreated {
                     git.run(
                         project,
@@ -1488,7 +1474,8 @@ pub(crate) fn execute(
             }
         }
         if merged {
-            steps = follow_up(&project, &view, current, &mut output_globals, workers)?;
+            let git = Git::new()?;
+            steps = follow_up(&git, &project, &view, current, &mut output_globals, workers)?;
         }
         Ok(())
     })();
@@ -1743,14 +1730,14 @@ mod land_log_tests {
     fn land_policy_preserves_combined_evidence_and_ancestor_mode()
     -> Result<(), Box<dyn std::error::Error>> {
         use provenant_confinement::worktrees::{
-            CensusPolicyWorkers, CensusSession, WorkerEvidence, WorkerObserver, WorkerState,
+            CensusPolicyWorkers, CensusSession, Occupancy, WorkerEvidence, WorkerObserver,
         };
         use std::collections::BTreeMap;
         use std::path::PathBuf;
         use std::sync::atomic::{AtomicUsize, Ordering};
         struct Observer(AtomicUsize);
         impl WorkerObserver for Observer {
-            fn observe_roots(&self, _: &[PathBuf]) -> BTreeMap<PathBuf, WorkerState> {
+            fn observe_roots(&self, _: &[PathBuf]) -> BTreeMap<PathBuf, Occupancy> {
                 panic!("combined evidence required")
             }
             fn observe_evidence_with_policy(
@@ -1765,7 +1752,7 @@ mod land_log_tests {
                     states: roots
                         .iter()
                         .cloned()
-                        .map(|root| (root, WorkerState::Live))
+                        .map(|root| (root, Occupancy::Observed { process: None }))
                         .collect(),
                     holders: roots
                         .iter()
@@ -1803,15 +1790,12 @@ mod land_log_tests {
         let clock = provenant_os::clock::SystemClock;
         let session = CensusSession::new(&policy, &clock);
         assert!(session.requires_complete_census());
-        assert_eq!(
-            session.observe_roots(std::slice::from_ref(&checkout))[&checkout],
-            WorkerState::Live
-        );
-        assert_eq!(
+        assert!(session.observe_roots(std::slice::from_ref(&checkout))[&checkout].is_observed());
+        assert!(
             session
                 .observe_roots_with_details(std::slice::from_ref(&checkout))
-                .0[&checkout],
-            WorkerState::Live
+                .0[&checkout]
+                .is_observed()
         );
         assert_eq!(
             session.live_process(&checkout).map(|holder| holder.pid),

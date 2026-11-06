@@ -197,6 +197,12 @@ fn invalid_tool_arguments_are_results_with_the_field_path() {
         frames[1]["result"]["content"][0]["text"]
             .as_str()
             .unwrap()
+            .contains("arguments.<unknown>")
+    );
+    assert!(
+        !frames[1]["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
             .contains("extra")
     );
     assert!(matches!(server.finish(), Ok(())));
@@ -335,7 +341,7 @@ fn schema_tools_report_errors_in_text_in_both_protocol_eras() {
         for (index, (id, name, arguments, code, detail)) in [
             ("identity", "fabric_context", json!({"op":"inspect"}), "not_found", "not_found"),
             ("submit", "fabric_run", json!({"op":"submit","operation_id":"unknown-launch-17", "tasks":[{"prompt":"work", "route":{"kind":"named","name":"utility"}, "timeout_seconds":1}]}), "LAUNCH_UNKNOWN", "unknown-launch-17"),
-            ("bad-identity", "fabric_context", json!({"op":"inspect","extra":true}), "invalid_input", "arguments.extra"),
+            ("bad-identity", "fabric_context", json!({"op":"inspect","extra":true}), "invalid_input", "arguments.<unknown>"),
             ("bad-submit", "fabric_run", json!({"op":"submit","operation_id":"invalid", "tasks":[]}), "invalid_input", "arguments.tasks"),
         ].into_iter().enumerate() {
             let mut request = tool_call(id, name, arguments);
@@ -352,6 +358,9 @@ fn schema_tools_report_errors_in_text_in_both_protocol_eras() {
             assert_eq!(result.get("structuredContent").is_none(), name == "fabric_context", "{result}");
             let text = result["content"][0]["text"].as_str().unwrap();
             assert!(text.contains(code) && text.contains(detail), "{text}");
+            if id == "bad-identity" {
+                assert!(!text.contains("extra"), "{text}");
+            }
             assert_eq!(result.get("resultType").is_some(), modern);
         }
         assert!(matches!(server.finish(), Ok(())));

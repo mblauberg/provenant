@@ -48,6 +48,7 @@ impl DomainConfig for Settings {
         .into_iter()
         .filter(|(_, value, min, max)| !(min..=max).contains(&value))
         .map(|(field, ..)| SectionError {
+            detail: None,
             field: field.into(),
             code: "range",
         })

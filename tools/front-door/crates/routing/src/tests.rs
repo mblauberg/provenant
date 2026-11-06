@@ -4166,6 +4166,31 @@ fn cooling_ready_candidate_beats_unavailable_candidate() -> Result<(), Box<dyn s
     Ok(())
 }
 
+// Fresh exhaustion now excludes a named-pool member before account selection.
+// A one-member profile therefore refuses the pool rather than returning an
+// unavailable route. Check the exact member and reset, not an arbitrary error.
+fn agy_profile_ready(
+    result: Result<ResolvedRoute, Box<dyn std::error::Error>>,
+    model: &str,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    match result {
+        Ok(route) => {
+            assert!(matches!(route.readiness, RouteReadiness::Ready { .. }));
+            Ok(true)
+        }
+        Err(error) => match error.downcast_ref::<RoutingError>() {
+            Some(RoutingError::NoEligiblePoolMember { exclusions }) => {
+                assert_eq!(
+                    exclusions,
+                    &[format!("{model}: exhausted; earliest known reset 604900")]
+                );
+                Ok(false)
+            }
+            _ => Err(error),
+        },
+    }
+}
+
 #[test]
 fn agy_models_are_paced_and_reserved_by_their_own_quota_pool_only()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -4199,13 +4224,14 @@ fn agy_models_are_paced_and_reserved_by_their_own_quota_pool_only()
             10_000,
             "quota_pool=gemini",
         ),
-        ("agy/gemini-3.8-flash", 10_000, 0, 2_500, "gemini.weekly"),
+        ("agy/gemini-3.8-flash", 9_900, 0, 2_500, "gemini.weekly"),
+        ("agy/gemini-3.8-flash", 10_000, 0, 10_000, "exhausted"),
     ] {
         let config: RoutingConfig = serde_json::from_value(serde_json::json!({
             "pacing":{"accounts":{"agy-host":{"policy":"pace", "windows":["seven_day"]}}},
             "pacing_reserve":{"agy":{"seven_day_percent":5}}
         }))?;
-        let route = profile_preview(
+        let result = profile_preview(
             config,
             model,
             "agy-host",
@@ -4214,7 +4240,12 @@ fn agy_models_are_paced_and_reserved_by_their_own_quota_pool_only()
                 window("claude.weekly", claude),
             ],
             vec![],
-        )?;
+        );
+        if detail == "exhausted" {
+            assert!(!agy_profile_ready(result, model)?);
+            continue;
+        }
+        let route = result?;
         let candidate = &route.pool_selection.as_ref().ok_or("receipt")?.candidates[0];
         let text = candidate.pacing_detail.as_deref().ok_or("detail")?;
         assert_eq!(candidate.factor_basis_points, factor, "{model} {text}");
@@ -4287,9 +4318,10 @@ fn agy_exhaustion_follows_the_models_serving_windows() -> Result<(), Box<dyn std
         let config: RoutingConfig = serde_json::from_value(
             serde_json::json!({"pacing":{"accounts":{"agy-host":{"policy":"max"}}}}),
         )?;
-        let route =
-            profile_preview_with_status(config, model, "agy-host", windows, vec![], status)?;
-        Ok(matches!(route.readiness, RouteReadiness::Ready { .. }))
+        agy_profile_ready(
+            profile_preview_with_status(config, model, "agy-host", windows, vec![], status),
+            model,
+        )
     };
     let (claude, gemini) = ("agy/claude-sonnet-4-6", "agy/gemini-3.8-flash");
     // An exhausted ungrouped window serves every model.
@@ -4344,15 +4376,17 @@ fn agy_shared_claude_pool_exhaustion_skips_only_the_claude_models()
         let config: RoutingConfig = serde_json::from_value(
             serde_json::json!({"pacing":{"accounts":{"agy-host":{"policy":"max"}}}}),
         )?;
-        let route = profile_preview_with_status(
-            config,
+        agy_profile_ready(
+            profile_preview_with_status(
+                config,
+                model,
+                "agy-host",
+                windows.clone(),
+                vec![],
+                QuotaStatus::Available,
+            ),
             model,
-            "agy-host",
-            windows.clone(),
-            vec![],
-            QuotaStatus::Available,
-        )?;
-        Ok(matches!(route.readiness, RouteReadiness::Ready { .. }))
+        )
     };
     assert!(ready("agy/gemini-3.8-flash")?);
     assert!(!ready("agy/claude-sonnet-4-6")?);
@@ -4695,10 +4729,19 @@ fn account_evidence_reasons_carry_their_repair_text() {
             "scoped provider refusal",
         ),
         (RouteExclusionReason::InvalidAccountEvidence, "invalid"),
+        (
+            RouteExclusionReason::UnknownAvailability,
+            "provenant quota tick",
+        ),
+        (RouteExclusionReason::StaleAvailability, "stale"),
+        (RouteExclusionReason::AuthRequired, "sign in"),
     ] {
         assert!(exclusion_detail(&reason).contains(text), "{reason:?}");
     }
-    assert!(exclusion_detail(&RouteExclusionReason::Exhausted).contains("reset"));
+    let exhausted = exclusion_detail(&RouteExclusionReason::Exhausted);
+    assert!(exhausted.contains("exhausted"));
+    assert!(exhausted.contains("wait"));
+    assert!(exhausted.contains("reset"));
 }
 
 #[test]
@@ -6229,5 +6272,185 @@ fn model_choice_outside_route_obeys_restrictions() -> Result<(), Box<dyn std::er
     assert_eq!(resolve(&query, &ctx)?.model, "gpt-6.1-sol");
     query.intent.writes = true;
     assert_eq!(resolve(&query, &ctx)?.model, "gpt-6-luna");
+    Ok(())
+}
+
+#[test]
+fn alias_skips_known_spent_members_and_refuses_all_with_resets()
+-> Result<(), Box<dyn std::error::Error>> {
+    use provenant_quota::{QuotaStatus, QuotaWindow};
+    let catalogue = Catalogue::bundled()?;
+    let config: RoutingConfig = serde_json::from_value(serde_json::json!({"pools":{"trial":[
+        {"model":"codex/gpt-6-luna","weight":100},
+        {"model":"codex/gpt-6.1-sol","weight":1}
+    ]}}))?;
+    let records = [availability()];
+    let access = [AccessContext {
+        adapter: "codex",
+        disclosure_ref: "fixture",
+        confinement_ref: "fixture",
+    }];
+    let spent = |model: &str, reset| -> Result<QuotaObservation, RoutingError> {
+        let mut q = quota(model, "opaque-account", QuotaStatus::Exhausted, 1, 50, 120)?;
+        q.snapshot.windows.push(QuotaWindow {
+            pool: "secondary".into(),
+            window_seconds: Some(1000),
+            used_basis_points: 10_000,
+            resets_unix_seconds: Some(reset),
+        });
+        Ok(q)
+    };
+    let first = spent("codex/gpt-6-luna", 400)?;
+    let readings = [spent("codex/gpt-6-luna", 400)?];
+    let ctx = RoutingContext {
+        availability: &records,
+        access: &access,
+        quota: &readings,
+        ..context(&catalogue, &config, now()?)
+    };
+    let mut alias = request("codex/gpt-6-luna")?;
+    alias.choice = RouteChoice::NamedRoute(RouteName::parse("trial")?);
+    assert_eq!(resolve(&alias, &ctx)?.model, "gpt-6.1-sol");
+    assert_eq!(
+        resolve(&request("codex/gpt-6-luna")?, &ctx)?.model,
+        "gpt-6-luna"
+    );
+    let readings = [first, spent("codex/gpt-6.1-sol", 300)?];
+    let ctx = RoutingContext {
+        quota: &readings,
+        ..ctx
+    };
+    let rejected = [ModelId::parse("codex/gpt-6.1-sol")?];
+    let Err(RoutingError::NoEligiblePoolMember {
+        exclusions: overlap,
+    }) = resolve_for_account_with_seed_excluding(&alias, &ctx, None, "overlap", 0, &rejected, &[])
+    else {
+        panic!("all exhausted members must refuse")
+    };
+    assert!(overlap.iter().any(|e| e.contains("codex/gpt-6.1-sol")
+        && e.contains("admission rejected")
+        && e.contains("300")));
+    let Err(RoutingError::NoEligiblePoolMember { exclusions }) = resolve(&alias, &ctx) else {
+        panic!("all spent alias must refuse")
+    };
+    assert!(
+        exclusions
+            .iter()
+            .any(|e| e.contains("codex/gpt-6-luna") && e.contains("400"))
+    );
+    assert!(
+        exclusions
+            .iter()
+            .any(|e| e.contains("codex/gpt-6.1-sol") && e.contains("300"))
+    );
+    Ok(())
+}
+
+fn go_alias_quota_case(
+    all_spent: bool,
+    fresh: bool,
+    seed: u64,
+) -> Result<ResolvedRoute, Box<dyn std::error::Error>> {
+    let catalogue = Catalogue::bundled()?;
+    let config: RoutingConfig = serde_json::from_value(serde_json::json!({"pools":{"trial":[
+        {"model":"opencode/opencode-go/deepseek-v4.1-flash","weight":100},
+        {"model":"codex/gpt-6-luna","weight":1}
+    ]}}))?;
+    let records = [
+        availability(),
+        AvailabilityRecord {
+            adapter: "opencode".into(),
+            account_key: Some("go".into()),
+            ..availability()
+        },
+    ];
+    let access = [
+        AccessContext {
+            adapter: "codex",
+            disclosure_ref: "fixture",
+            confinement_ref: "fixture",
+        },
+        AccessContext {
+            adapter: "opencode",
+            disclosure_ref: "fixture",
+            confinement_ref: "fixture",
+        },
+    ];
+    let mut q = quota(
+        "opencode/opencode-go/deepseek-v4.1-flash",
+        "go",
+        provenant_quota::QuotaStatus::Available,
+        1,
+        50,
+        if fresh { 120 } else { 60 },
+    )?;
+    q.snapshot.account.adapter = "opencode".into();
+    q.snapshot.windows.push(provenant_quota::QuotaWindow {
+        pool: "five_hour".into(),
+        window_seconds: Some(18000),
+        used_basis_points: 10000,
+        resets_unix_seconds: (!all_spent).then_some(400),
+    });
+    let mut readings = vec![q];
+    if all_spent {
+        readings.push(quota(
+            "codex/gpt-6-luna",
+            "opaque-account",
+            provenant_quota::QuotaStatus::Exhausted,
+            1,
+            50,
+            60,
+        )?);
+    }
+    let ctx = RoutingContext {
+        availability: &records,
+        access: &access,
+        quota: &readings,
+        ..context(&catalogue, &config, now()?)
+    };
+    let mut alias = request("codex/gpt-6-luna")?;
+    alias.choice = RouteChoice::NamedRoute(RouteName::parse("trial")?);
+    Ok(resolve_with_seed(&alias, &ctx, "go-exhaustion", seed)?)
+}
+
+#[test]
+fn alias_ranks_stale_go_allowance_last_without_refusing_it()
+-> Result<(), Box<dyn std::error::Error>> {
+    for seed in 0..20 {
+        let stale = go_alias_quota_case(false, false, seed)?;
+        assert_eq!(stale.model, "gpt-6-luna");
+        assert!(
+            stale.pool_selection.as_ref().unwrap().candidates[0]
+                .exclusion
+                .is_none()
+        );
+        let fresh = go_alias_quota_case(false, true, seed)?;
+        assert_eq!(fresh.model, "gpt-6-luna");
+        assert!(
+            fresh.pool_selection.as_ref().unwrap().candidates[0]
+                .exclusion
+                .as_deref()
+                .is_some_and(|e| e.contains("exhausted"))
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn alias_with_only_stale_spent_members_and_no_reset_still_launches()
+-> Result<(), Box<dyn std::error::Error>> {
+    for seed in 0..20 {
+        let selected = go_alias_quota_case(true, false, seed)?;
+        assert!(matches!(selected.readiness, RouteReadiness::Ready { .. }));
+        assert!(
+            selected
+                .pool_selection
+                .as_ref()
+                .unwrap()
+                .candidates
+                .iter()
+                .all(|c| c.exclusion.is_none())
+        );
+    }
     Ok(())
 }

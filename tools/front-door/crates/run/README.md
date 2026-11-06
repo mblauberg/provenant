@@ -82,7 +82,7 @@ does not confirm marks the operation `launch_unknown` for `reconcile`.
 
 `RunHolder` is the guardian's production `Holder`. `admit` runs before spawn
 and waits in `RunStore::admit` until host, project and run concurrency, 20 s
-host start spacing and the memory and disk floors allow a start, or until the
+host start spacing and the configured resource guards allow a start, or until the
 admission deadline refuses it. `terminal` runs after the sealed exit is
 durable: `finish` decodes the sealed stdout capture, commits the terminal
 record idempotently. Writers seal an instruction baseline before launch and

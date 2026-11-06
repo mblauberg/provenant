@@ -90,7 +90,7 @@ pub(crate) fn prepare_refs(
 
 pub(crate) struct ObjectSource {
     pub objects: Directory,
-    refs: Directory,
+    pub refs: Directory,
 }
 
 pub(crate) fn merge_head(source: &ObjectSource) -> Result<Vec<u8>> {
@@ -192,6 +192,22 @@ pub(crate) fn merge_objects(source: &ObjectSource, repo: &VerifiedRepo) -> Resul
     objects.sort_by_key(ToString::to_string);
     objects.dedup();
     Ok(objects)
+}
+
+pub(crate) fn set_private_tip(source: &ObjectSource, branch: &str, tip: GitOid) -> Result<()> {
+    let (parent, leaf) = branch.rsplit_once('/').ok_or_else(invalid)?;
+    let mut held = source.refs.try_clone()?;
+    for component in parent.split('/') {
+        held = directory(&held, OsStr::new(component))?;
+    }
+    held.atomic_write(
+        OsStr::new(leaf),
+        ".budget-",
+        format!("{tip}\n").as_bytes(),
+        PublishMode::Replace,
+    )?
+    .require_durable()?;
+    Ok(())
 }
 
 pub(crate) fn private_tip(source: &ObjectSource, branch: &str) -> Result<GitOid> {

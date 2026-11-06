@@ -105,7 +105,12 @@ pub(crate) fn apply_launch_disposition(
         };
         let projected = launch_diagnostic(error);
         retry.reason = Some(bounded(
-            projected.detail.as_deref().unwrap_or(&projected.code),
+            &format!(
+                "[{}] {}; {}",
+                projected.code,
+                projected.next.as_deref().unwrap_or("inspect the current state before taking further action"),
+                projected.detail.as_deref().unwrap_or(&projected.code)
+            ),
             MAX_ADVANCE_ERROR_BYTES,
         ));
         if now < deadline && retry.failures <= retry.policy.limit {
@@ -151,9 +156,7 @@ pub(crate) fn apply_launch_disposition(
                 e,
                 crate::coordination::facade::FacadeError::LaunchUnknown { .. }
             )
-        }) {
-        String::new()
-    } else if !progress
+        }) || !progress
         .attempts
         .iter()
         .filter(|attempt| attempt.state != AttemptState::Terminal)
@@ -201,14 +204,18 @@ pub(crate) fn apply_launch_disposition(
 /// attempt was still starting: a bounded retry with backoff for a transient
 /// kind, a blocked node with reason and remedy otherwise and after the
 /// admission deadline. Saves the checkpoint either way.
+pub(crate) struct LaunchTiming {
+    pub clock: Option<provenant_core::WallTime>,
+    pub admission_seconds: u64,
+    pub policy: LaunchRetryPolicy,
+}
+
 pub(crate) fn launch_disposition<R: AttemptOwner, J: GraphJournal>(
     owner: &mut R,
     checkpoint: &mut GraphCheckpoint,
     index: usize,
     error: &R::Error,
-    clock: Option<provenant_core::WallTime>,
-    admission_seconds: u64,
-    policy: LaunchRetryPolicy,
+    timing: LaunchTiming,
     journal: &mut J,
 ) -> Result<(), GraphError<R::Error, J::Error>> {
     let proof = !launch_retry_kind(error)
@@ -226,7 +233,7 @@ pub(crate) fn launch_disposition<R: AttemptOwner, J: GraphJournal>(
                 .insert(PRELAUNCH_REFUSAL_PROOF.into(), true.into());
         }
     }
-    apply_launch_disposition(checkpoint, index, error, clock, admission_seconds, policy)
+    apply_launch_disposition(checkpoint, index, error, timing.clock, timing.admission_seconds, timing.policy)
         .map_err(GraphError::Refused)?;
     journal.save(checkpoint).map_err(GraphError::Journal)
 }
@@ -328,8 +335,10 @@ pub(crate) fn fallback_denial(
     launched: bool,
     access: AccessMode,
     unreadable: bool,
-) -> (&'static str, &'static str) {
-    if launched && access == AccessMode::WorktreeWrite {
+    outcome: AttemptOutcome,
+    cause: Option<&provenant_records::RouteExclusionReason>,
+) -> (&'static str, String) {
+    let (code, denial) = if launched && access == AccessMode::WorktreeWrite {
         (
             "fallback_launched_writer",
             "A launched writer may have effects; route fallback is denied.",
@@ -344,7 +353,41 @@ pub(crate) fn fallback_denial(
             "fallback_evidence_unavailable",
             "Cannot verify local preparation and released custody for route fallback.",
         )
-    }
+    };
+    let reason = match outcome {
+        AttemptOutcome::AuthRequired => "The lane requires authentication.",
+        AttemptOutcome::UsageLimited => "The lane reached a usage limit.",
+        AttemptOutcome::AdapterUnavailable => "The lane's adapter is unavailable.",
+        _ => "The lane failed.",
+    };
+    let detail = cause.map(provenant_routing::exclusion_detail);
+    (
+        code,
+        match detail {
+            Some(detail) => format!("{reason} {detail}. {denial}"),
+            None => format!("{reason} {denial}"),
+        },
+    )
+}
+
+/// Automatic quota redos share an infrastructure budget; an explicit user
+/// redo starts a fresh budget while retaining older evidence for trace.
+pub(super) fn infrastructure_attempts(progress: &NodeProgress) -> impl Iterator<Item = &GraphAttempt> {
+    let archived = progress.extra.get("quota_redraw_archived")
+        .and_then(serde_json::Value::as_u64).unwrap_or(0) as usize;
+    progress.previous_attempts.iter()
+        .skip(progress.previous_attempts.len().saturating_sub(archived))
+        .chain(&progress.attempts)
+}
+
+/// The sealed allowance bounds all launched attempts across automatic redos.
+pub(super) fn quota_redraw_budget(progress: &NodeProgress) -> bool {
+    progress.extra.get("retry").and_then(|value| value["retries"].as_u64()).is_some_and(|limit| {
+        let archived = progress.extra.get("quota_redraw_spent").and_then(serde_json::Value::as_u64).unwrap_or(0);
+        let current = progress.attempts.iter().filter(|attempt| attempt.launched).count() as u64
+            + u64::from(progress.attempts.last().is_some_and(|attempt| !attempt.launched));
+        archived.saturating_add(current) <= limit
+    })
 }
 
 /// Decide the next attempt disposition for a node during graph advancement.
@@ -379,7 +422,7 @@ pub(super) fn decide_next_attempt<R: AttemptOwner>(
         };
         if !accepted {
             return Ok(NextAttempt::LaunchRetryExhausted {
-                reason: retry.reason.clone().unwrap_or_default(),
+                reason: retry.reason.clone().unwrap_or_else(|| "inspect the current state before taking further action".into()),
             });
         }
     }
@@ -425,10 +468,13 @@ pub(super) fn decide_next_attempt<R: AttemptOwner>(
                 _ => (None, false),
             };
             if !live_fallback_allowed(outcome, last.launched, node.access, evidence) {
-                let (code, message) = fallback_denial(last.launched, node.access, unreadable);
+                let cause = last.attempt_ref.as_deref().and_then(|reference| {
+                    owner.preparation_refusal_cause(&last.key, reference).ok().flatten()
+                });
+                let (code, message) = fallback_denial(last.launched, node.access, unreadable, outcome, cause.as_ref());
                 return Ok(NextAttempt::Fail {
                     code: Some(code),
-                    message: Some(message.into()),
+                    message: Some(message),
                 });
             }
             if review_preparation_substitution(node, last)
@@ -457,7 +503,9 @@ pub(super) fn decide_next_attempt<R: AttemptOwner>(
         && progress
             .attempts
             .last()
-            .is_some_and(|attempt| attempt.launched && attempt.state == AttemptState::Terminal);
+            .is_some_and(|attempt| attempt.state == AttemptState::Terminal && (attempt.launched
+                || (attempt.outcome == Some(AttemptOutcome::UsageLimited)
+                    && progress.extra.get("quota_redraw_spent").and_then(serde_json::Value::as_u64).unwrap_or(0) > 0)));
     if switching
         && node
             .routes
@@ -479,19 +527,17 @@ pub(super) fn decide_next_attempt<R: AttemptOwner>(
         .get("retry")
         .and_then(|value| value["retries"].as_u64());
     let mut spent = 0u64;
-    for reference in progress
-        .attempts
-        .iter()
+    for reference in infrastructure_attempts(progress)
         .filter_map(|attempt| attempt.attempt_ref.as_deref())
     {
         spent = spent.saturating_add(owner.retry_successors(reference)?);
     }
-    let launched_switches = progress
-        .attempts
-        .iter()
-        .filter(|attempt| attempt.launched && attempt.state == AttemptState::Terminal)
+    let automatic = progress.extra.get("quota_redraw_spent").and_then(serde_json::Value::as_u64).unwrap_or(0);
+    let launched_switches = progress.attempts.iter()
+        .filter(|attempt| attempt.state == AttemptState::Terminal && (attempt.launched
+            || (automatic > 0 && attempt.outcome == Some(AttemptOutcome::UsageLimited))))
         .count() as u64;
-    spent = spent.saturating_add(launched_switches);
+    spent = spent.saturating_add(automatic).saturating_add(launched_switches);
     if switching && allowance.is_some_and(|limit| spent > limit) {
         return Ok(NextAttempt::Fail {
             code: Some("fallback_budget_exhausted"),
@@ -531,15 +577,21 @@ pub(crate) enum SettlementFallback {
 }
 
 /// Settle an attempt outcome, evaluating whether fallback should fire or node should fail.
+pub(super) struct FallbackEvidence<'a> {
+    pub preparation: Option<PreparationFallbackEvidence>,
+    pub unreadable: bool,
+    pub review_limit_reached: bool,
+    pub cause: Option<&'a provenant_records::RouteExclusionReason>,
+}
+
 pub(super) fn settlement_fallback_decision(
     node: &PlannedNode,
     route_index: usize,
     outcome: AttemptOutcome,
     launched: bool,
-    fallback_evidence: Option<PreparationFallbackEvidence>,
-    evidence_unreadable: bool,
-    review_limit_reached: bool,
+    evidence: FallbackEvidence<'_>,
 ) -> SettlementFallback {
+    let FallbackEvidence { preparation: fallback_evidence, unreadable: evidence_unreadable, review_limit_reached, cause: fallback_cause } = evidence;
     let route = node.routes.get(route_index);
 
     if !live_fallback_allowed(outcome, launched, node.access, fallback_evidence)
@@ -572,9 +624,9 @@ pub(super) fn settlement_fallback_decision(
         if !live_fallback_allowed(outcome, launched, node.access, fallback_evidence)
             && route_index + 1 < node.routes.len()
         {
-            let (code, message) = fallback_denial(launched, node.access, evidence_unreadable);
+            let (code, message) = fallback_denial(launched, node.access, evidence_unreadable, outcome, fallback_cause);
             advance_error_code = Some(code.into());
-            advance_error = Some(message.into());
+            advance_error = Some(message);
         }
         if review_limit_reached
             && route_index + 1 < node.routes.len()
@@ -815,9 +867,7 @@ mod tests {
             0,
             AttemptOutcome::AuthRequired,
             false,
-            None,
-            false,
-            false,
+            FallbackEvidence { preparation: None, unreadable: false, review_limit_reached: false, cause: None },
         );
         assert_eq!(
             decision,
@@ -898,6 +948,8 @@ mod tests {
             FacadeError::Io {
                 delivery_limit: None,
                 delivery_stage: None,
+                resource: None,
+                input_failure: None,
                 operation: "read file".into(),
                 path: None,
             },
@@ -909,8 +961,8 @@ mod tests {
         }
         for permanent in [
             FacadeError::InvalidInput { detail: None },
-            FacadeError::ConfinementRefused,
-            FacadeError::WriterBusy,
+            FacadeError::ConfinementRefused { resource: None },
+            FacadeError::WriterBusy { holder: None },
             FacadeError::DispatchRefused {
                 fact: None,
                 disk: None,

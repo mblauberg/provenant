@@ -160,7 +160,7 @@ pub(super) fn validate_extension(
     extension: &str,
     limits: &crate::config::GraphLimits,
 ) -> Result<(), String> {
-    let flattened = composites::expand(document, limits)?;
+    let flattened = composites::expand(document, limits).map_err(|error| error.to_string())?;
     let document = &flattened;
     let (key, value) = extension.split_once('=').ok_or("expected KEY=VALUE")?;
     let key = key.strip_prefix("loop.").ok_or("invalid loop extension")?;
@@ -187,7 +187,7 @@ pub(super) fn validate_resume_extension(
     limits: &crate::config::GraphLimits,
 ) -> Result<(), String> {
     validate_extension(document, extension, limits)?;
-    let flattened = composites::expand(document, limits)?;
+    let flattened = composites::expand(document, limits).map_err(|error| error.to_string())?;
     let document = &flattened;
     if checkpoint.extensions.iter().any(|saved| saved == extension) {
         return Ok(());
@@ -253,10 +253,10 @@ pub(super) fn expand(
     document: &GraphDocument,
     extensions: &[String],
     limits: &crate::config::GraphLimits,
-) -> Result<GraphDocument, String> {
+) -> Result<GraphDocument, AdmissionError> {
     let flattened = composites::expand(document, limits)?;
-    check_expanded_ids(&flattened, extensions)?;
-    expand_loops(&flattened, extensions)
+    check_expanded_ids(&flattened, extensions).map_err(AdmissionError::Composite)?;
+    expand_loops(&flattened, extensions).map_err(AdmissionError::Composite)
 }
 
 /// Check the longest round ID before lowering, using the same spelling and
@@ -417,7 +417,8 @@ fn expand_loops(document: &GraphDocument, extensions: &[String]) -> Result<Graph
             routes_per_node: u16::MAX as usize,
             ..Default::default()
         };
-        let (plan, positions) = validate_flat_plan(&body_document, &generous)?;
+        let (plan, positions) =
+            validate_flat_plan(&body_document, &generous).map_err(|error| error.to_string())?;
         let Some(gate) = positions.get(&spec.until).map(|i| &plan.nodes[*i]) else {
             return Err("loop until must name a body gate".into());
         };
@@ -655,8 +656,11 @@ pub(super) fn reconcile(checkpoint: &mut GraphCheckpoint, plan: &PlannedGraph) {
                 fragment: None,
                 handoff: None,
                 expansion_pause: None,
+                expansion_cause: None,
                 loop_pause: None,
                 loop_pause_code: None,
+                loop_cause: None,
+                truncation_cause: None,
                 round: n.round.clone(),
                 gate: None,
                 separation: None,
@@ -851,11 +855,13 @@ pub(super) fn settle<R: AttemptOwner, J: GraphJournal>(
         }
         checkpoint.nodes[index].loop_pause = None;
         checkpoint.nodes[index].loop_pause_code = None;
+        checkpoint.nodes[index].loop_cause = None;
         refresh_pause(checkpoint);
         journal.save(checkpoint).map_err(GraphError::Journal)?;
     } else if settled && dependency_state(node, plan, checkpoint, positions).is_none() {
         if checkpoint.nodes[index].loop_pause.is_none() {
             checkpoint.nodes[index].loop_pause_code = Some("loop_paused".into());
+            checkpoint.nodes[index].loop_cause = Some(NodeDecisionCause::LoopPaused);
             checkpoint.nodes[index].loop_pause = Some(format!(
                 "loop {} exhausted after {rounds} rounds; stop, extend or accept as is",
                 node.id
@@ -883,12 +889,9 @@ pub(super) fn settle<R: AttemptOwner, J: GraphJournal>(
             if let Some(answer) = checkpoint.asks[position].answer.clone() {
                 return apply(&node.id, rounds, &answer, checkpoint, journal);
             }
-            if checkpoint.nodes[index]
-                .loop_pause
-                .as_ref()
-                .is_none_or(|reason| !reason.contains("graph resume"))
-            {
+            if checkpoint.nodes[index].loop_cause != Some(NodeDecisionCause::LoopAskClosed) {
                 checkpoint.nodes[index].loop_pause_code = Some("loop_ask_closed".into());
+                checkpoint.nodes[index].loop_cause = Some(NodeDecisionCause::LoopAskClosed);
                 checkpoint.nodes[index].loop_pause = Some(format!(
                     "loop {} exhausted after {rounds} rounds; ask closed; use graph resume --extend loop.{}.rounds=N or --extend loop.{}.decision=stop|accept",
                     node.id, node.id, node.id
@@ -901,6 +904,7 @@ pub(super) fn settle<R: AttemptOwner, J: GraphJournal>(
         match asks::poll(checkpoint, position, owner) {
             Ok(reply) => {
                 checkpoint.nodes[index].loop_pause_code = Some("loop_paused".into());
+                checkpoint.nodes[index].loop_cause = Some(NodeDecisionCause::LoopPaused);
                 checkpoint.nodes[index].loop_pause = Some(format!(
                     "loop {} exhausted after {rounds} rounds; stop, extend or accept as is",
                     node.id
@@ -983,6 +987,7 @@ pub(super) fn pause_invalid_decision<R: Error + 'static, J: GraphJournal>(
 ) -> Result<(), GraphError<R, J::Error>> {
     if let Some(progress) = checkpoint.nodes.iter_mut().find(|n| n.id == node) {
         progress.loop_pause_code = Some("invalid_loop_decision".into());
+        progress.loop_cause = Some(NodeDecisionCause::InvalidLoopDecision);
         progress.loop_pause = Some(format!(
             "loop {node} exhausted; decision cannot be applied: {}; use graph resume --extend loop.{node}.rounds=N or --extend loop.{node}.decision=stop|accept",
             bounded(reason, MAX_ADVANCE_ERROR_BYTES)
@@ -1008,7 +1013,7 @@ pub(super) fn prepare_decision_extension(
     let mut extensions = checkpoint.extensions.clone();
     extensions.push(extension.to_owned());
     let expanded = plans::expand(document, &extensions, &checkpoint.expansions, limits)?;
-    let (plan, _) = validate_flat_plan(&expanded, limits).map_err(str::to_owned)?;
+    let (plan, _) = validate_flat_plan(&expanded, limits).map_err(|error| error.to_string())?;
     if let Some(reason) = structural_limit_reason(&expanded, &plan, limits) {
         return Err(reason);
     }
@@ -1043,10 +1048,12 @@ pub(super) fn refresh_pause(checkpoint: &mut GraphCheckpoint) {
         .iter()
         .filter_map(|n| n.loop_pause.as_deref())
         .collect();
-    if checkpoint
-        .pause_reason
-        .as_ref()
-        .is_none_or(|r| r.starts_with("loops paused:") || r.starts_with("loop "))
+    if checkpoint.pause_reason.is_none()
+        || checkpoint
+            .pause_code
+            .as_deref()
+            .and_then(NodeDecisionCause::from_loop_code)
+            .is_some()
     {
         checkpoint.pause_code = if reasons.is_empty() {
             None
@@ -1055,8 +1062,14 @@ pub(super) fn refresh_pause(checkpoint: &mut GraphCheckpoint) {
                 checkpoint
                     .nodes
                     .iter()
-                    .filter_map(|node| node.loop_pause_code.as_deref())
-                    .find(|code| *code != "loop_paused")
+                    .filter_map(|node| node.loop_cause.as_ref())
+                    .find_map(|cause| match cause {
+                        NodeDecisionCause::LoopAskClosed => Some("loop_ask_closed"),
+                        NodeDecisionCause::InvalidLoopDecision => Some("invalid_loop_decision"),
+                        NodeDecisionCause::LoopPaused
+                        | NodeDecisionCause::PlanExpansionPaused { .. }
+                        | NodeDecisionCause::CompositeFindingsTruncated { .. } => None,
+                    })
                     .unwrap_or("loop_paused")
                     .into(),
             )

@@ -1462,11 +1462,12 @@ fn published_disk_admission_refusal_names_figures_and_repair() {
         super::AdmissionError::Disk {
             free: 99,
             floor: 100,
+            origin: provenant_records::diagnostic::SettingSource::Configuration,
         },
     ));
     assert_eq!(
         reason,
-        "insufficient disk space: 99 bytes available, gc.free_floor 100 bytes; run `provenant gc --apply`"
+        "insufficient disk space: 99 bytes available, gc.free_floor 100 bytes (source: host configuration); run `provenant gc --apply`"
     );
 }
 
@@ -1536,6 +1537,20 @@ fn a_leased_port_block_replaces_any_block_the_launch_environment_named() {
         lease.base.to_string().into()
     )));
     assert!(out.contains(&("PROVENANT_LANE_PORT_COUNT".into(), "16".into())));
+}
+
+#[test]
+fn live_usage_counts_a_call_once_and_a_revised_figure_replaces_it() {
+    use provenant_os::capture::{DecodedEventSink, FrameEvent};
+    let events = Events::default();
+    let report = |key, tokens| events.try_send(FrameEvent::Usage { key, tokens }).unwrap();
+    report(1, 600);
+    report(1, 600);
+    assert_eq!(events.tokens(), 600);
+    report(2, 300);
+    assert_eq!(events.tokens(), 900);
+    report(1, 700);
+    assert_eq!(events.tokens(), 1000);
 }
 
 #[test]

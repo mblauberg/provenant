@@ -4,10 +4,38 @@ use super::*;
 /// A single acquisition supplies both the decision and its refusal evidence.
 #[derive(Clone, Default)]
 pub struct WorkerEvidence {
-    pub states: BTreeMap<PathBuf, WorkerState>,
+    pub states: BTreeMap<PathBuf, Occupancy>,
     pub holders: BTreeMap<PathBuf, ObservedProcess>,
     pub details: BTreeMap<PathBuf, String>,
     pub taints: BTreeMap<PathBuf, TaintCause>,
+}
+
+fn attach_worker_evidence(
+    states: &mut BTreeMap<PathBuf, Occupancy>,
+    holders: &BTreeMap<PathBuf, ObservedProcess>,
+    details: &BTreeMap<PathBuf, String>,
+) {
+    for (root, state) in states {
+        match state {
+            Occupancy::Unknown {
+                scope,
+                evidence,
+                source,
+            } => {
+                *scope = root.clone();
+                *source = OccupancyUnknownSource::Census;
+                if let Some(detail) = details.get(root) {
+                    *evidence = detail.clone();
+                }
+            }
+            Occupancy::Observed { process } => {
+                if let Some(holder) = holders.get(root) {
+                    *process = Some(holder.clone());
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -94,14 +122,16 @@ impl<'a> CensusSession<'a> {
             None => self.inner.observe_evidence(roots, for_land),
         };
         for root in roots {
-            evidence
-                .states
-                .entry(root.clone())
-                .or_insert(WorkerState::Unknown);
+            evidence.states.entry(root.clone()).or_insert_with(|| {
+                Occupancy::census_unknown(
+                    root.clone(),
+                    "process census did not return the requested root",
+                )
+            });
         }
         for root in roots {
             match evidence.states.get(root) {
-                Some(WorkerState::Live) => {
+                Some(Occupancy::Observed { .. }) => {
                     evidence.taints.entry(root.clone()).or_insert_with(|| {
                         evidence
                             .holders
@@ -111,7 +141,7 @@ impl<'a> CensusSession<'a> {
                             .unwrap_or(TaintCause::UnattributedLiveWriter)
                     });
                 }
-                Some(WorkerState::Unknown) => {
+                Some(Occupancy::Unknown { .. }) => {
                     evidence
                         .taints
                         .entry(root.clone())
@@ -133,8 +163,18 @@ impl<'a> CensusSession<'a> {
                 if identity.is_some() && identity == root_identity(root) {
                     continue;
                 }
-                if evidence.states.get(root) != Some(&WorkerState::Live) {
-                    evidence.states.insert(root.clone(), WorkerState::Unknown);
+                if !evidence
+                    .states
+                    .get(root)
+                    .is_some_and(Occupancy::is_observed)
+                {
+                    evidence.states.insert(
+                        root.clone(),
+                        Occupancy::census_unknown(
+                            root.clone(),
+                            "census observation could not be verified",
+                        ),
+                    );
                     evidence.taints.insert(
                         root.clone(),
                         TaintCause::Uncertainty(UncertaintyReason::RootUnreadable),
@@ -148,8 +188,18 @@ impl<'a> CensusSession<'a> {
         }
         if stable_policy.is_none() {
             for root in roots {
-                if evidence.states.get(root) != Some(&WorkerState::Live) {
-                    evidence.states.insert(root.clone(), WorkerState::Unknown);
+                if !evidence
+                    .states
+                    .get(root)
+                    .is_some_and(Occupancy::is_observed)
+                {
+                    evidence.states.insert(
+                        root.clone(),
+                        Occupancy::census_unknown(
+                            root.clone(),
+                            "census observation could not be verified",
+                        ),
+                    );
                     evidence.taints.insert(
                         root.clone(),
                         TaintCause::Uncertainty(UncertaintyReason::PolicyRejected),
@@ -161,6 +211,7 @@ impl<'a> CensusSession<'a> {
                 }
             }
         }
+        attach_worker_evidence(&mut evidence.states, &evidence.holders, &evidence.details);
         *epoch = stable
             .zip(stable_policy)
             .map(|(roots, policy)| CensusEpoch {
@@ -190,10 +241,10 @@ impl<'a> CensusSession<'a> {
 }
 
 impl WorkerObserver for CensusSession<'_> {
-    fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, WorkerState> {
+    fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, Occupancy> {
         self.evidence(roots, false).states
     }
-    fn observe_roots_for_land(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, WorkerState> {
+    fn observe_roots_for_land(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, Occupancy> {
         self.evidence(roots, true).states
     }
     fn observe_roots_with_details(&self, roots: &[PathBuf]) -> WorkerObservations {
@@ -239,7 +290,7 @@ impl WorkerObserver for CensusSession<'_> {
 /// Injectable native observation seam. Implementations return one conservative
 /// state per canonical candidate root; they never grant signal authority.
 pub trait WorkerObserver: Send + Sync {
-    fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, WorkerState>;
+    fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, Occupancy>;
 
     /// Effective policy defining the current epoch; `None` prevents reuse.
     fn epoch_policy(&self) -> Option<CensusEpochPolicy> {
@@ -247,11 +298,12 @@ pub trait WorkerObserver: Send + Sync {
     }
 
     fn observe_evidence(&self, roots: &[PathBuf], for_land: bool) -> WorkerEvidence {
-        let (states, details) = if for_land {
+        let (mut states, details) = if for_land {
             self.observe_roots_for_land_with_details(roots)
         } else {
             self.observe_roots_with_details(roots)
         };
+        attach_worker_evidence(&mut states, &BTreeMap::new(), &details);
         WorkerEvidence {
             taints: default_taints(&states, &|_| None),
             states,
@@ -281,7 +333,7 @@ pub trait WorkerObserver: Send + Sync {
 
     /// Landing may remove its caller's checkout. Exclude only the caller and
     /// its verified ancestors through the session leader, never other workers.
-    fn observe_roots_for_land(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, WorkerState> {
+    fn observe_roots_for_land(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, Occupancy> {
         self.observe_roots(roots)
     }
 
@@ -379,20 +431,22 @@ pub trait WorkerObserver: Send + Sync {
 }
 
 fn default_taints(
-    states: &BTreeMap<PathBuf, WorkerState>,
+    states: &BTreeMap<PathBuf, Occupancy>,
     live: &dyn Fn(&Path) -> Option<ObservedProcess>,
 ) -> BTreeMap<PathBuf, TaintCause> {
     states
         .iter()
         .filter_map(|(root, state)| {
             let taint = match state {
-                WorkerState::Free => return None,
-                WorkerState::Busy => TaintCause::LockContention,
-                WorkerState::Live => live(root).map_or_else(
-                    || TaintCause::UnattributedLiveWriter,
-                    TaintCause::LiveWriter,
-                ),
-                WorkerState::Unknown => {
+                Occupancy::Available => return None,
+                Occupancy::Held => TaintCause::LockContention,
+                Occupancy::Observed { process } => {
+                    process.clone().or_else(|| live(root)).map_or_else(
+                        || TaintCause::UnattributedLiveWriter,
+                        TaintCause::LiveWriter,
+                    )
+                }
+                Occupancy::Unknown { .. } => {
                     TaintCause::Uncertainty(UncertaintyReason::CensusUnavailable)
                 }
             };
@@ -454,7 +508,12 @@ impl WorkerObserver for CensusPolicyWorkers<'_> {
                 states: roots
                     .iter()
                     .cloned()
-                    .map(|root| (root, WorkerState::Unknown))
+                    .map(|root| {
+                        (
+                            root.clone(),
+                            Occupancy::census_unknown(root, "process census unavailable"),
+                        )
+                    })
                     .collect(),
                 ..WorkerEvidence::default()
             };
@@ -515,10 +574,10 @@ impl WorkerObserver for CensusPolicyWorkers<'_> {
     fn requires_complete_census(&self) -> bool {
         self.inner.requires_complete_census()
     }
-    fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, WorkerState> {
+    fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, Occupancy> {
         self.observe_roots_with_details(roots).0
     }
-    fn observe_roots_for_land(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, WorkerState> {
+    fn observe_roots_for_land(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, Occupancy> {
         self.observe_roots_for_land_with_details(roots).0
     }
     fn observe_roots_with_details(&self, roots: &[PathBuf]) -> WorkerObservations {
@@ -597,11 +656,11 @@ impl WorkerObserver for SystemWorkerObserver {
     ) -> Option<ObservedProcess> {
         system_live_process_with_policy(root, for_land, entries)
     }
-    fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, WorkerState> {
+    fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, Occupancy> {
         system_worker_roots(roots, false).0
     }
 
-    fn observe_roots_for_land(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, WorkerState> {
+    fn observe_roots_for_land(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, Occupancy> {
         system_worker_roots(roots, true).0
     }
 
@@ -712,11 +771,21 @@ fn system_worker_evidence(
     entries: &[CensusIgnoreEntry],
 ) -> WorkerEvidence {
     let ProcessObservation::Present(current) = current_process() else {
+        let detail = process_detail(
+            &PolicyCwdObserver(entries),
+            i64::from(std::process::id()),
+            "current process unavailable",
+        );
         return WorkerEvidence {
             states: roots
                 .iter()
                 .cloned()
-                .map(|root| (root, WorkerState::Unknown))
+                .map(|root| {
+                    (
+                        root.clone(),
+                        Occupancy::census_unknown(root, detail.clone()),
+                    )
+                })
                 .collect(),
             holders: BTreeMap::new(),
             taints: roots
@@ -732,16 +801,7 @@ fn system_worker_evidence(
             details: roots
                 .iter()
                 .cloned()
-                .map(|root| {
-                    (
-                        root,
-                        process_detail(
-                            &PolicyCwdObserver(entries),
-                            i64::from(std::process::id()),
-                            "current process unavailable",
-                        ),
-                    )
-                })
+                .map(|root| (root, detail.clone()))
                 .collect(),
         };
     };
@@ -771,7 +831,12 @@ pub(super) fn system_worker_roots_with_policy_taints(
             roots
                 .iter()
                 .cloned()
-                .map(|root| (root, WorkerState::Unknown))
+                .map(|root| {
+                    (
+                        root.clone(),
+                        Occupancy::census_unknown(root, "process census unavailable"),
+                    )
+                })
                 .collect(),
             roots
                 .iter()
@@ -833,7 +898,7 @@ pub(super) fn observe_worker_holders(
     current: &ProcessFact,
     ancestors: bool,
 ) -> (
-    BTreeMap<PathBuf, WorkerState>,
+    BTreeMap<PathBuf, Occupancy>,
     BTreeMap<PathBuf, ObservedProcess>,
     BTreeMap<PathBuf, String>,
 ) {
@@ -859,7 +924,7 @@ pub(super) fn observe_worker_holders_with_audit(
     ancestors: bool,
     unplaceable: &mut dyn FnMut(Option<i64>, Option<&'static str>),
 ) -> (
-    BTreeMap<PathBuf, WorkerState>,
+    BTreeMap<PathBuf, Occupancy>,
     BTreeMap<PathBuf, ObservedProcess>,
     BTreeMap<PathBuf, String>,
 ) {
@@ -875,7 +940,7 @@ pub(super) fn observe_worker_holders_with_audit(
 }
 
 type WorkerHolderAudit = (
-    BTreeMap<PathBuf, WorkerState>,
+    BTreeMap<PathBuf, Occupancy>,
     BTreeMap<PathBuf, ObservedProcess>,
     BTreeMap<PathBuf, String>,
     BTreeMap<PathBuf, TaintCause>,
@@ -892,7 +957,7 @@ pub(super) fn observe_worker_holders_with_taints_and_audit(
     let mut states: BTreeMap<_, _> = roots
         .iter()
         .cloned()
-        .map(|root| (root, WorkerState::Free))
+        .map(|root| (root, Occupancy::Available))
         .collect();
     let mut holders = BTreeMap::new();
     let mut details = BTreeMap::new();
@@ -904,11 +969,6 @@ pub(super) fn observe_worker_holders_with_taints_and_audit(
         Ok(census) => census,
         Err(error) => {
             unplaceable(None, Some("complete process census unavailable"));
-            let unknown = roots
-                .iter()
-                .cloned()
-                .map(|root| (root, WorkerState::Unknown))
-                .collect();
             let detail = if matches!(
                 error,
                 provenant_supervisor::census::CensusError::ProcessList(_)
@@ -917,6 +977,11 @@ pub(super) fn observe_worker_holders_with_taints_and_audit(
             } else {
                 "process census unavailable"
             };
+            let unknown = roots
+                .iter()
+                .cloned()
+                .map(|root| (root.clone(), Occupancy::census_unknown(root, detail)))
+                .collect();
             return (
                 unknown,
                 holders,
@@ -1030,10 +1095,11 @@ pub(super) fn observe_worker_holders_with_taints_and_audit(
                             &format!("occupancy path unavailable: {}", path.display()),
                         );
                         for (root, state) in &mut states {
-                            if occupancy_path_could_be_under(path, root)
-                                && *state != WorkerState::Live
-                            {
-                                *state = WorkerState::Unknown;
+                            if occupancy_path_could_be_under(path, root) && !state.is_observed() {
+                                *state = Occupancy::census_unknown(
+                                    root.clone(),
+                                    "process occupancy could not be placed",
+                                );
                                 details
                                     .entry(root.clone())
                                     .or_insert_with(|| detail.clone());
@@ -1061,7 +1127,7 @@ pub(super) fn observe_worker_holders_with_taints_and_audit(
                             ),
                         );
                         for (root, state) in &states {
-                            if *state == WorkerState::Unknown {
+                            if state.is_unknown() {
                                 details.entry(root.clone()).or_insert_with(|| {
                                     process_detail(
                                         cwd_observer,
@@ -1209,7 +1275,7 @@ pub(super) fn observe_worker_holders_with_taints_and_audit(
                     }
                     cwd_outside = placed.is_empty() && !placement_failed;
                     for (root, state) in &states {
-                        if *state == WorkerState::Unknown {
+                        if state.is_unknown() {
                             details.entry(root.clone()).or_insert_with(|| {
                                 process_detail(cwd_observer, pid, "cwd or root identity unreadable")
                             });
@@ -1243,9 +1309,11 @@ pub(super) fn observe_worker_holders_with_taints_and_audit(
                     );
                     let detail = process_detail(cwd_observer, pid, "cwd unreadable");
                     for (root, state) in &mut states {
-                        if occupancy_path_could_be_under(&path, root) && *state != WorkerState::Live
-                        {
-                            *state = WorkerState::Unknown;
+                        if occupancy_path_could_be_under(&path, root) && !state.is_observed() {
+                            *state = Occupancy::census_unknown(
+                                root.clone(),
+                                "process occupancy could not be placed",
+                            );
                             details
                                 .entry(root.clone())
                                 .or_insert_with(|| detail.clone());
@@ -1302,6 +1370,7 @@ pub(super) fn observe_worker_holders_with_taints_and_audit(
             TaintCause::Uncertainty(UncertaintyReason::ListingIncomplete),
         );
     }
+    attach_worker_evidence(&mut states, &holders, &details);
     if let Some(detail) = excused_gap_detail {
         for root in states.keys() {
             details
@@ -1391,15 +1460,16 @@ pub(super) fn process_detail(observer: &dyn CwdObserver, pid: i64, category: &st
 }
 
 pub(super) fn record_unknown_all_with_taint(
-    states: &mut BTreeMap<PathBuf, WorkerState>,
+    states: &mut BTreeMap<PathBuf, Occupancy>,
     details: &mut BTreeMap<PathBuf, String>,
     taints: &mut BTreeMap<PathBuf, TaintCause>,
     detail: &str,
     taint: TaintCause,
 ) {
     for (root, state) in states {
-        if *state != WorkerState::Live {
-            *state = WorkerState::Unknown;
+        if !state.is_observed() {
+            *state =
+                Occupancy::census_unknown(root.clone(), "process occupancy could not be placed");
             details
                 .entry(root.clone())
                 .or_insert_with(|| detail.to_owned());
@@ -1444,22 +1514,25 @@ pub(super) fn observe_same_process(
 /// path spellings; textual prefix comparisons cannot establish occupancy.
 #[cfg(test)]
 pub(super) fn record_live_path(
-    states: &mut BTreeMap<PathBuf, WorkerState>,
+    states: &mut BTreeMap<PathBuf, Occupancy>,
     cwd: &Path,
 ) -> Vec<PathBuf> {
     record_live_path_with_audit(states, cwd, &mut || {})
 }
 
 pub(super) fn record_live_path_with_audit(
-    states: &mut BTreeMap<PathBuf, WorkerState>,
+    states: &mut BTreeMap<PathBuf, Occupancy>,
     cwd: &Path,
     unplaceable: &mut dyn FnMut(),
 ) -> Vec<PathBuf> {
     if !cwd.is_absolute() {
         unplaceable();
-        for state in states.values_mut() {
-            if *state != WorkerState::Live {
-                *state = WorkerState::Unknown;
+        for (root, state) in states.iter_mut() {
+            if !state.is_observed() {
+                *state = Occupancy::census_unknown(
+                    root.clone(),
+                    "process occupancy could not be placed",
+                );
             }
         }
         return Vec::new();
@@ -1484,14 +1557,17 @@ pub(super) fn record_live_path_with_audit(
         });
         match inside {
             Some(true) => {
-                *state = WorkerState::Live;
+                *state = Occupancy::Observed { process: None };
                 placed.push(root.clone());
             }
             Some(false) => {}
             None => {
                 unplaceable();
-                if occupancy_path_could_be_under(cwd, root) && *state != WorkerState::Live {
-                    *state = WorkerState::Unknown;
+                if occupancy_path_could_be_under(cwd, root) && !state.is_observed() {
+                    *state = Occupancy::census_unknown(
+                        root.clone(),
+                        "process occupancy could not be placed",
+                    );
                 }
             }
         }

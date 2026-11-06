@@ -577,6 +577,19 @@ pub(crate) enum AccountProfileError {
     Ambiguous,
     Duplicate,
 }
+impl AccountProfileError {
+    fn kind(self) -> Option<provenant_run::ErrorKind> {
+        match self {
+            Self::Unknown => Some(provenant_run::ErrorKind::UnknownAccount),
+            Self::Ambiguous => None,
+            Self::Duplicate => Some(provenant_run::ErrorKind::DuplicatePacingProfile),
+        }
+    }
+
+    fn code(self) -> &'static str {
+        self.kind().map_or("CONFIG", |kind| kind.code())
+    }
+}
 impl From<provenant_config::ConfigError> for EdgeError {
     fn from(error: provenant_config::ConfigError) -> Self {
         let is_pacing = match &error {
@@ -1359,10 +1372,10 @@ pub(crate) fn resolve_dispatch_rejecting(
         rules,
         choice_context,
     );
-    // The unused families have no member to take: none is eligible, or the one
-    // chosen is blocked by persisted account evidence (mismatch or refusal). A
-    // snapshot-exhausted or unavailable one is not: it stays selected rather
-    // than relaxing to a used family, as it did before account evidence.
+    // Relax when the unused families have no eligible member, including fresh
+    // snapshot exhaustion, or the selected account is blocked by persisted
+    // mismatch or refusal evidence. Stale quota and other availability
+    // uncertainty alone do not relax family separation.
     let exhausted = match &selected {
         Err(EdgeError::Routing(error)) => error.code() == "no_eligible_pool_member",
         Ok(route) => {
@@ -3073,21 +3086,36 @@ pub fn run(
                 EdgeError::Routing(_) | EdgeError::Unresolved { .. } | EdgeError::Pacing(_) => {
                     (Outcome::Invalid, "INVALID")
                 }
+                EdgeError::Config(error) | EdgeError::PacingConfig(error)
+                    if error.refusal_code().is_some() =>
+                {
+                    (
+                        Outcome::Invalid,
+                        error
+                            .refusal_code()
+                            .unwrap_or(provenant_config::shared_settings::NEVER_SYNCED_CODE),
+                    )
+                }
                 EdgeError::Config(_) | EdgeError::PacingConfig(_) => (Outcome::Invalid, "CONFIG"),
-                EdgeError::AccountProfile { kind, .. } => match kind {
-                    AccountProfileError::Unknown
-                    | AccountProfileError::Ambiguous
-                    | AccountProfileError::Duplicate => (Outcome::Invalid, "CONFIG"),
-                },
+                EdgeError::AccountProfile { kind, .. } => (Outcome::Invalid, kind.code()),
                 _ => (Outcome::Error, "IO"),
             };
             let mut result = CommandResult::new(name, status, None);
+            let projection = match &error {
+                EdgeError::AccountProfile { kind, .. } => kind.kind().map(|kind| kind.diagnostic()),
+                EdgeError::Config(error) | EdgeError::PacingConfig(error)
+                    if error.refusal_code().is_some() =>
+                {
+                    Some(provenant_run::ErrorKind::SharedSettingsNeverSynced.diagnostic())
+                }
+                _ => None,
+            };
             result.error = Some(CommandError {
-                diagnostic: None,
+                diagnostic: projection.as_ref().map(Into::into),
                 code: code.into(),
                 message: error.to_string(),
                 cause: None,
-                repair: None,
+                repair: projection.and_then(|diagnostic| diagnostic.next),
             });
             result
         }
@@ -3348,6 +3376,30 @@ mod route_tests {
         RouteSelectionCandidate, RouteSelectionReceipt,
     };
     use std::error::Error;
+
+    #[test]
+    fn account_profile_refusals_have_distinct_stable_codes() {
+        use super::AccountProfileError;
+        let error = super::resolve_account_reference(
+            "missing",
+            "account",
+            &provenant_providers::accounts::Settings::default(),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            super::EdgeError::AccountProfile {
+                kind: AccountProfileError::Unknown,
+                ..
+            }
+        ));
+        assert_eq!(AccountProfileError::Unknown.code(), "UNKNOWN_ACCOUNT");
+        assert_eq!(
+            AccountProfileError::Duplicate.code(),
+            "DUPLICATE_PACING_PROFILE"
+        );
+        assert_eq!(AccountProfileError::Ambiguous.code(), "CONFIG");
+    }
 
     #[test]
     fn route_list_does_not_call_omitted_evidence_unprobed() -> Result<(), Box<dyn Error>> {
@@ -4779,11 +4831,12 @@ mod route_tests {
             reason,
             provenant_records::RouteExclusionReason::ProviderRefused
         );
-        // The unavailable reason keeps the repair text, not a debug name.
-        assert_eq!(
-            provenant_routing::exclusion_detail(&reason),
-            "scoped provider refusal"
-        );
+        // The unavailable reason retains the typed owner's cause and repair.
+        let diagnostic = reason.diagnostic("REFUSED");
+        let detail = provenant_routing::exclusion_detail(&reason);
+        assert!(detail.contains(diagnostic.detail.as_deref().ok_or("cause detail")?));
+        assert!(detail.contains(diagnostic.next.as_deref().ok_or("cause action")?));
+        assert!(!detail.contains("ProviderRefused"));
         Ok(())
     }
 
@@ -5431,40 +5484,43 @@ mod route_tests {
     }
 
     #[test]
-    fn review_substitution_keeps_a_snapshot_exhausted_unused_family() -> Result<(), Box<dyn Error>>
-    {
-        // Snapshot exhaustion is not an account block: an unused family whose
-        // reading is spent stays selected, as it did before account evidence.
-        let fixture = ReviewFixture::new()?;
-        let now = fixture.now;
-        fixture.seed_claude(|record| {
-            let account = record.account.clone();
-            record.snapshot = Some(provenant_quota::QuotaSnapshot {
-                schema_version: 1,
-                account,
-                revision: 0,
-                status: provenant_quota::QuotaStatus::Exhausted,
-                observed_unix_seconds: now,
-                source_ref: "fixture".into(),
-                authority_ref: None,
-                windows: vec![provenant_quota::QuotaWindow {
-                    pool: "seven_day".into(),
-                    window_seconds: Some(604_800),
-                    used_basis_points: 10_000,
-                    resets_unix_seconds: Some(now + 3_600),
-                }],
-                details: None,
-            });
-        })?;
-        let route = fixture.resolve(false)?;
-        assert_eq!(route.adapter, "claude");
-        assert!(matches!(
-            route.readiness,
-            RouteReadiness::Unavailable {
-                reason: provenant_records::RouteExclusionReason::Exhausted,
-                ..
+    fn review_substitution_only_skips_fresh_snapshot_exhaustion() -> Result<(), Box<dyn Error>> {
+        // Fresh exhaustion excludes the unused family, so optional separation
+        // relaxes. Stale exhaustion still ranks it without excluding it.
+        for stale in [false, true] {
+            let fixture = ReviewFixture::new()?;
+            let now = fixture.now;
+            fixture.seed_claude(|record| {
+                let account = record.account.clone();
+                record.snapshot = Some(provenant_quota::QuotaSnapshot {
+                    schema_version: 1,
+                    account,
+                    revision: 0,
+                    status: provenant_quota::QuotaStatus::Exhausted,
+                    observed_unix_seconds: if stale { now - 86_400 } else { now },
+                    source_ref: "fixture".into(),
+                    authority_ref: None,
+                    windows: vec![provenant_quota::QuotaWindow {
+                        pool: "seven_day".into(),
+                        window_seconds: Some(604_800),
+                        used_basis_points: 10_000,
+                        resets_unix_seconds: Some(now + 3_600),
+                    }],
+                    details: None,
+                });
+            })?;
+            let route = fixture.resolve(false)?;
+            assert_eq!(route.adapter, if stale { "claude" } else { "codex" });
+            assert!(matches!(route.readiness, RouteReadiness::Ready { .. }));
+            if stale {
+                assert_eq!(fixture.resolve(true)?.adapter, "claude");
+            } else {
+                assert!(matches!(
+                    fixture.resolve(true),
+                    Err(super::DispatchError::FamilySeparation(..))
+                ));
             }
-        ));
+        }
         Ok(())
     }
 

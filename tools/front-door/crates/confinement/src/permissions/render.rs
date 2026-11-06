@@ -1,5 +1,7 @@
 //! SBPL compilation and rendering.
 
+#[cfg(target_os = "macos")]
+use super::validation::filtered_native_controls;
 use super::*;
 #[cfg(target_os = "macos")]
 use crate::cache::verify_cache_metadata;
@@ -58,17 +60,16 @@ pub(super) const DYLD_BOOTSTRAP_RULES: &str = r#"
   (allow system-mac-syscall (mac-syscall-number 2)))
 "#;
 /// Fixed operating-system runtime every provider CLI needs under deny-default:
-/// kernel and preference reads, TLS trust, DNS, time zone data, and process
-/// information and signals within the same sandbox. It names no user path; explicit
+/// kernel and preference reads, TLS trust, DNS, time zone data, process
+/// information, and signals within the same sandbox. It names no user path; explicit
 /// secret-root denials still override the metadata grant.
 #[cfg(any(target_os = "macos", feature = "snapshot"))]
 pub(super) const RUNTIME_BASELINE_RULES: &str = r#"(allow sysctl-read)
-(deny sysctl-read (sysctl-name-prefix "kern.procargs") (sysctl-name-prefix "kern.proc."))
+(deny sysctl-read (sysctl-name-prefix "kern.procargs"))
 (allow file-read-metadata)
 (allow ipc-posix-shm-read* (ipc-posix-name-prefix "apple.cfprefs."))
 (allow signal (target same-sandbox))
-(deny process-info*)
-(allow process-info* (target same-sandbox))
+(allow process-info*)
 (allow mach-lookup
   (global-name "com.apple.cfprefsd.agent")
   (global-name "com.apple.cfprefsd.daemon")
@@ -82,6 +83,8 @@ pub(super) const RUNTIME_BASELINE_RULES: &str = r#"(allow sysctl-read)
   (global-name "com.apple.networkd"))
 (allow network-outbound (remote unix-socket (path-literal "/private/var/run/mDNSResponder")))
 (allow file-read* file-write-data (literal "/dev/null"))
+(allow file-read-metadata file-write-data (literal "/private/var/tmp"))
+(allow file-read* file-write* (regex #"^/private/var/tmp/sh-thd[^/]*$"))
 (allow file-read* (literal "/dev/urandom") (literal "/dev/random"))
 (allow file-read* (literal "/dev/fd"))
 (allow file-read* (subpath "/usr/share") (subpath "/private/var/db/timezone") (literal "/private/etc/localtime"))
@@ -365,23 +368,6 @@ fn compile_sbpl_impl(
     })
 }
 
-#[cfg(any(target_os = "macos", test))]
-pub(super) fn filtered_native_controls(controls: &[String]) -> Vec<String> {
-    let filtered: Vec<_> = controls
-        .iter()
-        .filter(|control| super::validation::valid_native_control(control))
-        .cloned()
-        .collect();
-    if filtered.len() != controls.len() {
-        use std::io::Write;
-        let _ = writeln!(
-            std::io::stderr().lock(),
-            "warning: invalid native control labels were omitted"
-        );
-    }
-    filtered
-}
-
 /// All path grants and inputs used to render one launch profile.
 ///
 /// Build this once from the launch inputs, then use the same set for
@@ -614,7 +600,7 @@ pub(super) fn verify_private_scratch(
     Ok(())
 }
 
-#[cfg(all(test, target_os = "macos"))]
+#[cfg(all(test, any(target_os = "macos", feature = "snapshot")))]
 pub(super) fn render_profile(
     plan: &PlanPermissions,
     profile: &ProviderProfile,
