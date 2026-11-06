@@ -3134,7 +3134,7 @@ fn main() -> ExitCode {
                         codex_capacity_settles_without_quota_refusal()
                     }
 
-                    _ => opencode_free_pool_cools_second_model(),
+                    _ => return Err(io::Error::other(format!("unknown test: {name}"))),
                 };
                 result.map_err(|e| io::Error::other(e.to_string()))
             },
