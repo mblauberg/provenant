@@ -1330,3 +1330,142 @@ fn retry_of_explicit_launch_refusal_preserves_pending_siblings_and_rejects_uncer
     );
     assert_eq!(owner.calls.len(), 2);
 }
+
+#[test]
+fn retry_node_and_dependants_resets_consumers_and_preserves_unrelated_work() {
+    let mut consumer = node("consumer", route("first"));
+    consumer.depends_on = vec!["work".into()];
+    let mut last = node("last", route("first"));
+    last.depends_on = vec!["consumer".into()];
+    let document = graph(vec![node("work", route("first")), consumer, last, node("unrelated", route("first"))]);
+    let mut owner = FakeOwner { observations: [done_as("old-work"), done_as("old-consumer"), done_as("old-last"), done_as("unrelated")].into(), ..Default::default() };
+    use provenant_os::{clock::SystemClock, fs::SystemPathResolver};
+    use std::os::unix::fs::PermissionsExt;
+    let temp = crate::test_support::tempdir().unwrap();
+    std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let base = std::fs::canonicalize(temp.path()).unwrap();
+    let mut inputs = provenant_core::RootInputs::new(base.join("home"), base.join("checkout"));
+    inputs.state_dir = Some(base.clone());
+    let root = StateRoot::resolve(&inputs, &SystemPathResolver).unwrap();
+    let project = ProjectId::from_bytes([39; 16]);
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let budget = WaitBudget::cli(clock.mono_now(), 5).unwrap();
+    let open = || FileJournal::open(&root, project, &document.graph_id, budget, &cancel, &clock).unwrap();
+    let mut journal = open();
+    journal.bind(GraphExecution { review_base: None, extra: Default::default(), integration_base: None, directory: base, document: document.clone() }).unwrap();
+    let mut checkpoint = advance(&document, &mut owner, &mut journal).unwrap().checkpoint;
+    let original = checkpoint.clone();
+    let event_count = FileJournal::read_events(&root, project, &document.graph_id).unwrap().len();
+    let library = template::TemplateLibrary::bundled();
+    let resolvers = Default::default();
+    let limits = plans::generous();
+    let context = patch::PatchContext { library: &library, resolvers: &resolvers, scan: &|_| Ok(()), journal: None, limits: &limits };
+    let mut live = original.clone();
+    live.nodes.iter_mut().find(|node| node.id == "last").unwrap().attempts[0].state = AttemptState::Running;
+    let before = live.clone();
+    assert!(patch::retry_node_and_dependants(&mut patch::LiveGraph { document: &document, checkpoint: &mut live }, "work", None, &context).is_err());
+    assert_eq!(live, before);
+    let admitted = patch::retry_node_and_dependants(&mut patch::LiveGraph { document: &document, checkpoint: &mut checkpoint }, "work", Some("Repaired work"), &context).unwrap();
+    assert_eq!(admitted.revision, 1);
+    assert_eq!(checkpoint.nodes.iter().filter(|node| node.state == NodeState::Pending).count(), 3);
+    let mut owner = FakeOwner { observations: [done_as("new-work"), done_as("new-consumer"), done_as("new-last")].into(), ..Default::default() };
+    journal.save(&checkpoint).unwrap();
+    drop(journal);
+    let mut journal = open();
+    let events = FileJournal::read_events(&root, project, &document.graph_id).unwrap();
+    let retry_events = &events[event_count..];
+    assert_eq!(retry_events.iter().filter(|event| event.kind == GraphEventKind::Patch).count(), 1);
+    assert_eq!(retry_events.iter().filter(|event| event.kind == GraphEventKind::NodeState && event.code == "pending").count(), 3);
+    let run = advance(&document, &mut owner, &mut journal).unwrap();
+    assert!(run.checkpoint.successful());
+    assert_eq!(owner.calls.iter().map(|(key, _)| key.node_id.as_str()).collect::<Vec<_>>(), ["work", "consumer", "last"]);
+    assert_eq!(run.checkpoint.nodes.iter().find(|node| node.id == "unrelated"), original.nodes.iter().find(|node| node.id == "unrelated"));
+    for id in ["work", "consumer", "last"] {
+        let old = original.nodes.iter().find(|node| node.id == id).unwrap();
+        let new = run.checkpoint.nodes.iter().find(|node| node.id == id).unwrap();
+        assert_eq!(new.previous_attempts, old.attempts);
+        assert_ne!(new.attempts[0].key, old.attempts[0].key);
+    }
+    let mut replay = FakeOwner::default();
+    advance(&document, &mut replay, &mut journal).unwrap();
+    assert!(replay.calls.is_empty());
+}
+
+#[test]
+fn planner_patched_loop_body_redo_recovers_after_checkpoint_crash() {
+    let document: GraphDocument = serde_json::from_value(json!({
+        "schema_version":1,"graph_id":"redo-dynamic-loop-crash","nodes":[
+            {"id":"work","kind":"loop","access":"read_only","loop":{
+                "max_rounds":1,"until":"check","body":[
+                    {"id":"planner","kind":"plan","prompt":"Plan work","access":"read_only","route":{"alias":"senior"},"plan":{"kinds":["task"],"max_nodes":1}},
+                    {"id":"check","kind":"gate","access":"read_only","depends_on":["planner"],"condition":{"type":"budget"}}
+                ]
+            }},
+            {"id":"sibling","prompt":"Independent work","access":"read_only","route":{"alias":"junior"}}
+        ]
+    })).unwrap();
+    let checkpoint = redo_container_after_checkpoint_crash(
+        document, "work", "work--r1--planner--slice",
+        vec![terminal_from(&slice_fragment("slice"), "planner-old"), done_as("sibling-old"), terminal_from("old slice", "slice-old")],
+        vec![terminal_from(&slice_fragment("slice"), "planner-new")],
+        vec![terminal_from("new slice", "slice-new")],
+        &["work--r1--planner--slice"],
+    );
+    assert_eq!(checkpoint.expansions.iter().filter(|expansion| expansion.retired()).count(), 1);
+    let slice = checkpoint.nodes.iter().find(|node| node.id == "work--r1--planner--slice").unwrap();
+    assert!(slice.round.is_some());
+    assert_eq!(slice.attempts[0].attempt_ref.as_deref(), Some("slice-new"));
+    assert!(slice.previous_attempts.iter().any(|attempt| attempt.attempt_ref.as_deref() == Some("slice-old")));
+}
+
+#[test]
+fn public_planner_retry_replaces_dynamic_children_instead_of_relaunching_stale_work() {
+    for replacement in ["slice", "replacement"] {
+        let document: GraphDocument = serde_json::from_value(json!({
+            "schema_version":1,"graph_id":"retry-planner-consumers","nodes":[{
+                "id":"work","kind":"plan","access":"read_only","prompt":"Plan work",
+                "route":{"alias":"senior"},"plan":{"kinds":["task"],"max_nodes":4}
+            }]
+        })).unwrap();
+        let mut owner = FakeOwner { observations: [terminal_from(&slice_fragment("slice"), "old-plan"), done_as("old-child")].into(), ..Default::default() };
+        let mut checkpoint = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap().checkpoint;
+        patch::retry_node_and_dependants(
+            &mut patch::LiveGraph { document: &document, checkpoint: &mut checkpoint }, "work", None,
+            &patch::PatchContext { library: &template::TemplateLibrary::bundled(), resolvers: &Default::default(), scan: &|_| Ok(()), journal: None, limits: &plans::generous() },
+        ).unwrap();
+        assert!(checkpoint.expansions.iter().any(|expansion| expansion.retired()));
+        let mut owner = FakeOwner { observations: [terminal_from(&slice_fragment(replacement), "new-plan"), done_as("new-child")].into(), ..Default::default() };
+        let mut journal = MemoryJournal(Some(checkpoint));
+        let run = advance(&document, &mut owner, &mut journal).unwrap();
+        assert!(run.checkpoint.successful(), "{:?}", run.checkpoint.pause_reason);
+        assert_eq!(owner.calls.iter().map(|(key, _)| key.node_id.as_str()).collect::<Vec<_>>(), ["work", &format!("work--{replacement}")]);
+        let child = run.checkpoint.nodes.iter().find(|node| node.id == format!("work--{replacement}")).unwrap();
+        assert_eq!(child.attempts[0].attempt_ref.as_deref(), Some("new-child"));
+        if replacement == "slice" {
+            assert!(child.previous_attempts.iter().any(|attempt| attempt.attempt_ref.as_deref() == Some("old-child")));
+        } else {
+            assert!(!run.checkpoint.nodes.iter().any(|node| node.id == "work--slice"));
+        }
+        let mut replay = FakeOwner::default();
+        advance(&document, &mut replay, &mut journal).unwrap();
+        assert!(replay.calls.is_empty());
+    }
+}
+
+#[test]
+fn public_retry_of_dynamic_member_recomputes_enclosing_join_without_retiring_the_member() {
+    let document = planner_container("retry-dynamic-member");
+    let mut owner = FakeOwner { observations: [terminal_from(&slice_fragment("slice"), "old-plan"), done_as("old-slice"), done_as("old-consumer")].into(), ..Default::default() };
+    let mut checkpoint = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap().checkpoint;
+    patch::retry_node_and_dependants(
+        &mut patch::LiveGraph { document: &document, checkpoint: &mut checkpoint }, "work--planner--slice", None,
+        &patch::PatchContext { library: &template::TemplateLibrary::bundled(), resolvers: &Default::default(), scan: &|_| Ok(()), journal: None, limits: &plans::generous() },
+    ).unwrap();
+    let mut owner = FakeOwner { observations: [done_as("new-slice"), done_as("new-consumer")].into(), ..Default::default() };
+    let run = advance(&document, &mut owner, &mut MemoryJournal(Some(checkpoint))).unwrap();
+    assert!(run.checkpoint.successful(), "{:?}", run.checkpoint.pause_reason);
+    assert_eq!(owner.calls.iter().map(|(key, _)| key.node_id.as_str()).collect::<Vec<_>>(), ["work--planner--slice", "sibling"]);
+    let planner = run.checkpoint.nodes.iter().find(|node| node.id == "work--planner").unwrap();
+    assert_eq!(planner.attempts[0].attempt_ref.as_deref(), Some("old-plan"));
+}
