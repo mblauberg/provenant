@@ -1262,11 +1262,11 @@ fn graph_cancel_recovers_an_attempt_missing_its_checkpoint_reference() -> Result
 
 #[test]
 fn run_status_and_wait_read_the_owner_store_and_event_pull_deduplicates() -> Result {
-    use provenant_fabric_runtime::hosts::PeerResult;
     use provenant_core::{
         ActorId, AttemptId, CancelToken, Clock, Digest, HostId, OperationId, ProjectId, RootInputs,
         RunId, TaskId,
     };
+    use provenant_fabric_runtime::hosts::PeerResult;
     use provenant_os::clock::SystemClock;
     use provenant_records::{
         CanonicalV1,
@@ -1865,11 +1865,17 @@ fn mcp_child_run_requires_the_parent_relay_before_any_local_submission() -> Resu
     let mut rig = TestRig::new()?;
     let (parent, _) = seed_attempt(&mut rig, "parent brief", false)?;
     // A host prepares coordination state before handing its read-only view to a lane.
-    assert_eq!(code(&rig.command(&["fabric", "events", "read", "--json"])?), 0);
+    assert_eq!(
+        code(&rig.command(&["fabric", "events", "read", "--json"])?),
+        0
+    );
     let before = std::fs::read(rig.state.join("run.sqlite3"))?;
     rig.env.extend([
         (provenant_run::LANE_DEPTH_ENV.into(), "1".into()),
-        (provenant_run::PARENT_ATTEMPT_ENV.into(), parent.to_string().into()),
+        (
+            provenant_run::PARENT_ATTEMPT_ENV.into(),
+            parent.to_string().into(),
+        ),
     ]);
     let replies = mcp(
         &rig,
@@ -1897,25 +1903,39 @@ fn submitted_policy(
     } else {
         json!({"adapter":route["provider"],"model":route["model"]})
     };
-    let replies = mcp(rig, &[json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{
-        "name":"fabric_run","arguments":{"op":"run","wait_seconds":1,"document":{
-            "schema_version":1,"graph_id":operation,"nodes":[{
-                "id":"task","title":"Review fixture","prompt":"fixture","access":"read_only",
-                "route":route,"deadline_seconds":60
-            }]
-        }}
-    }})])?;
+    let replies = mcp(
+        rig,
+        &[
+            json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{
+                "name":"fabric_run","arguments":{"op":"run","wait_seconds":1,"document":{
+                    "schema_version":1,"graph_id":operation,"nodes":[{
+                        "id":"task","title":"Review fixture","prompt":"fixture","access":"read_only",
+                        "route":route,"deadline_seconds":60
+                    }]
+                }}
+            }}),
+        ],
+    )?;
     let result = &replies.iter().find(|r| r["id"] == 1).ok_or("graph run")?["result"];
     assert_ne!(result["isError"], true, "{result}");
-    let reference = result["structuredContent"]["checkpoint"]["nodes"][0]["attempts"][0]["attempt_ref"]
-        .as_str().ok_or_else(|| format!("graph attempt reference: {result}"))?;
+    let reference =
+        result["structuredContent"]["checkpoint"]["nodes"][0]["attempts"][0]["attempt_ref"]
+            .as_str()
+            .ok_or_else(|| format!("graph attempt reference: {result}"))?;
     let attempt_id = reference.rsplit_once('/').ok_or("qualified attempt")?.1;
-    let replies = mcp(rig, &[json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{
-        "name":"fabric_run","arguments":{"op":"status","target":{"attempt":attempt_id},"detail":true}
-    }})])?;
+    let replies = mcp(
+        rig,
+        &[
+            json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{
+                "name":"fabric_run","arguments":{"op":"status","target":{"attempt":attempt_id},"detail":true}
+            }}),
+        ],
+    )?;
     let attempt = replies.iter().find(|r| r["id"] == 2).ok_or("status")?["result"]["structuredContent"]["attempt"].clone();
     let run = attempt["run_id"].as_str().ok_or("run ID")?;
-    let request = serde_json::from_slice(&std::fs::read(rig.state.join("runs").join(run).join("request.json"))?)?;
+    let request = serde_json::from_slice(&std::fs::read(
+        rig.state.join("runs").join(run).join("request.json"),
+    )?)?;
     Ok((request, attempt))
 }
 
@@ -1923,11 +1943,8 @@ fn submitted_policy(
 fn submission_preserves_explicit_named_route_tier() -> Result {
     let rig = TestRig::new()?;
     let cleanup = rig.process_cleanup();
-    let (request, attempt) = submitted_policy(
-        &rig,
-        "named-tier",
-        json!({"kind":"named","name":"senior"}),
-    )?;
+    let (request, attempt) =
+        submitted_policy(&rig, "named-tier", json!({"kind":"named","name":"senior"}))?;
     assert_eq!(request.tasks[0].title.as_deref(), Some("Review fixture"));
     assert_eq!(attempt["title"], "Review fixture");
     assert_eq!(
@@ -1950,11 +1967,8 @@ fn mcp_submission_stamps_the_local_host_on_its_trace() -> Result {
     let identity = rig.command(&["fabric", "identity", "--json"])?;
     assert_eq!(code(&identity), 0);
     let identity: Value = serde_json::from_slice(&identity.stdout.bytes)?;
-    let (_, attempt) = submitted_policy(
-        &rig,
-        "trace-host",
-        json!({"kind":"named","name":"senior"}),
-    )?;
+    let (_, attempt) =
+        submitted_policy(&rig, "trace-host", json!({"kind":"named","name":"senior"}))?;
     assert_eq!(attempt["trace"]["host"], identity["data"]["host"]);
     assert_eq!(attempt["trace"]["attempt"], attempt["attempt_id"]);
     rig.assert_legacy_unchanged()?;
@@ -2019,7 +2033,10 @@ fn silence_knob_controls_capture_plan_observations() -> Result {
         json!({"kind":"model","provider":"codex","model":"fixture"}),
     )?;
     let plan = provenant_run::capture_plan(
-        &request.tasks[0], request.tasks[0].provider_timeout_seconds, u64::MAX, "codex",
+        &request.tasks[0],
+        request.tasks[0].provider_timeout_seconds,
+        u64::MAX,
+        "codex",
     );
     assert_eq!(plan.silence_ms, 2000);
     assert!(!plan.silent(1999, Some(0)));
@@ -2764,19 +2781,33 @@ fn graph_writer_needs_only_git_worktree_registration() -> Result {
         String::from_utf8_lossy(&claim.stderr.bytes)
     );
     for (index, delivery) in ["none", "push"].into_iter().enumerate() {
-        let replies = mcp(&rig, &[json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{
-            "name":"fabric_run","arguments":{"op":"run","document":{
-                "schema_version":1,"graph_id":format!("git-writer-{index}"),"nodes":[{
-                    "id":"writer","prompt":"commit the fix","access":"worktree_write",
-                    "worktree":worktree,"write_scope":["src"],"delivery":delivery,
-                    "route":{"adapter":"codex","model":"gpt-6.1-sol","effort":"high"}
-                }]
-            }}
-        }})])?;
-        let result = &replies.iter().find(|reply| reply["id"] == 1).ok_or("graph reply")?["result"];
+        let replies = mcp(
+            &rig,
+            &[
+                json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{
+                    "name":"fabric_run","arguments":{"op":"run","document":{
+                        "schema_version":1,"graph_id":format!("git-writer-{index}"),"nodes":[{
+                            "id":"writer","prompt":"commit the fix","access":"worktree_write",
+                            "worktree":worktree,"write_scope":["src"],"delivery":delivery,
+                            "route":{"adapter":"codex","model":"gpt-6.1-sol","effort":"high"}
+                        }]
+                    }}
+                }}),
+            ],
+        )?;
+        let result = &replies
+            .iter()
+            .find(|reply| reply["id"] == 1)
+            .ok_or("graph reply")?["result"];
         assert_ne!(result["isError"], true, "{result}");
-        assert_ne!(result["structuredContent"]["code"], "worktree_unregistered", "{result}");
-        assert_eq!(result["structuredContent"]["checkpoint"]["nodes"][0]["id"], "writer", "{result}");
+        assert_ne!(
+            result["structuredContent"]["code"], "worktree_unregistered",
+            "{result}"
+        );
+        assert_eq!(
+            result["structuredContent"]["checkpoint"]["nodes"][0]["id"], "writer",
+            "{result}"
+        );
     }
     rig.assert_legacy_unchanged()
 }
@@ -2835,7 +2866,10 @@ fn graph_writer_invalid_head_refuses_without_disclosing_private_paths() -> Resul
             Some(b"ref: refs/heads/../invalid\n".to_vec()),
             "submit: parse writer branch",
         ),
-    ].into_iter().enumerate() {
+    ]
+    .into_iter()
+    .enumerate()
+    {
         if let Some(contents) = contents {
             std::fs::write(&head, contents)?;
         } else {
@@ -2845,8 +2879,15 @@ fn graph_writer_invalid_head_refuses_without_disclosing_private_paths() -> Resul
         let graph = &result["structuredContent"];
         assert_eq!(graph["outcome"], "failed", "{result}");
         let error = &graph["checkpoint"]["nodes"][0];
-        assert_eq!(error["advance_error_code"], "writer_binding_unavailable", "{result}");
-        assert_eq!(error["attempts"], json!([]), "no provider launch after invalid custody: {result}");
+        assert_eq!(
+            error["advance_error_code"], "writer_binding_unavailable",
+            "{result}"
+        );
+        assert_eq!(
+            error["attempts"],
+            json!([]),
+            "no provider launch after invalid custody: {result}"
+        );
         assert!(
             !error.to_string().contains(head.to_string_lossy().as_ref()),
             "{result}"
@@ -2895,13 +2936,28 @@ fn graph_cancel_reconciles_a_remote_attempt_using_existing_peer_calls() -> Resul
     let cleanup = rig.process_cleanup();
     let peer = loopback_peer(&mut rig)?;
     let peer_state = rig.root.join("peer-state");
-    let peer_identity = rig.execute_os(Path::new(env!("CARGO_BIN_EXE_provenant")), &[
-        "--state-dir".into(), peer_state.clone().into(), "fabric".into(), "identity".into(), "--json".into(),
-    ], None)?;
+    let peer_identity = rig.execute_os(
+        Path::new(env!("CARGO_BIN_EXE_provenant")),
+        &[
+            "--state-dir".into(),
+            peer_state.clone().into(),
+            "fabric".into(),
+            "identity".into(),
+            "--json".into(),
+        ],
+        None,
+    )?;
     assert_eq!(code(&peer_identity), 0);
     let peer_identity: Value = serde_json::from_slice(&peer_identity.stdout.bytes)?;
     let context = serde_json::from_value(json!({"graph_id":"remote-graph","node_id":"one"}))?;
-    let (attempt, _) = seed_attempt_in_state(&rig, &peer_identity, &peer_state, "fixture", false, Some(context))?;
+    let (attempt, _) = seed_attempt_in_state(
+        &rig,
+        &peer_identity,
+        &peer_state,
+        "fixture",
+        false,
+        Some(context),
+    )?;
     let identity = rig.command(&["fabric", "identity", "--json"])?;
     assert_eq!(code(&identity), 0);
     let identity: Value = serde_json::from_slice(&identity.stdout.bytes)?;
@@ -2998,7 +3054,10 @@ fn seed_attempt_in_state(
     prompt: &str,
     cancel_it: bool,
     work_context: Option<provenant_records::run::WorkContext>,
-) -> Result<(provenant_core::AttemptId, Vec<provenant_records::run::RunEvent>)> {
+) -> Result<(
+    provenant_core::AttemptId,
+    Vec<provenant_records::run::RunEvent>,
+)> {
     use provenant_core::{
         ActorId, AttemptId, CancelToken, Clock, Digest, OperationId, ProjectId, RootInputs, RunId,
         TaskId,
@@ -3169,18 +3228,27 @@ fn lane_graph_mutations_fail_closed_without_host_submission() -> Result {
     let mut rig = TestRig::new()?;
     let (parent, _) = seed_attempt(&mut rig, "parent brief", false)?;
     // A host prepares coordination state before handing its read-only view to a lane.
-    assert_eq!(code(&rig.command(&["fabric", "events", "read", "--json"])?), 0);
+    assert_eq!(
+        code(&rig.command(&["fabric", "events", "read", "--json"])?),
+        0
+    );
     let before = std::fs::read(rig.state.join("run.sqlite3"))?;
-    rig.env.push((provenant_run::PARENT_ATTEMPT_ENV.into(), parent.to_string().into()));
+    rig.env.push((
+        provenant_run::PARENT_ATTEMPT_ENV.into(),
+        parent.to_string().into(),
+    ));
     for arguments in [
         json!({"op":"stop","id":"missing"}),
         json!({"op":"retry","id":"missing"}),
         json!({"op":"edit","id":"missing","patch":{"schema_version":1,"expected_revision":1,"idempotency_key":"lane-edit","nodes":[{"id":"added","use":"task","brief":"Inspect"}]}}),
     ] {
         let retry = arguments["op"] == "retry";
-        assert!(provenant_fabric_mcp::tools::ToolCall::parse("fabric_run", arguments.clone()).is_ok());
+        assert!(
+            provenant_fabric_mcp::tools::ToolCall::parse("fabric_run", arguments.clone()).is_ok()
+        );
         if arguments["op"] == "edit" {
-            let _: provenant_fabric_runtime::graph::patch::Patch = serde_json::from_value(arguments["patch"].clone())?;
+            let _: provenant_fabric_runtime::graph::patch::Patch =
+                serde_json::from_value(arguments["patch"].clone())?;
         }
         let replies = mcp(
             &rig,
@@ -3195,7 +3263,11 @@ fn lane_graph_mutations_fail_closed_without_host_submission() -> Result {
         assert_eq!(result["isError"], true, "{result}");
         assert_eq!(
             result["structuredContent"]["code"],
-            if retry { "confinement_refused" } else { "invalid_input" },
+            if retry {
+                "confinement_refused"
+            } else {
+                "invalid_input"
+            },
             "{result}"
         );
     }
