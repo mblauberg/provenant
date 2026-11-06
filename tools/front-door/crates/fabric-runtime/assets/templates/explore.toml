@@ -1,0 +1,10 @@
+doc = "Map an area and cite evidence. Use `over` for a swarm across areas."
+brief = "Map ${item} and cite evidence by path and symbol. Report what exists, how it connects and what is missing."
+tier = "junior"
+access = "read_only"
+outputs = ["result"]
+
+[parameters.item]
+type = "string"
+default = "the repository"
+doc = "Area to map"

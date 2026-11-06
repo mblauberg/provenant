@@ -1,0 +1,5 @@
+doc = "Falsify claims."
+brief = "Try to falsify each claim in your inputs by running or reading the evidence. Report which claims held."
+tier = "senior"
+access = "read_only"
+outputs = ["result", "findings"]

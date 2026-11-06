@@ -15,7 +15,7 @@ pub(super) fn nodes_have_v2(nodes: &[GraphNode]) -> bool {
                     .any(|input| !input.required_outputs.is_empty())
             })
             || node.plan.as_ref().is_some_and(|spec| {
-                spec.patterns.iter().any(|pattern| {
+                spec.templates.iter().any(|pattern| {
                     pattern.nodes.iter().any(value_has_v2)
                         || pattern
                             .exports
@@ -117,7 +117,7 @@ pub(super) fn validate_output_kinds(document: &GraphDocument) -> Result<(), Stri
         document.nodes.iter().map(|n| (n.id.as_str(), n)).collect();
     for consumer in &document.nodes {
         if consumer.plan.as_ref().is_some_and(|plan| {
-            plan.patterns.iter().any(|pattern| {
+            plan.templates.iter().any(|pattern| {
                 pattern.exports.iter().any(|input| {
                     !input.required_outputs.is_empty() || input.extra.contains_key("required")
                 })
@@ -1174,6 +1174,7 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
         if progress.state == NodeState::Skipped
             && (dependency_state(node, plan, checkpoint, &positions) != Some(NodeState::Skipped)
                 && !loops::inactive_round(node, checkpoint, &positions)
+                && !patch::skipped_by_patch(checkpoint, &node.id)
                 || !progress.attempts.is_empty()
                 || progress.outputs.is_some())
         {

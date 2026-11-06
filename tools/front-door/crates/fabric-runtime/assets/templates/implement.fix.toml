@@ -1,0 +1,2 @@
+doc = "Fix qualified findings at their cause."
+brief = "Fix each qualified finding at its cause, add a regression check, commit and end with a handoff block."

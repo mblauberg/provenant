@@ -619,7 +619,7 @@ fn a_pause_answer_can_cancel_and_a_rejected_answer_asks_again() {
 }
 
 #[test]
-fn a_planner_fragment_can_add_a_decide_node_when_its_kinds_allow_it() {
+fn a_planner_fragment_can_add_a_decide_node() {
     let document: GraphDocument = serde_json::from_value(json!({
         "schema_version":1, "graph_id":"planned-decide", "decision_session":"chair-session", "nodes":[
             {"id":"plan", "kind":"plan", "access":"read_only", "prompt":"Slice the work",
@@ -652,19 +652,4 @@ fn a_planner_fragment_can_add_a_decide_node_when_its_kinds_allow_it() {
     );
     assert_eq!(state(&run, "plan--choose"), NodeState::Succeeded);
     assert_eq!(owner.calls.len(), 2);
-
-    let mut narrow = document.clone();
-    narrow.nodes[0].plan.as_mut().unwrap().kinds = vec![NodeKind::Task];
-    let mut owner = FakeOwner {
-        observations: [terminal_with_result(AttemptOutcome::Succeeded, &fragment)].into(),
-        ..Default::default()
-    };
-    let paused = advance(&narrow, &mut owner, &mut MemoryJournal::default()).unwrap();
-    assert_eq!(paused.status, GraphStatus::Paused);
-    assert_eq!(
-        paused.checkpoint.pause_code.as_deref(),
-        Some("invalid_plan_expansion")
-    );
-    // The graph's decision session turns the expansion pause into a pause ask.
-    assert_eq!(owner.asked, ["pause-1"]);
 }

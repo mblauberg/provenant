@@ -1,0 +1,16 @@
+doc = "Fix qualified findings, then review the delta, until the review passes. Use with `repeat = { until = \"accepted\", max_rounds = N }`."
+nodes = [
+  { id = "fix", use = "implement.fix", worktree = "${worktree}", write_scope = "${write_scope}" },
+  { id = "check", use = "review", after = ["fix"], with = { lens = "delta" } },
+  { id = "accepted", kind = "gate", access = "read_only", after = ["check"], inputs = [{ node = "check", outputs = ["verdict"] }], condition = { type = "verdict", expected = "VERDICT: PASS", threshold = "all" } },
+]
+exports = [{ node = "accepted", outputs = ["result"] }]
+
+[parameters.worktree]
+type = "string"
+doc = "Registered worktree the fix writes in"
+
+[parameters.write_scope]
+type = "list"
+min = 1
+doc = "Relative paths the fix may write"

@@ -1050,7 +1050,8 @@ fn fixture_review_expansion(source: &GraphNode, subject: &str) -> Expansion {
         source: id,
         continuation: false,
         nodes,
-        patterns: vec![],
+        uses: vec![],
+        patch: None,
     }
 }
 

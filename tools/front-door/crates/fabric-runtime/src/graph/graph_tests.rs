@@ -742,7 +742,8 @@ fn admitted_deferred_review_fits_checkpoint_after_expansion() {
         nodes: composites::expand(&graph(vec![root]), &plans::generous())
             .unwrap()
             .nodes,
-        patterns: vec![],
+        uses: vec![],
+        patch: None,
     };
     let mut owner = FakeOwner {
         review_expansion: Some(expansion),
@@ -862,7 +863,8 @@ fn deferred_review_journals_and_replays_without_resolving_again() {
         source: "outer--review".into(),
         continuation: false,
         nodes: expanded.nodes,
-        patterns: vec![],
+        uses: vec![],
+        patch: None,
     };
     let mut invalid = addition.clone();
     invalid.review = None;
@@ -8232,7 +8234,8 @@ fn deferred_lens_substitution_keeps_panel_topology() {
         nodes: composites::expand(&graph(vec![root]), &plans::generous())
             .unwrap()
             .nodes,
-        patterns: vec![],
+        uses: vec![],
+        patch: None,
     };
     let count = expansion.nodes.len();
     let mut forged = expansion.clone();
@@ -11120,7 +11123,8 @@ fn deferred_review_evaluator_uses_bounded_findings_and_tolerates_one_invalid_len
             source: "review".into(),
             continuation: false,
             nodes,
-            patterns: vec![],
+            uses: vec![],
+            patch: None,
         };
         let mut evaluate = node("evaluate", route("first"));
         evaluate.depends_on = vec!["review".into()];
@@ -11274,7 +11278,8 @@ fn a_deferred_review_lens_keeps_the_writer_for_family_separation() {
         source: "review".into(),
         continuation: false,
         nodes,
-        patterns: vec![],
+        uses: vec![],
+        patch: None,
     };
     let mut document = graph(vec![write, review]);
     document.schema_version = 2;

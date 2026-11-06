@@ -1,6 +1,8 @@
 //! Dynamic plans and honest-stop continuations share the scheduler and journal.
+use super::patch::{PatchRecord, TemplateUse};
+use super::template::Template;
 use super::*;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 const FALLBACK_RETRY_CONTEXT: &str = "\n[planner-fragment-retry-context:";
 
@@ -8,21 +10,21 @@ const FALLBACK_RETRY_CONTEXT: &str = "\n[planner-fragment-retry-context:";
 pub struct PlanSpec {
     #[serde(flatten)]
     pub extra: provenant_records::ExtraFields,
+    /// Retained for the wire shape; a planner may emit any node kind.
+    #[serde(default)]
     pub kinds: Vec<NodeKind>,
     pub max_nodes: usize,
-    /// Patterns this plan node allows a fragment to instantiate.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub patterns: Vec<PatternSpec>,
-    /// A fragment may instantiate patterns only, never emit raw nodes.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub patterns_only: bool,
+    /// Host-authored templates this planner's patch may `use` with the
+    /// authority they declare. Any other node is held to the planner's own.
+    #[serde(default, rename = "patterns", skip_serializing_if = "Vec::is_empty")]
+    pub templates: Vec<Template>,
     /// Fragment units that no dependency orders form one wave, and the writers
     /// of one wave must hold disjoint scopes. Without it, overlapping writers
     /// share a checkout and run in turn.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub disjoint_waves: bool,
-    /// Consumers of the plan node also read what the fragment's pattern
-    /// instances export. Off, a consumer keeps exactly the inputs it declared.
+    /// Consumers of the plan node also read what the fragment's template
+    /// uses export. Off, a consumer keeps exactly the inputs it declared.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub wire_exports: bool,
     /// Static preset stage to run if this planner's attempt fails.
@@ -47,13 +49,20 @@ impl PlanSpec {
     /// writer's head existed. A lens must never inherit a framing node as its
     /// source or retain the writer's moving head binding.
     pub fn pin_review_subject(&mut self, commit: &str) -> Result<(), String> {
-        for pattern in &mut self.patterns {
-            for node in &mut pattern.nodes {
+        for template in &mut self.templates {
+            let name = template.name.clone().unwrap_or_default();
+            for node in &mut template.nodes {
                 pin_review_node(node, commit)
-                    .map_err(|error| format!("review pattern {}: {error}", pattern.name))?;
+                    .map_err(|error| format!("review template {name}: {error}"))?;
             }
         }
         Ok(())
+    }
+
+    fn template(&self, name: &str) -> Option<&Template> {
+        self.templates
+            .iter()
+            .find(|template| template.name.as_deref() == Some(name))
     }
 }
 
@@ -75,73 +84,6 @@ fn pin_review_node(node: &mut serde_json::Value, commit: &str) -> Result<(), &'s
     Ok(())
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PatternSpec {
-    #[serde(flatten)]
-    pub extra: provenant_records::ExtraFields,
-    pub name: String,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub parameters: BTreeMap<String, PatternParameter>,
-    /// Kept as JSON until parameter interpolation, because a typed field such as
-    /// `write_scope` may be a single `${scope}` placeholder for a list value.
-    pub nodes: Vec<serde_json::Value>,
-    pub exports: Vec<GraphInput>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PatternParameter {
-    #[serde(flatten)]
-    pub extra: provenant_records::ExtraFields,
-    #[serde(rename = "type")]
-    pub kind: PatternParameterKind,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub default: Option<serde_json::Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub min: Option<serde_json::Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max: Option<serde_json::Value>,
-    #[serde(default, rename = "enum", skip_serializing_if = "Vec::is_empty")]
-    pub allowed: Vec<serde_json::Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub doc: Option<String>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PatternParameterKind {
-    String,
-    Integer,
-    Number,
-    Boolean,
-    List,
-    Table,
-}
-
-impl PatternParameterKind {
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::String => "string",
-            Self::Integer => "integer",
-            Self::Number => "number",
-            Self::Boolean => "boolean",
-            Self::List => "list",
-            Self::Table => "table",
-        }
-    }
-}
-
-/// One pattern instantiation retained with the expansion that produced it.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PatternInstantiation {
-    #[serde(flatten)]
-    pub extra: provenant_records::ExtraFields,
-    pub id: String,
-    pub name: String,
-    pub parameters: serde_json::Value,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub nodes: Vec<String>,
-}
-
 /// Only validated, normalised additions enter the checkpoint. The original
 /// document remains the digest authority, just as it does for loop rounds.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -154,8 +96,12 @@ pub struct Expansion {
     pub continuation: bool,
     #[serde(with = "expanded_nodes")]
     pub nodes: Vec<GraphNode>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub patterns: Vec<PatternInstantiation>,
+    /// Template uses whose boundaries this expansion retains.
+    #[serde(default, rename = "patterns", skip_serializing_if = "Vec::is_empty")]
+    pub uses: Vec<TemplateUse>,
+    /// Present when the expansion was admitted as a patch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub patch: Option<PatchRecord>,
 }
 
 // Documents and untrusted fragments cannot set computed topology. Flattened
@@ -244,48 +190,16 @@ pub struct RemainingBudgets {
     pub continuations: usize,
 }
 
-#[derive(Deserialize)]
-struct Fragment {
-    schema_version: u64,
-    #[serde(default)]
-    nodes: Vec<GraphNode>,
-    #[serde(default)]
-    patterns: Vec<pattern_plan::PatternInstance>,
-}
-
-fn pattern_summary(spec: &PlanSpec) -> String {
-    spec.patterns
+fn catalogue_summary(spec: &PlanSpec) -> String {
+    spec.templates
         .iter()
-        .map(|pattern| {
-            let parameters = pattern
-                .parameters
-                .iter()
-                .map(|(name, parameter)| {
-                    let kind = parameter.kind.name();
-                    let mut details = vec![match &parameter.default {
-                        Some(value) => format!("default={value}"),
-                        None => "required".into(),
-                    }];
-                    if let Some(value) = &parameter.min {
-                        details.push(format!("min={value}"));
-                    }
-                    if let Some(value) = &parameter.max {
-                        details.push(format!("max={value}"));
-                    }
-                    if !parameter.allowed.is_empty() {
-                        details.push(format!("enum={}", serde_json::json!(parameter.allowed)));
-                    }
-                    if let Some(doc) = &parameter.doc {
-                        details.push(doc.clone());
-                    }
-                    format!("{name}:{kind} ({})", details.join(", "))
-                })
-                .collect::<Vec<_>>()
-                .join(", ");
+        .map(|template| {
+            let name = template.name.clone().unwrap_or_default();
+            let parameters = template.parameter_summary();
             if parameters.is_empty() {
-                pattern.name.clone()
+                name
             } else {
-                format!("{} ({parameters})", pattern.name)
+                format!("{name} ({parameters})")
             }
         })
         .collect::<Vec<_>>()
@@ -306,43 +220,42 @@ pub fn prompt(node: &GraphNode) -> String {
             .and_then(serde_json::Value::as_u64)
             .and_then(|n| usize::try_from(n).ok())
             .unwrap_or(spec.max_nodes);
-        let kinds = serde_json::to_string(&spec.kinds).unwrap_or_default();
-        if spec.patterns.is_empty() {
-            prompt.push_str(&format!("\n\nReturn one final fenced `fragment` JSON block, at most 12288 bytes: {{\"schema_version\":1,\"nodes\":[...]}}. Emit 1..{} nodes, using only {kinds}. Each agent node requires id, goal or brief, access, `acceptance_checks` and local depends_on. Writers also require `write_scope` (relative literal files/directories) and the `worktree` key naming an existing registered worktree; read-only agents may omit `write_scope`. Route defaults to {{\"alias\":\"senior\"}}. Synthesise nodes require `inputs` selecting dependency outputs, either as `{{\"node\":\"id\",\"outputs\":[\"result\"]}}` or the shorthand `\"id\"` (which selects `result`). Gate nodes use the graph gate condition schema; decide nodes use the graph decide schema. Dependencies and inputs name fragment-local IDs. Keep each namespaced ID (this node's ID + -- + child ID) within 64 bytes. Do not emit presets or review shapes.", planner_limit));
-        } else {
-            prompt.push_str(&format!("\n\nReturn one final fenced `fragment` JSON block, at most 12288 bytes: {{\"schema_version\":1,\"nodes\":[...],\"patterns\":[...]}}. Emit 1..{} nodes or pattern instances, using only {kinds}. Allowed patterns: {}. Instantiate them in a `patterns` array with id, pattern, parameters, depends_on and inputs; pattern parameters are validated against their schemas and pattern nodes are fixed. Do not emit other presets or review shapes. Each agent node requires id, goal or brief, access, `acceptance_checks` and local depends_on. Writers also require `write_scope` (relative literal files/directories) and the `worktree` key naming an existing registered worktree; read-only agents may omit `write_scope`. Route defaults to {{\"alias\":\"senior\"}}. Synthesise nodes require `inputs` selecting dependency outputs using `{{\"node\":\"id\",\"outputs\":[\"result\"]}}` or the shorthand `\"id\"` (which selects `result`). Gate nodes use the graph gate condition schema; decide nodes use the graph decide schema. Dependencies and inputs name fragment-local IDs. Keep each namespaced ID (this node's ID + -- + child ID) within 64 bytes.", planner_limit, pattern_summary(spec)));
+        prompt.push_str(&format!("\n\nReturn one final fenced `fragment` JSON block, at most 12288 bytes, holding a patch: {{\"schema_version\":1,\"nodes\":[...],\"templates\":{{...}}}}. Emit 1..{planner_limit} nodes. A node is either `use` of a template with `with` parameters and overrides (`brief`, `tier`, `after`, `inputs`, `over`, `min_ok`, `repeat`), or compiled-node fields with a `kind` of task, plan, composite, loop, gate, decide, synthesise or land; composites, loops and further plan nodes are allowed. `over` copies a node once per named item with `${{item}}`; `repeat = {{\"until\":\"gate\",\"max_rounds\":N}}` loops a composite until its gate passes. Bundled templates: task, plan, explore, research, design, implement, implement.fix, review, review.security, verify, synthesise, repair; `templates` may define more inline. Each agent node requires id, a `brief` (or `goal`), `acceptance_checks` and local `after` or depends_on. `access` defaults to read_only; writers set worktree_write and also require `write_scope` (relative literal files/directories) and the `worktree` key naming an existing registered worktree; read-only agents may omit `write_scope`. The tier defaults to senior. Synthesise nodes require `inputs` selecting dependency outputs, either as `{{\"node\":\"id\",\"outputs\":[\"result\"]}}` or the shorthand `\"id\"` (which selects `result`). Gate nodes use the graph gate condition schema; decide nodes use the graph decide schema. Dependencies and inputs name fragment-local IDs. Keep each namespaced ID (this node's ID + -- + child ID) within 64 bytes."));
+        if !spec.templates.is_empty() {
+            prompt.push_str(&format!(
+                " Host templates with their declared authority: {}.",
+                catalogue_summary(spec)
+            ));
         }
     }
     prompt
 }
 
+/// A plan node carries a plan specification and only reads. What its patch
+/// may contain is not restricted here: any agent may emit any template.
 pub(super) fn validate_spec(node: &GraphNode) -> Result<(), &'static str> {
     if (node.kind == Some(NodeKind::Plan)) != node.plan.is_some() {
-        return Err("plan requires fragment kinds and max_nodes");
+        return Err("plan requires a plan specification with max_nodes");
     }
     if let Some(spec) = &node.plan {
-        let mut seen = Vec::new();
         if node.access != AccessMode::ReadOnly
             || node.required_verdict.is_some()
             || spec.max_nodes == 0
             || spec.max_nodes > 512
-            || spec.kinds.is_empty()
-            || spec.kinds.iter().any(|kind| {
-                let duplicate = seen.contains(kind);
-                seen.push(*kind);
-                duplicate || matches!(*kind, NodeKind::Loop | NodeKind::Composite)
-            })
         {
-            return Err(
-                "invalid plan configuration; fragments support task, plan, synthesise and gate",
-            );
+            return Err("invalid plan configuration; a planner reads only and emits 1..=512 nodes");
         }
         let mut names = std::collections::BTreeSet::new();
-        for pattern in &spec.patterns {
-            if !names.insert(&pattern.name) {
-                return Err("plan pattern names must be unique");
+        for template in &spec.templates {
+            let Some(name) = template.name.as_deref() else {
+                return Err("plan templates require a name");
+            };
+            if !names.insert(name) || !super::template::valid_template_name(name) {
+                return Err("plan template names must be valid and unique");
             }
-            pattern_plan::validate(pattern)?;
+            template
+                .check_authority()
+                .map_err(|_| "plan template cannot vary authority by parameter")?;
         }
     }
     Ok(())
@@ -426,13 +339,21 @@ pub(super) fn expand(
     let mut expanded = loops::expand(document, extensions, limits)?;
     let mut sources = std::collections::BTreeSet::new();
     for addition in expansions {
-        if addition.nodes.is_empty()
-            || !sources.insert(&addition.source)
-            || !expanded.nodes.iter().any(|n| n.id == addition.source)
-        {
+        // A patch may come from the host (no source), a parent may patch more
+        // than once, and a patch may only skip or replace.
+        let valid = if addition.patch.is_some() {
+            addition.source.is_empty() || expanded.nodes.iter().any(|n| n.id == addition.source)
+        } else {
+            !addition.nodes.is_empty()
+                && sources.insert(&addition.source)
+                && expanded.nodes.iter().any(|n| n.id == addition.source)
+        };
+        if !valid {
             return Err("invalid expansion source".into());
         }
-        validate_review_addition(&expanded, addition)?;
+        if !addition.source.is_empty() {
+            validate_review_addition(&expanded, addition)?;
+        }
         append(&mut expanded, addition);
     }
     Ok(expanded)
@@ -460,6 +381,11 @@ pub(super) fn validate_persisted_topology(
             .iter()
             .any(|node| node.id == addition.source && node.review.is_some())
         {
+            append(&mut expanded, addition);
+            continue;
+        }
+        if addition.patch.is_some() {
+            check_patch_topology(&expanded, addition)?;
             append(&mut expanded, addition);
             continue;
         }
@@ -494,190 +420,160 @@ fn derive_topology(
     expanded: &GraphDocument,
     addition: &Expansion,
 ) -> Result<Vec<NodeTopology>, (String, &'static str)> {
-    let mut expected = vec![(Vec::new(), Vec::new()); addition.nodes.len()];
     let fallback = addition
         .nodes
         .iter()
         .any(|node| node.id == format!("{}--fallback", addition.source));
-    if fallback
-        || !addition.patterns.is_empty()
-        || addition.nodes.iter().any(|node| node.composite.is_some())
-    {
-        let planner = expanded
-            .nodes
-            .iter()
-            .find(|node| node.id == addition.source)
-            .filter(|node| node.plan.is_some())
-            .ok_or_else(|| {
-                (
-                    addition.source.clone(),
-                    "composite topology requires a planner specification",
-                )
-            })?;
-        let spec = planner.plan.as_ref().ok_or_else(|| {
+    if !fallback {
+        if let Some(node) = addition.nodes.iter().find(|node| node.composite.is_some()) {
+            return Err((
+                node.id.clone(),
+                "composite topology must derive from a patch or fallback",
+            ));
+        }
+        return Ok(vec![(Vec::new(), Vec::new()); addition.nodes.len()]);
+    }
+    let planner = expanded
+        .nodes
+        .iter()
+        .find(|node| node.id == addition.source)
+        .filter(|node| node.plan.is_some())
+        .ok_or_else(|| {
             (
                 addition.source.clone(),
                 "composite topology requires a planner specification",
             )
         })?;
-        if spec
-            .extra
-            .get("planned_review")
-            .and_then(serde_json::Value::as_bool)
-            == Some(true)
-            && addition
-                .nodes
-                .iter()
-                .filter(|node| node.composite.is_none())
-                .any(|node| node.source != planner.source)
-        {
-            return Err((
-                addition.source.clone(),
-                "planned review lenses must retain the pinned subject",
-            ));
-        }
-        if !fallback
-            && let Some(required) = spec
-                .extra
-                .get("required_floor_patterns")
-                .and_then(serde_json::Value::as_array)
-            && required
-                .iter()
-                .filter_map(serde_json::Value::as_str)
-                .any(|name| {
-                    !addition
-                        .patterns
-                        .iter()
-                        .any(|instance| instance.name == name)
-                })
-        {
-            return Err((
-                addition.source.clone(),
-                "expanded plan must include required path-floor patterns",
-            ));
-        }
-        if !fallback {
-            let candidates: Vec<&str> = spec
-                .extra
-                .get("floor_candidate_patterns")
-                .and_then(serde_json::Value::as_array)
-                .into_iter()
-                .flatten()
-                .filter_map(serde_json::Value::as_str)
-                .collect();
-            let minimum = spec
-                .extra
-                .get("floor_min_reviewers")
-                .and_then(serde_json::Value::as_u64)
-                .and_then(|n| usize::try_from(n).ok())
-                .unwrap_or(0);
-            let count = addition
-                .patterns
-                .iter()
-                .filter(|instance| candidates.contains(&instance.name.as_str()))
-                .map(|instance| &instance.name)
-                .collect::<std::collections::BTreeSet<_>>()
-                .len();
-            if count < minimum {
-                return Err((
-                    addition.source.clone(),
-                    "expanded plan must meet the path-floor reviewer count",
-                ));
-            }
-        }
-        if fallback {
-            let derived = fallback_expansion(
-                &addition.source,
-                spec,
-                document,
-                planner.require_skill_location,
-            )
-            .map_err(|_| {
-                (
-                    addition.source.clone(),
-                    "fallback topology must be derivable from its specification",
-                )
-            })?;
-            if !matches!(
-                (serde_json::to_value(&addition.nodes), serde_json::to_value(&derived.nodes)),
-                (Ok(stored), Ok(expected)) if stored == expected
-            ) {
-                return Err((
-                    addition.source.clone(),
-                    "fallback nodes must match the submitted fallback specification",
-                ));
-            }
-            expected = derived
-                .nodes
-                .into_iter()
-                .map(|node| (node.composite_members, node.after_expansion))
-                .collect();
-        } else {
-            for instance in &addition.patterns {
-                let pattern = spec
-                    .patterns
+    let spec = planner.plan.as_ref().ok_or_else(|| {
+        (
+            addition.source.clone(),
+            "composite topology requires a planner specification",
+        )
+    })?;
+    let derived = fallback_expansion(
+        &addition.source,
+        spec,
+        document,
+        planner.require_skill_location,
+    )
+    .map_err(|_| {
+        (
+            addition.source.clone(),
+            "fallback topology must be derivable from its specification",
+        )
+    })?;
+    if !matches!(
+        (serde_json::to_value(&addition.nodes), serde_json::to_value(&derived.nodes)),
+        (Ok(stored), Ok(expected)) if stored == expected
+    ) {
+        return Err((
+            addition.source.clone(),
+            "fallback nodes must match the submitted fallback specification",
+        ));
+    }
+    Ok(derived
+        .nodes
+        .into_iter()
+        .map(|node| (node.composite_members, node.after_expansion))
+        .collect())
+}
+
+/// A patch's persisted topology must be the one its own composites imply,
+/// and a planned review's patch must keep its subject and path floors.
+fn check_patch_topology(
+    expanded: &GraphDocument,
+    addition: &Expansion,
+) -> Result<(), (String, &'static str)> {
+    let ids: std::collections::BTreeSet<&str> =
+        addition.nodes.iter().map(|node| node.id.as_str()).collect();
+    for node in &addition.nodes {
+        if node.composite.is_some() {
+            let prefix = format!("{}--", node.id);
+            if node.composite_members.is_empty()
+                || node
+                    .composite_members
                     .iter()
-                    .find(|pattern| pattern.name == instance.name)
-                    .ok_or_else(|| {
-                        (
-                            instance.id.clone(),
-                            "pattern must name an approved catalogue entry",
-                        )
-                    })?;
-                let members: Vec<_> = pattern
-                    .nodes
-                    .iter()
-                    .map(|node| {
-                        node.get("id")
-                            .and_then(serde_json::Value::as_str)
-                            .map(|id| format!("{}--{id}", instance.id))
-                            .ok_or_else(|| {
-                                (
-                                    instance.id.clone(),
-                                    "catalogue member must have a node identity",
-                                )
-                            })
-                    })
-                    .collect::<Result<_, _>>()?;
-                let mut sorted = members.clone();
-                sorted.sort();
-                if sorted != instance.nodes
-                    || members
-                        .iter()
-                        .any(|id| !addition.nodes.iter().any(|node| &node.id == id))
-                {
-                    return Err((
-                        instance.id.clone(),
-                        "pattern members must match the approved catalogue",
-                    ));
-                }
-                let index = addition
-                    .nodes
-                    .iter()
-                    .position(|node| node.id == instance.id)
-                    .ok_or_else(|| {
-                        (
-                            instance.id.clone(),
-                            "pattern must retain its composite boundary",
-                        )
-                    })?;
-                expected[index] = (members.clone(), members);
-            }
-            if let Some(node) = addition.nodes.iter().find(|node| {
-                node.composite.is_some()
-                    && !addition
-                        .patterns
-                        .iter()
-                        .any(|pattern| pattern.id == node.id)
-            }) {
+                    .any(|member| !member.starts_with(&prefix) || !ids.contains(member.as_str()))
+                || node.after_expansion != node.composite_members
+            {
                 return Err((
                     node.id.clone(),
-                    "composite topology must derive from an approved pattern or fallback",
+                    "persisted composite topology must match the patch's own members",
                 ));
             }
+        } else if !node.composite_members.is_empty() || !node.after_expansion.is_empty() {
+            return Err((
+                node.id.clone(),
+                "persisted after_expansion must match the approved topology",
+            ));
         }
     }
-    Ok(expected)
+    let Some(planner) = expanded
+        .nodes
+        .iter()
+        .find(|node| node.id == addition.source)
+    else {
+        return Ok(());
+    };
+    let Some(spec) = planner.plan.as_ref() else {
+        return Ok(());
+    };
+    if spec
+        .extra
+        .get("planned_review")
+        .and_then(serde_json::Value::as_bool)
+        == Some(true)
+        && addition
+            .nodes
+            .iter()
+            .filter(|node| node.composite.is_none() && node.loop_body.is_none())
+            .any(|node| node.source != planner.source)
+    {
+        return Err((
+            addition.source.clone(),
+            "planned review lenses must retain the pinned subject",
+        ));
+    }
+    let names = |key: &str| -> Vec<String> {
+        spec.extra
+            .get(key)
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(serde_json::Value::as_str)
+            .map(str::to_owned)
+            .collect()
+    };
+    if names("required_floor_patterns")
+        .iter()
+        .any(|name| !addition.uses.iter().any(|used| &used.name == name))
+    {
+        return Err((
+            addition.source.clone(),
+            "expanded plan must include required path-floor patterns",
+        ));
+    }
+    let candidates = names("floor_candidate_patterns");
+    let minimum = spec
+        .extra
+        .get("floor_min_reviewers")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|n| usize::try_from(n).ok())
+        .unwrap_or(0);
+    let count = addition
+        .uses
+        .iter()
+        .filter(|used| candidates.contains(&used.name))
+        .map(|used| &used.name)
+        .collect::<std::collections::BTreeSet<_>>()
+        .len();
+    if count < minimum {
+        return Err((
+            addition.source.clone(),
+            "expanded plan must meet the path-floor reviewer count",
+        ));
+    }
+    Ok(())
 }
 
 pub(super) fn append(document: &mut GraphDocument, expansion: &Expansion) {
@@ -839,6 +735,50 @@ pub(super) fn append(document: &mut GraphDocument, expansion: &Expansion) {
             });
             child
         }));
+    if let Some(record) = &expansion.patch {
+        restore_patch_rounds(document, expansion);
+        for replacement in &record.replaced {
+            if let Some(target) = document.nodes.iter_mut().find(|n| n.id == replacement.id) {
+                let mut node = replacement.clone();
+                node.after_expansion = std::mem::take(&mut target.after_expansion);
+                node.round = target.round.take();
+                *target = node;
+            }
+        }
+    }
+}
+
+/// Rounds of a loop that a patch added are derived again from their names,
+/// as the base document's rounds are derived on every load.
+fn restore_patch_rounds(document: &mut GraphDocument, expansion: &Expansion) {
+    for boundary in &expansion.nodes {
+        let Some(spec) = &boundary.loop_body else {
+            continue;
+        };
+        for node in &mut document.nodes {
+            let Some(rest) = node.id.strip_prefix(&format!("{}--r", boundary.id)) else {
+                continue;
+            };
+            let Some((round, local)) = rest.split_once("--") else {
+                continue;
+            };
+            let Ok(round) = round.parse::<usize>() else {
+                continue;
+            };
+            if round == 0 || !spec.body.iter().any(|member| member.id == local) {
+                continue;
+            }
+            node.round = Some(LoopRound {
+                extra: Default::default(),
+                loop_id: boundary.id.clone(),
+                round,
+                node_id: local.to_owned(),
+                until: local == spec.until,
+                previous_gate: (round > 1)
+                    .then(|| format!("{}--r{}--{}", boundary.id, round - 1, spec.until)),
+            });
+        }
+    }
 }
 
 /// Check the host's review fragment before publication and again on replay.
@@ -1027,7 +967,8 @@ pub(super) fn validate_review_addition(
         || !shape_matches
         || addition.nodes.iter().filter(|node| node.composite.is_none()).any(|node| !matches!(&node.source, Some(SourceBinding::Commit { commit }) if Some(commit) == subject.as_ref()))
         || addition.continuation
-        || !addition.patterns.is_empty()
+        || !addition.uses.is_empty()
+        || addition.patch.is_some()
         || addition.nodes.len() < 2
         || addition.nodes.len() > spec.max_nodes
         || lens_root.composite.as_ref().is_none_or(|composite| {
@@ -1115,17 +1056,21 @@ fn review_catalogue_matches(
         return false;
     };
     let mut names = std::collections::BTreeSet::new();
-    !plan.patterns.is_empty()
-        && plan.patterns.iter().all(|pattern| {
-            if !names.insert(&pattern.name) {
-                return false;
-            }
-            let Some(raw) = catalogue.iter().find(|entry| {
-                entry.get("name").and_then(serde_json::Value::as_str) == Some(&pattern.name)
-            }) else {
+    !plan.templates.is_empty()
+        && plan.templates.iter().all(|pattern| {
+            let Some(name) = pattern.name.as_deref() else {
                 return false;
             };
-            let Ok(mut expected) = serde_json::from_value::<PatternSpec>(raw.clone()) else {
+            if !names.insert(name) {
+                return false;
+            }
+            let Some(raw) = catalogue
+                .iter()
+                .find(|entry| entry.get("name").and_then(serde_json::Value::as_str) == Some(name))
+            else {
+                return false;
+            };
+            let Ok(mut expected) = serde_json::from_value::<Template>(raw.clone()) else {
                 return false;
             };
             for (node, actual) in expected.nodes.iter_mut().zip(&pattern.nodes) {
@@ -1226,19 +1171,29 @@ fn fragment_exports(document: &GraphDocument, expansion: &Expansion) -> Vec<Grap
             outputs,
         }];
     }
+    // Each template use exports what its boundary exports, or its own result.
     let mut exports: Vec<GraphInput> = expansion
-        .patterns
+        .uses
         .iter()
-        .filter_map(|instance| {
-            let pattern = spec.patterns.iter().find(|p| p.name == instance.name)?;
-            Some(pattern.exports.iter().map(move |export| GraphInput {
+        .filter_map(|used| expansion.nodes.iter().find(|node| node.id == used.id))
+        .flat_map(|node| match &node.composite {
+            Some(composite) => composite
+                .exports
+                .iter()
+                .map(|export| GraphInput {
+                    required_outputs: Vec::new(),
+                    extra: Default::default(),
+                    node: export.node.clone(),
+                    outputs: export.outputs.clone(),
+                })
+                .collect::<Vec<_>>(),
+            None => vec![GraphInput {
                 required_outputs: Vec::new(),
                 extra: Default::default(),
-                node: format!("{}--{}", instance.id, export.node),
-                outputs: export.outputs.clone(),
-            }))
+                node: node.id.clone(),
+                outputs: vec![OutputKind::Result],
+            }],
         })
-        .flatten()
         .collect();
     if spec
         .extra
@@ -1317,7 +1272,7 @@ pub(super) fn writers_conflict(left: &PlannedNode, right: &PlannedNode) -> bool 
         && (left.worktree == right.worktree || overlaps(&left.write_scope, &right.write_scope))
 }
 
-fn prepare(
+pub(super) fn prepare(
     child: &mut GraphNode,
     node: &PlannedNode,
     spec: &PlanSpec,
@@ -1395,17 +1350,27 @@ fn prepare_nested(
             ));
         }
     }
-    if !spec.kinds.contains(&child.kind.unwrap_or(NodeKind::Task))
-        && !(trusted
-            && (child.kind == Some(NodeKind::Composite) || (nested && child.review.is_some())))
+    // A nested planner's host templates carry authority, so an untrusted
+    // author may only pass on templates its own planner was given.
+    if !trusted
+        && let Some(nested_spec) = &child.plan
+        && nested_spec
+            .templates
+            .iter()
+            .any(|template| !spec.templates.contains(template))
     {
         return Err(format!(
-            "fragment kind {:?} was not declared",
-            child.kind.unwrap_or(NodeKind::Task)
+            "fragment node {} gives a planner templates its author was not given",
+            child.id
         ));
     }
     if let Some(composite) = &mut child.composite {
         for member in &mut composite.nodes {
+            prepare_nested(member, node, spec, document, trusted, true)?;
+        }
+    }
+    if let Some(body) = &mut child.loop_body {
+        for member in &mut body.body {
             prepare_nested(member, node, spec, document, trusted, true)?;
         }
     }
@@ -1415,10 +1380,12 @@ fn prepare_nested(
         }
         return Ok(());
     }
-    // Fixed read-only preset leaves already carry their authored prompts.
+    // Fixed read-only preset leaves already carry their authored prompts;
+    // a leaf with acceptance checks still gets them appended below.
     if trusted
         && nested
         && child.access == AccessMode::ReadOnly
+        && child.acceptance_checks.is_empty()
         && child.composite.is_none()
         && !matches!(child.kind, Some(NodeKind::Gate | NodeKind::Decide))
     {
@@ -1442,7 +1409,7 @@ fn prepare_nested(
     // Writer nodes carry explicit scope; all agents carry acceptance prose.
     if !matches!(
         child.kind,
-        Some(NodeKind::Gate | NodeKind::Decide | NodeKind::Composite)
+        Some(NodeKind::Gate | NodeKind::Decide | NodeKind::Composite | NodeKind::Loop)
     ) {
         if child.prompt.trim().is_empty()
             || child.acceptance_checks.is_empty()
@@ -1504,88 +1471,100 @@ fn prepare_nested(
     Ok(())
 }
 
+static BUNDLED_TEMPLATES: std::sync::OnceLock<super::template::TemplateLibrary> =
+    std::sync::OnceLock::new();
+
+pub(super) fn bundled_templates() -> &'static super::template::TemplateLibrary {
+    BUNDLED_TEMPLATES.get_or_init(super::template::TemplateLibrary::bundled)
+}
+
+/// A planner's fragment is a patch, admitted through the one patch path.
 fn fragment(
     node: &PlannedNode,
+    source: &GraphDocument,
     document: &GraphDocument,
     checkpoint: &GraphCheckpoint,
     json: &str,
+    limits: &crate::config::GraphLimits,
 ) -> Result<Expansion, String> {
     let spec = node.plan.as_ref().ok_or("missing plan configuration")?;
-    let mut value: serde_json::Value =
-        serde_json::from_str(json).map_err(|e| format!("invalid fragment: {e}"))?;
-    normalise_input_shorthand(&mut value);
-    if let Some(instances) = value
-        .get_mut("patterns")
-        .and_then(serde_json::Value::as_array_mut)
-    {
-        for instance in instances {
-            let name = instance
-                .get("pattern")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("<unknown>");
-            serde_json::from_value::<pattern_plan::PatternInstance>(instance.clone())
-                .map_err(|e| format!("pattern {name}: {e}"))?;
-        }
-    }
-    let mut fragment: Fragment =
-        serde_json::from_value(value).map_err(|e| format!("invalid fragment: {e}"))?;
-    if spec.patterns_only && !fragment.nodes.is_empty() {
-        return Err("this plan accepts pattern instances only; raw nodes are refused".into());
-    }
-    if fragment.schema_version != 1 || fragment.nodes.len() > spec.max_nodes {
-        return Err(format!(
-            "fragment requires 1..{} nodes and schema_version 1",
-            spec.max_nodes
-        ));
-    }
+    let patch = super::patch::Patch::from_fragment(json)?;
     let model_limit = spec
         .extra
         .get("model_max_nodes")
         .and_then(serde_json::Value::as_u64)
         .and_then(|n| usize::try_from(n).ok())
-        .unwrap_or(spec.max_nodes);
-    if fragment.nodes.len() + fragment.patterns.len() > model_limit {
+        .unwrap_or(spec.max_nodes)
+        .min(spec.max_nodes);
+    if patch.schema_version != 1 || patch.nodes.len() > model_limit {
         return Err(format!(
             "fragment requires 1..{model_limit} nodes and schema_version 1"
         ));
     }
-    let mut floor_warnings = Vec::new();
-    let mut required: Vec<String> = spec
-        .extra
-        .get("required_floor_patterns")
-        .and_then(serde_json::Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(serde_json::Value::as_str)
-        .map(str::to_owned)
-        .collect();
-    let candidates: Vec<&str> = spec
-        .extra
-        .get("floor_candidate_patterns")
-        .and_then(serde_json::Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(serde_json::Value::as_str)
-        .collect();
+    let resolvers = BTreeMap::new();
+    let context = super::patch::PatchContext {
+        library: bundled_templates(),
+        resolvers: &resolvers,
+        scan: &super::patch::scan_for_secrets,
+        limits,
+    };
+    match super::patch::prepare(source, document, checkpoint, Some(node), &patch, &context)
+        .map_err(|error| error.message)?
+    {
+        super::patch::Prepared::Ready(admission) => {
+            let mut expansion = admission.expansion;
+            if !admission.warnings.is_empty() {
+                expansion.extra.insert(
+                    "floor_warnings".into(),
+                    serde_json::json!(admission.warnings),
+                );
+            }
+            Ok(expansion)
+        }
+        super::patch::Prepared::Replayed(_) => Err("fragment repeats an admitted patch".into()),
+    }
+}
+
+/// Add each review lens a path floor requires that the patch did not use.
+pub(super) fn add_floor_uses(
+    planner: &PlannedNode,
+    spec: &PlanSpec,
+    document: &GraphDocument,
+    compiler: &super::template::Compiler<'_>,
+    local: &mut Vec<GraphNode>,
+    uses: &mut Vec<TemplateUse>,
+    warnings: &mut Vec<String>,
+) -> Result<(), String> {
+    let names = |key: &str| -> Vec<String> {
+        spec.extra
+            .get(key)
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(serde_json::Value::as_str)
+            .map(str::to_owned)
+            .collect()
+    };
+    let mut required = names("required_floor_patterns");
+    let candidates = names("floor_candidate_patterns");
     let minimum = spec
         .extra
         .get("floor_min_reviewers")
         .and_then(serde_json::Value::as_u64)
         .and_then(|n| usize::try_from(n).ok())
         .unwrap_or(0);
-    let mut selected: std::collections::BTreeSet<String> = fragment
-        .patterns
+    let mut selected: std::collections::BTreeSet<String> = uses
         .iter()
-        .filter(|instance| candidates.contains(&instance.pattern.as_str()))
-        .map(|instance| instance.pattern.clone())
+        .filter(|used| candidates.contains(&used.name))
+        .map(|used| used.name.clone())
         .chain(required.iter().cloned())
         .collect();
     for candidate in &candidates {
         if selected.len() >= minimum {
             break;
         }
-        if selected.insert((*candidate).to_owned()) {
-            required.push((*candidate).to_owned());
+        if selected.insert(candidate.clone()) {
+            required.push(candidate.clone());
         }
     }
     if selected.len() < minimum {
@@ -1593,94 +1572,56 @@ fn fragment(
             "path floor requires more distinct review lenses than the catalogue offers".into(),
         );
     }
-    {
-        for (index, pattern) in required.iter().map(String::as_str).enumerate() {
-            if fragment
-                .patterns
+    let classes = spec
+        .extra
+        .get("floor_classes")
+        .and_then(serde_json::Value::as_array)
+        .map(|names| {
+            names
                 .iter()
-                .any(|instance| instance.pattern == pattern)
-            {
-                continue;
-            }
-            if !spec.patterns.iter().any(|entry| entry.name == pattern) {
-                return Err(format!("required floor pattern {pattern} is not available"));
-            }
-            let mut id = format!("floor-{index}");
-            while fragment.patterns.iter().any(|instance| instance.id == id)
-                || fragment.nodes.iter().any(|child| child.id == id)
-            {
-                id.push('x');
-            }
-            fragment.patterns.push(pattern_plan::PatternInstance {
-                id,
-                pattern: pattern.to_owned(),
-                parameters: serde_json::json!({}),
-                depends_on: Vec::new(),
-                inputs: Vec::new(),
-                title: None,
-            });
-            let classes = spec
-                .extra
-                .get("floor_classes")
-                .and_then(serde_json::Value::as_array)
-                .map(|names| {
-                    names
-                        .iter()
-                        .filter_map(serde_json::Value::as_str)
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                })
-                .unwrap_or_default();
-            floor_warnings.push(format!(
-                "path floor {classes} added required review lens {pattern}"
-            ));
+                .filter_map(serde_json::Value::as_str)
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+        .unwrap_or_default();
+    for (index, name) in required.iter().enumerate() {
+        if uses.iter().any(|used| &used.name == name) {
+            continue;
         }
-    }
-    if fragment.nodes.is_empty() && fragment.patterns.is_empty() {
-        return Err(format!(
-            "fragment requires 1..{} nodes and schema_version 1",
-            spec.max_nodes
+        if spec.template(name).is_none() {
+            return Err(format!("required floor pattern {name} is not available"));
+        }
+        let mut id = format!("floor-{index}");
+        while local.iter().any(|child| child.id == id) {
+            id.push('x');
+        }
+        let mut node = compiler.compile(&serde_json::json!({"id": id, "use": name}))?;
+        prepare(&mut node, planner, spec, document, true)?;
+        local.push(node);
+        uses.push(TemplateUse {
+            extra: Default::default(),
+            id,
+            name: name.clone(),
+            parameters: serde_json::json!({}),
+            nodes: Vec::new(),
+        });
+        warnings.push(format!(
+            "path floor {classes} added required review lens {name}"
         ));
     }
-    for child in &mut fragment.nodes {
-        prepare(child, node, spec, document, false)?;
-    }
-    let mut instantiations = Vec::new();
-    let mut wrappers = Vec::new();
-    for instance in &fragment.patterns {
-        let pattern = spec
-            .patterns
-            .iter()
-            .find(|pattern| pattern.name == instance.pattern)
-            .ok_or_else(|| {
-                format!(
-                    "pattern {} is not in this plan's allow-list: {}",
-                    instance.pattern,
-                    spec.patterns
-                        .iter()
-                        .map(|p| p.name.as_str())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                )
-            })?;
-        let (mut wrapper, instantiation) = pattern_plan::instantiate(pattern, instance)?;
-        if let Some(composite) = &mut wrapper.composite {
-            for child in &mut composite.nodes {
-                prepare(child, node, spec, document, true)?;
-            }
-        }
-        wrappers.push(wrapper);
-        instantiations.push(instantiation);
-    }
-    let fragment_nodes = fragment.nodes.len() + wrappers.len();
-    if fragment_nodes > spec.max_nodes {
-        return Err(format!(
-            "fragment requires 1..{} nodes and schema_version 1",
-            spec.max_nodes
-        ));
-    }
-    let mut local_nodes = fragment.nodes;
-    local_nodes.extend(wrappers);
+    Ok(())
+}
+
+/// Expand a patch's compiled nodes (composites and loops included), check
+/// them as one graph, then namespace them under their parent and share
+/// checkouts between overlapping writers.
+pub(super) fn flatten_fragment(
+    local_nodes: Vec<GraphNode>,
+    parent: Option<&PlannedNode>,
+    spec: Option<&PlanSpec>,
+    document: &GraphDocument,
+    checkpoint: &GraphCheckpoint,
+) -> Result<Vec<GraphNode>, String> {
     let units: BTreeMap<String, Vec<String>> = local_nodes
         .iter()
         .map(|unit| {
@@ -1691,6 +1632,31 @@ fn fragment(
             (unit.id.clone(), after.cloned().collect())
         })
         .collect();
+    // A host or lane patch may wait on nodes already in the graph; a planner
+    // names only its own fragment's nodes. External nodes stand in as plain
+    // read-only placeholders while the fragment is checked, then drop out.
+    let external: BTreeSet<String> = if parent.is_none_or(|parent| parent.plan.is_none()) {
+        units
+            .values()
+            .flatten()
+            .filter(|name| !units.contains_key(*name))
+            .filter(|name| document.nodes.iter().any(|node| &node.id == *name))
+            .cloned()
+            .collect()
+    } else {
+        BTreeSet::new()
+    };
+    let mut local_nodes = local_nodes;
+    for existing in document.nodes.iter().filter(|node| external.contains(&node.id)) {
+        let name = &existing.id;
+        let mut stub: GraphNode = serde_json::from_value(serde_json::json!({
+            "id": name, "access": "read_only", "prompt": "placeholder", "route": {"alias": "senior"}
+        }))
+        .map_err(|error| error.to_string())?;
+        stub.require_findings = existing.require_findings;
+        stub.required_verdict.clone_from(&existing.required_verdict);
+        local_nodes.push(stub);
+    }
     let local = GraphDocument {
         review_base: None,
         context: document.context.clone(),
@@ -1703,18 +1669,19 @@ fn fragment(
         decision_session: document.decision_session.clone(),
         integration_branch: document.integration_branch.clone(),
     };
-    // Pattern wrappers are ordinary static composites. Expand them before the
-    // fragment is validated so the host limits see every child.
-    let local = composites::expand(&local, &generous())?;
+    // Composites and loops expand before the patch is checked, so the host
+    // limits see every member and round.
+    let local = loops::expand(&local, &[], &generous())?;
     validate_schema(&local).map_err(str::to_owned)?;
     let (plan, _) = validate_flat_plan(&local, &generous()).map_err(str::to_owned)?;
     validate_output_kinds(&local)?;
     let mut nodes: Vec<GraphNode> = plan
         .nodes
         .iter()
+        .filter(|n| !external.contains(&n.id))
         .filter_map(|n| local.nodes.iter().find(|child| child.id == n.id).cloned())
         .collect();
-    if spec.disjoint_waves {
+    if spec.is_some_and(|spec| spec.disjoint_waves) {
         check_waves(&units, &nodes)?;
     }
     // Union overlapping writer scopes, including transitive overlaps. Every
@@ -1746,91 +1713,53 @@ fn fragment(
             nodes[i].worktree = first.worktree;
         }
     }
-    let id = |name: &str| format!("{}--{name}", node.id);
-    for child in &mut nodes {
-        if id(&child.id).len() > 64 {
-            return Err(format!(
-                "child {} of planner {} exceeds the namespaced node ID limit of 64 bytes; shorten either ID",
-                child.id, node.id
-            ));
-        }
-        child.id = id(&child.id);
-        child.depends_on = child.depends_on.iter().map(|name| id(name)).collect();
-        if child.depends_on.is_empty() {
-            child.depends_on.push(node.id.clone());
-        }
-        child.after_expansion = child.after_expansion.iter().map(|name| id(name)).collect();
-        child.composite_members = child
-            .composite_members
-            .iter()
-            .map(|name| id(name))
-            .collect();
-        if let Some(composite) = &mut child.composite {
-            for export in &mut composite.exports {
-                export.node = id(&export.node);
+    if let Some(parent) = parent {
+        let id = |name: &str| {
+            if external.contains(name) {
+                name.to_owned()
+            } else {
+                format!("{}--{name}", parent.id)
             }
-        }
-        for input in &mut child.inputs {
-            input.node = id(&input.node);
-        }
-        if let Some(SourceBinding::Node { node: source }) = &mut child.source {
-            *source = id(source);
-        }
-        child.on_fail = child.on_fail.as_deref().map(id);
-        child.round = None;
-    }
-    for instantiation in &mut instantiations {
-        let instance = id(&instantiation.id);
-        instantiation.nodes = nodes
-            .iter()
-            .filter(|child| child.id.starts_with(&format!("{instance}--")))
-            .map(|child| child.id.clone())
-            .collect();
-        instantiation.nodes.sort();
-        instantiation.id = instance;
-    }
-    coordinate(&mut nodes, document, checkpoint)?;
-    Ok(Expansion {
-        review: None,
-        extra: if floor_warnings.is_empty() {
-            Default::default()
-        } else {
-            BTreeMap::from([("floor_warnings".into(), serde_json::json!(floor_warnings))])
-        },
-        source: node.id.clone(),
-        continuation: false,
-        nodes,
-        patterns: instantiations,
-    })
-}
-
-/// Planner fragments commonly abbreviate a result input as its local node ID.
-/// Normalise only this untrusted fragment JSON; persisted graphs remain typed.
-fn normalise_input_shorthand(value: &mut serde_json::Value) {
-    if let Some(fields) = value.as_object_mut() {
-        for key in ["nodes", "patterns"] {
-            if let Some(items) = fields
-                .get_mut(key)
-                .and_then(serde_json::Value::as_array_mut)
-            {
-                for item in items {
-                    if let Some(inputs) = item
-                        .get_mut("inputs")
-                        .and_then(serde_json::Value::as_array_mut)
-                    {
-                        for input in inputs {
-                            if let Some(node) = input.as_str() {
-                                *input = serde_json::json!({
-                                    "node": node,
-                                    "outputs": ["result"]
-                                });
-                            }
-                        }
-                    }
+        };
+        for child in &mut nodes {
+            if id(&child.id).len() > 64 {
+                return Err(format!(
+                    "child {} of planner {} exceeds the namespaced node ID limit of 64 bytes; shorten either ID",
+                    child.id, parent.id
+                ));
+            }
+            child.id = id(&child.id);
+            child.depends_on = child.depends_on.iter().map(|name| id(name)).collect();
+            // A planner's patch consumes its plan; a lane's children do not
+            // wait for the lane that spawned them.
+            if child.depends_on.is_empty() && parent.plan.is_some() {
+                child.depends_on.push(parent.id.clone());
+            }
+            child.after_expansion = child.after_expansion.iter().map(|name| id(name)).collect();
+            child.composite_members = child
+                .composite_members
+                .iter()
+                .map(|name| id(name))
+                .collect();
+            if let Some(composite) = &mut child.composite {
+                for export in &mut composite.exports {
+                    export.node = id(&export.node);
                 }
             }
+            for input in &mut child.inputs {
+                input.node = id(&input.node);
+            }
+            if let Some(SourceBinding::Node { node: source }) = &mut child.source {
+                *source = id(source);
+            }
+            child.on_fail = child.on_fail.as_deref().map(id);
         }
     }
+    for child in &mut nodes {
+        child.round = None;
+    }
+    coordinate(&mut nodes, document, checkpoint)?;
+    Ok(nodes)
 }
 
 /// Refuse a wave whose units write overlapping scopes. A unit is a fragment
@@ -2002,7 +1931,8 @@ fn continuation(
         source: node.id.clone(),
         continuation: true,
         nodes: vec![child],
-        patterns: Vec::new(),
+        uses: Vec::new(),
+        patch: None,
     })
 }
 
@@ -2148,7 +2078,7 @@ pub(super) fn settle(
                 .clone()
                 .ok_or_else(|| "planner result missing".into())
         };
-        json.and_then(|json| fragment(node, document, checkpoint, &json))
+        json.and_then(|json| fragment(node, source, document, checkpoint, &json, limits))
     } else if writer(node) {
         let handoff = capture
             .map(handoff)
@@ -2234,9 +2164,7 @@ pub(super) fn settle(
                     .as_ref()
                     .map(|_| "invalid_plan_expansion".into());
             }
-            checkpoint.expansions.push(addition);
-            loops::reconcile(checkpoint, &plan);
-            remaining(checkpoint, &preview, limits);
+            super::patch::commit(checkpoint, addition, &preview, &plan, limits);
             Some((preview, plan, positions))
         }
         Err(reason) => {
@@ -2384,7 +2312,8 @@ pub(super) fn fallback_expansion(
                 child
             })
             .collect(),
-        patterns: Vec::new(),
+        uses: Vec::new(),
+        patch: None,
     })
 }
 

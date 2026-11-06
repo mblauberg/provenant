@@ -1,0 +1,5 @@
+doc = "Options, root constraint, smallest slice."
+brief = "Name the root constraint, compare the realistic options and recommend the smallest slice that proves the design."
+tier = "principal"
+access = "read_only"
+outputs = ["result"]

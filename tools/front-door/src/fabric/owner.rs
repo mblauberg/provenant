@@ -1118,7 +1118,8 @@ impl BoundGraphOwner<'_> {
             source: node.id.clone(),
             continuation: false,
             nodes,
-            patterns: Vec::new(),
+            uses: Vec::new(),
+            patch: None,
         })
     }
 }

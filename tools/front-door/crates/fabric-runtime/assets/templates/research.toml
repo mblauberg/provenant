@@ -1,0 +1,10 @@
+doc = "Answer from dated primary sources."
+brief = "Answer ${item} from dated primary sources. Cite each source with its date and say where sources disagree."
+tier = "web"
+access = "read_only"
+outputs = ["result"]
+
+[parameters.item]
+type = "string"
+default = "the question in the brief"
+doc = "Question to answer"

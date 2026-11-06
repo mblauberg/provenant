@@ -100,6 +100,22 @@ pub struct Expansion {
 fn decode_lowered_node(
     value: &Value,
 ) -> Result<provenant_fabric_runtime::graph::GraphNode, String> {
+    // Every preset node goes through the template compiler: `use`, `over`
+    // and `repeat` lower to compiled nodes, and compiled nodes pass through.
+    let library = bundled_templates();
+    let lowered = provenant_fabric_runtime::graph::Compiler::new(library).lower(value)?;
+    decode_compiled_node(&lowered)
+}
+
+fn bundled_templates() -> &'static provenant_fabric_runtime::graph::TemplateLibrary {
+    static LIBRARY: std::sync::OnceLock<provenant_fabric_runtime::graph::TemplateLibrary> =
+        std::sync::OnceLock::new();
+    LIBRARY.get_or_init(provenant_fabric_runtime::graph::TemplateLibrary::bundled)
+}
+
+fn decode_compiled_node(
+    value: &Value,
+) -> Result<provenant_fabric_runtime::graph::GraphNode, String> {
     provenant_fabric_runtime::graph::GraphNode::deserialize(value).map_err(|error| {
         for children in [
             value.get("composite").and_then(|group| group.get("nodes")),
@@ -111,7 +127,7 @@ fn decode_lowered_node(
         .filter_map(Value::as_array)
         {
             for child in children {
-                if let Err(error) = decode_lowered_node(child) {
+                if let Err(error) = decode_compiled_node(child) {
                     return error;
                 }
             }
@@ -5355,5 +5371,29 @@ mod readiness_tests {
         assert!(!prompt_ready(
             "Acceptance criteria in src/run.rs. Risk tier: TBD. Verification uses cargo test. Design decision is settled."
         ));
+    }
+}
+
+#[cfg(test)]
+mod template_lowering_tests {
+    use serde_json::json;
+
+    #[test]
+    fn preset_nodes_lower_through_the_template_compiler() {
+        let swarm = super::decode_lowered_node(
+            &json!({"id": "map", "use": "explore", "over": ["crates/run", "src"]}),
+        )
+        .unwrap();
+        let members = &swarm.composite.as_ref().unwrap().nodes;
+        assert_eq!(members.len(), 2);
+        assert!(members[1].prompt.contains("Map src"));
+        let raw = super::decode_lowered_node(
+            &json!({"id": "raw", "access": "read_only", "prompt": "as written"}),
+        )
+        .unwrap();
+        assert_eq!(raw.prompt, "as written");
+        let error =
+            super::decode_lowered_node(&json!({"id": "bad", "use": "no-such-template"})).unwrap_err();
+        assert!(error.contains("no-such-template"), "{error}");
     }
 }
