@@ -371,6 +371,11 @@ pub enum RunError {
         command: String,
         limit: usize,
     },
+    #[error("host writer delivery failed at {stage:?}: {source}")]
+    DeliveryFact {
+        stage: WriterDeliveryStage,
+        source: provenant_confinement::worktrees::WorktreeError,
+    },
     #[error("Git executable unavailable")]
     GitUnavailable,
     #[error("provider evidence could not be committed: {0}")]
@@ -657,6 +662,24 @@ impl RunError {
             Self::Delivery(stage) => {
                 diagnostic = diagnostic
                     .detail(format!("host writer delivery failed at {stage:?}"))
+                    .fact(DiagnosticFact::DeliveryStage(*stage));
+            }
+            Self::DeliveryFact { stage, source } => {
+                use provenant_confinement::utility::UtilityError;
+                let detail = match source {
+                    WorktreeError::Utility(UtilityError::Truncated { .. }) => {
+                        "repository fact output exceeded the session cap"
+                    }
+                    WorktreeError::Utility(UtilityError::Cancelled) => {
+                        "repository fact was cancelled"
+                    }
+                    WorktreeError::Utility(UtilityError::TimedOut) => "repository fact timed out",
+                    _ => "repository fact output was incomplete",
+                };
+                diagnostic = diagnostic
+                    .detail(format!(
+                        "host writer delivery failed at {stage:?}: {detail}"
+                    ))
                     .fact(DiagnosticFact::DeliveryStage(*stage));
             }
             Self::DeliveryReconciliation { reason, next } => {

@@ -838,6 +838,7 @@ fn prepare_writer_git(
         },
         repo.private_git_dir(),
         cancel,
+        &writer.facts,
     )?;
     repo.revalidate()
         .map_err(error("verify writer repository after fetch", Some(&path)))?;

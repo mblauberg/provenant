@@ -960,7 +960,8 @@ impl RunStore {
                         ..
                     } => Ok((*host).clone()),
                     _ => {
-                        let host = crate::HostDeliveryContext::capture();
+                        let host = crate::HostDeliveryContext::capture()
+                            .with_repo_facts(self.repo_facts());
                         let evidence = [
                             "delivery.json",
                             "delivery-started.json",
@@ -1004,7 +1005,7 @@ impl RunStore {
                         &cancel,
                         || {
                             crate::delivery::deliver_once(
-                                &host.cancellable(&cancel),
+                                &host.with_repo_facts(self.repo_facts()).cancellable(&cancel),
                                 writer,
                                 delivery,
                                 attempt,
