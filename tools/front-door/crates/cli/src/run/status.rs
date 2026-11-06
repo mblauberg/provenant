@@ -9,6 +9,21 @@ pub fn status(command: crate::Status, _json_output: bool, edge: &Edge<'_>) -> Re
             let clock = SystemClock::new();
             let cancel = CancelToken::new();
             let call = request(&clock, &cancel)?;
+            if command.id.is_none()
+                && matches!(
+                    crate::fabric::Context::open_read_only(edge.roots.clone(), edge.home, edge.cwd),
+                    Err(crate::fabric::EdgeError::Invalid)
+                )
+            {
+                let mut data = json!({"lanes": [], "next_cursor": null});
+                let mut human = "no work\n".to_owned();
+                append_native_status(
+                    Some(provenant_telemetry::native_attempts::read(edge.roots)),
+                    &mut data,
+                    &mut human,
+                );
+                return Ok((data, human));
+            }
             if let Some(graph_id) = command.id.as_deref().filter(|id| graph_identifier(id))
                 && let Some((data, human)) = paused_graph_status(edge, &call, graph_id)?
             {
@@ -194,9 +209,38 @@ pub fn status(command: crate::Status, _json_output: bool, edge: &Edge<'_>) -> Re
             Ok((data, human))
         })(),
     );
+    if out.result.error.is_none() {
+        let rows = status_rows(&out.result.data);
+        let mut data = json!({"rows": rows, "next_cursor": out.result.data["next_cursor"]});
+        for key in ["review_exempt", "native_attempts_error", "cloud_jobs"] {
+            if let Some(value) = out.result.data.get(key) {
+                data[key] = value.clone();
+            }
+        }
+        out.result.data = data;
+    }
     out.summary = summary;
     out.read_only = true;
     out
+}
+
+/// Stable status projection shared by graph, node and attempt selections.
+fn status_rows(data: &Value) -> Vec<Value> {
+    if let Some(graph) = data["graph_id"].as_str() {
+        return vec![json!({"id": graph, "kind": "graph", "graph_id": graph,
+            "node_id": null, "attempt_id": null, "state": data["status"],
+            "reason": data["cancel_reason"].as_str().or(data["pause_reason"].as_str())})];
+    }
+    data["lanes"].as_array().into_iter().flatten().map(|lane| {
+        json!({"id": lane["attempt_id"], "kind": "attempt",
+            "graph_id": lane["graph_id"], "node_id": lane["task_id"],
+            "attempt_id": lane["attempt_id"], "state": lane["state"],
+            "reason": lane["reason"]})
+    }).chain(data["native_attempts"].as_array().into_iter().flatten().map(|attempt| {
+        json!({"id": attempt["id"], "kind": "attempt", "graph_id": null,
+            "node_id": null, "attempt_id": attempt["id"],
+            "state": if attempt["ended_at"].is_null() { "running" } else { "settled" }, "reason": null})
+    })).collect()
 }
 
 fn append_native_status(
@@ -349,6 +393,23 @@ fn paused_graph_reply(
 #[cfg(test)]
 mod graph_status_tests {
     #[test]
+    fn unified_status_rows_have_the_same_fields_for_graphs_and_attempts() {
+        let graph = super::status_rows(&serde_json::json!({
+            "graph_id": "g", "status": "paused", "pause_reason": "budget"
+        }));
+        let attempts = super::status_rows(&serde_json::json!({"lanes": [{
+            "attempt_id": "a", "task_id": "n", "state": "running"
+        }]}));
+        assert_eq!(
+            graph[0].as_object().unwrap().keys().collect::<Vec<_>>(),
+            attempts[0].as_object().unwrap().keys().collect::<Vec<_>>()
+        );
+        assert_eq!(graph[0]["reason"], "budget");
+        assert_eq!(attempts[0]["kind"], "attempt");
+        assert_eq!(attempts[0]["state"], "running");
+    }
+
+    #[test]
     fn graph_target_status_shows_cancellation_reason() {
         let checkpoint: provenant_fabric_runtime::graph::GraphCheckpoint =
             serde_json::from_value(serde_json::json!({
@@ -459,7 +520,7 @@ pub(super) fn lane_summary(lanes: &[LaneLine], continuation: Option<String>) -> 
             if lane_rank(&lane.state) == 0 {
                 format!("provenant output {}", lane.id)
             } else {
-                format!("provenant lanes --id {} --wait 4m", lane.id)
+                format!("provenant status {} --wait=4m", lane.id)
             }
         })
     });
@@ -925,7 +986,7 @@ pub(super) fn render_lanes_with_view(
                     .is_some_and(|session| !session.is_empty())
                 {
                     human.push_str(&format!(
-                        "  continue: provenant resume {} --prompt-file PROMPT\n",
+                        "  continue: provenant retry {} --prompt-file PROMPT\n",
                         lane.attempt_id
                     ));
                 }
@@ -947,7 +1008,7 @@ pub(super) fn render_lanes_with_view(
                 .is_some_and(|session| !session.is_empty())
             {
                 human.push_str(&format!(
-                    "  continue: provenant resume {} --prompt-file PROMPT\n",
+                    "  continue: provenant retry {} --prompt-file PROMPT\n",
                     lane.attempt_id
                 ));
             }
@@ -966,7 +1027,7 @@ pub(super) fn render_lanes_with_view(
                         .is_some_and(|session| !session.is_empty())
                 {
                     human.push_str(&format!(
-                        "  continue: provenant resume {} --prompt-file PROMPT\n",
+                        "  continue: provenant retry {} --prompt-file PROMPT\n",
                         lane.attempt_id
                     ));
                 } else if capacity {
@@ -1276,7 +1337,7 @@ pub(super) fn lanes_inner(
         return Err(Fail::new(
             Status::Invalid,
             ErrorKind::Invalid,
-            "targets belong to different projects; run one `provenant lanes --id ID --wait 4m` command per project",
+            "targets belong to different projects; run one `provenant status ID --wait=4m` command per project",
         ));
     }
     let command = &normalised;

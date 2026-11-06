@@ -10,7 +10,7 @@ pub fn resume(command: Resume, edge: &Edge<'_>) -> Reply {
 }
 
 pub(super) fn resume_reply(command: Resume, edge: &Edge<'_>) -> Reply {
-    reply_waited("resume", resume_inner(command, edge))
+    reply_waited("retry", resume_inner(command, edge))
 }
 
 pub fn lane(command: crate::Lane, edge: &Edge<'_>) -> Reply {
@@ -163,10 +163,35 @@ pub fn continue_attempt_mode(
     edge: &Edge<'_>,
     prior: AttemptId,
     operation_id: OperationId,
+    prompt: String,
+    expected_generation: u64,
+    call: &run::Request<'_>,
+    fallback: bool,
+) -> Result<(run::RunRecord, Vec<run::Started>), Fail> {
+    retry_attempt_mode(
+        session,
+        edge,
+        prior,
+        operation_id,
+        prompt,
+        expected_generation,
+        call,
+        fallback,
+        false,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn retry_attempt_mode(
+    session: &Session,
+    edge: &Edge<'_>,
+    prior: AttemptId,
+    operation_id: OperationId,
     mut prompt: String,
     expected_generation: u64,
     call: &run::Request<'_>,
     fallback: bool,
+    redo: bool,
 ) -> Result<(run::RunRecord, Vec<run::Started>), Fail> {
     scan(&prompt)?;
     let record = session.service().status(prior, call)?;
@@ -177,7 +202,9 @@ pub fn continue_attempt_mode(
     // may have expired since the first submission.
     if let Some(operation) = session.store.operation(&operation_id, call)? {
         let existing = session.store.request(operation.run_id, call)?;
-        if existing.parent != Some(prior) {
+        if existing.parent != Some(prior)
+            || redo != (existing.fresh_continuation.as_deref() == Some("node retry requested"))
+        {
             return Err(run::RunError::OperationConflict.into());
         }
         let page = session.store.lanes(
@@ -198,7 +225,7 @@ pub fn continue_attempt_mode(
         )?;
         if let Some(accepted) = page.lanes.first() {
             let retained = read_full_prompt(session, accepted.attempt_id, call)?;
-            let matches = if existing.fresh_continuation.is_some() {
+            let matches = if existing.fresh_continuation.is_some() && !redo {
                 retained.ends_with(&format!("\n\nNew prompt:\n{prompt}"))
             } else {
                 retained == prompt
@@ -218,15 +245,17 @@ pub fn continue_attempt_mode(
         .ok()
         .and_then(|owner| owner.as_ref())
         .map(|owner| owner.base.clone());
-    let unavailable = ownership.err().map(|error| error.to_string()).or_else(|| {
-        Registry::default()
-            .check_continuable(&record)
-            .err()
-            .map(|fail| fail.message)
-            .or_else(|| {
-                provider::continuation_available(&record, session.context.state_root.as_path())
-                    .err()
-            })
+    let unavailable = redo.then(|| "node retry requested".to_owned()).or_else(|| {
+        ownership.err().map(|error| error.to_string()).or_else(|| {
+            Registry::default()
+                .check_continuable(&record)
+                .err()
+                .map(|fail| fail.message)
+                .or_else(|| {
+                    provider::continuation_available(&record, session.context.state_root.as_path())
+                        .err()
+                })
+        })
     });
     if !fallback && let Some(reason) = &unavailable {
         return Err(Fail::new(
@@ -235,7 +264,9 @@ pub fn continue_attempt_mode(
             format!("continuation unavailable; fresh fallback disabled by --no-fallback: {reason}"),
         ));
     }
-    if let Some(reason) = &unavailable {
+    if let Some(reason) = &unavailable
+        && !redo
+    {
         let task = session
             .store
             .request(record.run_id, call)?
@@ -536,6 +567,21 @@ pub(super) fn read_full_prompt(
         .map_err(|_| run::RunError::Validation("original prompt is not UTF-8").into())
 }
 
+/// A retry without a new brief must read retained input, never wait on stdin.
+pub(super) fn retry_prompt(
+    command: &Resume,
+    session: &Session,
+    prior: AttemptId,
+    call: &run::Request<'_>,
+) -> Result<String, Fail> {
+    match (&command.brief, &command.prompt.prompt_file) {
+        (Some(brief), _) => Ok(brief.clone()),
+        (_, Some(path)) => read_bounded(path),
+        _ if command.prompt.prompt_stdin => read_text(std::io::stdin().lock()),
+        _ => read_full_prompt(session, prior, call),
+    }
+}
+
 pub(super) fn resume_inner(
     command: Resume,
     edge: &Edge<'_>,
@@ -550,18 +596,20 @@ pub(super) fn resume_inner(
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
     let call = request(&clock, &cancel)?;
-    let candidate = targets::resolve(edge, &command.attempt.0, false)?;
-    let prior = candidate.target.attempt.ok_or(Fail::new(
-        Status::Invalid,
-        ErrorKind::Invalid,
-        "attempt required",
-    ))?;
-    let prompt = match &command.prompt.prompt_file {
-        Some(path) => read_bounded(path)?,
-        None => read_text(std::io::stdin().lock())?,
-    };
+    let candidate = targets::resolve(edge, &command.attempt.0, true)?;
+    if !command.extend.is_empty() {
+        return Err(Fail::new(
+            Status::Invalid,
+            ErrorKind::Invalid,
+            "--extend requires a graph target",
+        ));
+    }
     let (session, target) = targets::open_resolved(edge, candidate, &call)?;
-    let prior = target.attempt.unwrap_or(prior);
+    let prior = match target.attempt {
+        Some(id) => id,
+        None => output::newest_attempt(&session, &target, &call)?.0,
+    };
+    let prompt = retry_prompt(&command, &session, prior, &call)?;
     let record = session.service().status(prior, &call)?;
     if target.run.is_some_and(|run| record.run_id != run)
         || target.task.is_some_and(|task| task != record.task_id)
@@ -579,7 +627,7 @@ pub(super) fn resume_inner(
         cwd: &scoped_cwd,
         ..*edge
     };
-    let (run, started) = continue_attempt_mode(
+    let (run, started) = retry_attempt_mode(
         &session,
         &scoped_edge,
         prior,
@@ -588,6 +636,7 @@ pub(super) fn resume_inner(
         0,
         &call,
         !command.no_fallback,
+        command.node,
     )?;
     let (mut data, human, timed_out) = report(
         &session,
