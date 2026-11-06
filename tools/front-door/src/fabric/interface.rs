@@ -1299,18 +1299,29 @@ mod tests {
             ("child_depth", "child exceeds limits.child_depth=2"),
         ] {
             let error = super::relay_error(ServiceError::Cli {
-                code: code.into(), message: detail.into(), data: Value::Null,
+                code: code.into(),
+                message: detail.into(),
+                data: Value::Null,
             });
             assert_eq!(error.code(), code);
             let diagnostic = error.diagnostic();
             assert_eq!(diagnostic.code, code);
-            assert!(diagnostic.detail.as_deref().is_some_and(|text| text.contains(detail)));
+            assert!(
+                diagnostic
+                    .detail
+                    .as_deref()
+                    .is_some_and(|text| text.contains(detail))
+            );
             let restored: FacadeError = serde_json::from_value(serde_json::to_value(&error)?)?;
             assert_eq!(restored.code(), code);
             assert_eq!(restored.diagnostic(), diagnostic);
             let mcp = ServiceError::Facade(error).structured_error();
             assert_eq!(mcp["code"], code);
-            assert!(mcp["message"].as_str().is_some_and(|text| text.contains(detail)));
+            assert!(
+                mcp["message"]
+                    .as_str()
+                    .is_some_and(|text| text.contains(detail))
+            );
         }
         Ok(())
     }

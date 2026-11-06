@@ -1152,7 +1152,11 @@ pub(super) fn prepare(
     let unstarted = |id: &str| -> Result<(), PatchError> {
         if let Some(parent) = parent
             && parent.plan.is_none()
-            && parent.extra.get(template::TEMPLATE_FIELD).and_then(Value::as_str) != Some("plan")
+            && parent
+                .extra
+                .get(template::TEMPLATE_FIELD)
+                .and_then(Value::as_str)
+                != Some("plan")
             && id != parent.id
             && !id.starts_with(&format!("{}--", parent.id))
         {

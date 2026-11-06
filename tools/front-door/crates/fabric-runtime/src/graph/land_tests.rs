@@ -172,7 +172,9 @@ impl AttemptOwner for Owner {
         replay: Replay<'_>,
     ) -> Result<AttemptObservation, Self::Error> {
         if self.pending_writer && key.node_id == "write" {
-            return Ok(AttemptObservation::Pending { attempt_ref: Some("pending-writer".into()) });
+            return Ok(AttemptObservation::Pending {
+                attempt_ref: Some("pending-writer".into()),
+            });
         }
         self.launches.push(Launch {
             node: key.node_id.clone(),
@@ -1031,7 +1033,6 @@ fn a_composite_verdict_binds_to_the_head_its_producer_reviewed() {
     );
 }
 
-
 #[test]
 fn a_replaced_gate_accepting_rejection_never_lands() {
     let document = document("routine", None);
@@ -1039,7 +1040,9 @@ fn a_replaced_gate_accepting_rejection_never_lands() {
     owner.pending_writer = true;
     owner.review_verdict = Some("VERDICT: FAIL");
     let mut journal = Journal::default();
-    let mut checkpoint = advance(&document, &mut owner, &mut journal).unwrap().checkpoint;
+    let mut checkpoint = advance(&document, &mut owner, &mut journal)
+        .unwrap()
+        .checkpoint;
     assert_eq!(node(&checkpoint, "accepted").state, NodeState::Pending);
     let mut replacement = nodes("routine")[4].clone();
     replacement["condition"]["expected"] = json!("VERDICT: FAIL");
@@ -1047,16 +1050,33 @@ fn a_replaced_gate_accepting_rejection_never_lands() {
     let resolvers = Default::default();
     let limits = plans::generous();
     patch::admit_patch(
-        &mut patch::LiveGraph { document: &document, checkpoint: &mut checkpoint },
+        &mut patch::LiveGraph {
+            document: &document,
+            checkpoint: &mut checkpoint,
+        },
         None,
-        &patch::Patch { schema_version: 1, replace: vec![replacement], ..Default::default() },
-        &patch::PatchContext { library: &library, resolvers: &resolvers, scan: &|_| Ok(()), journal: None, limits: &limits },
-    ).unwrap();
+        &patch::Patch {
+            schema_version: 1,
+            replace: vec![replacement],
+            ..Default::default()
+        },
+        &patch::PatchContext {
+            library: &library,
+            resolvers: &resolvers,
+            scan: &|_| Ok(()),
+            journal: None,
+            limits: &limits,
+        },
+    )
+    .unwrap();
     journal.0 = Some(checkpoint);
     owner.pending_writer = false;
     let checkpoint = run(&document, &mut owner, &mut journal);
     assert!(node(&checkpoint, "accepted").gate.as_ref().unwrap().passed);
     assert_eq!(node(&checkpoint, "land").state, NodeState::Failed);
-    assert_eq!(node(&checkpoint, "land").advance_error_code.as_deref(), Some("land_review_required"));
+    assert_eq!(
+        node(&checkpoint, "land").advance_error_code.as_deref(),
+        Some("land_review_required")
+    );
     assert!(owner.lands.is_empty());
 }

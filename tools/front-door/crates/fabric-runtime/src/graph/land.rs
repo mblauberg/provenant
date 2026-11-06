@@ -418,9 +418,8 @@ fn acceptance_error(
                 if matches!(ReviewVerdict::from_token(expected),
                     Some(ReviewVerdict::Approve
                         | ReviewVerdict::ApproveWithNits))
-        )
-            || !writer_index
-                .is_some_and(|writer| ancestors(&plan.nodes, positions, &gate.id).contains(&writer))
+        ) || !writer_index
+            .is_some_and(|writer| ancestors(&plan.nodes, positions, &gate.id).contains(&writer))
             || progress.state != NodeState::Succeeded
             || !progress.gate.as_ref().is_some_and(|gate| gate.passed)
         {

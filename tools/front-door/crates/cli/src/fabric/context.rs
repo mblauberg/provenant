@@ -717,7 +717,9 @@ pub fn facade_outcome(error: &FacadeError) -> (Outcome, provenant_run::ErrorKind
         FacadeError::NotTerminal => (Outcome::Refused, ErrorKind::Nonterminal),
         FacadeError::OperationConflict => (Outcome::Refused, ErrorKind::OperationConflict),
         FacadeError::Busy => (Outcome::Refused, ErrorKind::QueueFull),
-        FacadeError::ConfinementRefused { .. } | FacadeError::GraphRelayRefused { .. } => (Outcome::Refused, ErrorKind::Refused),
+        FacadeError::ConfinementRefused { .. } | FacadeError::GraphRelayRefused { .. } => {
+            (Outcome::Refused, ErrorKind::Refused)
+        }
         FacadeError::WriterBusy { .. } => (Outcome::Refused, ErrorKind::WriterBusy),
         FacadeError::WriterLockBusy => (Outcome::Refused, ErrorKind::WriterLockBusy),
         FacadeError::WriterUnknown => (Outcome::Refused, ErrorKind::WriterUnknown),

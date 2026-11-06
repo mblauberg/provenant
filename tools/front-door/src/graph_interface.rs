@@ -35,7 +35,8 @@ fn response_outcome(command: &str, data: &Value) -> Outcome {
 fn input_diagnostic(error: impl std::fmt::Display) -> provenant_records::diagnostic::Diagnostic {
     provenant_fabric_runtime::coordination::facade::FacadeError::invalid(
         provenant_fabric_runtime::coordination::facade::InvalidInputDetail::graph_reason(error),
-    ).diagnostic()
+    )
+    .diagnostic()
 }
 
 fn invoke(
@@ -53,9 +54,7 @@ fn invoke(
             return Ok(factory.relay_document(&input, budget, &CancelToken::new())?);
         }
         let factory =
-            if input["explain"] == true
-                || matches!(command, "templates" | "status" | "stats")
-            {
+            if input["explain"] == true || matches!(command, "templates" | "status" | "stats") {
                 fabric::read_factory(globals, workers)?
             } else {
                 fabric::factory(globals, workers)?
@@ -83,9 +82,7 @@ fn invoke(
                         .downcast_ref::<provenant_cli::fabric::EdgeError>()
                         .and_then(provenant_cli::fabric::edge_diagnostic)
                 })
-                .unwrap_or_else(|| {
-                    input_diagnostic(&error)
-                });
+                .unwrap_or_else(|| input_diagnostic(&error));
             let outcome = error
                 .downcast_ref::<provenant_fabric_runtime::coordination::facade::FacadeError>()
                 .map_or(
@@ -95,9 +92,10 @@ fn invoke(
             let mut result = CommandResult::new(command, outcome, Value::Null);
             result.error = Some(provenant_records::CommandError {
                 diagnostic: Some((&projection).into()),
-                code: projection.code.as_str()
-                    .into(),
-                message: projection.detail.clone()
+                code: projection.code.as_str().into(),
+                message: projection
+                    .detail
+                    .clone()
                     .unwrap_or_else(|| "graph input could not be processed".into()),
                 cause: None,
                 repair: projection.next,
@@ -251,15 +249,26 @@ mod tests {
 
     fn run_request() -> GraphRunArgs {
         GraphRunArgs {
-            brief: None, template: None, tier: None, mode: None,
-            worktree: None, branch: None, base: None, write_scope: Vec::new(),
-            over: Vec::new(), set: Vec::new(), file: None, detached: false,
-            explain: false, wait: None,
+            brief: None,
+            template: None,
+            tier: None,
+            mode: None,
+            worktree: None,
+            branch: None,
+            base: None,
+            write_scope: Vec::new(),
+            over: Vec::new(),
+            set: Vec::new(),
+            file: None,
+            detached: false,
+            explain: false,
+            wait: None,
         }
     }
 
     #[test]
-    fn malformed_set_and_missing_file_preserve_input_detail() -> Result<(), Box<dyn std::error::Error>> {
+    fn malformed_set_and_missing_file_preserve_input_detail()
+    -> Result<(), Box<dyn std::error::Error>> {
         for (setting, detail) in [
             ("broken", "--set expects NAME=TOML_VALUE"),
             ("=1", "--set parameter name is empty"),
@@ -270,15 +279,27 @@ mod tests {
             let error = run_input(request).err().ok_or("invalid set was accepted")?;
             let diagnostic = input_diagnostic(error);
             assert_eq!(diagnostic.code, "invalid_input");
-            assert!(diagnostic.detail.as_deref().is_some_and(|text| text.contains(detail)));
+            assert!(
+                diagnostic
+                    .detail
+                    .as_deref()
+                    .is_some_and(|text| text.contains(detail))
+            );
         }
         let directory = tempfile::tempdir()?;
         let mut request = run_request();
         request.file = Some(directory.path().join("missing.json"));
-        let error = run_input(request).err().ok_or("missing file was accepted")?;
+        let error = run_input(request)
+            .err()
+            .ok_or("missing file was accepted")?;
         let diagnostic = input_diagnostic(error);
         assert_eq!(diagnostic.code, "invalid_input");
-        assert!(diagnostic.detail.as_deref().is_some_and(|text| text.contains("--file") && text.contains("missing.json")));
+        assert!(
+            diagnostic
+                .detail
+                .as_deref()
+                .is_some_and(|text| text.contains("--file") && text.contains("missing.json"))
+        );
         Ok(())
     }
 

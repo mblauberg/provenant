@@ -660,8 +660,11 @@ impl FacadeError {
 
     pub fn code(&self) -> &str {
         if let Self::GraphRelayRefused { refusal_code, .. } = self
-            && !refusal_code.is_empty() && refusal_code.len() <= 128
-            && refusal_code.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+            && !refusal_code.is_empty()
+            && refusal_code.len() <= 128
+            && refusal_code
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
         {
             return refusal_code;
         }

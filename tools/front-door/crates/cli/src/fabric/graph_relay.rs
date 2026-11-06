@@ -1158,7 +1158,11 @@ mod provisioning_tests {
         std::fs::create_dir_all(&project)?;
         let mut inputs = provenant_core::RootInputs::new(home.clone(), project.clone());
         inputs.state_dir = Some(root.path().join("state"));
-        let context = Context::open(inputs.resolve(&provenant_os::fs::SystemPathResolver)?, &home, &project)?;
+        let context = Context::open(
+            inputs.resolve(&provenant_os::fs::SystemPathResolver)?,
+            &home,
+            &project,
+        )?;
         let cancel = CancelToken::new();
         let clock = provenant_os::clock::SystemClock::new();
         let budget = WaitBudget::cli(clock.mono_now(), 5)?;
@@ -1181,10 +1185,20 @@ mod provisioning_tests {
             ]
         }))?;
         {
-            let mut journal = FileJournal::open(&context.roots.state, context.identity.project, "edit-scope", budget, &cancel, &clock)?;
+            let mut journal = FileJournal::open(
+                &context.roots.state,
+                context.identity.project,
+                "edit-scope",
+                budget,
+                &cancel,
+                &clock,
+            )?;
             journal.bind(GraphExecution {
-                review_base: None, extra: Default::default(), integration_base: None,
-                directory: project.clone(), document,
+                review_base: None,
+                extra: Default::default(),
+                integration_base: None,
+                directory: project.clone(),
+                document,
             })?;
             journal.save(&checkpoint)?;
         }
@@ -1194,9 +1208,21 @@ mod provisioning_tests {
         ] {
             let mut patch = edit;
             patch["schema_version"] = json!(1);
-            let result = serve(&context, "caller", json!({"op":"edit","id":"edit-scope","patch":patch}), budget, &cancel, &clock);
+            let result = serve(
+                &context,
+                "caller",
+                json!({"op":"edit","id":"edit-scope","patch":patch}),
+                budget,
+                &cancel,
+                &clock,
+            );
             assert!(matches!(result, Err(ServiceError::Cli { code, .. }) if code == "edit_scope"));
-            let saved = FileJournal::read_checkpoint(&context.roots.state, context.identity.project, "edit-scope")?.ok_or("missing checkpoint")?;
+            let saved = FileJournal::read_checkpoint(
+                &context.roots.state,
+                context.identity.project,
+                "edit-scope",
+            )?
+            .ok_or("missing checkpoint")?;
             assert_eq!(saved, checkpoint);
         }
         Ok(())

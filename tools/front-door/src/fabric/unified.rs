@@ -447,12 +447,18 @@ fn project_node_waits(rows: &mut [Value]) {
         })
         .filter_map(|row| {
             Some((
-                (row["graph_id"].as_str()?.to_owned(), row["node_id"].as_str()?.to_owned()),
+                (
+                    row["graph_id"].as_str()?.to_owned(),
+                    row["node_id"].as_str()?.to_owned(),
+                ),
                 row["waiting_for"].clone(),
             ))
         })
         .collect();
-    for row in rows.iter_mut().filter(|row| row["kind"] == "node" && row["state"] == "running") {
+    for row in rows
+        .iter_mut()
+        .filter(|row| row["kind"] == "node" && row["state"] == "running")
+    {
         let key = (
             row["graph_id"].as_str().unwrap_or_default().to_owned(),
             row["node_id"].as_str().unwrap_or_default().to_owned(),
@@ -1141,10 +1147,17 @@ mod tests {
 
     #[test]
     fn graph_status_keeps_admission_reclaim_visible_on_the_running_parent() {
-        let target = GraphTarget { graph: "g".into(), node: None, attempt: None };
+        let target = GraphTarget {
+            graph: "g".into(),
+            node: None,
+            attempt: None,
+        };
         let mut rows = status_rows(&graph_snapshot(checkpoint("g")), &target);
         let wait = "admission: reclaiming host and project capacity or startup spacing";
-        let attempt = rows.iter_mut().find(|row| row["kind"] == "attempt").unwrap();
+        let attempt = rows
+            .iter_mut()
+            .find(|row| row["kind"] == "attempt")
+            .unwrap();
         attempt["graph_state"] = json!("running");
         attempt["waiting_for"] = json!(wait);
         project_node_waits(&mut rows);
@@ -1155,7 +1168,10 @@ mod tests {
 
         // A historical attempt's wait must not leak onto a later live parent.
         rows[1]["waiting_for"] = Value::Null;
-        let attempt = rows.iter_mut().find(|row| row["kind"] == "attempt").unwrap();
+        let attempt = rows
+            .iter_mut()
+            .find(|row| row["kind"] == "attempt")
+            .unwrap();
         attempt["state"] = json!("terminal");
         project_node_waits(&mut rows);
         assert!(rows[1]["waiting_for"].is_null());
