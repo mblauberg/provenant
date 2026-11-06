@@ -122,7 +122,11 @@ fn composite_integration_branch_is_created_once_without_checkout() {
     use std::process::Command;
     let temp = tempfile::tempdir().unwrap();
     let git = |args: &[&str]| {
-        let output = Command::new("git")
+        let output = Command::new(provenant_os::git::git_executable().unwrap())
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
             .args(args)
             .current_dir(temp.path())
             .output()
