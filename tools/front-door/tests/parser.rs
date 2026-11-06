@@ -1030,12 +1030,7 @@ fn run_leaves_accept_control_and_report_work_refused_per_task() -> Result {
             value["error"]["code"], "CONTINUATION_UNSUPPORTED",
             "{value}"
         );
-        assert!(
-            value["error"]["message"].as_str().is_some_and(
-                |message| message.contains("account fixture-account is not registered")
-            ),
-            "{value}"
-        );
+        assert_eq!(value["data"]["operation_id"], operation, "{value}");
         let after = rig.command(&["lanes", "--all", "--json"])?;
         let after: serde_json::Value = serde_json::from_slice(&after.stdout.bytes)?;
         assert_eq!(after["data"]["lanes"], before["data"]["lanes"], "{value}");
