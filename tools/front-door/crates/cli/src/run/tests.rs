@@ -5145,6 +5145,18 @@ fn reconcile_reports_publish_error_and_explicitly_abandons_a_writer_fence()
 
 #[test]
 fn projected_cli_error_omits_unsafe_source_and_keeps_bounded_fields() {
+    for source in [
+        "TOKEN_SENTINEL\u{1b}".to_owned(),
+        format!("TOKEN_SENTINEL{}", "é".repeat(2048)),
+    ] {
+        let failure = super::Fail::from(provenant_run::RunError::Io(std::io::Error::other(source)));
+        let reply = super::reply("run", Err(failure));
+        let wire = serde_json::to_value(&reply.result).unwrap();
+        assert_eq!(wire["error"]["code"], "IO");
+        assert!(wire["error"].get("detail").is_none());
+        assert!(!wire.to_string().contains("TOKEN_SENTINEL"));
+        assert!(wire.to_string().len() < 4096);
+    }
     let failure = super::Fail::from(provenant_run::RunError::Io(std::io::Error::other(
         "TOKEN_SENTINEL\u{1b}",
     )));

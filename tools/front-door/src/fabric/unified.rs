@@ -502,6 +502,7 @@ fn project_node_failures(rows: &mut [Value]) {
             }
             if !reason.is_null() {
                 row["reason"] = reason.clone();
+                row["next"] = reason.clone();
             }
         }
     }
@@ -1174,7 +1175,14 @@ fn with_graph_failures(
 ) -> provenant_cli::run::Reply {
     if !rows.is_empty() {
         reply.result.data["graph_failures"] = json!(rows);
-        reply.human.push_str(&render_graph_status(rows));
+        let reading = render_graph_status(rows);
+        reply.human.push_str(&reading);
+        if let Some(summary) = &mut reply.summary {
+            summary
+                .lines
+                .splice(0..0, reading.lines().map(str::to_owned));
+            summary.next = None;
+        }
     }
     reply
 }
@@ -1528,7 +1536,7 @@ mod tests {
                     json!({"outputs":[]}),
                 ),
                 human: String::new(),
-                summary: None,
+                summary: Some(provenant_cli::Summary::verbatim("attempt output", None)),
                 read_only: true,
             },
             std::slice::from_ref(node),
@@ -1538,6 +1546,14 @@ mod tests {
             node["reason"]
         );
         assert!(reply.human.contains("op-123"));
+        assert!(
+            reply
+                .summary
+                .unwrap()
+                .lines
+                .iter()
+                .any(|line| line.contains("op-123"))
+        );
 
         let mut rows = vec![
             json!({"kind":"node", "graph_id":"g", "node_id":"a", "state":"failed", "reason":null, "cause_code":"adapter_unavailable"}),
@@ -1546,6 +1562,7 @@ mod tests {
         project_node_failures(&mut rows);
         assert_eq!(rows[0]["cause_code"], "command_unavailable");
         assert_eq!(rows[0]["reason"], "configure the provider command");
+        assert_eq!(rows[0]["next"], "configure the provider command");
         assert!(render_graph_status(&rows[..1]).contains("configure the provider command"));
     }
 

@@ -11170,6 +11170,28 @@ fn writer_binding_failure_persists_only_the_safe_projection() {
     assert!(!reason.contains("/private/host"));
     assert!(!reason.chars().any(char::is_control));
     assert!(reason.len() <= MAX_ADVANCE_ERROR_BYTES);
+
+    let mut writer = node("writer", route("first"));
+    writer.access = AccessMode::WorktreeWrite;
+    writer.worktree = Some("/fixture/worktree".into());
+    let mut owner = ErrorLauncher {
+        binding_error: Some(FacadeError::DispatchRefused {
+            fact: Some(crate::coordination::facade::DispatchRefusalFact::DirtyWriter),
+            reason: "TOKEN_SENTINEL".into(),
+            disk: None,
+        }),
+        ..Default::default()
+    };
+    let run = advance(
+        &graph(vec![writer]),
+        &mut owner,
+        &mut MemoryJournal::default(),
+    )
+    .unwrap();
+    let reason = run.checkpoint.nodes[0].advance_error.as_deref().unwrap();
+    assert!(reason.contains("uncommitted"));
+    assert!(reason.contains("commit"));
+    assert!(!reason.contains("TOKEN_SENTINEL"));
 }
 
 #[test]

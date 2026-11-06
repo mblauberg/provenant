@@ -1315,10 +1315,8 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                                 progress.state = NodeState::Failed;
                                 progress.advance_error_code =
                                     Some("writer_binding_unavailable".into());
-                                progress.advance_error = Some(bounded(
-                                    &format!("node {}: cannot bind writer: {error}", node.id),
-                                    MAX_ADVANCE_ERROR_BYTES,
-                                ));
+                                progress.advance_error =
+                                    Some(next_attempt::writer_binding_reason(&node.id, &error));
                                 continue;
                             }
                         };
@@ -2323,23 +2321,11 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     let binding = match binding_result {
                         Ok(binding) => binding,
                         Err(error) => {
-                            let diagnostic = next_attempt::launch_diagnostic(&error);
                             let progress = &mut checkpoint.nodes[node_index];
                             progress.state = NodeState::Failed;
                             progress.advance_error_code = Some("writer_binding_unavailable".into());
-                            progress.advance_error = Some(bounded(
-                                &format!(
-                                    "node {}: cannot bind writer [{}]: {}; {}",
-                                    provenant_records::diagnostic::safe_text(&node.id),
-                                    diagnostic.code,
-                                    diagnostic.detail.as_deref().unwrap_or(&diagnostic.code),
-                                    diagnostic
-                                        .next
-                                        .as_deref()
-                                        .unwrap_or("inspect writer custody before retrying"),
-                                ),
-                                MAX_ADVANCE_ERROR_BYTES,
-                            ));
+                            progress.advance_error =
+                                Some(next_attempt::writer_binding_reason(&node.id, &error));
                             journal.save(&checkpoint).map_err(GraphError::Journal)?;
                             break;
                         }
