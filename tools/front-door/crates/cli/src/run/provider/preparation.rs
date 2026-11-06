@@ -371,6 +371,10 @@ pub(super) enum PrepareError {
     Prompt(#[from] LaunchPromptError),
     #[error(transparent)]
     Run(#[from] run::RunError),
+    #[error("write grants overlap a host index")]
+    HostIndexOverlap,
+    #[error("write grants overlap the host target seed store")]
+    TargetSeedOverlap,
     #[error("{message}")]
     Candidates {
         message: String,
@@ -448,6 +452,11 @@ impl PrepareError {
                 refusal.boundary_class = provenant_records::diagnostic::BoundaryClass::Authority;
                 refusal
             }
+            error @ (Self::HostIndexOverlap | Self::TargetSeedOverlap) => {
+                let mut refusal = run::PrepareRefusal::from(error.to_string());
+                refusal.boundary_class = provenant_records::diagnostic::BoundaryClass::Integrity;
+                refusal
+            }
             other => other.to_string().into(),
         }
     }
@@ -470,6 +479,14 @@ fn preparation_preserves_typed_boundaries_without_classifying_other_errors() {
     assert_eq!(prompt.boundary_class, BoundaryClass::Authority);
     let other = PrepareError::Other("TOKEN_SENTINEL".into()).into_refusal();
     assert_eq!(other.boundary_class, BoundaryClass::None);
+    for error in [
+        PrepareError::HostIndexOverlap,
+        PrepareError::TargetSeedOverlap,
+    ] {
+        let refusal = error.into_refusal();
+        assert_eq!(refusal.boundary_class, BoundaryClass::Integrity);
+        assert!(refusal.message.contains("overlap"));
+    }
     let candidate = || {
         let mut route = skip("fixture/model", SkipKind::Unavailable, "plan refused");
         route.set_cause(provenant_records::RouteExclusionReason::DisclosureDenied);
@@ -2322,13 +2339,13 @@ pub(super) fn prepare_candidates(
             roots.state.as_path(),
             &provenant_confinement::write_grants(plan.permissions(), &spec.profile),
         ) {
-            return Err("write grants overlap a host index".into());
+            return Err(PrepareError::HostIndexOverlap);
         }
         if !target_seeds_protected(
             roots.state.as_path(),
             &provenant_confinement::write_grants(plan.permissions(), &spec.profile),
         ) {
-            return Err("write grants overlap the host target seed store".into());
+            return Err(PrepareError::TargetSeedOverlap);
         }
         if let Some(head) = &task.head {
             spec.env.push(("PROVENANT_LANE_HEAD".into(), head.into()));

@@ -176,7 +176,7 @@ reason = "A handoff must use the selected worktree and its held custody binding;
 [[guard]]
 site = "run/src/launch.rs#RunStore::start_inner"
 boundary = "unclassified"
-reason = "Mixed or untyped candidate failures remain combined in RefusalKind::Preparation. Typed run errors, nested argv prompt guards, and uniformly classified plan failures retain their boundaries."
+reason = "Mixed or untyped candidate failures remain combined in RefusalKind::Preparation. Typed run errors, nested argv prompt guards, protected host stores, and uniformly classified plan failures retain their boundaries."
 
 [[guard]]
 site = "run/src/launch/hand_off.rs#RunStore::hand_off"
