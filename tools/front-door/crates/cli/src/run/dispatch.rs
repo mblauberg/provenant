@@ -178,6 +178,7 @@ fn lane_add(command: &Dispatch) -> Result<provenant_fabric_runtime::graph::relay
             .iter()
             .map(|path| path.to_string_lossy().into_owned())
             .collect(),
+        launch: None,
         detached: false,
         idempotency_key: command.operation_id.to_string(),
         reason: command.title.clone(),
