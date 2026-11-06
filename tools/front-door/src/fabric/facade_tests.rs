@@ -881,7 +881,7 @@ pub(crate) mod peer_tests {
             assert_eq!(status.status, GraphStatus::Paused);
             let explanation = status.advance_error.unwrap();
             assert!(explanation.contains(id), "{explanation}");
-            assert!(explanation.contains("cancel it to retire"), "{explanation}");
+            assert!(explanation.contains(&format!("provenant stop {id}")), "{explanation}");
             if id == "g-test" {
                 assert!(explanation.contains("predates node asks"), "{explanation}");
                 assert!(explanation.contains("previous release"), "{explanation}");
@@ -1527,7 +1527,7 @@ esac
             preview["explain"] = serde_json::json!(true);
             preview
         }, budget, &cancel)?;
-        assert_eq!(preview["document"]["graph_id"], "g-graph-run-controls");
+        assert_eq!(preview["document"]["graph_id"], "g-e813e34cbb5c0bf4b1ee8313250533");
         let node = &preview["document"]["nodes"][0];
         assert_eq!(node["attempt"]["host"], "local");
         assert_eq!(node["attempt"]["build_heavy"], true);
