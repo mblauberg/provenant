@@ -98,33 +98,47 @@ impl Outcome {
     }
 }
 
-pub(crate) fn seed_registry(enabled: bool, home: &Path, cache: &Path) -> Outcome {
+pub(crate) fn seed_registry(
+    enabled: bool,
+    home: &Path,
+    cache: &Path,
+    cancel: &provenant_core::CancelToken,
+) -> Outcome {
     if !enabled {
         return Outcome::skipped("disabled");
     }
     #[cfg(target_os = "macos")]
     {
-        seed_with(home, cache, clone_registry)
+        seed_store_cancellable(home, cache, "registry", Some(cancel), |source, dest| {
+            clone_registry(source, dest, cancel)
+        })
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = (home, cache);
+        let _ = (home, cache, cancel);
         Outcome::skipped("unsupported_platform")
     }
 }
 
 /// Seed the Git store independently of the registry.
-pub(crate) fn seed_git(enabled: bool, home: &Path, cache: &Path) -> Outcome {
+pub(crate) fn seed_git(
+    enabled: bool,
+    home: &Path,
+    cache: &Path,
+    cancel: &provenant_core::CancelToken,
+) -> Outcome {
     if !enabled {
         return Outcome::skipped("disabled");
     }
     #[cfg(target_os = "macos")]
     {
-        seed_store_with(home, cache, "git", clone_git)
+        seed_store_cancellable(home, cache, "git", Some(cancel), |source, dest| {
+            clone_git(source, dest, cancel)
+        })
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = (home, cache);
+        let _ = (home, cache, cancel);
         Outcome::skipped("unsupported_platform")
     }
 }
@@ -136,32 +150,56 @@ pub(crate) fn seed_target(
     worktree: &Path,
     home: &Path,
     environment: &[(std::ffi::OsString, std::ffi::OsString)],
+    cancel: &provenant_core::CancelToken,
 ) -> Outcome {
     if !enabled {
         return Outcome::skipped("disabled");
     }
     #[cfg(target_os = "macos")]
     {
-        let (version, triple) =
-            match crate::target_seed::lane_rustc_metadata(worktree, home, environment) {
-                Ok(metadata) => metadata,
-                Err(detail) => return Outcome::fallback_detail("toolchain_unverified", detail),
-            };
-        seed_target_with(state, cache, &version, &triple, clone_target)
+        let (version, triple) = match crate::target_seed::lane_rustc_metadata_cancellable(
+            worktree,
+            home,
+            environment,
+            Some(cancel),
+        ) {
+            Ok(metadata) => metadata,
+            Err(detail) => return Outcome::fallback_detail("toolchain_unverified", detail),
+        };
+        seed_target_cancellable(
+            state,
+            cache,
+            &version,
+            &triple,
+            Some(cancel),
+            |source, dest| clone_target(source, dest, cancel),
+        )
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = (state, cache, worktree, home, environment);
+        let _ = (state, cache, worktree, home, environment, cancel);
         Outcome::skipped("unsupported_platform")
     }
 }
 
-#[cfg(any(target_os = "macos", test))]
+#[cfg(test)]
 fn seed_target_with(
     state: &Path,
     cache: &Path,
     version: &str,
     triple: &str,
+    clone: impl FnOnce(&Path, &provenant_os::fs::Directory) -> Result<(), &'static str>,
+) -> Outcome {
+    seed_target_cancellable(state, cache, version, triple, None, clone)
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn seed_target_cancellable(
+    state: &Path,
+    cache: &Path,
+    version: &str,
+    triple: &str,
+    cancel: Option<&provenant_core::CancelToken>,
     clone: impl FnOnce(&Path, &provenant_os::fs::Directory) -> Result<(), &'static str>,
 ) -> Outcome {
     use provenant_os::fs::{Directory, temporary_name};
@@ -178,6 +216,26 @@ fn seed_target_with(
     let Ok(_lock) = crate::target_seed::lock_store(state) else {
         return Outcome::fallback("seed_lock_unavailable");
     };
+    // An interrupted clone leaves a private stage; remove it under the same
+    // store lock before attempting another target seed.
+    let Ok(stages) = cache_dir.entries() else {
+        return Outcome::fallback("staging_cleanup_failed");
+    };
+    for stage in stages {
+        if cancel.is_some_and(|token| token.is_cancelled()) {
+            return Outcome::fallback("cancelled");
+        }
+        let Ok(stage) = stage else {
+            return Outcome::fallback("staging_cleanup_failed");
+        };
+        if stage.to_string_lossy().starts_with(".target-seed-") {
+            match remove_seed_tree(&cache_dir, &stage, cancel) {
+                Ok(true) => {}
+                Ok(false) => return Outcome::fallback("cancelled"),
+                Err(_) => return Outcome::fallback("staging_cleanup_failed"),
+            }
+        }
+    }
     let generations = crate::target_seed::store_path(state).join("generations");
     let Ok(entries) = std::fs::read_dir(generations) else {
         return Outcome::fallback("store_unavailable");
@@ -189,6 +247,9 @@ fn seed_target_with(
     let mut saw_entry = false;
     let mut selected = None;
     for entry in entries {
+        if cancel.is_some_and(|token| token.is_cancelled()) {
+            return Outcome::fallback("cancelled");
+        }
         use std::os::unix::fs::PermissionsExt;
         if !entry.file_type().is_ok_and(|kind| kind.is_dir())
             || entry.file_name().to_string_lossy().starts_with('.')
@@ -263,9 +324,12 @@ fn seed_target_with(
             },
             detail: None,
         },
+        Err("cancelled") => Outcome::fallback("cancelled"),
         Err(reason) => {
-            if crate::artifacts::remove_entry_tree(&cache_dir, &stage).is_err() {
-                return Outcome::fallback("staging_cleanup_failed");
+            match remove_seed_tree(&cache_dir, &stage, cancel) {
+                Ok(true) => {}
+                Ok(false) => return Outcome::fallback("cancelled"),
+                Err(_) => return Outcome::fallback("staging_cleanup_failed"),
             }
             Outcome::fallback(reason)
         }
@@ -276,6 +340,7 @@ fn seed_target_with(
 fn clone_target(
     source: &Path,
     destination: &provenant_os::fs::Directory,
+    cancel: &provenant_core::CancelToken,
 ) -> Result<(), &'static str> {
     // The seed can be read-only; make each clone writable without changing the seed.
     clone_tree(
@@ -288,10 +353,11 @@ fn clone_target(
             unsupported: "target_contains_unsupported_entry",
             writable_files: true,
         },
+        cancel,
     )
 }
 
-#[cfg(any(target_os = "macos", test))]
+#[cfg(test)]
 pub(crate) fn seed_with(
     home: &Path,
     cache: &Path,
@@ -300,11 +366,22 @@ pub(crate) fn seed_with(
     seed_store_with(home, cache, "registry", clone)
 }
 
-#[cfg(any(target_os = "macos", test))]
+#[cfg(test)]
 fn seed_store_with(
     home: &Path,
     cache: &Path,
     store: &'static str,
+    clone: impl FnOnce(&Path, &provenant_os::fs::Directory) -> Result<(), &'static str>,
+) -> Outcome {
+    seed_store_cancellable(home, cache, store, None, clone)
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn seed_store_cancellable(
+    home: &Path,
+    cache: &Path,
+    store: &'static str,
+    cancel: Option<&provenant_core::CancelToken>,
     clone: impl FnOnce(&Path, &provenant_os::fs::Directory) -> Result<(), &'static str>,
 ) -> Outcome {
     use provenant_os::fs::{Directory, LockMode, temporary_name};
@@ -355,10 +432,15 @@ fn seed_store_with(
         let Ok(name) = entry else {
             return Outcome::fallback("staging_cleanup_failed");
         };
-        if name.to_string_lossy().starts_with(&stage_prefix)
-            && crate::artifacts::remove_entry_tree(&cargo_dir, &name).is_err()
-        {
-            return Outcome::fallback("staging_cleanup_failed");
+        if cancel.is_some_and(|token| token.is_cancelled()) {
+            return Outcome::fallback("cancelled");
+        }
+        if name.to_string_lossy().starts_with(&stage_prefix) {
+            match remove_seed_tree(&cargo_dir, &name, cancel) {
+                Ok(true) => {}
+                Ok(false) => return Outcome::fallback("cancelled"),
+                Err(_) => return Outcome::fallback("staging_cleanup_failed"),
+            }
         }
     }
     let mut stage = None;
@@ -405,9 +487,12 @@ fn seed_store_with(
             },
             detail: None,
         },
+        Err("cancelled") => Outcome::fallback("cancelled"),
         Err(reason) => {
-            if crate::artifacts::remove_entry_tree(&cargo_dir, &stage_name).is_err() {
-                return Outcome::fallback("staging_cleanup_failed");
+            match remove_seed_tree(&cargo_dir, &stage_name, cancel) {
+                Ok(true) => {}
+                Ok(false) => return Outcome::fallback("cancelled"),
+                Err(_) => return Outcome::fallback("staging_cleanup_failed"),
             }
             if reason == "publish_raced" {
                 Outcome::skipped(reason)
@@ -418,10 +503,50 @@ fn seed_store_with(
     }
 }
 
+// Stale or failed staging trees can be large too. Leave a partial private
+// tree for the next seed if cancellation arrives during cleanup.
+#[cfg(any(target_os = "macos", test))]
+fn remove_seed_tree(
+    parent: &provenant_os::fs::Directory,
+    name: &std::ffi::OsStr,
+    cancel: Option<&provenant_core::CancelToken>,
+) -> provenant_os::fs::Result<bool> {
+    use provenant_os::fs::FileKind;
+    if cancel.is_some_and(|token| token.is_cancelled()) {
+        return Ok(false);
+    }
+    let metadata = match parent.metadata_at(name, false) {
+        Ok(metadata) => metadata,
+        Err(error) if error.is_not_found() => return Ok(true),
+        Err(error) => return Err(error),
+    };
+    if metadata.kind != FileKind::Directory {
+        parent.unlink(name)?;
+        return Ok(true);
+    }
+    let directory = parent.open_verified_directory(name)?;
+    directory.make_writable()?;
+    let mut entries = Vec::new();
+    for entry in directory.entries()? {
+        if cancel.is_some_and(|token| token.is_cancelled()) {
+            return Ok(false);
+        }
+        entries.push(entry?);
+    }
+    for entry in entries {
+        if !remove_seed_tree(&directory, &entry, cancel)? {
+            return Ok(false);
+        }
+    }
+    parent.rmdir(name)?;
+    Ok(true)
+}
+
 #[cfg(target_os = "macos")]
 fn clone_registry(
     source: &Path,
     destination: &provenant_os::fs::Directory,
+    cancel: &provenant_core::CancelToken,
 ) -> Result<(), &'static str> {
     clone_tree(
         source,
@@ -433,11 +558,16 @@ fn clone_registry(
             unsupported: "registry_contains_unsupported_entry",
             writable_files: false,
         },
+        cancel,
     )
 }
 
 #[cfg(target_os = "macos")]
-fn clone_git(source: &Path, destination: &provenant_os::fs::Directory) -> Result<(), &'static str> {
+fn clone_git(
+    source: &Path,
+    destination: &provenant_os::fs::Directory,
+    cancel: &provenant_core::CancelToken,
+) -> Result<(), &'static str> {
     clone_tree(
         source,
         destination,
@@ -448,6 +578,7 @@ fn clone_git(source: &Path, destination: &provenant_os::fs::Directory) -> Result
             unsupported: "git_contains_unsupported_entry",
             writable_files: false,
         },
+        cancel,
     )
 }
 
@@ -461,20 +592,34 @@ struct CloneStore {
     writable_files: bool,
 }
 
-/// Clone a store into `destination`, then hold the clone to the seed's rules.
-///
-/// Each top-level directory is cloned in one call. A registry holds tens of
-/// thousands of files, and cloning them one at a time took minutes when several
-/// lanes started together; the kernel clones the same tree in seconds.
+/// Clone one entry at a time so cancellation can interrupt large stores.
 #[cfg(target_os = "macos")]
 fn clone_tree(
     source: &Path,
     destination: &provenant_os::fs::Directory,
     store: &CloneStore,
+    cancel: &provenant_core::CancelToken,
 ) -> Result<(), &'static str> {
-    use provenant_os::fs::{Directory, FileKind};
-    let source = Directory::open_anchor(source).map_err(|_| store.unavailable)?;
+    let source = provenant_os::fs::Directory::open_anchor(source).map_err(|_| store.unavailable)?;
+    clone_entries(&source, destination, store, cancel, 0)
+}
+
+#[cfg(target_os = "macos")]
+fn clone_entries(
+    source: &provenant_os::fs::Directory,
+    destination: &provenant_os::fs::Directory,
+    store: &CloneStore,
+    cancel: &provenant_core::CancelToken,
+    depth: usize,
+) -> Result<(), &'static str> {
+    use provenant_os::fs::FileKind;
+    if depth > 128 {
+        return Err(store.too_deep);
+    }
     for entry in source.entries().map_err(|_| store.read_failed)? {
+        if cancel.is_cancelled() {
+            return Err("cancelled");
+        }
         let name = entry.map_err(|_| store.read_failed)?;
         match source
             .metadata_at(&name, false)
@@ -486,56 +631,30 @@ fn clone_tree(
                     .open_verified_directory(&name)
                     .map_err(|_| store.read_failed)?;
                 destination
-                    .clone_directory_from(&child, &name)
+                    .mkdir(&name, 0o700)
                     .map_err(|_| "clone_failed")?;
+                let target = destination
+                    .open_verified_directory(&name)
+                    .map_err(|_| "clone_failed")?;
+                clone_entries(&child, &target, store, cancel, depth + 1)?;
             }
             FileKind::Regular => {
                 let file = source.open_read(&name).map_err(|_| store.read_failed)?;
                 destination
                     .clone_file_from(&file, &name)
                     .map_err(|_| "clone_failed")?;
+                if store.writable_files {
+                    destination
+                        .open_read(&name)
+                        .and_then(|file| file.make_owner_writable())
+                        .map_err(|_| "clone_failed")?;
+                }
             }
             _ => return Err(store.unsupported),
         }
     }
-    settle_clone(destination, store, 0)
-}
-
-/// Refuse what a seed may not hold, and make the cloned tree private to the lane.
-/// Nothing here follows a link, so an entry refused here was never used.
-#[cfg(target_os = "macos")]
-fn settle_clone(
-    directory: &provenant_os::fs::Directory,
-    store: &CloneStore,
-    depth: usize,
-) -> Result<(), &'static str> {
-    use provenant_os::fs::FileKind;
-    if depth > 128 {
-        return Err(store.too_deep);
-    }
-    for entry in directory.entries().map_err(|_| "clone_failed")? {
-        let name = entry.map_err(|_| "clone_failed")?;
-        match directory
-            .metadata_at(&name, false)
-            .map_err(|_| "clone_failed")?
-            .kind
-        {
-            FileKind::Directory => {
-                let child = directory
-                    .open_verified_directory(&name)
-                    .map_err(|_| "clone_failed")?;
-                child.make_private().map_err(|_| "clone_failed")?;
-                settle_clone(&child, store, depth + 1)?;
-            }
-            FileKind::Regular if store.writable_files => {
-                directory
-                    .open_read(&name)
-                    .and_then(|file| file.make_owner_writable())
-                    .map_err(|_| "clone_failed")?;
-            }
-            FileKind::Regular => {}
-            _ => return Err(store.unsupported),
-        }
+    if cancel.is_cancelled() {
+        return Err("cancelled");
     }
     Ok(())
 }
@@ -543,6 +662,43 @@ fn settle_clone(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cancellation_preserves_private_staging_and_next_seed_cleans_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cancel = provenant_core::CancelToken::new();
+        let result = seed_store_cancellable(
+            tmp.path(),
+            tmp.path(),
+            "registry",
+            Some(&cancel),
+            |_, stage| {
+                stage.mkdir(std::ffi::OsStr::new("partial"), 0o700).unwrap();
+                cancel.cancel();
+                Err("cancelled")
+            },
+        );
+        assert_eq!(result.reason, "cancelled");
+        let cargo = tmp.path().join("cargo-home");
+        assert!(std::fs::read_dir(&cargo).unwrap().any(|entry| {
+            entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".registry-seed-")
+        }));
+        let result = seed_store_cancellable(tmp.path(), tmp.path(), "registry", None, |_, _| {
+            Err("clone_failed")
+        });
+        assert_eq!(result.reason, "clone_failed");
+        assert!(!std::fs::read_dir(&cargo).unwrap().any(|entry| {
+            entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".registry-seed-")
+        }));
+    }
 
     fn generation(state: &Path, name: &str, version: &str, triple: &str) {
         let dir = crate::target_seed::store_path(state)
@@ -699,12 +855,28 @@ mod tests {
             ("RUSTUP_HOME".into(), home.join(".rustup").into_os_string()),
             ("RUSTUP_AUTO_INSTALL".into(), "0".into()),
         ];
-        let outcome = seed_target(true, &state, &cache, &worktree, &home, &env);
+        let outcome = seed_target(
+            true,
+            &state,
+            &cache,
+            &worktree,
+            &home,
+            &env,
+            &provenant_core::CancelToken::new(),
+        );
         assert_eq!((outcome.status, outcome.reason), ("seeded", "cloned"));
         assert!(cache.join("target").is_dir());
         // A refusal records its code and nothing from the environment.
         let refused = [("RUSTC".into(), "/secret/rustc".into())];
-        let outcome = seed_target(true, &state, &cache, &worktree, &home, &refused);
+        let outcome = seed_target(
+            true,
+            &state,
+            &cache,
+            &worktree,
+            &home,
+            &refused,
+            &provenant_core::CancelToken::new(),
+        );
         assert_eq!(
             outcome,
             Outcome::fallback_detail("toolchain_unverified", codes::TOOLCHAIN_ENV_OVERRIDE)
@@ -723,7 +895,12 @@ mod tests {
         std::fs::write(&seed, b"seed").unwrap();
         std::fs::set_permissions(&seed, std::fs::Permissions::from_mode(0o444)).unwrap();
         assert_eq!(
-            seed_target_with(tmp.path(), &cache, "v1", "host", clone_target).status,
+            seed_target_with(tmp.path(), &cache, "v1", "host", |src, dst| clone_target(
+                src,
+                dst,
+                &provenant_core::CancelToken::new()
+            ))
+            .status,
             "seeded"
         );
         std::fs::write(cache.join("target/file"), b"lane").unwrap();
@@ -749,7 +926,12 @@ mod tests {
         read_only(&nested, 0o555);
         read_only(&target.join("debug"), 0o555);
         assert_eq!(
-            seed_target_with(tmp.path(), &cache, "v1", "host", clone_target).status,
+            seed_target_with(tmp.path(), &cache, "v1", "host", |src, dst| clone_target(
+                src,
+                dst,
+                &provenant_core::CancelToken::new()
+            ))
+            .status,
             "seeded"
         );
         let lane = cache.join("target/debug/deps");
@@ -765,7 +947,12 @@ mod tests {
     fn disabled_does_not_touch_cache() {
         let tmp = tempfile::tempdir().unwrap();
         assert_eq!(
-            seed_registry(false, tmp.path(), tmp.path()),
+            seed_registry(
+                false,
+                tmp.path(),
+                tmp.path(),
+                &provenant_core::CancelToken::new()
+            ),
             Outcome::skipped("disabled")
         );
         assert_eq!(std::fs::read_dir(tmp.path()).unwrap().count(), 0);
@@ -776,7 +963,12 @@ mod tests {
     fn enabled_is_a_no_op_on_other_platforms() {
         let tmp = tempfile::tempdir().unwrap();
         assert_eq!(
-            seed_registry(true, tmp.path(), tmp.path()),
+            seed_registry(
+                true,
+                tmp.path(),
+                tmp.path(),
+                &provenant_core::CancelToken::new()
+            ),
             Outcome::skipped("unsupported_platform")
         );
         assert_eq!(std::fs::read_dir(tmp.path()).unwrap().count(), 0);
@@ -921,7 +1113,10 @@ mod tests {
         std::fs::create_dir_all(home.join(".cargo/git/db")).unwrap();
         std::fs::create_dir(&cache).unwrap();
         std::fs::write(home.join(".cargo/git/db/item"), b"host").unwrap();
-        assert_eq!(seed_git(true, &home, &cache).status, "seeded");
+        assert_eq!(
+            seed_git(true, &home, &cache, &provenant_core::CancelToken::new()).status,
+            "seeded"
+        );
         std::fs::write(cache.join("cargo-home/git/db/item"), b"lane").unwrap();
         assert_eq!(
             std::fs::read(home.join(".cargo/git/db/item")).unwrap(),
@@ -938,13 +1133,13 @@ mod tests {
         std::fs::create_dir_all(&home).unwrap();
         std::fs::create_dir(&cache).unwrap();
         assert_eq!(
-            seed_git(true, &home, &cache),
+            seed_git(true, &home, &cache, &provenant_core::CancelToken::new()),
             Outcome::fallback("git_unavailable")
         );
         std::fs::create_dir_all(home.join(".cargo/git/checkouts")).unwrap();
         std::os::unix::fs::symlink("/outside", home.join(".cargo/git/checkouts/link")).unwrap();
         assert_eq!(
-            seed_git(true, &home, &cache),
+            seed_git(true, &home, &cache, &provenant_core::CancelToken::new()),
             Outcome::fallback("git_contains_unsupported_entry")
         );
         assert!(!cache.join("cargo-home/git").exists());
@@ -1007,7 +1202,10 @@ mod tests {
                 ("CARGO_NET_GIT_FETCH_WITH_CLI", "true".into()),
             ],
         );
-        assert_eq!(seed_git(true, &home, &cache).status, "seeded");
+        assert_eq!(
+            seed_git(true, &home, &cache, &provenant_core::CancelToken::new()).status,
+            "seeded"
+        );
         run(
             &["cargo".into(), "check".into(), "--offline".into()],
             &app,
@@ -1040,7 +1238,10 @@ mod tests {
         std::fs::create_dir_all(home.join(".cargo/registry/index")).unwrap();
         std::fs::create_dir(&cache).unwrap();
         std::fs::write(home.join(".cargo/registry/index/item"), b"host").unwrap();
-        assert_eq!(seed_registry(true, &home, &cache).status, "seeded");
+        assert_eq!(
+            seed_registry(true, &home, &cache, &provenant_core::CancelToken::new()).status,
+            "seeded"
+        );
         std::fs::write(cache.join("cargo-home/registry/index/item"), b"lane").unwrap();
         assert_eq!(
             std::fs::read(home.join(".cargo/registry/index/item")).unwrap(),
@@ -1059,7 +1260,10 @@ mod tests {
         std::fs::create_dir(&cache).unwrap();
         std::fs::write(nested.join("lib.rs"), b"host").unwrap();
         std::fs::write(home.join(".cargo/registry/top"), b"top").unwrap();
-        assert_eq!(seed_registry(true, &home, &cache).status, "seeded");
+        assert_eq!(
+            seed_registry(true, &home, &cache, &provenant_core::CancelToken::new()).status,
+            "seeded"
+        );
         let seeded = cache.join("cargo-home/registry");
         assert_eq!(
             std::fs::read(seeded.join("src/index/crate-1.0/src/lib.rs")).unwrap(),
@@ -1078,7 +1282,7 @@ mod tests {
         std::fs::create_dir(&cache).unwrap();
         std::os::unix::fs::symlink("/outside", home.join(".cargo/registry/src/link")).unwrap();
         assert_eq!(
-            seed_registry(true, &home, &cache),
+            seed_registry(true, &home, &cache, &provenant_core::CancelToken::new()),
             Outcome::fallback("registry_contains_unsupported_entry")
         );
         assert!(!cache.join("cargo-home/registry").exists());

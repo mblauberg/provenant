@@ -2216,6 +2216,16 @@ impl RunStore {
             }
             // Capture errors leave the claim available to this or another launcher.
             self.seal_work(&record, &plan, child.map(|_| &request), call)?;
+            // Establish launcher liveness before publishing Starting. Reaping can
+            // then distinguish a live pre-custody handoff from an abandoned one.
+            let _launcher = match attempt.try_lock(
+                std::ffi::OsStr::new("launcher.lock"),
+                provenant_os::fs::LockMode::Exclusive,
+            ) {
+                Ok(guard) => guard,
+                Err(provenant_os::fs::FsError::LockTimeout { .. }) => continue,
+                Err(error) => return Err(error.into()),
+            };
             let record = match self.mark_starting_with_priority(
                 &record,
                 &plan.route,

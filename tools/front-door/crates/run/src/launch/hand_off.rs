@@ -307,6 +307,13 @@ impl RunStore {
                 local_or_withdraw!(Err::<(), _>(typed_local("attempt record", &error)));
             }
         }
+        let setup_cancel = provenant_core::CancelToken::new();
+        let _watch = CancelWatch::start(
+            local_or_withdraw!(directory()),
+            scope,
+            &setup_cancel,
+            call.cancel,
+        );
         if let Some(deliver) = &task.deliver {
             let prepare = || -> Result<Vec<u8>> {
                 let mut holder: HolderContext = decode(&holder_context)?;
@@ -320,6 +327,7 @@ impl RunStore {
                     .ok_or(RunError::Validation("delivery lacks host context"))?;
                 let host = host
                     .with_repo_facts(self.repo_facts())
+                    .cancellable(&setup_cancel)
                     .prepare(writer, deliver)?;
                 host.seal_launch_binding(&self.attempt_dir(record.run_id, id, false)?, scope)?;
                 holder.host_delivery = Some(host);
@@ -340,15 +348,7 @@ impl RunStore {
             local_or_withdraw!(Err::<(), _>(local("launch", &CANCELLED_BEFORE_LAUNCH)));
         }
         if let Some(confinement) = &mut plan.confinement {
-            let setup_cancel = provenant_core::CancelToken::new();
-            let watch = CancelWatch::start(
-                local_or_withdraw!(directory()),
-                scope,
-                &setup_cancel,
-                call.cancel,
-            );
             let prepared = confinement.prepare_git(&setup_cancel);
-            drop(watch);
             if let Err(error) = prepared {
                 lease.withdraw_unlaunched().map_err(|release| {
                     HandOff::Protected(format!("Git setup: {error}; custody withdrawal: {release}"))
@@ -364,14 +364,17 @@ impl RunStore {
                     std::ffi::OsStr::new(crate::writer::SEED_WAIT_LOCK),
                     provenant_os::fs::LockMode::Exclusive,
                     call.lock_budget(),
-                    call.cancel,
+                    &setup_cancel,
                     call.clock,
                 )
                 .ok();
             #[cfg(feature = "fixture")]
-            hold_seed_for_fixture();
-            confinement.seed_cargo(&plan.environment, &seed_attempt);
+            hold_seed_for_fixture(&setup_cancel);
+            confinement.seed_cargo(&plan.environment, &seed_attempt, &setup_cancel);
             drop(seeding);
+            if setup_cancel.is_cancelled() || local_or_withdraw!(cancel_requested()) {
+                local_or_withdraw!(Err::<(), _>(local("launch", &CANCELLED_BEFORE_LAUNCH)));
+            }
             let writer_attempt = local_or_withdraw!(directory());
             if let Some(writer) = &confinement.writer
                 && let Err(error) = crate::objects::prepare_bound(
@@ -475,7 +478,7 @@ impl RunStore {
 /// Integration fixtures can hold the actual handoff at the seed boundary.
 #[cfg(feature = "fixture")]
 #[allow(clippy::disallowed_methods)]
-fn hold_seed_for_fixture() {
+fn hold_seed_for_fixture(cancel: &provenant_core::CancelToken) {
     let Some(directory) = std::env::var_os("PROVENANT_FIXTURE_HOLD_SEED") else {
         return;
     };
@@ -486,7 +489,7 @@ fn hold_seed_for_fixture() {
     let _ = provenant_test_support::wait_for(
         "seed preparation release",
         std::time::Duration::from_secs(30),
-        || !directory.join("hold").exists(),
+        || cancel.is_cancelled() || !directory.join("hold").exists(),
         |released| *released,
     );
 }

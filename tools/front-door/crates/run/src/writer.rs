@@ -658,13 +658,22 @@ impl LaunchConfinement {
         )
     }
     /// Prepare the private Cargo caches while writer custody is held.
-    pub(crate) fn seed_cargo(&self, environment: &[(OsString, OsString)], attempt_dir: &Directory) {
+    pub(crate) fn seed_cargo(
+        &self,
+        environment: &[(OsString, OsString)],
+        attempt_dir: &Directory,
+        cancel: &CancelToken,
+    ) {
+        if cancel.is_cancelled() {
+            return;
+        }
         let writer = self.writer.as_ref().map(|w| (&w.worktree, &w.branch));
         let outcome = match &self.plan.permissions().mode {
             AccessMode::WorktreeWrite(authority) => crate::cargo_seed::seed_registry(
                 self.cargo_registry_seed,
                 &self.home,
                 &authority.cargo_cache().path,
+                cancel,
             ),
             AccessMode::ReadOnly => crate::cargo_seed::Outcome::skipped("read_only_lane"),
         };
@@ -676,11 +685,15 @@ impl LaunchConfinement {
                 "warning: could not record Cargo setup: {error}"
             );
         }
+        if cancel.is_cancelled() {
+            return;
+        }
         let git_outcome = match &self.plan.permissions().mode {
             AccessMode::WorktreeWrite(authority) => crate::cargo_seed::seed_git(
                 self.cargo_registry_seed,
                 &self.home,
                 &authority.cargo_cache().path,
+                cancel,
             ),
             AccessMode::ReadOnly => crate::cargo_seed::Outcome::skipped("read_only_lane"),
         };
@@ -692,6 +705,9 @@ impl LaunchConfinement {
                 std::io::stderr().lock(),
                 "warning: could not record Cargo Git setup: {error}"
             );
+        }
+        if cancel.is_cancelled() {
+            return;
         }
         let target_outcome = match (&self.plan.permissions().mode, writer) {
             (AccessMode::WorktreeWrite(authority), Some((worktree, _)))
@@ -724,6 +740,7 @@ impl LaunchConfinement {
                     worktree.path(),
                     &self.home,
                     environment,
+                    cancel,
                 )
             }
             _ => crate::cargo_seed::Outcome::skipped("read_only_lane"),

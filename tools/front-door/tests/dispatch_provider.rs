@@ -3602,6 +3602,149 @@ fn local_wait_returns_while_writer_seed_is_held() -> Result {
     Ok(())
 }
 
+fn cancel_live_preparation_releases_writer_for_the_next_run() -> Result {
+    if !graph_fixture_available()? {
+        return Ok(());
+    }
+    for phase in ["delivery", "seed"] {
+        let mut rig = writer_pool_redraw_fixture()?;
+        let _cleanup = rig.process_cleanup();
+        let gate = rig.root.join("preparation-gate");
+        fs::create_dir(&gate)?;
+        fs::write(gate.join("hold"), b"hold")?;
+        let git = provenant_os::git::git_executable().ok_or("git")?;
+        if phase == "delivery" {
+            // Intercept the actual host delivery fetch, leaving all preceding
+            // Git commands and the process-group executor on their real paths.
+            let remote = rig.root.join("remote.git");
+            let init = rig.execute(
+                &git,
+                &["init", "--bare", remote.to_str().ok_or("remote")?],
+                None,
+            )?;
+            assert_eq!(code(&init), 0, "{init:?}");
+            let add = rig.execute(
+                &git,
+                &["remote", "add", "origin", remote.to_str().ok_or("remote")?],
+                None,
+            )?;
+            assert_eq!(code(&add), 0, "{add:?}");
+            let push = rig.execute(&git, &["push", "origin", "HEAD:refs/heads/main"], None)?;
+            assert_eq!(code(&push), 0, "{push:?}");
+            let wrapper = rig.root.join("slow-git");
+            fs::write(
+                &wrapper,
+                format!(
+                    "#!/bin/sh\ncase \" $* \" in *' fetch '*) if [ -f '{}/hold' ]; then : > '{}/entered'; exec /bin/sleep 30; fi;; esac\nexec '{}' \"$@\"\n",
+                    gate.display(),
+                    gate.display(),
+                    git.display()
+                ),
+            )?;
+            fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o700))?;
+            rig.env.retain(|(key, _)| key != "PROVENANT_GIT");
+            rig.env
+                .push(("PROVENANT_GIT".into(), wrapper.into_os_string()));
+        } else {
+            rig.env.push((
+                "PROVENANT_FIXTURE_HOLD_SEED".into(),
+                gate.clone().into_os_string(),
+            ));
+        }
+        let prompt = rig.root.join("cancel-prompt.txt");
+        fs::write(&prompt, "reply OK")?;
+        let first = rig.command(&[
+            "dispatch",
+            "--operation-id",
+            "cancel-preparation",
+            "--route",
+            "writer-redraw",
+            "--mode",
+            "worktree-write",
+            "--worktree-branch",
+            "fixture/cancel-preparation",
+            "--base",
+            "HEAD",
+            "--deliver",
+            if phase == "delivery" { "push" } else { "none" },
+            "--prompt-file",
+            prompt.to_str().ok_or("prompt")?,
+            "--wait",
+            "1s",
+            "--json",
+        ])?;
+        assert!(matches!(code(&first), 0 | 124), "{phase}: {first:?}");
+        let first: Value = serde_json::from_slice(&first.stdout.bytes)?;
+        let run = first["data"]["run_id"].as_str().ok_or("run id")?;
+        let worktree = first["data"]["worktree"]["path"]
+            .as_str()
+            .ok_or("worktree")?;
+        provenant_test_support::wait_for(
+            "preparation entered",
+            std::time::Duration::from_secs(20),
+            || gate.join("entered").exists(),
+            |ready| *ready,
+        )?;
+        let before = std::time::Instant::now();
+        let stopped = rig.command(&["cancel", run, "--json"])?;
+        let elapsed = before.elapsed();
+        let stopped: Value = serde_json::from_slice(&stopped.stdout.bytes)?;
+        assert!(
+            elapsed < std::time::Duration::from_secs(4),
+            "{phase}: {elapsed:?}: {stopped}"
+        );
+        assert_eq!(
+            stopped["data"]["receipts"][0]["receipt"]["state"], "cancelled",
+            "{phase}: {stopped}"
+        );
+        assert_eq!(
+            stopped["data"]["lanes"][0]["state"], "cancelled",
+            "{phase}: {stopped}"
+        );
+        // Keep the launcher blocked until cancellation has returned. The next
+        // real dispatch must acquire this same worktree's writer immediately.
+        fs::remove_file(gate.join("hold"))?;
+        let next = rig.command(&[
+            "dispatch",
+            "--operation-id",
+            "after-cancel",
+            "--route",
+            "writer-redraw",
+            "--mode",
+            "worktree-write",
+            "--worktree",
+            worktree,
+            "--base",
+            "HEAD",
+            "--deliver",
+            "none",
+            "--prompt-file",
+            prompt.to_str().ok_or("prompt")?,
+            "--wait",
+            "30s",
+            "--json",
+        ])?;
+        assert_eq!(code(&next), 0, "{phase}: {next:?}");
+        let next: Value = serde_json::from_slice(&next.stdout.bytes)?;
+        assert!(next["data"]["run_id"].is_string(), "{phase}: {next}");
+        let lanes = rig.command(&[
+            "lanes",
+            "--id",
+            next["data"]["run_id"].as_str().ok_or("next run")?,
+            "--all",
+            "--json",
+        ])?;
+        let lanes: Value = serde_json::from_slice(&lanes.stdout.bytes)?;
+        assert!(
+            lanes["data"]["lanes"]
+                .as_array()
+                .is_some_and(|rows| rows.iter().any(|row| row["state"] == "succeeded")),
+            "{phase}: {lanes}"
+        );
+    }
+    Ok(())
+}
+
 fn graph_writer_launches_second_eligible_pool_member() -> Result {
     if !graph_fixture_available()? {
         return Ok(());
@@ -6108,6 +6251,7 @@ fn main() -> ExitCode {
                 "owned_dispatch_retains_failed_attempt_and_replays",
                 "owned_dispatch_refuses_adopted_owner_and_cleans_refused_creation",
                 "local_wait_returns_while_writer_seed_is_held",
+                "cancel_live_preparation_releases_writer_for_the_next_run",
                 "printed_credentials_leave_no_plaintext_in_run_files",
                 "codex_dispatch_observes_rollout",
                 "codex_pinned_reader_launches_from_head_and_base",
@@ -6176,6 +6320,7 @@ fn main() -> ExitCode {
                         owned_dispatch_refuses_adopted_owner_and_cleans_refused_creation()
                     }
                     "local_wait_returns_while_writer_seed_is_held" => local_wait_returns_while_writer_seed_is_held(),
+                    "cancel_live_preparation_releases_writer_for_the_next_run" => cancel_live_preparation_releases_writer_for_the_next_run(),
                     "printed_credentials_leave_no_plaintext_in_run_files" => printed_credentials_leave_no_plaintext_in_run_files(),
                     "codex_dispatch_observes_rollout" => codex_dispatch_observes_rollout(),
                     "codex_pinned_reader_launches_from_head_and_base" => codex_pinned_reader_launches_from_head_and_base(),
