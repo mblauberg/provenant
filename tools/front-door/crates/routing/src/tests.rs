@@ -6231,3 +6231,64 @@ fn model_choice_outside_route_obeys_restrictions() -> Result<(), Box<dyn std::er
     assert_eq!(resolve(&query, &ctx)?.model, "gpt-6-luna");
     Ok(())
 }
+
+#[test]
+fn alias_skips_known_spent_members_and_refuses_all_with_resets()
+-> Result<(), Box<dyn std::error::Error>> {
+    use provenant_quota::{QuotaStatus, QuotaWindow};
+    let catalogue = Catalogue::bundled()?;
+    let config: RoutingConfig = serde_json::from_value(serde_json::json!({"pools":{"trial":[
+        {"model":"codex/gpt-6-luna","weight":100},
+        {"model":"codex/gpt-6.1-sol","weight":1}
+    ]}}))?;
+    let records = [availability()];
+    let access = [AccessContext {
+        adapter: "codex",
+        disclosure_ref: "fixture",
+        confinement_ref: "fixture",
+    }];
+    let spent = |model: &str, reset| -> Result<QuotaObservation, RoutingError> {
+        let mut q = quota(model, "opaque-account", QuotaStatus::Exhausted, 1, 50, 60)?;
+        q.snapshot.windows.push(QuotaWindow {
+            pool: "secondary".into(),
+            window_seconds: Some(1000),
+            used_basis_points: 10_000,
+            resets_unix_seconds: Some(reset),
+        });
+        Ok(q)
+    };
+    let first = spent("codex/gpt-6-luna", 400)?;
+    let readings = [first.clone()];
+    let ctx = RoutingContext {
+        availability: &records,
+        access: &access,
+        quota: &readings,
+        ..context(&catalogue, &config, now()?)
+    };
+    let mut alias = request("codex/gpt-6-luna")?;
+    alias.choice = RouteChoice::NamedRoute(RouteName::parse("trial")?);
+    assert_eq!(resolve(&alias, &ctx)?.model, "gpt-6.1-sol");
+    assert_eq!(
+        resolve(&request("codex/gpt-6-luna")?, &ctx)?.model,
+        "gpt-6-luna"
+    );
+    let readings = [first, spent("codex/gpt-6.1-sol", 300)?];
+    let ctx = RoutingContext {
+        quota: &readings,
+        ..ctx
+    };
+    let Err(RoutingError::NoEligiblePoolMember { exclusions }) = resolve(&alias, &ctx) else {
+        panic!("all spent alias must refuse")
+    };
+    assert!(
+        exclusions
+            .iter()
+            .any(|e| e.contains("codex/gpt-6-luna") && e.contains("400"))
+    );
+    assert!(
+        exclusions
+            .iter()
+            .any(|e| e.contains("codex/gpt-6.1-sol") && e.contains("300"))
+    );
+    Ok(())
+}

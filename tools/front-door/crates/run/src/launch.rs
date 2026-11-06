@@ -1592,6 +1592,7 @@ impl RunStore {
                     effective_task.account = None;
                 }
                 effective_task.route = record.requested_route.clone();
+                effective_task.profile = record.profile.clone();
                 effective_task.fallback.clear();
                 if task.writer.is_some()
                     && let Some(prior) = &prior

@@ -2047,7 +2047,42 @@ fn classify_pool(
     for member in members {
         let effort = request.effort.clone().or(member.effort.clone());
         let mut factor_basis_points = NEUTRAL_FACTOR_BASIS_POINTS;
-        if let Some(detail) = excluded_members.reason(&member.model, context) {
+        let spent = context
+            .availability
+            .iter()
+            .filter(|a| a.adapter == member.model.adapter()
+                && provenant_records::AdapterSpec::get(member.model.adapter()).is_none_or(|spec| {
+                    a.account_key.as_deref().is_none_or(|key| spec.account_serves_model(key, member.model.model()))
+                }))
+            .map(|a| latest_reading(&member.model, a, context, false))
+            .collect::<Vec<_>>();
+        let exhausted = !spent.is_empty()
+            && spent
+                .iter()
+                .all(|q| q.is_some_and(|q| reading_exhausted(&q.snapshot, &member.model, context)));
+        let reset = spent
+            .iter()
+            .filter_map(|q| *q)
+            .flat_map(|q| &q.snapshot.windows)
+            .filter(|w| {
+                window_serves(
+                    member.model.adapter(),
+                    &w.pool,
+                    context.catalogue.quota_pool(&member.model),
+                )
+            })
+            .filter(|w| w.used_basis_points >= 10_000)
+            .filter_map(|w| w.resets_unix_seconds)
+            .filter(|reset| *reset > context.now_seconds())
+            .min();
+        let spent_detail = exhausted.then(|| match reset {
+            Some(reset) => format!("exhausted; earliest known reset {reset}"),
+            None => "exhausted; reset unknown".to_owned(),
+        });
+        if let Some(detail) = excluded_members
+            .reason(&member.model, context)
+            .or(spent_detail)
+        {
             classified
                 .exclusions
                 .push(format!("{}: {detail}", member.model.as_str()));
