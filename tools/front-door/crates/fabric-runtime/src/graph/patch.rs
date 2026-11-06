@@ -444,18 +444,6 @@ pub fn retry_node(
                 .filter(|node| node.id.starts_with(&prefix))
                 .map(|node| node.id.clone()),
         );
-        // A producer's old descendants cannot share names and dependency edges
-        // with a new execution. Until generations can be retired atomically,
-        // refuse this topology rather than replaying stale dynamic work.
-        if graph.checkpoint.expansions.iter().any(|expansion| {
-            !expansion.nodes.is_empty()
-                && (expansion.source == id || expansion.source.starts_with(&prefix))
-        }) {
-            return Err(PatchError::new(
-                "redo_dynamic_subtree",
-                "container retry requires retirement of its dynamic subtree",
-            ));
-        }
     }
     for progress in &graph.checkpoint.nodes {
         if reset_ids.contains(&progress.id)
@@ -537,6 +525,27 @@ pub fn retry_node(
                 snapshots.entry(prior.id.clone()).or_insert(value);
             }
         }
+    }
+    // A producer's old descendants cannot share names and dependency edges
+    // with a new execution, so their expansions retire in this same candidate.
+    let retired = if container {
+        super::retire::dynamic_subtree(&mut candidate, id, &format!("retry node {id}"))
+            .map_err(PatchError::invalid)?
+    } else {
+        BTreeSet::new()
+    };
+    if !retired.is_empty() {
+        // The container's own spec loses the wiring the retired expansions added.
+        node = plans::expand(
+            graph.document,
+            &candidate.extensions,
+            &candidate.expansions,
+            context.limits,
+        )?
+        .nodes
+        .into_iter()
+        .find(|node| node.id == id)
+        .ok_or_else(|| PatchError::invalid(format!("unknown node {id}")))?;
     }
     for progress in &mut candidate.nodes {
         if reset_ids.contains(&progress.id) {

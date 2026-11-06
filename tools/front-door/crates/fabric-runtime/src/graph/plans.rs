@@ -338,7 +338,7 @@ pub(super) fn expand(
 ) -> Result<GraphDocument, String> {
     let mut expanded = loops::expand(document, extensions, limits)?;
     let mut sources = std::collections::BTreeSet::new();
-    for addition in expansions {
+    for addition in expansions.iter().filter(|addition| !addition.retired()) {
         // A patch may come from the host (no source), a parent may patch more
         // than once, and a patch may only skip or replace.
         let valid = if addition.patch.is_some() {
@@ -379,7 +379,7 @@ pub(super) fn validate_persisted_topology(
             "expansion topology requires a valid base plan",
         )
     })?;
-    for addition in expansions {
+    for addition in expansions.iter().filter(|addition| !addition.retired()) {
         // A deferred review is resolved by the host, not derived from a planner
         // specification; its topology has always been persisted with it.
         if expanded

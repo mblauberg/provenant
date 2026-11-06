@@ -41,6 +41,7 @@ mod plans;
 mod prompt_store;
 pub mod relay;
 mod repair;
+mod retire;
 pub mod template;
 #[cfg(test)]
 mod template_tests;
