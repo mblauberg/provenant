@@ -3045,100 +3045,114 @@ fn main() -> ExitCode {
     {
         fixture()
     } else {
-        provenant_supervisor::fixture::run_libtest(
-            &args,
-            &[
-                #[cfg(target_os = "macos")]
+        let tests: &[(&str, fn() -> Result)] = &[
+            #[cfg(target_os = "macos")]
+            (
                 "graph_launch_proceeds_when_provider_update_is_busy",
+                graph_launch_proceeds_when_provider_update_is_busy,
+            ),
+            (
                 "graph_settlement_records_a_failed_advance_for_status",
+                graph_settlement_records_a_failed_advance_for_status,
+            ),
+            (
                 "graph_node_reads_full_upstream_result_from_its_inputs_directory",
-                "opencode_stderr_live_quota",
+                graph_node_reads_full_upstream_result_from_its_inputs_directory,
+            ),
+            ("opencode_stderr_live_quota", opencode_stderr_live_quota),
+            (
                 "opencode_usage_limit_stops_hanging_provider",
+                opencode_usage_limit_stops_hanging_provider,
+            ),
+            (
                 "pool_receipt_excludes_prompt_and_credential_from_artifacts",
+                pool_receipt_excludes_prompt_and_credential_from_artifacts,
+            ),
+            (
                 "printed_credentials_leave_no_plaintext_in_run_files",
+                printed_credentials_leave_no_plaintext_in_run_files,
+            ),
+            (
                 "receipt_output_reports_unknown_route_for_settled_lost_attempt",
+                receipt_output_reports_unknown_route_for_settled_lost_attempt,
+            ),
+            (
                 "output_names_the_attempt_it_reads_and_writes_or_locates_parts",
+                output_names_the_attempt_it_reads_and_writes_or_locates_parts,
+            ),
+            (
                 "receipt_output_resolves_run_task_and_attempt",
+                receipt_output_resolves_run_task_and_attempt,
+            ),
+            (
                 "receipt_output_classifies_writers_and_refuses_ambiguous_or_running_attempts",
+                receipt_output_classifies_writers_and_refuses_ambiguous_or_running_attempts,
+            ),
+            (
                 "opencode_usage_limit_settlement_is_bounded",
+                opencode_usage_limit_settlement_is_bounded,
+            ),
+            (
                 "host_native_preparation_uses_the_provider_contract",
+                host_native_preparation_uses_the_provider_contract,
+            ),
+            (
                 "graph_host_native_launch_uses_the_provider_contract",
+                graph_host_native_launch_uses_the_provider_contract,
+            ),
+            (
                 "graph_codex_rollout_binds_observed_route_and_missing_rollout_is_explicit",
+                graph_codex_rollout_binds_observed_route_and_missing_rollout_is_explicit,
+            ),
+            (
                 "graph_read_only_alias_retries_another_member_after_empty_launch_quota",
+                graph_read_only_alias_retries_another_member_after_empty_launch_quota,
+            ),
+            (
                 "named_route_writer_retries_quota_with_partial_work",
+                named_route_writer_retries_quota_with_partial_work,
+            ),
+            (
                 "named_route_read_only_retries_quota_with_partial_output",
-
+                named_route_read_only_retries_quota_with_partial_output,
+            ),
+            (
                 "graph_opencode_observes_v2_wal_session",
+                graph_opencode_observes_v2_wal_session,
+            ),
+            (
                 "opencode_free_pool_cools_second_model",
+                opencode_free_pool_cools_second_model,
+            ),
+            (
                 "opencode_free_reset_cools_pool_until_reset_and_restores",
+                opencode_free_reset_cools_pool_until_reset_and_restores,
+            ),
+            (
                 "agy_individual_quota_cools_model_until_reset",
+                agy_individual_quota_cools_model_until_reset,
+            ),
+            (
                 "agy_denied_command_reaches_result_without_entering_terminal_diagnostics",
+                agy_denied_command_reaches_result_without_entering_terminal_diagnostics,
+            ),
+            (
                 "agy_denial_result_stays_out_of_terminal_diagnostics",
+                agy_denial_result_stays_out_of_terminal_diagnostics,
+            ),
+            (
                 "codex_capacity_settles_without_quota_refusal",
-            ],
-            |name| {
-                let result = match name {
-                    #[cfg(target_os = "macos")]
-                    "graph_launch_proceeds_when_provider_update_is_busy" => graph_launch_proceeds_when_provider_update_is_busy(),
-                    "graph_settlement_records_a_failed_advance_for_status" => graph_settlement_records_a_failed_advance_for_status(),
-                    "graph_node_reads_full_upstream_result_from_its_inputs_directory" => graph_node_reads_full_upstream_result_from_its_inputs_directory(),
-                    "opencode_stderr_live_quota" => opencode_stderr_live_quota(),
-                    "opencode_usage_limit_stops_hanging_provider" => opencode_usage_limit_stops_hanging_provider(),
-                    "pool_receipt_excludes_prompt_and_credential_from_artifacts" => pool_receipt_excludes_prompt_and_credential_from_artifacts(),
-                    "printed_credentials_leave_no_plaintext_in_run_files" => printed_credentials_leave_no_plaintext_in_run_files(),
-
-                    "receipt_output_reports_unknown_route_for_settled_lost_attempt" => {
-                        receipt_output_reports_unknown_route_for_settled_lost_attempt()
-                    }
-                    "output_names_the_attempt_it_reads_and_writes_or_locates_parts" => {
-                        output_names_the_attempt_it_reads_and_writes_or_locates_parts()
-                    }
-                    "receipt_output_resolves_run_task_and_attempt" => {
-                        receipt_output_resolves_run_task_and_attempt()
-                    }
-                    "receipt_output_classifies_writers_and_refuses_ambiguous_or_running_attempts" => {
-                        receipt_output_classifies_writers_and_refuses_ambiguous_or_running_attempts()
-                    }
-
-                    "opencode_usage_limit_settlement_is_bounded" => {
-                        opencode_usage_limit_settlement_is_bounded()
-                    }
-
-                    "graph_host_native_launch_uses_the_provider_contract" => graph_host_native_launch_uses_the_provider_contract(),
-                    "graph_codex_rollout_binds_observed_route_and_missing_rollout_is_explicit" => graph_codex_rollout_binds_observed_route_and_missing_rollout_is_explicit(),
-                    "host_native_preparation_uses_the_provider_contract" => {
-                        host_native_preparation_uses_the_provider_contract()
-                    }
-
-                    "graph_read_only_alias_retries_another_member_after_empty_launch_quota" => graph_read_only_alias_retries_another_member_after_empty_launch_quota(),
-                    "named_route_writer_retries_quota_with_partial_work" => named_route_writer_retries_quota_with_partial_work(),
-                    "named_route_read_only_retries_quota_with_partial_output" => named_route_read_only_retries_quota_with_partial_output(),
-
-                    "graph_opencode_observes_v2_wal_session" => graph_opencode_observes_v2_wal_session(),
-                    "opencode_free_pool_cools_second_model" => {
-                        opencode_free_pool_cools_second_model()
-                    }
-                    "opencode_free_reset_cools_pool_until_reset_and_restores" => {
-                        opencode_free_reset_cools_pool_until_reset_and_restores()
-                    }
-                    "agy_individual_quota_cools_model_until_reset" => {
-                        agy_individual_quota_cools_model_until_reset()
-                    }
-                    "agy_denied_command_reaches_result_without_entering_terminal_diagnostics" => {
-                        agy_denied_command_reaches_result_without_entering_terminal_diagnostics()
-                    }
-                    "agy_denial_result_stays_out_of_terminal_diagnostics" => {
-                        agy_denial_result_stays_out_of_terminal_diagnostics()
-                    }
-                    "codex_capacity_settles_without_quota_refusal" => {
-                        codex_capacity_settles_without_quota_refusal()
-                    }
-
-                    _ => return Err(io::Error::other(format!("unknown test: {name}"))),
-                };
-                result.map_err(|e| io::Error::other(e.to_string()))
-            },
-        )
+                codex_capacity_settles_without_quota_refusal,
+            ),
+        ];
+        let names: Vec<_> = tests.iter().map(|(name, _)| *name).collect();
+        provenant_supervisor::fixture::run_libtest(&args, &names, |name| {
+            let (_, test) = tests
+                .iter()
+                .find(|(candidate, _)| *candidate == name)
+                .ok_or_else(|| io::Error::other(format!("unknown test: {name}")))?;
+            test().map_err(|e| io::Error::other(e.to_string()))
+        })
         .map_err(Into::into)
     };
     match result {
