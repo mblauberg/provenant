@@ -3871,6 +3871,12 @@ fn verify_lane_profile(
             "lane-swift: PASS"
         };
         assert!(String::from_utf8_lossy(&output.stdout.bytes).contains(marker));
+        if probe == Some(Probe::Swift) {
+            // Nested child admission is exercised by the lane preparation
+            // fixtures; it is unrelated to this writer's Swift build proof.
+            host.provider_exited(&parent.encode()?, None)?;
+            return Ok(());
+        }
     }
     if cfg!(target_os = "macos") && probe == Some(Probe::CargoReadOnly) {
         let scratch = &confinement.plan.permissions().scratch.path;

@@ -868,7 +868,7 @@ fn interrupted_progress_recovers_on_another_account_in_the_same_worktree() -> Re
         "--prompt-file",
         prompt.to_str().ok_or("prompt path")?,
         "--wait",
-        "3s",
+        "1s",
         "--json",
     ])?;
     let launch: Value = serde_json::from_slice(&output.stdout.bytes)?;
@@ -897,7 +897,7 @@ fn interrupted_progress_recovers_on_another_account_in_the_same_worktree() -> Re
                             "attempt_number": row["attempt_number"],
                             "state": row["state"],
                             "continuation": row["continuation"],
-                            "account": row["account"],
+                            "account": row["applied_route"]["account_key"],
                         })
                     })
                     .collect::<Vec<_>>()
