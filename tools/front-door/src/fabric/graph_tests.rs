@@ -24,6 +24,10 @@ mod graph_writer_admission_tests {
             graph_writer_initialisation_error("head", WorktreeError::UnknownWriter),
             FacadeError::WriterUnknown
         ));
+        let error = graph_writer_initialisation_error("head", WorktreeError::UnknownOccupancy {
+            path: "/lane".into(), detail: "retained fence".into(),
+        });
+        assert!(matches!(error, FacadeError::DispatchRefused { reason, .. } if reason.contains("/lane") && reason.contains("retained fence")));
         for error in [
             lock("writer.lock"),
             WorktreeError::LiveWriter,
@@ -176,14 +180,14 @@ mod graph_writer_admission_tests {
 
     #[test]
     fn real_graph_writer_retries_registry_lock_and_launches() -> Result<(), Box<dyn std::error::Error>> {
-        use provenant_confinement::worktrees::{self, WorktreeCreate, WorkerObserver, WorkerState};
+        use provenant_confinement::worktrees::{self, WorktreeCreate, WorkerObserver, Occupancy};
         use provenant_fabric_runtime::graph::{self, NodeState};
         use provenant_os::fs::{Directory, LockMode};
         if super::peer_tests::host_test("fabric::graph_writer_admission_tests::real_graph_writer_retries_registry_lock_and_launches")? { return Ok(()); }
         struct Free;
         impl WorkerObserver for Free {
-            fn observe_roots(&self, roots: &[PathBuf]) -> std::collections::BTreeMap<PathBuf, WorkerState> {
-                roots.iter().cloned().map(|root| (root, WorkerState::Free)).collect()
+            fn observe_roots(&self, roots: &[PathBuf]) -> std::collections::BTreeMap<PathBuf, Occupancy> {
+                roots.iter().cloned().map(|root| (root, Occupancy::Available)).collect()
             }
         }
         let rig = crate::worktree_tests::support::TestRig::new()?;
@@ -716,7 +720,7 @@ mod result_tests {
         use provenant_fabric_runtime::graph::AttemptOwner;
         struct FreeWorkers;
         impl WorkerObserver for FreeWorkers {
-            fn observe_roots(&self, _: &[PathBuf]) -> std::collections::BTreeMap<PathBuf, provenant_confinement::worktrees::WorkerState> {
+            fn observe_roots(&self, _: &[PathBuf]) -> std::collections::BTreeMap<PathBuf, provenant_confinement::worktrees::Occupancy> {
                 Default::default()
             }
         }
@@ -758,6 +762,50 @@ mod result_tests {
         assert!(super::graph_human::graph_human_full(&run).contains("error=blocked by ordinary (Failed)"));
         let summary = super::graph_human::graph_summary(&serde_json::to_value(&run).unwrap());
         assert!(format!("{summary:?}").contains("blocked by ordinary (Failed)"));
+    }
+
+    #[test]
+    fn graph_status_renders_invalid_input_field_and_reason() {
+        let mut run = graph_status_fixture();
+        let node = &mut run.checkpoint.nodes[0];
+        node.state = provenant_fabric_runtime::graph::NodeState::Blocked;
+        node.advance_error = Some("node ordinary: the launch failed [invalid_input]: input exceeds the 1 MiB limit; check the named input field and retry".into());
+        let human = super::graph_human(&run);
+        let machine = serde_json::to_value(&run).unwrap();
+        for text in [human, machine.to_string()] {
+            assert!(text.contains("input"));
+            assert!(text.contains("1 MiB"));
+            assert!(text.contains("retry"));
+        }
+    }
+
+    #[test]
+    fn graph_status_renders_unreadable_input_without_source_text() {
+        use provenant_fabric_runtime::coordination::facade::FacadeError;
+        use provenant_records::diagnostic::IoFact;
+        let diagnostic = FacadeError::Io {
+            operation: "TOKEN_SENTINEL".into(),
+            path: Some("/private/host".into()),
+            delivery_limit: None,
+            delivery_stage: None,
+            resource: None,
+            input_failure: Some(IoFact::InputUnreadable),
+        }.diagnostic();
+        let mut run = graph_status_fixture();
+        let node = &mut run.checkpoint.nodes[0];
+        node.state = provenant_fabric_runtime::graph::NodeState::Blocked;
+        node.advance_error = Some(format!(
+            "node ordinary: the launch failed: [{}] {}; {}",
+            diagnostic.code, diagnostic.next.unwrap(), diagnostic.detail.unwrap()
+        ));
+        let human = super::graph_human(&run);
+        let machine = serde_json::to_value(&run).unwrap().to_string();
+        for text in [human, machine] {
+            assert!(text.contains("input could not be read"));
+            assert!(text.contains("retry"));
+            assert!(!text.contains("TOKEN_SENTINEL"));
+            assert!(!text.contains("/private/host"));
+        }
     }
 
     #[test]
@@ -1023,12 +1071,12 @@ mod result_tests {
             fn observe_roots(
                 &self,
                 roots: &[PathBuf],
-            ) -> std::collections::BTreeMap<PathBuf, provenant_confinement::worktrees::WorkerState>
+            ) -> std::collections::BTreeMap<PathBuf, provenant_confinement::worktrees::Occupancy>
             {
                 roots
                     .iter()
                     .cloned()
-                    .map(|root| (root, provenant_confinement::worktrees::WorkerState::Free))
+                    .map(|root| (root, provenant_confinement::worktrees::Occupancy::Available))
                     .collect()
             }
         }
@@ -1129,7 +1177,7 @@ mod result_tests {
             fn observe_roots(
                 &self,
                 _roots: &[PathBuf],
-            ) -> std::collections::BTreeMap<PathBuf, provenant_confinement::worktrees::WorkerState>
+            ) -> std::collections::BTreeMap<PathBuf, provenant_confinement::worktrees::Occupancy>
             {
                 Default::default()
             }
@@ -1714,7 +1762,7 @@ mod result_tests {
         }
         assert_eq!(
             super::decode_graph_document(br#"{"schema_version":0}"#).unwrap_err(),
-            super::FacadeError::invalid("graph document schema_version must be 1 or 2")
+            super::FacadeError::invalid(provenant_fabric_runtime::coordination::facade::InvalidInputDetail::Schema)
         );
     }
 

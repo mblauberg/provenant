@@ -51,6 +51,55 @@ impl From<OwnWorktreeError> for Fail {
     }
 }
 
+fn warn_worktree_census(path: &Path, detail: &str) {
+    let _ = write_worktree_census_warning(&mut std::io::stderr().lock(), path, detail);
+}
+
+/// Warn about process evidence while preserving custody uncertainty as a refusal.
+pub(super) fn warn_advisory_occupancy(
+    path: &Path,
+    occupancy: &provenant_confinement::worktrees::Occupancy,
+) -> Result<(), provenant_confinement::worktrees::WorktreeError> {
+    use provenant_confinement::worktrees::{Occupancy, OccupancyUnknownSource, WorktreeError};
+    match occupancy {
+        Occupancy::Observed { process } => {
+            let detail = process.as_ref().map_or_else(
+                || "a process was observed".to_owned(),
+                |process| format!("process {process} ({})", process.kind),
+            );
+            warn_worktree_census(path, &detail);
+        }
+        Occupancy::Unknown {
+            scope,
+            evidence,
+            source: OccupancyUnknownSource::Census,
+        } => {
+            warn_worktree_census(scope, evidence);
+        }
+        Occupancy::Unknown {
+            scope,
+            evidence,
+            source: OccupancyUnknownSource::Custody,
+        } => {
+            return Err(WorktreeError::UnknownOccupancy {
+                path: scope.clone(),
+                detail: evidence.clone(),
+            });
+        }
+        Occupancy::Available | Occupancy::Held => {}
+    }
+    Ok(())
+}
+
+pub(super) fn write_worktree_census_warning(
+    output: &mut impl std::io::Write,
+    path: &Path,
+    detail: &str,
+) -> std::io::Result<()> {
+    let warning = format!("{}: {detail}", path.display());
+    writeln!(output, "warning: {}", plain_text(&warning, 4096))
+}
+
 /// Create or claim the owned tree and publish its lane ownership. A new
 /// tree's owner records the commit creation pinned, so nothing is resolved
 /// again after the side effect and a replay finds the same base.
@@ -87,7 +136,7 @@ pub(super) fn own_worktree(
         cancel,
         |context| {
             use provenant_confinement::worktrees::{
-                self, WorktreeCreate, WorktreeOrigin, WorktreeOwner, WriterState,
+                self, Occupancy, WorktreeCreate, WorktreeOrigin, WorktreeOwner,
             };
             let context = &worktrees::WorktreeContext {
                 workers,
@@ -108,15 +157,14 @@ pub(super) fn own_worktree(
             } else {
                 None
             };
-            let existing = worktrees::list_with_observation(context, cancel)?
+            let existing = worktrees::list(context, cancel)?
                 .into_iter()
                 .find(|observation| {
-                    observation.info.branch.as_deref()
-                        == Some(format!("refs/heads/{branch}").as_str())
+                    observation.branch.as_deref() == Some(format!("refs/heads/{branch}").as_str())
                 });
             let (info, pinned) = match existing {
                 Some(observation) => {
-                    let info = observation.info;
+                    let info = observation;
                     if let Some(base) = requested_base_oid
                         && !worktrees::is_ancestor(context, base, info.head, cancel)?
                     {
@@ -126,56 +174,21 @@ pub(super) fn own_worktree(
                             base,
                         });
                     }
+                    warn_advisory_occupancy(&info.path, &info.occupancy)?;
                     let tree = provenant_confinement::verify_worktree(context.repo, &info.path)?;
-                    let owner = worktrees::load_owner(&tree)?;
+                    let owner = worktrees::load_owner(&tree);
+                    if matches!(info.occupancy, Occupancy::Held) {
+                        return Err(worktrees::WorktreeError::WriterBusy {
+                            holder: worktrees::writer_holder(context.project_state, &info.path),
+                        });
+                    }
+                    let owner = owner?;
                     if owner
                         .as_ref()
                         .is_some_and(|owner| owner.origin != WorktreeOrigin::Lane)
                     {
                         owner_refused = true;
                         return Err(worktrees::WorktreeError::UnknownWriter);
-                    }
-                    if observation.observed == worktrees::WorkerState::Unknown
-                        && !observation.registration_unknown
-                        && owner.is_none()
-                        && worktrees::cache_writer_probe(context.project_state, &info.path).is_ok()
-                    {
-                        let evidence = context
-                            .workers
-                            .observe_evidence(std::slice::from_ref(&info.path), false);
-                        return Err(worktrees::WorktreeError::CensusUnknown {
-                            path: info.path.clone(),
-                            detail: evidence
-                                .details
-                                .get(&info.path)
-                                .cloned()
-                                .unwrap_or_else(|| context.workers.incomplete_census_detail()),
-                        });
-                    }
-                    match info.writer {
-                        WriterState::Free => {}
-                        WriterState::Busy => {
-                            return Err(worktrees::WorktreeError::WriterBusy {
-                                holder: owner.and_then(|owner| owner.attempt_id),
-                            });
-                        }
-                        WriterState::Live => {
-                            return Err(worktrees::live_refusal(context.workers, &info.path));
-                        }
-                        WriterState::Unknown => {
-                            let settled = owner
-                                .as_ref()
-                                .and_then(|owner| owner.attempt_id)
-                                .is_some_and(&terminal_attempt);
-                            if !settled
-                                || worktrees::cache_writer_probe(context.project_state, &info.path)
-                                    .is_err()
-                            {
-                                return Err(worktrees::WorktreeError::UnknownWriterAt {
-                                    path: info.path.clone(),
-                                });
-                            }
-                        }
                     }
                     (info, None)
                 }
@@ -222,14 +235,18 @@ pub(super) fn own_worktree(
                         // An unowned existing tree: nothing was created, so
                         // a base that does not resolve leaves no side effect.
                         (None, None, None) => {
-                            let git = provenant_os::git::git_executable()
-                                .ok_or(worktrees::WorktreeError::InvalidRequest)?;
-                            run::resolve_git_base(
-                                &git,
-                                context.repo.root_path(),
-                                requested_base.unwrap_or("HEAD"),
-                            )
-                            .map_err(|_| worktrees::WorktreeError::InvalidRequest)?
+                            let head = provenant_confinement::repo::GitRevision::new("HEAD")
+                                .map_err(|_| worktrees::WorktreeError::InvalidRequest)?;
+                            context
+                                .facts
+                                .resolve_revision(context, head, cancel)
+                                .map_err(|error| match error {
+                                    worktrees::WorktreeError::NotFound => {
+                                        worktrees::WorktreeError::InvalidRequest
+                                    }
+                                    other => other,
+                                })?
+                                .to_string()
                         }
                     },
                     host: *host,
@@ -238,19 +255,15 @@ pub(super) fn own_worktree(
                     label: None,
                 },
             };
-            if created.as_ref().is_some_and(|(path, _)| path == &info.path) {
-                worktrees::save_owner(&verified, &owner)?;
-            } else {
-                worktrees::save_lane_owner_when_free(
-                    context,
-                    &verified,
-                    &owner,
-                    info.head,
-                    expected_prior.as_ref(),
-                    terminal_prior,
-                    cancel,
-                )?;
-            }
+            worktrees::save_lane_owner_when_free(
+                context,
+                &verified,
+                &owner,
+                info.head,
+                expected_prior.as_ref(),
+                terminal_prior,
+                cancel,
+            )?;
             let base = provenant_core::GitOid::parse(&owner.base)
                 .map_err(|_| worktrees::WorktreeError::InvalidRequest)?;
             Ok((info, base))

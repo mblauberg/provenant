@@ -21,6 +21,7 @@ impl DomainConfig for Settings {
         let mut errors = Vec::new();
         if self.count == 0 {
             errors.push(SectionError {
+                detail: None,
                 field: "count".into(),
                 code: "nonzero",
             });
@@ -28,12 +29,14 @@ impl DomainConfig for Settings {
         for (index, row) in self.rows.iter().enumerate() {
             if row.weight == 0 {
                 errors.push(SectionError {
+                    detail: None,
                     field: format!("rows.{index}.weight"),
                     code: "nonzero",
                 });
             }
             if !row.enabled {
                 errors.push(SectionError {
+                    detail: None,
                     field: format!("rows.{index}.enabled"),
                     code: "disabled",
                 });

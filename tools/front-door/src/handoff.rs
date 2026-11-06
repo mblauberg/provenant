@@ -11,7 +11,7 @@ use provenant_cli::{
     workflow::Handoff,
 };
 use provenant_confinement::worktrees::{
-    self, WorkerObserver, WorktreeCondition, WorktreeCreate, WriterState,
+    self, Occupancy, WorkerObserver, WorktreeCondition, WorktreeCreate,
 };
 use provenant_core::{CancelToken, Clock, HostId, OperationId, WaitBudget};
 use provenant_fabric_runtime::{
@@ -106,13 +106,7 @@ fn git(dir: &Path, args: &[&str], timeout: Duration) -> Result<(bool, String), R
     let mut options = ExecOptions::new(&argv, dir, timeout);
     options.env = Some(&environment);
     options.stdin = Some(b"");
-    // A worktree listing grows with the linked worktrees, so it gets the same
-    // capture default as delivery. Any other output keeps its bound.
-    let limit = if args.starts_with(&["worktree", "list"]) {
-        provenant_os::exec::DEFAULT_CAPTURE_LIMIT
-    } else {
-        64 * 1024
-    };
+    let limit = 64 * 1024;
     options.stdout = StreamPolicy::Capture { limit };
     options.stderr = StreamPolicy::Capture { limit: 4096 };
     let out = SystemExecutor::new(1)?.execute(options)?;
@@ -145,101 +139,103 @@ fn git(dir: &Path, args: &[&str], timeout: Duration) -> Result<(bool, String), R
     Ok((ok, text))
 }
 
-/// Plain-text Git output for callers outside the handoff owner.
-pub(crate) fn git_text(dir: &Path, args: &[&str]) -> Result<String, String> {
-    match git(dir, args, GIT_TIMEOUT) {
-        Ok((true, text)) => Ok(text),
-        Ok((false, text)) => Err(text.trim().to_owned()),
-        Err(refusal) => Err(refusal.message),
-    }
-}
-
-fn inspect(src: &Source, workers: &dyn WorkerObserver) -> Result<Vec<Tree>, Refusal> {
-    let project = src.cwd.as_path();
-    let infos = crate::worktrees::with_context(
+fn inspect(
+    src: &Source,
+    workers: &dyn WorkerObserver,
+    facts: &worktrees::RepoFacts,
+) -> Result<Vec<Tree>, Refusal> {
+    crate::worktrees::with_context(
         &src.roots,
         &src.home,
-        project,
+        &src.cwd,
         GIT_TIMEOUT,
         workers,
-        |context, cancel| Ok(worktrees::list(context, cancel)?),
-    )?;
-    let common =
-        provenant_os::git::repository_path(project, provenant_os::git::RepositoryPath::CommonDir)
-            .map_err(|error| {
-            if matches!(
-                error
-                    .get_ref()
-                    .and_then(|cause| cause.downcast_ref::<provenant_os::git::DiscoveryError>()),
-                Some(provenant_os::git::DiscoveryError::TimedOut)
-            ) {
-                Refusal::new(
-                    Outcome::Timeout,
-                    "GIT",
-                    "git rev-parse --path-format=absolute --git-common-dir timed out",
-                )
-            } else if matches!(
-                error
-                    .get_ref()
-                    .and_then(|cause| cause.downcast_ref::<provenant_os::git::DiscoveryError>()),
-                Some(provenant_os::git::DiscoveryError::Unavailable)
-            ) {
-                Refusal::new(Outcome::Error, "GIT", error.to_string())
-            } else {
-                Refusal::from(error)
-            }
-        })?;
+        |context, cancel| inspect_context(context, facts, cancel),
+    )
+    .map_err(|error| {
+        if matches!(
+            error,
+            crate::worktrees::Error::Worktree(worktrees::WorktreeError::Utility(
+                provenant_confinement::utility::UtilityError::TimedOut
+            ))
+        ) {
+            Refusal::new(Outcome::Timeout, "GIT", "repository fact read timed out")
+        } else {
+            Refusal::from(error)
+        }
+    })
+}
+
+fn inspect_context(
+    context: &worktrees::WorktreeContext<'_>,
+    facts: &worktrees::RepoFacts,
+    cancel: &CancelToken,
+) -> Result<Vec<Tree>, crate::worktrees::Error> {
+    let context = &worktrees::WorktreeContext { facts, ..*context };
+    let observations = worktrees::list(context, cancel)?;
+    let common = context.repo.common_git_dir();
     let primary = common
         .file_name()
         .is_some_and(|name| name == ".git")
-        .then(|| common.parent().map(fs::canonicalize))
-        .flatten()
-        .transpose()?;
-    let mut trees = Vec::with_capacity(infos.len());
-    for info in infos {
-        let head = info.head.to_string();
-        // Worktree listings carry full refs; the hand-off speaks branch names.
+        .then(|| common.parent())
+        .flatten();
+    let mut trees = Vec::with_capacity(observations.len());
+    for observation in observations {
+        let info = observation;
         let branch = info.branch.as_deref().map(short_branch);
         let (upstream, pushed) = match branch.as_deref() {
             Some(branch) => {
-                let remote = format!("refs/remotes/origin/{branch}");
-                let (found, oid) = git(
-                    project,
-                    &[
-                        "rev-parse",
-                        "--verify",
-                        "--quiet",
-                        &format!("{remote}^{{commit}}"),
-                    ],
-                    GIT_TIMEOUT,
-                )?;
-                if found {
-                    let (contained, _) = git(
-                        project,
-                        &["merge-base", "--is-ancestor", &head, &remote],
-                        GIT_TIMEOUT,
-                    )?;
-                    (Some(oid.trim().to_owned()), contained)
-                } else {
-                    (None, false)
+                let remote = provenant_confinement::repo::GitRefName::remote_tracking(format!(
+                    "origin/{branch}"
+                ))
+                .map_err(|_| worktrees::WorktreeError::InvalidRequest)?;
+                match facts.resolve_commit(context, remote, cancel) {
+                    Ok(oid) => (
+                        Some(oid.to_string()),
+                        worktrees::is_ancestor(context, info.head, oid, cancel)?,
+                    ),
+                    Err(worktrees::WorktreeError::NotFound) => (None, false),
+                    Err(error) => return Err(error.into()),
                 }
             }
             None => (None, false),
         };
         let path = fs::canonicalize(&info.path).unwrap_or(info.path);
+        let (live_writer, writer_unknown) = handoff_writer_state(&info.occupancy);
+        let writer_evidence = match &info.occupancy {
+            Occupancy::Unknown {
+                scope,
+                evidence,
+                source: worktrees::OccupancyUnknownSource::Custody,
+            } => Some(format!("{}: {evidence}", scope.display())),
+            _ => None,
+        };
+        let writer_advisory = match &info.occupancy {
+            Occupancy::Observed { process } => Some(process.as_ref().map_or_else(
+                || format!("{}: a process was observed", path.display()),
+                |process| format!("{}: process {process} ({})", path.display(), process.kind),
+            )),
+            Occupancy::Unknown {
+                scope,
+                evidence,
+                source: worktrees::OccupancyUnknownSource::Census,
+            } => Some(format!("{}: {evidence}", scope.display())),
+            _ => None,
+        };
         trees.push(Tree {
-            primary: primary.as_deref() == Some(path.as_path()),
+            primary: primary == Some(path.as_path()),
             path,
             branch,
-            head,
-            // Ignored files, such as build output and `.worktrees/`, are not
-            // lost work.
+            head: info.head.to_string(),
             dirty: info.dirty == WorktreeCondition::Dirty,
             unknown: matches!(
                 info.dirty,
                 WorktreeCondition::Unknown | WorktreeCondition::GitOperationInProgress
             ),
-            live_writer: info.writer == WriterState::Live,
+            live_writer,
+            writer_unknown,
+            writer_evidence,
+            writer_advisory,
             upstream,
             pushed,
         });
@@ -247,8 +243,124 @@ fn inspect(src: &Source, workers: &dyn WorkerObserver) -> Result<Vec<Tree>, Refu
     Ok(trees)
 }
 
+fn handoff_writer_state(occupancy: &Occupancy) -> (bool, bool) {
+    (
+        matches!(occupancy, Occupancy::Held),
+        matches!(
+            occupancy,
+            Occupancy::Unknown {
+                source: worktrees::OccupancyUnknownSource::Custody,
+                ..
+            }
+        ),
+    )
+}
+
+/// WIP mutates Git, so an unresolved writer state cannot grant custody.
+fn unsafe_wip(tree: &Tree) -> bool {
+    tree.primary || tree.branch.is_none() || tree.live_writer || tree.writer_unknown || tree.unknown
+}
+
+fn write_writer_advisory(output: &mut impl io::Write, advisory: &str) -> io::Result<()> {
+    writeln!(
+        output,
+        "warning: {}",
+        provenant_fabric_runtime::hosts::plain_text(advisory, 4096)
+    )
+}
+
+fn wip_unsafe_description(tree: &Tree) -> String {
+    let detail = match (tree.writer_unknown, tree.writer_evidence.as_deref()) {
+        (true, Some(evidence)) => format!("; writer custody unknown: {evidence}"),
+        (true, None) => "; writer custody unknown".to_owned(),
+        (false, _) => String::new(),
+    };
+    format!("  {}{detail}", tree.describe())
+}
+
+/// Hold writer custody through WIP Git operations, not just the earlier preview.
+fn with_wip_custody(
+    roots: &provenant_core::Roots,
+    home: &Path,
+    project: &Path,
+    workers: &dyn WorkerObserver,
+    facts: &worktrees::RepoFacts,
+    tree: &Tree,
+    action: impl FnOnce() -> Result<(), Refusal>,
+) -> Result<(), Refusal> {
+    crate::worktrees::with_context(
+        roots,
+        home,
+        project,
+        GIT_TIMEOUT,
+        workers,
+        |context, cancel| {
+            let context = &worktrees::WorktreeContext { facts, ..*context };
+            let verified = provenant_confinement::verify_worktree(context.repo, &tree.path)
+                .map_err(worktrees::WorktreeError::from)?;
+            let _writer = worktrees::cache_writer_guard(context.project_state, verified.path())
+                .map_err(worktrees::custody_refusal)?;
+            worktrees::check_writer_terminal(verified.repo())?;
+            let branch = tree
+                .branch
+                .as_deref()
+                .ok_or(worktrees::WorktreeError::IdentityChanged)?;
+            let reference = provenant_confinement::repo::GitRefName::branch(branch)
+                .map_err(|_| worktrees::WorktreeError::IdentityChanged)?;
+            let head = verified
+                .repo()
+                .private_dir()
+                .read_stable(std::ffi::OsStr::new("HEAD"), 4096)
+                .map_err(worktrees::WorktreeError::from)?;
+            if head != format!("ref: {}\n", reference.as_str()).as_bytes()
+                || facts
+                    .resolve_commit(context, reference, cancel)?
+                    .to_string()
+                    != tree.head
+            {
+                return Err(worktrees::WorktreeError::IdentityChanged.into());
+            }
+            facts.invalidate_inventory(context);
+            Ok(action())
+        },
+    )
+    .map_err(|error| Refusal::refused("WIP_REFUSED", error.to_string()))?
+}
+
 /// Commit a dirty tree as WIP and push its branch. Hooks run as usual.
-fn wip(tree: &Tree) -> Result<(), Refusal> {
+fn wip(
+    src: &Source,
+    workers: &dyn WorkerObserver,
+    facts: &worktrees::RepoFacts,
+    tree: &Tree,
+) -> Result<(), Refusal> {
+    with_wip_custody(
+        &src.roots,
+        &src.home,
+        &src.cwd,
+        workers,
+        facts,
+        tree,
+        || {
+            if tree.dirty {
+                let files = untracked(tree)?;
+                if !files.is_empty() {
+                    return Err(Refusal::refused(
+                        "WIP_REFUSED",
+                        format!(
+                            "untracked files in {}: {}",
+                            tree.path.display(),
+                            files.join(", ")
+                        ),
+                    ));
+                }
+            }
+            wip_git(tree)
+        },
+    )
+}
+
+fn wip_git(tree: &Tree) -> Result<(), Refusal> {
     let branch = tree.branch.as_deref().ok_or_else(|| {
         Refusal::refused("WIP_REFUSED", "a detached worktree has no branch to push")
     })?;
@@ -573,8 +685,15 @@ fn execute(
     };
 
     // 2. Worktrees must be clean and pushed, unless the caller says otherwise.
-    let mut trees = inspect(&src, workers)?;
+    let facts = worktrees::RepoFacts::default();
+    let mut trees = inspect(&src, workers, &facts)?;
     let mut input = request(&trees)?;
+    for advisory in trees
+        .iter()
+        .filter_map(|tree| tree.writer_advisory.as_deref())
+    {
+        let _ = write_writer_advisory(&mut std::io::stderr().lock(), advisory);
+    }
     let problems: Vec<Tree> = trees
         .iter()
         .filter(|t| !t.problems().is_empty())
@@ -590,8 +709,8 @@ fn execute(
         if args.wip {
             let mut unsafe_trees: Vec<String> = problems
                 .iter()
-                .filter(|t| t.primary || t.branch.is_none() || t.live_writer || t.unknown)
-                .map(|t| format!("  {}", t.describe()))
+                .filter(|tree| unsafe_wip(tree))
+                .map(wip_unsafe_description)
                 .collect();
             for tree in problems.iter().filter(|t| t.dirty) {
                 let files = untracked(tree)?;
@@ -607,7 +726,7 @@ fn execute(
                 return Err(Refusal::refused(
                     "WIP_REFUSED",
                     format!(
-                        "--wip commits tracked changes in branch worktrees with no live writer, \
+                        "--wip commits tracked changes in branch worktrees with available writer custody, \
                          never the primary checkout or untracked files. Settle these first or \
                          pass --allow-dirty:\n{}",
                         unsafe_trees.join("\n")
@@ -618,7 +737,7 @@ fn execute(
             if !args.dry_run {
                 let mut pushed: Vec<String> = Vec::new();
                 for tree in &problems {
-                    if let Err(mut refusal) = wip(tree) {
+                    if let Err(mut refusal) = wip(&src, workers, &facts, tree) {
                         if !pushed.is_empty() {
                             let _ = write!(
                                 refusal.message,
@@ -630,7 +749,7 @@ fn execute(
                     }
                     pushed.push(tree.branch.clone().unwrap_or_default());
                 }
-                trees = inspect(&src, workers)?;
+                trees = inspect(&src, workers, &facts)?;
                 let left: Vec<String> = trees
                     .iter()
                     .filter(|t| !t.problems().is_empty())
@@ -973,6 +1092,18 @@ fn account_directory(
         .find(|a| a.key() == label)
         .map(|a| a.directory().to_path_buf())
 }
+/// Reuse tracking refs only after a base has been fetched and verified.
+fn fetch_recreation_base<T, E>(
+    fetched: &mut bool,
+    resolve: impl FnOnce(bool) -> Result<T, E>,
+) -> Result<T, E> {
+    let result = resolve(!*fetched);
+    if result.is_ok() {
+        *fetched = true;
+    }
+    result
+}
+
 /// Recreate each branch's worktree with this host's own worktree owner, from
 /// `origin/<branch>`. A worktree already on the branch is kept. Failures are
 /// reported per branch; the hand-off still lands.
@@ -983,6 +1114,7 @@ fn recreate(target: &Target<'_>, branches: &[String]) -> Vec<HandoffWorktree> {
         left.saturating_sub(RESERVE)
     };
     let mut fetched = false;
+    let facts = worktrees::RepoFacts::default();
     branches
         .iter()
         .map(|branch| {
@@ -998,13 +1130,30 @@ fn recreate(target: &Target<'_>, branches: &[String]) -> Vec<HandoffWorktree> {
             if time.is_zero() {
                 return failed("the peer call budget ran out".into());
             }
-            let base = crate::fabric::remote_base(
-                target.cwd,
-                &format!("origin/{branch}"),
-                time / 2,
-                !fetched,
-            );
-            fetched = true;
+            let base = fetch_recreation_base(&mut fetched, |fetch| {
+                crate::worktrees::with_context(
+                    &target.context.roots,
+                    target.home,
+                    target.cwd,
+                    remaining(),
+                    target.workers,
+                    |context, cancel| {
+                        let context = &worktrees::WorktreeContext {
+                            facts: &facts,
+                            ..*context
+                        };
+                        Ok(crate::fabric::remote_base(
+                            context,
+                            &format!("origin/{branch}"),
+                            time / 2,
+                            fetch,
+                            cancel,
+                        ))
+                    },
+                )
+                .map_err(|error| error.to_string())?
+                .map_err(|error| error.to_string())
+            });
             let base = match base {
                 Ok(base) => base,
                 Err(error) => return failed(format!("origin/{branch}: {error}")),
@@ -1016,7 +1165,11 @@ fn recreate(target: &Target<'_>, branches: &[String]) -> Vec<HandoffWorktree> {
                 remaining(),
                 target.workers,
                 |context, cancel| {
-                    if let Some(info) = worktrees::list(context, cancel)?
+                    let context = &worktrees::WorktreeContext {
+                        facts: &facts,
+                        ..*context
+                    };
+                    if let Some(info) = worktrees::list_cached(context, cancel)?
                         .into_iter()
                         .find(|w| w.branch.as_deref().map(short_branch).as_ref() == Some(branch))
                     {
@@ -1198,22 +1351,335 @@ mod tests {
     use super::*;
 
     #[test]
-    fn git_text_refuses_stdout_past_its_bound() {
+    fn git_refuses_stdout_past_its_bound() {
         let temp = tempfile::tempdir().unwrap();
         std::fs::write(temp.path().join("big"), vec![b'a'; 128 * 1024]).unwrap();
-        let error = git_text(
+        let error = git(
             temp.path(),
             &["diff", "--no-index", "--no-color", "/dev/null", "big"],
+            GIT_TIMEOUT,
         )
-        .expect_err("truncated output must not read as complete");
+        .expect_err("truncated output must not read as complete")
+        .message;
         assert!(
             error.contains("output exceeded the 65536-byte limit"),
             "{error}"
         );
         assert!(error.contains("diff"), "{error}");
         // Output within the bound is still returned whole.
-        let text = git_text(temp.path(), &["--version"]).unwrap();
+        let (ok, text) = git(temp.path(), &["--version"], GIT_TIMEOUT).unwrap();
+        assert!(ok);
         assert!(text.starts_with("git version"), "{text}");
+    }
+
+    #[test]
+    fn failed_recreation_fetch_never_authorises_stale_tracking_refs() {
+        let mut fetched = false;
+        let mut attempts = 0;
+        for _ in 0..2 {
+            let result = fetch_recreation_base(&mut fetched, |fetch| {
+                assert!(fetch, "a failed fetch must be retried");
+                attempts += 1;
+                Err::<(), _>("fetch failed")
+            });
+            assert!(result.is_err());
+        }
+        assert_eq!(attempts, 2);
+        fetch_recreation_base(&mut fetched, |fetch| {
+            assert!(fetch);
+            Ok::<_, &str>(())
+        })
+        .expect("fetch succeeds");
+        fetch_recreation_base(&mut fetched, |fetch| {
+            assert!(!fetch, "a verified fetch may be reused");
+            Ok::<_, &str>(())
+        })
+        .expect("verified tracking refs may be reused");
+    }
+
+    #[test]
+    fn wip_refuses_held_or_uncertain_writer_custody() {
+        let mut tree = Tree {
+            path: "/repo/lane".into(),
+            branch: Some("lane".into()),
+            head: "a".repeat(40),
+            primary: false,
+            dirty: true,
+            unknown: false,
+            live_writer: false,
+            writer_unknown: false,
+            writer_evidence: None,
+            writer_advisory: None,
+            upstream: None,
+            pushed: false,
+        };
+        for state in [
+            Occupancy::Held,
+            Occupancy::Unknown {
+                scope: tree.path.clone(),
+                evidence: "fixture".into(),
+                source: worktrees::OccupancyUnknownSource::Custody,
+            },
+        ] {
+            (tree.live_writer, tree.writer_unknown) = handoff_writer_state(&state);
+            assert!(unsafe_wip(&tree), "{state:?} must not permit Git writes");
+        }
+        for advisory in [
+            Occupancy::Available,
+            Occupancy::Observed { process: None },
+            Occupancy::Unknown {
+                scope: tree.path.clone(),
+                evidence: "census incomplete".into(),
+                source: worktrees::OccupancyUnknownSource::Census,
+            },
+        ] {
+            (tree.live_writer, tree.writer_unknown) = handoff_writer_state(&advisory);
+            assert!(!unsafe_wip(&tree), "{advisory:?} is advisory");
+        }
+        let mut output = Vec::new();
+        write_writer_advisory(&mut output, "/repo/lane: census incomplete")
+            .expect("advisory written");
+        let output = String::from_utf8(output).expect("UTF-8 advisory");
+        assert!(output.contains("/repo/lane: census incomplete"));
+        tree.writer_unknown = true;
+        tree.writer_evidence = Some("/repo: process census incomplete".into());
+        let refusal = wip_unsafe_description(&tree);
+        assert!(refusal.contains("/repo: process census incomplete"));
+        tree.dirty = false;
+        tree.upstream = Some("b".repeat(40));
+        tree.pushed = true;
+        assert!(
+            tree.problems().is_empty(),
+            "observation alone must not block handoff"
+        );
+    }
+
+    #[test]
+    fn wip_holds_the_writer_lease_during_git_mutation() -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_confinement::worktrees::{Occupancy, WorkerObserver};
+        use std::collections::BTreeMap;
+        struct Free;
+        impl WorkerObserver for Free {
+            fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, Occupancy> {
+                roots
+                    .iter()
+                    .cloned()
+                    .map(|path| (path, Occupancy::Available))
+                    .collect()
+            }
+        }
+        struct Bystander;
+        impl WorkerObserver for Bystander {
+            fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, Occupancy> {
+                roots
+                    .iter()
+                    .cloned()
+                    .map(|path| (path, Occupancy::Observed { process: None }))
+                    .collect()
+            }
+        }
+        let temp = tempfile::tempdir()?;
+        let home = temp.path().join("home");
+        let state = temp.path().join("state");
+        let project = temp.path().join("project");
+        std::fs::create_dir_all(&home)?;
+        std::fs::create_dir_all(&state)?;
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700))?;
+        std::fs::create_dir_all(&project)?;
+        provenant_os::fixture::run_git(&project, &["init", "-q"])?;
+        provenant_os::fixture::run_git(&project, &["commit", "--allow-empty", "-qm", "base"])?;
+        let mut inputs = provenant_core::RootInputs::new(home.clone(), project.clone());
+        inputs.state_dir = Some(state);
+        let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+        let info = crate::worktrees::with_context(
+            &roots,
+            &home,
+            &project,
+            GIT_TIMEOUT,
+            &Free,
+            |context, cancel| {
+                Ok(worktrees::create(
+                    context,
+                    WorktreeCreate {
+                        branch: "wip-custody".into(),
+                        base: None,
+                    },
+                    cancel,
+                )?)
+            },
+        )?;
+        let mut tree = Tree {
+            path: info.path.clone(),
+            branch: Some("wip-custody".into()),
+            head: info.head.to_string(),
+            primary: false,
+            dirty: true,
+            unknown: false,
+            live_writer: false,
+            writer_unknown: false,
+            writer_evidence: None,
+            writer_advisory: None,
+            upstream: None,
+            pushed: false,
+        };
+        let facts = worktrees::RepoFacts::default();
+        provenant_os::fixture::run_git(
+            &project,
+            &["update-ref", "refs/remotes/origin/wip-custody", &tree.head],
+        )?;
+        let inspected = crate::worktrees::with_context(
+            &roots,
+            &home,
+            &project,
+            GIT_TIMEOUT,
+            &Free,
+            |context, cancel| inspect_context(context, &facts, cancel),
+        )?;
+        let row = inspected
+            .iter()
+            .find(|row| row.path == tree.path)
+            .ok_or("missing lane")?;
+        assert_eq!(row.upstream.as_deref(), Some(tree.head.as_str()));
+        assert!(row.pushed);
+        let observed = crate::worktrees::with_context(
+            &roots,
+            &home,
+            &project,
+            GIT_TIMEOUT,
+            &Bystander,
+            |context, cancel| inspect_context(context, &facts, cancel),
+        )?;
+        let observed = observed
+            .iter()
+            .find(|row| row.path == tree.path)
+            .ok_or("missing lane")?;
+        assert!(!unsafe_wip(observed));
+        assert!(observed.writer_advisory.as_deref().is_some_and(|warning| {
+            warning.contains(&tree.path.to_string_lossy().into_owned())
+                && warning.contains("process was observed")
+        }));
+        let limited =
+            worktrees::RepoFacts::with_limits(1, provenant_os::git::REPO_FACT_SCALAR_LIMIT)?;
+        let overflow = crate::worktrees::with_context(
+            &roots,
+            &home,
+            &project,
+            GIT_TIMEOUT,
+            &Free,
+            |context, cancel| inspect_context(context, &limited, cancel),
+        );
+        assert!(matches!(
+            overflow,
+            Err(crate::worktrees::Error::Worktree(
+                worktrees::WorktreeError::Utility(
+                    provenant_confinement::utility::UtilityError::Truncated { stream: "stdout" }
+                )
+            ))
+        ));
+        let held = crate::worktrees::with_context(
+            &roots,
+            &home,
+            &project,
+            GIT_TIMEOUT,
+            &Free,
+            |context, _| {
+                worktrees::cache_writer_guard(context.project_state, &tree.path)
+                    .map_err(|_| worktrees::WorktreeError::UnknownWriter.into())
+            },
+        )?;
+        let called = std::cell::Cell::new(false);
+        let refused = with_wip_custody(&roots, &home, &project, &Free, &facts, &tree, || {
+            called.set(true);
+            Ok(())
+        })
+        .expect_err("held writer must refuse WIP");
+        assert_eq!(refused.code(), "WIP_REFUSED");
+        assert!(!called.get());
+        drop(held);
+        with_wip_custody(&roots, &home, &project, &Bystander, &facts, &tree, || {
+            called.set(true);
+            Ok(())
+        })
+        .map_err(|error| error.message)?;
+        assert!(
+            called.replace(false),
+            "a bystander must not block guarded WIP"
+        );
+        provenant_os::fixture::run_git(&tree.path, &["commit", "--allow-empty", "-qm", "moved"])?;
+        let refreshed = crate::worktrees::with_context(
+            &roots,
+            &home,
+            &project,
+            GIT_TIMEOUT,
+            &Free,
+            |context, cancel| inspect_context(context, &facts, cancel),
+        )?;
+        let row = refreshed
+            .iter()
+            .find(|row| row.path == tree.path)
+            .ok_or("missing lane")?;
+        assert!(!row.pushed, "inspection must refresh after HEAD moves");
+        let refused = with_wip_custody(&roots, &home, &project, &Free, &facts, &tree, || {
+            called.set(true);
+            Ok(())
+        })
+        .expect_err("moved HEAD must refuse WIP");
+        assert_eq!(refused.code(), "WIP_REFUSED");
+        assert!(!called.get());
+        tree.head = String::from_utf8(provenant_os::fixture::run_git(
+            &tree.path,
+            &["rev-parse", "HEAD"],
+        )?)?
+        .trim()
+        .to_owned();
+        with_wip_custody(&roots, &home, &project, &Free, &facts, &tree, || {
+            let held = crate::worktrees::with_context(
+                &roots,
+                &home,
+                &project,
+                GIT_TIMEOUT,
+                &Free,
+                |context, _| {
+                    Ok(worktrees::cache_writer_probe(context.project_state, &tree.path).is_err())
+                },
+            )?;
+            assert!(held, "the writer lock must cover the mutation");
+            provenant_os::fixture::run_git(
+                &tree.path,
+                &["commit", "--allow-empty", "-qm", "guarded mutation"],
+            )
+            .map_err(|error| Refusal::refused("WIP_FAILED", error.to_string()))?;
+            called.set(true);
+            Ok(())
+        })
+        .map_err(|error| error.message)?;
+        assert!(called.get());
+        let current = String::from_utf8(provenant_os::fixture::run_git(
+            &tree.path,
+            &["rev-parse", "HEAD"],
+        )?)?;
+        let cached = crate::worktrees::with_context(
+            &roots,
+            &home,
+            &project,
+            GIT_TIMEOUT,
+            &Free,
+            |context, cancel| {
+                let context = &worktrees::WorktreeContext {
+                    facts: &facts,
+                    ..*context
+                };
+                Ok(worktrees::list_cached(context, cancel)?)
+            },
+        )?;
+        let current_row = cached
+            .iter()
+            .find(|row| row.path == tree.path)
+            .ok_or("missing lane")?;
+        assert_eq!(current_row.head.to_string(), current.trim());
+        assert_ne!(current_row.head.to_string(), tree.head);
+        Ok(())
     }
 
     #[test]
@@ -1238,8 +1704,9 @@ mod tests {
             branch: Some("feat/x".into()),
             head: base,
             dirty: WorktreeCondition::Clean,
-            writer: WriterState::Free,
-            owner: worktrees::OwnerStatus::Unknown,
+            occupancy: Occupancy::Available,
+            owner: Err("worktree registration was not observed".into()),
+            primary: false,
         };
         assert_eq!(worktree_warning(&info, &base), None);
         info.head = provenant_core::GitOid::parse(&"b".repeat(40)).unwrap();

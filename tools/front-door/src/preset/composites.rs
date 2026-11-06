@@ -398,7 +398,7 @@ pub fn expand_composite(
     };
     document.schema_version = u64::from(graph::minimum_schema_version(&document));
     graph::patch::scan_for_secrets(&serde_json::to_string(&document).map_err(|e| e.to_string())?)?;
-    document.admit(&layers.graph_limits)?;
+    document.admit(&layers.graph_limits).map_err(|error| error.to_string())?;
     let mut document = serde_json::to_value(document).map_err(|e| e.to_string())?;
     document["provenance"] = json!({"preset":name,"template":template});
     Ok(Expansion {

@@ -16,6 +16,22 @@ fn decode(text: &str) -> Result<Value, String> {
         .or_else(|_| toml_edit::de::from_str(text))
         .map_err(|error| error.to_string())
 }
+fn response_outcome(command: &str, data: &Value) -> Outcome {
+    if data["timed_out"] == true {
+        return Outcome::Waiting;
+    }
+    if command == "run" {
+        match data["status"].as_str() {
+            Some("complete") if data["outcome"] == "failed" => return Outcome::Failed,
+            Some("cancelled") => return Outcome::Cancelled,
+            Some("paused") => return Outcome::Refused,
+            Some("pending") => return Outcome::Waiting,
+            _ => {}
+        }
+    }
+    Outcome::Ok
+}
+
 fn invoke(
     command: &str,
     input: Result<Value, String>,
@@ -40,11 +56,7 @@ fn invoke(
             crate::emit(
                 &CommandResult::new(
                     command,
-                    if data["timed_out"] == true {
-                        Outcome::Waiting
-                    } else {
-                        Outcome::Ok
-                    },
+                    response_outcome(command, &data),
                     data,
                 ),
                 globals,
@@ -53,23 +65,26 @@ fn invoke(
             )
         }
         Err(error) => {
-            let message = match error
+            let projection = error
                 .downcast_ref::<provenant_fabric_runtime::coordination::facade::FacadeError>()
-            {
-                Some(
-                    provenant_fabric_runtime::coordination::facade::FacadeError::InvalidInput {
-                        detail: Some(detail),
-                    },
-                ) => detail.clone(),
-                _ => error.to_string(),
-            };
-            crate::fail(
-                command,
-                Outcome::Invalid,
-                "GRAPH_INTERFACE",
-                &message,
-                globals,
-            )
+                .map(|error| error.diagnostic())
+                .or_else(|| {
+                    error.downcast_ref::<provenant_cli::fabric::EdgeError>()
+                        .and_then(provenant_cli::fabric::edge_diagnostic)
+                });
+            let outcome = error
+                .downcast_ref::<provenant_fabric_runtime::coordination::facade::FacadeError>()
+                .map_or(Outcome::Invalid, provenant_cli::fabric::coordination_outcome);
+            let mut result = CommandResult::new(command, outcome, Value::Null);
+            result.error = Some(provenant_records::CommandError {
+                diagnostic: projection.as_ref().map(Into::into),
+                code: projection.as_ref().map_or("GRAPH_INTERFACE", |value| value.code.as_str()).into(),
+                message: projection.as_ref().and_then(|value| value.detail.clone())
+                    .unwrap_or_else(|| "graph input could not be processed".into()),
+                cause: None,
+                repair: projection.and_then(|value| value.next),
+            });
+            crate::emit(&result, globals, "", false)
         }
     }
 }
@@ -187,4 +202,26 @@ pub(crate) fn graph_stats(
         globals,
         workers,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn run_reports_the_graph_outcome_and_status_reads_remain_successful() {
+        for (status, outcome, expected) in [
+            ("complete", "failed", Outcome::Failed),
+            ("complete", "succeeded", Outcome::Ok),
+            ("cancelled", "failed", Outcome::Cancelled),
+            ("paused", "failed", Outcome::Refused),
+            ("pending", "partial", Outcome::Waiting),
+        ] {
+            let data = json!({"status":status,"outcome":outcome});
+            assert_eq!(response_outcome("run", &data), expected);
+            assert_eq!(response_outcome("status", &data), Outcome::Ok);
+        }
+        assert_eq!(response_outcome("run", &json!({"document":{}})), Outcome::Ok);
+        assert_eq!(response_outcome("run", &json!({"timed_out":true})), Outcome::Waiting);
+    }
 }

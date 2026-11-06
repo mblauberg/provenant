@@ -209,3 +209,6 @@ pub(crate) use quota_source;
 mod seatbelt_snapshots;
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod readonly_tests;

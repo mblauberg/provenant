@@ -160,6 +160,14 @@ fn loop_fixture_exhausts_and_pauses_without_delivery() {
     let run = advance(&document, &mut owner, &mut journal).unwrap();
     assert_eq!(run.status, GraphStatus::Paused);
     assert_eq!(run.checkpoint.pause_code.as_deref(), Some("loop_paused"));
+    let gate = run.checkpoint.nodes.iter().find(|node| node.id == "revise").unwrap();
+    assert_eq!(gate.loop_cause, Some(NodeDecisionCause::LoopPaused));
+    let decoded: GraphCheckpoint = serde_json::from_slice(&serde_json::to_vec(&run.checkpoint).unwrap()).unwrap();
+    assert_eq!(decoded, run.checkpoint);
+    let mut forged = run.checkpoint.clone();
+    forged.nodes.iter_mut().find(|node| node.id == "revise").unwrap().loop_cause = None;
+    let mut forged_journal = MemoryJournal(Some(forged));
+    assert!(matches!(advance(&document, &mut reviews(&[]), &mut forged_journal), Err(GraphError::BadCheckpoint { .. })));
     assert!(!run.checkpoint.successful());
     assert_eq!(owner.deliveries, 0);
     assert_eq!(run.checkpoint.ask_actor.as_deref(), Some("chair"));

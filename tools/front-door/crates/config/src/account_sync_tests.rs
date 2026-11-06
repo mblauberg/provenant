@@ -415,7 +415,7 @@ fn identity_and_credential_keys_are_never_syncable() {
     for key in crate::shared_settings::DEFAULT_KEYS {
         assert!(check_key(key).is_ok(), "{key}");
     }
-    assert!(check_key("hooks").is_err());
+    assert_eq!(check_key("hooks").unwrap_err().code(), None);
     assert!(check_value("env", &serde_json::json!({"ANTHROPIC_AUTH_TOKEN": "x"})).is_err());
     assert!(check_value("env", &serde_json::json!({"EDITOR": "vim"})).is_ok());
     for name in [
@@ -428,11 +428,18 @@ fn identity_and_credential_keys_are_never_syncable() {
         "MY_SESSION_ID",
     ] {
         let error = check_value("env", &serde_json::json!({ name: "x" })).unwrap_err();
+        assert_eq!(error.code(), Some("SHARED_SETTINGS_NEVER_SYNCED"));
+        let error = error.to_string();
         assert!(error.contains(&format!("`env.{name}`")), "{error}");
         assert!(error.contains("contains"), "{error}");
     }
     // The reason names the substring that matched.
-    assert!(check_key("refreshtoken").unwrap_err().contains("`token`"));
+    assert!(
+        check_key("refreshtoken")
+            .unwrap_err()
+            .to_string()
+            .contains("`token`")
+    );
 }
 
 #[test]

@@ -280,6 +280,25 @@ pub trait AttemptOwner {
         Ok(None)
     }
 
+    /// Read a typed preparation cause for reporting, without granting fallback.
+    fn preparation_refusal_cause(
+        &mut self,
+        _key: &AttemptKey,
+        _reference: &str,
+    ) -> Result<Option<provenant_records::RouteExclusionReason>, Self::Error> {
+        Ok(None)
+    }
+
+    /// Host proof that a terminal quota refusal did no work, belongs to the
+    /// same unpinned alias and has released custody. Missing evidence denies redraw.
+    fn quota_alias_redraw(
+        &mut self,
+        _key: &AttemptKey,
+        _reference: &str,
+    ) -> Result<bool, Self::Error> {
+        Ok(false)
+    }
+
     /// Resolve a deferred review; hosts without support fail closed.
     fn resolve_review(
         &mut self,
@@ -491,6 +510,8 @@ pub enum GraphError<RunError: Error + 'static, JournalError: Error + 'static> {
     Instance(#[source] FsError),
     #[error("invalid graph: {0}")]
     Invalid(String),
+    #[error("invalid graph: {0}")]
+    Admission(AdmissionError),
     #[error("invalid extension: {0}")]
     Extension(String),
     /// The graph cannot advance as it stands; the text names the next step.
@@ -516,7 +537,7 @@ impl<R: Error + 'static, J: Error + 'static> GraphError<R, J> {
     pub fn code(&self) -> &'static str {
         match self {
             Self::Instance(_) => "instance",
-            Self::Invalid(_) => "invalid_graph",
+            Self::Invalid(_) | Self::Admission(_) => "invalid_graph",
             Self::Extension(_) => "invalid_extension",
             Self::Refused(_) => "graph_refused",
             Self::PlanChanged => "plan_changed",
@@ -1057,10 +1078,10 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
     let stored_extensions = stored.as_ref().map_or(&[][..], |c| c.extensions.as_slice());
     let (base, _) = if stored.is_some() {
         validate_replay_plan(document, &unbounded)
+            .map_err(|error| GraphError::Invalid(error.to_string()))?
     } else {
-        validate_plan_with_limits(document, &unbounded)
-    }
-    .map_err(GraphError::Invalid)?;
+        validate_plan_with_limits(document, &unbounded).map_err(GraphError::Admission)?
+    };
     let mut expanded = plans::expand(
         document,
         stored_extensions,
@@ -1086,11 +1107,9 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     .skip_reason
                     .as_deref()
                     .is_some_and(|reason| reason.starts_with("parent "))
-                {
-                    if let Some(state) = node.cancelled_from.take() {
+                    && let Some(state) = node.cancelled_from.take() {
                         node.state = state;
                         node.skip_reason = None;
-                    }
                 }
             }
             asks::refresh_wake(&mut validation);
@@ -1162,8 +1181,11 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         fragment: None,
                         handoff: None,
                         expansion_pause: None,
+                        expansion_cause: None,
                         loop_pause: None,
                         loop_pause_code: None,
+                        loop_cause: None,
+                        truncation_cause: None,
                         round: node.round.clone(),
                         gate: None,
                         separation: None,
@@ -1423,6 +1445,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                 checkpoint.extensions.push(extension.clone());
             }
         }
+        checkpoint.deactivate_expansion_pauses();
         checkpoint.pause_reason = None;
         checkpoint.pause_code = None;
         if extensions.iter().any(|e| e.starts_with("loop.")) {
@@ -1444,6 +1467,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                 if let Some(node) = checkpoint.nodes.iter_mut().find(|n| n.id == name) {
                     node.loop_pause = None;
                     node.loop_pause_code = None;
+                    node.loop_cause = None;
                 }
             }
             loops::reconcile(&mut checkpoint, &extended);
@@ -1497,11 +1521,18 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                 continue 'schedule;
             }
         }
-        if let Some(reason) = checkpoint.nodes.iter().find_map(|node| {
-            node.expansion_pause
-                .as_deref()
-                .map(plans::pause_reason_for_display)
-        }) {
+        if let Some((index, reason)) =
+            checkpoint
+                .nodes
+                .iter()
+                .enumerate()
+                .find_map(|(index, node)| {
+                    node.expansion_pause
+                        .as_ref()
+                        .map(|reason| (index, reason.clone()))
+                })
+        {
+            checkpoint.activate_expansion_pause(index);
             checkpoint.pause_reason = Some(reason);
             checkpoint.pause_code = Some("invalid_plan_expansion".into());
         }
@@ -1515,6 +1546,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
             })
         };
         if let Some(reason) = &structural_pause {
+            checkpoint.deactivate_expansion_pauses();
             checkpoint.pause_reason = Some(bounded(reason, PAUSE_REASON_BYTES));
             checkpoint.pause_code = Some("structural_limit".into());
             journal.save(&checkpoint).map_err(GraphError::Journal)?;
@@ -1954,7 +1986,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         plans::append(&mut preview, &addition);
                         let (next_plan, next_positions) =
                             validate_flat_plan(&preview, &plans::generous())
-                                .map_err(str::to_owned)?;
+                                .map_err(|error| error.to_string())?;
                         if let Some(reason) = structural_limit_reason(&preview, &next_plan, limits)
                         {
                             return Err(reason);
@@ -2027,14 +2059,12 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     NextAttempt::LaunchRetryExhausted { reason } => {
                         let progress = &mut checkpoint.nodes[node_index];
                         progress.advance_error_code = Some("launch_retry_exhausted".into());
-                        progress.advance_error = Some(format!(
-                            "node {}: the launch failed: {}; {}",
-                            progress.id,
-                            reason,
-                            launch_diagnostic(&crate::coordination::facade::FacadeError::Busy)
-                                .next
-                                .as_deref()
-                                .unwrap_or("retry the graph advance")
+                        progress.advance_error = Some(bounded(
+                            &format!(
+                                "node {}: the launch failed: {reason}",
+                                provenant_records::diagnostic::safe_text(&progress.id)
+                            ),
+                            MAX_ADVANCE_ERROR_BYTES,
                         ));
                         progress.state = NodeState::Blocked;
                         progress.last_launch_retry =
@@ -2074,6 +2104,13 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                 {
                     attempt_extra.insert("retry_generation".into(), generation.clone());
                 }
+                let predecessor = checkpoint.nodes[node_index].recorded_attempts()
+                    .filter(|attempt| attempt.state == AttemptState::Terminal)
+                    .filter_map(|attempt| attempt.attempt_ref.as_ref())
+                    .next_back();
+                if let Some(reference) = predecessor {
+                    attempt_extra.insert("previous_attempt_ref".into(), reference.clone().into());
+                }
                 let key = AttemptKey {
                     extra: attempt_extra,
                     graph_id: plan.graph_id.clone(),
@@ -2081,6 +2118,9 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     route_index: u16::try_from(route_index)
                         .map_err(|_| GraphError::Invalid(String::from("route count")))?,
                 };
+                let key = checkpoint.nodes[node_index].attempts.last()
+                    .filter(|attempt| attempt.state != AttemptState::Terminal)
+                    .map_or(key, |attempt| attempt.key.clone());
 
                 // Expanded writers acquire their binding as soon as they exist.
                 if plans::writer(node)
@@ -2628,9 +2668,13 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                 }
                 let mut prior_attempts = Vec::new();
                 for attempt in checkpoint.nodes[node_index]
-                    .attempts
+                    .previous_attempts
                     .iter()
-                    .take(route_index)
+                    .skip(checkpoint.nodes[node_index].previous_attempts.len().saturating_sub(
+                        checkpoint.nodes[node_index].extra.get("quota_redraw_archived")
+                            .and_then(serde_json::Value::as_u64).unwrap_or(0) as usize
+                    ))
+                    .chain(checkpoint.nodes[node_index].attempts.iter().take(route_index))
                     .filter(|_| !review_retry)
                 {
                     let resolved = if let Some(reference) = &attempt.attempt_ref {
@@ -2749,9 +2793,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                             &mut checkpoint,
                             node_index,
                             &error,
-                            clock,
-                            admission_seconds,
-                            policy,
+                            LaunchTiming { clock, admission_seconds, policy },
                             journal,
                         )?;
                         break;
@@ -2820,6 +2862,37 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         Err(_) => (None, true),
                     },
                     _ => (None, false),
+                };
+                let fallback_cause = match &observation {
+                    AttemptObservation::Terminal {
+                        attempt_ref: Some(reference),
+                        launched: false,
+                        outcome,
+                        ..
+                    } if route_index + 1 < node.routes.len()
+                        && fallback_candidate(*outcome, node.access, false)
+                        && !live_fallback_allowed(
+                            *outcome,
+                            false,
+                            node.access,
+                            fallback_evidence,
+                        ) =>
+                    {
+                        owner
+                            .preparation_refusal_cause(&key, reference)
+                            .ok()
+                            .flatten()
+                    }
+                    _ => None,
+                };
+                let quota_redraw = match &observation {
+                    AttemptObservation::Terminal {
+                        attempt_ref: Some(reference), outcome: AttemptOutcome::UsageLimited, ..
+                    } if route.alias.is_some() && route.model.is_none() => {
+                        quota_redraw_budget(&checkpoint.nodes[node_index])
+                            && owner.quota_alias_redraw(&key, reference).map_err(GraphError::Run)?
+                    }
+                    _ => false,
                 };
                 let mut usage_error = None;
                 let mut cost_error = None;
@@ -3173,9 +3246,8 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                                         route_index,
                                         outcome,
                                         launched,
-                                        fallback_evidence,
-                                        evidence_unreadable,
-                                        review_limit_reached,
+                                        FallbackEvidence { preparation: fallback_evidence, unreadable: evidence_unreadable,
+                                            review_limit_reached, cause: fallback_cause.as_ref() },
                                     ) {
                                         SettlementFallback::Continue => true,
                                         SettlementFallback::Fail { code, message } => {
@@ -3233,6 +3305,36 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     record_usage_events(&mut checkpoint, node_index, usage_error, cost_error);
                 }
                 update_usage_warnings(&mut checkpoint);
+                if quota_redraw {
+                    // Same-alias redraw takes precedence over a different configured
+                    // route, and the retry patch requires the old execution settled.
+                    checkpoint.nodes[node_index].state = NodeState::Failed;
+                    let retry_policy = checkpoint.nodes[node_index].extra.get("retry").cloned();
+                    let spent = checkpoint.nodes[node_index].extra.get("quota_redraw_spent")
+                        .and_then(serde_json::Value::as_u64).unwrap_or(0)
+                        .saturating_add(checkpoint.nodes[node_index].attempts.iter().filter(|attempt| attempt.launched).count() as u64)
+                        .saturating_add(u64::from(checkpoint.nodes[node_index].attempts.last().is_some_and(|attempt| !attempt.launched)));
+                    let archived = checkpoint.nodes[node_index].extra.get("quota_redraw_archived")
+                        .and_then(serde_json::Value::as_u64).unwrap_or(0)
+                        .saturating_add(checkpoint.nodes[node_index].attempts.len() as u64);
+                    let library = template::TemplateLibrary::bundled();
+                    let resolvers = Default::default();
+                    patch::retry_node(
+                        &mut patch::LiveGraph { document, checkpoint: &mut checkpoint },
+                        &node.id, None,
+                        &patch::PatchContext {
+                            library: &library, resolvers: &resolvers, limits,
+                            scan: &patch::scan_for_secrets, journal: None,
+                        },
+                    ).map_err(|error| GraphError::Refused(error.to_string()))?;
+                    if let Some(policy) = retry_policy {
+                        checkpoint.nodes[node_index].extra.insert("retry".into(), policy);
+                    }
+                    checkpoint.nodes[node_index].extra.insert("quota_redraw_spent".into(), spent.into());
+                    checkpoint.nodes[node_index].extra.insert("quota_redraw_archived".into(), archived.into());
+                    journal.save(&checkpoint).map_err(GraphError::Journal)?;
+                    return advance_inner(document, owner, journal, limits, budget, false, &[], observed_ci);
+                }
                 let appended = if settled_result.is_some() || node.plan.is_some() {
                     plans::settle(
                         node,
@@ -3303,6 +3405,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
             && checkpoint.nodes.iter().all(|n| n.expansion_pause.is_none())
             && checkpoint.pause_reason.take().is_some()
         {
+            checkpoint.deactivate_expansion_pauses();
             checkpoint.pause_code = None;
             journal.save(&checkpoint).map_err(GraphError::Journal)?;
         }

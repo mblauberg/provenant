@@ -15,7 +15,7 @@ fn required<'a>(input: &'a Value, field: &str) -> Result<&'a str, FacadeError> {
     input[field]
         .as_str()
         .filter(|value| !value.is_empty())
-        .ok_or_else(|| FacadeError::invalid(format!("{field} is required")))
+        .ok_or_else(|| FacadeError::invalid(InvalidInputDetail::Field(field.into())))
 }
 
 impl Factory {
@@ -27,73 +27,21 @@ impl Factory {
             &self.context.roots,
             &provenant_cli::domains::SECTIONS,
         )
-        .map_err(|error| FacadeError::invalid(error.to_string()))?;
-        let mut request: provenant_routing::ReviewRequest = document
-            .and_then(|document| document.get("review"))
-            .cloned()
-            .map(serde_json::from_value)
-            .transpose()
-            .map_err(|error| {
-                FacadeError::invalid(format!("invalid graph review request: {error}"))
-            })?
-            .unwrap_or_default();
-        if let Some(context) = document.and_then(|document| document.get("context")) {
-            request.risk_tier = request
-                .risk_tier
-                .or_else(|| context["risk_tier"].as_str().map(str::to_owned));
-            request.kind = request
-                .kind
-                .or_else(|| context["task_kind"].as_str().map(str::to_owned));
+        .map_err(|_| FacadeError::InvalidInput { detail: None })?;
+        // Resolver selection needs review context, before template nodes compile.
+        let mut resolver_document = json!({"schema_version":2,"graph_id":"launch-resolvers","nodes":[]});
+        for field in ["review", "context"] {
+            if let Some(value) = document.and_then(|document| document.get(field)) {
+                resolver_document[field] = value.clone();
+            }
         }
-        let panel = config
-            .domains
-            .routing
-            .review
-            .resolve_panel(&request, None, &[], false)
-            .map_err(FacadeError::invalid)?;
-        let mut resolvers = BTreeMap::new();
-        let single = panel.slots.len() == 1;
-        let frame = !single && panel.frame;
-        let verifiers = if single { 0 } else { panel.verifiers };
-        let synthesis = !single && panel.synthesis == provenant_routing::ReviewSynthesis::Model;
-        resolvers.insert(
-            "review-topology".into(),
-            vec![format!(
-                "f{}-v{}-s{}",
-                u8::from(frame),
-                u8::from(verifiers > 0),
-                u8::from(synthesis)
-            )],
-        );
-        // The explicit shape variants containing a verifier also explain on
-        // their own when the selected shape happens to need none.
-        resolvers.insert(
-            "review-verifiers".into(),
-            (1..=verifiers.max(1))
-                .map(|number| number.to_string())
-                .collect(),
-        );
-        let mut lenses = Vec::new();
-        for lens in panel.slots.iter().map(|slot| slot.lens.as_str()).chain([
-            "correctness",
-            "security",
-            "tests",
-            "contract",
-            "design",
-            "adversarial",
-        ]) {
-            let advice = if lens == "tests"
-                && matches!(request.risk_tier.as_deref(), Some("crucial" | "terminal"))
-            {
-                include_str!("../../assets/review-tests-advice.txt")
-            } else {
-                ""
-            };
-            resolvers.insert(format!("review-advice-{lens}"), vec![advice.into()]);
-        }
-        lenses.extend(panel.slots.into_iter().map(|slot| slot.lens));
-        resolvers.insert("review-panel".into(), lenses);
-        Ok(resolvers)
+        let document: GraphDocument = serde_json::from_value(resolver_document)
+            .map_err(|_| FacadeError::InvalidInput { detail: None })?;
+        provenant_cli::fabric::graph_relay::launch_resolvers(
+            &config.domains.routing.review,
+            &document,
+        )
+        .map_err(|_| FacadeError::InvalidInput { detail: None })
     }
 
     fn relay_document(
@@ -108,9 +56,7 @@ impl Factory {
                 .get("set")
                 .is_some_and(|value| value.as_object().is_none_or(|object| !object.is_empty()))
         {
-            return Err(FacadeError::invalid(
-                "the lane relay accepts a template, brief and tier; document, over and set require host submission",
-            ));
+            return Err(FacadeError::invalid(InvalidInputDetail::Field("document".into())));
         }
         // Distinct submissions may have identical briefs. Generate the key once
         // per call; transport retries retain this request and its identity.
@@ -147,13 +93,13 @@ impl Factory {
             cancel,
             within,
         )
-        .map_err(|error| FacadeError::invalid(error.to_string()))?;
+        .map_err(|_| FacadeError::InvalidInput { detail: None })?;
         if let Some(seconds) = input.get("wait_seconds").and_then(Value::as_u64) {
             let children = provenant_cli::fabric::graph_relay::wait_for_children(
                 cancel,
                 std::time::Duration::from_secs(seconds),
             )
-            .map_err(|error| FacadeError::invalid(error.to_string()))?;
+            .map_err(|_| FacadeError::InvalidInput { detail: None })?;
             return Ok(json!({"receipt":receipt,"children":children}));
         }
         Ok(receipt)
@@ -161,22 +107,22 @@ impl Factory {
 
     fn confine_node(&self, node: &mut Value) -> Result<(), FacadeError> {
         let policy = provenant_fabric_runtime::read_roots::ReadRoots::new(
-            crate::preset::project_worktrees(&self.cwd),
+            crate::graph_support::project_worktrees(&self.cwd),
             &self.context.config.graph.allowed_read_roots,
         );
-        crate::preset::confine_pattern_roots(node, &policy).map_err(FacadeError::invalid)?;
+        crate::graph_support::confine_pattern_roots(node, &policy).map_err(|_| FacadeError::InvalidInput { detail: None })?;
         if let Some(roots) = node.get_mut("read_roots").and_then(Value::as_array_mut) {
             for root in roots {
                 let given = root
                     .as_str()
-                    .ok_or_else(|| FacadeError::invalid("read_roots entries must be strings"))?;
+                    .ok_or_else(|| FacadeError::invalid(InvalidInputDetail::Field("read_roots".into())))?;
                 let path = Path::new(given);
                 let path = if path.is_absolute() {
                     path.to_owned()
                 } else {
                     self.cwd.join(path)
                 };
-                *root = encode(policy.confine(&path).map_err(FacadeError::invalid)?)?;
+                *root = encode(policy.confine(&path).map_err(|_| FacadeError::InvalidInput { detail: None })?)?;
             }
         }
         for pointer in ["/composite/nodes", "/loop/body", "/plan/fallback/nodes"] {
@@ -203,21 +149,21 @@ impl Factory {
             .map(PathBuf::from)
             .unwrap_or_else(|| self.home.join(".config"));
         if !config.is_absolute() {
-            return Err(FacadeError::invalid("XDG_CONFIG_HOME must be absolute"));
+            return Err(FacadeError::invalid(InvalidInputDetail::Field("document".into())));
         }
         let mut library = TemplateLibrary::bundled();
         library
             .load_dir(Layer::User, &config.join("provenant/templates"))
-            .map_err(FacadeError::invalid)?;
+            .map_err(|_| FacadeError::InvalidInput { detail: None })?;
         library
             .load_dir(Layer::Repository, &self.cwd.join(".provenant/templates"))
-            .map_err(FacadeError::invalid)?;
+            .map_err(|_| FacadeError::InvalidInput { detail: None })?;
         if let Some(inline) = inline.filter(|value| !value.is_null()) {
             let templates: BTreeMap<String, Template> = serde_json::from_value(inline.clone())
-                .map_err(|error| FacadeError::invalid(format!("inline templates: {error}")))?;
+                .map_err(|_| FacadeError::InvalidInput { detail: None })?;
             library = library
                 .with(Layer::Inline, &templates)
-                .map_err(FacadeError::invalid)?;
+                .map_err(|_| FacadeError::InvalidInput { detail: None })?;
         }
         Ok(library)
     }
@@ -233,15 +179,15 @@ impl Factory {
         if let Some(wait) = input.get("wait_seconds") {
             let seconds = wait
                 .as_u64()
-                .ok_or_else(|| FacadeError::invalid("wait_seconds must be an integer"))?;
+                .ok_or_else(|| FacadeError::invalid(InvalidInputDetail::Field("wait_seconds".into())))?;
             WaitBudget::cli(self.clock.mono_now(), seconds)
-                .map_err(|error| FacadeError::invalid(error.to_string()))?;
+                .map_err(|_| FacadeError::InvalidInput { detail: None })?;
         }
         if self.context.inspection_only
             && (matches!(operation, "edit" | "stop" | "retry")
                 || operation == "run" && input["explain"] != true)
         {
-            return Err(FacadeError::ConfinementRefused);
+            return Err(FacadeError::ConfinementRefused { resource: None });
         }
         if self.context.in_lane {
             if operation == "run" {
@@ -249,7 +195,7 @@ impl Factory {
             }
             if operation == "edit" {
                 let patch: Patch = serde_json::from_value(input["patch"].clone())
-                    .map_err(|error| FacadeError::invalid(error.to_string()))?;
+                    .map_err(|_| FacadeError::InvalidInput { detail: None })?;
                 let op = provenant_fabric_runtime::graph::relay::RelayOp::Edit {
                     id: required(&input, "id")?.to_owned(),
                     patch,
@@ -258,10 +204,10 @@ impl Factory {
                     budget.remaining(self.clock.mono_now()).as_micros(),
                 );
                 return provenant_cli::fabric::graph_relay::from_lane(&op, cancel, within)
-                    .map_err(|error| FacadeError::invalid(error.to_string()));
+                    .map_err(|_| FacadeError::InvalidInput { detail: None });
             }
             if matches!(operation, "stop" | "retry") {
-                return Err(FacadeError::ConfinementRefused);
+                return Err(FacadeError::ConfinementRefused { resource: None });
             }
         }
         match operation {
@@ -277,7 +223,7 @@ impl Factory {
                         Ok(json!({
                             "name":name,
                             "layer":library.layer(name),
-                            "template":library.resolve(name).map_err(FacadeError::invalid)?,
+                            "template":library.resolve(name).map_err(|_| FacadeError::InvalidInput { detail: None })?,
                         }))
                     })
                     .collect::<Result<Vec<_>, FacadeError>>()?;
@@ -318,7 +264,7 @@ impl Factory {
                 self.control_receipt(run, &target, &input, budget, cancel, true)
             }
             "retry" => self.retry_document(&input, budget, cancel),
-            _ => Err(FacadeError::invalid("unknown graph operation")),
+            _ => Err(FacadeError::invalid(InvalidInputDetail::Field("operation".into()))),
         }
     }
 
@@ -330,9 +276,7 @@ impl Factory {
     ) -> Result<Value, FacadeError> {
         let raw = input.get("document");
         if raw.is_some_and(|document| !document.is_object()) {
-            return Err(FacadeError::invalid(
-                "document must be an object, not a file path",
-            ));
+            return Err(FacadeError::invalid(InvalidInputDetail::Field("document".into())));
         }
         let has_overrides = ["brief", "use", "tier", "over"]
             .iter()
@@ -380,12 +324,12 @@ impl Factory {
                 let patch = Patch {
                     schema_version: patch::PATCH_SCHEMA_VERSION,
                     nodes: serde_json::from_value(raw["nodes"].clone())
-                        .map_err(|error| FacadeError::invalid(error.to_string()))?,
+                        .map_err(|_| FacadeError::InvalidInput { detail: None })?,
                     ..Default::default()
                 };
                 let mut document =
                     patch::submit(id, &patch, &context, raw["integration_branch"].as_str())
-                        .map_err(|error| FacadeError::invalid(error.to_string()))?;
+                        .map_err(|_| FacadeError::InvalidInput { detail: None })?;
                 // Graph-wide settings belong to the document rather than a node.
                 let mut compiled = encode(&document)?;
                 for key in [
@@ -401,11 +345,11 @@ impl Factory {
                     }
                 }
                 document = serde_json::from_value(compiled)
-                    .map_err(|error| FacadeError::invalid(error.to_string()))?;
+                    .map_err(|_| FacadeError::InvalidInput { detail: None })?;
                 document
             } else {
                 serde_json::from_value::<GraphDocument>(raw.clone())
-                    .map_err(|error| FacadeError::invalid(error.to_string()))?
+                    .map_err(|_| FacadeError::InvalidInput { detail: None })?
             }
         } else {
             let mut node = match lane_document {
@@ -426,7 +370,7 @@ impl Factory {
             }
             let template = library
                 .resolve(node["use"].as_str().unwrap_or("task"))
-                .map_err(FacadeError::invalid)?;
+                .map_err(|_| FacadeError::InvalidInput { detail: None })?;
             let mut parameters = node.get("with").cloned().unwrap_or_else(|| json!({}));
             let overrides = input
                 .get("set")
@@ -434,7 +378,7 @@ impl Factory {
                 .cloned()
                 .unwrap_or_else(|| json!({}));
             if !parameters.is_object() || !overrides.is_object() {
-                return Err(FacadeError::invalid("set must be a parameter object"));
+                return Err(FacadeError::invalid(InvalidInputDetail::Field("set".into())));
             }
             parameters
                 .as_object_mut()
@@ -472,7 +416,7 @@ impl Factory {
                 &context,
                 integration_branch.as_ref().and_then(Value::as_str),
             )
-            .map_err(|error| FacadeError::invalid(error.to_string()))?
+            .map_err(|_| FacadeError::InvalidInput { detail: None })?
         };
         if let Some(raw) = lane_document.filter(|value| value.get("graph_id").is_some()) {
             let mut compiled = encode(&document)?;
@@ -489,14 +433,14 @@ impl Factory {
                 }
             }
             document = serde_json::from_value(compiled)
-                .map_err(|error| FacadeError::invalid(error.to_string()))?;
+                .map_err(|_| FacadeError::InvalidInput { detail: None })?;
         }
         if (raw.is_none() || lane_document.is_some())
             && let Some(tier) = input.get("tier").filter(|value| !value.is_null())
         {
             let tier = tier
                 .as_str()
-                .ok_or_else(|| FacadeError::invalid("tier must name a route alias"))?;
+                .ok_or_else(|| FacadeError::invalid(InvalidInputDetail::Field("tier".into())))?;
             let route = serde_json::from_value(json!({"alias":tier}))
                 .map_err(|_| FacadeError::StateCorrupt)?;
             for node in &mut document.nodes {
@@ -506,14 +450,17 @@ impl Factory {
         let mut bound = encode(&document)?;
         self.confine_nodes(&mut bound)?;
         document = serde_json::from_value(bound)
-            .map_err(|error| FacadeError::invalid(error.to_string()))?;
+            .map_err(|_| FacadeError::InvalidInput { detail: None })?;
+        document
+            .admit(&self.context.config.graph.limits)
+            .map_err(FacadeError::graph_admission)?;
         let submission_key = format!("submit:{}", document.graph_id);
         patch::submission(
             &mut document,
             &submission_key,
             &self.context.config.graph.limits,
         )
-        .map_err(|error| FacadeError::invalid(error.to_string()))?;
+        .map_err(|_| FacadeError::InvalidInput { detail: None })?;
         if input["explain"] == true {
             return Ok(json!({"document":document}));
         }
@@ -521,7 +468,7 @@ impl Factory {
             .prepare_scratch(cancel, budget)
             .map_err(scratch_prepare_error)?;
         let path = publish_preset_graph(&scratch, &encode(&document)?)
-            .map_err(|error| FacadeError::invalid(error.to_string()))?;
+            .map_err(|_| FacadeError::InvalidInput { detail: None })?;
         let run = self.graph_with_scratch(
             GraphInput::Run {
                 extra: Default::default(),
@@ -552,7 +499,7 @@ impl Factory {
             None => self.resolve_graph(selector)?.0,
         };
         let patch: Patch = serde_json::from_value(input["patch"].clone())
-            .map_err(|error| FacadeError::invalid(error.to_string()))?;
+            .map_err(|_| FacadeError::InvalidInput { detail: None })?;
         let mut journal = FileJournal::open(
             &self.context.roots.state,
             self.context.identity.project,
@@ -590,7 +537,7 @@ impl Factory {
                 limits: &self.context.config.graph.limits,
             },
         )
-        .map_err(|error| FacadeError::invalid(error.to_string()))?;
+        .map_err(|_| FacadeError::InvalidInput { detail: None })?;
         for expansion in &mut checkpoint.expansions {
             for node in &mut expansion.nodes {
                 let mut value = encode(&*node)?;
@@ -622,9 +569,7 @@ impl Factory {
                 .as_deref()
                 .is_some_and(|selected| selected != node)
             {
-                return Err(FacadeError::invalid(
-                    "node selector conflicts with node override",
-                ));
+                return Err(FacadeError::invalid(InvalidInputDetail::Field("over".into())));
             }
             target.node = Some(node.into());
         }
@@ -633,14 +578,12 @@ impl Factory {
             .cloned()
             .map(serde_json::from_value)
             .transpose()
-            .map_err(|error| FacadeError::invalid(error.to_string()))?
+            .map_err(|_| FacadeError::InvalidInput { detail: None })?
             .unwrap_or_default();
         if !extend.is_empty()
             && (target.node.is_some() || input.get("brief").is_some_and(|value| !value.is_null()))
         {
-            return Err(FacadeError::invalid(
-                "apply extend separately before redoing a node",
-            ));
+            return Err(FacadeError::invalid(InvalidInputDetail::Field("node".into())));
         }
         let id = target.graph.clone();
         if let Some(node) = target.node.as_deref() {
@@ -681,10 +624,10 @@ impl Factory {
                     limits: &self.context.config.graph.limits,
                 },
             )
-            .map_err(|error| FacadeError::invalid(error.to_string()))?;
+            .map_err(|_| FacadeError::InvalidInput { detail: None })?;
             journal.save(&checkpoint).map_err(graph_journal_error)?;
         } else if input.get("brief").is_some_and(|value| !value.is_null()) {
-            return Err(FacadeError::invalid("brief requires a node target"));
+            return Err(FacadeError::invalid(InvalidInputDetail::Field("brief".into())));
         }
         let run = self.graph(
             GraphInput::Resume {
@@ -711,7 +654,7 @@ impl Factory {
         let mut timed_out = false;
         if let Some(seconds) = input.get("wait_seconds").and_then(Value::as_u64) {
             let wait = WaitBudget::cli(self.clock.mono_now(), seconds)
-                .map_err(|error| FacadeError::invalid(error.to_string()))?
+                .map_err(|_| FacadeError::InvalidInput { detail: None })?
                 .cap_at(budget.deadline().as_mono_time());
             loop {
                 let unfinished = if stopping {
@@ -767,7 +710,9 @@ impl Factory {
                 };
             }
         }
-        Ok(json!({"rows":super::unified::status_rows(&run,target),"timed_out":timed_out}))
+        let mut rows = super::unified::status_rows(&run, target);
+        super::unified::enrich_status_rows(&mut rows, &self.context, &self.clock, cancel)?;
+        Ok(json!({"rows":rows,"timed_out":timed_out}))
     }
 
     fn wait_document(
@@ -783,9 +728,9 @@ impl Factory {
         let now = self.clock.mono_now();
         let deadline = now
             .checked_add(budget.remaining(now))
-            .map_err(|error| FacadeError::invalid(error.to_string()))?;
+            .map_err(|_| FacadeError::InvalidInput { detail: None })?;
         let wait = WaitBudget::cli(now, seconds)
-            .map_err(|error| FacadeError::invalid(error.to_string()))?
+            .map_err(|_| FacadeError::InvalidInput { detail: None })?
             .cap_at(deadline);
         while run.status == GraphStatus::Pending && !cancel.is_cancelled() {
             let remaining = wait.remaining(self.clock.mono_now());
@@ -840,7 +785,7 @@ impl Factory {
     fn graph_stats(&self, input: &Value) -> Result<Value, FacadeError> {
         let by = input.get("by").and_then(Value::as_str).unwrap_or("tier");
         if !matches!(by, "tier" | "template") {
-            return Err(FacadeError::invalid("by must be tier or template"));
+            return Err(FacadeError::invalid(InvalidInputDetail::Field("tier".into())));
         }
         let ids =
             FileJournal::event_graph_ids(&self.context.roots.state, self.context.identity.project)
@@ -938,12 +883,12 @@ fn bind_read_roots(
 ) -> Result<(), FacadeError> {
     if let Some(roots) = value.get("read_roots") {
         node.read_roots = serde_json::from_value(roots.clone())
-            .map_err(|error| FacadeError::invalid(error.to_string()))?;
+            .map_err(|_| FacadeError::InvalidInput { detail: None })?;
     }
     if let Some(plan) = value.get("plan") {
         node.plan = Some(
             serde_json::from_value(plan.clone())
-                .map_err(|error| FacadeError::invalid(error.to_string()))?,
+                .map_err(|_| FacadeError::InvalidInput { detail: None })?,
         );
     }
     if let Some(composite) = &mut node.composite {
@@ -1006,6 +951,7 @@ fn add(row: &mut Value, key: &str, value: u64) {
 }
 
 #[cfg(test)]
+#[allow(dead_code, unused_imports, reason = "the custom worktree driver omits libtest functions")]
 mod tests {
     use super::*;
     use crate::worktree_tests::support::{Result, TestRig};
@@ -1015,7 +961,7 @@ mod tests {
         fn observe_roots(
             &self,
             _: &[PathBuf],
-        ) -> BTreeMap<PathBuf, provenant_confinement::worktrees::WorkerState> {
+        ) -> BTreeMap<PathBuf, provenant_confinement::worktrees::Occupancy> {
             BTreeMap::new()
         }
     }

@@ -31,6 +31,7 @@ mod service_tests;
 pub mod settlement;
 mod short_temporary;
 mod store;
+pub mod token_budget;
 mod transcript;
 pub use service::{DispatchRequest, DispatchTask, ErrorKind, Service};
 pub use transcript::locate as locate_transcript;
@@ -307,6 +308,10 @@ impl std::fmt::Display for ArtifactProvenance {
 
 #[derive(Debug, Error)]
 pub enum RunError {
+    #[error("continuation preparation refused: {}", cause.reason())]
+    ContinuationRefused {
+        cause: provenant_records::run::TerminalCause,
+    },
     #[error("{0}")]
     InvalidTaskTitle(String),
     #[error("{message}")]
@@ -423,6 +428,11 @@ pub enum RunError {
     GenerationConflict { current_generation: u64 },
     #[error("read or record exceeds byte limit {limit}")]
     TooLarge { limit: u64 },
+    #[error("read or record exceeds byte limit {limit}")]
+    PromptTooLarge {
+        task_index: Option<usize>,
+        limit: u64,
+    },
     #[error("artifact digest or length does not match its record: {0}")]
     ArtifactMismatch(ArtifactProvenance),
     #[error("terminal publication is already sealed; recover its original facts and result")]
@@ -508,7 +518,30 @@ impl RunError {
         let kind = ErrorKind::from(self);
         let mut diagnostic = Diagnostic::new(kind.code()).category(kind.category());
         match self {
+            Self::ContinuationRefused { cause } => {
+                diagnostic = diagnostic.detail(cause.reason());
+            }
+            Self::PromptTooLarge { task_index, limit } => {
+                let field = task_index.map_or_else(
+                    || "tasks".to_owned(),
+                    |index| format!("tasks[{index}].prompt"),
+                );
+                diagnostic = diagnostic
+                    .detail(format!(
+                        "invalid input field `{field}`: exceeds {limit} bytes"
+                    ))
+                    .next("reduce the prompt input before retrying")
+                    .fact(DiagnosticFact::PromptLimit {
+                        task_index: *task_index,
+                        limit: *limit,
+                    });
+            }
             Self::Confinement(PermissionError::CredentialGrant { path, access }) => {
+                let access = match *access {
+                    "read" => "read",
+                    "write" => "write",
+                    _ => "requested",
+                };
                 diagnostic = diagnostic
                     .detail(match safe_path(path, destination) {
                         Some(path) => format!("credential root refused for {access} grant: {path}"),
@@ -546,7 +579,8 @@ impl RunError {
                     diagnostic = diagnostic.next(action);
                 }
                 if let WorktreeError::UnknownWriterAt { path }
-                | WorktreeError::CensusUnknown { path, .. } = error
+                | WorktreeError::CensusUnknown { path, .. }
+                | WorktreeError::UnknownOccupancy { path, .. } = error
                 {
                     if let Some(path) = safe_path(path, destination) {
                         diagnostic =
@@ -561,7 +595,8 @@ impl RunError {
                 // Census evidence can name processes and host paths. The local
                 // operator needs it to understand the uncertainty, but it is
                 // not an approved fact for remote peers.
-                if let WorktreeError::CensusUnknown { path, detail } = error
+                if let WorktreeError::CensusUnknown { path, detail }
+                | WorktreeError::UnknownOccupancy { path, detail } = error
                     && matches!(
                         destination,
                         provenant_records::diagnostic::Destination::Local
@@ -572,15 +607,14 @@ impl RunError {
                     diagnostic = diagnostic
                         .detail(format!("writer occupancy is unknown for {scope}: {detail}"));
                 }
-                if let WorktreeError::BranchCollision { existing } = error {
+                if matches!(error, WorktreeError::BranchCollision { .. }) {
                     diagnostic = diagnostic
-                        .detail(format!("branch name collides with existing ref {existing}"));
+                        .detail("branch name collides with an existing ref")
+                        .next("inspect existing Git refs and choose a different branch name");
                 }
-                if let WorktreeError::BranchExistsWithBase { branch, head, base } = error {
+                if let WorktreeError::BranchExistsWithBase { head, base, .. } = error {
                     diagnostic = diagnostic
-                        .detail(format!(
-                            "branch {branch} at {head} does not contain base {base}"
-                        ))
+                        .detail(format!("branch at {head} does not contain base {base}"))
                         .next("omit --base to reuse the branch");
                 }
                 if let WorktreeError::WriterBusy {
@@ -631,20 +665,17 @@ impl RunError {
                     ));
                 }
             }
-            Self::Sqlite(error)
-                if matches!(
-                    destination,
-                    provenant_records::diagnostic::Destination::Local
-                ) =>
-            {
-                diagnostic = diagnostic.detail(format!("run store: {error}"));
-            }
             Self::GenerationConflict { current_generation } => {
                 diagnostic =
                     diagnostic.fact(DiagnosticFact::GenerationConflict(*current_generation));
             }
+            Self::Io(_) => {
+                diagnostic = diagnostic.next("inspect the host I/O failure before retrying");
+            }
             Self::OperationIo { operation, .. } => {
-                diagnostic = diagnostic.fact(DiagnosticFact::Filesystem { operation });
+                diagnostic = diagnostic
+                    .fact(DiagnosticFact::Filesystem { operation })
+                    .next("inspect the host I/O failure before retrying");
             }
             Self::Filesystem(error) | Self::Publication(error) => {
                 use provenant_os::fs::FsError;
@@ -660,18 +691,60 @@ impl RunError {
                 };
                 diagnostic = diagnostic.fact(DiagnosticFact::Filesystem { operation });
             }
-            Self::Admission(AdmissionError::Disk { .. }) => {
-                diagnostic = diagnostic.next("free disk space above gc.free_floor before retrying")
+            Self::Admission(AdmissionError::Disk {
+                free,
+                floor,
+                origin,
+            }) => {
+                diagnostic = diagnostic
+                    .detail(format!(
+                        "disk space: {free} bytes available; gc.free_floor is {floor} bytes (source: {})", origin.description()
+                    ))
+                    .next("free disk space above gc.free_floor before retrying");
             }
-            Self::Admission(AdmissionError::MemoryPressure { .. }) => {
-                diagnostic = diagnostic.next("reduce host memory pressure before retrying")
+            Self::Admission(AdmissionError::MemoryPressure {
+                level,
+                threshold,
+                origin,
+            }) => {
+                let fact = provenant_records::diagnostic::ResourceFact::MemoryPressure {
+                    level: *level,
+                    threshold: *threshold,
+                    origin: *origin,
+                };
+                diagnostic = fact
+                    .project(diagnostic)
+                    .fact(DiagnosticFact::Resource(fact));
             }
-            Self::Admission(AdmissionError::Processes { .. }) => {
-                diagnostic = diagnostic.next("reduce host process use before retrying")
+            Self::Admission(AdmissionError::Processes { used, limit }) => {
+                let fact = provenant_records::diagnostic::ResourceFact::Processes {
+                    used: *used,
+                    limit: *limit,
+                    reserved: provenant_os::sys::resources::ProcessBudget {
+                        used: *used,
+                        limit: *limit,
+                    }
+                    .headroom(),
+                };
+                diagnostic = fact
+                    .project(diagnostic)
+                    .fact(DiagnosticFact::Resource(fact));
             }
-            Self::Admission(AdmissionError::LaneCap { .. }) => {
-                diagnostic =
-                    diagnostic.next("wait for an active lane to finish or adjust the lane limit")
+            Self::Admission(AdmissionError::LaneCap {
+                active,
+                limit,
+                kind,
+                origin,
+            }) => {
+                let fact = provenant_records::diagnostic::ResourceFact::LaneCap {
+                    active: *active,
+                    limit: *limit,
+                    lane_limit: *kind,
+                    origin: *origin,
+                };
+                diagnostic = fact
+                    .project(diagnostic)
+                    .fact(DiagnosticFact::Resource(fact));
             }
             Self::RetainedWriterImport {
                 run,
@@ -690,6 +763,10 @@ impl RunError {
                     ));
             }
             _ => {}
+        }
+        if diagnostic.next.is_none() {
+            diagnostic = diagnostic
+                .next("inspect the current state and request before taking further action");
         }
         diagnostic
     }
@@ -748,16 +825,142 @@ mod diagnostic_projection_tests {
     use std::path::{Path, PathBuf};
 
     #[test]
-    fn raw_io_source_is_not_a_safe_fact() {
-        let error = RunError::Io(std::io::Error::other("TOKEN_SENTINEL\u{1b}[31m"));
-        let projection = error.diagnostic(Destination::Remote {
+    fn resource_refusals_name_limits_and_corrective_actions() {
+        let cases = [
+            (
+                AdmissionError::Disk {
+                    free: 1,
+                    floor: 2,
+                    origin: provenant_records::diagnostic::SettingSource::Configuration,
+                },
+                "gc.free_floor",
+                "disk",
+            ),
+            (
+                AdmissionError::MemoryPressure {
+                    level: provenant_records::diagnostic::PressureLevel::Critical,
+                    threshold: provenant_records::diagnostic::PressureThreshold::Warning,
+                    origin: provenant_records::diagnostic::SettingSource::Configuration,
+                },
+                "memory_pressure_threshold",
+                "memory",
+            ),
+            (
+                AdmissionError::Processes { used: 3, limit: 4 },
+                "operating system RLIMIT_NPROC",
+                "process",
+            ),
+            (
+                AdmissionError::LaneCap {
+                    active: 5,
+                    limit: 5,
+                    kind: provenant_records::diagnostic::LaneLimit::ProjectWriters,
+                    origin: provenant_records::diagnostic::SettingSource::ShippedDefault,
+                },
+                "max_project_writer_lanes",
+                "writer",
+            ),
+        ];
+        for (cause, limit, corrective) in cases {
+            let diagnostic = RunError::Admission(cause).diagnostic(Destination::Remote {
+                repository: None,
+                home: None,
+            });
+            assert!(diagnostic.detail.as_deref().unwrap().contains(limit));
+            assert!(diagnostic.next.as_deref().unwrap().contains(corrective));
+            assert!(
+                !serde_json::to_string(&diagnostic)
+                    .unwrap()
+                    .contains("TOKEN_SENTINEL")
+            );
+        }
+    }
+
+    #[test]
+    fn dirty_writer_projection_preserves_edits_without_source_text() {
+        use provenant_confinement::worktrees::WorktreeError;
+        let error = RunError::Writer(WorktreeError::Dirty("TOKEN_SENTINEL\u{1b}".into()));
+        let diagnostic = error.diagnostic(Destination::Remote {
             repository: None,
             home: None,
         });
+        assert_eq!(diagnostic.code, "WRITER_SCOPE");
+        assert!(
+            diagnostic
+                .detail
+                .as_deref()
+                .unwrap()
+                .contains("uncommitted")
+        );
+        let action = diagnostic.next.as_deref().unwrap();
+        assert!(action.contains("commit") || action.contains("preserve"));
+        assert!(
+            !serde_json::to_string(&diagnostic)
+                .unwrap()
+                .contains("TOKEN_SENTINEL")
+        );
+    }
+
+    #[test]
+    fn raw_io_source_is_not_a_safe_fact() {
+        for source in [
+            "TOKEN_SENTINEL\u{1b}[31m".to_owned(),
+            format!("TOKEN_SENTINEL{}", "é".repeat(2048)),
+        ] {
+            let error = RunError::Io(std::io::Error::other(source));
+            for destination in [
+                Destination::Local,
+                Destination::Remote {
+                    repository: None,
+                    home: None,
+                },
+            ] {
+                let projection = error.diagnostic(destination);
+                let encoded = serde_json::to_string(&projection).unwrap();
+                assert!(!encoded.contains("TOKEN_SENTINEL"));
+                assert!(encoded.len() < 4096);
+                assert!(!encoded.chars().any(char::is_control));
+                assert_eq!(projection.code, "IO");
+                assert!(projection.detail.is_none());
+                assert!(projection.next.is_some());
+            }
+        }
+    }
+
+    #[test]
+    fn branch_refusal_omits_untrusted_ref_text() {
+        use provenant_confinement::worktrees::WorktreeError;
+        let error = RunError::Writer(WorktreeError::BranchCollision {
+            existing: "TOKEN_SENTINEL\u{1b}".into(),
+        });
+        for destination in [
+            Destination::Local,
+            Destination::Remote {
+                repository: None,
+                home: None,
+            },
+        ] {
+            let diagnostic = error.diagnostic(destination);
+            assert_eq!(diagnostic.code, "WRITER_SCOPE");
+            assert!(diagnostic.detail.as_deref().unwrap().contains("collides"));
+            assert!(diagnostic.next.as_deref().unwrap().contains("branch"));
+            assert!(
+                !serde_json::to_string(&diagnostic)
+                    .unwrap()
+                    .contains("TOKEN_SENTINEL")
+            );
+        }
+    }
+
+    #[test]
+    fn source_errors_are_not_diagnostic_detail_even_locally() {
+        let error = RunError::Sqlite(rusqlite::Error::InvalidParameterName(
+            "TOKEN_SENTINEL".into(),
+        ));
+        let projection = error.diagnostic(Destination::Local);
         let encoded = serde_json::to_string(&projection).unwrap();
         assert!(!encoded.contains("TOKEN_SENTINEL"));
-        assert_eq!(projection.code, "IO");
-        assert!(projection.detail.is_none());
+        assert!(projection.next.is_some());
     }
 
     #[test]
@@ -800,6 +1003,25 @@ mod diagnostic_projection_tests {
         });
         assert!(remote.detail.is_none());
         assert!(remote.next.is_some());
+    }
+
+    #[test]
+    fn credential_grant_does_not_echo_unknown_access_text() {
+        let error = RunError::Confinement(
+            provenant_confinement::permissions::PermissionError::CredentialGrant {
+                path: PathBuf::from("/private/root"),
+                access: "TOKEN_SENTINEL",
+            },
+        );
+        let diagnostic = error.diagnostic(Destination::Remote {
+            repository: None,
+            home: None,
+        });
+        assert_eq!(diagnostic.code, "CREDENTIAL_ROOT");
+        assert!(diagnostic.next.is_some());
+        let wire = serde_json::to_string(&diagnostic).unwrap();
+        assert!(!wire.contains("TOKEN_SENTINEL"));
+        assert!(!wire.contains("/private"));
     }
 
     #[test]
@@ -864,23 +1086,31 @@ mod diagnostic_projection_tests {
     }
 
     #[test]
-    fn unknown_census_diagnostic_names_local_scope_and_evidence() {
-        let error = RunError::Writer(
+    fn unknown_occupancy_diagnostics_name_local_scope_without_leaking_remote_evidence() {
+        for cause in [
             provenant_confinement::worktrees::WorktreeError::CensusUnknown {
                 path: PathBuf::from("/checkout/tree"),
                 detail: "process 123: cwd unreadable at /private/other".into(),
             },
-        );
-        let local = error.diagnostic(Destination::Local);
-        let detail = local.detail.unwrap();
-        assert!(detail.contains("/checkout/tree"));
-        assert!(detail.contains("process 123: cwd unreadable at /private/other"));
-        let remote = error.diagnostic(Destination::Remote {
-            repository: None,
-            home: None,
-        });
-        let rendered = serde_json::to_string(&remote).unwrap();
-        assert!(!rendered.contains("/private/other"));
-        assert!(!rendered.contains("/checkout/tree"));
+            provenant_confinement::worktrees::WorktreeError::UnknownOccupancy {
+                path: PathBuf::from("/checkout/tree"),
+                detail: "process 123: cwd unreadable at /private/other".into(),
+            },
+        ] {
+            let error = RunError::Writer(cause);
+            assert_eq!(ErrorKind::from(&error), ErrorKind::WriterUnknown);
+            let local = error.diagnostic(Destination::Local);
+            let detail = local.detail.unwrap();
+            assert!(detail.contains("/checkout/tree"));
+            assert!(detail.contains("process 123: cwd unreadable at /private/other"));
+            let remote = error.diagnostic(Destination::Remote {
+                repository: None,
+                home: None,
+            });
+            let rendered = serde_json::to_string(&remote).unwrap();
+            assert!(!rendered.contains("process 123"));
+            assert!(!rendered.contains("/private/other"));
+            assert!(!rendered.contains("/checkout/tree"));
+        }
     }
 }

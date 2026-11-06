@@ -101,7 +101,7 @@ fn gc_preview_reuses_one_census_for_many_worktrees() -> Result<(), Box<dyn Error
         }
     }
     impl WorkerObserver for Counting {
-        fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, WorkerState> {
+        fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, Occupancy> {
             super::census::observe_worker_roots(roots, self, self, &self.current, false).0
         }
     }
@@ -117,7 +117,7 @@ fn gc_preview_reuses_one_census_for_many_worktrees() -> Result<(), Box<dyn Error
     }
     let mut lanes = list(&context, &cancel())?;
     for lane in &mut lanes {
-        lane.writer = WriterState::Unknown;
+        lane.occupancy = Occupancy::custody_unknown(lane.path.clone(), "fixture unknown writer");
     }
     struct CountingGit<'a> {
         inner: &'a dyn Executor,
@@ -194,6 +194,319 @@ fn gc_preview_reuses_one_census_for_many_worktrees() -> Result<(), Box<dyn Error
 }
 
 #[test]
+fn repo_facts_resolves_a_moved_ref_fresh() -> Result<(), Box<dyn Error>> {
+    let fixture = Fixture::new()?;
+    let test = TestContext::new(&fixture)?;
+    let context = test.context();
+    let facts = RepoFacts::default();
+    fixture.run(&["branch", "facts-ref", "HEAD"])?;
+    let name = GitRefName::branch("facts-ref")?;
+    let initial = facts.resolve_commit(&context, name.clone(), &cancel())?;
+    fixture.run(&["commit", "--allow-empty", "-m", "move facts ref"])?;
+    fixture.run(&["branch", "-f", "facts-ref", "HEAD"])?;
+    let moved = facts.resolve_commit(&context, name, &cancel())?;
+    assert_ne!(moved, initial);
+    assert_eq!(moved, fixture.head()?);
+    assert_eq!(
+        facts.resolve_revision(&context, GitRevision::new("facts-ref")?, &cancel())?,
+        moved
+    );
+    assert_eq!(
+        facts.resolve_revision(&context, GitRevision::new("facts-ref~1")?, &cancel())?,
+        initial
+    );
+    assert_eq!(
+        facts.symbolic_revision(&context, GitRevision::new("facts-ref")?, &cancel())?,
+        Some("refs/heads/facts-ref".into())
+    );
+    context.facts.capture_inventory(&context, &cancel())?;
+    context.facts.read_inventory(&context, &cancel())?;
+    assert!(context.facts.take_inventory(&context).is_none());
+    let inventory_limit = provenant_os::exec::DEFAULT_CAPTURE_LIMIT;
+    assert!(RepoFacts::with_limits(inventory_limit, 0).is_err());
+    assert!(RepoFacts::with_limits(0, provenant_os::git::REPO_FACT_SCALAR_LIMIT).is_err());
+    let limited = RepoFacts::with_limits(inventory_limit, 1)?;
+    assert!(matches!(
+        limited.resolve_commit(&context, GitRefName::branch("facts-ref")?, &cancel()),
+        Err(WorktreeError::Utility(UtilityError::Truncated {
+            stream: "stdout"
+        }))
+    ));
+    assert_eq!(
+        facts.bare_setting(
+            context.repo,
+            context.executor,
+            context.utility,
+            context.utility_budget,
+            &cancel(),
+        )?,
+        Some(false)
+    );
+    assert!(matches!(
+        limited.bare_setting(
+            context.repo,
+            context.executor,
+            context.utility,
+            context.utility_budget,
+            &cancel(),
+        ),
+        Err(WorktreeError::Utility(UtilityError::Truncated {
+            stream: "stdout"
+        }))
+    ));
+    let read_only = context.utility.open_read_repo(
+        context.executor,
+        fixture.repo.root_path(),
+        context.utility_budget,
+        &cancel(),
+    )?;
+    let registrations = facts.read_only_inventory(
+        &read_only,
+        context.executor,
+        context.utility,
+        context.utility_budget,
+        &cancel(),
+    )?;
+    assert!(registrations.starts_with(b"worktree "));
+    assert!(registrations.ends_with(b"\0\0"));
+    assert_eq!(
+        facts.read_only_worktree_paths(
+            &read_only,
+            context.executor,
+            context.utility,
+            context.utility_budget,
+            &cancel(),
+        )?,
+        vec![fixture.repo.root_path().to_path_buf()]
+    );
+    let limited_inventory = RepoFacts::with_limits(1, provenant_os::git::REPO_FACT_SCALAR_LIMIT)?;
+    assert!(matches!(
+        limited_inventory.writer_inventory(
+            context.repo,
+            context.executor,
+            context.utility,
+            context.utility_budget,
+            &cancel()
+        ),
+        Err(WorktreeError::Utility(UtilityError::Truncated {
+            stream: "stdout"
+        }))
+    ));
+    let git = provenant_os::git::git_executable().ok_or("Git executable unavailable")?;
+    let environment = provenant_os::fixture::git_env();
+    assert!(matches!(
+        limited_inventory.discover_worktree_paths(
+            fixture.repo.root_path(),
+            &git,
+            &environment,
+            context.executor,
+            std::time::Duration::from_secs(30),
+            &cancel(),
+        ),
+        Err(WorktreeError::Utility(UtilityError::Truncated {
+            stream: "stdout"
+        }))
+    ));
+    assert!(matches!(
+        limited_inventory.read_only_inventory(
+            &read_only,
+            context.executor,
+            context.utility,
+            context.utility_budget,
+            &cancel()
+        ),
+        Err(WorktreeError::Utility(UtilityError::Truncated {
+            stream: "stdout"
+        }))
+    ));
+    let tree = fixture.run(&["rev-parse", "facts-ref^{tree}"])?;
+    let tree = GitOid::parse(std::str::from_utf8(&tree.stdout.bytes)?.trim())?;
+    assert_eq!(
+        facts.resolve_read_tree(
+            &read_only,
+            context.executor,
+            context.utility,
+            context.utility_budget,
+            moved,
+            &cancel()
+        )?,
+        tree
+    );
+    assert!(matches!(
+        limited.resolve_read_tree(
+            &read_only,
+            context.executor,
+            context.utility,
+            context.utility_budget,
+            moved,
+            &cancel()
+        ),
+        Err(WorktreeError::Utility(UtilityError::Truncated {
+            stream: "stdout"
+        }))
+    ));
+    // An existing ref to a non-commit object remains distinct from a missing
+    // ref, even when a caller separately asks for a peeled commit.
+    fs::write(fixture.root.join("blob-fixture"), b"object")?;
+    let blob = fixture.run(&["hash-object", "-w", "blob-fixture"])?;
+    let blob = std::str::from_utf8(&blob.stdout.bytes)?.trim();
+    fs::write(
+        fixture.repo.common_git_dir().join("refs/heads/blob-ref"),
+        format!("{blob}\n"),
+    )?;
+    assert_eq!(
+        facts.resolve_read_ref(
+            &read_only,
+            context.executor,
+            context.utility,
+            context.utility_budget,
+            GitRefName::branch("blob-ref")?,
+            &cancel()
+        )?,
+        GitOid::parse(blob)?
+    );
+    assert!(matches!(
+        facts.resolve_read_commit(
+            &read_only,
+            context.executor,
+            context.utility,
+            context.utility_budget,
+            GitRefName::branch("blob-ref")?,
+            &cancel()
+        ),
+        Err(WorktreeError::NotFound)
+    ));
+    assert_eq!(
+        facts.resolve_read_ref(
+            &read_only,
+            context.executor,
+            context.utility,
+            context.utility_budget,
+            GitRefName::branch("facts-ref")?,
+            &cancel()
+        )?,
+        moved
+    );
+    assert!(matches!(
+        limited.resolve_read_ref(
+            &read_only,
+            context.executor,
+            context.utility,
+            context.utility_budget,
+            GitRefName::branch("facts-ref")?,
+            &cancel()
+        ),
+        Err(WorktreeError::Utility(UtilityError::Truncated {
+            stream: "stdout"
+        }))
+    ));
+    assert!(matches!(
+        limited.resolve_read_commit(
+            &read_only,
+            context.executor,
+            context.utility,
+            context.utility_budget,
+            GitRefName::branch("facts-ref")?,
+            &cancel(),
+        ),
+        Err(WorktreeError::Utility(UtilityError::Truncated {
+            stream: "stdout"
+        }))
+    ));
+    assert!(matches!(
+        limited.resolve_revision(&context, GitRevision::new("facts-ref")?, &cancel()),
+        Err(WorktreeError::Utility(UtilityError::Truncated {
+            stream: "stdout"
+        }))
+    ));
+    assert!(matches!(
+        limited.symbolic_revision(&context, GitRevision::new("facts-ref")?, &cancel()),
+        Err(WorktreeError::Utility(UtilityError::Truncated {
+            stream: "stdout"
+        }))
+    ));
+    assert!(matches!(
+        limited.checkout_head(&context, &fixture.repo, &cancel()),
+        Err(WorktreeError::Utility(UtilityError::Truncated {
+            stream: "stdout"
+        }))
+    ));
+    let limited_inventory = RepoFacts::with_limits(1, provenant_os::git::REPO_FACT_SCALAR_LIMIT)?;
+    assert!(matches!(
+        limited_inventory.read_inventory(&context, &cancel()),
+        Err(WorktreeError::Utility(UtilityError::Truncated {
+            stream: "stdout"
+        }))
+    ));
+    assert!(matches!(
+        limited_inventory.capture_inventory(&context, &cancel()),
+        Err(WorktreeError::Utility(UtilityError::Truncated {
+            stream: "stdout"
+        }))
+    ));
+    Ok(())
+}
+
+#[test]
+fn cached_inventory_is_reused_until_a_worktree_mutation() -> Result<(), Box<dyn Error>> {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    struct CountingGit<'a> {
+        inner: &'a dyn Executor,
+        listings: AtomicUsize,
+    }
+    impl Executor for CountingGit<'_> {
+        fn execute(
+            &self,
+            options: provenant_os::exec::ExecOptions<'_>,
+        ) -> Result<ExecOutcome, provenant_os::exec::ExecError> {
+            if options
+                .argv
+                .windows(2)
+                .any(|pair| pair[0] == "worktree" && pair[1] == "list")
+            {
+                self.listings.fetch_add(1, Ordering::SeqCst);
+            }
+            self.inner.execute(options)
+        }
+    }
+    let fixture = Fixture::new()?;
+    let test = TestContext::new(&fixture)?;
+    let mut context = test.context();
+    let git = CountingGit {
+        inner: context.executor,
+        listings: AtomicUsize::new(0),
+    };
+    context.executor = &git;
+    assert_eq!(list_cached(&context, &cancel())?.len(), 1);
+    assert_eq!(list_cached(&context, &cancel())?.len(), 1);
+    assert_eq!(git.listings.load(Ordering::SeqCst), 1);
+    let tight = WorktreeContext {
+        utility_budget: context.utility_budget.with_stdout_cap(1)?,
+        ..context
+    };
+    assert!(matches!(
+        list_cached(&tight, &cancel()),
+        Err(WorktreeError::Utility(UtilityError::Truncated {
+            stream: "stdout"
+        }))
+    ));
+    assert_eq!(git.listings.load(Ordering::SeqCst), 2);
+    create(
+        &context,
+        WorktreeCreate {
+            branch: "cache-mutation".into(),
+            base: None,
+        },
+        &cancel(),
+    )?;
+    let after_mutation = git.listings.load(Ordering::SeqCst);
+    assert_eq!(list_cached(&context, &cancel())?.len(), 2);
+    assert_eq!(list_cached(&context, &cancel())?.len(), 2);
+    assert_eq!(git.listings.load(Ordering::SeqCst), after_mutation + 1);
+    Ok(())
+}
+
+#[test]
 fn gc_does_not_inspect_status_of_out_of_scope_worktrees() -> Result<(), Box<dyn Error>> {
     use std::sync::atomic::{AtomicUsize, Ordering};
     struct CountingGit<'a> {
@@ -212,7 +525,7 @@ fn gc_does_not_inspect_status_of_out_of_scope_worktrees() -> Result<(), Box<dyn 
     let fixture = Fixture::new()?;
     let test = TestContext::new(&fixture)?;
     let mut context = test.context();
-    for index in 0..40 {
+    for index in 0..100 {
         let path = fixture.root.join(format!("foreign-{index}"));
         fixture.run(&["worktree", "add", "--detach", path.to_str().ok_or("path")?])?;
     }
@@ -238,9 +551,26 @@ fn gc_does_not_inspect_status_of_out_of_scope_worktrees() -> Result<(), Box<dyn 
         &cancel(),
     )?;
     assert!(report.worktrees.removed.is_empty());
-    // One inventory read in list and one in collect, independent of the
-    // number of out-of-scope worktrees. No per-tree Git probes are needed.
-    assert_eq!(git.calls.load(Ordering::SeqCst), 2);
+    // A single command-scoped inventory serves both phases of a preview.
+    assert_eq!(git.calls.load(Ordering::SeqCst), 1);
+    let lanes = list_for_gc(&context, &cancel())?;
+    collect_lazy(
+        &context,
+        &lanes,
+        &WorktreeGcPolicy {
+            upstream: None,
+            terminal: &|_| false,
+            no_live_lanes: &|_| false,
+            regenerable: &[],
+            keep: &[],
+            written_before_ns: i128::MAX,
+            dry_run: false,
+            foreign_merged_clean: false,
+        },
+        &cancel(),
+    )?;
+    // Applying discards the cached snapshot and reads again under custody.
+    assert_eq!(git.calls.load(Ordering::SeqCst), 3);
     Ok(())
 }
 
@@ -320,6 +650,15 @@ fn gc_lazy_candidate_is_retained_when_its_git_probe_fails() -> Result<(), Box<dy
         rejected: AtomicUsize::new(0),
     };
     context.executor = &git;
+    let observation = list(&context, &cancel())?
+        .into_iter()
+        .find(|entry| entry.path == lane.path)
+        .ok_or("missing worktree")?;
+    assert!(matches!(
+        observation.occupancy,
+        Occupancy::Unknown { scope, evidence, source: OccupancyUnknownSource::Custody }
+            if scope == lane.path && evidence.contains("worktree verification failed:")
+    ));
     let lanes = list_for_gc(&context, &cancel())?;
     let report = collect_lazy(
         &context,
@@ -452,10 +791,11 @@ fn gc_unknown_writer_only_prunes_idle_unheld_output() -> Result<(), Box<dyn Erro
             .find(|lane| lane.path == path)
             .ok_or("missing tree")?;
         if scenario != "unowned" {
-            lane.writer = WriterState::Unknown;
+            lane.occupancy =
+                Occupancy::custody_unknown(lane.path.clone(), "fixture unknown writer");
         } else {
-            assert_eq!(lane.owner, OwnerStatus::Unowned);
-            assert_eq!(lane.writer, WriterState::Free);
+            assert!(lane.is_unowned());
+            assert!(lane.occupancy.is_available());
         }
         let live = NamedLive;
         let unknown = UnknownWorkers;
@@ -595,7 +935,7 @@ fn gc_native_output_preview_creates_no_writer_state() -> Result<(), Box<dyn Erro
         let held = cache_writer_guard(context.project_state, &path).map_err(|_| "guard failed")?;
         assert!(matches!(
             cache_writer_probe(context.project_state, &path),
-            Err(WorkerState::Busy)
+            Err(Occupancy::Held)
         ));
         drop(held);
     }
@@ -616,39 +956,88 @@ fn retained_import_fences_a_released_writer_slot() -> Result<(), Box<dyn Error>>
         path.to_str().ok_or("path")?,
     ])?;
     let slot = writer_directory(context.project_state, &path)?;
-    let guard = slot.try_lock(OsStr::new(WRITER_LOCK), LockMode::Exclusive)?;
-    let attempt = slot.current_path()?.join("retained-attempt");
-    fs::create_dir(&attempt)?;
-    fs::write(attempt.join("reservation.json"), "reservation")?;
+    let scope = provenant_supervisor::custody::Scope {
+        run: provenant_core::RunId::from_bytes([11; 16]),
+        attempt: provenant_core::AttemptId::from_bytes([12; 16]),
+        generation: 1,
+    };
+    let lease = provenant_supervisor::fixture::acquire_writer(
+        slot.try_clone()?,
+        scope,
+        WaitBudget::nonblocking(context.clock.mono_now()),
+        &cancel(),
+        context.clock,
+    )?;
+    let attempt = slot.current_path()?.join(scope.attempt.to_string());
+    let reservation = fs::read(attempt.join("reservation.json"))?;
     fs::write(attempt.join("import-retained.json"), "retained")?;
-    drop(guard);
+    drop(lease);
+    let listing = provenant_supervisor::custody::list_writer_reservations(context.project_state)?;
+    assert!(listing.issues.is_empty());
+    assert!(
+        listing
+            .reservations
+            .iter()
+            .any(|record| record.scope == scope)
+    );
 
-    assert!(matches!(
-        cache_writer_probe(context.project_state, &path),
-        Err(WorkerState::Busy)
-    ));
-    assert!(matches!(
-        cache_writer_guard(context.project_state, &path),
-        Err(WorkerState::Busy)
-    ));
+    for refusal in [
+        cache_writer_probe(context.project_state, &path).map(|_| ()),
+        cache_writer_guard(context.project_state, &path).map(|_| ()),
+    ] {
+        assert!(matches!(refusal,
+            Err(Occupancy::Unknown { scope, evidence, source: OccupancyUnknownSource::Custody })
+                if scope == path && evidence.contains("retained import fence")
+        ));
+    }
     let lane = list(&context, &cancel())?
         .into_iter()
         .find(|lane| lane.path == path)
         .ok_or("lane")?;
-    assert_eq!(lane.writer, WriterState::Busy);
-    let entries = read_worktrees(&context, &cancel())?;
+    assert!(matches!(&lane.occupancy,
+        Occupancy::Unknown { scope, evidence, source: OccupancyUnknownSource::Custody }
+            if scope == &path && evidence.contains("retained import fence")
+    ));
+    fs::write(path.join("uncommitted"), "preserve unfinished work")?;
+    let tree = verify_worktree(&fixture.repo, &path)?;
+    let new_owner = WorktreeOwner {
+        attempt_id: None,
+        operation_id: Some("retained-import-claim".parse()?),
+        branch: "native".into(),
+        base: lane.head.to_string(),
+        host: provenant_core::HostId::from_bytes([3; 16]),
+        created_at: context.clock.wall_now()?,
+        origin: WorktreeOrigin::Lane,
+        label: None,
+    };
+    assert!(matches!(
+        save_lane_owner_when_free(
+            &context,
+            &tree,
+            &new_owner,
+            lane.head,
+            None,
+            false,
+            &cancel()
+        ),
+        Err(WorktreeError::UnknownOccupancy { path: scope, detail })
+            if scope == path && detail.contains("retained import fence")
+    ));
+    assert!(load_owner(&tree)?.is_none());
+    assert_eq!(fs::read(attempt.join("reservation.json"))?, reservation);
+    assert_eq!(fs::read(attempt.join("import-retained.json"))?, b"retained");
+    let entries = context.facts.read_inventory(&context, &cancel())?;
     let entry = entries
         .iter()
         .find(|entry| entry.path == path)
         .ok_or("entry")?;
-    assert!(matches!(
-        lock_worktree(&context, entry, &cancel(), false),
-        Err(WorktreeError::LockBusy)
-    ));
-    assert!(matches!(
-        lock_worktree(&context, entry, &cancel(), true),
-        Err(WorktreeError::LockBusy)
-    ));
+    for preview in [false, true] {
+        assert!(matches!(
+            lock_worktree(&context, entry, &cancel(), preview),
+            Err(WorktreeError::UnknownOccupancy { path: scope, detail })
+                if scope == path && detail.contains("retained import fence")
+        ));
+    }
     fs::create_dir(path.join("target"))?;
     fs::write(path.join("target/artifact"), "retained")?;
     let lanes = list(&context, &cancel())?;
@@ -665,6 +1054,12 @@ fn retained_import_fences_a_released_writer_slot() -> Result<(), Box<dyn Error>>
     };
     collect(&context, &lanes, &policy, &cancel())?;
     assert!(path.join("target/artifact").is_file());
+    assert_eq!(
+        fs::read_to_string(path.join("uncommitted"))?,
+        "preserve unfinished work"
+    );
+    assert_eq!(fs::read(attempt.join("reservation.json"))?, reservation);
+    assert_eq!(fs::read(attempt.join("import-retained.json"))?, b"retained");
 
     // Settlement can retain historical evidence after clearing the reservation.
     fs::remove_file(attempt.join("reservation.json"))?;
@@ -713,8 +1108,8 @@ fn git_inventory_accepts_unregistered_and_recreated_worktrees() -> Result<(), Bo
             .iter()
             .find(|tree| tree.path == path)
             .ok_or("tree")?
-            .writer,
-        WriterState::Free
+            .occupancy,
+        Occupancy::Available
     );
     assert!(
         context
@@ -802,8 +1197,8 @@ fn writer_lock_busy_is_distinct_from_observed_live_process() -> Result<(), Box<d
             .iter()
             .find(|tree| tree.path == info.path)
             .ok_or("tree")?
-            .writer,
-        WriterState::Busy
+            .occupancy,
+        Occupancy::Held
     );
     let report = collect(
         &context,
@@ -982,6 +1377,10 @@ fn batch_worktree_on_a_private_branch_follows_an_integration_ref_by_fast_forward
     assert_eq!(before.head, start);
     assert_eq!(before.dirty, WorktreeCondition::Clean);
     fast_forward(&context, &batch.path, lane_head, &cancel())?;
+    assert!(
+        context.facts.take_inventory(&context).is_none(),
+        "a Git mutation must not leave the earlier inventory snapshot reusable"
+    );
     let after = entry(&batch.path)?;
     assert_eq!(after.head, lane_head);
     assert_eq!(after.dirty, WorktreeCondition::Clean);
@@ -1009,14 +1408,18 @@ fn fallback_writer_after_a_partial_commit_continues_past_the_pin() -> Result<(),
         &info.path,
         &["commit", "--allow-empty", "-m", "partial work"],
     )?;
-    let ahead = read_worktrees(&context, &cancel())?
+    let ahead = context
+        .facts
+        .read_inventory(&context, &cancel())?
         .into_iter()
         .find(|entry| entry.path == info.path)
         .ok_or("missing writer")?
         .head;
     assert_ne!(ahead, pin);
     fast_forward(&context, &info.path, pin, &cancel())?;
-    let after = read_worktrees(&context, &cancel())?
+    let after = context
+        .facts
+        .read_inventory(&context, &cancel())?
         .into_iter()
         .find(|entry| entry.path == info.path)
         .ok_or("missing writer")?
@@ -1058,7 +1461,9 @@ fn source_fast_forward_refuses_dirty_diverged_or_leased_tree() -> Result<(), Box
                 &["commit", "--allow-empty", "-m", "diverged writer"],
             )?;
         }
-        let before = read_worktrees(&context, &cancel())?
+        let before = context
+            .facts
+            .read_inventory(&context, &cancel())?
             .into_iter()
             .find(|entry| entry.path == info.path)
             .ok_or("missing writer")?
@@ -1076,7 +1481,9 @@ fn source_fast_forward_refuses_dirty_diverged_or_leased_tree() -> Result<(), Box
             "leased" => assert!(matches!(error, WorktreeError::LockBusy)),
             _ => unreachable!(),
         }
-        let after = read_worktrees(&context, &cancel())?
+        let after = context
+            .facts
+            .read_inventory(&context, &cancel())?
             .into_iter()
             .find(|entry| entry.path == info.path)
             .ok_or("missing writer")?
@@ -1115,7 +1522,9 @@ fn source_fast_forward_preserves_ignored_files_that_become_tracked() -> Result<(
         fast_forward(&context, &info.path, target, &cancel()),
         Err(WorktreeError::SourceAdvanceFailed { target: requested }) if requested == target
     ));
-    let after = read_worktrees(&context, &cancel())?
+    let after = context
+        .facts
+        .read_inventory(&context, &cancel())?
         .into_iter()
         .find(|entry| entry.path == info.path)
         .ok_or("missing writer")?
@@ -1129,14 +1538,181 @@ fn source_fast_forward_preserves_ignored_files_that_become_tracked() -> Result<(
 }
 
 #[test]
-fn held_writer_lease_takes_precedence_over_live_census() -> Result<(), Box<dyn Error>> {
-    struct Live;
-    impl WorkerObserver for Live {
-        fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, WorkerState> {
+fn occupancy_keeps_scoped_census_evidence_and_held_lease_priority() -> Result<(), Box<dyn Error>> {
+    let scope = Path::new("/fixture/worktree");
+    assert!(matches!(
+        combine_occupancy(scope, Occupancy::custody_unknown(scope.to_path_buf(), "fixture"), Occupancy::Observed { process: None }),
+        Occupancy::Unknown { scope: actual, source: OccupancyUnknownSource::Custody, .. } if actual == scope
+    ));
+    assert_eq!(
+        combine_occupancy(
+            scope,
+            Occupancy::Held,
+            Occupancy::Observed { process: None }
+        ),
+        Occupancy::Held
+    );
+    assert!(matches!(
+        combine_occupancy(scope, Occupancy::Available, Occupancy::Held),
+        Occupancy::Unknown { scope: actual, source: OccupancyUnknownSource::Census, .. } if actual == scope
+    ));
+    struct Incomplete;
+    struct Contended;
+    impl WorkerObserver for Contended {
+        fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, Occupancy> {
             roots
                 .iter()
                 .cloned()
-                .map(|path| (path, WorkerState::Live))
+                .map(|path| (path, Occupancy::Held))
+                .collect()
+        }
+    }
+    impl WorkerObserver for Incomplete {
+        fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, Occupancy> {
+            roots
+                .iter()
+                .cloned()
+                .map(|path| {
+                    (
+                        path.clone(),
+                        Occupancy::census_unknown(path, "fixture census unavailable"),
+                    )
+                })
+                .collect()
+        }
+        fn observe_roots_with_details(&self, roots: &[PathBuf]) -> WorkerObservations {
+            (
+                self.observe_roots(roots),
+                roots
+                    .iter()
+                    .cloned()
+                    .map(|path| (path, "fixture census incomplete".into()))
+                    .collect(),
+            )
+        }
+    }
+    let fixture = Fixture::new()?;
+    let test = TestContext::new(&fixture)?;
+    let mut context = test.context();
+    let info = create(
+        &context,
+        WorktreeCreate {
+            branch: "occupancy-evidence".into(),
+            base: None,
+        },
+        &cancel(),
+    )?;
+    context.workers = &Incomplete;
+    let observation = list(&context, &cancel())?
+        .into_iter()
+        .find(|entry| entry.path == info.path)
+        .ok_or("missing worktree")?;
+    assert!(matches!(
+        observation.occupancy,
+        Occupancy::Unknown { scope, evidence, source: OccupancyUnknownSource::Census }
+            if scope == info.path && evidence == "fixture census incomplete"
+    ));
+    let _held = cache_writer_guard(context.project_state, &info.path).map_err(|_| "lease")?;
+    let observation = list(&context, &cancel())?
+        .into_iter()
+        .find(|entry| entry.path == info.path)
+        .ok_or("missing worktree")?;
+    assert_eq!(observation.occupancy, Occupancy::Held);
+    drop(_held);
+    context.workers = &Contended;
+    let observation = list(&context, &cancel())?
+        .into_iter()
+        .find(|entry| entry.path == info.path)
+        .ok_or("missing worktree")?;
+    assert!(matches!(
+        observation.occupancy,
+        Occupancy::Unknown { scope, evidence, source: OccupancyUnknownSource::Census }
+            if scope == info.path && evidence.contains("without a held writer lease")
+    ));
+    let tree = verify_worktree(&fixture.repo, &info.path)?;
+    let owner = WorktreeOwner {
+        attempt_id: None,
+        operation_id: Some("occupancy-evidence".parse()?),
+        branch: "occupancy-evidence".into(),
+        base: info.head.to_string(),
+        host: provenant_core::HostId::from_bytes([3; 16]),
+        created_at: context.clock.wall_now()?,
+        origin: WorktreeOrigin::Lane,
+        label: None,
+    };
+    save_lane_owner_when_free(&context, &tree, &owner, info.head, None, false, &cancel())?;
+    assert_eq!(load_owner(&tree)?, Some(owner.clone()));
+    let registered = list(&context, &cancel())?
+        .into_iter()
+        .find(|entry| entry.path == info.path)
+        .ok_or("missing registered worktree")?;
+    assert_eq!(
+        registered.owner.as_ref().ok().and_then(Option::as_ref),
+        Some(&owner)
+    );
+    assert_eq!(serde_json::to_value(&registered)?["owner"], "registered");
+    let owner_path = tree.repo().private_git_dir().join("provenant-owner.json");
+    let saved = fs::read(&owner_path)?;
+    fs::write(&owner_path, b"invalid owner record")?;
+    context.workers = &FreeWorkers;
+    let observation = list(&context, &cancel())?
+        .into_iter()
+        .find(|entry| entry.path == info.path)
+        .ok_or("missing worktree")?;
+    assert!(matches!(observation.occupancy, Occupancy::Unknown { .. }));
+    assert!(
+        observation
+            .owner
+            .as_ref()
+            .is_err_and(|evidence| evidence.contains("owner record could not be read"))
+    );
+    assert_eq!(serde_json::to_value(&observation)?["owner"], "unknown");
+    let policy = WorktreeGcPolicy {
+        upstream: Some(info.head),
+        terminal: &|_| true,
+        no_live_lanes: &|_| true,
+        regenerable: &[],
+        keep: &[],
+        written_before_ns: i128::MAX,
+        dry_run: false,
+        foreign_merged_clean: false,
+    };
+    collect(
+        &context,
+        std::slice::from_ref(&observation),
+        &policy,
+        &cancel(),
+    )?;
+    assert!(info.path.exists());
+    assert_eq!(fs::read(&owner_path)?, b"invalid owner record");
+    assert!(matches!(
+        observation.occupancy,
+        Occupancy::Unknown { scope, evidence, source: OccupancyUnknownSource::Custody }
+            if scope == info.path && evidence.contains("owner record could not be read")
+    ));
+    fs::write(&owner_path, saved)?;
+    fixture.run(&["worktree", "lock", info.path.to_str().ok_or("path")?])?;
+    let observation = list(&context, &cancel())?
+        .into_iter()
+        .find(|entry| entry.path == info.path)
+        .ok_or("missing worktree")?;
+    assert!(matches!(
+        observation.occupancy,
+        Occupancy::Unknown { scope, evidence, source: OccupancyUnknownSource::Custody }
+            if scope == info.path && evidence.contains("locked")
+    ));
+    Ok(())
+}
+
+#[test]
+fn held_writer_lease_takes_precedence_over_live_census() -> Result<(), Box<dyn Error>> {
+    struct Live;
+    impl WorkerObserver for Live {
+        fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, Occupancy> {
+            roots
+                .iter()
+                .cloned()
+                .map(|path| (path, Occupancy::Observed { process: None }))
                 .collect()
         }
     }
@@ -1170,11 +1746,175 @@ fn held_writer_lease_takes_precedence_over_live_census() -> Result<(), Box<dyn E
         .into_iter()
         .find(|entry| entry.path == info.path)
         .ok_or("missing worktree")?;
-    assert_eq!(listed.writer, WriterState::Busy);
+    assert_eq!(listed.occupancy, Occupancy::Held);
     assert_eq!(
         load_owner(&tree)?.and_then(|owner| owner.attempt_id),
         Some(attempt)
     );
+    let next = WorktreeOwner {
+        attempt_id: None,
+        operation_id: Some("next-lease".parse()?),
+        ..owner.clone()
+    };
+    assert!(matches!(
+        save_lane_owner_when_free(
+            &context,
+            &tree,
+            &next,
+            info.head,
+            Some(&owner),
+            true,
+            &cancel()
+        ),
+        Err(WorktreeError::LockBusy)
+    ));
+    drop(_held);
+    assert!(matches!(
+        save_lane_owner_when_free(
+            &context,
+            &tree,
+            &next,
+            info.head,
+            Some(&owner),
+            false,
+            &cancel()
+        ),
+        Err(WorktreeError::WriterBusy { holder: Some(holder) }) if holder == attempt
+    ));
+    save_lane_owner_when_free(
+        &context,
+        &tree,
+        &next,
+        info.head,
+        Some(&owner),
+        true,
+        &cancel(),
+    )?;
+    assert_eq!(load_owner(&tree)?, Some(next));
+    Ok(())
+}
+
+#[test]
+fn competing_initial_lane_claims_publish_only_one_owner() -> Result<(), Box<dyn Error>> {
+    let fixture = Fixture::new()?;
+    let test = TestContext::new(&fixture)?;
+    let context = test.context();
+    let info = create(
+        &context,
+        WorktreeCreate {
+            branch: "competing-claims".into(),
+            base: None,
+        },
+        &cancel(),
+    )?;
+    let tree = verify_worktree(&fixture.repo, &info.path)?;
+    let first = WorktreeOwner {
+        attempt_id: None,
+        operation_id: Some("competing-first".parse()?),
+        branch: "competing-claims".into(),
+        base: info.head.to_string(),
+        host: provenant_core::HostId::from_bytes([3; 16]),
+        created_at: context.clock.wall_now()?,
+        origin: WorktreeOrigin::Lane,
+        label: None,
+    };
+    let second = WorktreeOwner {
+        operation_id: Some("competing-second".parse()?),
+        ..first.clone()
+    };
+    let barrier = std::sync::Barrier::new(2);
+    let claim = |owner: &WorktreeOwner| {
+        barrier.wait();
+        save_lane_owner_when_free(&context, &tree, owner, info.head, None, false, &cancel())
+    };
+    let results = std::thread::scope(|scope| {
+        let first_result = scope.spawn(|| claim(&first));
+        let second_result = scope.spawn(|| claim(&second));
+        Ok::<_, Box<dyn Error>>((
+            first_result
+                .join()
+                .map_err(|_| "first claim thread panicked")?,
+            second_result
+                .join()
+                .map_err(|_| "second claim thread panicked")?,
+        ))
+    })?;
+    assert!(
+        matches!(
+            (&results.0, &results.1),
+            (Ok(()), Err(WorktreeError::IdentityChanged))
+                | (Err(WorktreeError::IdentityChanged), Ok(()))
+        ),
+        "both claims must not succeed: {results:?}"
+    );
+    let owner = load_owner(&tree)?.ok_or("missing winning owner")?;
+    assert!(owner == first || owner == second);
+    Ok(())
+}
+
+#[test]
+fn stale_owner_update_cannot_overwrite_a_successor_claim() -> Result<(), Box<dyn Error>> {
+    let fixture = Fixture::new()?;
+    let test = TestContext::new(&fixture)?;
+    let context = test.context();
+    let info = create(
+        &context,
+        WorktreeCreate {
+            branch: "owner-update-race".into(),
+            base: None,
+        },
+        &cancel(),
+    )?;
+    let tree = verify_worktree(&fixture.repo, &info.path)?;
+    let first = WorktreeOwner {
+        attempt_id: Some(provenant_core::AttemptId::from_bytes([4; 16])),
+        operation_id: Some("first-operation".parse()?),
+        branch: "owner-update-race".into(),
+        base: info.head.to_string(),
+        host: provenant_core::HostId::from_bytes([3; 16]),
+        created_at: context.clock.wall_now()?,
+        origin: WorktreeOrigin::Lane,
+        label: None,
+    };
+    save_lane_owner_when_free(&context, &tree, &first, info.head, None, false, &cancel())?;
+    let successor = WorktreeOwner {
+        attempt_id: None,
+        operation_id: Some("successor-operation".parse()?),
+        ..first.clone()
+    };
+    save_lane_owner_when_free(
+        &context,
+        &tree,
+        &successor,
+        info.head,
+        Some(&first),
+        true,
+        &cancel(),
+    )?;
+    let stale_update = WorktreeOwner {
+        attempt_id: Some(provenant_core::AttemptId::from_bytes([5; 16])),
+        ..first.clone()
+    };
+    assert!(matches!(
+        update_owner_when_unchanged(&context, &tree, &first, &stale_update, &cancel()),
+        Err(WorktreeError::IdentityChanged)
+    ));
+    assert_eq!(load_owner(&tree)?, Some(successor.clone()));
+    let current_update = WorktreeOwner {
+        attempt_id: Some(provenant_core::AttemptId::from_bytes([6; 16])),
+        ..successor.clone()
+    };
+    let held = cache_writer_guard(context.project_state, &info.path).map_err(|_| "lease")?;
+    assert!(matches!(
+        update_owner_when_unchanged(&context, &tree, &successor, &current_update, &cancel()),
+        Err(WorktreeError::WriterBusy { holder: None })
+    ));
+    assert_eq!(load_owner(&tree)?, Some(successor.clone()));
+    drop(held);
+    update_owner_when_unchanged(&context, &tree, &successor, &current_update, &cancel())?;
+    // A replay that already reached the exact target remains idempotent.
+    update_owner_when_unchanged(&context, &tree, &successor, &current_update, &cancel())?;
+    assert_eq!(load_owner(&tree)?, Some(current_update));
     Ok(())
 }
 
@@ -1204,6 +1944,35 @@ fn lane_owner_reassignment_holds_custody_and_preserves_adopted_owners() -> Resul
         label: None,
     };
     save_lane_owner_when_free(&context, &tree, &owner, info.head, None, false, &cancel())?;
+    let competing = WorktreeOwner {
+        operation_id: Some("competing-owner".parse()?),
+        ..owner.clone()
+    };
+    assert!(matches!(
+        save_lane_owner_when_free(
+            &context,
+            &tree,
+            &competing,
+            info.head,
+            None,
+            false,
+            &cancel()
+        ),
+        Err(WorktreeError::IdentityChanged)
+    ));
+    assert_eq!(load_owner(&tree)?, Some(owner.clone()));
+    assert!(matches!(
+        remove_created_by_operation(
+            &context,
+            "lane-owner".into(),
+            info.head,
+            &"competing-owner".parse()?,
+            &cancel()
+        ),
+        Err(WorktreeError::IdentityChanged)
+    ));
+    assert!(info.path.exists());
+    assert_eq!(load_owner(&tree)?, Some(owner.clone()));
     let state = context
         .project_state
         .open_verified_directory(&state_dir_name(&info.path))?;
@@ -1233,6 +2002,35 @@ fn lane_owner_reassignment_holds_custody_and_preserves_adopted_owners() -> Resul
     ));
     assert_eq!(load_owner(&tree)?, Some(owner.clone()));
     drop(held);
+    assert!(matches!(
+        save_lane_owner_when_free(
+            &context,
+            &tree,
+            &next,
+            info.head,
+            Some(&owner),
+            false,
+            &cancel()
+        ),
+        Err(WorktreeError::WriterBusy { holder }) if holder == owner.attempt_id
+    ));
+    assert_eq!(load_owner(&tree)?, Some(owner.clone()));
+    let pending = WorktreeOwner {
+        attempt_id: None,
+        ..owner.clone()
+    };
+    save_owner(&tree, &pending)?;
+    save_lane_owner_when_free(
+        &context,
+        &tree,
+        &next,
+        info.head,
+        Some(&pending),
+        false,
+        &cancel(),
+    )?;
+    assert_eq!(load_owner(&tree)?, Some(next.clone()));
+    save_owner(&tree, &owner)?;
     fs::write(info.path.join("dirty"), "keep")?;
     let error = save_lane_owner_when_free(
         &context,
@@ -1623,11 +2421,11 @@ fn owned_cleanup_refuses_dirty_unmerged_and_adopted_trees() -> Result<(), Box<dy
 }
 
 impl WorkerObserver for FreeWorkers {
-    fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, WorkerState> {
+    fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, Occupancy> {
         roots
             .iter()
             .cloned()
-            .map(|root| (root, WorkerState::Free))
+            .map(|root| (root, Occupancy::Available))
             .collect()
     }
 }
@@ -1636,11 +2434,11 @@ impl WorkerObserver for FreeWorkers {
 pub(super) struct NamedLive;
 
 impl WorkerObserver for NamedLive {
-    fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, WorkerState> {
+    fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, Occupancy> {
         roots
             .iter()
             .cloned()
-            .map(|root| (root, WorkerState::Live))
+            .map(|root| (root, Occupancy::Observed { process: None }))
             .collect()
     }
 
@@ -1748,17 +2546,23 @@ fn detached_removal_keeps_dirty_unmerged_and_live_work() -> Result<(), Box<dyn E
 }
 
 impl WorkerObserver for UnknownWorkers {
-    fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, WorkerState> {
+    fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, Occupancy> {
         roots
             .iter()
             .cloned()
-            .map(|root| (root, WorkerState::Unknown))
+            .map(|root| {
+                (
+                    root.clone(),
+                    Occupancy::census_unknown(root, "fixture census unavailable"),
+                )
+            })
             .collect()
     }
 }
 
 pub(super) struct TestContext<'a> {
     pub(super) fixture: &'a Fixture,
+    pub(super) facts: RepoFacts,
     pub(super) binding: ProjectBinding,
     pub(super) project_state: Directory,
     pub(super) workers: FreeWorkers,
@@ -1791,6 +2595,7 @@ impl<'a> TestContext<'a> {
         let lock_budget = WaitBudget::cli(clock.mono_now(), 5)?;
         Ok(Self {
             fixture,
+            facts: RepoFacts::default(),
             binding,
             project_state,
             workers: FreeWorkers,
@@ -1809,6 +2614,7 @@ impl<'a> TestContext<'a> {
             project_state: &self.project_state,
             executor: &self.fixture.executor,
             utility: &self.fixture.runtime,
+            facts: &self.facts,
             workers: &self.workers,
             clock: &self.clock,
             utility_budget: self.utility_budget,
@@ -1957,7 +2763,7 @@ fn gc_idle_output_requires_ignored_idle_and_free_writer() -> Result<(), Box<dyn 
         if scenario == "untracked" {
             // Call the pruning owner directly so the early dirty-lane gate
             // cannot mask the non-ignored output protection.
-            let entries = read_worktrees(&context, &cancel())?;
+            let entries = context.facts.read_inventory(&context, &cancel())?;
             let entry = entries
                 .iter()
                 .find(|entry| entry.path == created.path)
@@ -2223,8 +3029,7 @@ fn gc_foreign_merged_clean_is_opt_in_immediate_and_requires_complete_census()
                 .map(|reason| RetainedBranch {
                     branch: "native".into(),
                     reason,
-                    detail: (scenario == "unknown")
-                        .then(|| "worker census did not prove the tree free".into()),
+                    detail: (scenario == "unknown").then(|| "fixture census unavailable".into()),
                 })
                 .collect::<Vec<_>>(),
             "{scenario}"
@@ -2404,19 +3209,20 @@ pub(super) fn gc_foreign_retains_a_process_with_cwd_inside_the_worktree()
     }
     struct CwdWorker(ProcessFact);
     impl WorkerObserver for CwdWorker {
-        fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, WorkerState> {
+        fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, Occupancy> {
             let mut states = roots
                 .iter()
                 .cloned()
-                .map(|root| (root, WorkerState::Free))
+                .map(|root| (root, Occupancy::Available))
                 .collect();
             match observe_same_process(&SystemProcessObserver, &SystemCwdObserver, &self.0) {
                 NativeCwd::Path(path) => {
                     record_live_path(&mut states, &path);
                 }
                 _ => {
-                    for state in states.values_mut() {
-                        *state = WorkerState::Unknown;
+                    for (root, state) in &mut states {
+                        *state =
+                            Occupancy::census_unknown(root.clone(), "fixture process unavailable");
                     }
                 }
             }
@@ -2451,7 +3257,7 @@ pub(super) fn gc_foreign_retains_a_process_with_cwd_inside_the_worktree()
     let worker = CwdWorker(fact);
     assert_eq!(
         worker.observe_roots(std::slice::from_ref(&path)).get(&path),
-        Some(&WorkerState::Live)
+        Some(&Occupancy::Observed { process: None })
     );
     context.workers = &worker;
     let report = collect(
@@ -2621,7 +3427,7 @@ fn gc_foreign_prunes_under_writer_then_locks_repository() -> Result<(), Box<dyn 
     let mut lane = gc_merged_worktree(&fixture, &context, "foreign-output-lock")?;
     fs::create_dir(lane.path.join("target"))?;
     fs::write(lane.path.join("target/artifact"), "output")?;
-    lane.writer = WriterState::Unknown;
+    lane.occupancy = Occupancy::custody_unknown(lane.path.clone(), "fixture unknown writer");
     let state = context
         .project_state
         .open_verified_directory(&state_dir_name(&lane.path))?;
@@ -2968,7 +3774,8 @@ fn gc_managed_fallback_keeps_fresh_trees_at_the_tip_or_first_parent() -> Result<
                 .find(|lane| lane.path == created.path)
                 .ok_or("missing lane")?;
             if entry == "unknown-writer" {
-                lane.writer = WriterState::Unknown;
+                lane.occupancy =
+                    Occupancy::custody_unknown(lane.path.clone(), "fixture unknown writer");
             }
             let report = collect(
                 &context,
@@ -3013,7 +3820,7 @@ struct LockProbeWorkers<'a> {
 }
 
 impl WorkerObserver for LockProbeWorkers<'_> {
-    fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, WorkerState> {
+    fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, Occupancy> {
         let held = self
             .project_state
             .try_lock_existing(OsStr::new(REPOSITORY_LOCK), LockMode::Exclusive)
@@ -3022,7 +3829,7 @@ impl WorkerObserver for LockProbeWorkers<'_> {
         roots
             .iter()
             .cloned()
-            .map(|root| (root, WorkerState::Free))
+            .map(|root| (root, Occupancy::Available))
             .collect()
     }
 }
@@ -3041,7 +3848,8 @@ fn gc_census_never_runs_under_the_repository_lock() -> Result<(), Box<dyn Error>
         context.workers = &probe;
         let foreign = scenario.starts_with("foreign");
         if foreign {
-            lane.writer = WriterState::Unknown;
+            lane.occupancy =
+                Occupancy::custody_unknown(lane.path.clone(), "fixture unknown writer");
         }
         let report = collect(
             &context,
@@ -3097,11 +3905,11 @@ fn inventory_census_runs_after_repository_snapshot_lock_is_released() -> Result<
 fn locked_registration_stays_unknown_when_census_reports_live() -> Result<(), Box<dyn Error>> {
     struct LiveWorkers;
     impl WorkerObserver for LiveWorkers {
-        fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, WorkerState> {
+        fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, Occupancy> {
             roots
                 .iter()
                 .cloned()
-                .map(|root| (root, WorkerState::Live))
+                .map(|root| (root, Occupancy::Observed { process: None }))
                 .collect()
         }
     }
@@ -3124,7 +3932,7 @@ fn locked_registration_stays_unknown_when_census_reports_live() -> Result<(), Bo
         .into_iter()
         .find(|entry| entry.path == path)
         .ok_or("locked linked worktree missing from inventory")?;
-    assert_eq!(listed.writer, WriterState::Unknown);
+    assert!(matches!(listed.occupancy, Occupancy::Unknown { .. }));
     Ok(())
 }
 
@@ -3135,21 +3943,27 @@ struct FlippingWorkers {
 }
 
 impl WorkerObserver for FlippingWorkers {
-    fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, WorkerState> {
+    fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, Occupancy> {
         let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
-        let state = if call >= self.unknown_from {
-            WorkerState::Unknown
-        } else {
-            WorkerState::Free
-        };
-        roots.iter().cloned().map(|root| (root, state)).collect()
+        roots
+            .iter()
+            .cloned()
+            .map(|root| {
+                let state = if call >= self.unknown_from {
+                    Occupancy::census_unknown(root.clone(), "fixture census unavailable")
+                } else {
+                    Occupancy::Available
+                };
+                (root, state)
+            })
+            .collect()
     }
 
     fn observe_roots_with_details(&self, roots: &[PathBuf]) -> WorkerObservations {
         let states = self.observe_roots(roots);
         let details = states
             .iter()
-            .filter(|(_, state)| **state != WorkerState::Free)
+            .filter(|(_, state)| !state.is_available())
             .map(|(root, _)| {
                 (
                     root.clone(),
@@ -3169,14 +3983,18 @@ fn removal_refreshes_session_after_output_preparation() -> Result<(), Box<dyn Er
         complete_required: bool,
     }
     impl WorkerObserver for AppearingAfterPreparation {
-        fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, WorkerState> {
+        fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, Occupancy> {
             self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             let state = if self.artifact.exists() {
-                WorkerState::Free
+                Occupancy::Available
             } else {
-                WorkerState::Live
+                Occupancy::Observed { process: None }
             };
-            roots.iter().cloned().map(|root| (root, state)).collect()
+            roots
+                .iter()
+                .cloned()
+                .map(|root| (root, state.clone()))
+                .collect()
         }
         fn requires_complete_census(&self) -> bool {
             self.complete_required
@@ -3239,13 +4057,17 @@ fn custody_refresh_rechecks_a_cached_free_observation() -> Result<(), Box<dyn Er
     use std::sync::atomic::{AtomicUsize, Ordering};
     struct Appearing(AtomicUsize);
     impl WorkerObserver for Appearing {
-        fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, WorkerState> {
+        fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, Occupancy> {
             let state = if self.0.fetch_add(1, Ordering::SeqCst) == 0 {
-                WorkerState::Free
+                Occupancy::Available
             } else {
-                WorkerState::Live
+                Occupancy::Observed { process: None }
             };
-            roots.iter().cloned().map(|root| (root, state)).collect()
+            roots
+                .iter()
+                .cloned()
+                .map(|root| (root, state.clone()))
+                .collect()
         }
         fn requires_complete_census(&self) -> bool {
             true
@@ -3258,7 +4080,7 @@ fn custody_refresh_rechecks_a_cached_free_observation() -> Result<(), Box<dyn Er
     let session = CensusSession::new(&observer, &test.clock);
     assert_eq!(
         session.observe_roots(std::slice::from_ref(&fixture.root))[&fixture.root],
-        WorkerState::Free
+        Occupancy::Available
     );
     context.workers = &session;
     assert!(matches!(
@@ -3276,14 +4098,18 @@ fn removal_session_detects_worker_after_preview() -> Result<(), Box<dyn Error>> 
         complete_required: bool,
     }
     impl WorkerObserver for Appearing {
-        fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, WorkerState> {
+        fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, Occupancy> {
             let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             let state = if call == 0 {
-                WorkerState::Free
+                Occupancy::Available
             } else {
-                WorkerState::Live
+                Occupancy::Observed { process: None }
             };
-            roots.iter().cloned().map(|root| (root, state)).collect()
+            roots
+                .iter()
+                .cloned()
+                .map(|root| (root, state.clone()))
+                .collect()
         }
         fn requires_complete_census(&self) -> bool {
             self.complete_required
@@ -3308,7 +4134,7 @@ fn removal_session_detects_worker_after_preview() -> Result<(), Box<dyn Error>> 
         let session = CensusSession::new(&observer, &test.clock);
         assert_eq!(
             session.observe_roots(std::slice::from_ref(&info.path))[&info.path],
-            WorkerState::Free
+            Occupancy::Available
         );
         context.workers = &session;
         let error = remove(
@@ -3340,14 +4166,20 @@ fn removal_session_detects_worker_after_preview() -> Result<(), Box<dyn Error>> 
 fn foreign_gc_session_requires_fresh_complete_census() -> Result<(), Box<dyn Error>> {
     struct BecomingUnknown(std::sync::atomic::AtomicUsize);
     impl WorkerObserver for BecomingUnknown {
-        fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, WorkerState> {
+        fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, Occupancy> {
             let call = self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            let state = if call == 0 {
-                WorkerState::Free
-            } else {
-                WorkerState::Unknown
-            };
-            roots.iter().cloned().map(|root| (root, state)).collect()
+            roots
+                .iter()
+                .cloned()
+                .map(|root| {
+                    let state = if call == 0 {
+                        Occupancy::Available
+                    } else {
+                        Occupancy::census_unknown(root.clone(), "fixture census unavailable")
+                    };
+                    (root, state)
+                })
+                .collect()
         }
     }
     let fixture = Fixture::new()?;
@@ -3366,7 +4198,7 @@ fn foreign_gc_session_requires_fresh_complete_census() -> Result<(), Box<dyn Err
     let session = CensusSession::new(&observer, &test.clock);
     assert_eq!(
         session.observe_roots(std::slice::from_ref(&path))[&path],
-        WorkerState::Free
+        Occupancy::Available
     );
     context.workers = &session;
     let report = collect(
@@ -3394,14 +4226,18 @@ fn foreign_gc_session_requires_fresh_complete_census() -> Result<(), Box<dyn Err
 fn gc_session_detects_worker_after_preview() -> Result<(), Box<dyn Error>> {
     struct Appearing(std::sync::atomic::AtomicUsize);
     impl WorkerObserver for Appearing {
-        fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, WorkerState> {
+        fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, Occupancy> {
             let call = self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             let state = if call == 0 {
-                WorkerState::Free
+                Occupancy::Available
             } else {
-                WorkerState::Live
+                Occupancy::Observed { process: None }
             };
-            roots.iter().cloned().map(|root| (root, state)).collect()
+            roots
+                .iter()
+                .cloned()
+                .map(|root| (root, state.clone()))
+                .collect()
         }
     }
     let fixture = Fixture::new()?;
@@ -3412,7 +4248,7 @@ fn gc_session_detects_worker_after_preview() -> Result<(), Box<dyn Error>> {
     let session = CensusSession::new(&observer, &test_context.clock);
     assert_eq!(
         session.observe_roots(std::slice::from_ref(&lane.path))[&lane.path],
-        WorkerState::Free
+        Occupancy::Available
     );
     context.workers = &session;
     let report = collect(
@@ -3878,7 +4714,12 @@ fn remote_base_uses_exact_advertisement_instead_of_tracking_ref() -> Result<(), 
         "@{push}",
     ] {
         assert_eq!(
-            pin_revision(&test_context.context(), alias, &cancel())?,
+            pin_revision(
+                &test_context.context(),
+                &RepoFacts::default(),
+                alias,
+                &cancel()
+            )?,
             expected,
             "{alias}"
         );
@@ -3891,7 +4732,12 @@ fn remote_base_uses_exact_advertisement_instead_of_tracking_ref() -> Result<(), 
         "@{push}^0",
     ] {
         assert_eq!(
-            pin_revision(&test_context.context(), expression, &cancel())?,
+            pin_revision(
+                &test_context.context(),
+                &RepoFacts::default(),
+                expression,
+                &cancel()
+            )?,
             expected,
             "{expression}"
         );
@@ -3920,6 +4766,7 @@ fn remote_base_uses_exact_advertisement_instead_of_tracking_ref() -> Result<(), 
             assert_eq!(
                 pin_revision(
                     &test_context.context(),
+                    &RepoFacts::default(),
                     &format!("{root}{suffix}"),
                     &cancel()
                 )?,
@@ -3980,9 +4827,14 @@ fn tracking_base_the_remote_cannot_vouch_for_fails_closed() -> Result<(), Box<dy
         unverifiable.extend(["Origin/main", "Origin/main~1", "remotes/Origin/main"]);
     }
     for base in unverifiable {
-        let error = pin_revision(&test_context.context(), base, &cancel())
-            .err()
-            .ok_or_else(|| format!("{base} must not fall back to the local tracking OID"))?;
+        let error = pin_revision(
+            &test_context.context(),
+            &RepoFacts::default(),
+            base,
+            &cancel(),
+        )
+        .err()
+        .ok_or_else(|| format!("{base} must not fall back to the local tracking OID"))?;
         assert!(
             matches!(&error, WorktreeError::BaseUnverified { base: named } if named == base),
             "{base}: {error}"
@@ -4066,7 +4918,9 @@ fn create_skips_prunable_worktree_registrations() -> Result<(), Box<dyn Error>> 
     assert!(created.path.is_dir());
     assert!(!stale.path.exists());
     assert!(
-        read_worktrees(&context, &cancel())?
+        context
+            .facts
+            .read_inventory(&context, &cancel())?
             .iter()
             .any(|entry| entry.path == stale.path && entry.prunable)
     );
@@ -4146,7 +5000,9 @@ fn remove_reports_stale_registration_by_branch_and_directory() -> Result<(), Box
     }
     assert!(branch_exists(&fixture, "scratch/stale"));
     assert!(
-        read_worktrees(&context, &cancel())?
+        context
+            .facts
+            .read_inventory(&context, &cancel())?
             .iter()
             .any(|entry| entry.path == stale.path && entry.prunable)
     );
@@ -4179,7 +5035,7 @@ fn prune_treats_a_prunable_branch_as_not_checked_out() -> Result<(), Box<dyn Err
         "merge stale work",
     ])?;
     fs::remove_dir_all(&stale.path)?;
-    let entries = read_worktrees(&context, &cancel())?;
+    let entries = context.facts.read_inventory(&context, &cancel())?;
     let branch = GitRefName::branch("scratch/stale")?;
     assert!(matching_worktree(&entries, &branch, &fixture.root)?.is_none());
     assert!(!checked_out_elsewhere(&entries, &branch, None)?);
@@ -4411,14 +5267,14 @@ fn create_list_remove_keeps_branch_and_refuses_primary() -> Result<(), Box<dyn E
     );
     assert_eq!(created.head, fixture.head()?);
     assert_eq!(created.dirty, WorktreeCondition::Clean);
-    assert_eq!(created.writer, WriterState::Free);
+    assert!(created.occupancy.is_available());
 
     let listed = list(&context, &cancellation)?;
     assert!(listed.iter().any(|entry| {
         entry.path == created.path
             && entry.branch.as_deref() == Some("refs/heads/feature/lifecycle")
             && entry.dirty == WorktreeCondition::Clean
-            && entry.writer == WriterState::Free
+            && entry.occupancy.is_available()
     }));
     assert!(matches!(
         remove(

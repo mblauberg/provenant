@@ -48,6 +48,7 @@ fn removed_rule_advisories(table: &toml_edit::Table) -> Vec<SectionError> {
         });
     if unknown {
         vec![SectionError {
+            detail: None,
             field: "deny".into(),
             code: "unknown-rule",
         }]

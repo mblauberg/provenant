@@ -50,10 +50,11 @@ pub(super) struct ManifestTask {
 
 pub(super) fn read_bounded(path: &Path) -> Result<String, Fail> {
     let invalid = |error: &dyn std::fmt::Display| {
-        Fail::new(
+        input_failure(
             Status::Invalid,
             ErrorKind::Invalid,
             format!("{}: {error}", path.display()),
+            provenant_fabric_runtime::coordination::facade::InvalidInputDetail::InputUnreadable,
         )
     };
     // A FIFO or device would block or never end.
@@ -63,21 +64,121 @@ pub(super) fn read_bounded(path: &Path) -> Result<String, Fail> {
     read_text(std::fs::File::open(path).map_err(|e| invalid(&e))?)
 }
 
+fn input_failure(
+    status: Status,
+    kind: ErrorKind,
+    message: impl Into<String>,
+    detail: provenant_fabric_runtime::coordination::facade::InvalidInputDetail,
+) -> Fail {
+    let error = provenant_fabric_runtime::coordination::facade::FacadeError::invalid(detail);
+    let mut diagnostic = error.diagnostic();
+    diagnostic.code = kind.code().into();
+    let mut fail = Fail::new(status, kind, message);
+    fail.projection = Some(Box::new(diagnostic));
+    fail.detail = Some(Box::new(error));
+    fail
+}
+
+#[cfg(test)]
+mod diagnostic_tests {
+    use super::*;
+
+    #[test]
+    fn input_failures_keep_refusals_and_project_safe_reasons() {
+        let oversized = vec![b'x'; (PROMPT_LIMIT + 1) as usize];
+        let Err(too_large) = read_text(oversized.as_slice()) else {
+            panic!("accepted oversized input")
+        };
+        assert_eq!(too_large.kind, ErrorKind::Invalid);
+        assert_eq!(too_large.message, "input exceeds 1 MiB");
+        let detail = too_large.detail.unwrap().diagnostic();
+        assert!(detail.detail.unwrap().contains("1 MiB"));
+        assert!(detail.next.is_some());
+
+        let directory = tempfile::tempdir().unwrap();
+        let missing = directory.path().join("TOKEN_SENTINEL-no-such-input");
+        let Err(unreadable) = read_bounded(&missing) else {
+            panic!("accepted missing input")
+        };
+        assert_eq!(unreadable.kind, ErrorKind::Invalid);
+        let projected = unreadable.detail.unwrap().diagnostic();
+        assert!(projected.detail.as_ref().unwrap().contains("unreadable"));
+        assert!(
+            !serde_json::to_string(&projected)
+                .unwrap()
+                .contains("TOKEN_SENTINEL")
+        );
+    }
+
+    #[test]
+    fn unreadable_stream_keeps_io_refusal_and_safe_input_reason() {
+        struct FailedRead;
+        impl std::io::Read for FailedRead {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("TOKEN_SENTINEL /private/host"))
+            }
+        }
+        let fail = read_text(FailedRead).unwrap_err();
+        assert_eq!(fail.kind, ErrorKind::Io);
+        assert!(fail.message.contains("TOKEN_SENTINEL"));
+        let rendered = super::super::command_error(&fail);
+        assert_eq!(rendered.code, "IO");
+        assert!(rendered.cause.as_deref().unwrap().contains("input"));
+        assert!(rendered.repair.is_some());
+        assert!(!rendered.cause.unwrap().contains("TOKEN_SENTINEL"));
+        let projection = fail.projection.unwrap();
+        assert_eq!(projection.code, "IO");
+        assert!(projection.detail.as_deref().unwrap().contains("input"));
+        assert!(projection.next.is_some());
+        let error = fail.detail.unwrap();
+        let decoded: provenant_fabric_runtime::coordination::facade::FacadeError =
+            serde_json::from_slice(&serde_json::to_vec(&error).unwrap()).unwrap();
+        let wire = serde_json::to_string(&decoded.diagnostic()).unwrap();
+        assert!(!wire.contains("TOKEN_SENTINEL"));
+        assert!(!wire.contains("/private/host"));
+        assert!(wire.contains("input"));
+    }
+}
+
 pub(super) fn read_text(source: impl Read) -> Result<String, Fail> {
     let mut bytes = Vec::new();
     source
         .take(PROMPT_LIMIT + 1)
         .read_to_end(&mut bytes)
-        .map_err(|error| Fail::new(Status::Error, ErrorKind::Io, error.to_string()))?;
+        .map_err(|error| {
+            let fact = provenant_records::diagnostic::IoFact::InputUnreadable;
+            let detail = provenant_fabric_runtime::coordination::facade::FacadeError::Io {
+                operation: "read input".into(),
+                path: None,
+                delivery_limit: None,
+                delivery_stage: None,
+                resource: None,
+                input_failure: Some(fact),
+            };
+            let mut projection = detail.diagnostic();
+            projection.code = ErrorKind::Io.code().into();
+            projection.category = Some(ErrorKind::Io.category().into());
+            let mut fail = Fail::new(Status::Error, ErrorKind::Io, error.to_string());
+            fail.projection = Some(Box::new(projection));
+            fail.detail = Some(Box::new(detail));
+            fail
+        })?;
     if bytes.len() as u64 > PROMPT_LIMIT {
-        return Err(Fail::new(
+        return Err(input_failure(
             Status::Invalid,
             ErrorKind::Invalid,
             "input exceeds 1 MiB",
+            provenant_fabric_runtime::coordination::facade::InvalidInputDetail::InputTooLarge,
         ));
     }
-    String::from_utf8(bytes)
-        .map_err(|_| Fail::new(Status::Invalid, ErrorKind::Invalid, "input is not UTF-8"))
+    String::from_utf8(bytes).map_err(|_| {
+        input_failure(
+            Status::Invalid,
+            ErrorKind::Invalid,
+            "input is not UTF-8",
+            provenant_fabric_runtime::coordination::facade::InvalidInputDetail::InputInvalidUtf8,
+        )
+    })
 }
 
 /// `ADAPTER/NAME` for a model-less adapter such as `command/fmt-check`.
@@ -329,6 +430,8 @@ pub struct Submitted {
     pub base: Option<String>,
     pub pinned_base: Option<provenant_core::GitOid>,
     pub head: Option<String>,
+    /// Original source of a predecessor whose committed head is being retained.
+    pub source_head: Option<String>,
     pub route: run::RequestedRoute,
     pub provider_timeout: u64,
     pub delivery_id: Option<DeliveryId>,
@@ -366,6 +469,7 @@ pub(super) enum DiskCheck {
         available: u64,
         floor: u64,
         reclaimed: u64,
+        origin: provenant_records::diagnostic::SettingSource,
     },
 }
 
@@ -378,9 +482,11 @@ impl From<DiskCheck> for String {
                 available,
                 floor,
                 reclaimed,
+                origin,
             } => format!(
-                "insufficient disk space on {}: {available} bytes available, floor {floor} bytes; bounded GC reported {reclaimed} bytes reclaimed; run `provenant gc --free-floor {floor}B` before dispatching a writer",
-                path.display()
+                "insufficient disk space on {}: {available} bytes available, floor {floor} bytes; gc.free_floor source: {}; bounded GC reported {reclaimed} bytes reclaimed; run `provenant gc --free-floor {floor}B` before dispatching a writer",
+                path.display(),
+                origin.description()
             ),
         }
     }
@@ -506,6 +612,11 @@ pub(super) fn check_writer_disk_with_collection(
                     available: minimum,
                     floor,
                     reclaimed,
+                    origin: if settings.free_floor.is_some() {
+                        provenant_records::diagnostic::SettingSource::Configuration
+                    } else {
+                        provenant_records::diagnostic::SettingSource::ShippedDefault
+                    },
                 });
             }
         }
@@ -580,7 +691,7 @@ fn submit_with_launcher(
 ) -> Result<(run::RunRecord, Vec<run::Started>), Fail> {
     let (lane_depth, parent_attempt) = nested_dispatch_context(edge.roots)?;
     let config = provenant_config::read_with_domains(edge.roots, &crate::domains::SECTIONS)
-        .map_err(|error| Fail::new(Status::Invalid, ErrorKind::Config, error.to_string()))?;
+        .map_err(|error| Fail::config(Status::Invalid, error))?;
     // Nested proposals are checked by the host before provider preparation.
     // A confined parent cannot open a sibling worktree to sample its volume.
     if parent_attempt.is_none() {
@@ -600,13 +711,13 @@ fn submit_with_launcher(
                         DiskCheck::Unobserved(_) => (ErrorKind::Io, Status::Error),
                     };
                     let projection = match &check {
-                        DiskCheck::Low { path, available, floor, reclaimed } => {
+                        DiskCheck::Low { path, available, floor, reclaimed, origin } => {
                             let path = provenant_records::diagnostic::safe_path(path, provenant_records::diagnostic::Destination::Local)
                                 .unwrap_or_else(|| "the limiting volume".into());
                             Some(provenant_records::diagnostic::Diagnostic::new(kind.code()).category(kind.category())
-                                .detail(format!("insufficient disk space on {path}: {available} bytes available, floor {floor} bytes; bounded GC reported {reclaimed} bytes reclaimed"))
+                                .detail(format!("insufficient disk space on {path}: {available} bytes available, floor {floor} bytes; gc.free_floor from {}; bounded GC reported {reclaimed} bytes reclaimed", origin.description()))
                                 .next(format!("run `provenant gc --free-floor {floor}B` before dispatching a writer"))
-                                .fact(provenant_records::diagnostic::DiagnosticFact::DiskPressure { available: *available, floor: *floor, reclaimed: *reclaimed }))
+                                .fact(provenant_records::diagnostic::DiagnosticFact::DiskPressure { available: *available, floor: *floor, reclaimed: *reclaimed, origin: *origin }))
                         }
                         DiskCheck::Unobserved(_) => Some(provenant_records::diagnostic::Diagnostic::new(kind.code()).category(kind.category())
                             .detail("disk observation failed").next("restore the host disk observation before retrying")
@@ -660,6 +771,7 @@ fn submit_with_launcher(
                 base: task.base,
                 pinned_base: task.pinned_base,
                 head: task.head,
+                source_head: task.source_head,
                 route: task.route,
                 account: attempt.account,
                 timeout_seconds: task.provider_timeout,
@@ -711,8 +823,15 @@ fn submit_with_launcher(
                                 .iter()
                                 .find(|attempt| attempt.task_id == task.task_id)
                         {
+                            let expected = owner.clone();
                             owner.attempt_id = Some(attempt.attempt_id);
-                            worktrees::save_owner(&tree, &owner)?;
+                            worktrees::update_owner_when_unchanged(
+                                context,
+                                &tree,
+                                &expected,
+                                &owner,
+                                call.cancel,
+                            )?;
                         }
                         Ok(())
                     },

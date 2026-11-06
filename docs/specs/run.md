@@ -365,16 +365,18 @@ workflow. Lane-writable missing child records alone cannot authorise deletion.
 
 Admission and operation insertion are one transaction, and the immutable
 request is published before acknowledgement. No launch, probe, wait or
-supervisor call happens inside a transaction. Admission bounds active lanes
-at the fixed ceilings of 64 per host and 32 per project (writers also by the configured caps below) and queued lanes at 256 per host, with
-memory and disk floors, startup spacing and a deadline.
+supervisor call happens inside a transaction. Admission bounds active lanes by
+`max_lanes` (host, default 64) and `max_project_lanes` (project, default 32),
+with hard ceilings of 64 and 32; writers also have the configured caps below.
+Queued lanes are bounded at 256 per host, with
+the disk floor, startup spacing and a deadline. The unconfigured memory floor
+is advisory and emits `MEMORY_FLOOR` with a next action.
 
 On macOS, Critical kernel memory pressure defers both classes by default.
 `domains.fabric.lanes.memory_pressure_threshold` accepts `critical`, `warning`
-(Warning or Critical) or `never`. The memory floor applies at every pressure
-level, including when the pressure gate is disabled. An unavailable or unknown
-pressure sample is logged and falls back to the floor; Linux uses the floor.
-Disk and memory floors apply to both classes. Build slots do not gate
+(Warning or Critical) or `never`. An unavailable or unknown pressure sample is
+logged. Low available memory warns on both classes without holding admission.
+The disk floor applies to both classes. Build slots do not gate
 admission: a host-wide build throttle (not a hard cap), by default
 max(1, min(cores / cargo_build_jobs, GiB of RAM / 6)) slots, gates each
 compiling cargo command a lane runs (`provenant_os::build_slots`, reached
@@ -382,11 +384,11 @@ through the lane's `cargo` shim), so idle writers are admitted beyond the slot
 count. Writer lanes are capped separately by `max_writer_lanes` (host, default
 40) and `max_project_writer_lanes` (per project, default 30); a writer at the
 cap queues to the admission deadline and is then refused with a reason naming
-the cap, its scope and the key to raise. All lanes also count against fixed
-ceilings of 64 per host and 32 per project. At expiry, disk floor, known
-pressure and the writer cap have distinct refusal reasons. Disk-floor refusal
-takes precedence when disk and pressure are both insufficient. A failed memory
-sample or a floor-only memory shortage retains the generic admission refusal.
+the cap, its scope and the key to raise. All lanes also count against the
+configured total caps. At expiry, disk floor, known pressure and the applicable
+lane cap have distinct refusal reasons with their setting and source. Disk-floor
+refusal takes precedence when disk and pressure are both insufficient. A failed
+memory sample or a floor-only memory shortage does not by itself refuse admission.
 The ledger associates new leases
 with the boot and guardian identity; a different boot, a definitely absent
 guardian or an admission row proven absent from the same readable owner store
@@ -402,10 +404,10 @@ never installed; upgrades retain spacing but discard their lease rows.
 
 Each ticket and host ledger lease records a lane class: `writer` for a
 `worktree-write` lane, `read_only` for every other. Startup spacing is per
-class and measured only against the last start of that class: writers wait 20 s
-after the last writer start, and read-only lanes wait 2 s after the last
-read-only start, so a burst of provider launches is still staggered but a
-read-only lane never waits behind a writer. Spacing is measured on the host's
+class and defaults to zero for both classes. `[domains.fabric.lanes] start_spacing_ms`
+sets the spacing in milliseconds for both classes, measured against the last
+start of the same class. A read-only lane never waits behind a writer.
+Build slots (`provenant_os::build_slots`) remain the gate for heavy runs. Spacing is measured on the host's
 monotonic clock since boot (`CLOCK_MONOTONIC` on macOS, `CLOCK_BOOTTIME` on
 Linux, both counting sleep), never the wall clock. Every process on the host
 shares that clock, and the ledger records each class's last start as a reading
@@ -423,7 +425,8 @@ one spacing. If the clock or the boot identity cannot be read the claim is refus
 judged: host clock or boot identity unreadable`), which the guardian publishes
 as the lane's never-spawned reason, rather than judged on the wall clock;
 `lanes` then names no spacing wait. The wall clock is kept only as the `started_at` a lane displays. The
-memory floor (5 %) and the live `gc.free_floor` disk floor refuse both classes.
+memory floor (5 %) warns for both classes; the live `gc.free_floor` disk floor
+can refuse both classes.
 The disk default is 10 % of the state volume, with a 50 GiB minimum. A ticket with no class is a writer; opening a version 1 ledger upgrades it in
 place, in one transaction, carrying any wall-time start across as a start of now under the current boot
 for each class, whatever its age and without reading the wall clock, so the
@@ -441,8 +444,9 @@ has.
 
 `lanes` shows each queued or starting lane's `lane_class` and `waiting_for`,
 and uses the latter as its reason: launch not yet handed to a guardian, run
-concurrency, the class's remaining startup spacing, or otherwise host
-capacity. It reads the store and host ledger, from a nested lane too, and names only a wait it can see. `lanes --host` and the other peer
+concurrency, the class's remaining configured startup spacing, or a measured host
+limit. A reached lane cap names its scope and active and limit counts. When no
+check is failing, the reason says `launch preparation: preparing the lane`. It reads the store and host ledger, from a nested lane too, and names only a wait it can see. `lanes --host` and the other peer
 listings show the same two fields: the peer derives them from its own store and
 ledger (peer action `lane_waits`) and an older peer that does not know the
 action simply shows none.
@@ -457,7 +461,7 @@ lane; silence never counts as completion or settlement.
   must not queue behind writer spacing that exists to pace worktree and
   provider startup.
 - Test: `crates/run/src/ledger.rs::tests::{live_guardian_fences_busy_replaced_and_corrupt_store, cross_boot_malformed_and_readable_row_removal_release}`;
-  `crates/run/src/dispatch_tests.rs::{memory_pressure_defers_even_when_available_memory_is_high, pressure_errors_fall_back_and_normal_still_obeys_floor, idle_writers_are_admitted_beyond_the_build_limit, the_writer_cap_refuses_at_its_limit_and_names_it, out_of_range_build_settings_do_not_block_admission}`;
+  `crates/run/src/dispatch_tests.rs::{memory_pressure_defers_even_when_available_memory_is_high, pressure_errors_and_low_advisory_memory_do_not_refuse, idle_writers_are_admitted_beyond_the_build_limit, the_writer_cap_refuses_at_its_limit_and_names_it, out_of_range_build_settings_do_not_block_admission}`;
   `crates/providers/src/lane.rs::tests::claude_shell_restores_jobs_after_scrub`;
   `crates/os/src/build_slots.rs::tests::{slots_are_bounded_and_reusable, contention_never_exceeds_the_limit, read_only_slot_files_cannot_be_created_unlinked_or_replaced_yet_still_lock, the_slot_descriptor_is_close_on_exec, a_process_that_outlives_the_holder_does_not_keep_the_slot, a_wait_reports_progress_then_times_out_naming_the_slots, waiting_for_a_cargo_lock_reports_progress_and_times_out}`;
   `crates/providers/src/lane.rs::tests::{the_cargo_shim_hands_the_command_to_the_build_slot_gate, the_cargo_shim_refuses_settings_that_cannot_be_trusted, no_write_grant_of_the_finished_lane_profile_reaches_the_slot_directory}`;
@@ -469,7 +473,7 @@ lane; silence never counts as completion or settlement.
   `::read_only_lane_is_admitted_inside_a_writers_spacing_window`;
   `::writers_stay_20_seconds_apart_and_read_only_starts_do_not_reset_the_clock`;
   `::read_only_lanes_are_spaced_2_seconds_apart`;
-  `::memory_floor_refuses_both_lane_classes`;
+  `::memory_floor_warns_for_both_lane_classes`;
   `::project_cap_allows_up_to_32_active_lanes`;
   `::batch_concurrency_defaults_by_lane_class_and_an_explicit_value_wins`;
   `::sixteen_read_only_lanes_run_in_one_batch_two_seconds_apart`;
@@ -691,12 +695,18 @@ or an existing settlement owner; the supervisor owns this work after return.
 
 Success needs a supervisor-observed exit 0, a matching provider identity and
 a complete, validated, non-empty result; capture bytes are never completion
-evidence. A dead owner is not a failed provider. A writer with only
-uncommitted edits ends `uncommitted` and does not deliver, unless those paths
-are review-exempt. Run reads no provider transcript except Codex's post-exit
-identity projection.
+evidence. A dead owner is not a failed provider. A writer with only uncommitted edits ends `uncommitted` and does not deliver,
+unless those paths are review-exempt. Paths in the project's
+`[domains.run] review_exempt` list (release-note fragments, specs, lock files
+and `.tracker-input` by default) never count toward either, and Git metadata,
+hooks and provider control roots can never be listed. Run reads no provider
+transcript except Codex's post-exit identity projection. A read-only lane (no
+`writer`) whose complete, validated, non-empty answer is present settles
+`succeeded` without a handoff; only a writer must also report one.
 - Why: a crash, truncation or impostor must never read as success.
 - Test: `crates/run/src/dispatch_tests.rs::holder_commits_decoded_success_only_with_exit_zero_and_observed_identity`;
+  `crates/run/src/dispatch_tests.rs::a_read_only_answer_without_handoff_settles_succeeded`;
+  `crates/run/src/tests.rs::protected_review_retains_candidate_and_paths_without_delivery`;
   `crates/confinement/src/git_evidence.rs::exempt_paths_left_uncommitted_do_not_count`
 - Owner: `crates/run/src/holder.rs`, `crates/run/src/writer.rs`, `crates/confinement/src/review_exempt.rs`
 
@@ -709,8 +719,9 @@ schema v2 block with status `stopped_early` or `blocked`, and nothing after it),
 `provider_stop` (the provider reported a stop reason other
 than a finished turn, such as Claude's `stop_reason` `max_tokens` or a
 `terminal_reason` other than `completed`), `uncommitted_work`, and
-`handoff_missing` (a model lane, meaning any route other than a model-less
-adapter such as `command`, settled without a valid final handoff). A failed
+`handoff_missing` (a writer on a model route, meaning any route other than a
+model-less adapter such as `command`, settled without a valid final handoff;
+a read-only lane never carries it). A failed
 lane never carries `handoff_missing`; a redaction failure flips the outcomes
 that would into `failed`. Prose is never read, and a quoted, repeated or
 trailing-text block is no flag. A declared stop (`stopped_early` or `blocked`)
@@ -722,7 +733,22 @@ record, including a refusal before launch, carries a `settlement_reason`
 `uncommitted_work`, `pre_launch_refusal`, `cancelled`, `lost`, `unsettled`,
 `failed`), derived once where the terminal decision is committed
 (`RunStore::commit_terminal`, or `commit_lost` for an attempt whose record was
-lost). A lost or unsettled outcome names its reason whatever evidence it
+lost). Lane rows expose that settlement classification as `cause`. When a
+specific typed terminal cause was recorded, `terminal_cause` identifies it and
+`reason` uses fixed text from that cause. Pre-launch causes distinguish an
+unsupported platform, an unknown pacing account, an unregistered selected
+account, a credential-helper failure at delivery Prepare, a configured command
+that cannot be resolved, an unconfigured host-native route and a provider
+identity that was not observed. A terminal record may also carry a
+`terminal_note`, a bounded sentence Provenant composes from fixed text and typed
+values: the configured executable of an unresolved command, or a policy retry
+decision such as "retrying this session (attempt 2 of 2)". The lane `reason`
+appends it to the fixed text. These projections never copy raw preparation
+errors or provider output. A refused resume retains
+the specific preparation reason without consuming a continuation or creating a
+new run.
+
+A lost or unsettled outcome names its reason whatever evidence it
 carries; the process may have run even though custody was not proven. A failed, cancelled or lost
 lane whose final answer declares a stop records `declared_stop` (with any
 provider stop it already reported) and no other partial signal. The settled outcome is
@@ -761,6 +787,48 @@ The `Status:` line protocol is removed.
   `crates/run/src/completion.rs::tests`;
   `crates/providers/src/tests.rs::claude_success_that_stopped_for_another_reason_is_an_early_stop`
 - Owner: `crates/run/src/completion.rs`, `crates/run/src/holder.rs`
+
+## A writer stops on a token budget
+
+A writer lane is bounded by a token budget, not by the wall clock alone: the
+host `[domains.run] writer_token_budget` (default 500000, 0 for none), replaced
+per project under `[domains.run.projects."PROJECT_ID"]`. The guardian sums the
+fresh tokens the provider reports while the attempt runs, one figure per
+provider call; cache reads do not count. When the sum passes the budget it stops
+the provider with the typed stop `token_budget`, and the attempt settles
+`timed_out` with a reason naming the budget and its source (`project`, `host` or
+`default`); a host setting equal to the default still reports `host`. If the
+lane stopped with uncommitted work, the host attempts a bounded commit with
+message `stopped on budget`, after custody proves no provider process can still
+write, and before publishing the branch. An in-progress merge is left to the
+existing stopped-merge handling. Settlement reports a skipped or failed commit;
+a Git error does not replace the budget outcome. At 90% the host uses the
+existing steer capability matrix. All current lane adapters are
+`continuation_only` or `unsupported`: the warning records an unsupported
+control receipt, and is not delivered to the lane. `provenant run --explain`
+shows the budget, its source and the providers it is enforced for. Claude
+enforces the budget from live usage. Codex exec emits tool and message item
+events within a turn, but reports usage only at terminal `turn.completed`;
+it cannot be stopped mid-turn by this budget. The version-matched Codex
+[JSONL processor](https://github.com/openai/codex/blob/f2ed5dc90e514b59c2334f3bafb9b0250cc3e038/codex-rs/exec/src/event_processor_with_jsonl_output.rs)
+(`rust-v0.166.0-alpha.1`) stores `ThreadTokenUsageUpdated` internally without
+emitting a JSON frame, and emits usage at `TurnCompleted` before shutdown. This launch path has no further
+turn to stop, so Codex's budget is not enforced. Its completed-turn accounting
+still subtracts cached input per turn. Other providers without live usage are
+also not enforced, and launch warnings or receipt notes report this.
+Time a lane spends queued for
+a build slot stays off the wall deadline, up to `lanes.slot_wait_seconds`
+(default 7200) in total.
+- Why: a long writer should stop on what it spends, and a stuck lane must not
+  wait or run forever.
+- Test: `crates/supervisor/src/machine.rs::tests::a_token_budget_stop_is_a_typed_stop`;
+  `crates/providers/src/claude.rs::tests::live_usage_counts_each_call_once_with_fresh_input`;
+  `crates/providers/src/codex.rs::live_usage_tests::a_completed_turn_reports_its_fresh_input_and_output`;
+  `crates/run/src/token_budget.rs::tests::fresh_tokens_count_towards_the_budget_and_cache_reads_are_ignored`;
+  `crates/run/src/token_budget.rs::tests::a_fake_provider_passing_the_budget_ends_the_attempt_and_silence_only_warns`;
+  `crates/run/src/holder.rs::writer_recovery_tests::writer_token_budget_stop_commits_uncommitted_work_and_publishes_branch`;
+  `crates/confinement/src/run_config.rs::tests::a_host_setting_equal_to_the_default_still_reports_host`
+- Owner: `crates/supervisor/src/guardian.rs`, `crates/run/src/token_budget.rs`
 
 ## Host inputs fail before launch
 
@@ -830,6 +898,16 @@ refused, and the attempt records every granted path.
 - Test: `crates/confinement/src/plan/read_only.rs::policy_defaults_and_refuses_escape_control_paths_and_symlinks`;
   `crates/run/src/dispatch_tests.rs::read_only_exceptions_are_recorded_and_temporary_paths_are_private_per_attempt`
 - Owner: `crates/confinement/src/plan/read_only.rs`
+
+Read-only Codex and Claude lanes with open network access can use the host
+GitHub login. The host asks `gh auth token` outside confinement, including
+keychain-backed logins, and passes the result only in the live child
+environment; no token enters setup files, prompts, receipts or logs.
+Shell here-documents use the attempt scratch directory through `TMPDIR` and
+`TMPPREFIX`. Apple’s `/bin/bash` 3.2 ignores `TMPDIR` for here-documents, so
+profiles also allow its `/private/var/tmp/sh-thd*` files. Denial hints name the
+reported operation and point to the captured output, which holds the path,
+without claiming which sandbox or filesystem rule caused the refusal.
 
 Read-only runs use their bound repository with its Git metadata read-only.
 Their PATH selects the host-resolved Git executable; the sandbox grants that
@@ -1165,8 +1243,14 @@ Nested submission uses a dedicated store under the submitting attempt,
 selected by `PROVENANT_RUN_STATE_DIR`; identity and config stay on the
 original root. The host launches only accepted operations, under the rules
 in [nested lanes, MCP and hooks](routing.md#nested-lanes-mcp-and-hooks).
+Claude and Codex lanes expose the host-selected `provenant` on their private
+`PATH`. Its launcher pins the original home, configuration root, child Run
+store and parent attempt context even when a provider scrubs shell variables.
+A lane can submit `provenant run --mode read-only` and read its child's
+`provenant output` through the existing child-store grants.
 - Why: a lane must not reach the parent's database or other runs.
 - Test: `src/worktree_tests.rs::lane_prepare_isolates_nested_state`
+- Test: `crates/providers/src/lane.rs::tests::lane_path_pins_provenant_and_child_context_after_shell_scrubbing`
 - Owner: `crates/run/src/plan.rs`
 
 ## Not provided
@@ -1373,3 +1457,13 @@ reassigned worktrees require a new owned checkout for fresh fallback;
   `crates/cli/src/run.rs::tests::displaced_fallback_reports_unavailable_history`;
   `crates/cli/src/lib.rs::lifecycle_flags_parse_and_refuse_ambiguous_authority`.
 - Owner: `crates/run/src/controls.rs`, `crates/run/src/launch.rs`, `crates/cli/src/run.rs`
+
+### Alias quota recovery
+
+Named route pools skip members with fresh, unreset exhaustion. Stale spent
+observations rank a member behind other ready members, but never refuse a launch.
+When every member has fresh exhaustion, refusal identifies the members
+and their earliest known resets. An exact model request keeps its model.
+A quota refusal before any generated work may retry the same alias;
+the successor attempt retains the spent members in its routing exclusions and
+links to the prior attempt. Generated output prevents this redraw. A writer with a session also needs explicit zero output usage.

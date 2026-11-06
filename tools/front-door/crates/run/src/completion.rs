@@ -210,6 +210,7 @@ mod tests {
     }
     fn decoded() -> Decoded {
         Decoded {
+            terminal_cause: None,
             outcome: Outcome::QuotaLimited,
             result: String::new(),
             complete: false,

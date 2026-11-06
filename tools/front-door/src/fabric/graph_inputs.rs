@@ -93,6 +93,19 @@ fn read_result(
     }
 }
 
+fn read_failure_reason(error: &FacadeError) -> String {
+    let projection = error.diagnostic();
+    let detail = projection.detail.as_deref().unwrap_or(&projection.code);
+    let action = projection
+        .next
+        .as_deref()
+        .unwrap_or("inspect the input source");
+    provenant_records::diagnostic::safe_text(&format!(
+        "its result could not be read [{}]; {action}; {detail}",
+        projection.code
+    ))
+}
+
 /// Page through the same verified and redacted peer output used by the CLI.
 fn read_remote(
     owner: &mut BinaryRunOwner<'_>,
@@ -260,7 +273,7 @@ pub(super) fn materialise(
                     .map_err(super::run_error)
                     .and_then(|record| {
                         provenant_cli::run::cloud_owner::placement(&session.store, &record, &call)
-                            .map_err(|error| FacadeError::invalid(&error))
+                            .map_err(|_| FacadeError::InvalidInput { detail: None })
                     });
                 match cloud {
                     Ok(Some(_)) => read_remote(
@@ -299,10 +312,7 @@ pub(super) fn materialise(
         let (bytes, length) = match read {
             Ok(read) => read,
             Err(error) => {
-                entries.push(unavailable(
-                    request,
-                    format!("its result could not be read: {error}"),
-                ));
+                entries.push(unavailable(request, read_failure_reason(&error)));
                 continue;
             }
         };
@@ -327,10 +337,10 @@ pub(super) fn materialise(
                 PublishMode::Replace,
             )
             .and_then(|publication| publication.require_durable());
-        if let Err(error) = written {
+        if written.is_err() {
             entries.push(unavailable(
                 request,
-                format!("its file could not be written: {error}"),
+                "its file could not be written; inspect the host input directory".into(),
             ));
             continue;
         }
@@ -386,5 +396,27 @@ pub(super) fn materialise(
         directory: Some(path),
         index,
         entries,
+    }
+}
+
+#[cfg(test)]
+mod diagnostic_tests {
+    #[test]
+    fn input_read_failure_omits_raw_error_and_host_path() {
+        use super::{FacadeError, read_failure_reason};
+        let error = FacadeError::Io {
+            operation: format!("TOKEN_SENTINEL\u{1b}{}", "é".repeat(1000)),
+            path: Some("/private/host".into()),
+            delivery_limit: None,
+            delivery_stage: None,
+            resource: None,
+            input_failure: None,
+        };
+        let reason = read_failure_reason(&error);
+        assert!(reason.contains("io"));
+        assert!(!reason.contains("TOKEN_SENTINEL"));
+        assert!(!reason.contains("/private/host"));
+        assert!(!reason.chars().any(char::is_control));
+        assert!(reason.len() <= provenant_records::diagnostic::MAX_DIAGNOSTIC_BYTES);
     }
 }

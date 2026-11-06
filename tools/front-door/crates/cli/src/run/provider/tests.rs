@@ -861,6 +861,59 @@ fn credential_messages_suggest_signin_only_for_missing_or_expired_tokens() {
     }
 }
 
+#[test]
+fn credential_refresh_skip_retains_selected_account_login_only_for_typed_causes() {
+    use provenant_providers::ProviderError;
+    use provenant_records::RouteExclusionReason;
+    let entry: provenant_providers::accounts::Registration =
+        serde_json::from_value(serde_json::json!({
+            "adapter":"claude", "label":"work", "key":"selected-work",
+            "directory":"/fixture/account work"
+        }))
+        .unwrap();
+    for (error, cause) in [
+        (
+            ProviderError::CredentialNotFound,
+            RouteExclusionReason::AuthRequired,
+        ),
+        (
+            ProviderError::CredentialExpired,
+            RouteExclusionReason::LoginExpired,
+        ),
+    ] {
+        let skipped =
+            credential_failure_skip("claude/model", &error, &entry.label, &entry.directory);
+        let skipped: SkippedRoute =
+            serde_json::from_slice(&serde_json::to_vec(&skipped).unwrap()).unwrap();
+        assert_eq!(skipped.kind, SkipKind::AuthRequired);
+        assert_eq!(skipped.cause, Some(cause));
+        assert!(skipped.detail.contains("account work"));
+        assert!(
+            skipped
+                .detail
+                .contains("CLAUDE_CONFIG_DIR='/fixture/account work'")
+        );
+        assert!(skipped.detail.contains("claude auth login"));
+        let diagnostic = serde_json::to_string(&skipped.diagnostic()).unwrap();
+        assert!(!diagnostic.contains("/fixture/account work"));
+        assert_eq!(skipped.diagnostic().code, "REFUSED");
+    }
+    for error in [
+        ProviderError::CredentialReadFailed("TOKEN_SENTINEL /private/provider\u{1b}".into()),
+        ProviderError::CredentialUnavailable,
+    ] {
+        let skipped =
+            credential_failure_skip("claude/model", &error, &entry.label, &entry.directory);
+        assert_eq!(skipped.kind, SkipKind::AuthRequired);
+        assert_eq!(skipped.cause, None);
+        assert!(!skipped.detail.contains("TOKEN_SENTINEL"));
+        assert!(!skipped.detail.contains("/private/provider"));
+        assert!(!skipped.detail.contains("CLAUDE_CONFIG_DIR"));
+        assert!(!skipped.detail.contains("/fixture/account work"));
+        assert!(!skipped.detail.chars().any(char::is_control));
+    }
+}
+
 fn prompt_paths(attempt: &Path) -> Result<run::LaunchPaths, Box<dyn std::error::Error>> {
     Ok(run::LaunchPaths {
         attempt_id: provenant_core::AttemptId::from_bytes([1; 16]),
@@ -1572,7 +1625,7 @@ fn registry_provider_resolves_prepares_and_reports_quota(
         provenant_config::ProjectLocation::new(repo.common_git_dir())?,
     )?;
     let executable = assets.join(adapter_name);
-    std::fs::write(&executable, b"#!/bin/sh\nprintf 'fixture 1.0\\n'\n")?;
+    std::fs::write(&executable, b"#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then printf x >> \"$HOME/probe-count\"; fi\nprintf 'fixture 1.0\\n'\n")?;
     std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700))?;
     let run_id = RunId::from_bytes([2; 16]);
     let attempt_id = AttemptId::from_bytes([1; 16]);
@@ -1949,6 +2002,7 @@ fn writer_plan_stages_scratch_in_private_temporary_directory()
             project_state: &project_state,
             executor: &executor,
             utility: &utility,
+            facts: &worktrees::RepoFacts::default(),
             workers: &worktrees::SystemWorkerObserver,
             clock: &clock,
             utility_budget: budget,
@@ -2882,6 +2936,11 @@ printf 'agy 1.0.0\n'
     assert!(
         redraw_launch.skipped_routes[0]
             .detail
+            .contains("selected route is unavailable")
+    );
+    assert!(
+        !redraw_launch.skipped_routes[0]
+            .detail
             .contains("fixture executable disappeared")
     );
     assert_ne!(
@@ -2933,9 +2992,14 @@ printf 'agy 1.0.0\n'
         panic!("zero retry budget must not redraw")
     };
     assert!(
-        refusal
+        !refusal
             .to_string()
             .contains("fixture executable disappeared")
+    );
+    assert!(
+        refusal
+            .to_string()
+            .contains("selected route is unavailable")
     );
     assert_eq!(calls.get(), 3);
     let PrepareError::Candidates { skipped_routes, .. } = &refusal else {
@@ -3262,6 +3326,7 @@ fn writer_continuation_dirty_brief(committed: bool) -> Result<(), Box<dyn std::e
             project_state: &project_state,
             executor: &executor,
             utility: &utility,
+            facts: &worktrees::RepoFacts::default(),
             workers: &worktrees::SystemWorkerObserver,
             clock: &clock,
             utility_budget: budget,

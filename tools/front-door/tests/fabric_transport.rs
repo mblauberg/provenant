@@ -1056,15 +1056,41 @@ fn graph_persists_auth_and_usage_refusals_before_fallback() -> Result {
             } => reason,
             _ => return Err("missing refusal reason".into()),
         };
-        match scenario {
-            "authority" => assert!(reason.contains("single regular file"), "{reason}"),
-            "refresh" => assert!(reason.contains("stored credential JSON"), "{reason}"),
-            "quota" => assert!(
-                reason.to_ascii_lowercase().contains("exhausted"),
-                "{reason}"
-            ),
-            _ => unreachable!(),
+        let skipped = record
+            .skipped_routes
+            .iter()
+            .find(|route| route.route.starts_with("claude/"))
+            .ok_or("missing Claude preparation refusal")?;
+        if scenario == "quota" {
+            assert_eq!(skipped.kind, provenant_records::run::SkipKind::Unavailable);
+            assert_eq!(
+                skipped.cause,
+                Some(provenant_records::RouteExclusionReason::Exhausted)
+            );
+        } else {
+            assert_eq!(skipped.kind, provenant_records::run::SkipKind::AuthRequired);
+            assert_eq!(
+                skipped.cause, None,
+                "unclassified source errors add no invented account cause"
+            );
         }
+        let diagnostic = skipped.diagnostic();
+        assert_eq!(diagnostic.code, "REFUSED");
+        assert!(
+            reason.contains(diagnostic.next.as_deref().ok_or("preparation action")?),
+            "{reason}"
+        );
+        assert!(!reason.contains("single regular file"), "{reason}");
+        assert!(!reason.contains("stored credential JSON"), "{reason}");
+        assert!(
+            !reason.contains(directory.to_str().ok_or("directory")?),
+            "{reason}"
+        );
+        assert_eq!(record.provider_launched, Some(false));
+        assert_eq!(
+            record.terminal_evidence,
+            Some(provenant_records::run::TerminalEvidence::PreLaunchRefusal)
+        );
         cleanup.disarm();
     }
     Ok(())
@@ -1822,6 +1848,8 @@ fn run_status_and_wait_read_the_owner_store_and_event_pull_deduplicates() -> Res
             FacadeError::Io {
                 delivery_limit: None,
                 delivery_stage: None,
+                resource: None,
+                input_failure: None,
                 operation: "submit: access database".into(),
                 path: None,
             },
@@ -1831,6 +1859,8 @@ fn run_status_and_wait_read_the_owner_store_and_event_pull_deduplicates() -> Res
             FacadeError::Io {
                 delivery_limit: None,
                 delivery_stage: None,
+                resource: None,
+                input_failure: None,
                 operation: "spawn peer".into(),
                 path: None,
             },
@@ -2302,6 +2332,8 @@ fn silence_knob_controls_capture_plan_observations() -> Result {
         let plan = provenant_run::capture_plan(
             &request.tasks[0],
             request.tasks[0].provider_timeout_seconds,
+            u64::MAX,
+            "codex",
         );
         assert_eq!(plan.silence_ms, threshold);
         assert!(!plan.silent(threshold - 1, Some(0)));
@@ -3631,4 +3663,144 @@ fn stats_reports_attempts_after_graph_collection() -> Result {
     assert_eq!(value["data"]["groups"][0]["attempts"], 1);
     assert_eq!(value["data"]["groups"][0]["tokens"], 100);
     Ok(())
+}
+
+#[test]
+fn peer_refusal_codes_and_protocol_mismatches_reach_mcp() -> Result {
+    use provenant_fabric_runtime::coordination::facade::FacadeError;
+    let mut rig = TestRig::new()?;
+    let identity = federated_identity(&mut rig)?;
+    let local = provenant_core::HostId::parse(identity["data"]["host"].as_str().ok_or("host")?)?;
+    let host = next_host(local)?;
+    let project = &identity["data"]["federation"]["key"];
+    let ssh = rig.root.join("ssh");
+    let refusal = rig.root.join("refusal.json");
+    let calls = rig.root.join("ssh-calls");
+    std::fs::write(
+        &ssh,
+        format!(
+            "#!/bin/sh\nrequest=$(cat)\nprintf '%s\\n' \"$request\" >> '{}'\ncat '{}'\n",
+            calls.display(),
+            refusal.display(),
+        ),
+    )?;
+    std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o700))?;
+    std::fs::write(
+        rig.state.join("config.toml"),
+        format!(
+            "schema_version=1\n[gc]\nfree_floor='1B'\n[domains.fabric]\nssh_executable={:?}\n\
+         [domains.fabric.peers.workshop]\nhost='{host}'\ndestination='workshop'\n",
+            ssh.to_string_lossy(),
+        ),
+    )?;
+    let frame = json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{
+        "name":"fabric_run", "arguments":{"op":"status","target":{
+            "host":host.to_string(), "attempt":"11111111111111111111111111111111",
+        }},
+    }});
+    for wire in [
+        "not_terminal",
+        "operation_conflict",
+        "owner_unavailable",
+    ] {
+        std::fs::write(
+            &refusal,
+            serde_json::to_vec(&json!({
+                "version":1,"protocol":PROTOCOL, "host":host.to_string(), "project":project,
+                "result":{"result":"error","data":{"error":{"code":wire}}},
+            }))?,
+        )?;
+        let replies = mcp(&rig, std::slice::from_ref(&frame))?;
+        let result = &replies.iter().find(|r| r["id"] == 1).ok_or("MCP reply")?["result"];
+        assert_eq!(result["structuredContent"]["code"], wire, "{result}");
+    }
+    // The released v1 health response, without protocol in either place.
+    std::fs::write(
+        &refusal,
+        serde_json::to_vec(&json!({
+            "version":1, "host":host.to_string(), "project":project,
+            "result":{"result":"health","data":{
+                "host":host.to_string(), "available":true, "execution":true,
+            }},
+        }))?,
+    )?;
+    std::fs::write(&calls, "")?;
+    let hosts = json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{
+        "name":"fabric_context", "arguments":{"op":"hosts","limit":10},
+    }});
+    let replies = mcp(&rig, &[frame, hosts])?;
+    let result = &replies.iter().find(|r| r["id"] == 1).ok_or("MCP reply")?["result"];
+    assert_eq!(
+        result["structuredContent"]["code"], "peer_version",
+        "{result}"
+    );
+    let projection = FacadeError::PeerProtocolMismatch {
+        peer: "workshop".into(),
+        remote: 1,
+        expected: PROTOCOL,
+    }
+    .diagnostic();
+    assert_eq!(
+        result["structuredContent"]["detail"],
+        serde_json::json!(projection.detail.as_deref())
+    );
+    assert_eq!(
+        result["structuredContent"]["next"],
+        serde_json::json!(projection.next.as_deref())
+    );
+    let text = result["content"][0]["text"]
+        .as_str()
+        .ok_or("MCP error text")?;
+    assert!(text.contains(projection.detail.as_deref().ok_or("protocol detail")?));
+    assert!(text.contains(projection.next.as_deref().ok_or("protocol action")?));
+    assert!(!result.to_string().contains("workshop"), "{result}");
+    let result = &replies
+        .iter()
+        .find(|r| r["id"] == 2)
+        .ok_or("MCP hosts reply")?["result"];
+    let hosts = result["structuredContent"]["hosts"]
+        .as_array()
+        .ok_or("host list")?;
+    assert_eq!(hosts.len(), 2, "{result}");
+    let remote = hosts
+        .iter()
+        .find(|entry| entry["host"] == host.to_string())
+        .ok_or("remote")?;
+    assert_eq!(remote["available"], false);
+    assert_eq!(remote["protocol"], 1);
+    assert_eq!(remote["reason"], "peer_version");
+    assert!(remote.get("features").is_none());
+    let local_health = hosts
+        .iter()
+        .find(|entry| entry["host"] == local.to_string())
+        .ok_or("local")?;
+    assert_eq!(local_health["available"], true);
+    assert_eq!(local_health["protocol"], PROTOCOL);
+    assert_eq!(local_health["features"], DOCTOR_PROTOCOL);
+    let calls = std::fs::read_to_string(calls)?;
+    assert_eq!(calls.lines().count(), 2);
+    let actions = calls
+        .lines()
+        .map(serde_json::from_str::<Value>)
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    // MCP workers run the two tool calls concurrently, so their order varies.
+    let mut concurrent = [&actions[0], &actions[1]].map(|call| call["action"]["action"].clone());
+    concurrent.sort_by_key(|action| action.to_string());
+    assert_eq!(concurrent, ["health", "run"]);
+    for call in actions {
+        assert_eq!(call["protocol"], PROTOCOL);
+    }
+    let (status, output) = json_command(&rig, &["hosts", "--json"])?;
+    assert_eq!(status, 0, "{output}");
+    let remote = output["data"]
+        .as_array()
+        .ok_or("CLI host list")?
+        .iter()
+        .find(|entry| entry["host"] == host.to_string())
+        .ok_or("remote")?;
+    assert_eq!(remote["available"], false);
+    assert_eq!(remote["protocol"], 1);
+    assert_eq!(remote["reason"], "peer_version");
+    assert!(remote.get("features").is_none());
+    rig.assert_legacy_unchanged()
 }

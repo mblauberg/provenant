@@ -38,6 +38,41 @@ pub const WAIT_MARKER: &str = "build-slot-wait";
 /// How long after its last refresh a wait marker still counts.
 pub const WAIT_MARKER_FRESH: Duration = Duration::from_secs(150);
 
+/// Whether any command of the lane at `attempt` is waiting for a build slot
+/// now. The lane writes the marker, so it is read bounded and trusted only for
+/// being a fresh slot wait. A lane that keeps one fresh only extends its own
+/// wall clock, and the guardian bounds the total extension
+/// (`lanes.slot_wait_seconds`), so a stuck lane cannot run forever.
+pub fn slot_wait_active(attempt: &Directory, now_secs: u64) -> bool {
+    let Ok(temporary) = attempt.open_directory("tmp".as_ref()) else {
+        return false;
+    };
+    let Ok(entries) = temporary.entries() else {
+        return false;
+    };
+    entries
+        .map_while(|entry| entry.ok())
+        .take(32)
+        .filter_map(|name| temporary.open_directory(&name).ok())
+        .any(|scratch| {
+            scratch.entries().is_ok_and(|names| {
+                names
+                    .map_while(|entry| entry.ok())
+                    .filter(|name| name.to_string_lossy().starts_with(WAIT_MARKER))
+                    .take(32)
+                    .any(|name| {
+                        scratch
+                            .read_stable(&name, 64)
+                            .ok()
+                            .and_then(|raw| String::from_utf8(raw).ok())
+                            .is_some_and(|text| {
+                                WaitKind::from_marker(&text, now_secs) == Some(WaitKind::Slot)
+                            })
+                    })
+            })
+        })
+}
+
 /// What a gated build is waiting for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WaitKind {

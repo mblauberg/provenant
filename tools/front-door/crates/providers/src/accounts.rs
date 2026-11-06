@@ -185,12 +185,14 @@ impl Settings {
     /// Why the shared-settings configuration must be refused, if it must.
     /// Identity, credential or hook keys in the allow-list, an override or an
     /// `env` name; or an override of a key the allow-list does not name.
-    pub fn settings_error(&self) -> Option<&'static str> {
+    pub fn settings_error(&self) -> Option<(&'static str, Option<&'static str>)> {
         use provenant_config::shared_settings::{check_key, check_value, interned};
-        let refuse = |reason: String| {
-            interned(format!(
+        let refuse = |reason: provenant_config::shared_settings::SharedSettingsError| {
+            let code = reason.code();
+            let detail = interned(format!(
                 "{reason}; remove it from `keys` or `settings` (or the `env` it names)"
-            ))
+            ));
+            (detail, code)
         };
         let keys = self.settings_keys();
         if let Some(reason) = keys.iter().find_map(|key| check_key(key).err()) {
@@ -202,7 +204,7 @@ impl Settings {
                     return Some(refuse(reason));
                 }
                 if !keys.contains(key) {
-                    return Some(NOT_ALLOWED);
+                    return Some((NOT_ALLOWED, None));
                 }
             }
         }
@@ -240,6 +242,7 @@ impl DomainConfig for Settings {
         let mut errors = Vec::new();
         if bad {
             errors.push(SectionError {
+                detail: None,
                 field: "entries".into(),
                 code: "registration",
             });
@@ -247,12 +250,14 @@ impl DomainConfig for Settings {
         for (id, entry) in &self.entries {
             for index in provenant_quota::invalid_plan_rows(&entry.plans) {
                 errors.push(SectionError {
+                    detail: None,
                     field: format!("entries.{id}.plans.{index}"),
                     code: "plans",
                 });
             }
             if !provenant_quota::valid_icon(id) {
                 errors.push(SectionError {
+                    detail: None,
                     field: format!("entries.{id}"),
                     code: "display",
                 });
@@ -263,21 +268,24 @@ impl DomainConfig for Settings {
                 .is_some_and(|name| !valid_display_name(name))
             {
                 errors.push(SectionError {
+                    detail: None,
                     field: format!("entries.{id}.display_name"),
                     code: "display",
                 });
             }
             if entry.order.is_some_and(|order| !(1..=999).contains(&order)) {
                 errors.push(SectionError {
+                    detail: None,
                     field: format!("entries.{id}.order"),
                     code: "display",
                 });
             }
         }
-        if let Some(code) = self.settings_error() {
+        if let Some((message, stable_code)) = self.settings_error() {
             errors.push(SectionError {
+                detail: stable_code.map(|_| message),
                 field: "shared_settings".into(),
-                code,
+                code: stable_code.unwrap_or(message),
             });
         }
         errors
@@ -806,10 +814,12 @@ mod config_tests {
             );
         }
         assert!((SECTION.boundary)(&SectionError {
+            detail: None,
             field: "entries.work.alias.directory".into(),
             code: "type"
         }));
         assert!(!(SECTION.boundary)(&SectionError {
+            detail: None,
             field: "entries.work.alias.display_name".into(),
             code: "type"
         }));

@@ -22,12 +22,15 @@ Set these in `[domains.fabric.lanes]` in the host configuration. Omit a key for 
 
 | Key | Default | Effect |
 |---|---|---|
-| `memory_pressure_threshold` | critical | Kernel memory pressure level at which new lanes wait on macOS. warning also defers at critical; never disables the pressure gate. The memory and disk floors still apply. (critical, warning or never). |
+| `start_spacing_ms` | 0 | Milliseconds between starts of the same lane class, for both writers and read-only lanes. Build slots gate heavy runs independently. (0 to 600000). |
+| `memory_pressure_threshold` | critical | Kernel memory pressure level at which new lanes wait on macOS. warning also defers at critical; never disables the pressure gate. The disk floor still applies; the memory floor is advisory. (critical, warning or never). |
 | `max_concurrent_builds` | max(1, min(cores / cargo_build_jobs, GiB of RAM / 6)) | A build throttle, not a hard cap: cargo builds, tests, checks and lints that a lane's cargo shim runs at once across the host and every project that shares the state directory. Lanes are not capped by it; a command that compiles waits for a free slot. Direct ~/.cargo/bin/cargo, rustc and non-cargo builds are not gated. (1 to 64 or -1 for auto). |
 | `build_wait_minutes` | 30 | Minutes a build waits for a build slot or another build's Cargo lock before it gives up with an error. (1 to 1440 or -1 for auto). |
 | `lane_port_base` | 30000 | First port of the range split into per-writer-lane blocks. A writer with an allocated block holds it for its lifetime and sees PROVENANT_LANE_PORT_BASE and PROVENANT_LANE_PORT_COUNT. Unreadable lane-port settings or allocation I/O errors warn and skip allocation. (1024 to 65535 or -1 for auto). |
 | `lane_port_block` | 16 | Ports in each writer lane's block (PROVENANT_LANE_PORT_COUNT). (1 to 1024 or -1 for auto). |
 | `lane_port_blocks` | 64 | Blocks in the range, so the most writer lanes that hold a block at once; the base plus blocks times block size must be at most 65536. 0 turns allocation off. A writer launched while every block is held is not started and reports no free port block. (0 to 1024 or -1 for auto). |
+| `max_lanes` | 64 | Most lanes of any class live at once across the host; a lane beyond it queues and is refused with the limit and source. (1 to 64 or -1 for auto). |
+| `max_project_lanes` | 32 | Most lanes of any class live at once for one project; at most max_lanes. (1 to 32 or -1 for auto). |
 | `max_writer_lanes` | 40 | Most writer lanes live at once across the host; a writer beyond it queues and is then refused with a reason naming the cap. (1 to 64 or -1 for auto). |
 | `max_project_writer_lanes` | 30 | Most writer lanes live at once for one project; at most max_writer_lanes. (1 to 32 or -1 for auto). |
 | `cargo_build_jobs` | Half the available cores, at least 1 | Default CARGO_BUILD_JOBS for lanes; an inherited value takes precedence. (1 to 1024 or -1 for auto). |
@@ -505,6 +508,19 @@ Set the cap in `[domains.quota]`; set prices per account as shown.
 | `trade_off` | `"Lower marks silence sooner; the process census and observation cadence stays unchanged."` |
 | `type` | `"int"` |
 
+## `lanes.slot_wait_seconds`
+
+| Field | Value |
+|---|---|
+| `default` | `7200` |
+| `effect` | `"Most time in total that a lane's build-slot waits keep off its wall-clock deadline. Beyond it the wall deadline runs while the lane waits, so a stuck lane cannot wait forever. 0 keeps no waiting off the deadline."` |
+| `max` | `86400` |
+| `min` | `0` |
+| `reader` | `"tools/front-door/crates/run/src/launch.rs, tools/front-door/crates/supervisor/src/guardian.rs"` |
+| `status` | `"wired"` |
+| `trade_off` | `"Higher tolerates longer queues for build slots; lower ends a stuck lane sooner."` |
+| `type` | `"int"` |
+
 ## `routing.allow_unknown_partial_headroom`
 
 | Field | Value |
@@ -644,6 +660,12 @@ Set the cap in `[domains.quota]`; set prices per account as shown.
         "effect": "Maximum rendered macOS sandbox profile size. Increase for lanes with many grants; profiles pass through argv and may still hit OS limits.",
         "type": "int"
       },
+      "projects.{project}.writer_token_budget": {
+        "allowed": "0 or more tokens",
+        "default": "host writer_token_budget",
+        "effect": "Replace the host writer token budget for this project.",
+        "type": "int"
+      },
       "projects.{project}.writer_writes": {
         "allowed": "up to 16 absolute, safe directory paths outside credential roots",
         "default": "host writer_writes",
@@ -654,6 +676,12 @@ Set the cap in `[domains.quota]`; set prices per account as shown.
         "allowed": "1 to 8388608 bytes",
         "default": "262144",
         "effect": "Maximum encoded bytes of applied write grants recorded for a lane. Increase when an otherwise valid grant ledger exceeds the default; terminal records retain bounded headroom.",
+        "type": "int"
+      },
+      "writer_token_budget": {
+        "allowed": "0 or more tokens",
+        "default": "500000",
+        "effect": "Tokens a writer attempt may use, from the fresh usage its provider reports, before it is ended with its work committed and pushed for a continuation. 0 turns the budget off. Cache reads do not count. Enforced for Claude from live usage. Codex exec reports usage only at turn.completed, so its budget is not enforced; other providers without live usage are also not enforced. Launch warnings or receipt notes say so. Current lane adapters cannot receive a live steer: the 90% warning records an unsupported control receipt. After custody is absent the host attempts a bounded commit; an in-progress merge is preserved for stopped-merge handling, and a commit failure is reported without replacing the budget outcome. Time queued for a build slot does not count towards the wall-clock deadline, up to lanes.slot_wait_seconds in total. The source (run, project, host or default) is shown with the budget.",
         "type": "int"
       }
     }

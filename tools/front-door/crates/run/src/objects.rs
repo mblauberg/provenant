@@ -19,6 +19,7 @@ use view::object_binding;
 pub(crate) use view::{bind, prepare_refs};
 pub(crate) use view::{
     bound_source, merge_head, merge_objects, prepare_bound, private_tip, restore_index,
+    set_private_tip,
 };
 
 fn invalid() -> RunError {
@@ -48,16 +49,22 @@ fn execute(
     execute_bounded(git, git_dir, cwd, arguments, cancel, Execution::default())
 }
 
-struct Execution<'a> {
-    timeout: Duration,
-    discard: bool,
-    input: Option<&'a [u8]>,
-    clean_stderr: bool,
+pub(crate) struct Execution<'a> {
+    pub(crate) object_directory: Option<&'a Path>,
+    pub(crate) index_file: Option<&'a Path>,
+    pub(crate) alternate_directory: Option<&'a Path>,
+    pub(crate) timeout: Duration,
+    pub(crate) discard: bool,
+    pub(crate) input: Option<&'a [u8]>,
+    pub(crate) clean_stderr: bool,
 }
 
 impl Default for Execution<'_> {
     fn default() -> Self {
         Self {
+            object_directory: None,
+            index_file: None,
+            alternate_directory: None,
             timeout: Duration::from_secs(120),
             discard: false,
             input: None,
@@ -66,7 +73,7 @@ impl Default for Execution<'_> {
     }
 }
 
-fn execute_bounded(
+pub(crate) fn execute_bounded(
     git: &Path,
     git_dir: &Path,
     cwd: &Path,
@@ -74,7 +81,7 @@ fn execute_bounded(
     cancel: Option<&CancelToken>,
     settings: Execution<'_>,
 ) -> Result<Vec<u8>> {
-    let env: Vec<(OsString, OsString)> = [
+    let mut env: Vec<(OsString, OsString)> = [
         ("PATH", "/usr/bin:/bin"),
         ("GIT_CONFIG_NOSYSTEM", "1"),
         ("GIT_CONFIG_GLOBAL", "/dev/null"),
@@ -82,13 +89,29 @@ fn execute_bounded(
         ("GIT_NO_REPLACE_OBJECTS", "1"),
         ("GIT_GRAFT_FILE", "/dev/null"),
         ("GIT_NO_LAZY_FETCH", "1"),
-        ("GIT_ALTERNATE_OBJECT_DIRECTORIES", ""),
         ("GIT_TERMINAL_PROMPT", "0"),
         ("LC_ALL", "C"),
     ]
     .into_iter()
     .map(|(k, v)| (k.into(), v.into()))
     .collect();
+    if let Some(objects) = settings.object_directory {
+        env.push((
+            "GIT_OBJECT_DIRECTORY".into(),
+            objects.as_os_str().to_owned(),
+        ));
+    }
+    if let Some(index) = settings.index_file {
+        env.push(("GIT_INDEX_FILE".into(), index.as_os_str().to_owned()));
+    }
+    env.push((
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES".into(),
+        settings
+            .alternate_directory
+            .map(quote_alternate)
+            .unwrap_or_default()
+            .into(),
+    ));
     // argv confines GIT_DIR to the sender; receive-pack opens the destination.
     let argv: Vec<OsString> = std::iter::once(git.into())
         .chain([OsString::from("--git-dir"), git_dir.into()])
@@ -400,6 +423,16 @@ fn sanitise_source(source: &Directory, repo: &VerifiedRepo) -> Result<u64> {
     object_bytes(source, 0)
 }
 
+/// Apply the existing import checks before budget Git writes any lane objects.
+pub(crate) fn prepare_budget_objects(
+    source: &Directory,
+    repo: &VerifiedRepo,
+) -> Result<std::path::PathBuf> {
+    let path = source_path(source, repo)?;
+    sanitise_source(source, repo)?;
+    Ok(path)
+}
+
 // Git needs a pathname for alternates. Reopen it without following a final
 // symlink and compare the held identity before giving Git access. Custody must
 // remain absent while Git uses it. Never sanitise the shared store as a source.
@@ -507,6 +540,52 @@ fn sweep_stale(repo: &VerifiedRepo) -> Result<()> {
     Ok(())
 }
 
+/// Reuse the host-owned Git view for operations that must never load lane config.
+pub(crate) fn with_clean_view<T>(
+    git: &Path,
+    repo: &VerifiedRepo,
+    head: GitOid,
+    cancel: Option<&CancelToken>,
+    operation: impl FnOnce(&Directory, &Path) -> Result<T>,
+) -> Result<T> {
+    sweep_stale(repo)?;
+    let name = OsString::from(format!(
+        "tmp-provenant-import-{}",
+        provenant_os::fs::temporary_name()?.to_string_lossy()
+    ));
+    repo.common_dir().mkdir(&name, 0o700)?;
+    let view = repo.common_dir().open_verified_directory(&name)?;
+    let path = repo.common_git_dir().join(&name);
+    let result: Result<T> = (|| {
+        execute(
+            git,
+            &path,
+            repo.root_path(),
+            &args(&[
+                "init",
+                "--bare",
+                "--quiet",
+                "--template=",
+                &format!(
+                    "--object-format={}",
+                    if head.to_string().len() == 64 {
+                        "sha256"
+                    } else {
+                        "sha1"
+                    }
+                ),
+                path.to_str().ok_or_else(invalid)?,
+            ]),
+            cancel,
+        )?;
+        operation(&view, &path)
+    })();
+    let cleanup = crate::artifacts::remove_entry_tree(repo.common_dir(), &name);
+    let value = result?;
+    cleanup?;
+    Ok(value)
+}
+
 /// Use a clean host-owned sender view, never mutable lane configuration.
 /// receive-pack quarantines objects until integrity and connectivity pass.
 #[cfg(test)]
@@ -545,36 +624,7 @@ pub(crate) fn settle_many(
     let source_path = source_path(source, repo)?;
     let bytes = sanitise_source(source, repo)?;
     let (cap, timeout) = import_limits(bytes)?;
-    sweep_stale(repo)?;
-    let name = OsString::from(format!(
-        "tmp-provenant-import-{}",
-        provenant_os::fs::temporary_name()?.to_string_lossy()
-    ));
-    repo.common_dir().mkdir(&name, 0o700)?;
-    let view = repo.common_dir().open_verified_directory(&name)?;
-    let path = repo.common_git_dir().join(&name);
-    let result: Result<()> = (|| {
-        execute(
-            git,
-            &path,
-            repo.root_path(),
-            &args(&[
-                "init",
-                "--bare",
-                "--quiet",
-                "--template=",
-                &format!(
-                    "--object-format={}",
-                    if head.to_string().len() == 64 {
-                        "sha256"
-                    } else {
-                        "sha1"
-                    }
-                ),
-                path.to_str().ok_or_else(invalid)?,
-            ]),
-            cancel,
-        )?;
+    with_clean_view(git, repo, head, cancel, |view, path| {
         let objects = view.open_verified_directory(OsStr::new("objects"))?;
         let info = objects.open_verified_directory(OsStr::new("info"))?;
         info.atomic_write(
@@ -648,7 +698,7 @@ pub(crate) fn settle_many(
             push.extend(chunk.iter().map(Into::into));
             execute_bounded(
                 git,
-                &path,
+                path,
                 repo.root_path(),
                 &push,
                 cancel,
@@ -659,11 +709,7 @@ pub(crate) fn settle_many(
             )?;
         }
         Ok(())
-    })();
-    let cleanup = crate::artifacts::remove_entry_tree(repo.common_dir(), &name);
-    result?;
-    cleanup?;
-    Ok(())
+    })
 }
 
 #[cfg(test)]

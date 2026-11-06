@@ -731,6 +731,46 @@ pub enum Outcome {
     Uncommitted,
     InputRequired,
 }
+impl Outcome {
+    /// A safe status reason derived only from the typed terminal outcome.
+    pub fn diagnostic_reason(self) -> &'static str {
+        use crate::diagnostic::ProviderFailureFact;
+        match self {
+            Self::Succeeded => "the lane completed; inspect its result",
+            Self::ReviewRequired => "the lane needs review; inspect its result and evidence",
+            Self::Failed => "the lane failed; inspect its result and local evidence",
+            Self::Rejected => "the lane was refused; inspect the request and access policy",
+            Self::Cancelled => {
+                "the lane was cancelled; inspect its status before taking further action"
+            }
+            Self::TimedOut => {
+                "the lane timed out; inspect its result and runtime limit before resuming"
+            }
+            Self::RateLimited => ProviderFailureFact::RateLimit.reason(),
+            Self::QuotaLimited => ProviderFailureFact::Quota { free_pool: false }.reason(),
+            Self::AuthRequired => ProviderFailureFact::AuthRequired.reason(),
+            Self::ModelUnavailable => {
+                "the model is unavailable; check the selected model or wait for capacity"
+            }
+            Self::PermissionDenied => {
+                "access was denied; check the declared grants and filesystem permissions"
+            }
+            Self::Quarantined => {
+                "the lane is quarantined; inspect its evidence before further action"
+            }
+            Self::Lost | Self::Unsettled => {
+                "the lane outcome is uncertain; inspect its status before retrying"
+            }
+            Self::Uncommitted => {
+                "the writer has uncommitted changes; preserve or commit the edits before retrying"
+            }
+            Self::InputRequired => {
+                "the lane needs input; inspect its request and provide the missing input"
+            }
+        }
+    }
+}
+
 impl From<Outcome> for crate::AttemptOutcome {
     fn from(outcome: Outcome) -> Self {
         match outcome {
@@ -753,6 +793,63 @@ impl From<Outcome> for crate::AttemptOutcome {
         }
     }
 }
+/// Safe cause of a terminal decision, independent of provider text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TerminalCause {
+    UnsupportedPlatform,
+    UnknownPacingAccount,
+    UnregisteredAccount,
+    DeliveryPrepareCredentialHelper,
+    SpawnFailure,
+    ProcessCrash,
+    TokenBudget,
+    SettlementFailure,
+    ProviderEarlyStop,
+    FreePoolQuota,
+    CommandUnavailable,
+    HostNativeUnconfigured,
+    IdentityUnobserved,
+}
+
+impl TerminalCause {
+    pub fn reason(self) -> &'static str {
+        match self {
+            Self::UnsupportedPlatform => "sandbox backend is unavailable: UnsupportedPlatform",
+            Self::UnknownPacingAccount => {
+                "pacing configuration references an unregistered account; correct the pacing profile"
+            }
+            Self::UnregisteredAccount => {
+                "the selected account is not registered for the requested route; run `provenant accounts list`"
+            }
+            Self::DeliveryPrepareCredentialHelper => {
+                "host writer delivery failed at Prepare (credential helper); check the host credential helper configuration"
+            }
+            Self::SpawnFailure => "the provider could not start; inspect local launch evidence",
+            Self::ProcessCrash => {
+                "the provider process crashed; inspect local evidence before retrying"
+            }
+            Self::TokenBudget => "the host stopped the provider at its token budget; inspect the retained work before retrying",
+            Self::SettlementFailure => "lane settlement failed; inspect local recovery evidence",
+            Self::ProviderEarlyStop => {
+                "provider stopped early; inspect the result and resume if needed"
+            }
+            Self::FreePoolQuota => {
+                crate::diagnostic::ProviderFailureFact::Quota { free_pool: true }.reason()
+            }
+            Self::CommandUnavailable => {
+                "the configured command could not be resolved; correct its argv in domains.fabric.commands"
+            }
+            Self::HostNativeUnconfigured => {
+                "the requested host-native route is not configured in domains.fabric.host_native; select a configured route"
+            }
+            Self::IdentityUnobserved => {
+                "provider identity was not observed; inspect the local session evidence"
+            }
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum AttemptState {
@@ -807,6 +904,39 @@ pub enum SkipKind {
     /// Confinement, continuation or provider preparation refused the candidate.
     Refused,
 }
+impl SkipKind {
+    /// Safe, actionable reason when a skipped route has no more specific fact.
+    pub fn diagnostic(self) -> crate::diagnostic::Diagnostic {
+        use crate::diagnostic::Diagnostic;
+        let (detail, next) = match self {
+            Self::Unavailable => (
+                "the selected route is unavailable",
+                "check route readiness with `provenant quota tick`",
+            ),
+            Self::Account => (
+                "the selected account could not be observed",
+                "check the account and run `provenant quota tick`",
+            ),
+            Self::AuthRequired => (
+                "the selected account requires login",
+                crate::diagnostic::ProviderFailureFact::AuthRequired.reason(),
+            ),
+            Self::Setup => (
+                "the selected route could not be prepared",
+                "inspect local setup and retry after correcting it",
+            ),
+            Self::Refused => (
+                "the selected route was refused during preparation",
+                "inspect the request and access policy before retrying",
+            ),
+        };
+        Diagnostic::new("REFUSED")
+            .category("refused")
+            .detail(detail)
+            .next(next)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SkippedRoute {
     #[serde(flatten)]
@@ -814,8 +944,32 @@ pub struct SkippedRoute {
     /// `adapter/model`, or the adapter alone for an account-level skip.
     pub route: String,
     pub kind: SkipKind,
+    /// Typed readiness cause, when the router supplied one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cause: Option<crate::RouteExclusionReason>,
     pub detail: String,
 }
+impl SkippedRoute {
+    /// Attach a typed cause and persist only its bounded safe projection.
+    pub fn set_cause(&mut self, cause: crate::RouteExclusionReason) {
+        self.cause = Some(cause);
+        let diagnostic = self.diagnostic();
+        self.detail = format!(
+            "{}; {}",
+            diagnostic.detail.unwrap_or_default(),
+            diagnostic.next.unwrap_or_default()
+        );
+    }
+
+    /// Project typed facts only; `detail` may contain provider or OS text.
+    pub fn diagnostic(&self) -> crate::diagnostic::Diagnostic {
+        self.cause
+            .as_ref()
+            .map(|cause| cause.diagnostic("REFUSED"))
+            .unwrap_or_else(|| self.kind.diagnostic())
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ArtifactRecord {
     #[serde(flatten)]
@@ -1249,7 +1403,7 @@ pub struct AdmissionTicket {
     pub generation: u64,
     pub holder: Option<ActorId>,
     pub active: bool,
-    /// Available memory floor as basis points of installed memory.
+    /// Advisory available-memory floor as basis points of installed memory.
     pub memory_floor_basis_points: u64,
     pub disk_floor_bytes: u64,
     /// Spacing for this lane's class, fixed at submission.

@@ -406,6 +406,18 @@ fn retry_attempt_mode(
         None
     };
     let run = accepted.map_err(|error| {
+        if matches!(error, run::RunError::ContinuationRefused { .. }) {
+            let mut fail = Fail::from(error);
+            if cleanup_failure.is_some() {
+                let retained = "fresh fallback worktree cleanup failed; inspect retained worktrees with `provenant worktree list` before retrying or running `provenant gc`";
+                fail.message.push_str(&format!("; {retained}"));
+                if let Some(projection) = &mut fail.projection {
+                    let detail = projection.detail.get_or_insert_with(String::new);
+                    detail.push_str(&format!("; {retained}"));
+                }
+            }
+            return fail;
+        }
         Fail::new(
             Status::Refused,
             ErrorKind::ContinuationUnsupported,
@@ -486,7 +498,8 @@ pub(super) fn fresh_continuation_worktree(
                 call.cancel,
             )?;
             let tree = provenant_confinement::verify_worktree(context.repo, &info.path)?;
-            let publication = worktrees::save_owner(
+            let publication = worktrees::save_lane_owner_when_free(
+                context,
                 &tree,
                 &WorktreeOwner {
                     attempt_id: Some(input.attempt_id),
@@ -498,16 +511,17 @@ pub(super) fn fresh_continuation_worktree(
                     origin: WorktreeOrigin::Lane,
                     label: None,
                 },
+                info.head,
+                None,
+                false,
+                call.cancel,
             );
             if let Err(error) = publication {
-                if worktrees::remove(
+                if worktrees::remove_created_by_operation(
                     context,
-                    worktrees::WorktreeRemove::Name {
-                        name: format!("lane/resume-{}", input.attempt_id),
-                        discard: false,
-                        integration: None,
-                        expected_head: Some(info.head),
-                    },
+                    format!("lane/resume-{}", input.attempt_id),
+                    info.head,
+                    &input.operation_id,
                     call.cancel,
                 )
                 .is_err()

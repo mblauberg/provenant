@@ -5,7 +5,8 @@ composite. Give each assignment outcome, acceptance evidence, source SHA,
 read roots, literal write scope, authority, budget, output location and stop
 conditions. The [planner brief](planner.md) owns slicing and tier choice.
 
-Writers commit recoverable steps, run targeted checks and report environment
+Keep writer budgets near 35 to 60 minutes; reserve longer lanes for coupled
+work that cannot be split. Writers commit recoverable steps, run targeted checks and report environment
 failures without repairing unrelated code. Name one writer per worktree;
 confirm a stopped process has exited before adopting its worktree. Reviewers
 receive the base, pinned subject and spec without the author's hypothesis.

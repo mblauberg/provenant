@@ -64,6 +64,13 @@ pub enum CloudTransport {
     Codex,
 }
 
+/// How a provider receives host GitHub authentication for an open-network launch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GithubAuth {
+    Environment,
+    ShellEnvironment,
+}
+
 /// How preparation rechecks a recorded login failure.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LoginReprobe {
@@ -174,6 +181,7 @@ pub struct AdapterSpec {
     /// The local hook can read pending answer offers for this adapter.
     pub local_offer_reader: bool,
     pub cloud_transport: Option<CloudTransport>,
+    pub github_auth: Option<GithubAuth>,
     /// Supports launching a transferred interactive session.
     pub session_handoff: bool,
     /// Refresh an account token through the authorised credential broker at launch.
@@ -394,6 +402,7 @@ adapter_specs! { $;
         chair_switch: true,
         local_offer_reader: true,
         cloud_transport: Some(CloudTransport::Claude),
+        github_auth: Some(GithubAuth::Environment),
         session_handoff: true,
         launch_token_refresh: true,
         deduplicate_result: false,
@@ -471,6 +480,7 @@ adapter_specs! { $;
         chair_switch: false,
         local_offer_reader: false,
         cloud_transport: Some(CloudTransport::Codex),
+        github_auth: Some(GithubAuth::ShellEnvironment),
         session_handoff: false,
         launch_token_refresh: false,
         deduplicate_result: false,
@@ -547,6 +557,7 @@ adapter_specs! { $;
         chair_switch: false,
         local_offer_reader: false,
         cloud_transport: None,
+        github_auth: None,
         session_handoff: false,
         launch_token_refresh: false,
         deduplicate_result: false,
@@ -627,6 +638,7 @@ adapter_specs! { $;
         chair_switch: false,
         local_offer_reader: false,
         cloud_transport: None,
+        github_auth: None,
         session_handoff: false,
         launch_token_refresh: false,
         deduplicate_result: true,
@@ -705,6 +717,7 @@ adapter_specs! { $;
         chair_switch: false,
         local_offer_reader: false,
         cloud_transport: None,
+        github_auth: None,
         session_handoff: false,
         launch_token_refresh: false,
         deduplicate_result: false,
@@ -774,6 +787,7 @@ adapter_specs! { $;
         chair_switch: false,
         local_offer_reader: false,
         cloud_transport: None,
+        github_auth: None,
         session_handoff: false,
         launch_token_refresh: false,
         deduplicate_result: false,
@@ -845,6 +859,7 @@ adapter_specs! { $;
         chair_switch: false,
         local_offer_reader: false,
         cloud_transport: None,
+        github_auth: None,
         session_handoff: false,
         launch_token_refresh: false,
         deduplicate_result: false,
@@ -915,6 +930,7 @@ adapter_specs! { $;
         chair_switch: false,
         local_offer_reader: false,
         cloud_transport: None,
+        github_auth: None,
         session_handoff: false,
         launch_token_refresh: false,
         deduplicate_result: false,

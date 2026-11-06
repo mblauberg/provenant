@@ -67,7 +67,61 @@ pub(crate) struct Request {
 enum Reply {
     Ready,
     Ok(Value),
-    Error { code: String, detail: Value },
+    Error {
+        code: String,
+        detail: Value,
+        cause: Option<FacadeError>,
+        operation_id: Option<provenant_core::OperationId>,
+    },
+}
+
+/// The delivery variants project onto the established IO envelope on the
+/// relay as they do on the peer wire; their typed facts remain available.
+fn relay_cause(error: &FacadeError) -> FacadeError {
+    match error {
+        FacadeError::HostDeliveryLimit { fact } => FacadeError::Io {
+            operation: "host delivery".into(),
+            path: None,
+            delivery_limit: Some(fact.clone()),
+            delivery_stage: None,
+            resource: None,
+            input_failure: None,
+        },
+        FacadeError::HostDeliveryStage { stage } => FacadeError::Io {
+            operation: "host delivery".into(),
+            path: None,
+            delivery_limit: None,
+            delivery_stage: Some(*stage),
+            resource: None,
+            input_failure: None,
+        },
+        _ => error.clone(),
+    }
+}
+
+fn service_cause(error: &ServiceError) -> Option<FacadeError> {
+    match error {
+        ServiceError::Facade(cause) => Some(relay_cause(cause)),
+        ServiceError::Coordination(cause) => Some(relay_cause(&FacadeError::from(cause))),
+        ServiceError::Invalid(cause) => Some(FacadeError::from(
+            &provenant_fabric_runtime::coordination::CoordinationError::Input(cause.clone()),
+        )),
+        ServiceError::Mutation { source, .. } => service_cause(source),
+        _ => None,
+    }
+}
+
+fn with_operation(
+    error: ServiceError,
+    operation_id: Option<provenant_core::OperationId>,
+) -> ServiceError {
+    match operation_id {
+        Some(operation_id) => ServiceError::Mutation {
+            operation_id,
+            source: Box::new(error),
+        },
+        None => error,
+    }
 }
 
 /// The guardian owns this handle until provider exit, including failed spawn.
@@ -144,6 +198,8 @@ impl HostRelay {
                                         &Reply::Error {
                                             code: "busy".into(),
                                             detail: Value::Null,
+                                            cause: None,
+                                            operation_id: None,
                                         },
                                         Instant::now() + IO_TIMEOUT,
                                         &cancel,
@@ -341,6 +397,11 @@ fn reply(result: Result<Value, ServiceError>) -> Reply {
         Err(error) => Reply::Error {
             code: error.code().into(),
             detail: error.structured_error(),
+            cause: service_cause(&error),
+            operation_id: match &error {
+                ServiceError::Mutation { operation_id, .. } => Some(operation_id.clone()),
+                _ => None,
+            },
         },
     }
 }
@@ -366,9 +427,17 @@ pub(crate) fn serve_one_with(
                 let within = confirm_budget(stream, deadline, cancel)?;
                 reply(handler(call, cancel, within))
             }
-            Err(_) => Reply::Error {
+            Err(crate::tools::InvalidInput::Validated(error)) => Reply::Error {
                 code: "invalid_input".into(),
-                detail: Value::Null,
+                detail: ServiceError::Invalid(error.clone()).structured_error(),
+                cause: Some(FacadeError::from(
+                    &provenant_fabric_runtime::coordination::CoordinationError::Input(error),
+                )),
+                operation_id: None,
+            },
+            Err(_) => Reply::Error {
+                code: "invalid_input".into(), detail: Value::Null,
+                cause: None, operation_id: None,
             },
         }
     };
@@ -379,6 +448,8 @@ pub(crate) fn serve_one_with(
             &Reply::Error {
                 code: "response_too_large".into(),
                 detail: Value::Null,
+                cause: None,
+                operation_id: None,
             },
             deadline,
             cancel,
@@ -475,9 +546,17 @@ pub(crate) fn exchange_within(
     };
     match reply {
         Reply::Ok(value) => Ok(value),
-        Reply::Error { code, detail } => {
+        Reply::Error {
+            code,
+            detail,
+            cause,
+            operation_id,
+        } => {
+            if let Some(cause) = cause.filter(|cause| cause.code() == code) {
+                return Err(with_operation(cause.into(), operation_id));
+            }
             if code == "result_too_large" || code == "response_too_large" {
-                return Err(ServiceError::ResultTooLarge);
+                return Err(with_operation(ServiceError::ResultTooLarge, operation_id));
             }
             if (detail.is_null()
                 || detail.as_object().is_some_and(|fields| {
@@ -490,18 +569,21 @@ pub(crate) fn exchange_within(
                 && let Ok(error) =
                     serde_json::from_value::<FacadeError>(serde_json::json!({"code": code}))
             {
-                return Err(error.into());
+                return Err(with_operation(error.into(), operation_id));
             }
             let message = detail
                 .get("message")
                 .and_then(Value::as_str)
                 .unwrap_or("host Fabric coordination refused")
                 .to_owned();
-            Err(ServiceError::Cli {
-                code,
-                message,
-                data: detail,
-            })
+            Err(with_operation(
+                ServiceError::Cli {
+                    code,
+                    message,
+                    data: detail,
+                },
+                operation_id,
+            ))
         }
         Reply::Ready => Err(FacadeError::StateCorrupt.into()),
     }
@@ -766,6 +848,181 @@ mod tests {
             1
         );
         assert_eq!(checkpoint.expansions.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn relay_retains_typed_input_and_io_facts_without_source_text()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let invalid = Request {
+            tool: "fabric_run".into(),
+            arguments: serde_json::json!({"op":"submit","tasks":[{
+                "title":"TOKEN_SENTINEL\u{1b}", "prompt":"work",
+                "route":{"kind":"named","name":"utility"}, "timeout_seconds":1
+            }]}),
+        };
+        let (mut client, mut server) = UnixStream::pair()?;
+        thread::scope(|scope| {
+            let serving = scope.spawn(move || {
+                serve_one(
+                    &mut server,
+                    provenant_records::Limits::CONFIG,
+                    &|_, _, _| panic!("invalid input must not reach the handler"),
+                    &CancelToken::new(),
+                )
+            });
+            let error = exchange(&mut client, &invalid, &CancelToken::new()).unwrap_err();
+            let value = error.structured_error();
+            assert_eq!(value["code"], "invalid_input");
+            assert!(value["detail"].as_str().unwrap().contains("tasks[0].title"));
+            assert!(
+                value["detail"]
+                    .as_str()
+                    .unwrap()
+                    .contains("control characters")
+            );
+            assert!(!value.to_string().contains("TOKEN_SENTINEL"));
+            serving.join().unwrap().unwrap();
+        });
+        let (mut client, mut server) = UnixStream::pair()?;
+        thread::scope(|scope| {
+            let serving = scope.spawn(move || {
+                serve_one(
+                    &mut server,
+                    provenant_records::Limits::CONFIG,
+                    &|_, _, _| {
+                        Err(FacadeError::Io {
+                            operation: "TOKEN_SENTINEL".into(),
+                            path: Some("/private/host".into()),
+                            delivery_limit: None,
+                            delivery_stage: None,
+                            resource: None,
+                            input_failure: Some(
+                                provenant_records::diagnostic::IoFact::InputUnreadable,
+                            ),
+                        }
+                        .into())
+                    },
+                    &CancelToken::new(),
+                )
+            });
+            let error = exchange(&mut client, &request(), &CancelToken::new()).unwrap_err();
+            let value = error.structured_error();
+            assert_eq!(value["code"], "io");
+            assert!(
+                value["detail"]
+                    .as_str()
+                    .unwrap()
+                    .contains("input could not be read")
+            );
+            assert!(!value.to_string().contains("TOKEN_SENTINEL"));
+            assert!(!value.to_string().contains("/private/host"));
+            serving.join().unwrap().unwrap();
+        });
+        Ok(())
+    }
+
+    #[test]
+    fn relay_host_delivery_limit_keeps_io_detail() -> Result<(), Box<dyn std::error::Error>> {
+        let fact = provenant_records::diagnostic::DeliveryLimit::new(
+            provenant_records::run::WriterDeliveryStage::Prepare,
+            "git",
+            "worktree list",
+            8388608,
+        )
+        .unwrap();
+        let (mut client, mut server) = UnixStream::pair()?;
+        thread::scope(|scope| {
+            let serving = scope.spawn(move || {
+                serve_one(
+                    &mut server,
+                    provenant_records::Limits::CONFIG,
+                    &|_, _, _| Err(FacadeError::HostDeliveryLimit { fact: fact.clone() }.into()),
+                    &CancelToken::new(),
+                )
+            });
+            let error = exchange(&mut client, &request(), &CancelToken::new()).unwrap_err();
+            let value = error.structured_error();
+            assert_eq!(value["code"], "io");
+            let detail = value["detail"].as_str().unwrap();
+            assert!(detail.contains("git worktree list"));
+            assert!(detail.contains("8388608"));
+            serving.join().unwrap().unwrap();
+        });
+        Ok(())
+    }
+
+    #[test]
+    fn relay_uncertain_mutation_keeps_operation_identity() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let operation_id = provenant_core::OperationId::parse("dispatch-17")?;
+        let (mut client, mut server) = UnixStream::pair()?;
+        thread::scope(|scope| {
+            let serving = scope.spawn(move || {
+                serve_one(
+                    &mut server,
+                    provenant_records::Limits::CONFIG,
+                    &|_, _, _| {
+                        Err(ServiceError::Mutation {
+                            operation_id: operation_id.clone(),
+                            source: Box::new(ServiceError::Facade(FacadeError::LaunchUnknown {
+                                operation_id: operation_id.clone(),
+                            })),
+                        })
+                    },
+                    &CancelToken::new(),
+                )
+            });
+            let error = exchange(&mut client, &request(), &CancelToken::new()).unwrap_err();
+            let value = error.structured_error();
+            assert_eq!(value["code"], "LAUNCH_UNKNOWN");
+            assert_eq!(value["operation_id"], "dispatch-17");
+            assert!(value["next"].as_str().unwrap().contains("dispatch-17"));
+            serving.join().unwrap().unwrap();
+        });
+        Ok(())
+    }
+
+    #[test]
+    fn relay_coordination_unknown_keeps_typed_operation_and_remedy()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let operation_id = provenant_core::OperationId::parse("peer-dispatch-17")?;
+        let (mut client, mut server) = UnixStream::pair()?;
+        thread::scope(|scope| {
+            let serving = scope.spawn(|| {
+                serve_one(
+                    &mut server,
+                    provenant_records::Limits::CONFIG,
+                    &|_, _, _| {
+                        Err(
+                            provenant_fabric_runtime::coordination::CoordinationError::Peer(
+                                provenant_fabric_runtime::hosts::PeerError::Unknown {
+                                    operation_id: operation_id.clone(),
+                                },
+                            )
+                            .into(),
+                        )
+                    },
+                    &CancelToken::new(),
+                )
+            });
+            let error = exchange(&mut client, &request(), &CancelToken::new()).unwrap_err();
+            assert!(matches!(
+                &error,
+                ServiceError::Facade(FacadeError::LaunchUnknown { operation_id: actual })
+                    if actual == &operation_id
+            ));
+            let value = error.structured_error();
+            assert_eq!(value["code"], "LAUNCH_UNKNOWN");
+            assert_eq!(value["operation_id"], operation_id.as_str());
+            assert!(
+                value["next"]
+                    .as_str()
+                    .unwrap()
+                    .contains(operation_id.as_str())
+            );
+            serving.join().unwrap().unwrap();
+        });
         Ok(())
     }
 

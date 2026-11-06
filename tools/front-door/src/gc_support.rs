@@ -170,6 +170,7 @@ fn refresh_branch(repo: &Path, executor: &dyn Executor, branch: &str) -> Result<
 /// stale origin/HEAD. Only this branch's remote-tracking ref is updated.
 pub(crate) fn fetch_default(
     context: &WorktreeContext<'_>,
+    cancel: &CancelToken,
 ) -> Result<Option<(String, GitOid)>, Error> {
     let run = |args: &[&str], timeout: Duration| {
         host_git(context.repo.root_path(), context.executor, args, timeout)
@@ -221,17 +222,9 @@ pub(crate) fn fetch_default(
     if fetched.termination != Termination::Exit(0) {
         return Err(Error::GcObservation("cannot fetch upstream default branch"));
     }
-    let tip = run(
-        &["rev-parse", "--verify", &format!("{reference}^{{commit}}")],
-        Duration::from_secs(5),
-    )?;
-    if tip.termination != Termination::Exit(0) {
-        return Err(Error::GcObservation("cannot pin fetched upstream"));
-    }
-    let oid = std::str::from_utf8(&tip.stdout.bytes)
-        .ok()
-        .and_then(|text| GitOid::parse(text.trim()).ok())
-        .ok_or(Error::GcObservation("invalid fetched upstream"))?;
+    let name = provenant_confinement::repo::GitRefName::remote_tracking(format!("origin/{branch}"))
+        .map_err(|_| Error::GcObservation("invalid fetched upstream ref"))?;
+    let oid = context.facts.resolve_commit(context, name, cancel)?;
     Ok(Some((reference, oid)))
 }
 
@@ -558,6 +551,54 @@ pub(crate) fn disk_alert(
 mod tests {
     #[allow(unused_imports)] // The worktree driver includes this module without libtest.
     use super::*;
+
+    #[test]
+    fn fetched_default_is_resolved_by_repo_facts() -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let home = temp.path().join("home");
+        let state = temp.path().join("state");
+        let repo = temp.path().join("repo");
+        let remote = temp.path().join("remote.git");
+        std::fs::create_dir_all(&home)?;
+        std::fs::create_dir_all(&state)?;
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700))?;
+        std::fs::create_dir_all(&repo)?;
+        provenant_os::fixture::run_git(
+            temp.path(),
+            &["init", "--bare", remote.to_str().ok_or("remote")?],
+        )?;
+        for args in [
+            vec!["init", "-q"],
+            vec!["commit", "--allow-empty", "-qm", "base"],
+            vec!["remote", "add", "origin", remote.to_str().ok_or("remote")?],
+            vec!["push", "origin", "HEAD:refs/heads/main"],
+        ] {
+            provenant_os::fixture::run_git(&repo, &args)?;
+        }
+        provenant_os::fixture::run_git(&remote, &["symbolic-ref", "HEAD", "refs/heads/main"])?;
+        let mut inputs = provenant_core::RootInputs::new(home.clone(), repo.clone());
+        inputs.state_dir = Some(state);
+        let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+        let clock = SystemClock::new();
+        let cancel = CancelToken::new();
+        let result = provenant_confinement::worktrees::with_context(
+            &roots,
+            &home,
+            &repo,
+            &clock,
+            &cancel,
+            |context| Ok(fetch_default(context, &cancel)),
+        )??
+        .ok_or("missing upstream")?;
+        assert_eq!(result.0, "refs/remotes/origin/main");
+        let actual = provenant_os::fixture::run_git(&repo, &["rev-parse", "HEAD"])?;
+        assert_eq!(
+            result.1,
+            GitOid::parse(std::str::from_utf8(&actual)?.trim())?
+        );
+        Ok(())
+    }
 
     #[test]
     fn writer_tracking_refresh_handles_remote_branch_absence_and_failure()

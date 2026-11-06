@@ -744,7 +744,8 @@ node before it launches. The host refuses a worktree whose branch differs
 from the bound branch, then pushes the lane head to that branch without
 force, so the remote refuses a non-fast-forward update and the delivery
 fails at the push stage with the branch unchanged. The lane boundary is
-unchanged: lanes never push, and only the host writes branch configuration.
+unchanged: the host performs this push, and only the host writes branch
+configuration. A lane pushes its own branch only when `lanes.publish` is on.
 
 The repair brief is ordinary `inputs`: the upstream gate's `findings` and the
 writer's `result`, so failed checks reach the repair as generic findings.

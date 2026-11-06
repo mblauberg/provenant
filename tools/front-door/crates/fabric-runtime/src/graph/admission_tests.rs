@@ -26,7 +26,10 @@ fn admission_refuses_unenforced_required_output_fields() {
         let error = graph
             .admit(&crate::config::GraphLimits::default())
             .unwrap_err();
-        assert!(error.contains("required output"), "{key}: {error}");
+        assert!(
+            error.to_string().contains("required output"),
+            "{key}: {error}"
+        );
         let round_trip: GraphDocument =
             serde_json::from_value(serde_json::to_value(&graph).unwrap()).unwrap();
         assert_eq!(
@@ -96,6 +99,7 @@ fn required_output_contract_requires_v2_and_selected_supported_kinds() {
         unsupported
             .admit(&limits)
             .unwrap_err()
+            .to_string()
             .contains("cannot yet be verified")
     );
     let planner = document(
@@ -110,6 +114,7 @@ fn required_output_contract_requires_v2_and_selected_supported_kinds() {
     assert!(
         validate_output_kinds(&planner)
             .unwrap_err()
+            .to_string()
             .contains("planner exports")
     );
     let prior_round = document(
@@ -127,8 +132,39 @@ fn required_output_contract_requires_v2_and_selected_supported_kinds() {
         prior_round
             .admit(&limits)
             .unwrap_err()
+            .to_string()
             .contains("previous-round")
     );
+}
+
+#[test]
+fn admission_returns_typed_cause_with_original_text() {
+    let graph = document(3, json!([{"id":"n","prompt":"x","access":"read_only"}]));
+    let error = graph.admit(&Default::default()).unwrap_err();
+    assert!(matches!(error, AdmissionError::Schema(_)));
+    assert_eq!(error.to_string(), "schema version");
+}
+
+#[test]
+fn admission_expansion_returns_typed_cause_with_original_text() {
+    let graph = document(2, json!([{"id":"loop","kind":"loop","access":"read_only"}]));
+    let error = loops::expand(&graph, &[], &Default::default()).unwrap_err();
+    assert!(matches!(error, AdmissionError::Composite(_)));
+    assert_eq!(error.to_string(), "loop requires a body");
+    let error = graph.admit(&Default::default()).unwrap_err();
+    assert!(matches!(error, AdmissionError::Composite(_)));
+    assert_eq!(error.to_string(), "loop requires a body");
+}
+
+#[test]
+fn flat_plan_returns_typed_cause_with_original_text() {
+    let graph = document(1, json!([{"id":"n","access":"read_only","prompt":"x"}]));
+    let error = validate_flat_plan(&graph, &Default::default()).unwrap_err();
+    assert!(matches!(error, AdmissionError::Plan(_)));
+    assert_eq!(error.to_string(), "route list is empty");
+    let error = graph.admit(&Default::default()).unwrap_err();
+    assert!(matches!(error, AdmissionError::Plan(_)));
+    assert_eq!(error.to_string(), "route list is empty");
 }
 
 #[test]
@@ -245,6 +281,8 @@ fn admission_output_kind_matrix() {
         ]),
     );
     let error = validate_output_kinds(&selected_commit).unwrap_err();
+    assert!(matches!(error, AdmissionError::OutputKind { .. }));
+    let error = error.to_string();
     for part in ["consumer", "source", "commit", "result", "findings"] {
         assert!(error.contains(part), "{error}");
     }
@@ -350,6 +388,11 @@ fn admission_structural_limits_name_the_key() {
         let mut limits = crate::config::GraphLimits::default();
         configure(&mut limits);
         let refusal = graph.admit(&limits).unwrap_err();
+        assert!(
+            matches!(refusal, AdmissionError::StructuralLimit(_)),
+            "{refusal}"
+        );
+        let refusal = refusal.to_string();
         assert!(refusal.contains(&format!("limits.{key}")), "{refusal}");
     }
 }

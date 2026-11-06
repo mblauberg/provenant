@@ -304,6 +304,11 @@ pub trait Holder {
     fn provider_exited(&self, _context: &[u8], _reason: Option<machine::StopReason>) -> Result<()> {
         Ok(())
     }
+    /// Called when live token usage reaches 90% of the token budget, so the
+    /// lane can be told to commit its work before reaching the budget stop.
+    fn budget_warning(&self, _context: &[u8], _tokens: u64, _budget: u64) -> Result<()> {
+        Ok(())
+    }
     fn terminal(
         &self,
         context: &[u8],
@@ -602,10 +607,35 @@ struct Driver<'a> {
     /// `descendant_stop_allowed`.
     escapee_stop_allowed: bool,
 }
+/// Calls tracked by key before the sink stops de-duplicating and only adds.
+const USAGE_KEYS: usize = 65_536;
 #[derive(Default)]
 struct Events {
     terminal: std::sync::atomic::AtomicBool,
     rejected: std::sync::atomic::AtomicBool,
+    usage: std::sync::Mutex<Usage>,
+}
+/// Live token usage: one figure per provider call, summed.
+#[derive(Default)]
+struct Usage {
+    calls: std::collections::HashMap<u64, u64>,
+    total: u64,
+}
+impl Usage {
+    fn report(&mut self, key: u64, tokens: u64) {
+        let before = if self.calls.len() < USAGE_KEYS || self.calls.contains_key(&key) {
+            self.calls.insert(key, tokens).unwrap_or(0)
+        } else {
+            0
+        };
+        self.total = self.total.saturating_sub(before).saturating_add(tokens);
+    }
+}
+impl Events {
+    /// Tokens the provider has reported so far.
+    fn tokens(&self) -> u64 {
+        self.usage.lock().map_or(0, |usage| usage.total)
+    }
 }
 impl provenant_os::capture::DecodedEventSink for Events {
     fn try_send(
@@ -619,6 +649,11 @@ impl provenant_os::capture::DecodedEventSink for Events {
             }
             provenant_os::capture::FrameEvent::ProtocolRejected => {
                 self.rejected.store(true, Ordering::Relaxed)
+            }
+            provenant_os::capture::FrameEvent::Usage { key, tokens } => {
+                if let Ok(mut usage) = self.usage.lock() {
+                    usage.report(key, tokens);
+                }
             }
             provenant_os::capture::FrameEvent::Progress => {}
         }
@@ -773,6 +808,14 @@ impl Driver<'_> {
         let budgets =
             Budgets::with_cleanup(plan.wall_ms, plan.root_flush_ms, plan.descendant_grace_ms);
         let mut state = State::prepared(budgets);
+        // Time spent queued for a build slot does not count towards the wall
+        // deadline: sample the lane's wait markers about once a second.
+        let mut slot_sampled_at: Option<Instant> = None;
+        // Total extension granted for slot waits, bounded by `plan.slot_wait_ms`
+        // so a lane that keeps refreshing its marker cannot run forever.
+        let mut slot_extended_ms = 0_u64;
+        let mut budget_warned = false;
+        let mut budget_stop_sent = false;
         let spawn_result = self.spawn_provider(
             argv,
             env,
@@ -1042,6 +1085,27 @@ impl Driver<'_> {
             terminal |= newly_terminal;
             let rejected = out_events.rejected.load(Ordering::Relaxed)
                 || err_events.rejected.load(Ordering::Relaxed);
+            let tokens = out_events.tokens().saturating_add(err_events.tokens());
+            if plan.token_budget > 0
+                && !budget_warned
+                && tokens >= plan.token_budget / 10 * 9
+                && tokens <= plan.token_budget
+            {
+                budget_warned = true;
+                warn(
+                    &mut warnings,
+                    &mut omitted_warnings,
+                    "token budget 90% used",
+                );
+                if let Some(holder) = self.holder {
+                    let _ = holder.budget_warning(&self.holder_context, tokens, plan.token_budget);
+                }
+            }
+            let over_budget = plan.token_budget > 0
+                && tokens > plan.token_budget
+                && !budget_stop_sent
+                && !terminal
+                && exit.is_none();
             let event = if signal {
                 Event::SupervisorSignal
             } else if rejected {
@@ -1051,6 +1115,7 @@ impl Driver<'_> {
                     machine::StopReason::ExplicitCancellation => Event::Cancel,
                     machine::StopReason::ProtocolRejected => Event::ProtocolRejected,
                     machine::StopReason::SupervisorSignal => Event::SupervisorSignal,
+                    machine::StopReason::TokenBudget => Event::TokenBudget,
                     machine::StopReason::WallDeadline
                     | machine::StopReason::PostTerminalCleanup
                         if state.stop_attempts().iter().any(|attempt| {
@@ -1063,6 +1128,9 @@ impl Driver<'_> {
                     machine::StopReason::WallDeadline
                     | machine::StopReason::PostTerminalCleanup => Event::RetryStop(reason),
                 }
+            } else if over_budget {
+                budget_stop_sent = true;
+                Event::TokenBudget
             } else if newly_terminal {
                 Event::Terminal
             } else if output_progress || cpu_progress {
@@ -1070,6 +1138,29 @@ impl Driver<'_> {
             } else {
                 Event::Silence
             };
+            if exit.is_none() {
+                let at = Instant::now();
+                if let Some(last) = slot_sampled_at
+                    && at.duration_since(last) >= Duration::from_secs(1)
+                {
+                    let waiting = wall_now().is_some_and(|wall| {
+                        provenant_os::build_slots::slot_wait_active(
+                            &self.attempt,
+                            u64::try_from(wall.as_micros() / 1_000_000).unwrap_or(0),
+                        )
+                    });
+                    if waiting {
+                        let ms = u64::try_from(at.duration_since(last).as_millis())
+                            .unwrap_or(0)
+                            .min(plan.slot_wait_ms.saturating_sub(slot_extended_ms));
+                        slot_extended_ms = slot_extended_ms.saturating_add(ms);
+                        state.extend_wall_deadline(ms);
+                    }
+                    slot_sampled_at = Some(at);
+                } else if slot_sampled_at.is_none() {
+                    slot_sampled_at = Some(at);
+                }
+            }
             let mut tick = Tick::at(now);
             tick.observed_exit = exit;
             // The monotonic clock stops while the host sleeps; the wall

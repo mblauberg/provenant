@@ -365,6 +365,22 @@ impl provenant_os::capture::FrameDecoder for Decoder {
         if frame == b"crash-guardian" {
             std::process::exit(70);
         }
+        // `usage:KEY:TOKENS` is a fake provider's live usage report.
+        if let Some(rest) = frame.strip_prefix(b"usage:") {
+            let text =
+                std::str::from_utf8(rest).map_err(|_| provenant_os::capture::DecodeFailure)?;
+            let (key, tokens) = text
+                .split_once(':')
+                .ok_or(provenant_os::capture::DecodeFailure)?;
+            return Ok(provenant_os::capture::FrameEvent::Usage {
+                key: key
+                    .parse()
+                    .map_err(|_| provenant_os::capture::DecodeFailure)?,
+                tokens: tokens
+                    .parse()
+                    .map_err(|_| provenant_os::capture::DecodeFailure)?,
+            });
+        }
         Ok(if frame == b"terminal" {
             provenant_os::capture::FrameEvent::Terminal
         } else {
@@ -2625,6 +2641,30 @@ fn capture_failure_never_requests_a_stop(root: &Path) -> Result<()> {
     assert_eq!(exit.stop_reason, None);
     Ok(())
 }
+/// A fake provider reports 600 tokens for one call, repeats it, then reports a
+/// second 600: the repeat does not count, the second call passes the 1000
+/// budget, and the guardian stops the provider with the typed reason.
+fn a_fake_provider_passing_the_token_budget_is_stopped(root: &Path) -> Result<()> {
+    let socket = root.join("budget.sock");
+    let listener = UnixListener::bind(&socket)?;
+    let (_writer, handle) = start(
+        root,
+        "budget",
+        "usage-blocked",
+        &[socket.into_os_string()],
+        CapturePlan {
+            token_budget: 1000,
+            root_flush_ms: 30,
+            descendant_grace_ms: 10,
+            ..CapturePlan::default()
+        },
+    )?;
+    let mut held = fixture::fixture_accept(&listener, Duration::from_secs(5))?;
+    byte(&mut held, b'R')?;
+    let exit = exited(&handle)?;
+    assert_eq!(exit.stop_reason, Some(StopReason::TokenBudget));
+    Ok(())
+}
 fn wall_deadline_is_the_execution_bound(root: &Path) -> Result<()> {
     let socket = root.join("wall.sock");
     let listener = UnixListener::bind(&socket)?;
@@ -2687,6 +2727,10 @@ fn a_host_sleep_cannot_extend_the_wall_deadline(root: &Path) -> Result<()> {
 
 type Case = (&'static str, fn(&Path) -> Result<()>);
 const CASES: &[Case] = &[
+    (
+        "a_fake_provider_passing_the_token_budget_is_stopped",
+        a_fake_provider_passing_the_token_budget_is_stopped,
+    ),
     (
         "live_census_failure_warns_once",
         live_census_failure_warns_once,

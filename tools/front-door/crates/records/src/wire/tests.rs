@@ -4,6 +4,7 @@ use serde_json::json;
 
 fn row() -> LaneRow {
     LaneRow {
+        terminal_cause: None,
         project_id: "9".repeat(32),
         run_id: "0".repeat(32),
         task_id: "1".repeat(32),

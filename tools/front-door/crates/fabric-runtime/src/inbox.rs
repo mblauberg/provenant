@@ -726,12 +726,11 @@ impl InboxInput {
 }
 impl ValidateInput for InboxInput {
     fn validate_input(&self, _: WaitTransport) -> Result<(), InputError> {
-        self.validate_fields().map_err(|error| InputError {
-            path: match error {
+        self.validate_fields().map_err(|error| {
+            InputError::new(match error {
                 InboxError::Invalid(field) => field,
                 _ => "inbox",
-            }
-            .into(),
+            })
         })
     }
 }

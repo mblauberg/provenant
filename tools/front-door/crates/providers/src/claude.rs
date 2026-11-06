@@ -18,10 +18,60 @@ use std::path::Path;
 use std::time::Duration;
 pub struct Claude;
 
+/// Live token usage for a token budget. Each assistant message carries the
+/// usage of its API call, repeated on every content block of that message, so
+/// a call is keyed by its message id and counted once. Output counts are
+/// streaming placeholders until the result, so a live total may undercount
+/// output; it counts input, cached reads and cache writes in full.
+pub struct LiveUsage;
+impl provenant_os::capture::FrameDecoder for LiveUsage {
+    fn decode(
+        &self,
+        frame: &[u8],
+    ) -> Result<provenant_os::capture::FrameEvent, provenant_os::capture::DecodeFailure> {
+        use provenant_os::capture::FrameEvent;
+        Ok(
+            live_usage(frame).map_or(FrameEvent::Progress, |(key, tokens)| FrameEvent::Usage {
+                key,
+                tokens,
+            }),
+        )
+    }
+    fn reports_usage(&self) -> bool {
+        true
+    }
+}
+/// The key and token total of an assistant frame, or `None` for any other
+/// frame or one that does not parse. A bad frame never ends an attempt.
+fn live_usage(frame: &[u8]) -> Option<(u64, u64)> {
+    use std::hash::{Hash, Hasher};
+    if !frame.windows(7).any(|window| window == b"\"usage\"") {
+        return None;
+    }
+    let value: serde_json::Value = serde_json::from_slice(frame).ok()?;
+    if value.get("type")?.as_str()? != "assistant" {
+        return None;
+    }
+    let message = value.get("message")?;
+    let usage = message.get("usage")?;
+    let count = |name: &str| usage.get(name).and_then(serde_json::Value::as_u64);
+    let tokens = [
+        "input_tokens",
+        "output_tokens",
+        "cache_creation_input_tokens",
+    ]
+    .into_iter()
+    .filter_map(count)
+    .fold(0_u64, u64::saturating_add);
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    message.get("id")?.as_str()?.hash(&mut hasher);
+    Some((hasher.finish(), tokens))
+}
+
 pub const REGISTRATION: crate::Registration = crate::Registration {
     adapter: &Claude,
     quota_source: Some(&Claude),
-    stdout_decoder: None,
+    stdout_decoder: Some(&LiveUsage),
     stderr_decoder: None,
     display_name: "Claude",
     quota: provenant_quota::QuotaPolicy {
@@ -520,8 +570,8 @@ fn refresh_account(
 /// Claude uses the selected config directory. The host reads its login token
 /// and passes it through an inherited pipe, so the keychain stays
 /// unreadable. Both lane types deny keychain services and the security
-/// executable and ask Claude to scrub subprocess credentials. Writers use
-/// private configuration; read-only lanes retain their transcript location.
+/// executable. Writers use private configuration; read-only lanes retain
+/// their transcript location.
 /// Provenant and its hook helpers are added explicitly for lane MCP use.
 fn prepare(
     input: &PrepareInput<'_>,
@@ -618,7 +668,6 @@ fn prepare(
     let mut package_omissions = Vec::new();
     let package = package_grant(input.executable, &mut package_omissions);
     let scratch = &plan.scratch.path;
-    // Scrub mode forces default permissions, regardless of --permission-mode.
     let allowed_tools = if shell && input.images.is_empty() {
         "Read,Grep,Glob,Edit,Write,Bash,Skill,mcp__fabric__*"
     } else if shell {
@@ -737,11 +786,10 @@ fn prepare(
     let mut tool_exec_roots = ["/bin", "/usr/bin", "/usr/libexec"].map(subtree).to_vec();
     let tool_writes = Vec::new();
     env.extend([
-        ("CLAUDE_CODE_SUBPROCESS_ENV_SCRUB".into(), "1".into()),
         ("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()),
         ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
     ]);
-    // The git wrapper script; the scrub drops GIT_CONFIG_GLOBAL from Bash.
+    // The git wrapper script remains available to Bash.
     tool_exec_roots.push(subtree(scratch.join("bin")));
     // Use the same read-only toolchain, public TLS configuration and CLT
     // selection as Codex. Access still controls private caches and writes.
@@ -936,7 +984,40 @@ fn rate_limited(text: Option<String>, fallback: &str) -> E {
 }
 
 fn decode(bytes: &[u8]) -> Result<Vec<E>, ProviderError> {
-    Ok(match wire::<Event>(bytes)? {
+    let event = wire::<Event>(bytes).map_err(|error| {
+        // Startup failures can use a result shape without session metadata.
+        // Preserve the provider's diagnostic while retaining malformed status.
+        let Ok(value) = wire::<serde_json::Value>(bytes) else {
+            return error;
+        };
+        if value.get("type").and_then(|v| v.as_str()) != Some("result") {
+            return error;
+        }
+        let message = value
+            .get("errors")
+            .and_then(|v| v.as_array())
+            .map(|errors| {
+                errors
+                    .iter()
+                    .filter_map(|v| v.as_str())
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            })
+            .filter(|message| !message.is_empty())
+            .or_else(|| {
+                value
+                    .get("result")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_owned)
+            });
+        match message.filter(|message| !message.is_empty()) {
+            Some(message) => ProviderError::MalformedResult(
+                provenant_confinement::redact::bounded_line(&message, 2048),
+            ),
+            None => error,
+        }
+    })?;
+    Ok(match event {
         Event::System {
             subtype,
             session_id,
@@ -1128,6 +1209,33 @@ mod overload_tests {
                 .iter()
                 .any(|event| matches!(event, E::ModelOverloaded { .. }))
         );
+    }
+
+    #[test]
+    fn live_usage_counts_each_call_once_with_fresh_input() {
+        use provenant_os::capture::{FrameDecoder, FrameEvent};
+        let frame = |id: &str| {
+            format!(
+                r#"{{"type":"assistant","session_id":"s","message":{{"id":"{id}","model":"m","role":"assistant","content":[],"usage":{{"input_tokens":10,"output_tokens":5,"cache_read_input_tokens":1000,"cache_creation_input_tokens":100}}}}}}"#
+            )
+        };
+        let one = LiveUsage.decode(frame("a").as_bytes()).unwrap();
+        // Every content block of a message repeats its usage under one key.
+        assert_eq!(one, LiveUsage.decode(frame("a").as_bytes()).unwrap());
+        let FrameEvent::Usage { tokens, .. } = one else {
+            panic!("an assistant frame with usage reports it");
+        };
+        // 10 (input) + 5 (output) + 100 (cache creation) = 115. Cache reads (1000) do not count.
+        assert_eq!(tokens, 115);
+        assert_ne!(one, LiveUsage.decode(frame("b").as_bytes()).unwrap());
+        for other in [
+            &br#"{"type":"system","subtype":"init","session_id":"s"}"#[..],
+            br#"{"type":"assistant","message":{"usage":{"input_tokens":1}}}"#,
+            b"not json with \"usage\"",
+        ] {
+            assert_eq!(LiveUsage.decode(other).unwrap(), FrameEvent::Progress);
+        }
+        assert!(LiveUsage.reports_usage());
     }
 
     #[test]

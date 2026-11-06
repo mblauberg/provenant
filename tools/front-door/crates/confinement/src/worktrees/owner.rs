@@ -62,6 +62,41 @@ pub fn save_owner(worktree: &VerifiedWorktree, owner: &WorktreeOwner) -> Result<
         .map_err(|_| WorktreeError::RegistrationUnconfirmed)
 }
 
+/// Update ownership metadata only if the observed record is still current.
+/// The repository lock serialises this check with lane-owner claims, and the
+/// writer guard excludes updates while custody is held. Call before acquiring
+/// writer custody; the guard does not bind this reservation to a later lease.
+pub fn update_owner_when_unchanged(
+    context: &WorktreeContext<'_>,
+    worktree: &VerifiedWorktree,
+    expected: &WorktreeOwner,
+    updated: &WorktreeOwner,
+    cancel: &CancelToken,
+) -> Result<(), WorktreeError> {
+    validate(updated)?;
+    validate_binding(context)?;
+    let _repository = repository_lock(context, LockMode::Exclusive, cancel)?;
+    let tree = verify_worktree(context.repo, worktree.path())?;
+    if !tree.identity().same_identity(&worktree.identity()) {
+        return Err(WorktreeError::IdentityChanged);
+    }
+    let current = load_owner(&tree)?;
+    if current.as_ref() == Some(updated) {
+        return Ok(());
+    }
+    if current.as_ref() != Some(expected) {
+        return Err(WorktreeError::IdentityChanged);
+    }
+    let _writer =
+        cache_writer_guard(context.project_state, tree.path()).map_err(|state| match state {
+            Occupancy::Held => WorktreeError::WriterBusy {
+                holder: current.as_ref().and_then(|owner| owner.attempt_id),
+            },
+            other => custody_refusal(other),
+        })?;
+    save_owner(&tree, updated)
+}
+
 fn validate(owner: &WorktreeOwner) -> Result<(), WorktreeError> {
     GitRefName::branch(&owner.branch).map_err(|_| WorktreeError::InvalidRequest)?;
     GitOid::parse(&owner.base).map_err(|_| WorktreeError::InvalidRequest)?;
@@ -77,8 +112,9 @@ fn validate(owner: &WorktreeOwner) -> Result<(), WorktreeError> {
 /// Publish lane ownership only while both repository and writer custody are
 /// excluded. Reassignment requires the caller's owner snapshot to remain
 /// current and the worktree HEAD must still be the one the caller observed
-/// (and validated, for example for base ancestry); only a verified terminal
-/// prior may permit an unknown census.
+/// (and validated, for example for base ancestry). An unowned tree or a
+/// verified terminal prior or a replay of the same operation may permit a live
+/// or unknown census observation.
 #[allow(clippy::too_many_arguments)]
 pub fn save_lane_owner_when_free(
     context: &WorktreeContext<'_>,
@@ -100,36 +136,35 @@ pub fn save_lane_owner_when_free(
         return Err(WorktreeError::IdentityChanged);
     }
     let branch = format!("refs/heads/{}", owner.branch);
-    if !read_worktrees(context, cancel)?.iter().any(|entry| {
-        canonicalize(&entry.path).ok().as_deref() == Some(tree.path())
-            && entry.branch.as_ref().map(GitRefName::as_str) == Some(branch.as_str())
-            && entry.head == expected_head
-            && !entry.locked
-            && !entry.prunable
-    }) {
+    if !context
+        .facts
+        .read_inventory(context, cancel)?
+        .iter()
+        .any(|entry| {
+            canonicalize(&entry.path).ok().as_deref() == Some(tree.path())
+                && entry.branch.as_ref().map(GitRefName::as_str) == Some(branch.as_str())
+                && entry.head == expected_head
+                && !entry.locked
+                && !entry.prunable
+        })
+    {
         return Err(WorktreeError::IdentityChanged);
     }
     let _writer =
-        cache_writer_guard(context.project_state, tree.path()).map_err(|state| match state {
-            WorkerState::Busy => WorktreeError::LockBusy,
-            WorkerState::Live => WorktreeError::LiveWriter,
-            _ => WorktreeError::UnknownWriter,
-        })?;
-    let observed = context
-        .workers
-        .observe_roots(&[tree.path().into()])
-        .get(tree.path())
-        .copied()
-        .unwrap_or(WorkerState::Unknown);
-    if observed == WorkerState::Live
-        || observed == WorkerState::Busy
-        || observed == WorkerState::Unknown && !terminal_prior
-    {
-        return Err(live_refusal(context.workers, tree.path()));
-    }
+        cache_writer_guard(context.project_state, tree.path()).map_err(custody_refusal)?;
     let current_prior = load_owner(&tree)?;
     if current_prior.as_ref() != expected_prior {
         return Err(WorktreeError::IdentityChanged);
+    }
+    if let Some(prior) = current_prior.as_ref()
+        && prior.origin == WorktreeOrigin::Lane
+        && prior.operation_id != owner.operation_id
+        && !terminal_prior
+        && prior.attempt_id.is_some()
+    {
+        return Err(WorktreeError::WriterBusy {
+            holder: prior.attempt_id,
+        });
     }
     if current_prior
         .as_ref()
@@ -191,7 +226,7 @@ pub fn prune_owned(
     };
     collect(context, &lanes, &output_policy, cancel)?;
     let _repository = repository_lock(context, LockMode::Exclusive, cancel)?;
-    let entries = read_worktrees(context, cancel)?;
+    let entries = context.facts.read_inventory(context, cancel)?;
     let entry = entries
         .iter()
         .find(|entry| canonicalize(&entry.path).ok().as_deref() == Some(path))

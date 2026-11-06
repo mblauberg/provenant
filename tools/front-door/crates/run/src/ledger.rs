@@ -7,7 +7,6 @@
 //! deletes the store admission row; pruning also releases leases after a boot
 //! change, confirmed guardian death, or a verified owner row removal.
 use crate::{
-    admission::{HOST_ACTIVE, PROJECT_ACTIVE},
     db::{immediate, open_database, sql_int},
     *,
 };
@@ -310,18 +309,45 @@ fn spacing_wait(last: Option<&HostInstant>, now: &HostInstant, spacing: u64) -> 
         _ => 0,
     }
 }
-/// The configured writer-lane caps (`domains.fabric.lanes.max_writer_lanes`
-/// and `max_project_writer_lanes`), applied to writer leases.
+/// Host and project caps for total lanes and writer leases.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct LaneCaps {
     pub host_writers: u64,
     pub project_writers: u64,
+    host_total: u64,
+    project_total: u64,
+    host_total_source: provenant_records::diagnostic::SettingSource,
+    project_total_source: provenant_records::diagnostic::SettingSource,
+    host_source: provenant_records::diagnostic::SettingSource,
+    project_source: provenant_records::diagnostic::SettingSource,
 }
 impl LaneCaps {
     pub(crate) fn of(settings: &provenant_config::LaneBuildSettings) -> Self {
         Self {
             host_writers: settings.writer_lanes(),
             project_writers: settings.project_writer_lanes(),
+            host_total: settings.total_lanes(),
+            project_total: settings.project_total_lanes(),
+            host_total_source: if settings.max_lanes.is_some() {
+                provenant_records::diagnostic::SettingSource::Configuration
+            } else {
+                provenant_records::diagnostic::SettingSource::ShippedDefault
+            },
+            project_total_source: if settings.max_project_lanes.is_some() {
+                provenant_records::diagnostic::SettingSource::Configuration
+            } else {
+                provenant_records::diagnostic::SettingSource::ShippedDefault
+            },
+            host_source: if settings.max_writer_lanes.is_some() {
+                provenant_records::diagnostic::SettingSource::Configuration
+            } else {
+                provenant_records::diagnostic::SettingSource::ShippedDefault
+            },
+            project_source: if settings.max_project_writer_lanes.is_some() {
+                provenant_records::diagnostic::SettingSource::Configuration
+            } else {
+                provenant_records::diagnostic::SettingSource::ShippedDefault
+            },
         }
     }
 }
@@ -330,10 +356,11 @@ impl LaneCaps {
 pub(crate) struct CapHit {
     pub active: u64,
     pub limit: u64,
-    pub scope: &'static str,
+    pub kind: provenant_records::diagnostic::LaneLimit,
+    pub origin: provenant_records::diagnostic::SettingSource,
 }
 /// Whether a lease of `class` for `project` would exceed a limit. Every lane
-/// counts against the fixed host and project ceilings; writers also count
+/// counts against the configured host and project caps; writers also count
 /// against the configured writer caps.
 pub(crate) fn cap_hit(
     tx: &Connection,
@@ -346,21 +373,48 @@ pub(crate) fn cap_hit(
         [project.to_string()],
         |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
     )?;
-    let hit = |active: i64, limit: u64, scope| {
+    use provenant_records::diagnostic::LaneLimit;
+    let hit = |active: i64, limit: u64, kind, origin| {
         let active = u64::try_from(active).unwrap_or(u64::MAX);
         (active >= limit).then_some(CapHit {
             active,
             limit,
-            scope,
+            kind,
+            origin,
         })
     };
     if class == LaneClass::Writer
-        && let Some(found) = hit(host_writers, caps.host_writers, "host")
-            .or_else(|| hit(project_writers, caps.project_writers, "project"))
+        && let Some(found) = hit(
+            host_writers,
+            caps.host_writers,
+            LaneLimit::HostWriters,
+            caps.host_source,
+        )
+        .or_else(|| {
+            hit(
+                project_writers,
+                caps.project_writers,
+                LaneLimit::ProjectWriters,
+                caps.project_source,
+            )
+        })
     {
         return Ok(Some(found));
     }
-    Ok(hit(host, HOST_ACTIVE, "host").or_else(|| hit(in_project, PROJECT_ACTIVE, "project")))
+    Ok(hit(
+        host,
+        caps.host_total,
+        LaneLimit::HostTotal,
+        caps.host_total_source,
+    )
+    .or_else(|| {
+        hit(
+            in_project,
+            caps.project_total,
+            LaneLimit::ProjectTotal,
+            caps.project_total_source,
+        )
+    }))
 }
 /// Inspect at most 256 leases, active ones first. Yielded parents do not count
 /// against caps, so they must not hide a dead active lease from this scan.
@@ -506,6 +560,74 @@ mod tests {
     use provenant_supervisor::census::SystemProcessObserver;
 
     #[test]
+    fn lane_cap_identifies_writer_and_total_settings_with_sources() {
+        use provenant_records::diagnostic::{LaneLimit, SettingSource};
+        let defaults = LaneCaps::of(&provenant_config::LaneBuildSettings::default());
+        assert_eq!(defaults.host_source, SettingSource::ShippedDefault);
+        assert_eq!(defaults.project_source, SettingSource::ShippedDefault);
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch(LEASES).unwrap();
+        let project = ProjectId::from_bytes([1; 16]);
+        for index in 0..PROJECT_ACTIVE {
+            db.execute(
+                "INSERT INTO leases (attempt,project,store,class,boot,guardian,owner_id) VALUES (?1,?2,x'00','read_only','boot','guardian','owner')",
+                params![index.to_string(), project.to_string()],
+            ).unwrap();
+        }
+        let hit = cap_hit(&db, project, LaneClass::Writer, defaults)
+            .unwrap()
+            .unwrap();
+        assert_eq!(hit.kind, LaneLimit::ProjectTotal);
+        assert_eq!(hit.limit, PROJECT_ACTIVE);
+        assert_eq!(hit.kind.setting(), "domains.fabric.lanes.max_project_lanes");
+        let fact = provenant_records::diagnostic::ResourceFact::LaneCap {
+            active: hit.active,
+            limit: hit.limit,
+            lane_limit: hit.kind,
+            origin: hit.origin,
+        };
+        let projection = fact.project(provenant_records::diagnostic::Diagnostic::new("LANE_CAP"));
+        let detail = projection.detail.unwrap();
+        assert!(detail.contains("project lanes"));
+        assert!(detail.contains("max_project_lanes"));
+        assert!(detail.contains("shipped default"));
+        assert!(projection.next.unwrap().contains("max_project_lanes"));
+        let settings = provenant_config::LaneBuildSettings {
+            max_lanes: Some(HOST_ACTIVE),
+            max_project_lanes: Some(10),
+            ..Default::default()
+        };
+        let configured = LaneCaps::of(&settings);
+        // Isolate the configured project cap before filling the host cap,
+        // which takes precedence when both limits are reached.
+        let hit = cap_hit(&db, project, LaneClass::ReadOnly, configured)
+            .unwrap()
+            .unwrap();
+        assert_eq!(hit.kind, LaneLimit::ProjectTotal);
+        assert_eq!(hit.limit, 10);
+        assert_eq!(hit.origin, SettingSource::Configuration);
+        let other = ProjectId::from_bytes([2; 16]);
+        for index in PROJECT_ACTIVE..HOST_ACTIVE {
+            db.execute(
+                "INSERT INTO leases (attempt,project,store,class,boot,guardian,owner_id) VALUES (?1,?2,x'00','read_only','boot','guardian','owner')",
+                params![index.to_string(), other.to_string()],
+            ).unwrap();
+        }
+        let third = ProjectId::from_bytes([3; 16]);
+        let hit = cap_hit(&db, third, LaneClass::Writer, defaults)
+            .unwrap()
+            .unwrap();
+        assert_eq!(hit.kind, LaneLimit::HostTotal);
+        assert_eq!(hit.limit, HOST_ACTIVE);
+        let hit = cap_hit(&db, third, LaneClass::ReadOnly, configured)
+            .unwrap()
+            .unwrap();
+        assert_eq!(hit.kind, LaneLimit::HostTotal);
+        assert_eq!(hit.limit, HOST_ACTIVE);
+        assert_eq!(hit.origin, SettingSource::Configuration);
+    }
+
+    #[test]
     fn injected_process_observation_fences_live_and_unknown_guardians() {
         use provenant_supervisor::census::{ObservationIssue, ProcessFact};
         struct Facts(ProcessObservation);
@@ -640,7 +762,10 @@ mod tests {
     #[test]
     fn cross_boot_malformed_and_readable_row_removal_release() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("run.sqlite3");
+        // The production reader refuses symlinked path components, including
+        // a host's short TMPDIR alias. Give it the canonical fixture root.
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let path = root.join("run.sqlite3");
         let owner = Connection::open(&path).unwrap();
         owner.execute_batch("CREATE TABLE admission (attempt TEXT); INSERT INTO admission VALUES ('old'), ('live');").unwrap();
         let db = Connection::open_in_memory().unwrap();
@@ -652,7 +777,7 @@ mod tests {
             _ => panic!("current guardian unavailable"),
         };
         let guardian = serde_json::to_string(&live).unwrap();
-        let store = dir.path().as_os_str().as_bytes();
+        let store = root.as_os_str().as_bytes();
         let owner_id = store_identity(&path).unwrap();
         db.execute(
             "INSERT INTO leases VALUES ('old','p',?1,'writer','old boot',?2,?3,0)",

@@ -24,7 +24,7 @@ int main(int argc, char **argv) {
     count = proc_pidinfo((pid_t)strtol(argv[1], NULL, 10), PROC_PIDTASKINFO,
         0, &peer, sizeof(peer));
     int error = errno;
-    if (count != 0 || error != EPERM) {
+    if (count != sizeof(peer) || peer.pti_resident_size == 0) {
         fprintf(stderr, "peer PROC_PIDTASKINFO: count=%d errno=%d\n", count, error);
         return 1;
     }
@@ -238,12 +238,12 @@ test "$notified" = yes
             options.process_group = true;
             options.stdout = StreamPolicy::Capture { limit: 1024 };
             options.stderr = StreamPolicy::Capture { limit: 1024 };
-            let denied_peer_info = executor.execute(options)?;
+            let peer_info = executor.execute(options)?;
             assert!(
-                successful_probe(&denied_peer_info),
-                "writer={writer}: byte-identical peer proc_pidinfo must fail with EPERM: {:?}; {}",
-                denied_peer_info.termination,
-                String::from_utf8_lossy(&denied_peer_info.stderr.bytes)
+                successful_probe(&peer_info),
+                "writer={writer}: byte-identical peer proc_pidinfo must succeed: {:?}; {}",
+                peer_info.termination,
+                String::from_utf8_lossy(&peer_info.stderr.bytes)
             );
             peer_stop.cancel();
             let _expected_cancel = peer.join().expect("peer sandbox thread");

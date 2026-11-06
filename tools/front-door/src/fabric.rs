@@ -23,6 +23,7 @@ pub(crate) use settlement::*;
 #[cfg(test)]
 #[allow(unused_imports)]
 use graph_human::graph_ci_waiting;
+#[cfg(test)]
 pub(crate) use graph_human::graph_human;
 use graph_human::graph_summary;
 use graph_status::{graph_snapshot, graph_status_elapsed, redact_checkout_paths};
@@ -70,6 +71,8 @@ pub(crate) fn scratch_prepare_error(error: impl std::fmt::Display) -> FacadeErro
     FacadeError::Io {
         delivery_limit: None,
         delivery_stage: None,
+        resource: None,
+        input_failure: None,
         operation: format!("prepare project scratch: {error}"),
         path: Some(".provenant/scratch".into()),
     }
@@ -82,14 +85,14 @@ fn graph_writer_initialisation_error(
     use provenant_confinement::worktrees::WorktreeError;
     match error {
         WorktreeError::RegistryLockTimeout | WorktreeError::LockBusy => FacadeError::WriterLockBusy,
-        WorktreeError::UnknownWriter
-        | WorktreeError::UnknownWriterAt { .. }
-        | WorktreeError::CensusUnknown { .. }
-        | WorktreeError::IncompleteCensus { .. } => FacadeError::WriterUnknown,
+        WorktreeError::UnknownWriter => FacadeError::WriterUnknown,
         error => FacadeError::DispatchRefused {
             fact: None,
             disk: None,
-            reason: format!("initialise graph writer at {commit}: {error}"),
+            reason: format!(
+                "initialise graph writer at {commit}: {}",
+                crate::worktrees::local_worktree_message(&error)
+            ),
         },
     }
 }
@@ -907,6 +910,8 @@ fn scope_io(error: FacadeError, scope: &str) -> FacadeError {
             path,
             delivery_limit,
             delivery_stage,
+            resource,
+            input_failure,
         } => {
             let prefix = format!("{scope}: ");
             let operation = if operation.starts_with(&prefix) {
@@ -919,6 +924,8 @@ fn scope_io(error: FacadeError, scope: &str) -> FacadeError {
                 path,
                 delivery_limit,
                 delivery_stage,
+                resource,
+                input_failure,
             }
         }
         other => other,
@@ -1292,7 +1299,7 @@ impl Factory {
         let path = provenant_os::fs::canonicalize(path)
             .map_err(|_| FacadeError::io("read project-local graph document; a bare name is read only from .provenant/scratch/graphs, so pass the explicit path of a legacy .agent-run/graphs document"))?;
         if !path.starts_with(&self.cwd) {
-            return Err(FacadeError::ConfinementRefused);
+            return Err(FacadeError::ConfinementRefused { resource: None });
         }
         let bytes = provenant_os::fs::FileHandle::open_source(&path)
             .and_then(|mut file| {
@@ -1303,12 +1310,7 @@ impl Factory {
             })
             .map_err(|error| match error {
                 provenant_os::fs::FsError::TooLarge { .. } => {
-                    let bound =
-                        provenant_fabric_runtime::config::GraphLimits::document_bytes_bound();
-                    FacadeError::invalid(format!(
-                        "limits.{}={} reached; set by {}",
-                        bound.name, bound.maximum, bound.owner
-                    ))
+                    FacadeError::invalid(InvalidInputDetail::GraphDocumentTooLarge)
                 }
                 _ => FacadeError::io("access graph journal"),
             })?;
@@ -1455,7 +1457,11 @@ impl Factory {
         };
         input
             .validate_input(provenant_core::WaitTransport::Cli)
-            .map_err(|error| FacadeError::invalid(error.to_string()))?;
+            .map_err(|error| {
+                FacadeError::from(
+                    &provenant_fabric_runtime::coordination::CoordinationError::Input(error),
+                )
+            })?;
         let resume = matches!(&input, GraphInput::Resume { .. });
         let mut scratch_source = None;
         let document = match &input {
@@ -1510,7 +1516,7 @@ impl Factory {
                         &submission_key,
                         &self.context.config.graph.limits,
                     )
-                    .map_err(|error| FacadeError::invalid(error.to_string()))?;
+                    .map_err(|_| FacadeError::InvalidInput { detail: None })?;
                 }
                 if let Some(branch) = &document.integration_branch {
                     provenant_run::HostDeliveryContext::validate_integration_target(
@@ -1525,6 +1531,9 @@ impl Factory {
                 )
                 .map_err(graph_journal_error)?;
                 let admitted = checkpoint.is_some();
+                document
+                    .admit(&self.context.config.graph.limits)
+                    .map_err(FacadeError::graph_admission)?;
                 let expanded = document
                     .expanded(&self.context.config.graph.limits)
                     .map_err(|reason| FacadeError::DispatchRefused {
@@ -1564,7 +1573,7 @@ impl Factory {
                             &self.cwd,
                             writer.branch.as_str().trim_start_matches("refs/heads/"),
                         )
-                        .map_err(|_| FacadeError::ConfinementRefused)?;
+                        .map_err(|_| FacadeError::ConfinementRefused { resource: None })?;
                     }
                     // A local target checked out in the writer's own worktree
                     // cannot be advanced by compare-and-swap, so refuse the
@@ -1894,9 +1903,15 @@ impl Factory {
             };
             let run = run.map_err(|error| match error {
                 provenant_fabric_runtime::graph::GraphError::Run(error) => error,
-                provenant_fabric_runtime::graph::GraphError::Invalid(reason) => {
-                    FacadeError::invalid(format!("graph {reason}"))
+                provenant_fabric_runtime::graph::GraphError::Invalid(_) => {
+                    FacadeError::InvalidInput { detail: None }
                 }
+                provenant_fabric_runtime::graph::GraphError::Admission(reason) => match reason {
+                    provenant_fabric_runtime::graph::AdmissionError::Schema(_) => {
+                        FacadeError::invalid(provenant_fabric_runtime::coordination::facade::InvalidInputDetail::Schema)
+                    }
+                    _ => FacadeError::InvalidInput { detail: None },
+                },
                 provenant_fabric_runtime::graph::GraphError::Extension(reason)
                 | provenant_fabric_runtime::graph::GraphError::Refused(reason) => {
                     FacadeError::DispatchRefused {
@@ -2097,8 +2112,8 @@ impl Factory {
                 ) {
                     Ok(Some(_)) => continue,
                     Ok(None) => {}
-                    Err(error) => {
-                        first_error.get_or_insert_with(|| FacadeError::invalid(&error));
+                    Err(_error) => {
+                        first_error.get_or_insert(FacadeError::InvalidInput { detail: None });
                         continue;
                     }
                 }
@@ -2132,7 +2147,11 @@ fn graph_operation(
     provenant_core::OperationId::parse(&format!("graph-{}", provenant_core::hex(digest.as_bytes())))
         .map_err(|_| FacadeError::InvalidInput { detail: None })
 }
-fn graph_display(
+#[cfg(test)]
+#[allow(dead_code, reason = "the custom worktree driver omits libtest functions")]
+mod test_presentation {
+    use super::*;
+pub(super) fn graph_display(
     run: &provenant_fabric_runtime::graph::GraphRun,
     command: &str,
     globals: &provenant_cli::Globals,
@@ -2144,7 +2163,7 @@ fn graph_display(
     }
 }
 
-fn graph_waiting_human(
+pub(super) fn graph_waiting_human(
     run: &provenant_fabric_runtime::graph::GraphRun,
     globals: &provenant_cli::Globals,
 ) -> String {
@@ -2173,7 +2192,7 @@ fn graph_waiting_human(
     )
 }
 
-fn graph_command_result(
+pub(super) fn graph_command_result(
     command: &str,
     run: provenant_fabric_runtime::graph::GraphRun,
 ) -> provenant_records::CommandResult<provenant_fabric_runtime::graph::GraphRun> {
@@ -2187,7 +2206,7 @@ fn graph_command_result(
     provenant_records::CommandResult::new(command, outcome, run)
 }
 
-fn wait_graph(
+pub(super) fn wait_graph(
     clock: &dyn Clock,
     pause: &dyn provenant_core::Pause,
     seconds: u64,
@@ -2209,6 +2228,11 @@ fn wait_graph(
         );
     }
 }
+
+}
+#[cfg(test)]
+#[allow(unused_imports, reason = "the custom worktree driver omits libtest functions")]
+use test_presentation::*;
 
 impl Factory {
     pub(crate) fn pull_events(

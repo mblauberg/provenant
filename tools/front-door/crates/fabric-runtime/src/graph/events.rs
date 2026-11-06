@@ -230,8 +230,8 @@ pub(super) fn append_changes(
                 &(&node.children, node.state),
             )?);
         }
-        if node.outputs.is_some() && old.is_none_or(|old| old.outputs != node.outputs) {
-            if let Some(outputs) = &node.outputs {
+        if old.is_none_or(|old| old.outputs != node.outputs)
+            && let Some(outputs) = &node.outputs {
                 if outputs.branch.is_some() {
                     events.push(event(
                         GraphEventKind::Effect,
@@ -248,7 +248,6 @@ pub(super) fn append_changes(
                         &outputs.commit,
                     )?);
                 }
-            }
         }
     }
     if previous.is_none_or(|old| old.cancelled != current.cancelled) && current.cancelled {
@@ -307,6 +306,7 @@ pub(super) fn append_changes(
 }
 
 /// Journal one admitted patch. Called by `admit_patch` before its commit.
+#[cfg(test)]
 pub(super) fn append_patch(
     directory: &Directory,
     id: &str,
@@ -321,7 +321,7 @@ fn patch_event(record: &super::patch::PatchRecord) -> Result<GraphEvent, Journal
     let reason = record
         .reason
         .as_ref()
-        .map(|reason| digest(reason))
+        .map(digest)
         .transpose()?;
     let replaced = record
         .replaced

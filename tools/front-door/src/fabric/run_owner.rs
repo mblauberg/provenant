@@ -1,5 +1,69 @@
 use super::*;
 
+pub(crate) fn peer_adoption_custody(
+    context: &provenant_confinement::worktrees::WorktreeContext<'_>,
+    observation: &provenant_confinement::worktrees::WorktreeInfo,
+    cancel: &CancelToken,
+) -> Result<Option<&'static str>, provenant_confinement::worktrees::WorktreeError> {
+    use provenant_confinement::worktrees::{
+        self, Occupancy, OccupancyUnknownSource, WorktreeError,
+    };
+    let warning = match &observation.occupancy {
+        Occupancy::Held => None,
+        Occupancy::Unknown {
+            scope,
+            evidence,
+            source: OccupancyUnknownSource::Custody,
+        } => {
+            return Err(WorktreeError::UnknownOccupancy {
+                path: scope.clone(),
+                detail: evidence.clone(),
+            });
+        }
+        Occupancy::Unknown { .. } => {
+            Some("process census was incomplete; writer custody was checked")
+        }
+        Occupancy::Observed { .. } => {
+            Some("a process was observed in the worktree; writer custody was checked")
+        }
+        Occupancy::Available => None,
+    };
+    let mut tree = provenant_confinement::verify_worktree(context.repo, &observation.path)
+        .map_err(|error| WorktreeError::UnknownOccupancy {
+            path: observation.path.clone(),
+            detail: format!("worktree registration could not be verified: {error}"),
+        })?;
+    let holder =
+        || worktrees::load_owner(&tree).map(|owner| owner.and_then(|owner| owner.attempt_id));
+    let _writer =
+        worktrees::cache_writer_guard(context.project_state, tree.path()).map_err(|state| {
+            match state {
+                Occupancy::Held => WorktreeError::WriterBusy {
+                    holder: holder().ok().flatten(),
+                },
+                other => worktrees::custody_refusal(other),
+            }
+        })?;
+    worktrees::check_writer_terminal(tree.repo())?;
+    let branch = observation
+        .branch
+        .as_deref()
+        .ok_or(WorktreeError::IdentityChanged)?;
+    let reference = provenant_confinement::repo::GitRefName::new(branch)
+        .map_err(|_| WorktreeError::IdentityChanged)?;
+    let head = tree
+        .repo()
+        .private_dir()
+        .read_stable(std::ffi::OsStr::new("HEAD"), 4096)?;
+    if head != format!("ref: {}\n", reference.as_str()).as_bytes()
+        || context.facts.resolve_commit(context, reference, cancel)? != observation.head
+    {
+        return Err(WorktreeError::IdentityChanged);
+    }
+    worktrees::require_clean_worktree(context, &mut tree, cancel)?;
+    Ok(warning)
+}
+
 pub(crate) struct BinaryRunOwner<'a> {
     pub(crate) factory: &'a Factory,
     /// False only at peer ingress: no forwarding, and writers name a new
@@ -46,7 +110,17 @@ pub(crate) fn run_error(error: provenant_run::RunError) -> FacadeError {
     // The unresolvable ref is the caller's own input; name it instead of
     // collapsing to a bare "invalid input".
     if let provenant_run::RunError::InvalidBase(base) = &error {
-        return FacadeError::invalid(format!("unresolvable base `{base}`"));
+        return FacadeError::invalid(
+            provenant_fabric_runtime::coordination::facade::InvalidInputDetail::UnresolvableBase(
+                base.clone(),
+            ),
+        );
+    }
+    if let provenant_run::RunError::Writer(
+        provenant_confinement::worktrees::WorktreeError::WriterBusy { holder },
+    ) = &error
+    {
+        return FacadeError::WriterBusy { holder: *holder };
     }
     fail_error(error.into())
 }
@@ -84,6 +158,7 @@ pub(crate) fn fail_error(fail: provenant_cli::run::Fail) -> FacadeError {
                 available,
                 floor,
                 reclaimed,
+                origin,
             }) => {
                 return FacadeError::DispatchRefused {
                     fact: None,
@@ -93,6 +168,7 @@ pub(crate) fn fail_error(fail: provenant_cli::run::Fail) -> FacadeError {
                             available: *available,
                             floor: *floor,
                             reclaimed: *reclaimed,
+                            origin: *origin,
                         },
                     ),
                 };
@@ -100,6 +176,33 @@ pub(crate) fn fail_error(fail: provenant_cli::run::Fail) -> FacadeError {
             Some(DiagnosticFact::DiskUnobserved) => {
                 return FacadeError::DispatchUnobserved {
                     reason: "disk observation failed".into(),
+                };
+            }
+            Some(DiagnosticFact::PromptLimit { task_index, limit }) => {
+                let field = task_index.map_or_else(
+                    || "tasks".to_owned(),
+                    |index| format!("tasks[{index}].prompt"),
+                );
+                return usize::try_from(*limit).map_or(FacadeError::InvalidInput { detail: None }, |limit| {
+                    FacadeError::invalid(provenant_fabric_runtime::coordination::facade::InvalidInputDetail::FieldTooLarge { field, limit })
+                });
+            }
+            Some(DiagnosticFact::Resource(fact)) => {
+                if matches!(
+                    fact,
+                    provenant_records::diagnostic::ResourceFact::Processes { .. }
+                ) {
+                    return FacadeError::Io {
+                        operation: "run operation".into(),
+                        path: None,
+                        delivery_limit: None,
+                        delivery_stage: None,
+                        resource: Some(Box::new(*fact)),
+                        input_failure: None,
+                    };
+                }
+                return FacadeError::ConfinementRefused {
+                    resource: Some(*fact),
                 };
             }
             None => {}
@@ -113,10 +216,14 @@ pub(crate) fn fail_error(fail: provenant_cli::run::Fail) -> FacadeError {
             operation,
             delivery_limit,
             delivery_stage,
+            resource,
+            input_failure,
             ..
         }) => FacadeError::Io {
             delivery_limit,
             delivery_stage,
+            resource,
+            input_failure,
             operation,
             path: None,
         },
@@ -128,6 +235,21 @@ pub(crate) fn fail_error(fail: provenant_cli::run::Fail) -> FacadeError {
 /// failures keep their own message; rendering it by kind would read as
 /// invalid input instead of a refusal.
 pub(crate) fn dispatch_refused(fail: provenant_cli::run::Fail) -> FacadeError {
+    if let Some(provenant_records::diagnostic::DiagnosticFact::Resource(fact)) = fail
+        .projection
+        .as_ref()
+        .and_then(|projection| projection.fact.as_ref())
+    {
+        return FacadeError::DispatchRefused {
+            fact: Some(
+                provenant_fabric_runtime::coordination::facade::DispatchRefusalFact::Resource(
+                    *fact,
+                ),
+            ),
+            disk: None,
+            reason: "dispatch was refused".into(),
+        };
+    }
     if matches!(
         fail.projection
             .as_ref()
@@ -165,8 +287,8 @@ pub(crate) fn facade_error_for_kind(kind: provenant_run::ErrorKind) -> FacadeErr
         | E::MemoryPressure
         | E::LaneCap
         | E::BuildSettings
-        | E::GuardianIdentity => FacadeError::ConfinementRefused,
-        E::WriterBusy => FacadeError::WriterBusy,
+        | E::GuardianIdentity => FacadeError::ConfinementRefused { resource: None },
+        E::WriterBusy => FacadeError::WriterBusy { holder: None },
         E::WriterLockBusy => FacadeError::WriterLockBusy,
         E::WriterUnknown => FacadeError::WriterUnknown,
         E::CredentialRoot => FacadeError::CredentialRoot {
@@ -302,7 +424,7 @@ impl BinaryRunOwner<'_> {
         match target.host {
             Some(host) if host != self.factory.context.identity.host => {
                 if !self.allow_remote {
-                    return Err(FacadeError::ConfinementRefused);
+                    return Err(FacadeError::ConfinementRefused { resource: None });
                 }
                 self.peer(host, action, budget, cancel).map(Some)
             }
@@ -318,7 +440,7 @@ impl BinaryRunOwner<'_> {
         let identity = &self.factory.context.identity;
         if target.host.is_some_and(|h| h != identity.host) {
             if !self.allow_remote {
-                return Err(FacadeError::ConfinementRefused);
+                return Err(FacadeError::ConfinementRefused { resource: None });
             }
             let host = target
                 .host
@@ -513,10 +635,10 @@ impl BinaryRunOwner<'_> {
         // Explicit placement forwards the whole batch; the peer confines it.
         if let Some(host) = host.filter(|h| *h != self.factory.context.identity.host) {
             if !access.is_default() {
-                return Err(FacadeError::ConfinementRefused);
+                return Err(FacadeError::ConfinementRefused { resource: None });
             }
             if !self.allow_remote {
-                return Err(FacadeError::ConfinementRefused);
+                return Err(FacadeError::ConfinementRefused { resource: None });
             }
             // MCP forwards read-only work only; a peer writer comes from `dispatch`.
             if tasks
@@ -632,6 +754,7 @@ impl BinaryRunOwner<'_> {
                 base: task.base,
                 pinned_base: None,
                 head: task.head,
+                source_head: task.source_head,
                 task_id: derived_task(&operation_id, index).map_err(fail_error)?,
                 prompt: task.prompt,
                 title: task.title,
@@ -668,7 +791,7 @@ impl BinaryRunOwner<'_> {
     /// remote, requires the base on a remote-tracking ref and creates the
     /// branch at it. A retry adopts the branch's worktree while it is still
     /// clean at that base; a replayed operation finds the one it created.
-    pub(crate) fn peer_worktree(
+    fn peer_worktree(
         &self,
         operation_id: &provenant_core::OperationId,
         spec: NewWorktree,
@@ -676,7 +799,7 @@ impl BinaryRunOwner<'_> {
         cancel: &CancelToken,
     ) -> Result<provenant_fabric_runtime::runs::PeerWorktree, FacadeError> {
         use provenant_confinement::worktrees::{
-            self, WorktreeCondition, WorktreeCreate, WorktreeError, WriterState,
+            self, WorktreeCondition, WorktreeCreate, WorktreeError,
         };
         let branch = provenant_confinement::repo::GitRefName::branch(&spec.branch)
             .map_err(|_| FacadeError::InvalidInput { detail: None })?;
@@ -694,44 +817,68 @@ impl BinaryRunOwner<'_> {
             std::time::Duration::from_micros(micros)
         };
         let project = &self.factory.cwd;
+        let facts = worktrees::RepoFacts::default();
         let base = if replay {
             None
         } else {
-            Some(fetch_remote_base(project, &spec.base, half())?)
+            let resolved = crate::worktrees::with_context(
+                &self.factory.context.roots,
+                &self.factory.home,
+                project,
+                half(),
+                self.factory.workers,
+                |context, cancel| {
+                    let context = &worktrees::WorktreeContext {
+                        facts: &facts,
+                        ..*context
+                    };
+                    Ok(remote_base(context, &spec.base, half(), true, cancel))
+                },
+            )
+            .map_err(|_| FacadeError::io("resolve peer base"))?;
+            Some(resolved?)
         };
-        let info = crate::worktrees::with_context(
+        let (info, warning) = crate::worktrees::with_context(
             &self.factory.context.roots,
             &self.factory.home,
             project,
             half(),
             self.factory.workers,
             |context, cancel| {
+                let context = &worktrees::WorktreeContext {
+                    facts: &facts,
+                    ..*context
+                };
                 let existing = worktrees::list(context, cancel)?
                     .into_iter()
-                    .find(|w| w.branch.as_deref() == Some(branch.as_str()));
+                    .find(|entry| entry.branch.as_deref() == Some(branch.as_str()));
                 let Some(base) = base else {
-                    return existing.ok_or(WorktreeError::NotFound.into());
+                    return existing
+                        .map(|entry| (entry, None))
+                        .ok_or(WorktreeError::NotFound.into());
                 };
                 match existing {
-                    Some(info)
-                        if info.head == base
-                            && info.dirty == WorktreeCondition::Clean
-                            && info.writer != WriterState::Live =>
-                    {
-                        Ok(info)
+                    Some(entry) => {
+                        if entry.head != base || entry.dirty != WorktreeCondition::Clean {
+                            if matches!(&entry.occupancy, worktrees::Occupancy::Held) {
+                                let _ = peer_adoption_custody(context, &entry, cancel)?;
+                            }
+                            return Err(WorktreeError::BranchExistsWithBase {
+                                branch: spec.branch.clone(),
+                                head: entry.head,
+                                base,
+                            }
+                            .into());
+                        }
+                        let warning = peer_adoption_custody(context, &entry, cancel)?;
+                        Ok((entry, warning))
                     }
-                    Some(info) => Err(WorktreeError::BranchExistsWithBase {
-                        branch: spec.branch.clone(),
-                        head: info.head,
-                        base,
-                    }
-                    .into()),
                     None => {
                         let request = WorktreeCreate {
                             branch: spec.branch.clone(),
                             base: Some(base.to_string()),
                         };
-                        Ok(worktrees::create(context, request, cancel)?)
+                        Ok((worktrees::create(context, request, cancel)?, None))
                     }
                 }
             },
@@ -748,10 +895,31 @@ impl BinaryRunOwner<'_> {
                 FacadeError::BaseUnreachable
             }
             crate::worktrees::Error::Worktree(WorktreeError::Cancelled) => FacadeError::Cancelled,
+            crate::worktrees::Error::Worktree(WorktreeError::IdentityChanged) => {
+                FacadeError::Conflict
+            }
+            crate::worktrees::Error::Worktree(
+                WorktreeError::GitOperationInProgress
+                | WorktreeError::Dirty(_)
+                | WorktreeError::IgnoredPaths(_),
+            ) => FacadeError::ConfinementRefused { resource: None },
+            crate::worktrees::Error::Worktree(WorktreeError::WriterBusy { holder }) => {
+                FacadeError::WriterBusy { holder }
+            }
+            crate::worktrees::Error::Worktree(WorktreeError::LockBusy) => {
+                FacadeError::WriterBusy { holder: None }
+            }
+            crate::worktrees::Error::Worktree(
+                WorktreeError::UnknownOccupancy { .. } | WorktreeError::UnknownWriter,
+            ) => FacadeError::WriterUnknown,
             _ => FacadeError::io("create peer worktree"),
         })?;
+        let mut extra = provenant_records::ExtraFields::default();
+        if let Some(warning) = warning {
+            extra.insert("warnings".into(), serde_json::json!([warning]));
+        }
         Ok(provenant_fabric_runtime::runs::PeerWorktree {
-            extra: Default::default(),
+            extra,
             path: info
                 .path
                 .to_str()
@@ -861,7 +1029,7 @@ impl BinaryRunOwner<'_> {
                 }
                 if matches!(part, OutputPart::Result)
                     && provenant_cli::run::cloud_owner::placement(&session.store, &record, &call)
-                        .map_err(|error| FacadeError::invalid(&error))?
+                        .map_err(|_| FacadeError::InvalidInput { detail: None })?
                         .is_some()
                 {
                     let job = provenant_cli::run::cloud_owner::load(
@@ -869,7 +1037,7 @@ impl BinaryRunOwner<'_> {
                         record.attempt_id,
                         &call,
                     )
-                    .map_err(|error| FacadeError::invalid(&error))?
+                    .map_err(|_| FacadeError::InvalidInput { detail: None })?
                     .ok_or(FacadeError::NotFound)?;
                     let view = provenant_cli::run::cloud_owner::view(&job);
                     let bytes = serde_json::to_vec(&view).map_err(|_| FacadeError::StateCorrupt)?;
@@ -1040,7 +1208,7 @@ impl BinaryRunOwner<'_> {
                     }
                 }
                 if !self.allow_remote && !remote_batches.is_empty() {
-                    return Err(FacadeError::ConfinementRefused);
+                    return Err(FacadeError::ConfinementRefused { resource: None });
                 }
                 let local_session = if local_indices.is_empty() {
                     None

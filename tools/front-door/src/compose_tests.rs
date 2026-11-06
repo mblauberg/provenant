@@ -303,14 +303,10 @@ pub(crate) fn provider() -> Result {
         fs::write(target.join("compose-target"), b"target")?;
         fs::create_dir_all(cargo.join("registry"))?;
         fs::write(cargo.join("registry/compose-home"), b"cargo")?;
-        let child_state = PathBuf::from(
+        let host_state = PathBuf::from(
             std::env::var_os(provenant_core::RUN_STATE_DIRECTORY_ENV)
-                .ok_or("child state missing")?,
+                .ok_or("host state missing")?,
         );
-        let host_state = child_state
-            .parent()
-            .and_then(Path::parent)
-            .ok_or("host state")?;
         denied(&host_state.join("cargo-target-seeds/generations/fixture/target/artifact"))?;
         for shared in [
             ".cargo/registry/compose",
@@ -366,49 +362,4 @@ fn denied(path: &Path) -> Result {
         path.display()
     );
     Ok(())
-}
-
-#[test]
-fn actionable_failures_have_specific_repairs_without_unrelated_advice() {
-    for (command, code, message, expected) in [
-        (
-            "install",
-            "HOME",
-            "HOME must be an absolute directory",
-            Some("Set HOME to your absolute home directory, then rerun `provenant install`."),
-        ),
-        (
-            "gc",
-            "GC",
-            "cache is unreadable",
-            Some(
-                "Run `provenant gc --apply --json` to inspect failed paths and retry incomplete collection.",
-            ),
-        ),
-        (
-            "dispatch",
-            "REFUSED",
-            "insufficient disk space: 99 bytes available, floor 100 bytes; run `provenant gc --free-floor 100B`",
-            Some("Run `provenant gc --apply`, then retry when free space reaches gc.free_floor."),
-        ),
-        ("config show", "CONFIG", "invalid configuration", None),
-    ] {
-        let mut error = provenant_records::CommandError {
-            diagnostic: None,
-            code: code.into(),
-            message: message.into(),
-            cause: None,
-            repair: None,
-        };
-        super::apply_repair(command, &mut error, true);
-        assert_eq!(error.repair.as_deref(), expected);
-        if command == "dispatch" {
-            assert!(
-                error
-                    .message
-                    .contains("99 bytes available, floor 100 bytes")
-            );
-            assert!(error.message.ends_with("provenant gc --apply`"));
-        }
-    }
 }

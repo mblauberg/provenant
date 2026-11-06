@@ -125,13 +125,7 @@ pub enum AccountBlock {
 impl AccountBlock {
     /// The repair text admission reports.
     pub fn repair(self) -> &'static str {
-        match self {
-            Self::Mismatch => "account mismatch; re-register",
-            Self::FreeTierRefusal => {
-                "free tier exhausted; use a paid route or wait for its allowance reset"
-            }
-            Self::ScopedRefusal => "scoped provider refusal",
-        }
+        self.exclusion_reason().diagnostic_parts().1
     }
     /// The route exclusion reason this block surfaces as; the one mapping
     /// resolution and the settlement alternates share.
@@ -648,11 +642,11 @@ mod admission_tests {
         };
         assert!(matches!(
             check(&record, 1000),
-            Err(QuotaError::Refused("account mismatch; re-register"))
+            Err(QuotaError::Refused(reason)) if reason.contains("re-register")
         ));
         assert!(matches!(
             check(&record, 9000),
-            Err(QuotaError::Refused("account mismatch; re-register"))
+            Err(QuotaError::Refused(reason)) if reason.contains("re-register")
         ));
         record.last_error = None;
         assert!(check(&record, 1000).is_ok());
@@ -996,11 +990,11 @@ mod admission_tests {
         assert_eq!(both.refusals.len(), 1);
         assert!(matches!(
             admit(&both, 1001),
-            Err(QuotaError::Refused("scoped provider refusal"))
+            Err(QuotaError::Refused(reason)) if reason.contains("scoped provider refusal")
         ));
         assert!(matches!(
             admit(&both, 1600),
-            Err(QuotaError::Refused("scoped provider refusal"))
+            Err(QuotaError::Refused(reason)) if reason.contains("scoped provider refusal")
         ));
         assert!(admit(&both, 3000).is_ok());
     }
@@ -1070,7 +1064,7 @@ mod admission_tests {
                 pools: &["pool-a".into()],
             }
             .check(&route()),
-            Err(QuotaError::Refused("scoped provider refusal"))
+            Err(QuotaError::Refused(reason)) if reason.contains("scoped provider refusal")
         ));
     }
     #[test]

@@ -47,6 +47,9 @@ pub struct SubmittedTask {
     pub base: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub head: Option<String>,
+    /// Original writer source, retained when a graph retry starts from a later head.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_head: Option<String>,
     pub route: provenant_records::run::RequestedRoute,
     pub timeout_seconds: u64,
     #[serde(default)]
@@ -178,6 +181,54 @@ bounded_input! {
 #[serde(rename_all = "snake_case")]
 pub enum DispatchRefusalFact {
     DetachedWriter,
+    GraphSchema,
+    GraphComposite,
+    GraphPlan,
+    GraphStructuralLimit(crate::graph::GraphStructuralLimit),
+    GraphEnvelope,
+    GraphOutputKind(crate::graph::GraphOutputField),
+    Resource(provenant_records::diagnostic::ResourceFact),
+}
+
+/// Facts the input owner has explicitly approved for disclosure.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InvalidInputDetail {
+    Schema,
+    LandingLock,
+    UnresolvableBase(String),
+    Field(String),
+    FieldTooLarge { field: String, limit: usize },
+    FieldTitle(String),
+    InputUnreadable,
+    InputTooLarge,
+    InputInvalidUtf8,
+    GraphDocumentTooLarge,
+}
+
+impl InvalidInputDetail {
+    fn safe_text(&self) -> Option<String> {
+        match self {
+            Self::Schema => Some("graph document schema_version is invalid".into()),
+            Self::LandingLock => Some("landing lock required".into()),
+            Self::UnresolvableBase(name) => safe_base_ref(name)
+                .map(|name| format!("unresolvable base `{name}`")),
+            Self::InputUnreadable => {
+                Some("input file is unreadable or is not a regular file".into())
+            }
+            Self::InputTooLarge => Some("input exceeds the 1 MiB limit".into()),
+            Self::InputInvalidUtf8 => Some("input is not UTF-8".into()),
+            Self::GraphDocumentTooLarge => {
+                let bound = crate::config::GraphLimits::document_bytes_bound();
+                Some(format!("limits.{}={} reached; set by {}", bound.name, bound.maximum, bound.owner))
+            }
+            Self::Field(path) => {
+                safe_input_field(path).map(|path| format!("invalid input field `{path}`"))
+            }
+            Self::FieldTooLarge { field, limit } => safe_input_field(field)
+                .map(|path| format!("invalid input field `{path}`: exceeds {limit} bytes")),
+            Self::FieldTitle(field) => safe_input_field(field).map(|path| format!("invalid input field `{path}`: task title must be 1 to 256 bytes and contain no control characters")),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error, Serialize, Deserialize)]
@@ -192,9 +243,10 @@ pub enum FacadeError {
         #[serde(
             default,
             skip_serializing_if = "Option::is_none",
-            serialize_with = "serialise_invalid_detail"
+            serialize_with = "serialise_invalid_detail",
+            deserialize_with = "deserialise_invalid_detail"
         )]
-        detail: Option<String>,
+        detail: Option<InvalidInputDetail>,
     },
     #[error("record not found")]
     NotFound,
@@ -216,6 +268,7 @@ pub enum FacadeError {
     PeerVersion,
     #[error("{}", crate::hosts::protocol_mismatch_message(peer, *remote, *expected))]
     PeerProtocolMismatch {
+        #[serde(serialize_with = "serialise_peer_label")]
         peer: String,
         remote: u64,
         /// The requested protocol level.
@@ -232,9 +285,15 @@ pub enum FacadeError {
     #[error("coordination mutations are not allowed inside a lane")]
     LaneCoordinationRefused,
     #[error("request violates confinement")]
-    ConfinementRefused,
-    #[error("writer lock or writer is busy")]
-    WriterBusy,
+    ConfinementRefused {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resource: Option<provenant_records::diagnostic::ResourceFact>,
+    },
+    #[error("writer lock or writer is busy{}", .holder.map_or_else(String::new, |attempt| format!(", held by attempt {attempt}")))]
+    WriterBusy {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        holder: Option<AttemptId>,
+    },
     #[error("writer lock is busy")]
     WriterLockBusy,
     #[error("writer custody is unknown")]
@@ -314,6 +373,10 @@ pub enum FacadeError {
         delivery_limit: Option<provenant_records::diagnostic::DeliveryLimit>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         delivery_stage: Option<provenant_records::run::WriterDeliveryStage>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resource: Option<Box<provenant_records::diagnostic::ResourceFact>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        input_failure: Option<provenant_records::diagnostic::IoFact>,
     },
 }
 
@@ -336,13 +399,18 @@ pub struct DiskPressure {
     pub available: u64,
     pub floor: u64,
     pub reclaimed: u64,
+    pub origin: provenant_records::diagnostic::SettingSource,
 }
 
 fn dispatch_message(reason: &str, disk: Option<&DiskPressure>) -> String {
     match disk {
         Some(disk) => format!(
-            "insufficient disk space on the limiting volume: {} bytes available, floor {} bytes; bounded GC reported {} bytes reclaimed; run `provenant gc --free-floor {}B` before dispatching a writer",
-            disk.available, disk.floor, disk.reclaimed, disk.floor
+            "insufficient disk space on the limiting volume: {} bytes available, floor {} bytes; gc.free_floor from {}; bounded GC reported {} bytes reclaimed; run `provenant gc --free-floor {}B` before dispatching a writer",
+            disk.available,
+            disk.floor,
+            disk.origin.description(),
+            disk.reclaimed,
+            disk.floor
         ),
         None => provenant_records::diagnostic::safe_text(reason),
     }
@@ -387,12 +455,16 @@ fn serialise_unanchored_optional_path<S: serde::Serializer>(
     Option::<String>::None.serialize(serializer)
 }
 
+/// Safe wire description for a bounded repository fact that did not fit.
+pub const REPOSITORY_FACT_LIMIT_OPERATION: &str = "repository fact output limit exceeded";
+
 fn serialise_io_operation<S: serde::Serializer>(
     operation: &str,
     serializer: S,
 ) -> Result<S::Ok, S::Error> {
     let operation = match operation {
         "access Fabric store"
+        | REPOSITORY_FACT_LIMIT_OPERATION
         | "create peer worktree"
         | "submit: create peer worktree"
         | "read file"
@@ -405,6 +477,16 @@ fn serialise_io_operation<S: serde::Serializer>(
         _ => "I/O operation",
     };
     serializer.serialize_str(operation)
+}
+
+fn serialise_peer_label<S: serde::Serializer>(
+    peer: &str,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    match peer.parse::<provenant_core::HostId>() {
+        Ok(host) => serializer.serialize_str(&host.to_string()),
+        Err(_) => serializer.serialize_str("peer"),
+    }
 }
 
 fn delivery_stage_wire<S: serde::Serializer>(
@@ -424,21 +506,68 @@ fn delivery_stage_wire<S: serde::Serializer>(
 }
 
 impl FacadeError {
+    /// Project a state directory permission refusal for the selected edge.
+    pub fn state_directory_permissions(
+        path: &std::path::Path,
+        mode: u32,
+        destination: provenant_records::diagnostic::Destination<'_>,
+    ) -> provenant_records::diagnostic::Diagnostic {
+        use provenant_records::diagnostic::{Diagnostic, safe_path, shell_path};
+        let detail = safe_path(path, destination).map_or_else(
+            || format!("Fabric state directory has mode {mode:04o}; other users can access it"),
+            |path| {
+                format!(
+                    "Fabric state directory {path} has mode {mode:04o}; other users can access it"
+                )
+            },
+        );
+        let action = shell_path(path, destination).map_or_else(
+            || "restrict the state directory to its owner, then retry".into(),
+            |path| format!("run chmod 700 {path} and retry"),
+        );
+        Diagnostic::new("invalid_input")
+            .category("invalid")
+            .detail(detail)
+            .next(action)
+    }
+
+    /// Retain the typed admission stage while keeping its original refusal text.
+    pub fn graph_admission(error: crate::graph::AdmissionError) -> Self {
+        use crate::graph::AdmissionError;
+        let fact = match &error {
+            AdmissionError::Schema(_) => DispatchRefusalFact::GraphSchema,
+            AdmissionError::Composite(_) => DispatchRefusalFact::GraphComposite,
+            AdmissionError::Plan(_) => DispatchRefusalFact::GraphPlan,
+            AdmissionError::StructuralLimit(limit) => {
+                DispatchRefusalFact::GraphStructuralLimit(*limit)
+            }
+            AdmissionError::Envelope(_) => DispatchRefusalFact::GraphEnvelope,
+            AdmissionError::OutputKind { field, .. } => {
+                DispatchRefusalFact::GraphOutputKind(*field)
+            }
+        };
+        Self::DispatchRefused {
+            reason: error.to_string(),
+            disk: None,
+            fact: Some(fact),
+        }
+    }
+
     /// Project only facts selected by the owning refusal, never its source text.
     pub fn diagnostic(&self) -> provenant_records::diagnostic::Diagnostic {
         use provenant_records::diagnostic::Diagnostic;
         let mut projected = Diagnostic::new(self.code());
         match self {
             Self::InvalidInput { detail: Some(detail) } => {
-                if let Some(detail) = safe_invalid_detail(detail) {
+                if let Some(detail) = detail.safe_text() {
                     projected = projected.detail(detail);
                 }
                 projected = projected.next("check the named input field and retry");
             }
             Self::InvalidInput { detail: None } => projected = projected.detail("invalid input").next("check the input and retry"),
             Self::Busy => projected = projected.detail("service is busy").next("wait for host capacity before retrying"),
-            Self::PeerProtocolMismatch { peer, remote, expected } => {
-                projected = projected.detail(crate::hosts::protocol_mismatch_message(peer, *remote, *expected))
+            Self::PeerProtocolMismatch { remote, expected, .. } => {
+                projected = projected.detail(format!("peer protocol {remote} is incompatible with expected protocol {expected}"))
                     .next("upgrade both hosts to compatible protocol versions");
             }
             Self::DispatchUnobserved { .. } => projected = projected.detail("disk observation failed").next("restore the host disk observation before retrying"),
@@ -446,23 +575,58 @@ impl FacadeError {
                 projected = projected.detail("writer needs a branch")
                     .next("create a branch for the worktree before retrying");
             }
+            Self::DispatchRefused { fact: Some(DispatchRefusalFact::GraphStructuralLimit(limit)), .. } => {
+                projected = projected.detail(limit.to_string()).next("reduce the graph or adjust the named graph limit");
+            }
+            Self::DispatchRefused { fact: Some(DispatchRefusalFact::Resource(fact)), .. } => {
+                projected = fact.project(projected);
+            }
+            Self::DispatchRefused { fact: Some(fact), .. } => {
+                let (detail, action) = match fact {
+                    DispatchRefusalFact::DetachedWriter => unreachable!(),
+                    DispatchRefusalFact::GraphSchema => ("graph document schema_version is invalid", "use a schema version that supports the document fields"),
+                    DispatchRefusalFact::GraphComposite => ("graph composite or loop expansion is invalid", "inspect the composite or loop definition"),
+                    DispatchRefusalFact::GraphPlan => ("graph plan is invalid", "inspect the graph plan and node dependencies"),
+                    DispatchRefusalFact::GraphStructuralLimit(_) => unreachable!(),
+                    DispatchRefusalFact::Resource(_) => unreachable!(),
+                    DispatchRefusalFact::GraphEnvelope => ("graph checkpoint would exceed its size limit", "split the graph into smaller runs"),
+                    DispatchRefusalFact::GraphOutputKind(crate::graph::GraphOutputField::Input) => ("graph inputs[].outputs selects an unavailable output kind", "select an output supplied by the source node"),
+                    DispatchRefusalFact::GraphOutputKind(crate::graph::GraphOutputField::CompositeExport) => ("graph composite.exports[].outputs selects an unavailable output kind", "select an output supplied by the source node"),
+                };
+                projected = projected.detail(detail).next(action);
+            }
             Self::DispatchRefused { disk: Some(disk), .. } => {
-                projected = projected.detail(format!("insufficient disk space on the limiting volume: {} bytes available, floor {} bytes; bounded GC reported {} bytes reclaimed", disk.available, disk.floor, disk.reclaimed))
+                projected = projected.detail(format!("insufficient disk space on the limiting volume: {} bytes available, floor {} bytes; gc.free_floor from {}; bounded GC reported {} bytes reclaimed", disk.available, disk.floor, disk.origin.description(), disk.reclaimed))
                     .next(format!("run `provenant gc --free-floor {}B` before dispatching a writer", disk.floor));
             }
-            Self::HostDeliveryStage { stage } | Self::Io { delivery_stage: Some(stage), .. } => projected = projected.detail(format!("host writer delivery failed at {stage:?}")).next("inspect host delivery before retrying"),
             Self::HostDeliveryLimit { fact } | Self::Io { delivery_limit: Some(fact), .. } => projected = projected.detail(fact.detail()).next("inspect host delivery before retrying"),
+            Self::HostDeliveryStage { stage } | Self::Io { delivery_stage: Some(stage), .. } => projected = projected.detail(format!("host writer delivery failed at {stage:?}")).next("inspect host delivery before retrying"),
+            Self::Io { resource: Some(fact), .. } if matches!(fact.as_ref(), provenant_records::diagnostic::ResourceFact::Processes { .. }) => projected = fact.project(projected),
+            Self::Io { input_failure: Some(fact), .. } => projected = fact.project(projected),
+            Self::Io { operation, .. } if operation == REPOSITORY_FACT_LIMIT_OPERATION => {
+                projected = projected.detail("repository fact output exceeded its capture limit");
+            }
             Self::LaunchUnknown { operation_id } => projected = projected.next(format!("inspect the receipt for operation {operation_id} before retrying with the same operation ID")),
-            Self::WriterBusy => projected = projected.next("wait for the current writer or lock holder to finish"),
+            Self::WriterBusy { holder } => {
+                if let Some(holder) = holder {
+                    projected = projected.detail(format!("writer is held by attempt {holder}"));
+                }
+                projected = projected.next("wait for the current writer or lock holder to finish");
+            }
             Self::WriterLockBusy => projected = projected.next("wait for the writer lock holder to finish, then retry"),
             Self::WriterUnknown | Self::WorktreeUnregistered { .. } => projected = projected.next("inspect worktree registration and custody before selecting a checkout with --worktree"),
-            Self::ConfinementRefused => projected = projected.next("inspect the requested access and confinement policy"),
+            Self::ConfinementRefused { resource: Some(fact) } => projected = fact.project(projected),
+            Self::ConfinementRefused { resource: None } => projected = projected.next("inspect the requested access and confinement policy"),
             Self::CredentialRoot { access } => {
                 let access = match access.as_str() { "read" => "read", "write" => "write", _ => "requested" };
                 projected = projected.detail(format!("credential root refused for {access} grant"))
                     .next(format!("inspect the {access} grant and select a permitted root"));
             }
             _ => {}
+        }
+        if projected.next.is_none() {
+            projected = projected
+                .next("inspect the current state and request before taking further action");
         }
         projected
     }
@@ -484,8 +648,8 @@ impl FacadeError {
             Self::ProviderStateExpired => "provider_state_expired",
             Self::LaneDepth => "lane_depth",
             Self::LaneCoordinationRefused => "lane_coordination_refused",
-            Self::ConfinementRefused => "confinement_refused",
-            Self::WriterBusy => "writer_busy",
+            Self::ConfinementRefused { .. } => "confinement_refused",
+            Self::WriterBusy { .. } => "writer_busy",
             Self::WriterLockBusy => "writer_lock_busy",
             Self::WriterUnknown => "writer_unknown",
             Self::CredentialRoot { .. } => "credential_root",
@@ -511,32 +675,18 @@ impl FacadeError {
 
 /// The ": reason" suffix of an invalid-input message, control characters
 /// escaped so a detail echoing caller text cannot forge terminal output.
-fn invalid_detail(detail: &Option<String>) -> String {
+fn invalid_detail(detail: &Option<InvalidInputDetail>) -> String {
     detail
-        .as_deref()
-        .and_then(safe_invalid_detail)
+        .as_ref()
+        .and_then(InvalidInputDetail::safe_text)
         .map(|detail| format!(": {detail}"))
         .unwrap_or_default()
 }
 
-fn safe_invalid_detail(detail: &str) -> Option<String> {
-    if detail.starts_with("graph document schema_version")
-        || detail.starts_with("schema_version")
-        || detail.starts_with("schema version")
-        || detail.starts_with("graph schema version")
-    {
-        return Some("graph document schema_version is invalid".into());
-    }
-    if detail == "landing lock required" {
-        return Some(detail.to_owned());
-    }
-    // A missing base or integration ref is the caller's own input and the
-    // remedy, so it is named. Only plain ref characters pass, which keeps
-    // control characters and quotes out of terminal output.
-    if let Some(name) = detail
-        .strip_prefix("unresolvable base `")
-        .and_then(|rest| rest.strip_suffix('`'))
-        && !name.is_empty()
+// Refs are caller input and actionable, but cannot contain terminal controls
+// or quoting characters when disclosed in diagnostics or on the peer wire.
+fn safe_base_ref(name: &str) -> Option<&str> {
+    (!name.is_empty()
         && name.len() <= 256
         && name.bytes().all(|b| {
             b.is_ascii_alphanumeric()
@@ -544,16 +694,14 @@ fn safe_invalid_detail(detail: &str) -> Option<String> {
                     b,
                     b'/' | b'.' | b'_' | b'-' | b'~' | b'^' | b'@' | b'{' | b'}'
                 )
-        })
-    {
-        return Some(detail.to_owned());
-    }
-    let field = detail
-        .strip_prefix("invalid input field `")?
-        .split('`')
-        .next()?;
+        }))
+    .then_some(name)
+}
+
+pub(super) fn safe_input_field(field: &str) -> Option<&str> {
     let allowed = [
         "scope",
+        "use", "brief", "over", "set", "node", "by", "tier", "templates", "read_roots", "op", "source_head",
         "paths",
         "path",
         "key",
@@ -616,26 +764,70 @@ fn safe_invalid_detail(detail: &str) -> Option<String> {
             .filter(|part| !part.is_empty())
             .all(|part| part.bytes().all(|b| b.is_ascii_digit()) || allowed.contains(&part))
     {
-        return Some(format!("invalid input field `{field}`"));
+        return Some(field);
     }
     None
 }
 
 fn serialise_invalid_detail<S: serde::Serializer>(
-    detail: &Option<String>,
+    detail: &Option<InvalidInputDetail>,
     serializer: S,
 ) -> Result<S::Ok, S::Error> {
     detail
-        .as_deref()
-        .and_then(safe_invalid_detail)
+        .as_ref()
+        .and_then(InvalidInputDetail::safe_text)
         .serialize(serializer)
+}
+
+fn deserialise_invalid_detail<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<InvalidInputDetail>, D::Error> {
+    let detail = Option::<String>::deserialize(deserializer)?;
+    Ok(detail.and_then(|detail| match detail.as_str() {
+        "graph document schema_version is invalid" => Some(InvalidInputDetail::Schema),
+        "landing lock required" => Some(InvalidInputDetail::LandingLock),
+        "input file is unreadable or is not a regular file" => {
+            Some(InvalidInputDetail::InputUnreadable)
+        }
+        "input exceeds the 1 MiB limit" => Some(InvalidInputDetail::InputTooLarge),
+        "input is not UTF-8" => Some(InvalidInputDetail::InputInvalidUtf8),
+        _ if Some(detail.as_str())
+            == InvalidInputDetail::GraphDocumentTooLarge
+                .safe_text()
+                .as_deref() =>
+        {
+            Some(InvalidInputDetail::GraphDocumentTooLarge)
+        }
+        _ if detail.starts_with("unresolvable base `") => detail
+            .strip_prefix("unresolvable base `")
+            .and_then(|name| name.strip_suffix('`'))
+            .and_then(safe_base_ref)
+            .map(|name| InvalidInputDetail::UnresolvableBase(name.to_owned())),
+        _ => detail
+            .strip_prefix("invalid input field `")
+            .and_then(|rest| {
+                let (field, reason) = rest.split_once('`')?;
+                let field = safe_input_field(field)?.to_owned();
+                match reason {
+                    "" => Some(InvalidInputDetail::Field(field)),
+                    ": task title must be 1 to 256 bytes and contain no control characters" => {
+                        Some(InvalidInputDetail::FieldTitle(field))
+                    }
+                    _ => reason
+                        .strip_prefix(": exceeds ")
+                        .and_then(|value| value.strip_suffix(" bytes"))
+                        .and_then(|value| value.parse::<usize>().ok())
+                        .map(|limit| InvalidInputDetail::FieldTooLarge { field, limit }),
+                }
+            }),
+    }))
 }
 
 impl FacadeError {
     /// An invalid-input refusal naming the field path or reason that failed.
-    pub fn invalid(detail: impl Into<String>) -> Self {
+    pub fn invalid(detail: InvalidInputDetail) -> Self {
         Self::InvalidInput {
-            detail: Some(detail.into()),
+            detail: Some(detail),
         }
     }
 
@@ -643,6 +835,8 @@ impl FacadeError {
         Self::Io {
             delivery_limit: None,
             delivery_stage: None,
+            resource: None,
+            input_failure: None,
             operation: operation.into(),
             path: None,
         }
@@ -674,6 +868,8 @@ impl FacadeError {
         Self::Io {
             delivery_limit: None,
             delivery_stage: None,
+            resource: None,
+            input_failure: None,
             operation: operation.into(),
             path: path
                 .map(|path| anchor.map_or_else(|| path.clone(), |anchor| anchor.join(&path)))
@@ -698,7 +894,7 @@ impl From<&crate::hosts::PeerError> for FacadeError {
                 expected: *expected,
             },
             PeerError::Project | PeerError::SourceHost | PeerError::RequestTooLarge => {
-                Self::invalid(error.to_string())
+                Self::InvalidInput { detail: None }
             }
             PeerError::Unavailable | PeerError::Failed(_) => Self::HomeUnavailable,
             PeerError::Unknown { operation_id } => Self::LaunchUnknown {
@@ -717,8 +913,13 @@ impl From<&super::CoordinationError> for FacadeError {
         match error {
             CoordinationError::LaneMutation => Self::LaneCoordinationRefused,
             CoordinationError::Peer(error) => Self::from(error),
-            CoordinationError::InvalidInput(reason) => Self::invalid(*reason),
-            CoordinationError::Input(error) => Self::invalid(error.to_string()),
+            CoordinationError::InvalidInput(_) => Self::InvalidInput { detail: None },
+            CoordinationError::LandingLockRequired => {
+                Self::invalid(InvalidInputDetail::LandingLock)
+            }
+            CoordinationError::Input(error) => Self::InvalidInput {
+                detail: error.diagnostic_detail(),
+            },
             CoordinationError::Time(_) | CoordinationError::ResponseEncoding(_) => {
                 Self::StateCorrupt
             }
@@ -745,9 +946,9 @@ impl From<&provenant_fabric_store::Error> for FacadeError {
             | Error::Overlap { .. } => Self::Conflict,
             Error::Busy => Self::Busy,
             Error::Cancelled => Self::Cancelled,
-            Error::Invalid(reason) => Self::invalid(*reason),
+            Error::Invalid(_) => Self::InvalidInput { detail: None },
             Error::PathEncoding | Error::ViewerLimit | Error::ViewerNotOpen => {
-                Self::invalid(error.to_string())
+                Self::InvalidInput { detail: None }
             }
             Error::Decode(provenant_records::DecodeError::UnsupportedVersion { found, .. })
                 if *found > 1 =>
@@ -786,6 +987,8 @@ impl From<&provenant_fabric_store::Error> for FacadeError {
             Error::Io { path, .. } => Self::Io {
                 delivery_limit: None,
                 delivery_stage: None,
+                resource: None,
+                input_failure: None,
                 operation: "access Fabric store".into(),
                 path: Some(path.to_string_lossy().into_owned()),
             },
@@ -793,6 +996,8 @@ impl From<&provenant_fabric_store::Error> for FacadeError {
             Error::UnsafePath(path) => Self::Io {
                 delivery_limit: None,
                 delivery_stage: None,
+                resource: None,
+                input_failure: None,
                 operation: "verify Fabric store path".into(),
                 path: Some(path.to_string_lossy().into_owned()),
             },
@@ -806,13 +1011,54 @@ mod diagnostic_tests {
 
     #[test]
     fn an_unresolvable_base_is_named_but_unsafe_text_is_not() {
-        let named = FacadeError::invalid("unresolvable base `refs/heads/batch/graph`");
+        use super::InvalidInputDetail;
+        let named = FacadeError::invalid(InvalidInputDetail::UnresolvableBase(
+            "refs/heads/batch/graph".into(),
+        ));
         assert_eq!(
             named.diagnostic().detail.as_deref(),
             Some("unresolvable base `refs/heads/batch/graph`")
         );
-        let forged = FacadeError::invalid("unresolvable base `x\u{1b}[31m`");
-        assert_eq!(forged.diagnostic().detail, None);
+        let encoded = serde_json::to_value(&named).expect("encode error");
+        let decoded: FacadeError = serde_json::from_value(encoded).expect("decode error");
+        assert_eq!(decoded, named);
+        for name in ["x\u{1b}[31m", "x`forged", "", &"x".repeat(257)] {
+            let forged = FacadeError::invalid(InvalidInputDetail::UnresolvableBase(name.into()));
+            assert_eq!(forged.diagnostic().detail, None);
+            assert_eq!(
+                serde_json::to_value(&forged).expect("encode error")["detail"],
+                serde_json::Value::Null
+            );
+            let incoming: FacadeError = serde_json::from_value(serde_json::json!({
+                "code": "invalid_input", "detail": format!("unresolvable base `{name}`")
+            }))
+            .expect("decode peer error");
+            assert_eq!(incoming, FacadeError::InvalidInput { detail: None });
+        }
+    }
+
+    #[test]
+    fn writer_busy_preserves_holder_and_reads_prior_frames()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let old: FacadeError = serde_json::from_value(serde_json::json!({"code":"writer_busy"}))?;
+        assert_eq!(old, FacadeError::WriterBusy { holder: None });
+        let holder = provenant_core::AttemptId::from_bytes([23; 16]);
+        let current = FacadeError::WriterBusy {
+            holder: Some(holder),
+        };
+        assert!(current.to_string().contains(&holder.to_string()));
+        assert!(
+            current
+                .diagnostic()
+                .detail
+                .as_deref()
+                .is_some_and(|detail| detail.contains(&holder.to_string()))
+        );
+        assert_eq!(
+            serde_json::from_value::<FacadeError>(serde_json::to_value(&current)?)?,
+            current
+        );
+        Ok(())
     }
 
     #[test]
@@ -837,6 +1083,69 @@ mod diagnostic_tests {
             FacadeError::from(&Error::SchemaVersion(1)),
             FacadeError::StateCorrupt
         );
+    }
+
+    #[test]
+    fn directory_permissions_projection_respects_destination() {
+        use provenant_records::diagnostic::Destination;
+        let path = std::path::Path::new("/private/a b");
+        let local = FacadeError::state_directory_permissions(path, 0o755, Destination::Local);
+        assert!(local.next.unwrap().contains("chmod 700 '/private/a b'"));
+        let remote = FacadeError::state_directory_permissions(
+            path,
+            0o755,
+            Destination::Remote {
+                repository: None,
+                home: None,
+            },
+        );
+        let wire = serde_json::to_string(&remote).unwrap();
+        assert!(!wire.contains("/private"));
+        assert!(remote.next.is_some());
+    }
+
+    #[test]
+    fn generic_io_has_safe_action_without_source_detail() {
+        let error = FacadeError::Io {
+            operation: "TOKEN_SENTINEL\u{1b}".into(),
+            path: Some("/private/host".into()),
+            delivery_limit: None,
+            delivery_stage: None,
+            resource: None,
+            input_failure: None,
+        };
+        let diagnostic = error.diagnostic();
+        assert_eq!(diagnostic.code, "io");
+        assert!(diagnostic.detail.is_none());
+        assert!(diagnostic.next.is_some());
+        let wire = serde_json::to_string(&diagnostic).unwrap();
+        assert!(!wire.contains("TOKEN_SENTINEL"));
+        assert!(!wire.contains("/private/host"));
+    }
+
+    #[test]
+    fn protocol_projection_omits_untrusted_peer_name() {
+        let error = FacadeError::PeerProtocolMismatch {
+            peer: "/private/TOKEN_SENTINEL\u{1b}".into(),
+            remote: 3,
+            expected: 6,
+        };
+        let projected = error.diagnostic();
+        let wire = serde_json::to_string(&projected).unwrap();
+        assert!(!wire.contains("TOKEN_SENTINEL"));
+        assert!(!wire.contains("/private"));
+        let transport = serde_json::to_string(&error).unwrap();
+        assert!(!transport.contains("TOKEN_SENTINEL"));
+        assert!(!transport.contains("/private"));
+        let host = provenant_core::HostId::from_bytes([7; 16]).to_string();
+        let safe = FacadeError::PeerProtocolMismatch {
+            peer: host.clone(),
+            remote: 3,
+            expected: 6,
+        };
+        assert_eq!(serde_json::to_value(safe).unwrap()["peer"], host);
+        assert!(projected.detail.unwrap().contains('3'));
+        assert!(projected.next.is_some());
     }
 
     #[test]
@@ -904,6 +1213,8 @@ mod diagnostic_tests {
             FacadeError::Io {
                 delivery_limit: None,
                 delivery_stage: None,
+                resource: None,
+                input_failure: None,
                 operation: "openat read".into(),
                 path: None,
             }
@@ -968,6 +1279,7 @@ mod diagnostic_tests {
                 available: 42,
                 floor: 100,
                 reclaimed: 3,
+                origin: provenant_records::diagnostic::SettingSource::Configuration,
             }),
         };
         let wire = serde_json::to_string(&error).unwrap();
@@ -979,10 +1291,42 @@ mod diagnostic_tests {
         assert!(
             projection
                 .detail
+                .as_deref()
                 .unwrap()
                 .contains("42 bytes available, floor 100")
         );
+        assert!(
+            projection
+                .detail
+                .unwrap()
+                .contains("gc.free_floor from host configuration")
+        );
         assert!(projection.next.unwrap().contains("100B"));
+    }
+
+    #[test]
+    fn memory_pressure_refusal_preserves_typed_source_over_transport() {
+        use provenant_records::diagnostic::{
+            PressureLevel, PressureThreshold, ResourceFact, SettingSource,
+        };
+        let error = FacadeError::ConfinementRefused {
+            resource: Some(ResourceFact::MemoryPressure {
+                level: PressureLevel::Critical,
+                threshold: PressureThreshold::Warning,
+                origin: SettingSource::Configuration,
+            }),
+        };
+        let received: FacadeError =
+            serde_json::from_value(serde_json::to_value(error).unwrap()).unwrap();
+        let diagnostic = received.diagnostic();
+        assert_eq!(diagnostic.code, "confinement_refused");
+        let detail = diagnostic.detail.unwrap();
+        assert!(detail.contains("critical"));
+        assert!(detail.contains("warning"));
+        assert!(detail.contains("host configuration"));
+        assert!(diagnostic.next.unwrap().contains("memory"));
+        let generic = FacadeError::ConfinementRefused { resource: None }.diagnostic();
+        assert!(generic.detail.is_none());
     }
 
     #[test]
@@ -993,7 +1337,7 @@ mod diagnostic_tests {
             serde_json::to_value(&bare).unwrap(),
             serde_json::json!({"code": "invalid_input"})
         );
-        let detailed = FacadeError::invalid("schema version\n\u{1b}[31m");
+        let detailed = FacadeError::invalid(super::InvalidInputDetail::Schema);
         assert_eq!(detailed.code(), "invalid_input");
         assert_eq!(
             detailed.to_string(),
@@ -1002,17 +1346,38 @@ mod diagnostic_tests {
         let wire = serde_json::to_value(&detailed).unwrap();
         assert_eq!(wire["detail"], "graph document schema_version is invalid");
         assert!(!wire.to_string().contains("31m"));
-        let untrusted = FacadeError::InvalidInput {
-            detail: Some("TOKEN_SENTINEL".into()),
-        };
+        let oversized = FacadeError::invalid(super::InvalidInputDetail::GraphDocumentTooLarge);
+        let received: FacadeError =
+            serde_json::from_value(serde_json::to_value(&oversized).unwrap()).unwrap();
+        assert_eq!(received, oversized);
+        assert_eq!(received.code(), "invalid_input");
+        assert!(received.diagnostic().next.is_some());
+        let untrusted: FacadeError = serde_json::from_value(serde_json::json!({
+            "code": "invalid_input", "detail": "schema version TOKEN_SENTINEL\u{1b}"
+        }))
+        .unwrap();
         assert!(
             !serde_json::to_string(&untrusted)
                 .unwrap()
                 .contains("TOKEN_SENTINEL")
         );
         assert!(!untrusted.to_string().contains("TOKEN_SENTINEL"));
+        for input in [
+            format!("schema version TOKEN_SENTINEL\u{1b}{}", "é".repeat(2048)),
+            "invalid input field `scope.paths` TOKEN_SENTINEL".to_owned(),
+        ] {
+            let received: FacadeError = serde_json::from_value(serde_json::json!({
+                "code": "invalid_input", "detail": input
+            }))
+            .unwrap();
+            let diagnostic = received.diagnostic();
+            let wire = serde_json::to_string(&diagnostic).unwrap();
+            assert!(!wire.contains("TOKEN_SENTINEL"));
+            assert!(wire.len() < 4096);
+            assert!(diagnostic.next.is_some());
+        }
         let fake_field = FacadeError::InvalidInput {
-            detail: Some("invalid input field `secret_token`".into()),
+            detail: Some(super::InvalidInputDetail::Field("secret_token".into())),
         };
         assert!(
             !serde_json::to_string(&fake_field)
@@ -1026,11 +1391,11 @@ mod diagnostic_tests {
             from_field.to_string().contains("scope.paths"),
             "{from_field}"
         );
+        let received: FacadeError =
+            serde_json::from_value(serde_json::to_value(&from_field).unwrap()).unwrap();
+        assert_eq!(received.diagnostic(), from_field.diagnostic());
         assert_eq!(
-            FacadeError::from(&super::super::CoordinationError::InvalidInput(
-                "landing lock required"
-            ))
-            .to_string(),
+            FacadeError::from(&super::super::CoordinationError::LandingLockRequired).to_string(),
             "invalid input: landing lock required"
         );
     }
