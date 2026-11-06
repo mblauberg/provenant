@@ -406,7 +406,7 @@ impl SessionState {
             return String::new();
         }
         let mut how = match (
-            self.commands.runnable("lanes"),
+            self.commands.runnable("status"),
             self.commands.runnable("pr status"),
         ) {
             (Some(lanes), Some(pr)) => format!("`{lanes}` and `{pr}`"),
@@ -495,7 +495,7 @@ fn render(title: &str, sections: &[Section], limit: usize, commands: &CommandPre
         // The listing must read the store the digest came from; a command that
         // cannot be shown whole, or would not fit, becomes a plain note.
         let marker = commands
-            .runnable("lanes")
+            .runnable("status")
             .map(|lanes| format!("- [output bounded; list the rest with `{lanes}`]\n"))
             .filter(|marker| marker.len() <= limit)
             .unwrap_or_else(|| {
@@ -753,14 +753,14 @@ mod tests {
             };
             state.digest(DIGEST_LIMIT)
         };
-        let good = "provenant --state-dir '/s/a b' lanes --limit 100 --cursor 7";
+        let good = "provenant --state-dir '/s/a b' status --limit 100 --cursor 7";
         assert!(render(good).contains(&format!("run `{good}`")));
         for bad in [
-            "provenant --state-dir '/s/<x>' lanes --limit 100 --cursor 7".to_owned(),
-            "provenant --state-dir '/s/a>b' lanes --limit 100 --cursor 7".to_owned(),
-            "provenant --state-dir '/s/a`b' lanes --limit 100 --cursor 7".to_owned(),
+            "provenant --state-dir '/s/<x>' status --limit 100 --cursor 7".to_owned(),
+            "provenant --state-dir '/s/a>b' status --limit 100 --cursor 7".to_owned(),
+            "provenant --state-dir '/s/a`b' status --limit 100 --cursor 7".to_owned(),
             format!(
-                "provenant --state-dir '/{}' lanes --limit 100 --cursor 7",
+                "provenant --state-dir '/{}' status --limit 100 --cursor 7",
                 "d".repeat(600)
             ),
         ] {
@@ -807,12 +807,12 @@ mod tests {
             assert!(text.len() <= limit);
             assert_eq!(
                 marker(&text),
-                "- [output bounded; list the rest with `provenant --state-dir '/s/a b' lanes`]"
+                "- [output bounded; list the rest with `provenant --state-dir '/s/a b' status`]"
             );
             let text = with(Some("rel")).document("t", limit);
             assert!(text.len() <= limit);
             assert!(
-                marker(&text).contains("`provenant --state-dir '/work/rel' lanes`"),
+                marker(&text).contains("`provenant --state-dir '/work/rel' status`"),
                 "{text}"
             );
             // A directory that cannot be shown whole gives a note, not a command.
@@ -827,7 +827,7 @@ mod tests {
             // The default store keeps the plain command.
             assert_eq!(
                 marker(&with(None).digest(limit)),
-                "- [output bounded; list the rest with `provenant lanes`]"
+                "- [output bounded; list the rest with `provenant status`]"
             );
         }
     }
@@ -844,7 +844,7 @@ mod tests {
         let title = with(Some("/s/a b")).digest(DIGEST_LIMIT);
         assert!(
             title.contains(
-                "`provenant --state-dir '/s/a b' lanes` and `provenant --state-dir '/s/a b' pr status`"
+                "`provenant --state-dir '/s/a b' status` and `provenant --state-dir '/s/a b' pr status`"
             ),
             "{title}"
         );
@@ -852,7 +852,7 @@ mod tests {
         assert!(!title.contains("`provenant"), "{title}");
         assert!(title.contains("this hook's --state-dir"), "{title}");
         let title = with(None).digest(DIGEST_LIMIT);
-        assert!(title.contains("`provenant lanes` and `provenant pr status`"));
+        assert!(title.contains("`provenant status` and `provenant pr status`"));
     }
 
     #[test]
