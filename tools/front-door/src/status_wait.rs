@@ -19,6 +19,7 @@ enum Target {
     Auto(String),
     Lane(provenant_cli::Target),
     Graph(String),
+    Operation(String),
     Pr(u64),
 }
 impl Target {
@@ -27,6 +28,9 @@ impl Target {
             return Ok(Self::Auto(value.into()));
         };
         match kind {
+            "operation" => provenant_core::OperationId::parse(id)
+                .map(|id| Self::Operation(id.to_string()))
+                .map_err(|error| error.to_string()),
             "lane" => id.parse().map(Self::Lane).map_err(str::to_owned),
             "graph"
                 if !id.is_empty()
@@ -43,7 +47,9 @@ impl Target {
                 .filter(|n| *n > 0)
                 .map(Self::Pr)
                 .ok_or_else(|| "PR and land targets require a positive PR number".into()),
-            _ => Err("target must be lane:ID, graph:ID, pr:NUMBER or land:NUMBER".into()),
+            _ => Err(
+                "target must be lane:ID, graph:ID, operation:ID, pr:NUMBER or land:NUMBER".into(),
+            ),
         }
     }
 }
@@ -81,6 +87,33 @@ impl Snapshot {
         cancel: &CancelToken,
     ) -> std::result::Result<Self, ReadFailure> {
         match target {
+            Target::Operation(id) => {
+                let reply = provenant_cli::run::status(
+                    provenant_cli::Status {
+                        id: Some(format!("operation:{id}")),
+                        wait: None,
+                        target: Vec::new(),
+                        until: Condition::Any,
+                        follow: false,
+                        limit: 100,
+                        cursor: None,
+                        all: false,
+                    },
+                    true,
+                    edge,
+                );
+                if let Some(error) = reply.result.error {
+                    return Err(ReadFailure {
+                        retry: error.code == provenant_run::ErrorKind::Contention.code(),
+                        message: error.message,
+                    });
+                }
+                Ok(Self {
+                    terminal: true,
+                    notable: true,
+                    data: reply.result.data,
+                })
+            }
             Target::Lane(target) => {
                 let rows = provenant_cli::run::status_wait_lanes(target, edge).map_err(|e| {
                     ReadFailure {
@@ -273,7 +306,7 @@ fn collect(
 
 pub(crate) fn run(command: provenant_cli::Status, globals: &Globals) -> u8 {
     use crate::roots::{Product, Workspace};
-    let run = || -> Result<bool> {
+    let run = || -> Result<(bool, bool)> {
         let resolved = crate::roots::resolve(globals, Workspace::Project, Product::Required)
             .map_err(|e| e.to_string())?;
         let settings =
@@ -308,7 +341,8 @@ pub(crate) fn run(command: provenant_cli::Status, globals: &Globals) -> u8 {
             cwd: &resolved.project,
         };
         let pr_read_timeout = Duration::from_secs(settings.pr_read_timeout_seconds);
-        std::thread::scope(|scope| {
+        let mut refused = false;
+        let met = std::thread::scope(|scope| {
             for (name, target) in &targets {
                 let sender = sender.clone();
                 let edge = &edge;
@@ -372,15 +406,19 @@ pub(crate) fn run(command: provenant_cli::Status, globals: &Globals) -> u8 {
                 deadline,
                 command.until,
                 command.follow,
-                &mut |event| write_event(&event, globals.json),
+                &mut |event| {
+                    refused |= event["data"]["operation"]["state"] == "refused";
+                    write_event(&event, globals.json)
+                },
             );
             stop.stop();
             drop(receiver);
             result
-        })
+        })?;
+        Ok((met, refused))
     };
     match run() {
-        Ok(met) => {
+        Ok((met, refused)) => {
             let event = json!({"event": "end", "condition_met": met, "timed_out": !met});
             if let Err(error) = write_event(&event, globals.json) {
                 return crate::fail(
@@ -391,7 +429,7 @@ pub(crate) fn run(command: provenant_cli::Status, globals: &Globals) -> u8 {
                     globals,
                 );
             }
-            if met { 0 } else { 124 }
+            wait_exit(met, refused)
         }
         Err(error) => crate::fail(
             "status",
@@ -400,6 +438,15 @@ pub(crate) fn run(command: provenant_cli::Status, globals: &Globals) -> u8 {
             &error,
             globals,
         ),
+    }
+}
+fn wait_exit(met: bool, refused: bool) -> u8 {
+    if !met {
+        124
+    } else if refused {
+        1
+    } else {
+        0
     }
 }
 fn write_event(event: &Value, json: bool) -> Result<()> {
@@ -430,6 +477,16 @@ fn write_event(event: &Value, json: bool) -> Result<()> {
 #[allow(dead_code)] // Also included by the worktree driver without libtest.
 mod tests {
     use super::*;
+    #[test]
+    fn refusal_targets_are_terminal_failures_when_observed() {
+        assert!(
+            matches!(Target::parse("operation:fixture-op"), Ok(Target::Operation(id)) if id == "fixture-op")
+        );
+        assert!(Target::parse("operation:bad/id").is_err());
+        assert_eq!(wait_exit(true, true), 1);
+        assert_eq!(wait_exit(true, false), 0);
+        assert_eq!(wait_exit(false, true), 124);
+    }
     fn update(target: &str, state: &str, terminal: bool) -> Update {
         Update {
             target: target.into(),

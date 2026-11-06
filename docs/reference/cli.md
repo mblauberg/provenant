@@ -2581,10 +2581,10 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 | Argument | Contract |
 |---|---|
 | `--wait` | `{"bounds": [1, 14400], "conflicts": ["all", "cursor"], "description": "Wait for mixed targets (no value uses domains.wait.timeout_seconds)", "name": "wait"}` |
-| `--target` | `{"description": "Observe lane:ID, graph:ID, pr:NUMBER or land:NUMBER (repeatable; land only observes)", "name": "target", "repeatable": true, "requires": ["wait"]}` |
+| `--target` | `{"description": "Observe lane:ID, graph:ID, operation:ID, pr:NUMBER or land:NUMBER (repeatable)", "name": "target", "repeatable": true, "requires": ["wait"]}` |
 | `--until` | `{"defaults": ["any"], "description": "Return on any transition or when all targets are terminal", "name": "until", "requires": ["wait"], "values": ["any", "all"]}` |
 | `--follow` | `{"defaults": ["false"], "description": "Stream transitions until all targets are terminal or the wait expires", "name": "follow", "requires": ["wait"], "values": ["true", "false"]}` |
-| `id` | `{"description": "Show this run, task, attempt or graph ID, including settled records", "name": "id", "positional": true}` |
+| `id` | `{"description": "Show a run, task, attempt or graph ID, or operation:ID for a refusal", "name": "id", "positional": true}` |
 | `--limit` | `{"bounds": [1, 100], "defaults": ["50"], "description": "Maximum full records per page", "name": "limit"}` |
 | `--cursor` | `{"description": "Continue a full-record page from its cursor", "name": "cursor"}` |
 | `--all` | `{"defaults": ["false"], "description": "Include full records and older lanes", "name": "all", "values": ["true", "false"]}` |
