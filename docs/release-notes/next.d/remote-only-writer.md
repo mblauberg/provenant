@@ -1,4 +1,4 @@
 ## Fixes
-### Lanes and settlement
+### Git and safety
 
-- `run --branch` refuses a remote-only branch before creating a writer at a different base. Create the local branch at the remote tip and retry.
+- `run --branch` now fetches a remote-only branch and starts its writer at the remote tip.

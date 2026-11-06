@@ -309,18 +309,18 @@ pub fn create(
     create_with_default(context, request, cancel, None)
 }
 
-/// Refuse to create a writer branch over an existing remote-only branch.
-/// Discover the exact remote ref even when the configured fetch refspec omits it.
-pub fn require_no_remote_only_branch(
+/// Fetch a remote branch when no local branch exists and return its exact tip.
+/// The fetch names the full remote ref, independent of configured refspecs.
+pub fn fetch_remote_branch_tip(
     context: &WorktreeContext<'_>,
     name: &str,
     cancel: &CancelToken,
-) -> Result<(), WorktreeError> {
+) -> Result<Option<GitOid>, WorktreeError> {
     let branch = GitRefName::branch(name).map_err(|_| WorktreeError::InvalidRequest)?;
     if read_branch_tips(context, cancel)?.contains_key(&branch) {
-        return Ok(());
+        return Ok(None);
     }
-    match crate::utility::fetch_missing_remote_branch(
+    let remote = crate::utility::fetch_missing_remote_branch(
         context.executor,
         context.repo,
         context.utility,
@@ -328,11 +328,13 @@ pub fn require_no_remote_only_branch(
         &format!("origin/{name}"),
         context.mutation_budget,
         cancel,
-    )? {
-        crate::utility::RemoteBase::Found(_) => Err(WorktreeError::RemoteOnlyBranch {
-            branch: name.to_owned(),
-        }),
-        crate::utility::RemoteBase::NotRemote | crate::utility::RemoteBase::Missing => Ok(()),
+    )
+    .map_err(|_| WorktreeError::RemoteOnlyBranch {
+        branch: name.to_owned(),
+    })?;
+    match remote {
+        crate::utility::RemoteBase::Found(tip) => Ok(Some(tip)),
+        crate::utility::RemoteBase::NotRemote | crate::utility::RemoteBase::Missing => Ok(None),
     }
 }
 

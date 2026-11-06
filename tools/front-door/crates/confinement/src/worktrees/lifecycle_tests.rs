@@ -33,7 +33,7 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 
 #[test]
-fn remote_only_writer_branch_is_refused_even_outside_fetch_refspec() -> Result<(), Box<dyn Error>> {
+fn remote_only_writer_branch_is_fetched_even_outside_fetch_refspec() -> Result<(), Box<dyn Error>> {
     let source = Fixture::new()?;
     source.run(&["branch", "remote-only"])?;
     let mut fixture = Fixture::new()?;
@@ -56,16 +56,22 @@ fn remote_only_writer_branch_is_refused_even_outside_fetch_refspec() -> Result<(
     )?;
     let test = TestContext::new(&fixture)?;
     let context = test.context();
-    let error = require_no_remote_only_branch(&context, "remote-only", &cancel()).unwrap_err();
-    assert!(
-        matches!(error, WorktreeError::RemoteOnlyBranch { .. }),
-        "{error}"
+    let tip = fetch_remote_branch_tip(&context, "remote-only", &cancel())?
+        .ok_or("remote branch tip was not fetched")?;
+    let created = create(
+        &context,
+        WorktreeCreate {
+            branch: "remote-only".into(),
+            base: Some(tip.to_string()),
+        },
+        &cancel(),
+    )?;
+    assert_eq!(created.head, tip);
+    let local_tip = fixture.run(&["rev-parse", "refs/heads/remote-only"])?;
+    assert_eq!(
+        GitOid::parse(std::str::from_utf8(&local_tip.stdout.bytes)?.trim())?,
+        tip
     );
-    assert!(!branch_exists(&fixture, "remote-only"));
-    assert!(!fixture.root.join(".worktrees/remote-only").exists());
-    require_no_remote_only_branch(&context, "new-branch", &cancel())?;
-    fixture.run(&["branch", "remote-only"])?;
-    require_no_remote_only_branch(&context, "remote-only", &cancel())?;
     Ok(())
 }
 

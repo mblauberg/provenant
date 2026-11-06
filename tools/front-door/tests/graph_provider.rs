@@ -622,7 +622,7 @@ fn policy_codex_fixture() -> Result<TestRig> {
     Ok(rig)
 }
 
-fn remote_only_writer_cli_refuses_without_leaving_a_lane() -> Result {
+fn remote_only_writer_cli_starts_at_remote_tip() -> Result {
     let rig = policy_codex_fixture()?;
     let git = provenant_os::git::git_executable().ok_or("git")?;
     let remote = rig.root.join("remote.git");
@@ -632,8 +632,23 @@ fn remote_only_writer_cli_refuses_without_leaving_a_lane() -> Result {
         vec!["branch", "remote-only"],
         vec!["remote", "add", "origin", remote.to_str().ok_or("remote")?],
         vec!["push", "origin", "remote-only"],
+    ] {
+        let output = rig.execute(&git, &args, None)?;
+        assert_eq!(code(&output), 0, "{args:?}: {output:?}");
+    }
+    let remote_tip = {
+        let output = rig.execute(&git, &["rev-parse", "refs/heads/remote-only"], None)?;
+        String::from_utf8(output.stdout.bytes)?.trim().to_owned()
+    };
+    for args in [
         vec!["branch", "-D", "remote-only"],
         vec!["update-ref", "-d", "refs/remotes/origin/remote-only"],
+        vec![
+            "config",
+            "--replace-all",
+            "remote.origin.fetch",
+            "+refs/heads/elsewhere:refs/remotes/origin/elsewhere",
+        ],
         vec!["commit", "--allow-empty", "-qm", "different local tip"],
     ] {
         let output = rig.execute(&git, &args, None)?;
@@ -643,57 +658,76 @@ fn remote_only_writer_cli_refuses_without_leaving_a_lane() -> Result {
     let key = provenant_providers::identity::codex_account(auth).ok_or("account key")?;
     support::register_account(&rig, "codex", "fixture", &key, &rig.root.join("codex"))
         .map_err(|e| format!("register account: {e}"))?;
-    for args in [
-        vec![
-            "run",
-            "remote writer",
-            "--mode",
-            "worktree-write",
-            "--branch",
-            "remote-only",
-            "--base",
-            "HEAD",
-            "--wait=30s",
-            "--json",
-        ],
-        vec![
-            "run",
-            "remote writer",
-            "--mode",
-            "worktree-write",
-            "--worktree",
-            "remote-only",
-            "--wait=30s",
-            "--json",
-        ],
-    ] {
-        for _ in 0..2 {
-            let output = rig
-                .command(&args)
-                .map_err(|e| format!("run {args:?}: {e}"))?;
-            let combined = format!(
-                "{} {}",
-                String::from_utf8_lossy(&output.stdout.bytes),
-                String::from_utf8_lossy(&output.stderr.bytes)
-            );
-            assert_ne!(code(&output), 0, "{args:?}: {combined}");
-            assert!(!combined.contains("WRITER_UNKNOWN"), "{combined}");
-            if args.contains(&"--branch") {
-                assert!(
-                    combined.contains("exists on origin but not locally"),
-                    "{combined}"
-                );
-            } else {
-                assert!(
-                    combined.contains("worktree")
-                        && (combined.contains("not found")
-                            || combined.contains("missing")
-                            || combined.contains("does not exist")),
-                    "{combined}"
-                );
-            }
-            assert!(!rig.project.join(".worktrees/remote-only").exists());
-        }
+    let args = vec![
+        "run",
+        "remote writer",
+        "--mode",
+        "worktree-write",
+        "--branch",
+        "remote-only",
+        "--base",
+        "HEAD",
+        "--wait=30s",
+        "--json",
+    ];
+    let output = rig
+        .command(&args)
+        .map_err(|e| format!("run {args:?}: {e}"))?;
+    let combined = format!(
+        "{} {}",
+        String::from_utf8_lossy(&output.stdout.bytes),
+        String::from_utf8_lossy(&output.stderr.bytes)
+    );
+    assert_ne!(
+        code(&output),
+        0,
+        "the fixture provider should remain unavailable"
+    );
+    let head = rig.execute(
+        &git,
+        &["-C", ".worktrees/remote-only", "rev-parse", "HEAD"],
+        None,
+    )?;
+    assert_eq!(
+        String::from_utf8(head.stdout.bytes)?.trim(),
+        remote_tip,
+        "writer must start at the remote branch tip"
+    );
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout.bytes)?;
+    assert_eq!(
+        report["data"]["checkpoint"]["nodes"][0]["source_commit"],
+        remote_tip
+    );
+    assert!(combined.contains("warning: ignoring --base"), "{combined}");
+
+    let args = vec![
+        "run",
+        "remote writer",
+        "--mode",
+        "worktree-write",
+        "--worktree",
+        "unprovisioned",
+        "--wait=30s",
+        "--json",
+    ];
+    for _ in 0..2 {
+        let output = rig
+            .command(&args)
+            .map_err(|e| format!("run {args:?}: {e}"))?;
+        let combined = format!(
+            "{} {}",
+            String::from_utf8_lossy(&output.stdout.bytes),
+            String::from_utf8_lossy(&output.stderr.bytes)
+        );
+        assert_ne!(code(&output), 0, "{args:?}: {combined}");
+        assert!(!combined.contains("WRITER_UNKNOWN"), "{combined}");
+        assert!(
+            combined.contains("worktree")
+                && (combined.contains("not found")
+                    || combined.contains("missing")
+                    || combined.contains("does not exist")),
+            "{combined}"
+        );
     }
     Ok(())
 }
@@ -3195,8 +3229,8 @@ fn main() -> ExitCode {
         type NamedTest = (&'static str, fn() -> Result);
         let tests: &[NamedTest] = &[
             (
-                "remote_only_writer_cli_refuses_without_leaving_a_lane",
-                remote_only_writer_cli_refuses_without_leaving_a_lane,
+                "remote_only_writer_cli_starts_at_remote_tip",
+                remote_only_writer_cli_starts_at_remote_tip,
             ),
             #[cfg(target_os = "macos")]
             (

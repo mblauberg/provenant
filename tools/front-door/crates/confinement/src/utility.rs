@@ -892,7 +892,9 @@ pub(crate) fn fetch_missing_remote_branch(
     if GitRefName::branch(branch).is_err() {
         return Ok(RemoteBase::NotRemote);
     }
-    let refspec = format!("refs/heads/{branch}");
+    // An explicit source and destination refspec works even when the remote's
+    // configured fetch refspec excludes this branch.
+    let refspec = format!("+refs/heads/{branch}:refs/remotes/{remote}/{branch}");
     // A failed fetch can mean either a missing remote ref or a transport fault.
     let fetched = run(&[
         "fetch".into(),
