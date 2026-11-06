@@ -1378,12 +1378,9 @@ mod tests {
             "[domains.fabric]\npipelines={experiment={trial={control='private-sentinel'}}}",
         ] {
             let text = format!("schema_version=1\n{stale}\n");
-            let loaded = provenant_config::load_with_domains(
-                &roots,
-                Some(text.as_bytes()),
-                &sections,
-            )
-            .unwrap();
+            let loaded =
+                provenant_config::load_with_domains(&roots, Some(text.as_bytes()), &sections)
+                    .unwrap();
             assert!(loaded.warnings.iter().any(|warning| {
                 warning.rule == "unknown_key"
                     && warning.message.starts_with("domains.fabric.pipelines:")

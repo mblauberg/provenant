@@ -1383,7 +1383,10 @@ struct UpgradeRunner {
 /// Read-only drain check, shared by staged preflight and the first new launch.
 /// New interface runs persist their resolved template library in the execution.
 /// A legacy lane cannot become current merely by upgrading its executable.
-fn pending_upgrade_findings(state: &provenant_core::StateRoot, legacy_only: bool) -> Result<Vec<String>, String> {
+fn pending_upgrade_findings(
+    state: &provenant_core::StateRoot,
+    legacy_only: bool,
+) -> Result<Vec<String>, String> {
     let mut findings = Vec::new();
     let mut current = std::collections::BTreeSet::new();
     let projects = state.as_path().join("fabric/graphs");
@@ -1402,22 +1405,26 @@ fn pending_upgrade_findings(state: &provenant_core::StateRoot, legacy_only: bool
             else {
                 continue;
             };
-            let ids = provenant_fabric_runtime::graph::FileJournal::graph_ids(
-                state,
-                project,
-            )
-            .map_err(|e| e.to_string())?;
+            let ids = provenant_fabric_runtime::graph::FileJournal::graph_ids(state, project)
+                .map_err(|e| e.to_string())?;
             for id in ids {
-                if legacy_only && provenant_fabric_runtime::graph::FileJournal::execution(state, project, &id)
-                    .ok().flatten().is_some_and(|execution| execution.document.extra.contains_key("template_library"))
+                if legacy_only
+                    && provenant_fabric_runtime::graph::FileJournal::execution(state, project, &id)
+                        .ok()
+                        .flatten()
+                        .is_some_and(|execution| {
+                            execution.document.extra.contains_key("template_library")
+                        })
                 {
                     current.insert((project.to_string(), id));
                     continue;
                 }
-                match provenant_fabric_runtime::graph::FileJournal::pending_execution(state, project, &id) {
+                match provenant_fabric_runtime::graph::FileJournal::pending_execution(
+                    state, project, &id,
+                ) {
                     Ok(None) => continue,
-                    Ok(Some(_)) => {},
-                    Err(error) if error.is_unreadable() => {},
+                    Ok(Some(_)) => {}
+                    Err(error) if error.is_unreadable() => {}
                     Err(error) => return Err(error.to_string()),
                 }
                 findings.push(format!(
@@ -1468,8 +1475,11 @@ fn pending_upgrade_findings(state: &provenant_core::StateRoot, legacy_only: bool
         for row in rows {
             let (project, run, attempt, record) = row.map_err(|e| e.to_string())?;
             if legacy_only && store == state.as_path() {
-                let record: serde_json::Value = serde_json::from_slice(&record).map_err(|e| e.to_string())?;
-                if record.pointer("/context/graph_id").and_then(serde_json::Value::as_str)
+                let record: serde_json::Value =
+                    serde_json::from_slice(&record).map_err(|e| e.to_string())?;
+                if record
+                    .pointer("/context/graph_id")
+                    .and_then(serde_json::Value::as_str)
                     .is_some_and(|id| current.contains(&(project.clone(), id.to_owned())))
                 {
                     continue;
@@ -1490,7 +1500,10 @@ pub(crate) fn cutover_pending_guard(state: &provenant_core::StateRoot) -> Result
     if findings.is_empty() {
         return Ok(());
     }
-    Err(format!("Graph-template cutover refused: old pending state remains. Run the previous release against this state directory, finish or cancel its pending graphs and drain its live lanes, then launch this release again. --yes cannot bypass this check. No child stores have been deleted.\n{}", findings.join("\n")))
+    Err(format!(
+        "Graph-template cutover refused: old pending state remains. Run the previous release against this state directory, finish or cancel its pending graphs and drain its live lanes, then launch this release again. --yes cannot bypass this check. No child stores have been deleted.\n{}",
+        findings.join("\n")
+    ))
 }
 
 /// Inspect the old state with the staged release before it replaces the binary.
@@ -1504,29 +1517,40 @@ fn upgrade_preflight(globals: &cli::Globals) -> Result<Vec<String>, String> {
         return Err("XDG_CONFIG_HOME must be absolute".into());
     }
     let mut repositories = crate::graph_support::project_worktrees(&environment.project);
-    for binding in provenant_config::registered_projects(&targets.roots).map_err(|e| e.to_string())? {
+    for binding in
+        provenant_config::registered_projects(&targets.roots).map_err(|e| e.to_string())?
+    {
         // Bindings name the canonical Git common directory, including bare repos.
-        if let Some(repository) = binding.common_dir().parent().filter(|_| binding.common_dir().file_name().is_some_and(|name| name == ".git")) {
+        if let Some(repository) = binding.common_dir().parent().filter(|_| {
+            binding
+                .common_dir()
+                .file_name()
+                .is_some_and(|name| name == ".git")
+        }) {
             repositories.extend(crate::graph_support::project_worktrees(repository));
         }
     }
     repositories.sort();
     repositories.dedup();
     let mut directories = vec![("User", config.join("provenant/presets"))];
-    directories.extend(repositories.into_iter().map(|repository| ("Repository", repository.join(".provenant/presets"))));
+    directories.extend(
+        repositories
+            .into_iter()
+            .map(|repository| ("Repository", repository.join(".provenant/presets"))),
+    );
     for (kind, presets) in directories {
-    match std::fs::read_dir(&presets) {
-        Ok(entries) => {
-            for entry in entries {
-                let entry = entry.map_err(|e| e.to_string())?;
-                if entry.path().extension().is_some_and(|ext| ext == "toml") {
-                    findings.push(format!("{kind} preset to port: {}", entry.path().display()));
+        match std::fs::read_dir(&presets) {
+            Ok(entries) => {
+                for entry in entries {
+                    let entry = entry.map_err(|e| e.to_string())?;
+                    if entry.path().extension().is_some_and(|ext| ext == "toml") {
+                        findings.push(format!("{kind} preset to port: {}", entry.path().display()));
+                    }
                 }
             }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(format!("{}: {error}", presets.display())),
         }
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(error) => return Err(format!("{}: {error}", presets.display())),
-    }
     }
     findings.sort();
     Ok(findings)
@@ -1866,14 +1890,23 @@ mod tests {
     }
 
     #[test]
-    fn cutover_distinguishes_template_runs_and_preserves_child_stores() -> Result<(), Box<dyn std::error::Error>> {
+    fn cutover_distinguishes_template_runs_and_preserves_child_stores()
+    -> Result<(), Box<dyn std::error::Error>> {
         use std::os::unix::fs::PermissionsExt;
         let temp = tempfile::tempdir()?;
         let roots = cutover_roots(temp.path())?;
         let project = "11111111111111111111111111111111";
-        let directory = roots.state.as_path().join(format!("fabric/graphs/{project}"));
+        let directory = roots
+            .state
+            .as_path()
+            .join(format!("fabric/graphs/{project}"));
         std::fs::create_dir_all(&directory)?;
-        for path in [roots.state.as_path().to_path_buf(), roots.state.as_path().join("fabric"), roots.state.as_path().join("fabric/graphs"), directory.clone()] {
+        for path in [
+            roots.state.as_path().to_path_buf(),
+            roots.state.as_path().join("fabric"),
+            roots.state.as_path().join("fabric/graphs"),
+            directory.clone(),
+        ] {
             std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
         }
         let path = directory.join("graph-old-pending-fixture.json");
@@ -1884,19 +1917,37 @@ mod tests {
         assert_eq!(std::fs::read(&path)?, original);
         let mut record: serde_json::Value = serde_json::from_slice(original)?;
         record["execution"]["document"]["template_library"] = serde_json::json!({});
-        record["digest"] = serde_json::json!(provenant_records::CanonicalV1::record_digest("fabric-graph-checkpoint", 2, &(&record["checkpoint"], &record["execution"]))?.to_string());
+        record["digest"] = serde_json::json!(
+            provenant_records::CanonicalV1::record_digest(
+                "fabric-graph-checkpoint",
+                2,
+                &(&record["checkpoint"], &record["execution"])
+            )?
+            .to_string()
+        );
         std::fs::write(&path, serde_json::to_vec(&record)?)?;
         super::cutover_pending_guard(&roots.state)?;
         let database = roots.state.as_path().join("run.sqlite3");
         let db = rusqlite::Connection::open(&database)?;
         db.execute_batch("CREATE TABLE attempts (project TEXT, run TEXT, id TEXT, record BLOB, terminal INTEGER);")?;
-        let current = serde_json::to_vec(&serde_json::json!({"context":{"graph_id":"old-pending-fixture"}}))?;
-        db.execute("INSERT INTO attempts VALUES (?1, 'run', 'attempt', ?2, 0)", rusqlite::params![project, current])?;
+        let current =
+            serde_json::to_vec(&serde_json::json!({"context":{"graph_id":"old-pending-fixture"}}))?;
+        db.execute(
+            "INSERT INTO attempts VALUES (?1, 'run', 'attempt', ?2, 0)",
+            rusqlite::params![project, current],
+        )?;
         super::cutover_pending_guard(&roots.state)?;
         // A completed parent can still have a detached live attempt. Its
         // retained template snapshot remains authoritative after settlement.
         record["checkpoint"]["nodes"][0]["state"] = serde_json::json!("succeeded");
-        record["digest"] = serde_json::json!(provenant_records::CanonicalV1::record_digest("fabric-graph-checkpoint", 2, &(&record["checkpoint"], &record["execution"]))?.to_string());
+        record["digest"] = serde_json::json!(
+            provenant_records::CanonicalV1::record_digest(
+                "fabric-graph-checkpoint",
+                2,
+                &(&record["checkpoint"], &record["execution"])
+            )?
+            .to_string()
+        );
         std::fs::write(&path, serde_json::to_vec(&record)?)?;
         super::cutover_pending_guard(&roots.state)?;
         assert!(!directory.join("pending").exists());

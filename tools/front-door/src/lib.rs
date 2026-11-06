@@ -1426,9 +1426,18 @@ pub fn dispatch(parsed: ParseOutcome, process: &dyn Process) -> u8 {
     let needs_cutover_guard = match &parsed {
         ParseOutcome::Invocation(inv) => match &inv.command {
             Command::Run(args) => !args.explain,
-            Command::Edit(_) | Command::Retry(_) | Command::Steer(_) | Command::Stop(_)
-                | Command::Lane(_) | Command::Reconcile(_) | Command::Native(_) | Command::Gc(_)
-                | Command::Tick | Command::Fabric(_) | Command::Hook(_) | Command::Internal(_) => true,
+            Command::Edit(_)
+            | Command::Retry(_)
+            | Command::Steer(_)
+            | Command::Stop(_)
+            | Command::Lane(_)
+            | Command::Reconcile(_)
+            | Command::Native(_)
+            | Command::Gc(_)
+            | Command::Tick
+            | Command::Fabric(_)
+            | Command::Hook(_)
+            | Command::Internal(_) => true,
             _ => false,
         },
         _ => false,
@@ -1437,7 +1446,13 @@ pub fn dispatch(parsed: ParseOutcome, process: &dyn Process) -> u8 {
         && let Some(resolved) = &resolved
         && let Err(error) = install::cutover_pending_guard(&resolved.roots.state)
     {
-        return fail(&verb, Outcome::Refused, "UPGRADE_DRAIN_REQUIRED", &error, globals);
+        return fail(
+            &verb,
+            Outcome::Refused,
+            "UPGRADE_DRAIN_REQUIRED",
+            &error,
+            globals,
+        );
     }
     let read_only_graph = match &parsed {
         ParseOutcome::Invocation(inv) => {
