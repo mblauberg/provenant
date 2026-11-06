@@ -1272,7 +1272,7 @@ impl GraphCheckpoint {
     }
 
     pub(super) fn node_successful(&self, node: &NodeProgress) -> bool {
-        if loops::handled_gate(self, node) {
+        if loops::handled_gate(self, node) || repair::handled_panel(self, node) {
             return true;
         }
         let mut current = node;

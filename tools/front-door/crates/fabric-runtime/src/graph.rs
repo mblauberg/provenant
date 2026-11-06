@@ -347,6 +347,11 @@ pub trait AttemptOwner {
     fn node_ask(&mut self, _scope: AskScope<'_>) -> Result<Option<AskReply>, Self::Error> {
         Ok(None)
     }
+    /// Send a durable non-blocking owner notification, idempotent by ask ID.
+    /// False means the host has no notification transport yet.
+    fn notify_owner(&mut self, _scope: AskScope<'_>) -> Result<bool, Self::Error> {
+        Ok(false)
+    }
     /// Withdraw a resolved ask's inbox request. Closing never creates one.
     fn close_node_ask(&mut self, _scope: AskScope<'_>) -> Result<(), Self::Error> {
         Ok(())
