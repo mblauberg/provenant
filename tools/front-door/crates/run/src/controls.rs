@@ -2088,7 +2088,12 @@ impl RunStore {
         )
     }
     fn fresh_writer_branch(&self, input: &Resume, writer: &WriterRequest) -> Result<String> {
-        let launch = crate::prepare_writer(writer, &self.writer_registry, self.context.project_id)?;
+        let launch = crate::prepare_writer_with_facts(
+            writer,
+            &self.writer_registry,
+            self.context.project_id,
+            &self.repo_facts,
+        )?;
         let owner = provenant_confinement::worktrees::load_owner(&launch.worktree)?.ok_or(
             RunError::Validation("fresh fallback needs an owned worktree"),
         )?;
@@ -2119,7 +2124,12 @@ impl RunStore {
         let Some(writer) = &task.writer else {
             return Ok(None);
         };
-        let launch = crate::prepare_writer(writer, &self.writer_registry, prior.project_id)?;
+        let launch = crate::prepare_writer_with_facts(
+            writer,
+            &self.writer_registry,
+            prior.project_id,
+            &self.repo_facts,
+        )?;
         self.check_writer_lineage(&prior, &launch.worktree, call)
     }
     pub(crate) fn check_writer_lineage(

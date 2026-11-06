@@ -1337,6 +1337,11 @@ pub enum Worktree {
     },
     /// List worktrees
     List,
+    /// Explain a worktree's state and suggest one repair command
+    Doctor {
+        /// Checkout path, relative to the selected project when not absolute
+        path: std::path::PathBuf,
+    },
     /// Stream advisory worktree inventory for the SessionStart collector.
     #[command(hide = true)]
     SessionList,

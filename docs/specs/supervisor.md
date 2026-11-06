@@ -15,8 +15,11 @@ relative to `tools/front-door/`.
 
 ## Custody
 
-### Repository facts in GC previews
+### Command-scoped repository facts
 
+Each command owns one repository facts session, passed into successive
+worktree contexts, admission and writer preparation. The session owns inventory
+and scalar output caps; callers do not interpret their own fact-limit cases.
 A GC command shares its worktree inventory between discovery and preview for
 each repository. The snapshot is tied to the common Git directory identity and
 is consumed once. Applied cleanup discards the snapshot and reads Git again

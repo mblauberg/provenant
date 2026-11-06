@@ -63,7 +63,8 @@ pub use controls::{
 };
 pub use delivery::HostDeliveryContext;
 pub use git_context::{
-    GitContext, continuation_history, ensure_local_branch, resolve_git_base, review_merge_base,
+    GitContext, continuation_history, ensure_local_branch, resolve_git_base,
+    resolve_git_base_with_facts, review_merge_base,
 };
 pub use holder::{HolderContext, HostLaunchContext, RootSeed, RunHolder, SealedTask};
 pub use launch::{
@@ -77,8 +78,8 @@ pub use retention::{
     AttemptLogRemoval, AttemptTmpRemoval, ProviderStateGc, ProviderStateIssue, TOMBSTONE,
 };
 pub use writer::{
-    LaunchConfinement, WriterFence, WriterLaunch, prepare_writer, resolve_reader_source,
-    resolve_writer, resolve_writer_proposal,
+    LaunchConfinement, WriterFence, WriterLaunch, prepare_writer, prepare_writer_with_facts,
+    resolve_reader_source, resolve_writer, resolve_writer_proposal,
 };
 
 pub use db::{ExecutionContext, Request, RunStore};

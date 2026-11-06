@@ -3221,6 +3221,7 @@ impl PrepareFixture {
             branch: provenant_confinement::repo::GitRefName::new("refs/heads/lane")?,
             base,
             custody: None,
+            facts: Default::default(),
             review_exempt: Default::default(),
         };
         let scope = provenant_supervisor::custody::Scope {
@@ -5079,5 +5080,44 @@ fn budget_commit_uses_bounded_git_without_running_hooks()
         String::from_utf8_lossy(&output.stderr)
     );
     assert_eq!(output.stdout, b"saved\n");
+    Ok(())
+}
+
+#[test]
+fn writer_preparation_preserves_command_repository_fact_caps()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    use provenant_confinement::{
+        utility::UtilityError,
+        worktrees::{RepoFacts, WorktreeError},
+    };
+    let fixture = PrepareFixture::new()?;
+    let execution = registered_landed_writer_fixture(&fixture)?;
+    let (clock, cancel) = (tests::clock(), CancelToken::new());
+    let call = tests::call(&clock, &cancel);
+    for (inventory, scalar) in [
+        (provenant_os::exec::DEFAULT_CAPTURE_LIMIT, 1),
+        (1, provenant_os::git::REPO_FACT_SCALAR_LIMIT),
+    ] {
+        let command_facts = RepoFacts::with_limits(inventory, scalar)?;
+        let store = RunStore::open(&execution, &call)?.with_repo_facts(&command_facts);
+        let result = crate::prepare_writer_with_facts(
+            &fixture.writer,
+            &store.writer_registry,
+            execution.project_id,
+            store.repo_facts(),
+        );
+        assert!(matches!(
+            result,
+            Err(RunError::Writer(WorktreeError::Utility(
+                UtilityError::Truncated { stream: "stdout" }
+            )))
+        ));
+    }
+    // The fixture remains admissible; a cap failure never leaves writer custody.
+    crate::prepare_writer(
+        &fixture.writer,
+        execution.state_root.as_path(),
+        execution.project_id,
+    )?;
     Ok(())
 }

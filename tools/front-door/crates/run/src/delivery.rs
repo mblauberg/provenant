@@ -2485,7 +2485,12 @@ impl crate::RunStore {
         if !self.custody_released(&record, call)? {
             return Err(RunError::Validation("writer custody has not settled"));
         }
-        let mut launch = crate::prepare_writer(&writer, &self.writer_registry, record.project_id)?;
+        let mut launch = crate::prepare_writer_with_facts(
+            &writer,
+            &self.writer_registry,
+            record.project_id,
+            &self.repo_facts,
+        )?;
         let state = launch
             .custody
             .take()

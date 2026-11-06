@@ -105,28 +105,38 @@ checkout; for an absolute path or a path below `.worktrees/`, use
 `--branch BRANCH` to create it. Git's worktree inventory establishes membership,
 so native linked checkouts and checkouts recreated at a previously used path
 need no registration or adoption. Another project's checkout is refused.
-A held writer lock reports busy; lifecycle removal and admission refuse an observed
-live process and name its pid, command and working directory when available.
+A held writer lock reports busy and admission names the holder when its attempt
+can be identified. Lifecycle removal refuses an observed live process; admission
+treats census observations as advisory when claiming an unowned checkout,
+replaying its operation or replacing a confirmed terminal lane owner.
 
 Live-writer detection at run admission excludes the invoking process and, by default,
 its verified ancestor chain (such as the invoking shell). A run launched from inside
-the target worktree is admitted when no other writer or foreign process is active in
-the tree. When a genuine live writer or foreign process is observed, admission is refused
-with an error naming the observed process (PID, command and working directory), rather
-than blaming a previous attempt. Hosts can tighten this policy by setting
+the target worktree is admitted when writer custody is free and the Git boundary
+is safe. Bystander observations warn with the observed process (PID, command
+and working directory) when available. Hosts can tighten the census policy by setting
 `confinement.census_exclude_ancestors = false` in `[knobs]` in host configuration
-(default `true`); when disabled, any ancestor shell whose working directory is inside
-the worktree is treated as a live writer and refused.
+(default `true`); when disabled, ancestor shells inside the worktree contribute
+to census observations too.
 
 A new writer may reuse a registered worktree from a terminal lane when the tree is clean and
-writer custody is free. Dirty trees, held locks and observed live writers still refuse. When
+writer custody is free. Dirty trees, held locks and retained import fences still refuse. When
 `--base` is supplied for a branch that already exists, Provenant accepts the branch only when
 it already contains that base (reusing its existing worktree or creating one); otherwise the refusal
 names the branch head and the base, and says to omit `--base` to reuse it.
 If a linked checkout has no Provenant lane-owner record, the worktree list
 shows that fact separately from its observed writer state. It may have been
 created outside Provenant. Inspect custody and use `--worktree <path>` to select
-the checkout explicitly; an unknown writer remains unknown until checked.
+the checkout explicitly; unknown custody remains refused until checked.
+
+Use `provenant worktree doctor PATH` after a worktree refusal. It reports the
+checkout's state, the reason and one suggested command for dirty, stale
+registration, live writer, unregistered and detached checkouts. Replace `BRANCH`
+or `PATH` placeholders before running a suggestion. Unknown occupancy includes
+its scope, evidence and source; inspect those before retrying. Doctor only
+observes the checkout: it does not run its suggestion, acquire writer custody
+for a lane or clear retained fences. Admission still rechecks custody and the
+Git boundary after a clean diagnosis.
 
 A refusal that says repository authority could not be revalidated includes the
 underlying repository error and its reason. Inspect that reason and the
