@@ -412,6 +412,28 @@ fn config_commands_report_graph_checkpoint_retention_and_source() -> Result {
     let all: serde_json::Value = serde_json::from_slice(&all.stdout.bytes)?;
     let advanced = all["data"]["fields"].as_array().ok_or("advanced fields")?;
     assert!(advanced.len() > compact.len());
+    let registry: serde_json::Value =
+        serde_json::from_str(include_str!("../../../config/harness-knobs.json"))?;
+    let documented_providers = registry["provider_updates"]["provider_ids"]
+        .as_array()
+        .ok_or("documented providers")?;
+    for adapter in provenant_records::ADAPTER_SPECS {
+        let documented = documented_providers
+            .iter()
+            .any(|provider| provider.as_str() == Some(adapter.name));
+        for setting in ["update", "runtime_deadline_seconds"] {
+            let path = format!("providers.{}.{setting}", adapter.name);
+            assert_eq!(
+                compact.iter().any(|field| field["path"] == path),
+                documented,
+                "compact provider setting {path}"
+            );
+            assert!(
+                advanced.iter().any(|field| field["path"] == path),
+                "advanced provider setting {path}"
+            );
+        }
+    }
     assert!(
         advanced
             .iter()
