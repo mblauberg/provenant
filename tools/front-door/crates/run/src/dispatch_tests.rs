@@ -9325,7 +9325,11 @@ fn legacy_tickets_without_a_class_are_treated_as_writers() -> TestResult {
     let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());
     let call = call(&clock, &cancel);
-    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let mut store = RunStore::open(&context(temp.path())?, &call)?;
+    store.set_admission_policy(AdmissionPolicy {
+        startup_spacing_ms: 20_000,
+        ..AdmissionPolicy::default()
+    });
     // A ledger from before lane classes, holding one lease and no start, so
     // the upgrade holds no class (the carried start has its own tests).
     old_ledger(
