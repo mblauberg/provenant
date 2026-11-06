@@ -718,7 +718,7 @@ fn native_attempt_store_preserves_unknown_versions_and_rejects_ambiguous_links()
 fn concurrent_native_attempt_updates_wait_and_preserve_both() -> Result {
     use crate::native_attempts::{self, Attempt};
     use provenant_os::fs::{Directory, LockMode};
-    use std::{ffi::OsStr, sync::mpsc, time::Duration};
+    use std::{ffi::OsStr, sync::mpsc};
 
     let f = Fixture::new()?;
     let directory = Directory::open_anchor(f.roots.state.as_path())?;
@@ -751,7 +751,6 @@ fn concurrent_native_attempt_updates_wait_and_preserve_both() -> Result {
             .collect();
         rx.recv().unwrap();
         rx.recv().unwrap();
-        std::thread::sleep(Duration::from_millis(100));
         drop(lock);
         for handle in handles {
             handle.join().unwrap().unwrap();
