@@ -2457,7 +2457,7 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 
 | Argument | Contract |
 |---|---|
-| `attempt` | `{"description": "Attempt ID", "name": "attempt", "positional": true, "required": true}` |
+| `attempt` | `{"description": "Attempt ID, graph ID or graph/node target", "name": "attempt", "positional": true, "required": true}` |
 | `--text-stdin` | `{"defaults": ["false"], "description": "Read the message from standard input (at most 4 KiB; input must finish within 5 seconds)", "name": "text_stdin", "required": true, "values": ["true", "false"]}` |
 | `--operation-id` | `{"name": "operation_id"}` |
 | `--help` | `{"description": "Print help", "name": "help"}` |

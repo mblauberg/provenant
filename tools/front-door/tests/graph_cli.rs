@@ -584,27 +584,28 @@ fn steer_graph_and_node_refuse_ambiguous_live_attempts_before_reading_stdin() ->
                 .is_some_and(|name| name == "graph-steer-ambiguous.json")
         })
         .ok_or("checkpoint")?;
-    let mut stored: Value = serde_json::from_slice(&std::fs::read(&checkpoint_path)?)?;
+    use provenant_core::{Clock, RootInputs, StateRoot, WaitBudget, CancelToken};
+    use provenant_fabric_runtime::graph::{FileJournal, GraphJournal, NodeState};
+    let mut inputs = RootInputs::new(rig.temp.path().to_path_buf(), rig.root.clone());
+    inputs.state_dir = Some(rig.state());
+    let state = StateRoot::resolve(&inputs, &provenant_os::fs::SystemPathResolver)?;
+    let project = checkpoint_path.parent().and_then(Path::file_name).and_then(|name| name.to_str()).ok_or("project id")?.parse()?;
+    let execution = FileJournal::execution(&state, project, "steer-ambiguous")?.ok_or("execution")?;
+    let mut checkpoint = FileJournal::read_checkpoint(&state, project, "steer-ambiguous")?.ok_or("checkpoint")?;
     let attempt = json!({"key":{"graph_id":"steer-ambiguous","node_id":"accept","route_index":0},
         "launched":false,"route":{"alias":"senior"},"state":"starting","attempt_ref":null,
         "outcome":null,"launch_actor":"fixture"});
-    stored["checkpoint"]["nodes"][0]["state"] = json!("running");
     let mut other = attempt.clone();
     other["key"]["route_index"] = json!(1);
-    stored["checkpoint"]["nodes"][0]["attempts"] = json!([attempt, other]);
-    let checkpoint: provenant_fabric_runtime::graph::GraphCheckpoint =
-        serde_json::from_value(stored["checkpoint"].clone())?;
-    let execution: provenant_fabric_runtime::graph::GraphExecution =
-        serde_json::from_value(stored["execution"].clone())?;
-    stored["digest"] = json!(
-        provenant_records::CanonicalV1::record_digest(
-            "fabric-graph-checkpoint",
-            2,
-            &(checkpoint, execution)
-        )?
-        .to_string()
-    );
-    std::fs::write(&checkpoint_path, serde_json::to_vec(&stored)?)?;
+    checkpoint.nodes[0].state = NodeState::Running;
+    checkpoint.nodes[0].attempts = serde_json::from_value(json!([attempt, other]))?;
+    let clock = provenant_os::clock::SystemClock::new();
+    let cancel = CancelToken::new();
+    let budget = WaitBudget::cli(clock.mono_now(), 5)?;
+    let mut journal = FileJournal::open(&state, project, "steer-ambiguous", budget, &cancel, &clock)?;
+    journal.bind(execution)?;
+    journal.save(&checkpoint)?;
+    drop(journal);
     for target in ["steer-ambiguous", "steer-ambiguous/accept"] {
         let (output, value) = rig.run(&["steer", target, "--text-stdin"])?;
         assert!(!output.status.success(), "{value}");
