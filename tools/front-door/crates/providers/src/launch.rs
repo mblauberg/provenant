@@ -567,6 +567,9 @@ pub(crate) fn private_git_objects(
     };
     let mut config_text = String::new();
     for path in globals.iter().filter(|path| path.is_file()) {
+        // Both Git's include and the exact sandbox grant must name the same
+        // physical file: anchor validation rejects symlink spellings.
+        let path = std::fs::canonicalize(path).map_err(|_| ProviderError::InvalidPath)?;
         let value = path.to_str().ok_or(ProviderError::InvalidPath)?;
         if value.chars().any(char::is_control) {
             return Err(ProviderError::InvalidPath);
@@ -575,7 +578,7 @@ pub(crate) fn private_git_objects(
             "[include]\n\tpath = {}\n",
             git_config_quote(value)
         ));
-        spec.profile.spec.runtime_reads.push(exact(path));
+        spec.profile.spec.runtime_reads.push(exact(&path));
     }
     config_text.push_str("[user]\n\tuseConfigOnly = true\n");
     for (key, value) in &identity {

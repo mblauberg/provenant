@@ -2971,10 +2971,12 @@ pub(super) fn prepare_candidates(
         };
         // Resolve gh credentials on the host, where a keychain login is
         // available. The token travels only in the live launch environment.
-        if writer.is_none()
+        let reader_gh = writer.is_none()
             && task.access.network(true) == NetworkAccess::Open
-            && adapter_spec.is_some_and(|spec| spec.github_auth.is_some())
-            && let Ok(gh) = locate("gh")
+            && adapter_spec.is_some_and(|spec| spec.github_auth.is_some());
+        if let Some(gh) = publishing_gh
+            .clone()
+            .or_else(|| reader_gh.then(|| locate("gh").ok()).flatten())
         {
             super::gh_auth::inject(&executor, &gh, &home, cancel, &mut spec.env);
             if adapter_spec.is_some_and(|spec| {
