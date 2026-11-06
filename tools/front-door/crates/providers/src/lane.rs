@@ -1115,7 +1115,7 @@ mod tests {
         use std::{
             io::Write,
             os::unix::fs::PermissionsExt,
-            process::{Command, Stdio},
+            process::Stdio,
         };
         let dir = tempfile::tempdir()?;
         let config = dir.path().join("host-config");
@@ -1145,7 +1145,7 @@ mod tests {
             (&wrapper, true, true),
             (&wrapper, false, true),
         ] {
-            let mut child = Command::new(executable)
+            let mut child = provenant_os::fixture::git_command_at(executable)
                 .args(["credential", "fill"])
                 .env_clear()
                 .envs(env.iter().filter(|_| with_config).cloned())
@@ -2364,7 +2364,8 @@ mod tests {
         let wrapper = dir.path().join("git-wrapper");
         std::fs::write(&wrapper, script)?;
         std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700))?;
-        let output = std::process::Command::new(wrapper)
+        let output = provenant_os::fixture::git_command_at(wrapper)
+            .env_clear()
             .args(["status", "argument with spaces"])
             .output()?;
         assert!(output.status.success());
