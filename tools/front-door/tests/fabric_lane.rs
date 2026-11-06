@@ -490,6 +490,7 @@ fn lane_edit_admits_revision_through_host_relay() -> Result {
 fn lane_cli_and_mcp_compile_rich_child_launches_without_local_submission() -> Result {
     let mut rig = TestRig::new()?;
     host(&rig, &["fabric", "identity", "--json"])?;
+    host(&rig, &["fabric", "task", "list", "--json"])?;
     lane_environment(&mut rig, AttemptId::from_bytes([78; 16]))?;
     let preview = host(&rig, &[
         "run", "Fix ${item}", "--use", "implement", "--over", "one,two",
@@ -502,9 +503,9 @@ fn lane_cli_and_mcp_compile_rich_child_launches_without_local_submission() -> Re
     assert!(children.iter().all(|child| child["access"] == "worktree_write"));
     let arguments = json!({"op":"run", "document":{
         "parameters":{"subject":{"type":"string"}},
-        "brief":"Inspect ${subject}", "tier":"junior", "access":"read_only"
-    }, "set":{"subject":"compiled MCP"}, "explain":true, "detached":true,
-       "idempotency_key":"rich-mcp-preview"});
+        "brief":"Inspect ${subject}", "tier":"junior", "access":"read_only",
+        "detached":true, "idempotency_key":"rich-mcp-preview"
+    }, "set":{"subject":"compiled MCP"}, "explain":true});
     let preview = mcp(&rig, "fabric_run", arguments.clone())?;
     assert_ne!(preview["isError"], true, "{preview}");
     let value = &preview["structuredContent"];

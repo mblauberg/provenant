@@ -156,7 +156,7 @@ impl Factory {
             return Err(invalid());
         }
         // Distinct calls create distinct children; callers opt into replay with a key.
-        let idempotency_key = match input.get("idempotency_key") {
+        let idempotency_key = match input.get("idempotency_key").or_else(|| raw.and_then(|document| document.get("idempotency_key"))) {
             Some(value) => value.as_str().filter(|key| !key.is_empty() && key.len() <= 200)
                 .ok_or_else(invalid)?.to_owned(),
             None => provenant_core::hex(&provenant_os::fs::entropy_128()
@@ -164,6 +164,16 @@ impl Factory {
         };
         let digest = provenant_records::CanonicalV1::file_digest(idempotency_key.as_bytes()).to_string();
         let key = format!("child-{}", &digest[7..39]);
+        let detached = input.get("detached")
+            .or_else(|| raw.and_then(|document| document.get("detached")))
+            .map(|value| value.as_bool().ok_or_else(invalid)).transpose()?.unwrap_or(false);
+        // These controls belong to the relay envelope, not the template schema.
+        let mut launch_document = raw.cloned();
+        if let Some(fields) = launch_document.as_mut().and_then(Value::as_object_mut) {
+            fields.remove("idempotency_key");
+            fields.remove("detached");
+        }
+        let raw = launch_document.as_ref();
         let has_overrides = ["brief", "use", "tier", "over"]
             .iter()
             .any(|field| input.get(*field).is_some_and(|value| !value.is_null()))
@@ -261,7 +271,7 @@ impl Factory {
             timeout_seconds: None,
             writer,
             write_scope,
-            detached: input.get("detached").map(|value| value.as_bool().ok_or_else(invalid)).transpose()?.unwrap_or(false),
+            detached,
             idempotency_key,
             reason: Some("run".into()),
             launch: Some(ChildLaunch {
@@ -1538,6 +1548,18 @@ mod tests {
         assert_eq!(node["attempt"]["new_worktree"], json!({"branch":"fix/child", "base":"HEAD"}));
         assert_eq!(controlled.write_scope, ["src"]);
         assert!(controlled.detached);
+        let nested = json!({"op":"run", "document":{"use":"implement", "brief":"Nested replay",
+            "idempotency_key":"nested-child", "detached":true}});
+        let nested_first = factory.child_request(&nested)?;
+        assert_eq!(factory.child_request(&nested)?, nested_first);
+        assert!(nested_first.detached);
+        let mut top = nested.clone();
+        top["idempotency_key"] = json!("top-child");
+        top["detached"] = json!(false);
+        let top = factory.child_request(&top)?;
+        assert_eq!(top.idempotency_key, "top-child");
+        assert_ne!(top.id, nested_first.id);
+        assert!(!top.detached);
         assert!(bound.writer);
         assert!(!bound.needs_worktree_provisioning());
         assert_eq!(
