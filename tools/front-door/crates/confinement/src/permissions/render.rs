@@ -1,6 +1,6 @@
 //! SBPL compilation and rendering.
 
-#[cfg(any(target_os = "macos", test))]
+#[cfg(target_os = "macos")]
 use super::validation::filtered_native_controls;
 use super::*;
 #[cfg(target_os = "macos")]
