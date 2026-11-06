@@ -27,10 +27,10 @@ use std::{
 };
 
 mod cancel;
-mod holder;
 pub mod cloud_owner;
 pub mod cloud_store;
 mod dispatch;
+mod holder;
 mod output;
 mod provider;
 mod reconcile;
@@ -44,8 +44,8 @@ mod wait;
 mod watch;
 mod worktree;
 pub use cancel::*;
-pub use holder::HostHolder;
 pub use dispatch::*;
+pub use holder::HostHolder;
 pub use output::*;
 pub(crate) use provider::find_executable as provider_executable;
 #[cfg(feature = "fixture")]

@@ -524,18 +524,11 @@ impl<'a> Service<'a> {
         run: RunId,
         providers: &dyn Providers,
         holder: &dyn Fn(&AttemptRecord, provenant_core::ActorId) -> Result<Vec<u8>>,
-        validated: Option<&ValidatedChild>,
         expected: &CanonicalRequest,
         call: &Request<'_>,
     ) -> Result<Vec<Started>> {
-        match validated {
-            Some(request) => self
-                .store
-                .start_child(run, request, providers, holder, call),
-            None => self
-                .store
-                .start_checked(run, expected, providers, holder, call),
-        }
+        self.store
+            .start_checked(run, expected, providers, holder, call)
     }
     pub fn resume(&self, input: &Resume, call: &Request<'_>) -> Result<RunRecord> {
         Self::scan(&input.prompt)?;
