@@ -1493,5 +1493,8 @@ and their earliest known resets. An exact model request keeps its model.
 A quota stop may retry the same alias even after generated work, within
 `settlement_retries` and the attempt limit. The graph archives the prior attempt and seals its reference in the successor;
 spent members remain in routing exclusions without a second run-policy lineage. Writers keep
-the same worktree; the successor is instructed to inspect its files and commits
-and continue the work rather than restart. Read-only lanes retry the original task.
+the same worktree, including uncommitted edits whose paths are listed in the
+successor's brief. The successor is instructed to inspect its files and commits
+and continue the work rather than restart. The original source pin, settled
+predecessor head and worktree ownership must still match. Read-only lanes retry
+the original task.

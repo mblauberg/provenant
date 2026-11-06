@@ -1917,6 +1917,18 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                     .iter()
                     .find(|task| task.task_id == previous.task_id)
                     .ok_or(FacadeError::StateCorrupt)?;
+                let writer = provenant_run::resolve_writer(
+                    self.factory.context.roots.state.as_path(),
+                    &self.factory.cwd,
+                    Path::new(worktree.ok_or(FacadeError::StateCorrupt)?),
+                )
+                .map_err(run_error)?;
+                if previous_task.writer.as_ref() != Some(&writer) {
+                    return Err(FacadeError::Conflict);
+                }
+                store
+                    .check_continuation_writer(previous.attempt_id, &call)
+                    .map_err(run_error)?;
                 let original = previous_task
                     .source_head
                     .as_ref()
@@ -2137,6 +2149,10 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             }
             if !accepted
                 && access == provenant_fabric_runtime::graph::AccessMode::WorktreeWrite
+                // A continuation already owns its predecessor's checkout.
+                // Preparation verifies its exact head and ancestry; advancing
+                // it here would refuse the uncommitted work it must retain.
+                && source_head.is_none()
                 && let (Some(path), Some(commit)) = (worktree, source_commit)
             {
                 let head = commit

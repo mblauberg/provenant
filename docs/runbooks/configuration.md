@@ -471,14 +471,14 @@ Homebrew or npm when its resolved executable identifies that installation.
 An unknown installation produces one activity note until its method becomes
 known or a command override is configured.
 
-Lanes hold shared leases from provider preparation through completion; updates
-need an exclusive lease. Busy providers are excluded from a lane's candidates
-without delaying other providers. Only when every candidate is busy does
-preparation wait, for up to 30 seconds total, before asking for a retry.
-Cancellation interrupts this wait. Nested launches retry missing executable
-discovery under the lease using the host's sealed search directories.
-Provider children inherit their shared lease: a long-lived background process
-keeps it and defers updates until it exits.
+Provider preparation takes shared leases; updates need an exclusive lease.
+Busy providers are excluded from a lane's candidates without delaying other
+providers. When every candidate is busy, preparation waits up to the caller's
+`--wait`, capped at 30 seconds, then proceeds with the installed provider.
+Cancellation interrupts this wait. Preparation releases its leases before
+launching the provider; providers and their children inherit no update lease.
+Nested launches retry missing executable discovery under the preparation lease
+using the host's sealed search directories.
 
 The updater inherits the exclusive lease, keeping it held if the worker is
 killed. On timeout the worker kills the updater's whole process group. The

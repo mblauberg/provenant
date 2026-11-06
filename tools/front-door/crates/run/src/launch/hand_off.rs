@@ -246,32 +246,6 @@ impl RunStore {
             };
             local_or_withdraw!(Err::<(), _>(refusal));
         }
-        if task.source_head.is_some()
-            && let Some(writer) = plan
-                .confinement
-                .as_ref()
-                .and_then(|plan| plan.writer.as_ref())
-        {
-            let git = local_or_withdraw!(
-                provenant_os::git::git_executable()
-                    .ok_or_else(|| local("Git", &RunError::GitUnavailable))
-            );
-            let paths = local_or_withdraw!(
-                writer
-                    .uncommitted_paths(&git)
-                    .map_err(|error| typed_local("writer status", &error))
-            );
-            if !paths.is_empty() {
-                local_or_withdraw!(Err::<(), _>(HandOff::Boundary {
-                    message: format!(
-                        "writer continuation: uncommitted predecessor edits: {}",
-                        paths.join(", ")
-                    ),
-                    class: provenant_records::diagnostic::BoundaryClass::Authority,
-                    cause: None,
-                }));
-            }
-        }
         // Reconcile may have withdrawn this attempt before the lease existed.
         match self.record(id, call) {
             Ok(now)

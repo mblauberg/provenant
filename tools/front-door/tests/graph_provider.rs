@@ -463,8 +463,10 @@ fn fixture() -> Result {
         }
         assert_eq!(policy_model, Some("gpt-6.1-terra"));
         assert!(!args.iter().any(|arg| arg == "resume"));
-        assert!(prompt.contains("The previous member stopped on quota."));
         if writer {
+            assert!(prompt.contains("The previous member stopped on quota."));
+            assert!(prompt.contains("quota-partial.txt"));
+            assert!(prompt.contains("quota-worktree.txt"));
             assert!(prompt.contains("Inspect the retained worktree and any commits"));
             assert!(prompt.contains("rather than restart"));
             assert_eq!(
@@ -1068,18 +1070,23 @@ fn claude_dispatch(host_native: bool, pool: bool) -> Result {
     let graph_route = if pool {
         json!({"alias":"secret-fixture"})
     } else if host_native {
-        json!({"adapter":"host-native","model":"ci-fixer"})
+        json!({"adapter":"host-native","name":"ci-fixer"})
     } else {
         json!({"adapter":"claude","model":"claude-sonnet-5-5","effort":"medium"})
     };
-    let lane = run_graph_provider(
-        &rig,
-        "fixture-claude",
-        json!({
-            "id":"provider", "prompt":if host_native { "fixture host-native" } else if pool { "prompt-sentinel-2719-indigo-owl" } else { "reply OK" },
-            "access":"read_only", "route":graph_route, "attempt":{"account":"pro"}
-        }),
-    )?;
+    let mut node = json!({
+        "id":"provider", "prompt":if host_native { "fixture host-native" } else if pool { "prompt-sentinel-2719-indigo-owl" } else { "reply OK" },
+        "access":"read_only", "attempt":{"account":"pro"}
+    });
+    if host_native {
+        node["routes"] = json!([
+            graph_route,
+            {"adapter":"claude","model":"claude-sonnet-5-5","effort":"medium"}
+        ]);
+    } else {
+        node["route"] = graph_route;
+    }
+    let lane = run_graph_provider(&rig, "fixture-claude", node)?;
     if !cfg!(target_os = "macos") {
         assert_eq!(lane["state"], "rejected", "{lane}");
         assert_eq!(lane["cause"], "pre_launch_refusal", "{lane}");
@@ -1264,7 +1271,12 @@ fn graph_read_only_alias_retries_another_member_after_empty_launch_quota() -> Re
     let lanes = rig.command(&["status", "--all", "--json"])?;
     assert_eq!(code(&lanes), 0, "{lanes:?}");
     let lanes: Value = serde_json::from_slice(&lanes.stdout.bytes)?;
-    let rows = lanes["data"]["rows"].as_array().ok_or("lanes")?;
+    let rows: Vec<_> = lanes["data"]["rows"]
+        .as_array()
+        .ok_or("rows")?
+        .iter()
+        .filter(|row| row["kind"] == "attempt")
+        .collect();
     assert_eq!(rows.len(), 2, "{lanes}");
     let first = rows
         .iter()
@@ -1391,7 +1403,12 @@ fn partial_quota_alias_fixture(writer: bool) -> Result {
     let status = rig.command(&["status", "--all", "--json"])?;
     assert_eq!(code(&status), 0, "{status:?}");
     let lanes: Value = serde_json::from_slice(&status.stdout.bytes)?;
-    let rows = lanes["data"]["rows"].as_array().ok_or("rows")?;
+    let rows: Vec<_> = lanes["data"]["rows"]
+        .as_array()
+        .ok_or("rows")?
+        .iter()
+        .filter(|row| row["kind"] == "attempt")
+        .collect();
     assert_eq!(rows.len(), 2, "{lanes}");
     let first = rows
         .iter()
@@ -2537,6 +2554,15 @@ fn agy_individual_quota_cools_model_until_reset() -> Result {
 }
 
 fn run_graph_provider(rig: &TestRig, graph_id: &str, node: Value) -> Result<Value> {
+    run_graph_provider_with_wait(rig, graph_id, node, "5s")
+}
+
+fn run_graph_provider_with_wait(
+    rig: &TestRig,
+    graph_id: &str,
+    node: Value,
+    wait: &str,
+) -> Result<Value> {
     let document = rig.root.join(format!("{graph_id}.json"));
     fs::write(
         &document,
@@ -2546,7 +2572,8 @@ fn run_graph_provider(rig: &TestRig, graph_id: &str, node: Value) -> Result<Valu
         "run",
         "--file",
         document.to_str().ok_or("document")?,
-        "--wait=5s",
+        "--wait",
+        wait,
         "--json",
     ])?;
     let response: Value = serde_json::from_slice(&out.stdout.bytes)?;
@@ -2667,11 +2694,17 @@ fn opencode_stderr_live_quota() -> Result {
             "stderr-quota",
             json!({
                 "id":"provider", "prompt":prompt_text, "access":"read_only",
-                "route":{"adapter":"opencode","model":"opencode/glm-5.3-flash-free"}
+                "route":{"adapter":"opencode","model":"opencode/opencode/glm-5.3-flash-free"}
             }),
         )?;
         let run = lane["run_id"].as_str().ok_or("run")?;
         assert_eq!(lane["state"], expected, "{prompt_text}: {lane}");
+        if expected == "succeeded" {
+            assert_eq!(
+                lane["observed_route"]["model"], "opencode/opencode/glm-5.3-flash-free",
+                "{lane}"
+            );
+        }
         let attempt = rig
             .state
             .join("runs")
@@ -2958,14 +2991,17 @@ fn graph_launch_proceeds_when_provider_update_is_busy() -> Result {
     )?;
     use std::os::unix::fs::MetadataExt;
     let metadata = fs::metadata(rig.state.join("provider-updates/agy.lock"))?;
-    let lane = run_graph_provider(
+    let started = std::time::Instant::now();
+    let lane = run_graph_provider_with_wait(
         &rig,
         "busy-provider",
         json!({
             "id":"provider", "prompt":format!("report lease status {} {}", metadata.dev(), metadata.ino()),
             "access":"read_only", "route":{"adapter":"agy","model":"gemini-3.8-flash"}
         }),
+        "1s",
     )?;
+    assert!(started.elapsed() < std::time::Duration::from_secs(8));
     let run = lane["run_id"].as_str().ok_or("run id")?;
     let lanes = rig.command(&["status", run, "--wait=60s", "--json"])?;
     assert_eq!(code(&lanes), 0, "{lanes:?}");
@@ -2997,8 +3033,8 @@ fn graph_codex_rollout_binds_observed_route_and_missing_rollout_is_explicit() ->
                 "route":{"adapter":"codex","model":"gpt-6-luna","effort":"low"}
             }),
         )?;
-        assert_eq!(lane["state"], "succeeded", "{lane}");
         if has_rollout {
+            assert_eq!(lane["state"], "succeeded", "{lane}");
             assert_eq!(
                 lane["observed_route"]["model"], "codex/gpt-6-luna",
                 "{lane}"
@@ -3008,8 +3044,14 @@ fn graph_codex_rollout_binds_observed_route_and_missing_rollout_is_explicit() ->
                 "01234567-89ab-cdef-0123-456789abcdef"
             );
         } else {
+            assert_eq!(lane["state"], "failed", "{lane}");
+            assert_eq!(lane["terminal_cause"], "identity_unobserved", "{lane}");
             assert!(lane["observed_route"].is_null(), "{lane}");
-            assert!(!lane["transcript"].is_null(), "{lane}");
+            assert_eq!(
+                lane["transcript"]["session"], "01234567-89ab-cdef-0123-456789abcdef",
+                "{lane}"
+            );
+            assert!(lane["transcript"]["path"].is_null(), "{lane}");
         }
     }
     cleanup.disarm();

@@ -247,9 +247,9 @@ boundary = "authority"
 reason = "Provider writes cannot modify the immutable source view supplied to the task."
 
 [[guard]]
-site = "cli/src/run/provider/preparation.rs#prepare_candidates"
+site = "cli/src/run/provider/confinement.rs#writer_source_context"
 boundary = "authority"
-reason = "A writer continuation cannot take over a predecessor's worktree while its edits are uncommitted."
+reason = "A writer continuation requires readable predecessor status and a head descended from its pinned source; retained uncommitted edits are reported in its brief."
 
 [[guard]]
 site = "run/src/launch/hand_off.rs#RunStore::hand_off"
@@ -284,7 +284,7 @@ reason = "A continuation must retain its recorded worktree ownership and cannot 
 [[guard]]
 site = "run/src/launch/hand_off.rs#RunStore::hand_off"
 boundary = "authority"
-reason = "A writer continuation cannot discard uncommitted predecessor edits, and an attempt changed after custody acquisition cannot be handed off."
+reason = "An attempt changed after custody acquisition cannot be handed off."
 
 [[guard]]
 site = "run/src/launch.rs#RunStore::start_inner"
