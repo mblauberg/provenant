@@ -2986,7 +2986,9 @@ fn prepare_all_adapters_and_pin_launch_controls() -> Result<(), ProviderError> {
             provenant_confinement::write_grants(confined.permissions(), &shared_spec.profile)
                 .iter()
                 .all(|grant| {
-                    !grant.path.starts_with(shared_var) && !shared_var.starts_with(&grant.path)
+                    !grant.path.starts_with(shared_var)
+                        && !shared_var.starts_with(&grant.path)
+                        && !Path::new("/opt/homebrew/bin/provider").starts_with(&grant.path)
                 })
         );
         assert!(shared_spec.omitted_discovery.iter().any(|omitted| {
@@ -6758,7 +6760,9 @@ fn shared_provider_package_prefix_falls_back_to_exact_executable() -> Result<(),
                 provenant_confinement::write_grants(plan.permissions(), &spec.profile)
                     .iter()
                     .all(|grant| {
-                        !grant.path.starts_with(&shared_var) && !shared_var.starts_with(&grant.path)
+                        !grant.path.starts_with(&shared_var)
+                            && !shared_var.starts_with(&grant.path)
+                            && !Path::new(prefix).join("bin/provider").starts_with(&grant.path)
                     }),
                 "{adapter}: {prefix}"
             );
