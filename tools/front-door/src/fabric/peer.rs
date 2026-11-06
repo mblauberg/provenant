@@ -420,7 +420,11 @@ pub fn peer(
                     }
                     let SubmitInput::Submit { tasks, host, .. } = input;
                     if host.is_some()
-                        || tasks.iter().any(|task| task.context.as_ref().is_some_and(|context| context.graph_template_launch))
+                        || tasks.iter().any(|task| {
+                            task.context
+                                .as_ref()
+                                .is_some_and(|context| context.graph_template_launch)
+                        })
                         || tasks.iter().any(|task| {
                             task.access != provenant_fabric_runtime::graph::AccessMode::ReadOnly
                                 || task.worktree.is_some()
@@ -477,7 +481,9 @@ pub fn peer(
                         .transpose()
                         .map_err(run_error)?
                         .flatten()
-                        .is_some_and(|operation| !matches!(operation.state, provenant_run::OperationState::Prepared));
+                        .is_some_and(|operation| {
+                            !matches!(operation.state, provenant_run::OperationState::Prepared)
+                        });
                     // Lost receipts replay their sealed request even when unrelated
                     // old work now needs draining. New operations still refuse.
                     if !retained {
@@ -486,22 +492,23 @@ pub fn peer(
                     let mut input = input.clone();
                     let SubmitInput::Submit { tasks, .. } = &mut input;
                     for task in tasks {
-                        let context = task.context.as_mut().filter(|context| {
-                            context.graph_id.as_ref().is_some_and(|id| !id.is_empty())
-                                && context.node_id.as_ref().is_some_and(|id| !id.is_empty())
-                        }).ok_or_else(|| FacadeError::invalid(InvalidInputDetail::Field("graph context".into())))?;
+                        let context = task
+                            .context
+                            .as_mut()
+                            .filter(|context| {
+                                context.graph_id.as_ref().is_some_and(|id| !id.is_empty())
+                                    && context.node_id.as_ref().is_some_and(|id| !id.is_empty())
+                            })
+                            .ok_or_else(|| {
+                                FacadeError::invalid(InvalidInputDetail::Field(
+                                    "graph context".into(),
+                                ))
+                            })?;
                         // The receiving host records provenance only after validating
                         // the authenticated graph launch envelope above.
                         context.graph_template_launch = true;
                     }
-                    owner.submit_with_access(
-                        input,
-                        budget,
-                        &cancel,
-                        access,
-                        retry,
-                        Some(attempt),
-                    )
+                    owner.submit_with_access(input, budget, &cancel, access, retry, Some(attempt))
                 })(),
                 |data| PeerResult::Submitted {
                     data,

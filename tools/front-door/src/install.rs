@@ -1788,17 +1788,34 @@ mod tests {
     }
 
     #[test]
-    fn cutover_reads_wal_and_closed_databases_without_mutation() -> Result<(), Box<dyn std::error::Error>> {
+    fn cutover_reads_wal_and_closed_databases_without_mutation()
+    -> Result<(), Box<dyn std::error::Error>> {
         const CHILD: &str = "PROVENANT_TEST_CUTOVER_READ";
         if let Some(path) = std::env::var_os(CHILD) {
-            let reader = provenant_fabric_runtime::graph::cutover::read_connection(Path::new(&path))?;
-            assert_eq!(reader.query_row("SELECT COUNT(*) FROM attempts WHERE terminal=0", [], |row| row.get::<_, i64>(0))?, 1);
+            let reader =
+                provenant_fabric_runtime::graph::cutover::read_connection(Path::new(&path))?;
+            assert_eq!(
+                reader.query_row(
+                    "SELECT COUNT(*) FROM attempts WHERE terminal=0",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )?,
+                1
+            );
             return Ok(());
         }
         let observe = |path: &Path| -> Result<(), Box<dyn std::error::Error>> {
-            use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination};
-            let argv = [std::env::current_exe()?.into_os_string(), "--exact".into(), "install::tests::cutover_reads_wal_and_closed_databases_without_mutation".into()];
-            let mut environment: Vec<_> = std::env::vars_os().filter(|(key, _)| key != CHILD).collect();
+            use provenant_os::exec::{
+                ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination,
+            };
+            let argv = [
+                std::env::current_exe()?.into_os_string(),
+                "--exact".into(),
+                "install::tests::cutover_reads_wal_and_closed_databases_without_mutation".into(),
+            ];
+            let mut environment: Vec<_> = std::env::vars_os()
+                .filter(|(key, _)| key != CHILD)
+                .collect();
             environment.push((CHILD.into(), path.as_os_str().to_owned()));
             let cwd = std::env::current_dir()?;
             let mut options = ExecOptions::new(&argv, &cwd, std::time::Duration::from_secs(30));
@@ -1806,7 +1823,13 @@ mod tests {
             options.stdout = StreamPolicy::Capture { limit: 65536 };
             options.stderr = StreamPolicy::Capture { limit: 65536 };
             let output = SystemExecutor::new(1)?.execute(options)?;
-            assert_eq!(output.termination, Termination::Exit(0), "{}{}", String::from_utf8_lossy(&output.stdout.bytes), String::from_utf8_lossy(&output.stderr.bytes));
+            assert_eq!(
+                output.termination,
+                Termination::Exit(0),
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout.bytes),
+                String::from_utf8_lossy(&output.stderr.bytes)
+            );
             assert!(!output.timed_out && !output.cancelled);
             Ok(())
         };
@@ -1835,22 +1858,36 @@ mod tests {
     }
 
     #[test]
-    fn cutover_remote_template_provenance_is_current_but_upgrade_still_drains() -> Result<(), Box<dyn std::error::Error>> {
+    fn cutover_remote_template_provenance_is_current_but_upgrade_still_drains()
+    -> Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
         let roots = cutover_roots(temp.path())?;
         std::fs::create_dir_all(roots.state.as_path())?;
         let db = rusqlite::Connection::open(roots.state.as_path().join("run.sqlite3"))?;
         db.execute_batch("CREATE TABLE attempts (project TEXT, run TEXT, id TEXT, record BLOB, terminal INTEGER);")?;
         let record = serde_json::json!({"context":{"graph_id":"remote", "node_id":"task", "graph_template_launch":true}});
-        db.execute("INSERT INTO attempts VALUES ('project','run','attempt',?1,0)", [serde_json::to_vec(&record)?])?;
+        db.execute(
+            "INSERT INTO attempts VALUES ('project','run','attempt',?1,0)",
+            [serde_json::to_vec(&record)?],
+        )?;
         super::cutover_pending_guard(&roots.state)?;
-        assert_eq!(super::pending_upgrade_findings(&roots.state, false)?.len(), 1);
+        assert_eq!(
+            super::pending_upgrade_findings(&roots.state, false)?.len(),
+            1
+        );
         let legacy = serde_json::json!({"context":{"graph_id":"remote", "node_id":"task"}});
-        db.execute("UPDATE attempts SET record=?1", [serde_json::to_vec(&legacy)?])?;
-        let error = super::cutover_admission_guard(&roots.state).expect_err("legacy admission must refuse");
+        db.execute(
+            "UPDATE attempts SET record=?1",
+            [serde_json::to_vec(&legacy)?],
+        )?;
+        let error =
+            super::cutover_admission_guard(&roots.state).expect_err("legacy admission must refuse");
         assert_eq!(error.code(), "UPGRADE_DRAIN_REQUIRED");
         assert!(!format!("{error:?}").contains(temp.path().to_str().ok_or("path")?));
-        assert_eq!(super::pending_upgrade_findings(&roots.state, true)?.len(), 1);
+        assert_eq!(
+            super::pending_upgrade_findings(&roots.state, true)?.len(),
+            1
+        );
         Ok(())
     }
 

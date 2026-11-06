@@ -204,7 +204,8 @@ pub fn open_locking_read_only_connection(path: &Path) -> rusqlite::Result<Connec
     read_only_vfs::register_locking_reader()?;
     let db = Connection::open_with_flags_and_vfs(
         path,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX
+        OpenFlags::SQLITE_OPEN_READ_ONLY
+            | OpenFlags::SQLITE_OPEN_NO_MUTEX
             | OpenFlags::SQLITE_OPEN_NOFOLLOW,
         "provenant-locking-reader",
     )?;

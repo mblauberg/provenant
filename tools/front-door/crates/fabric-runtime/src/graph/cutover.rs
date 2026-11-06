@@ -26,8 +26,7 @@ pub fn pending_findings(
             else {
                 continue;
             };
-            let ids = super::FileJournal::graph_ids(state, project)
-                .map_err(|e| e.to_string())?;
+            let ids = super::FileJournal::graph_ids(state, project).map_err(|e| e.to_string())?;
             for id in ids {
                 if legacy_only
                     && super::FileJournal::execution(state, project, &id)
@@ -40,9 +39,7 @@ pub fn pending_findings(
                     current.insert((project.to_string(), id));
                     continue;
                 }
-                match super::FileJournal::pending_execution(
-                    state, project, &id,
-                ) {
+                match super::FileJournal::pending_execution(state, project, &id) {
                     Ok(None) => continue,
                     Ok(Some(_)) => {}
                     Err(error) if error.is_unreadable() => {}
@@ -76,8 +73,7 @@ pub fn pending_findings(
         {
             continue;
         }
-        let db = read_connection(&database)
-            .map_err(|e| format!("{}: {e}", database.display()))?;
+        let db = read_connection(&database).map_err(|e| format!("{}: {e}", database.display()))?;
         let mut query = db
             .prepare(
                 "SELECT project, run, id, record FROM attempts WHERE terminal=0 ORDER BY project, run, id",
@@ -98,11 +94,18 @@ pub fn pending_findings(
             if legacy_only && store == state.as_path() {
                 let record: serde_json::Value =
                     serde_json::from_slice(&record).map_err(|e| e.to_string())?;
-                let graph = record.pointer("/context/graph_id").and_then(serde_json::Value::as_str);
-                let remote_template = record.pointer("/context/graph_template_launch") == Some(&serde_json::Value::Bool(true))
+                let graph = record
+                    .pointer("/context/graph_id")
+                    .and_then(serde_json::Value::as_str);
+                let remote_template = record.pointer("/context/graph_template_launch")
+                    == Some(&serde_json::Value::Bool(true))
                     && graph.is_some_and(|id| !id.is_empty())
-                    && record.pointer("/context/node_id").and_then(serde_json::Value::as_str).is_some_and(|id| !id.is_empty());
-                if remote_template || graph.is_some_and(|id| current.contains(&(project.clone(), id.to_owned())))
+                    && record
+                        .pointer("/context/node_id")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(|id| !id.is_empty());
+                if remote_template
+                    || graph.is_some_and(|id| current.contains(&(project.clone(), id.to_owned())))
                 {
                     continue;
                 }
@@ -132,10 +135,12 @@ pub fn read_connection(path: &Path) -> rusqlite::Result<rusqlite::Connection> {
         Ok(db) => return Ok(db),
         Err(rusqlite::Error::SqliteFailure(error, _))
             if error.code == rusqlite::ErrorCode::CannotOpen
-                || matches!(error.extended_code,
+                || matches!(
+                    error.extended_code,
                     rusqlite::ffi::SQLITE_IOERR_LOCK
                         | rusqlite::ffi::SQLITE_IOERR_SHMOPEN
-                        | rusqlite::ffi::SQLITE_IOERR_SHMMAP) => {}
+                        | rusqlite::ffi::SQLITE_IOERR_SHMMAP
+                ) => {}
         Err(error) => return Err(error),
     }
     // A missing WAL index needs an exclusive reader with a lock-capable
@@ -160,4 +165,3 @@ pub fn pending_guard(state: &provenant_core::StateRoot) -> Result<(), String> {
         findings.join("\n")
     ))
 }
-

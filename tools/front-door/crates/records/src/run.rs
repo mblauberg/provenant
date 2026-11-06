@@ -1527,7 +1527,13 @@ mod tests {
     #[test]
     fn graph_launch_provenance_is_typed_bound_and_canonical()
     -> Result<(), Box<dyn std::error::Error>> {
-        assert!(!WorkContext { graph_template_launch: true, ..Default::default() }.accepted());
+        assert!(
+            !WorkContext {
+                graph_template_launch: true,
+                ..Default::default()
+            }
+            .accepted()
+        );
         let labels = serde_json::json!({"graph_id":"graph-one", "node_id":"node-one"});
         let mut context: WorkContext = serde_json::from_value(labels.clone())?;
         assert!(context.accepted());
@@ -1536,12 +1542,24 @@ mod tests {
         let before = CanonicalV1::record_digest("run-request-context", 1, &context)?;
         context.graph_template_launch = true;
         assert!(context.accepted());
-        assert_eq!(serde_json::to_value(&context)?["graph_template_launch"], true);
-        assert_ne!(CanonicalV1::record_digest("run-request-context", 1, &context)?, before);
-        assert_eq!(serde_json::from_value::<WorkContext>(serde_json::to_value(&context)?)?, context);
+        assert_eq!(
+            serde_json::to_value(&context)?["graph_template_launch"],
+            true
+        );
+        assert_ne!(
+            CanonicalV1::record_digest("run-request-context", 1, &context)?,
+            before
+        );
+        assert_eq!(
+            serde_json::from_value::<WorkContext>(serde_json::to_value(&context)?)?,
+            context
+        );
         for missing in ["graph_id", "node_id"] {
             let mut value = serde_json::to_value(&context)?;
-            value.as_object_mut().ok_or("context fields")?.remove(missing);
+            value
+                .as_object_mut()
+                .ok_or("context fields")?
+                .remove(missing);
             assert!(!serde_json::from_value::<WorkContext>(value)?.accepted());
             let mut empty = serde_json::to_value(&context)?;
             empty[missing] = serde_json::json!("");

@@ -2182,10 +2182,13 @@ fn peer_dispatch_recovers_receipt_when_probes_fail() -> Result {
     // A lost receipt must remain recoverable after unrelated legacy work appears
     // at the receiver. Replay observes its sealed operation rather than admitting
     // a new launch, and must leave that legacy work untouched.
-    let legacy_directory = rig.root.join(
-        "peer-state/fabric/graphs/11111111111111111111111111111111",
-    );
-    std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&legacy_directory)?;
+    let legacy_directory = rig
+        .root
+        .join("peer-state/fabric/graphs/11111111111111111111111111111111");
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&legacy_directory)?;
     let legacy_path = legacy_directory.join("graph-old-pending-fixture.json");
     let legacy = include_bytes!("fixtures/install/old-pending-checkpoint.json");
     std::fs::write(&legacy_path, legacy)?;

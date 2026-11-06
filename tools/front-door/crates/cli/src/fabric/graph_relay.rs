@@ -1282,7 +1282,14 @@ mod provisioning_tests {
             }]}]
         }))?;
         {
-            let mut journal = FileJournal::open(&context.roots.state, context.identity.project, "current", budget, &cancel, &clock)?;
+            let mut journal = FileJournal::open(
+                &context.roots.state,
+                context.identity.project,
+                "current",
+                budget,
+                &cancel,
+                &clock,
+            )?;
             journal.bind(GraphExecution {
                 review_base: None, extra: Default::default(), integration_base: None,
                 directory: project.clone(),
@@ -1296,7 +1303,14 @@ mod provisioning_tests {
         let request = json!({"op":"add","id":"child","use":"task","brief":"Read","idempotency_key":"receipt"});
         let receipt = serve(&context, "caller", request.clone(), budget, &cancel, &clock)?;
         {
-            let mut journal = FileJournal::open(&context.roots.state, context.identity.project, "legacy", budget, &cancel, &clock)?;
+            let mut journal = FileJournal::open(
+                &context.roots.state,
+                context.identity.project,
+                "legacy",
+                budget,
+                &cancel,
+                &clock,
+            )?;
             journal.bind(GraphExecution {
                 review_base: None, extra: Default::default(), integration_base: None,
                 directory: project.clone(),
@@ -1304,17 +1318,35 @@ mod provisioning_tests {
             })?;
             journal.save(&serde_json::from_value(json!({"schema_version":1,"graph_id":"legacy","plan_digest":"fixture","nodes":[{"id":"old","state":"pending","worktree":null,"attempts":[]}]}))?)?;
         }
-        assert!(provenant_fabric_runtime::graph::cutover::pending_guard(&context.roots.state).is_err());
-        let before = FileJournal::read_checkpoint(&context.roots.state, context.identity.project, "current")?;
+        assert!(
+            provenant_fabric_runtime::graph::cutover::pending_guard(&context.roots.state).is_err()
+        );
+        let before = FileJournal::read_checkpoint(
+            &context.roots.state,
+            context.identity.project,
+            "current",
+        )?;
         let replay = serve(&context, "caller", request.clone(), budget, &cancel, &clock)?;
         assert_eq!(replay["node"], receipt["node"]);
         assert_eq!(replay["revision"], receipt["revision"]);
         assert_eq!(replay["replayed"], true);
         let mut fresh = request;
         fresh["idempotency_key"] = json!("new-child");
-        for request in [fresh, json!({"op":"edit","id":"current","patch":{"schema_version":1,"idempotency_key":"new-edit","nodes":[{"id":"another","use":"task","brief":"More"}]}})] {
-            assert!(matches!(serve(&context, "caller", request, budget, &cancel, &clock), Err(ServiceError::Cli { code, .. }) if code == "UPGRADE_DRAIN_REQUIRED"));
-            assert_eq!(FileJournal::read_checkpoint(&context.roots.state, context.identity.project, "current")?, before);
+        for request in [
+            fresh,
+            json!({"op":"edit","id":"current","patch":{"schema_version":1,"idempotency_key":"new-edit","nodes":[{"id":"another","use":"task","brief":"More"}]}}),
+        ] {
+            assert!(
+                matches!(serve(&context, "caller", request, budget, &cancel, &clock), Err(ServiceError::Cli { code, .. }) if code == "UPGRADE_DRAIN_REQUIRED")
+            );
+            assert_eq!(
+                FileJournal::read_checkpoint(
+                    &context.roots.state,
+                    context.identity.project,
+                    "current"
+                )?,
+                before
+            );
         }
         Ok(())
     }
