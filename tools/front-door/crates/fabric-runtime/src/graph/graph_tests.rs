@@ -10921,6 +10921,20 @@ fn admitted_invalid_launch_projects_safe_schema_reason_and_action() {
     assert!(reason.contains("check the named input field"));
     assert!(!reason.contains("TOKEN_SENTINEL"));
     assert!(!reason.chars().any(char::is_control));
+
+    let mut owner = ErrorLauncher {
+        now: Some(at(0)),
+        errors: [(
+            1,
+            crate::coordination::facade::FacadeError::InvalidInput { detail: None },
+        )]
+        .into(),
+        ..Default::default()
+    };
+    let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
+    let reason = run.checkpoint.nodes[0].advance_error.as_deref().unwrap();
+    assert!(reason.contains("invalid_input"));
+    assert!(reason.contains("check the input"));
 }
 
 #[test]

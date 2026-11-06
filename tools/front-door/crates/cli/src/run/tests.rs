@@ -5156,6 +5156,21 @@ fn projected_cli_error_omits_unsafe_source_and_keeps_bounded_fields() {
         assert!(wire["error"].get("detail").is_none());
         assert!(!wire.to_string().contains("TOKEN_SENTINEL"));
         assert!(wire.to_string().len() < 4096);
+        let mut human = Vec::new();
+        crate::render::render(
+            &reply.result,
+            crate::render::RenderMode::Human {
+                text: "",
+                summary: None,
+                read_only: false,
+            },
+            &mut human,
+        )
+        .unwrap();
+        let human = String::from_utf8(human).unwrap();
+        assert!(!human.contains("TOKEN_SENTINEL"));
+        assert!(!human.chars().any(|c| c == '\u{1b}'));
+        assert!(human.len() < 4096);
     }
     let failure = super::Fail::from(provenant_run::RunError::Io(std::io::Error::other(
         "TOKEN_SENTINEL\u{1b}",
