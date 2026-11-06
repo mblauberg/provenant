@@ -2496,8 +2496,8 @@ fn dispatch_reuses_only_free_lane_or_unowned_worktree() -> Result<(), Box<dyn st
                 .collect()
         }
     }
-    struct UnknownCustody;
-    impl WorkerObserver for UnknownCustody {
+    struct Unknown;
+    impl WorkerObserver for Unknown {
         fn observe_roots(
             &self,
             roots: &[PathBuf],
@@ -2508,7 +2508,7 @@ fn dispatch_reuses_only_free_lane_or_unowned_worktree() -> Result<(), Box<dyn st
                 .map(|root| {
                     (
                         root.clone(),
-                        Occupancy::custody_unknown(root, "fixture custody unavailable"),
+                        Occupancy::census_unknown(root, "fixture census unavailable"),
                     )
                 })
                 .collect()
@@ -2678,6 +2678,12 @@ fn dispatch_reuses_only_free_lane_or_unowned_worktree() -> Result<(), Box<dyn st
             "HEAD",
         ],
     )?;
+    // A census gap is advisory; a locked Git registration is real custody
+    // uncertainty and must refuse reuse until the operator repairs it.
+    run_git(
+        &project,
+        &["worktree", "lock", native_path.to_str().ok_or("path")?],
+    )?;
     let refused = super::own_worktree(
         &super::OwnedWorktree {
             branch: "native-branch".into(),
@@ -2687,7 +2693,7 @@ fn dispatch_reuses_only_free_lane_or_unowned_worktree() -> Result<(), Box<dyn st
         Some("HEAD"),
         &OperationId::parse("native-branch-refusal")?,
         &edge,
-        &UnknownCustody,
+        &Unknown,
         |_| false,
         &mut None,
         &clock,
@@ -2742,6 +2748,10 @@ fn dispatch_reuses_only_free_lane_or_unowned_worktree() -> Result<(), Box<dyn st
     assert_eq!(output.termination, Termination::Exit(0), "{remedy}");
     let selected = String::from_utf8(output.stdout.bytes)?;
     assert_eq!(std::path::Path::new(&selected), native_path);
+    run_git(
+        &project,
+        &["worktree", "unlock", native_path.to_str().ok_or("path")?],
+    )?;
     let mut worktree_command = parsed_run(&[
         "--worktree",
         &selected,
@@ -2952,7 +2962,7 @@ fn dispatch_reuses_only_free_lane_or_unowned_worktree() -> Result<(), Box<dyn st
         Some(&base_b),
         &OperationId::parse("terminal-replacement")?,
         &edge,
-        &UnknownCustody,
+        &Unknown,
         |attempt| attempt == prior_attempt,
         &mut None,
         &clock,
