@@ -1117,7 +1117,7 @@ mod tests {
         )?;
         let id = document.graph_id.clone();
         let attempt = json!({"key":{"graph_id":id,"node_id":"task","route_index":0},"launched":true,"route":{"alias":"senior"},"state":"terminal","attempt_ref":"host/attempt","launch_actor":"actor","usage":{"tokens":100,"cost_micro_usd":25,"wall_time_seconds":3}});
-        let checkpoint = serde_json::from_value(
+        let checkpoint: provenant_fabric_runtime::graph::GraphCheckpoint = serde_json::from_value(
             json!({"schema_version":1,"graph_id":id,"plan_digest":"test","nodes":[
                 {"id":"group","worktree":null,"state":"succeeded","attempts":[],"children":["task"],"usage":{"tokens":100}},
                 {"id":"task","worktree":null,"state":"succeeded","attempts":[attempt.clone()],"previous_attempts":[attempt]}
