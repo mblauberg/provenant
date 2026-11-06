@@ -26,6 +26,8 @@ pub struct Scope {
 pub enum CustodyError {
     #[error("worktree writer lock busy")]
     Busy,
+    #[error("writer observation gate unavailable: {0}")]
+    ObservationGate(String),
     #[error("writer reservation requires recovery")]
     Fenced,
     #[error("writer import retained for run {run}, attempt {attempt}")]
@@ -333,6 +335,7 @@ impl CustodyLease {
     fn ensure_lease(&mut self) -> Result<()> {
         if self.lease.is_none() {
             let clock = provenant_os::clock::SystemClock::new();
+            let observation = writer_admission_guard(&self.lock_directory)?;
             self.lease = Some(self.lock_directory.lock(
                 OsStr::new("writer.lock"),
                 LockMode::Exclusive,
@@ -340,6 +343,7 @@ impl CustodyLease {
                 &CancelToken::new(),
                 &clock,
             )?);
+            drop(observation);
         }
         Ok(())
     }
@@ -408,6 +412,7 @@ pub(crate) fn acquire_writer_with_observer(
     clock: &dyn Clock,
     observer: &dyn ProcessObserver,
 ) -> Result<CustodyLease> {
+    let observation = writer_admission_guard(&directory)?;
     let lease = directory
         .lock(
             OsStr::new("writer.lock"),
@@ -420,6 +425,7 @@ pub(crate) fn acquire_writer_with_observer(
             FsError::LockTimeout { .. } => CustodyError::Busy,
             other => other.into(),
         })?;
+    drop(observation);
     let lock_directory = directory;
     // Old guardians kept their evidence in the slot itself. Do not admit a
     // successor over that fence before recovery has retained its writer head.
@@ -1493,6 +1499,43 @@ fn observe_checkpoint(
     })
 }
 
+/// Initialise the short observer gate before publishing writer exclusion.
+/// Registry mutation owns creation; read-only reports only open this file.
+pub fn prepare_writer_observation(directory: &Directory) -> Result<()> {
+    drop(writer_admission_guard(directory)?);
+    Ok(())
+}
+
+/// Serialise admission with a brief read-only lock probe. This wait is separate
+/// from the writer Busy budget: an observer never owns writer custody.
+pub fn writer_admission_guard(directory: &Directory) -> Result<LockGuard> {
+    let clock = provenant_os::clock::SystemClock::new();
+    directory
+        .lock(
+            OsStr::new("writer-probe.lock"),
+            LockMode::Exclusive,
+            WaitBudget::cli(clock.mono_now(), 5).map_err(|_| CustodyError::InvalidRecord)?,
+            &CancelToken::new(),
+            &clock,
+        )
+        .map_err(|error| CustodyError::ObservationGate(error.to_string()))
+}
+
+/// A read-only observer holds this only until its writer-lock probe is dropped.
+/// Missing legacy gates remain uncertainty until registry mutation upgrades them.
+pub fn writer_observation_guard(directory: &Directory) -> Result<LockGuard> {
+    let clock = provenant_os::clock::SystemClock::new();
+    directory
+        .lock_existing(
+            OsStr::new("writer-probe.lock"),
+            LockMode::Exclusive,
+            WaitBudget::cli(clock.mono_now(), 5).map_err(|_| CustodyError::InvalidRecord)?,
+            &CancelToken::new(),
+            &clock,
+        )
+        .map_err(|error| CustodyError::ObservationGate(error.to_string()))
+}
+
 /// Recovery carries a verified reservation and optional writer exclusion.
 /// Worktree settlement retains the kernel lock through import and publication.
 #[derive(Debug)]
@@ -1535,6 +1578,7 @@ pub fn acquire_recovery(
     cancel: &CancelToken,
     clock: &dyn Clock,
 ) -> Result<Recovery> {
+    let observation = writer_admission_guard(&directory)?;
     let lease = directory.lock(
         OsStr::new("writer.lock"),
         LockMode::Exclusive,
@@ -1542,6 +1586,7 @@ pub fn acquire_recovery(
         cancel,
         clock,
     )?;
+    drop(observation);
     let lock_directory = directory;
     // recovery_evidence applies legacy_record_fences, so another attempt's
     // legacy slot-root record is never read as this attempt's reservation.
@@ -1602,6 +1647,7 @@ pub(crate) fn acquire_reboot_recovery_with(
     clock: &dyn Clock,
     observer: &dyn ProcessObserver,
 ) -> Result<Recovery> {
+    let observation = writer_admission_guard(&directory)?;
     let lease = directory.lock(
         OsStr::new("writer.lock"),
         LockMode::Exclusive,
@@ -1609,6 +1655,7 @@ pub(crate) fn acquire_reboot_recovery_with(
         cancel,
         clock,
     )?;
+    drop(observation);
     let lock_directory = directory;
     let directory = recovery_evidence(&lock_directory, scope)?;
     let reservation: Reservation = read_record(&directory, "reservation.json", RECORD_LIMIT)?;
@@ -1658,6 +1705,7 @@ pub fn prove_unreserved(
     cancel: &CancelToken,
     clock: &dyn Clock,
 ) -> Result<Option<Unreserved>> {
+    let observation = writer_admission_guard(directory)?;
     let lease = directory.lock(
         OsStr::new("writer.lock"),
         LockMode::Exclusive,
@@ -1665,6 +1713,7 @@ pub fn prove_unreserved(
         cancel,
         clock,
     )?;
+    drop(observation);
     for name in ["launch.json", "process-exit.json"] {
         match directory.metadata_at(OsStr::new(name), false) {
             Ok(_) => return Ok(None),
@@ -1844,9 +1893,11 @@ impl Recovery {
     /// under the lock rather than trusting a detached recovery's snapshot.
     fn ensure_writer_lock(&mut self) -> Result<()> {
         if self.lease.is_none() {
+            let observation = writer_admission_guard(&self.lock_directory)?;
             let lease = self
                 .lock_directory
                 .try_lock(OsStr::new("writer.lock"), LockMode::Exclusive)?;
+            drop(observation);
             let current: Reservation =
                 read_record(&self.directory, "reservation.json", RECORD_LIMIT)?;
             validate_anchor(&self.directory, &current)?;

@@ -440,7 +440,7 @@ fn refused_operation_is_durable_and_replay_checks_request_identity() -> TestResu
         "a replay cannot replace the first refusal"
     );
     assert!(
-        matches!(store.create(&input, &call), Err(RunError::RecordedRefusal(saved)) if saved == diagnostic)
+        matches!(store.create(&input, &call), Err(RunError::RecordedRefusal(saved)) if *saved == diagnostic)
     );
     let mut changed = input;
     changed.request.concurrency = 2;
@@ -511,6 +511,25 @@ fn refusal_notice_obligation_survives_restart_and_completes_only_for_same_facts(
             &call,
         )?;
     }
+    // Stored records are BLOBs: SQLite JSON queries must cast these exact bytes.
+    let storage: String =
+        store
+            .db
+            .query_row("SELECT typeof(record) FROM operations LIMIT 1", [], |row| {
+                row.get(0)
+            })?;
+    assert_eq!(storage, "blob");
+    assert_eq!(store.recent_refusals(100, &call)?.len(), 82);
+    let page = store.pending_refusal_notices_after(80, 0, &call)?;
+    assert_eq!(page.len(), 80);
+    let after = page.last().ok_or("empty page")?.0;
+    let tail = store.pending_refusal_notices_after(80, after, &call)?;
+    assert_eq!(
+        tail.len(),
+        1,
+        "failed notices in the first page cannot hide the tail"
+    );
+    assert_eq!(tail[0].1.operation_id.as_str(), "notice-90");
     let first = store.pending_refusal_notices(80, &call)?;
     assert_eq!(first.len(), 80);
     for pending in &first {
@@ -519,6 +538,29 @@ fn refusal_notice_obligation_survives_restart_and_completes_only_for_same_facts(
     assert_eq!(store.pending_refusal_notices(80, &call)?.len(), 1);
     Ok(())
 }
+#[test]
+fn recorded_refusal_freezes_the_notice_setting() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let context = context(temp.path())?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context, &call)?;
+    let mut input = input();
+    input.request.tasks[0]
+        .profile
+        .knobs
+        .insert("chair.refusal_notice".into(), serde_json::json!("off"));
+    let record = store.record_refusal(
+        &input,
+        provenant_records::diagnostic::Diagnostic::new("REFUSED"),
+        None,
+        &call,
+    )?;
+    assert_eq!(record.extra["refusal_notice"], "off");
+    assert_eq!(store.recent_refusals(1, &call)?, vec![record]);
+    Ok(())
+}
+
 pub(super) fn route() -> RouteRecord {
     RouteRecord {
         provider: Some("fixture".into()),

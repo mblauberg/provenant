@@ -1772,6 +1772,8 @@ impl RunStore {
                 },
                 None => attempt.try_clone()?,
             };
+            let observation = custody::writer_admission_guard(&custody)
+                .map_err(|error| RunError::Io(std::io::Error::other(error.to_string())))?;
             let _lease = match custody.try_lock(
                 std::ffi::OsStr::new("writer.lock"),
                 provenant_os::fs::LockMode::Exclusive,
@@ -1780,6 +1782,7 @@ impl RunStore {
                 Err(provenant_os::fs::FsError::LockTimeout { .. }) => return Ok(None),
                 Err(error) => return Err(error.into()),
             };
+            drop(observation);
             let stale = match custody::reservation_present(&custody, Self::scope(record)) {
                 Ok(false) => false,
                 Ok(true) => {
@@ -2598,6 +2601,9 @@ impl RunStore {
             }
             Err(_) => return false,
         }
+        let Ok(_observation) = custody::writer_admission_guard(dir) else {
+            return false;
+        };
         match dir.try_lock_existing(
             std::ffi::OsStr::new("writer.lock"),
             provenant_os::fs::LockMode::Exclusive,
@@ -3179,10 +3185,13 @@ impl RunStore {
             }
             // A read-only guardian reserves the attempt itself. Hold
             // its exclusion lock and refuse any retained reservation.
+            let observation = custody::writer_admission_guard(&attempt)
+                .map_err(|error| RunError::Io(std::io::Error::other(error.to_string())))?;
             let _lease = attempt.try_lock(
                 std::ffi::OsStr::new("writer.lock"),
                 provenant_os::fs::LockMode::Exclusive,
             )?;
+            drop(observation);
             match custody::reservation_present(&attempt, scope) {
                 Ok(true) => return Err(RunError::AttemptReservationRetained),
                 Ok(false) => {}

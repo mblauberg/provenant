@@ -247,3 +247,135 @@ fn doctor_unknown_preserves_census_and_custody_scope_and_evidence() -> Result<()
     );
     Ok(())
 }
+
+#[test]
+fn doctor_reports_an_observed_bystander_in_a_free_worktree() -> Result<(), Box<dyn Error>> {
+    struct Observed;
+    impl WorkerObserver for Observed {
+        fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, Occupancy> {
+            roots
+                .iter()
+                .cloned()
+                .map(|root| (root, Occupancy::Observed { process: None }))
+                .collect()
+        }
+    }
+    let fixture = Fixture::new()?;
+    let test = TestContext::new(&fixture)?;
+    let context = WorktreeContext {
+        workers: &Observed,
+        ..test.context()
+    };
+    let path = fixture.root.join("observed");
+    fixture.run(&[
+        "worktree",
+        "add",
+        "-b",
+        "observed",
+        path.to_str().ok_or("path")?,
+    ])?;
+    let report = doctor(&context, &path, &CancelToken::new())?;
+    assert_eq!(report.state, WorktreeDiagnosisState::Observed);
+    assert_eq!(report.holder, None);
+    assert!(report.repair.starts_with("provenant worktree doctor "));
+    Ok(())
+}
+
+#[test]
+fn a_read_only_probe_cannot_make_concurrent_admission_writer_busy() -> Result<(), Box<dyn Error>> {
+    use std::sync::{Arc, Barrier, mpsc};
+    use std::time::Duration;
+    let fixture = Fixture::new()?;
+    let test = TestContext::new(&fixture)?;
+    let context = test.context();
+    let path = fixture.root.join("probe-race");
+    let slot = writer_directory(context.project_state, &path)?;
+    drop(slot.try_lock(OsStr::new(WRITER_LOCK), LockMode::Exclusive)?);
+    let probe = provenant_supervisor::custody::writer_observation_guard(&slot)?;
+    let raw_probe = slot.try_lock_existing(OsStr::new(WRITER_LOCK), LockMode::Exclusive)?;
+    let barrier = Arc::new(Barrier::new(2));
+    let entered = barrier.clone();
+    let writer_slot = slot.try_clone()?;
+    let (send, receive) = mpsc::channel();
+    let thread = std::thread::spawn(move || {
+        let clock = provenant_os::clock::SystemClock::new();
+        entered.wait();
+        let result = provenant_supervisor::fixture::acquire_writer(
+            writer_slot,
+            provenant_supervisor::custody::Scope {
+                run: provenant_core::RunId::from_bytes([91; 16]),
+                attempt: AttemptId::from_bytes([92; 16]),
+                generation: 1,
+            },
+            WaitBudget::nonblocking(clock.mono_now()),
+            &CancelToken::new(),
+            &clock,
+        );
+        let _ = send.send(result);
+    });
+    barrier.wait();
+    assert!(
+        matches!(
+            receive.recv_timeout(Duration::from_millis(50)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ),
+        "an admitting writer must wait for the observer, not return WriterBusy"
+    );
+    drop(raw_probe);
+    drop(probe);
+    let lease = receive.recv_timeout(Duration::from_secs(5))??;
+    assert_eq!(
+        disk_writer_state(context.project_state, &path),
+        Occupancy::Held
+    );
+    drop(lease);
+    thread.join().map_err(|_| "writer panicked")?;
+    assert_eq!(
+        disk_writer_state(context.project_state, &path),
+        Occupancy::Available,
+        "a stale preparation record cannot substitute for a released lease"
+    );
+    Ok(())
+}
+
+#[test]
+fn legacy_gate_upgrade_and_missing_lock_preserve_custody_evidence() -> Result<(), Box<dyn Error>> {
+    let fixture = Fixture::new()?;
+    let test = TestContext::new(&fixture)?;
+    let context = test.context();
+    let path = fixture.root.join("legacy-probe");
+    let slot = writer_directory(context.project_state, &path)?;
+    drop(slot.try_lock(OsStr::new(WRITER_LOCK), LockMode::Exclusive)?);
+    let gate_path = slot.current_path()?.join("writer-probe.lock");
+    fs::remove_file(&gate_path)?;
+    assert!(matches!(
+        disk_writer_state(context.project_state, &path),
+        Occupancy::Unknown { .. }
+    ));
+    assert!(
+        !gate_path.exists(),
+        "read-only observation cannot initialise legacy state"
+    );
+    prepare_writer_probe(context.project_state, &path)?;
+    assert!(gate_path.is_file());
+    assert_eq!(
+        disk_writer_state(context.project_state, &path),
+        Occupancy::Available
+    );
+    // Retained import evidence remains a fence even without an exclusion inode.
+    fs::remove_file(slot.current_path()?.join(WRITER_LOCK))?;
+    fs::write(slot.current_path()?.join("reservation.json"), "retained")?;
+    fs::write(
+        slot.current_path()?.join("import-retained.json"),
+        "retained",
+    )?;
+    assert!(
+        matches!(disk_writer_state(context.project_state, &path), Occupancy::Unknown { evidence, .. }
+        if evidence.contains("retained import fence"))
+    );
+    assert!(
+        matches!(cache_writer_probe(context.project_state, &path), Err(Occupancy::Unknown { evidence, .. })
+        if evidence.contains("retained import fence"))
+    );
+    Ok(())
+}

@@ -2495,7 +2495,7 @@ fn opus_writer_dispatch_advises_a_cheaper_route() -> Result {
             "10s",
             "--json",
         ])?;
-        assert_eq!(code(&out), 0, "{out:?}");
+        assert_eq!(code(&out), 1, "{out:?}");
         let result: Value = serde_json::from_slice(&out.stdout.bytes)?;
         let run = result["data"]["run_id"].as_str().ok_or("run")?;
         let lanes = rig.command(&["lanes", "--id", run, "--json"])?;

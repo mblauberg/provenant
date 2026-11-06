@@ -386,24 +386,40 @@ impl RunStore {
         limit: u64,
         call: &Request<'_>,
     ) -> Result<Vec<OperationRecord>> {
+        Ok(self
+            .pending_refusal_notices_after(limit, 0, call)?
+            .into_iter()
+            .map(|(_, record)| record)
+            .collect())
+    }
+
+    /// Page by the immutable SQLite row ID, so failed notices cannot starve later rows.
+    pub fn pending_refusal_notices_after(
+        &self,
+        limit: u64,
+        after: i64,
+        call: &Request<'_>,
+    ) -> Result<Vec<(i64, OperationRecord)>> {
         call.check()?;
         if !(1..=100).contains(&limit) {
             return Err(RunError::Validation("refusal page limit"));
         }
         let mut statement = self.db.prepare(
-            "SELECT operation FROM operations WHERE project=?1 AND actor=?2 AND json_extract(CAST(record AS TEXT),'$.state')='refused' AND json_type(CAST(record AS TEXT),'$.refusal_chair')='object' AND COALESCE(json_extract(CAST(record AS TEXT),'$.refusal_notice_done'),0) != 1 ORDER BY rowid LIMIT ?3",
+            "SELECT rowid,operation FROM operations WHERE project=?1 AND actor=?2 AND json_extract(CAST(record AS TEXT),'$.state')='refused' AND json_type(CAST(record AS TEXT),'$.refusal_chair')='object' AND COALESCE(json_extract(CAST(record AS TEXT),'$.refusal_notice_done'),0) != 1 AND rowid > ?4 ORDER BY rowid LIMIT ?3",
         )?;
         let rows = statement.query_map(
             params![
                 self.context.project_id.to_string(),
                 self.context.actor_id.to_string(),
-                sql_int(limit)?
+                sql_int(limit)?,
+                after
             ],
-            |row| row.get::<_, String>(0),
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
         )?;
         let mut records = Vec::new();
         for row in rows {
-            let id = OperationId::parse(&row?)
+            let (rowid, operation) = row?;
+            let id = OperationId::parse(&operation)
                 .map_err(|_| RunError::Validation("operation index ID"))?;
             let record = self.operation(&id, call)?.ok_or(RunError::NotFound)?;
             if record.state != OperationState::Refused
@@ -413,7 +429,7 @@ impl RunStore {
             {
                 return Err(RunError::Validation("refusal notice record"));
             }
-            records.push(record);
+            records.push((rowid, record));
         }
         Ok(records)
     }

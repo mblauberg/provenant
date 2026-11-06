@@ -143,7 +143,7 @@ fn local_session(edge: &Edge<'_>) -> Option<Session> {
 
 pub(super) fn render_run(mut result: Reply, edge: &Edge<'_>) -> Reply {
     result.result.command = "run".into();
-    if result.result.error.is_some() {
+    if result.result.error.is_some() && result.result.data.get("started").is_none() {
         return result;
     }
     if let Some(jobs) = result.result.data["cloud_jobs"].as_array() {
@@ -194,6 +194,22 @@ pub(super) fn render_run(mut result: Reply, edge: &Edge<'_>) -> Reply {
         result.human = human;
         result.read_only = false;
         return result;
+    }
+    let started = result
+        .result
+        .data
+        .get("started")
+        .and_then(|value| serde_json::from_value::<Vec<run::Started>>(value.clone()).ok())
+        .unwrap_or_default();
+    let has_started_sibling = started.iter().any(|item| {
+        !matches!(
+            item,
+            run::Started::Refused { .. } | run::Started::Blocked { .. }
+        )
+    });
+    if let Err(failure) = check_launch_policy(&started) {
+        result.result.status = failure.status;
+        result.result.error = Some(command_error(&failure));
     }
     let rows = result.result.data["lanes"]
         .as_array()
@@ -309,9 +325,26 @@ pub(super) fn render_run(mut result: Reply, edge: &Edge<'_>) -> Reply {
                 next = Some(format!("provenant output {id}"));
             }
         }
+        let refused_sibling = has_started_sibling
+            && started.iter().any(|item| match item {
+                run::Started::Refused { attempt, .. } | run::Started::Blocked { attempt, .. } => {
+                    row["attempt_id"] == attempt.to_string()
+                }
+                _ => false,
+            });
         if !timed_out
+            && !refused_sibling
             && !row["superseded_by"].is_string()
-            && !matches!(state, "succeeded" | "review_required" | "input_required")
+            && !matches!(
+                state,
+                "queued"
+                    | "starting"
+                    | "running"
+                    | "settling"
+                    | "succeeded"
+                    | "review_required"
+                    | "input_required"
+            )
         {
             result.result.status = Status::Failed;
         }
@@ -417,6 +450,18 @@ pub(super) fn dispatch_with_workers(
     let mut out = reply_waited("dispatch", result);
     operation_reply(&mut out, &operation_id);
     out
+}
+
+/// Project launch policy after constructing the receipt, so no lane facts are lost.
+pub(super) fn apply_launch_policy(out: &mut Reply) {
+    if out.result.error.is_none()
+        && let Some(started) = out.result.data.get("started")
+        && let Ok(started) = serde_json::from_value::<Vec<run::Started>>(started.clone())
+        && let Err(failure) = check_launch_policy(&started)
+    {
+        out.result.status = failure.status;
+        out.result.error = Some(command_error(&failure));
+    }
 }
 
 pub(super) fn operation_reply(reply: &mut Reply, id: &OperationId) {
@@ -834,7 +879,7 @@ pub(super) fn dispatch_inner(
                         text.push_str("token budget: off\n");
                     } else {
                         text.push_str(&format!(
-                            "token budget: {} tokens ({}); enforced for {}, which report usage while running (Codex only at turn.completed); not enforced for other providers\n",
+                            "token budget: {} tokens ({}); enforced for {}, which report usage while running; does not stop Codex writers: codex exec reports usage only at its final turn.completed frame; there is no further turn to stop; not enforced for other providers\n",
                             budget.tokens,
                             budget.source.as_str(),
                             enforced.join(", ")
@@ -1620,6 +1665,10 @@ pub(super) fn dispatch_inner(
                                 lock_budget,
                                 ..*context
                             };
+                            worktrees::prepare_writer_probe(
+                                context.project_state,
+                                &writer.worktree,
+                            )?;
                             let observation = worktrees::list(context, &cancel)?
                                 .into_iter()
                                 .find(|tree| tree.path == writer.worktree)
@@ -1834,9 +1883,11 @@ pub(super) fn dispatch_inner(
                 if let Some(p) = provider
                     && !enforced.contains(&p)
                 {
-                    brief_warnings.push(format!(
-                        "token budget is not enforced for provider {p}: usage is not reported while it runs"
-                    ));
+                    brief_warnings.push(if p == "codex" {
+                        "token budget does not stop Codex writers: codex exec reports usage only at its final turn.completed frame; there is no further turn to stop".into()
+                    } else {
+                        format!("token budget is not enforced for provider {p}: usage is not reported while it runs")
+                    });
                 }
             }
         }
@@ -3118,13 +3169,11 @@ pub(super) fn launch_on_host_with_wait(
             Some(request),
             call,
         )?;
-        check_launch_policy(&started)?;
         return Ok(started);
     }
     let started = session
         .service()
         .start(run, &providers, &holder, validated, request, call)?;
-    check_launch_policy(&started)?;
     Ok(started)
 }
 

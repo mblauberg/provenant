@@ -1041,7 +1041,7 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
             if settlement::post_dispatch_refusal(edge, &reply).is_err() {
                 reply
                     .human
-                    .push_str("refusal notice check failed; retry the same operation\n");
+                    .push_str("refusal notice could not be delivered; inspect the chair binding and notice configuration\n");
                 reply.result.data["refusal_notice_error"] = serde_json::json!(true);
             }
             if let Err(error) =
@@ -1155,7 +1155,12 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
             if all {
                 let issue = match settlement::reconcile_refusal_notices(edge) {
                     Ok(false) => None,
-                    Ok(true) => Some("more refusal notices remain; rerun `provenant reconcile`"),
+                    Ok(true) => {
+                        reply.human.push_str("some refusal notices could not be delivered; inspect their chair bindings and inbox access\n");
+                        reply.result.data["refusal_notice_recovery_pending"] =
+                            serde_json::json!(true);
+                        None
+                    }
                     Err(_) => Some(
                         "refusal notice recovery failed; restore inbox access and rerun `provenant reconcile`",
                     ),

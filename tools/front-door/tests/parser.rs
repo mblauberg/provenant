@@ -587,7 +587,11 @@ fn run_base_consistency_on_existing_branch() -> Result {
     assert_eq!(code(&out_accepted), 1, "{out_accepted:?}");
     let accepted: serde_json::Value = serde_json::from_slice(&out_accepted.stdout.bytes)?;
     assert_eq!(accepted["command"], "run");
-    assert!(accepted["error"].is_null(), "unexpected error: {accepted}");
+    assert_eq!(accepted["error"]["code"], "REFUSED", "{accepted}");
+    assert_eq!(
+        accepted["data"]["lanes"][0]["terminal_cause"], "preparation_refused",
+        "{accepted}"
+    );
     let run_id = accepted["data"]["run_id"]
         .as_str()
         .ok_or("expected run_id in accepted run")?;
@@ -723,7 +727,7 @@ fn run_leaves_accept_control_and_report_work_refused_per_task() -> Result {
     let out = rig.execute(binary, &args, Some(b"hello"))?;
     assert_eq!(
         code(&out),
-        0,
+        1,
         "{}",
         String::from_utf8_lossy(&out.stdout.bytes)
     );
@@ -741,7 +745,7 @@ fn run_leaves_accept_control_and_report_work_refused_per_task() -> Result {
         "account-override",
         "--json",
     ])?;
-    assert_eq!(code(&placed), 0);
+    assert_eq!(code(&placed), 1);
     let placed: serde_json::Value = serde_json::from_slice(&placed.stdout.bytes)?;
     let run = placed["data"]["run_id"].as_str().ok_or("run")?;
     let saved: serde_json::Value = serde_json::from_slice(&std::fs::read(
@@ -767,7 +771,7 @@ fn run_leaves_accept_control_and_report_work_refused_per_task() -> Result {
         ],
         Some(b"hello"),
     )?;
-    assert_eq!(code(&pinned), 0);
+    assert_eq!(code(&pinned), 1);
     let pinned: serde_json::Value = serde_json::from_slice(&pinned.stdout.bytes)?;
     let run = pinned["data"]["run_id"].as_str().ok_or("run")?;
     let saved: serde_json::Value = serde_json::from_slice(&std::fs::read(
@@ -838,7 +842,7 @@ fn run_leaves_accept_control_and_report_work_refused_per_task() -> Result {
     )?;
     assert_eq!(
         code(&writer),
-        0,
+        1,
         "{}",
         String::from_utf8_lossy(&writer.stdout.bytes)
     );
