@@ -378,7 +378,7 @@ fn output_read(
         .store
         .lane_waits(std::slice::from_ref(&record), call);
     let successors = policy_successors(session, std::slice::from_ref(&record), call)?;
-    let mut projected = project_lane(
+    let projected = project_lane(
         &record,
         &waits,
         session.context.state_root.as_path(),
@@ -386,12 +386,6 @@ fn output_read(
         call.clock.wall_now().ok(),
         true,
     );
-    if let Some(detail) = status::lane_detail(&record, &waits) {
-        projected.reason = Some(detail.clone());
-        if let Some(settlement) = &mut projected.settlement {
-            settlement.reason = Some(detail);
-        }
-    }
     if let (Some(data), Some(row)) = (data.as_object_mut(), json!(projected).as_object()) {
         data.remove("settlement_reason");
         if let Some(grants) = data.get_mut("grants").and_then(Value::as_object_mut) {
@@ -625,7 +619,7 @@ fn output_read_part(
     let waits = session
         .store
         .lane_waits(std::slice::from_ref(&record), call);
-    let detail = status::lane_detail(&record, &waits);
+    let detail = status::lane_reason(&record, &waits);
     if matches!(part, run::ArtifactPart::Result)
         && record.result.is_none()
         && command.offset == 0

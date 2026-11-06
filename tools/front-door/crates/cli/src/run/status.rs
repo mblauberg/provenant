@@ -138,7 +138,8 @@ pub fn status(command: crate::Status, _json_output: bool, edge: &Edge<'_>) -> Re
             let lines: Vec<LaneLine> = rows
                 .iter()
                 .map(|lane| {
-                    let (_, reason) = state_and_reason(&lane.state);
+                    let (_, reason) =
+                        provenant_records::wire::LaneRow::state_and_label(&lane.state);
                     let state = lane_display_state(lane);
                     let reason = reason.or_else(|| {
                         waits
@@ -399,49 +400,21 @@ fn compact_wait_reason(reason: &str) -> &str {
     }
 }
 
-pub(super) fn lane_detail(lane: &run::AttemptRecord, waits: &[run::LaneWait]) -> Option<String> {
-    let summary = provenant_records::wire::LaneRow::state_and_reason(&lane.state).1;
-    provenant_records::wire::LaneRow::state_and_detail(&lane.state)
-        .1
-        // Preserve projection-specific settlement and custody reasons when
-        // there is no additional cause or note to expand.
-        .filter(|detail| Some(detail) != summary.as_ref())
-        .or_else(|| {
-            waits
-                .iter()
-                .find(|wait| wait.attempt_id == lane.attempt_id)
-                .map(|wait| {
-                    if wait.waiting_for.starts_with("host capacity: disk space:") {
-                        format!(
-                            "{}; free disk space or run `provenant gc --apply`",
-                            wait.waiting_for
-                        )
-                    } else {
-                        wait.waiting_for.clone()
-                    }
-                })
-        })
+fn full_wait_reason(reason: &str) -> String {
+    if reason.starts_with("host capacity: disk space:") {
+        format!("{reason}; free disk space or run `provenant gc --apply`")
+    } else {
+        reason.to_owned()
+    }
 }
 
-/// Expand a direct launch response or explicit selection, never a listing.
-/// Uses retained typed facts only, with no extra host or peer observations.
-pub(super) fn expand_lane_details(
-    data: &mut Value,
-    human: &mut String,
-    lanes: &[run::AttemptRecord],
-    waits: &[run::LaneWait],
-) {
-    if let Some(rows) = data["lanes"].as_array_mut() {
-        for (row, lane) in rows.iter_mut().zip(lanes) {
-            if let Some(detail) = lane_detail(lane, waits) {
-                human.push_str(&format!("  detail: {}\n", plain_text(&detail, usize::MAX)));
-                if row["settlement"].is_object() {
-                    row["settlement"]["reason"] = json!(detail);
-                }
-                row["reason"] = json!(detail);
-            }
-        }
-    }
+pub(super) fn lane_reason(lane: &run::AttemptRecord, waits: &[run::LaneWait]) -> Option<String> {
+    state_and_reason(&lane.state).1.or_else(|| {
+        waits
+            .iter()
+            .find(|wait| wait.attempt_id == lane.attempt_id)
+            .map(|wait| full_wait_reason(&wait.waiting_for))
+    })
 }
 
 /// One lane as the compact views show it.
@@ -618,7 +591,7 @@ pub(super) fn compact_status(
     rows.iter()
         .map(|lane| {
             let id = lane.attempt_id.to_string();
-            let (_, reason) = state_and_reason(&lane.state);
+            let (_, reason) = provenant_records::wire::LaneRow::state_and_label(&lane.state);
             let state = lane_display_state(lane);
             let model = lane
                 .applied_route
@@ -884,7 +857,7 @@ pub fn project_lane(
         })
         .flatten()
         .and_then(|path| provenant_records::StructuredPathWire::from_path(&path).ok());
-    provenant_records::wire::LaneRow::project(
+    let mut projected = provenant_records::wire::LaneRow::project(
         lane,
         provenant_records::wire::LaneProjectionFacts {
             superseded_by: successors.get(&lane.attempt_id).copied(),
@@ -901,7 +874,11 @@ pub fn project_lane(
             ),
             ..Default::default()
         },
-    )
+    );
+    if projected.reason == projected.waiting_for {
+        projected.reason = projected.waiting_for.as_deref().map(full_wait_reason);
+    }
+    projected
 }
 
 pub(super) fn render_lanes_with_lineage(
@@ -948,7 +925,13 @@ pub(super) fn render_lanes_with_view(
                 .map(|a| format!(" account={}", plain_text(a, usize::MAX)))
                 .unwrap_or_default();
             let route_text = plain_text(&route, usize::MAX);
-            let reason = projected.reason.clone();
+            let full = state_and_reason(&lane.state).1;
+            let label = provenant_records::wire::LaneRow::state_and_label(&lane.state).1;
+            let reason = if label != full {
+                label
+            } else {
+                projected.reason.clone()
+            };
             let reason_text = reason
                 .as_deref()
                 .map(|r| format!(" ({})", plain_text(compact_wait_reason(r), usize::MAX)))
@@ -1209,19 +1192,7 @@ pub fn lanes_streaming(
         && out.result.data["lanes"].is_array()
         && !(command.watch.is_some() && !json)
     {
-        let mut summary = lane_summary(&lane_lines(&out.result.data), None);
-        if !command.id.is_empty()
-            && let Some(rows) = out.result.data["lanes"].as_array()
-        {
-            for row in rows {
-                if let Some(reason) = row["reason"].as_str() {
-                    summary
-                        .lines
-                        .push(format!("detail: {}", plain_text(reason, usize::MAX)));
-                }
-            }
-        }
-        out.summary = Some(summary);
+        out.summary = Some(lane_summary(&lane_lines(&out.result.data), None));
     }
     out.read_only = true;
     out
@@ -1525,9 +1496,6 @@ pub(super) fn lanes_inner(
     append_provider_errors(&session, &lanes, &mut data, &mut human);
     attach_handoffs(&session, &lanes, &mut data);
     omit_listing_write_grants(&command.id, &mut data);
-    if !command.id.is_empty() {
-        expand_lane_details(&mut data, &mut human, &lanes, &waits);
-    }
     attach_cloud_jobs(&session.store, &lanes, &mut data, &mut human, &call)?;
     Ok((data, human, false))
 }

@@ -812,7 +812,7 @@ pub enum TerminalCause {
 }
 
 impl TerminalCause {
-    /// Bounded listing label. Full remedies belong in explicit lane detail.
+    /// Bounded label for human status rows. Structured results use `detail`.
     pub fn reason(self) -> &'static str {
         match self {
             Self::PreparationRefused => "preparation refused; provenant output ID",
@@ -843,7 +843,7 @@ impl TerminalCause {
         }
     }
 
-    /// Full safe cause and remedy for explicit detail and error responses.
+    /// Full safe cause and remedy for structured results and error responses.
     pub fn detail(self) -> &'static str {
         match self {
             Self::AccountLoginRequired => {

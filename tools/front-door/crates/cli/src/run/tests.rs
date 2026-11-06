@@ -9104,34 +9104,81 @@ fn lane_detail_and_output_retain_safe_refusal_remedies() -> Result<(), Box<dyn s
             let (listing, human, _) =
                 status::lanes_inner(&command, edge, true, &mut |_| Ok(()), None)
                     .map_err(|fail| fail.message)?;
-            assert_eq!(
-                listing["lanes"][0]["reason"],
-                provenant_records::run::TerminalCause::AccessPolicyRefused.reason()
-            );
-            for text in [serde_json::to_string(&listing)?, human] {
-                assert!(!text.contains(&note), "{text}");
-                assert!(!text.contains("PROVIDER_SENTINEL"), "{text}");
-            }
-            command.id = vec![target.clone()];
-            let (detail, human, _) =
-                status::lanes_inner(&command, edge, true, &mut |_| Ok(()), None)
-                    .map_err(|fail| fail.message)?;
             let expected = format!(
                 "{}; {note}",
                 provenant_records::run::TerminalCause::AccessPolicyRefused.detail()
             );
-            assert_eq!(detail["lanes"][0]["reason"], expected);
-            assert!(human.contains(&expected));
-            let explicit = status::lanes_streaming(command, edge, false, &mut |_| Ok(()));
+            assert_eq!(listing["lanes"][0]["reason"], expected);
             assert!(
-                explicit
-                    .summary
-                    .as_ref()
-                    .ok_or("explicit summary")?
-                    .lines
-                    .join("\n")
-                    .contains(&expected)
+                human.contains(provenant_records::run::TerminalCause::AccessPolicyRefused.reason()),
+                "{human}"
             );
+            assert!(!human.contains(&note), "{human}");
+            for text in [serde_json::to_string(&listing)?, human] {
+                assert!(!text.contains("PROVIDER_SENTINEL"), "{text}");
+            }
+            let listing_reply =
+                status::lanes_streaming(command.clone(), edge, false, &mut |_| Ok(()));
+            let listing_summary = listing_reply
+                .summary
+                .as_ref()
+                .ok_or("listing summary")?
+                .lines
+                .join("\n");
+            assert!(
+                listing_summary
+                    .contains(provenant_records::run::TerminalCause::AccessPolicyRefused.reason()),
+                "{listing_summary}"
+            );
+            assert!(!listing_summary.contains(&note), "{listing_summary}");
+            let crate::ParseOutcome::Invocation(invocation) =
+                crate::parse(["status"].into_iter().map(std::ffi::OsString::from))
+            else {
+                return Err("parse status failed".into());
+            };
+            let crate::Command::Status(status_command) = invocation.command else {
+                return Err("not status".into());
+            };
+            let status_reply = status::status(status_command, true, edge);
+            assert_eq!(status_reply.result.data["lanes"][0]["reason"], expected);
+            let status_summary = status_reply
+                .summary
+                .as_ref()
+                .ok_or("status summary")?
+                .lines
+                .join("\n");
+            assert!(
+                status_summary
+                    .contains(provenant_records::run::TerminalCause::AccessPolicyRefused.reason()),
+                "{status_summary}"
+            );
+            assert!(!status_summary.contains(&note), "{status_summary}");
+            assert!(
+                !serde_json::to_string(&status_reply.result.data)?.contains("PROVIDER_SENTINEL")
+            );
+            command.id = vec![target.clone()];
+            let (detail, human, _) =
+                status::lanes_inner(&command, edge, true, &mut |_| Ok(()), None)
+                    .map_err(|fail| fail.message)?;
+            assert_eq!(detail["lanes"][0]["reason"], expected);
+            assert!(
+                human.contains(provenant_records::run::TerminalCause::AccessPolicyRefused.reason()),
+                "{human}"
+            );
+            assert!(!human.contains(&note), "{human}");
+            let explicit = status::lanes_streaming(command, edge, false, &mut |_| Ok(()));
+            let explicit_summary = explicit
+                .summary
+                .as_ref()
+                .ok_or("explicit summary")?
+                .lines
+                .join("\n");
+            assert!(
+                explicit_summary
+                    .contains(provenant_records::run::TerminalCause::AccessPolicyRefused.reason()),
+                "{explicit_summary}"
+            );
+            assert!(!explicit_summary.contains(&note), "{explicit_summary}");
             let output_command = || Output {
                 attempt: crate::Attempt(target.clone()),
                 host: None,
@@ -9308,7 +9355,11 @@ fn disk_wait_rows_stay_compact_and_explicit_output_keeps_the_sample()
                 status::lanes_inner(&detail_command, edge, true, &mut |_| Ok(()), None)
                     .map_err(|fail| fail.message)?;
             assert_eq!(detail["lanes"][0]["reason"], expected);
-            assert!(human.contains(&expected), "{human}");
+            assert!(
+                human.contains("disk below gc.free_floor; provenant output ID"),
+                "{human}"
+            );
+            assert!(!human.contains("23622320128"), "{human}");
             for field in ["length", "digest", "complete", "clipped"] {
                 assert!(data[field].is_null(), "{field}: {data}");
             }

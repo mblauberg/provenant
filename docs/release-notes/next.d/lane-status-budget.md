@@ -1,4 +1,4 @@
 ## Fixes
 ### Lanes and settlement
 
-- `status` keeps refusal and disk-wait rows concise. `lanes --id ID` and `output ID` retain full remedies and lane-specific notes.
+- Human `status` and `lanes` rows keep refusal and disk-wait labels concise. Structured reasons in listings, launch replies and output retain full remedies and lane-specific notes.

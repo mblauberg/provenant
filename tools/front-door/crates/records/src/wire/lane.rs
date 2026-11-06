@@ -87,14 +87,14 @@ pub(super) fn grant_schema() -> Value {
 }
 
 impl LaneRow {
-    /// Project a listing label without per-lane notes or long remedies.
+    /// Project the full safe cause, remedy and note for structured results.
     pub fn state_and_reason(state: &crate::run::AttemptState) -> (String, Option<String>) {
-        Self::state_diagnostic(state, false)
+        Self::state_diagnostic(state, true)
     }
 
-    /// Project full safe cause, remedy and note for an explicit lane request.
-    pub fn state_and_detail(state: &crate::run::AttemptState) -> (String, Option<String>) {
-        Self::state_diagnostic(state, true)
+    /// Project a short label for human status rows, without per-lane notes.
+    pub fn state_and_label(state: &crate::run::AttemptState) -> (String, Option<String>) {
+        Self::state_diagnostic(state, false)
     }
 
     fn state_diagnostic(
@@ -523,16 +523,16 @@ mod terminal_cause_tests {
                 reason: Some("secret provider text".into()),
             };
             let (_, reason) = LaneRow::state_and_reason(&state);
-            assert_eq!(reason.as_deref(), Some(cause.reason()));
             let reason = reason.unwrap();
-            assert!(reason.len() <= 60, "{cause:?}: {reason}");
-            assert!(reason.contains("provenant output ID"), "{reason}");
-            assert!(!reason.contains("fixture scoped note"), "{reason}");
+            assert_eq!(reason, format!("{}; fixture scoped note", cause.detail()));
             assert!(!reason.contains("secret"));
-            let (_, detail) = LaneRow::state_and_detail(&state);
-            let detail = detail.unwrap();
-            assert_eq!(detail, format!("{}; fixture scoped note", cause.detail()));
-            assert!(!detail.contains("secret"));
+            let (_, label) = LaneRow::state_and_label(&state);
+            assert_eq!(label.as_deref(), Some(cause.reason()));
+            let label = label.unwrap();
+            assert!(label.len() <= 60, "{cause:?}: {label}");
+            assert!(label.contains("provenant output ID"), "{label}");
+            assert!(!label.contains("fixture scoped note"), "{label}");
+            assert!(!label.contains("secret"));
         }
         assert!(TerminalCause::FreePoolQuota.detail().contains("paid route"));
     }

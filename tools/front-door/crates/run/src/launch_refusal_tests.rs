@@ -106,14 +106,14 @@ fn exact_model_refusal_keeps_safe_cause_without_skipped_routes()
             extra.get("terminal_cause"),
             Some(&serde_json::to_value(cause)?)
         );
-        let reason = reason.ok_or("missing reason")?;
-        assert_eq!(reason, cause.reason());
-        assert!(reason.len() <= 60, "{reason}");
-        assert!(!reason.contains("PROVIDER_SECRET_SENTINEL"), "{reason}");
-        assert!(!reason.contains("unsupported_effort"), "{reason}");
-        assert!(!reason.contains("99 bytes available"), "{reason}");
-        let (_, detail) = LaneRow::state_and_detail(&record.state);
-        let reason = detail.ok_or("missing detail")?;
+        let (_, label) = LaneRow::state_and_label(&record.state);
+        let label = label.ok_or("missing human label")?;
+        assert_eq!(label, cause.reason());
+        assert!(label.len() <= 60, "{label}");
+        assert!(!label.contains("PROVIDER_SECRET_SENTINEL"), "{label}");
+        assert!(!label.contains("unsupported_effort"), "{label}");
+        assert!(!label.contains("99 bytes available"), "{label}");
+        let reason = reason.ok_or("missing structured reason")?;
         assert!(reason.starts_with(cause.detail()), "{reason}");
         assert!(!reason.contains("PROVIDER_SECRET_SENTINEL"), "{reason}");
         if disk {
