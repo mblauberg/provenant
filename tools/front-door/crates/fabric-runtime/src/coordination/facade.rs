@@ -193,6 +193,7 @@ pub enum DispatchRefusalFact {
 /// Facts the input owner has explicitly approved for disclosure.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InvalidInputDetail {
+    GraphReason(String),
     Schema,
     LandingLock,
     UnresolvableBase(String),
@@ -206,8 +207,22 @@ pub enum InvalidInputDetail {
 }
 
 impl InvalidInputDetail {
+    pub fn graph_reason(reason: impl std::fmt::Display) -> Self {
+        Self::GraphReason(reason.to_string())
+    }
+
     fn safe_text(&self) -> Option<String> {
         match self {
+            Self::GraphReason(reason) => {
+                if crate::graph::patch::scan_for_secrets(reason).is_err() {
+                    return Some("graph refused: diagnostic contains a secret".into());
+                }
+                let reason: String = reason.chars().take(4096).flat_map(|character| {
+                    if character.is_control() { character.escape_default().collect::<Vec<_>>() }
+                    else { vec![character] }
+                }).collect();
+                Some(format!("graph refused: {reason}"))
+            }
             Self::Schema => Some("graph document schema_version is invalid".into()),
             Self::LandingLock => Some("landing lock required".into()),
             Self::UnresolvableBase(name) => safe_base_ref(name)
@@ -797,6 +812,9 @@ fn deserialise_invalid_detail<'de, D: serde::Deserializer<'de>>(
     Ok(detail.and_then(|detail| match detail.as_str() {
         "graph document schema_version is invalid" => Some(InvalidInputDetail::Schema),
         "landing lock required" => Some(InvalidInputDetail::LandingLock),
+        _ if detail.starts_with("graph refused: ") => Some(InvalidInputDetail::GraphReason(
+            detail.trim_start_matches("graph refused: ").to_owned(),
+        )),
         "input file is unreadable or is not a regular file" => {
             Some(InvalidInputDetail::InputUnreadable)
         }

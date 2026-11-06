@@ -327,7 +327,7 @@ nodes = [
         .unwrap();
     let members = &node.composite.as_ref().unwrap().nodes;
     assert_eq!(members[0].kind, Some(NodeKind::Composite));
-    assert_eq!(members[1].kind, Some(NodeKind::Plan));
+    assert_eq!(members[1].kind, Some(NodeKind::Task));
     assert_eq!(members[1].depends_on, ["map"]);
     // Only the planner is a sink, so it alone exports.
     let exports = &node.composite.as_ref().unwrap().exports;

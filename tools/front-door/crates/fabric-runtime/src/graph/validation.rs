@@ -728,8 +728,7 @@ pub(super) fn validate_flat_plan(
             round: node.round.clone(),
             kind: match node.kind {
                 Some(
-                    NodeKind::Plan
-                    | NodeKind::Synthesise
+                    NodeKind::Synthesise
                     | NodeKind::Gate
                     | NodeKind::Loop
                     | NodeKind::Composite
@@ -1237,7 +1236,7 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
                 }),
                 pause,
             ) => {
-                (node.plan.is_some() || plans::writer(node))
+                plans::agent(node)
                     && (pause.is_some() || (*active && *fallback))
                     && fragment_error.is_none_or(|fact| match fact {
                         PlanFailureFact::Structural(limit) => limit.actual > limit.max,

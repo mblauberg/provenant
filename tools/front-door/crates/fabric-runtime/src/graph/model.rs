@@ -554,7 +554,6 @@ pub struct GraphInspection {
 #[serde(rename_all = "snake_case")]
 pub enum NodeKind {
     Composite,
-    Plan,
     Task,
     Synthesise,
     Gate,

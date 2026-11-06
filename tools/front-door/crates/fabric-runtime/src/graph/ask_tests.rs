@@ -622,7 +622,7 @@ fn a_pause_answer_can_cancel_and_a_rejected_answer_asks_again() {
 fn a_planner_fragment_can_add_a_decide_node() {
     let document: GraphDocument = serde_json::from_value(json!({
         "schema_version":1, "graph_id":"planned-decide", "decision_session":"chair-session", "nodes":[
-            {"id":"plan", "kind":"plan", "access":"read_only", "prompt":"Slice the work",
+            {"id":"plan", "kind":"task", "access":"read_only", "prompt":"Slice the work",
              "route":fixture_route(), "plan":{"kinds":["task", "decide"], "max_nodes":2}},
             {"id":"after", "access":"read_only", "prompt":"Continue", "depends_on":["plan"], "route":fixture_route()}
         ]
