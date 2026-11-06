@@ -245,3 +245,56 @@ fn lane_messaging_uses_the_host_attempt_actor_and_closes_with_the_endpoint() -> 
     assert_eq!(closed["isError"], true);
     Ok(())
 }
+
+#[test]
+fn lane_run_submits_child_through_parent_relay() -> Result {
+    use provenant_fabric_runtime::graph::relay::RelayOp;
+    let mut rig = TestRig::new()?;
+    host(&rig, &["fabric", "identity", "--json"])?;
+    let attempt = AttemptId::from_bytes(provenant_os::fs::entropy_128()?);
+    let (sent, received) = std::sync::mpsc::channel();
+    let relay = provenant_fabric_mcp::lane::HostRelay::start_with_graph(
+        provenant_providers::LaneRuntime::fabric_socket(attempt),
+        provenant_records::Limits::CONFIG,
+        |_, _, _| {
+            Err(provenant_fabric_mcp::tools::ServiceError::Cli {
+                code: "unexpected_coordination".into(),
+                message: "expected a graph frame".into(),
+                data: Value::Null,
+            })
+        },
+        move |arguments, _, _| {
+            sent.send(arguments)
+                .map_err(|_| provenant_fabric_mcp::tools::ServiceError::Cli {
+                    code: "fixture_closed".into(),
+                    message: "fixture receiver closed".into(),
+                    data: Value::Null,
+                })?;
+            Ok(json!({"parent_attempt":attempt.to_string(),"revision":2}))
+        },
+    )?;
+    lane_environment(&mut rig, attempt)?;
+    let launched = host(
+        &rig,
+        &[
+            "run",
+            "Inspect the child",
+            "--use",
+            "explore",
+            "--tier",
+            "junior",
+            "--json",
+        ],
+    )?;
+    assert_eq!(launched["data"]["parent_attempt"], attempt.to_string());
+    let frame = received.recv_timeout(std::time::Duration::from_secs(2))?;
+    let RelayOp::Add(child) = serde_json::from_value(frame)? else {
+        return Err("expected child admission".into());
+    };
+    assert_eq!(child.template, "explore");
+    assert_eq!(child.brief, "Inspect the child");
+    assert_eq!(child.tier.as_deref(), Some("junior"));
+    assert!(!child.detached);
+    drop(relay);
+    Ok(())
+}
