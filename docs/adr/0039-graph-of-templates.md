@@ -85,7 +85,9 @@ follows those pages' attempt references for graph and node output. Explicit
 attempt output remains the ordinary byte reader. Cancelling the origin node
 sends the existing peer cancellation request; the receiver fences and stops its
 subtree before replying. All communication uses forward SSH requests from the
-origin. No reverse connection or replicated journal is required. Budgets and
+origin. A collected terminal peer checkpoint is reported explicitly, so the
+origin can retain its own status row while the attempt record remains readable.
+No reverse connection or replicated journal is required. Budgets and
 recovery are owned by each host's graph; this boundary does not provide a shared
 cross-host spending ledger.
 

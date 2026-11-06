@@ -1137,7 +1137,22 @@ pub(crate) fn peer_graph_fields_page(
     )
     .map_err(graph_journal_error)?
     else {
-        return Ok(Default::default());
+        // Terminal checkpoints can be collected before their RunStore attempts.
+        // Retain an explicit pointer so the origin can keep its own durable row.
+        if !matches!(
+            record.state,
+            provenant_records::run::AttemptState::Terminal { .. }
+        ) {
+            return Err(FacadeError::StateCorrupt);
+        }
+        return Ok([
+            (
+                "peer_graph".into(),
+                serde_json::json!({"host":factory.context.identity.host,"graph_id":graph}),
+            ),
+            ("peer_graph_collected".into(), serde_json::json!(true)),
+        ]
+        .into());
     };
     let reference = format!("{}/{}", factory.context.identity.host, attempt);
     if relay::historical_parent_of_attempt(&checkpoint, &reference).is_none() {
@@ -1214,6 +1229,13 @@ pub(crate) fn peer_cancel_subtree(
     cancel: &CancelToken,
 ) -> Result<(), FacadeError> {
     let fields = peer_graph_fields(factory, attempt)?;
+    if fields
+        .get("peer_graph_collected")
+        .and_then(serde_json::Value::as_bool)
+        == Some(true)
+    {
+        return Ok(());
+    }
     let Some(graph) = fields
         .get("peer_graph")
         .and_then(|v| v["graph_id"].as_str())

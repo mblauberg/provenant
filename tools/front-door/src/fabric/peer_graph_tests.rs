@@ -558,3 +558,93 @@ fn peer_hosted_lane_subtree_pages_are_bounded_complete_and_private() -> TestResu
     assert_eq!(observed, expected);
     Ok(())
 }
+
+#[test]
+fn peer_hosted_lane_collection_preserves_origin_status() -> TestResult {
+    if host_test(
+        "fabric::peer_tests::peer_graph_tests::peer_hosted_lane_collection_preserves_origin_status",
+    )? {
+        return Ok(());
+    }
+    let (rig, factory) = receiver()?;
+    let cancel = CancelToken::new();
+    let receipt = submit_parent(&factory, "peer-collected-status", &cancel)?;
+    let graph = receipt.extra["peer_graph"]["graph_id"]
+        .as_str()
+        .ok_or("graph pointer")?;
+    let parent = receipt.targets[0].attempt;
+    let owner = BinaryRunOwner {
+        factory: &factory,
+        allow_remote: false,
+        actor: None,
+        chair: None,
+    };
+    let store = owner.store(&cancel)?;
+    let call = owner.call(&cancel);
+    let record = store.mark_starting_for_fixture(
+        parent,
+        &provenant_run::RouteRecord {
+            provider: Some("fixture".into()),
+            model: Some("fixture/model".into()),
+            ..Default::default()
+        },
+        &call,
+    )?;
+    let head = crate::worktree_tests::git(&rig, &["rev-parse", "HEAD"])?;
+    publish_success(&rig, &store, &record, head.parse()?, &call)?;
+    let advanced = advance_receiver(&factory, graph, &cancel)?;
+    assert_eq!(
+        advanced.status,
+        graph::GraphStatus::Complete,
+        "{advanced:?}"
+    );
+    assert_eq!(
+        FileJournal::collect_terminal(
+            &factory.context.roots.state,
+            factory.context.identity.project,
+            i128::MAX,
+            &cancel,
+            &factory.clock
+        )?,
+        1
+    );
+    assert!(
+        FileJournal::read_checkpoint(
+            &factory.context.roots.state,
+            factory.context.identity.project,
+            graph
+        )?
+        .is_none()
+    );
+    let fields = super::super::peer::peer_graph_fields(&factory, parent)?;
+    assert_eq!(fields["peer_graph_collected"], true);
+    assert_eq!(fields["peer_graph"], receipt.extra["peer_graph"]);
+    let mut record = store.record(parent, &call)?;
+    record.extra.extend(fields);
+    let peer = factory.context.identity.host;
+    let mut local = provenant_core::HostId::from_bytes([0; 16]);
+    if local == peer {
+        local = provenant_core::HostId::from_bytes([1; 16]);
+    }
+    let mut row = json!({"graph_id":"origin-graph","node_id":"parent","state":"terminal","outcome":"succeeded"});
+    assert!(super::super::unified::retain_collected_peer_row(
+        &mut row, &record, peer, local
+    ));
+    assert_eq!(row["graph_id"], "origin-graph");
+    assert_eq!(row["outcome"], "succeeded");
+    assert_eq!(row["peer_graph_collected"], true);
+    let mut local_row = json!({});
+    assert!(!super::super::unified::retain_collected_peer_row(
+        &mut local_row,
+        &record,
+        peer,
+        peer
+    ));
+    super::super::peer::peer_cancel_subtree(
+        &factory,
+        parent,
+        WaitBudget::cli(factory.clock.mono_now(), 30)?,
+        &cancel,
+    )?;
+    Ok(())
+}

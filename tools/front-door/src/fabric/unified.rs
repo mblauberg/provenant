@@ -409,6 +409,9 @@ pub(crate) fn enrich_status_rows(
         };
         // A peer owns a separate graph rooted at the submitted attempt. Its
         // authenticated status retains the origin binding beside that pointer.
+        if retain_collected_peer_row(row, &record, host, context.identity.host) {
+            continue;
+        }
         let peer_origin = record.extra.get("peer_origin_context");
         let peer_graph = record.extra.get("peer_graph");
         let origin_matches = host != context.identity.host
@@ -450,6 +453,39 @@ pub(crate) fn enrich_status_rows(
     }
     project_node_waits(rows);
     Ok(())
+}
+
+/// Collection on a peer must not invalidate the origin's retained checkpoint.
+pub(super) fn retain_collected_peer_row(
+    row: &mut Value,
+    record: &provenant_records::run::AttemptRecord,
+    peer: provenant_core::HostId,
+    local: provenant_core::HostId,
+) -> bool {
+    let Some(graph) = record.extra.get("peer_graph") else {
+        return false;
+    };
+    if peer == local
+        || record.extra.get("peer_graph_collected") != Some(&json!(true))
+        || !matches!(
+            record.state,
+            provenant_records::run::AttemptState::Terminal { .. }
+        )
+        || graph["host"] != json!(peer)
+        || graph["graph_id"]
+            .as_str()
+            .is_none_or(|id| !id.starts_with("peer-"))
+        || record
+            .context
+            .as_ref()
+            .and_then(|context| context.graph_id.as_deref())
+            != graph["graph_id"].as_str()
+    {
+        return false;
+    }
+    row["peer_graph"] = graph.clone();
+    row["peer_graph_collected"] = json!(true);
+    true
 }
 
 /// Keep a live parent's wait visible before bounded status output reaches its
