@@ -333,6 +333,7 @@ pub(super) fn render_run(mut result: Reply, edge: &Edge<'_>) -> Reply {
                 _ => false,
             });
         if !timed_out
+            && result.result.error.is_none()
             && !refused_sibling
             && !row["superseded_by"].is_string()
             && !matches!(

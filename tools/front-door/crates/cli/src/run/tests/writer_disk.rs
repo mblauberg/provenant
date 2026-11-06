@@ -30,7 +30,10 @@ fn all_refused_render_keeps_the_full_typed_receipt() -> Result<(), Box<dyn std::
             reason: "preparation refused".into(),
         },
     ];
-    let data = json!({"run_id":run, "operation_id":"fixture", "started":started, "lanes":[]});
+    let data = json!({"run_id":run, "operation_id":"fixture", "started":started, "lanes":[
+        {"attempt_id":first,"state":"rejected"},
+        {"attempt_id":second,"state":"rejected"}
+    ]});
     let rendered = render_run(reply("run", Ok((data.clone(), String::new()))), &edge);
     assert_eq!(rendered.result.status, Status::Refused);
     assert!(rendered.result.error.is_some());
