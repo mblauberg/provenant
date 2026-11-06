@@ -324,14 +324,18 @@ pub fn submit(
         nodes,
     };
     document.schema_version = u64::from(minimum_schema_version(&document));
-    document.admit(context.limits).map_err(|reason| {
-        if reason.contains("cycle") {
-            PatchError::new("cycle", reason)
-        } else {
-            PatchError::invalid(reason)
-        }
-    })?;
+    document.admit(context.limits).map_err(classify)?;
     Ok(document)
+}
+
+/// A dependency cycle gets its own code so a caller can tell it from other
+/// invalid patches.
+fn classify(reason: String) -> PatchError {
+    if reason.contains("cycle") {
+        PatchError::new("cycle", format!("patch would create a {reason}"))
+    } else {
+        PatchError::invalid(reason)
+    }
 }
 
 pub(super) enum Prepared {
@@ -496,7 +500,8 @@ pub(super) fn prepare(
             planner.map(|(_, spec)| spec),
             expanded,
             checkpoint,
-        )?
+        )
+        .map_err(classify)?
     };
     for instance in &mut uses {
         let id = match parent {
@@ -623,13 +628,8 @@ pub(super) fn prepare(
         }
     }
     validate_schema(&preview).map_err(str::to_owned)?;
-    let (plan, _) = validate_flat_plan(&preview, &plans::generous()).map_err(|reason| {
-        if reason.contains("cycle") {
-            PatchError::new("cycle", format!("patch would create a {reason}"))
-        } else {
-            PatchError::invalid(reason)
-        }
-    })?;
+    let (plan, _) = validate_flat_plan(&preview, &plans::generous())
+        .map_err(|reason| classify(reason.into()))?;
     validate_output_kinds(&preview)?;
     if let Some(reason) = structural_limit_reason(&preview, &plan, context.limits) {
         return Err(PatchError::invalid(reason));

@@ -1926,3 +1926,156 @@ fn planned_big_batch_refuses_overlapping_waves_and_budgets_over_the_lane_deadlin
     let run = advance(&doc, &mut owner, &mut MemoryJournal::default()).unwrap();
     assert_eq!(run.checkpoint.expansions.len(), 1, "{:?}", run.checkpoint.pause_reason);
 }
+
+fn running_graph() -> (GraphDocument, GraphCheckpoint) {
+    let document: GraphDocument = serde_json::from_value(json!({
+        "schema_version":1, "graph_id":"live", "nodes":[
+            {"id":"a", "access":"read_only", "prompt":"Start", "route":{"alias":"senior"}},
+            {"id":"b", "access":"read_only", "prompt":"Then", "depends_on":["a"], "route":{"alias":"senior"}}
+        ]
+    })).unwrap();
+    let mut owner = FakeOwner::default();
+    owner.observations.push_back(AttemptObservation::Pending { attempt_ref: Some("a".into()) });
+    let checkpoint = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap().checkpoint;
+    (document, checkpoint)
+}
+
+fn host_patch(value: Value) -> Patch {
+    serde_json::from_value(value).unwrap()
+}
+
+fn admit(document: &GraphDocument, checkpoint: &mut GraphCheckpoint, patch: Value) -> Result<Admitted, PatchError> {
+    admit_with(document, checkpoint, None, patch, &|_| Ok(()))
+}
+
+fn admit_with(
+    document: &GraphDocument,
+    checkpoint: &mut GraphCheckpoint,
+    parent: Option<&str>,
+    patch: Value,
+    scan: &dyn Fn(&str) -> Result<(), String>,
+) -> Result<Admitted, PatchError> {
+    let library = TemplateLibrary::bundled();
+    let resolvers = std::collections::BTreeMap::from([("areas".to_owned(), vec!["src".to_owned(), "docs".to_owned()])]);
+    let limits = plans::generous();
+    let context = PatchContext { library: &library, resolvers: &resolvers, scan, limits: &limits };
+    admit_patch(&mut LiveGraph { document, checkpoint }, parent, &host_patch(patch), &context)
+}
+
+fn live_ids(document: &GraphDocument, checkpoint: &GraphCheckpoint) -> Vec<String> {
+    let expanded = plans::expand(document, &checkpoint.extensions, &checkpoint.expansions, &plans::generous()).unwrap();
+    expanded.nodes.into_iter().map(|node| node.id).collect()
+}
+
+#[test]
+fn admit_patch_adds_a_swarm_and_replays_by_idempotency_key() {
+    let (document, mut checkpoint) = running_graph();
+    let patch = json!({"schema_version":1, "expected_revision":0, "idempotency_key":"map-1",
+        "reason":"map before acting",
+        "nodes":[{"id":"map", "use":"explore", "over":"@areas", "after":["a"]}]});
+    let admitted = admit(&document, &mut checkpoint, patch.clone()).unwrap();
+    assert_eq!((admitted.revision, admitted.replayed), (1, false));
+    assert!(admitted.added.contains(&"map".to_owned()), "{:?}", admitted.added);
+    let ids = live_ids(&document, &checkpoint);
+    for id in ["map", "map--src", "map--docs"] {
+        assert!(ids.contains(&id.to_owned()), "{ids:?}");
+    }
+    let record = checkpoint.expansions[0].patch.as_ref().unwrap();
+    assert_eq!((record.revision, record.key.as_deref(), record.parent.as_deref()), (1, Some("map-1"), None));
+    assert_eq!(record.reason.as_deref(), Some("map before acting"));
+    assert_eq!(checkpoint.expansions[0].uses[0].name, "explore");
+    assert!(checkpoint.nodes.iter().any(|node| node.id == "map--src" && node.state == NodeState::Pending));
+
+    let replay = admit(&document, &mut checkpoint, patch).unwrap();
+    assert_eq!((replay.revision, replay.replayed), (1, true));
+    assert_eq!(checkpoint.expansions.len(), 1);
+
+    let changed = json!({"schema_version":1, "idempotency_key":"map-1",
+        "nodes":[{"id":"other", "use":"task", "after":["a"]}]});
+    assert_eq!(admit(&document, &mut checkpoint, changed).unwrap_err().code, "idempotency_conflict");
+    let stale = json!({"schema_version":1, "expected_revision":0,
+        "nodes":[{"id":"late", "use":"task", "after":["a"]}]});
+    assert_eq!(admit(&document, &mut checkpoint, stale).unwrap_err().code, "stale_revision");
+}
+
+#[test]
+fn admit_patch_refuses_cycles_conflicts_and_secrets() {
+    let (document, mut checkpoint) = running_graph();
+    let cycle = json!({"schema_version":1, "nodes":[
+        {"id":"x", "use":"task", "after":["y"]}, {"id":"y", "use":"task", "after":["x"]}]});
+    assert_eq!(admit(&document, &mut checkpoint, cycle).unwrap_err().code, "cycle");
+    let duplicate = json!({"schema_version":1, "nodes":[{"id":"a", "use":"task"}]});
+    assert_eq!(admit(&document, &mut checkpoint, duplicate).unwrap_err().code, "conflict");
+    let both = json!({"schema_version":1, "skip":["b"],
+        "replace":[{"id":"b", "access":"read_only", "prompt":"New", "route":{"alias":"senior"}}]});
+    assert_eq!(admit(&document, &mut checkpoint, both).unwrap_err().code, "conflict");
+    let secret = json!({"schema_version":1, "nodes":[{"id":"leak", "use":"task", "brief":"use sk-fixture-secret"}]});
+    let error = admit_with(&document, &mut checkpoint, None, secret, &|text| {
+        if text.contains("sk-fixture-secret") { Err("credential-shaped text".into()) } else { Ok(()) }
+    })
+    .unwrap_err();
+    assert_eq!(error.code, "secret");
+    assert!(checkpoint.expansions.is_empty(), "refused patches leave no journal entry");
+}
+
+#[test]
+fn admit_patch_skips_and_replaces_only_unstarted_nodes() {
+    let (document, mut checkpoint) = running_graph();
+    let started = json!({"schema_version":1, "skip":["a"]});
+    assert_eq!(admit(&document, &mut checkpoint, started).unwrap_err().code, "started");
+    let replace = json!({"schema_version":1, "replace":[{"id":"b", "use":"review", "with":{"lens":"tests"}, "after":["a"]}]});
+    let admitted = admit(&document, &mut checkpoint, replace).unwrap();
+    assert_eq!(admitted.revision, 1);
+    let expanded = plans::expand(&document, &checkpoint.extensions, &checkpoint.expansions, &plans::generous()).unwrap();
+    let b = expanded.nodes.iter().find(|node| node.id == "b").unwrap();
+    assert!(b.prompt.contains("tests lens"), "{}", b.prompt);
+    assert_eq!(checkpoint.expansions[0].patch.as_ref().unwrap().replaced.len(), 1);
+
+    let skip = json!({"schema_version":1, "expected_revision":1, "skip":["b"]});
+    assert_eq!(admit(&document, &mut checkpoint, skip).unwrap().revision, 2);
+    assert_eq!(checkpoint.nodes.iter().find(|node| node.id == "b").unwrap().state, NodeState::Skipped);
+    assert_eq!(checkpoint.expansions[1].patch.as_ref().unwrap().skipped, ["b"]);
+}
+
+#[test]
+fn submit_compiles_a_patch_into_a_new_graph() {
+    let library = TemplateLibrary::bundled();
+    let resolvers = Default::default();
+    let limits = plans::generous();
+    let context = PatchContext { library: &library, resolvers: &resolvers, scan: &|_| Ok(()), limits: &limits };
+    let patch = host_patch(json!({"schema_version":1, "templates":{"pair":{"nodes":[
+            {"id":"one", "use":"task", "brief":"First"}, {"id":"two", "use":"task", "brief":"Second", "after":["one"]}]}},
+        "nodes":[{"id":"map", "use":"explore", "over":["src"]}, {"id":"work", "use":"pair", "after":["map"]}]}));
+    let document = patch::submit("submitted", &patch, &context).unwrap();
+    assert_eq!(document.nodes.len(), 2);
+    assert_eq!(document.nodes[1].kind, Some(NodeKind::Composite));
+    let cycle = host_patch(json!({"schema_version":1, "nodes":[
+        {"id":"x", "use":"task", "after":["y"]}, {"id":"y", "use":"task", "after":["x"]}]}));
+    assert_eq!(patch::submit("cyclic", &cycle, &context).unwrap_err().code, "cycle");
+    let stale = host_patch(json!({"schema_version":1, "expected_revision":3, "nodes":[{"id":"x", "use":"task"}]}));
+    assert_eq!(patch::submit("stale", &stale, &context).unwrap_err().code, "stale_revision");
+}
+
+#[test]
+fn planner_fragments_may_emit_composites_and_loops() {
+    let fragment = json!({"schema_version":1,
+        "templates":{"attempt":{"nodes":[
+            {"id":"work", "use":"task", "brief":"Try the slice", "acceptance_checks":["It works"]},
+            {"id":"done", "kind":"gate", "access":"read_only", "after":["work"],
+             "inputs":[{"node":"work", "outputs":["verdict"]}],
+             "condition":{"type":"verdict", "expected":"VERDICT: PASS", "threshold":"all"}}],
+            "exports":[{"node":"done", "outputs":["result"]}]}},
+        "nodes":[
+            {"id":"map", "use":"explore", "over":["src", "docs"], "acceptance_checks":["Cite paths"]},
+            {"id":"try", "use":"attempt", "after":["map"], "repeat":{"until":"done", "max_rounds":2}}]});
+    let output = format!("```fragment\n{fragment}\n```");
+    let mut owner = fixture_owner(&[&output]);
+    let run = advance(&planner(8), &mut owner, &mut MemoryJournal::default()).unwrap();
+    assert!(run.checkpoint.pause_reason.is_none(), "{:?}", run.checkpoint.pause_reason);
+    let expansion = &run.checkpoint.expansions[0];
+    assert!(expansion.patch.as_ref().is_some_and(|record| record.parent.as_deref() == Some("plan")));
+    let ids: Vec<_> = run.checkpoint.nodes.iter().map(|node| node.id.as_str()).collect();
+    for id in ["plan--map", "plan--map--src", "plan--map--docs", "plan--try", "plan--try--r1--work"] {
+        assert!(ids.contains(&id), "{ids:?}");
+    }
+}

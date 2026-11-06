@@ -2,7 +2,7 @@
 use super::patch::{PatchRecord, TemplateUse};
 use super::template::Template;
 use super::*;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 const FALLBACK_RETRY_CONTEXT: &str = "\n[planner-fragment-retry-context:";
 
@@ -1632,6 +1632,31 @@ pub(super) fn flatten_fragment(
             (unit.id.clone(), after.cloned().collect())
         })
         .collect();
+    // A host or lane patch may wait on nodes already in the graph; a planner
+    // names only its own fragment's nodes. External nodes stand in as plain
+    // read-only placeholders while the fragment is checked, then drop out.
+    let external: BTreeSet<String> = if parent.is_none_or(|parent| parent.plan.is_none()) {
+        units
+            .values()
+            .flatten()
+            .filter(|name| !units.contains_key(*name))
+            .filter(|name| document.nodes.iter().any(|node| &node.id == *name))
+            .cloned()
+            .collect()
+    } else {
+        BTreeSet::new()
+    };
+    let mut local_nodes = local_nodes;
+    for existing in document.nodes.iter().filter(|node| external.contains(&node.id)) {
+        let name = &existing.id;
+        let mut stub: GraphNode = serde_json::from_value(serde_json::json!({
+            "id": name, "access": "read_only", "prompt": "placeholder", "route": {"alias": "senior"}
+        }))
+        .map_err(|error| error.to_string())?;
+        stub.require_findings = existing.require_findings;
+        stub.required_verdict.clone_from(&existing.required_verdict);
+        local_nodes.push(stub);
+    }
     let local = GraphDocument {
         review_base: None,
         context: document.context.clone(),
@@ -1653,6 +1678,7 @@ pub(super) fn flatten_fragment(
     let mut nodes: Vec<GraphNode> = plan
         .nodes
         .iter()
+        .filter(|n| !external.contains(&n.id))
         .filter_map(|n| local.nodes.iter().find(|child| child.id == n.id).cloned())
         .collect();
     if spec.is_some_and(|spec| spec.disjoint_waves) {
@@ -1688,7 +1714,13 @@ pub(super) fn flatten_fragment(
         }
     }
     if let Some(parent) = parent {
-        let id = |name: &str| format!("{}--{name}", parent.id);
+        let id = |name: &str| {
+            if external.contains(name) {
+                name.to_owned()
+            } else {
+                format!("{}--{name}", parent.id)
+            }
+        };
         for child in &mut nodes {
             if id(&child.id).len() > 64 {
                 return Err(format!(
