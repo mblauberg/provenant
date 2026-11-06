@@ -1983,6 +1983,7 @@ struct ClassifiedPool {
     weighted: Vec<(usize, u64)>,
     zero_ready: Vec<usize>,
     standby_ready: Vec<usize>,
+    stale_spent: BTreeSet<usize>,
     first_zero_ready: Option<usize>,
     first_standby_ready: Option<usize>,
     first_recoverable_unavailable: Option<usize>,
@@ -2038,6 +2039,7 @@ fn classify_pool(
         weighted: Vec::new(),
         zero_ready: Vec::new(),
         standby_ready: Vec::new(),
+        stale_spent: BTreeSet::new(),
         first_zero_ready: None,
         first_standby_ready: None,
         first_recoverable_unavailable: None,
@@ -2062,19 +2064,27 @@ fn classify_pool(
             })
             .map(|a| latest_reading(&member.model, a, context, false))
             .collect::<Vec<_>>();
-        let exhausted = !spent.is_empty()
+        let is_spent = |q: &QuotaObservation| {
+            reading_exhausted(&q.snapshot, &member.model, context)
+                || provenant_quota::partial_headroom(
+                    &q.snapshot,
+                    member.model.adapter(),
+                    member.model.model(),
+                    &context.catalogue.admission_pools(&member.model),
+                    context.now_seconds(),
+                ) == provenant_quota::PartialHeadroom::Exhausted
+        };
+        let all_spent = !spent.is_empty() && spent.iter().all(|q| q.is_some_and(is_spent));
+        let exhausted = all_spent
             && spent.iter().all(|q| {
                 q.is_some_and(|q| {
-                    reading_exhausted(&q.snapshot, &member.model, context)
-                        || provenant_quota::partial_headroom(
-                            &q.snapshot,
-                            member.model.adapter(),
-                            member.model.model(),
-                            &context.catalogue.admission_pools(&member.model),
-                            context.now_seconds(),
-                        ) == provenant_quota::PartialHeadroom::Exhausted
+                    q.snapshot.observed_unix_seconds < q.expires_unix_seconds
+                        && context.now_seconds() < q.expires_unix_seconds
                 })
             });
+        if all_spent && !exhausted {
+            classified.stale_spent.insert(classified.candidates.len());
+        }
         let reset = spent
             .iter()
             .filter_map(|q| *q)
@@ -2094,10 +2104,14 @@ fn classify_pool(
             Some(reset) => format!("exhausted; earliest known reset {reset}"),
             None => "exhausted; reset unknown".to_owned(),
         });
-        if let Some(detail) = excluded_members
-            .reason(&member.model, context)
-            .or(spent_detail)
-        {
+        let exclusion_detail = match (
+            excluded_members.reason(&member.model, context),
+            spent_detail,
+        ) {
+            (Some(rule), Some(quota)) => Some(format!("{rule}; {quota}")),
+            (rule, quota) => rule.or(quota),
+        };
+        if let Some(detail) = exclusion_detail {
             classified
                 .exclusions
                 .push(format!("{}: {detail}", member.model.as_str()));
@@ -2372,6 +2386,30 @@ fn classify_with_image_preference(
         classified.weighted.retain(|(index, _)| image(*index));
         classified.zero_ready.retain(|index| image(*index));
         classified.standby_ready.retain(|index| image(*index));
+        classified.first_zero_ready = classified.zero_ready.first().copied();
+        classified.first_standby_ready = classified.standby_ready.first().copied();
+    }
+    // Stale exhaustion is a preference, never a launch refusal. Retain the
+    // original draw when every ready member has only stale spent evidence.
+    let ready = classified
+        .weighted
+        .iter()
+        .map(|(index, _)| *index)
+        .chain(classified.zero_ready.iter().copied())
+        .chain(classified.standby_ready.iter().copied());
+    if ready
+        .into_iter()
+        .any(|index| !classified.stale_spent.contains(&index))
+    {
+        classified
+            .weighted
+            .retain(|(index, _)| !classified.stale_spent.contains(index));
+        classified
+            .zero_ready
+            .retain(|index| !classified.stale_spent.contains(index));
+        classified
+            .standby_ready
+            .retain(|index| !classified.stale_spent.contains(index));
         classified.first_zero_ready = classified.zero_ready.first().copied();
         classified.first_standby_ready = classified.standby_ready.first().copied();
     }

@@ -1390,8 +1390,9 @@ reassigned worktrees require a new owned checkout for fresh fallback;
 
 ### Alias quota recovery
 
-Named route pools skip members with known, unreset exhaustion, including stale
-quota observations. When every member is spent, refusal identifies the members
+Named route pools skip members with fresh, unreset exhaustion. Stale spent
+observations rank a member behind other ready members, but never refuse a launch.
+When every member has fresh exhaustion, refusal identifies the members
 and their earliest known resets. An exact model request keeps its model.
 A quota refusal before any generated work may retry the same alias;
 the successor attempt retains the spent members in its routing exclusions and
