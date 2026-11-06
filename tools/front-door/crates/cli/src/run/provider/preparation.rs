@@ -2383,6 +2383,9 @@ pub(super) fn prepare_candidates(
                     if class != provenant_records::diagnostic::BoundaryClass::None {
                         reason_boundaries.insert(reasons.len(), class);
                     }
+                    if let Some(fact) = error.resource_fact() {
+                        reason_resources.insert(reasons.len(), fact);
+                    }
                     reasons.push(skip(&label, SkipKind::Refused, error.to_string()));
                     continue;
                 }

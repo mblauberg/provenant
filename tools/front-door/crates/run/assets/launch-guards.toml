@@ -766,3 +766,32 @@ boundary = "configurable_default"
 code = "HOST_PROCESSES"
 setting = "operating system RLIMIT_NPROC"
 reason = "A custody admission resource refusal retains the effective setting and source in its typed fact."
+
+# The three copy budgets are resource policy. They do not relax the anchored
+# filesystem, hard-link, credential, state-root or worktree-overlap guards.
+
+[[guard]]
+site = "cli/src/run/provider/continuation.rs#copy_state_classified"
+boundary = "configurable_default"
+code = "REFUSED"
+setting = "domains.run.continuation_copy_limit_bytes"
+reason = "Retained-state copy and search budgets report the effective host setting or shipped default, its source and a corrective action."
+
+[[guard]]
+site = "cli/src/run/provider/continuation.rs#copy_state_classified"
+boundary = "configurable_default"
+code = "REFUSED"
+setting = "domains.run.continuation_copy_entries"
+reason = "Retained-state copy and search budgets report the effective host setting or shipped default, its source and a corrective action."
+
+[[guard]]
+site = "cli/src/run/provider/continuation.rs#copy_state_classified"
+boundary = "configurable_default"
+code = "REFUSED"
+setting = "domains.run.continuation_copy_depth"
+reason = "Retained-state copy and search budgets report the effective host setting or shipped default, its source and a corrective action."
+
+[[guard]]
+site = "cli/src/run/provider/continuation.rs#StateCopyPolicy::read"
+boundary = "warning"
+reason = "Unavailable or invalid copy budget settings warn and use compiled defaults."

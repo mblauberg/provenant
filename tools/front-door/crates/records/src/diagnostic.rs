@@ -154,6 +154,25 @@ impl PortSettingSource {
     }
 }
 
+/// Configurable budgets for copying retained provider state. These never alter
+/// credential, state-root, mount or worktree confinement checks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContinuationCopyLimit {
+    Bytes,
+    Entries,
+    Depth,
+}
+impl ContinuationCopyLimit {
+    pub fn setting(self) -> &'static str {
+        match self {
+            Self::Bytes => "domains.run.continuation_copy_limit_bytes",
+            Self::Entries => "domains.run.continuation_copy_entries",
+            Self::Depth => "domains.run.continuation_copy_depth",
+        }
+    }
+}
+
 /// Closed resource facts safe to project across host boundaries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -166,6 +185,12 @@ pub enum ResourceFact {
     ArgvPromptLimit {
         limit: u64,
         origin: SettingSource,
+    },
+    ContinuationCopy {
+        limit: u64,
+        setting: ContinuationCopyLimit,
+        origin: SettingSource,
+        available_bytes: Option<u64>,
     },
     WriteGrantLimit {
         limit: u64,
@@ -219,6 +244,13 @@ impl ResourceFact {
             Self::ArgvPromptLimit { limit, origin } => diagnostic
                 .detail(format!("argv prompt exceeds domains.run.argv_prompt_limit_bytes ({limit} bytes; source: {})", origin.description()))
                 .next("shorten the prompt or adjust domains.run.argv_prompt_limit_bytes"),
+            Self::ContinuationCopy { limit, setting, origin, available_bytes } => {
+                let key = setting.setting();
+                let space = available_bytes.map_or_else(String::new, |bytes| format!("; {bytes} disk bytes available"));
+                diagnostic
+                    .detail(format!("retained provider state exceeds its copy budget; {key} is {limit} (source: {}){space}", origin.description()))
+                    .next(format!("reduce retained provider state, free disk space, or adjust {key} before retrying"))
+            }
             Self::WriteGrantLimit { limit, origin } => diagnostic
                 .detail(format!("encoded write grants exceed domains.run.write_grant_limit_bytes ({limit} bytes; source: {})", origin.description()))
                 .next("reduce the write grants or adjust domains.run.write_grant_limit_bytes"),

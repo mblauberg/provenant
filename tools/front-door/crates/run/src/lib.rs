@@ -1051,9 +1051,44 @@ mod diagnostic_projection_tests {
                 "host configuration",
             ));
         }
+        for setting in [
+            provenant_records::diagnostic::ContinuationCopyLimit::Bytes,
+            provenant_records::diagnostic::ContinuationCopyLimit::Entries,
+            provenant_records::diagnostic::ContinuationCopyLimit::Depth,
+        ] {
+            examples.push((
+                ResourceFact::ContinuationCopy {
+                    limit: 2,
+                    setting,
+                    origin: configured,
+                    available_bytes: None,
+                },
+                "host configuration",
+            ));
+        }
         let inventory = include_str!("../assets/launch-guards.toml")
             .parse::<toml_edit::DocumentMut>()
             .unwrap();
+        // Inverse coverage: deleting a row must fail even when every remaining
+        // inventory row still has a valid projection.
+        let guards = inventory["guard"].as_array_of_tables().unwrap();
+        for (fact, source) in &examples {
+            let diagnostic = RefusalKind::HandoffResource(*fact).diagnostic().unwrap();
+            let detail = diagnostic.detail.as_deref().unwrap();
+            assert!(detail.contains(source));
+            assert!(
+                guards.iter().any(|row| {
+                    row.get("boundary").and_then(|v| v.as_str()) == Some("configurable_default")
+                        && row.get("code").and_then(|v| v.as_str())
+                            == Some(diagnostic.code.as_str())
+                        && row
+                            .get("setting")
+                            .and_then(|v| v.as_str())
+                            .is_some_and(|setting| detail.contains(setting))
+                }),
+                "resource refusal is omitted from inventory: {fact:?}"
+            );
+        }
         for row in inventory["guard"]
             .as_array_of_tables()
             .unwrap()

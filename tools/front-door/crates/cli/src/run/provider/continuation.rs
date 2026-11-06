@@ -1,4 +1,5 @@
 use super::*;
+use provenant_records::diagnostic::ContinuationCopyLimit;
 
 #[derive(Debug, thiserror::Error)]
 pub(super) enum ContinuationRequestError {
@@ -64,6 +65,13 @@ pub(super) enum ContinuationError {
 }
 
 impl ContinuationError {
+    pub(super) fn resource_fact(&self) -> Option<provenant_records::diagnostic::ResourceFact> {
+        match self {
+            Self::StateCopy(error) => error.resource,
+            _ => None,
+        }
+    }
+
     pub(super) fn boundary_class(&self) -> provenant_records::diagnostic::BoundaryClass {
         use provenant_records::diagnostic::BoundaryClass;
         match self {
@@ -143,30 +151,25 @@ pub(super) fn continuation_for(
         .join("attempts")
         .join(prior.attempt_id.to_string())
         .join("provider-state");
-    match find_session_state(&prior_state, session) {
+    let policy = StateCopyPolicy::read(state_root);
+    match find_session_state_within(&prior_state, session, policy.limits) {
         // Codex's SQLite index holds absolute rollout paths. Rebuild it from
         // the copied sessions instead of resolving back into settled history.
-        Ok(Some(retained)) => copy_state_classified(&retained, private_state, RETAINED_STATE, AdapterSpec::get(&route.adapter).is_some_and(|spec| spec.copy_sessions_only))?,
+        Ok(Some(retained)) => copy_state_classified(&retained, private_state, policy, AdapterSpec::get(&route.adapter).is_some_and(|spec| spec.copy_sessions_only))?,
         // These adapters retain sessions in their existing user data stores.
         Ok(None) if AdapterSpec::get(&route.adapter).is_some_and(|spec| spec.user_sessions) => {}
         Ok(None) => return Err("the prior attempt's retained provider state is missing or has expired; dispatch a new lane with its retained result or transcripts as context".into()),
         // An unfinished search proves nothing missing, whatever the adapter.
-        Err(SearchExhausted) => {
-            return Err(format!(
-                "the prior attempt's retained provider state exceeds {} entries",
-                RETAINED_STATE.entries
-            ).into());
+        Err(exhausted) => {
+            return Err(StateCopyError::resource(policy.fact(exhausted.limit(), None)).into());
         }
     }
     Ok(continuation)
 }
 
-/// Bounds on retained provider state, shared by its search and its copy. A
-/// leftover process from the prior attempt may still grow the tree. The depth
-/// and entry limits match the launch census of writable trees, which would
-/// refuse a larger copy anyway, and leave room past the depth of Codex plugin
-/// caches. The byte budget is many times a long session's state while bounding
-/// what a sparse or still-growing file can make the host write.
+/// Configurable budgets shared by retained-state search and copy. A leftover
+/// process from the prior attempt may still grow the tree. These budgets bound
+/// host work without changing the anchored filesystem or hard-link guards.
 #[derive(Clone, Copy)]
 pub(super) struct StateLimits {
     pub(super) depth: u32,
@@ -178,6 +181,73 @@ pub(super) const RETAINED_STATE: StateLimits = StateLimits {
     entries: 100_000,
     bytes: 4 << 30,
 };
+
+#[derive(Clone, Copy)]
+struct StateCopyPolicy {
+    limits: StateLimits,
+    origins: [provenant_records::diagnostic::SettingSource; 3],
+}
+impl StateCopyPolicy {
+    fn shipped(limits: StateLimits) -> Self {
+        Self {
+            limits,
+            origins: [provenant_records::diagnostic::SettingSource::ShippedDefault; 3],
+        }
+    }
+    fn read(state_root: &Path) -> Self {
+        use provenant_records::diagnostic::SettingSource;
+        match provenant_confinement::run_config::RunConfig::read_with_keys(state_root) {
+            Ok((config, keys)) => {
+                let origins = [
+                    "continuation_copy_limit_bytes",
+                    "continuation_copy_entries",
+                    "continuation_copy_depth",
+                ]
+                .map(|key| {
+                    if keys.contains(key) {
+                        SettingSource::Configuration
+                    } else {
+                        SettingSource::ShippedDefault
+                    }
+                });
+                Self {
+                    limits: StateLimits {
+                        bytes: config.continuation_copy_limit_bytes,
+                        entries: config.continuation_copy_entries,
+                        depth: config.continuation_copy_depth,
+                    },
+                    origins,
+                }
+            }
+            Err(error) => {
+                use std::io::Write;
+                let _ = writeln!(
+                    std::io::stderr().lock(),
+                    "warning: continuation copy settings unavailable ({error}); using compiled defaults"
+                );
+                Self::shipped(RETAINED_STATE)
+            }
+        }
+    }
+    fn fact(
+        self,
+        setting: ContinuationCopyLimit,
+        available_bytes: Option<u64>,
+    ) -> provenant_records::diagnostic::ResourceFact {
+        use provenant_records::diagnostic::ResourceFact;
+        let (limit, origin) = match setting {
+            ContinuationCopyLimit::Bytes => (self.limits.bytes, self.origins[0]),
+            ContinuationCopyLimit::Entries => (u64::from(self.limits.entries), self.origins[1]),
+            ContinuationCopyLimit::Depth => (u64::from(self.limits.depth), self.origins[2]),
+        };
+        ResourceFact::ContinuationCopy {
+            limit,
+            setting,
+            origin,
+            available_bytes,
+        }
+    }
+}
 
 /// The names in `directory`, each spending one of `entries`, or `None` once
 /// they run out. Listing first closes the stream before any descent.
@@ -212,7 +282,7 @@ pub(super) fn open_local_directory(
 }
 
 /// The `candidate-N` directory of `provider_state` holding a file or directory
-/// named for `session`, searched within `RETAINED_STATE`. The prior lane
+/// named for `session`, searched within the configured retained-state budgets. The prior lane
 /// wrote this tree, so the path must already be canonical and every directory
 /// is opened from its parent's handle, never through a link or a mount.
 pub(crate) fn continuation_available(
@@ -237,15 +307,17 @@ pub(crate) fn continuation_available(
         .join("attempts")
         .join(prior.attempt_id.to_string())
         .join("provider-state");
-    match find_session_state(&state, session) {
+    let policy = StateCopyPolicy::read(state_root);
+    match find_session_state_within(&state, session, policy.limits) {
         Ok(Some(_)) => Ok(()),
         Ok(None) => Err("retained provider continuation is missing or expired".into()),
-        Err(_) => {
-            Err("provider continuation search exceeded its bound; fresh fallback required".into())
+        Err(exhausted) => {
+            Err(StateCopyError::resource(policy.fact(exhausted.limit(), None)).to_string())
         }
     }
 }
 
+#[cfg(test)]
 pub(super) fn find_session_state(
     provider_state: &Path,
     session: &str,
@@ -253,9 +325,20 @@ pub(super) fn find_session_state(
     find_session_state_within(provider_state, session, RETAINED_STATE)
 }
 
-/// The session search spent its entry budget before it finished.
+/// An unfinished bounded search cannot establish that a session is missing.
 #[derive(Debug, PartialEq)]
-pub(super) struct SearchExhausted;
+pub(super) enum SearchExhausted {
+    Entries,
+    Depth,
+}
+impl SearchExhausted {
+    fn limit(self) -> ContinuationCopyLimit {
+        match self {
+            Self::Entries => ContinuationCopyLimit::Entries,
+            Self::Depth => ContinuationCopyLimit::Depth,
+        }
+    }
+}
 
 pub(super) fn find_session_state_within(
     provider_state: &Path,
@@ -271,18 +354,18 @@ pub(super) fn find_session_state_within(
     ) -> Result<bool, SearchExhausted> {
         let names = match listed(dir, budget) {
             Ok(Some(names)) => names,
-            Ok(None) => return Err(SearchExhausted),
+            Ok(None) => return Err(SearchExhausted::Entries),
             Err(_) => return Ok(false),
         };
         for name in names {
             if name.to_string_lossy().contains(session) {
                 return Ok(true);
             }
-            if depth > 0
-                && let Some(child) = open_local_directory(dir, &name, device)
-                && holds(&child, session, depth - 1, device, budget)?
-            {
-                return Ok(true);
+            if let Some(child) = open_local_directory(dir, &name, device) {
+                let remaining = depth.checked_sub(1).ok_or(SearchExhausted::Depth)?;
+                if holds(&child, session, remaining, device, budget)? {
+                    return Ok(true);
+                }
             }
         }
         Ok(false)
@@ -298,7 +381,7 @@ pub(super) fn find_session_state_within(
     let mut budget = limits.entries;
     let names = match listed(&root, &mut budget) {
         Ok(Some(names)) => names,
-        Ok(None) => return Err(SearchExhausted),
+        Ok(None) => return Err(SearchExhausted::Entries),
         Err(_) => return Ok(None),
     };
     for name in names {
@@ -312,7 +395,7 @@ pub(super) fn find_session_state_within(
     Ok(None)
 }
 
-/// Copy regular files and directories within `RETAINED_STATE`. GC tombstones,
+/// Copy regular files and directories within the selected budgets. GC tombstones,
 /// symlinks and other entries are skipped. For Codex, copy only session trees:
 /// setup recreates caches and Codex rebuilds its index with local rollout paths.
 /// A leftover process may still change the tree, so every entry is opened from
@@ -323,12 +406,28 @@ pub(super) fn find_session_state_within(
 pub(super) struct StateCopyError {
     message: String,
     class: provenant_records::diagnostic::BoundaryClass,
+    resource: Option<provenant_records::diagnostic::ResourceFact>,
+}
+impl StateCopyError {
+    fn resource(fact: provenant_records::diagnostic::ResourceFact) -> Self {
+        let diagnostic = fact.project(provenant_records::diagnostic::Diagnostic::new("REFUSED"));
+        Self {
+            message: format!(
+                "{}; {}",
+                diagnostic.detail.unwrap_or_default(),
+                diagnostic.next.unwrap_or_default()
+            ),
+            class: provenant_records::diagnostic::BoundaryClass::None,
+            resource: Some(fact),
+        }
+    }
 }
 impl From<String> for StateCopyError {
     fn from(message: String) -> Self {
         Self {
             message,
             class: provenant_records::diagnostic::BoundaryClass::None,
+            resource: None,
         }
     }
 }
@@ -350,15 +449,17 @@ pub(super) fn copy_state_within(
     limits: StateLimits,
     sessions_only: bool,
 ) -> Result<(), String> {
-    copy_state_classified(from, to, limits, sessions_only).map_err(|error| error.to_string())
+    copy_state_classified(from, to, StateCopyPolicy::shipped(limits), sessions_only)
+        .map_err(|error| error.to_string())
 }
 
 fn copy_state_classified(
     from: &Path,
     to: &Path,
-    limits: StateLimits,
+    policy: StateCopyPolicy,
     sessions_only: bool,
 ) -> Result<(), StateCopyError> {
+    let limits = policy.limits;
     let failed =
         |detail: &dyn std::fmt::Display| format!("copying retained provider state: {detail}");
     // The anchor opens without following its final component; this stat only
@@ -377,9 +478,8 @@ fn copy_state_classified(
     let parent = Directory::open_anchor(parent).map_err(|error| failed(&error))?;
     // Free space caps the budget, so state the filesystem cannot hold is
     // refused before it fills the disk.
-    let bytes = limits
-        .bytes
-        .min(parent.available_bytes().map_err(|error| failed(&error))?);
+    let available_bytes = parent.available_bytes().map_err(|error| failed(&error))?;
+    let bytes = limits.bytes.min(available_bytes);
     let mut budget = Budget {
         entries: limits.entries,
         bytes,
@@ -400,22 +500,21 @@ fn copy_state_classified(
         let class = refusal.boundary_class();
         let message = match refusal {
             CopyRefusal::HardLink => "retained provider state holds a hard-linked file".into(),
-            CopyRefusal::TooLarge => {
-                format!("retained provider state exceeds its {bytes} byte copy budget")
+            CopyRefusal::Limit(setting) => {
+                let available =
+                    (setting == ContinuationCopyLimit::Bytes).then_some(available_bytes);
+                return StateCopyError::resource(policy.fact(setting, available));
             }
-            CopyRefusal::TooMany => {
-                format!("retained provider state exceeds {} entries", limits.entries)
-            }
-            CopyRefusal::TooDeep => format!(
-                "retained provider state nests deeper than {} directories",
-                limits.depth
-            ),
             CopyRefusal::CrossDevice => {
                 "retained provider state crosses a filesystem boundary".into()
             }
             CopyRefusal::Fs(error) => failed(&error),
         };
-        StateCopyError { message, class }
+        StateCopyError {
+            message,
+            class,
+            resource: None,
+        }
     });
     if let Err(refusal) = &copied
         && let Err(error) = remove_staged(&parent, &staging)
@@ -423,6 +522,7 @@ fn copy_state_classified(
         return Err(StateCopyError {
             message: format!("{refusal}; removing its staged copy: {error}"),
             class: refusal.class,
+            resource: refusal.resource,
         });
     }
     copied
@@ -443,8 +543,13 @@ fn retained_state_hard_link_is_an_integrity_refusal() -> Result<(), Box<dyn std:
         }
         return Err(error.into());
     }
-    let error = copy_state_classified(&source, &temp.path().join("copy"), RETAINED_STATE, false)
-        .unwrap_err();
+    let error = copy_state_classified(
+        &source,
+        &temp.path().join("copy"),
+        StateCopyPolicy::shipped(RETAINED_STATE),
+        false,
+    )
+    .unwrap_err();
     assert_eq!(error.class, BoundaryClass::Integrity);
     assert_eq!(
         error.to_string(),
@@ -481,9 +586,9 @@ pub(super) struct Budget {
 
 pub(super) enum CopyRefusal {
     HardLink,
-    TooLarge,
-    TooMany,
-    TooDeep,
+    // A resource refusal always names its configurable setting. The owner
+    // supplies that setting's value and source when projecting the error.
+    Limit(ContinuationCopyLimit),
     CrossDevice,
     Fs(FsError),
 }
@@ -494,25 +599,9 @@ impl CopyRefusal {
         match self {
             Self::HardLink => BoundaryClass::Integrity,
             Self::CrossDevice => BoundaryClass::Authority,
-            Self::TooLarge | Self::TooMany | Self::TooDeep | Self::Fs(_) => BoundaryClass::None,
+            Self::Limit(_) | Self::Fs(_) => BoundaryClass::None,
         }
     }
-}
-
-#[test]
-fn retained_state_copy_distinguishes_boundaries_from_resource_limits() {
-    use provenant_records::diagnostic::BoundaryClass;
-    assert_eq!(
-        CopyRefusal::HardLink.boundary_class(),
-        BoundaryClass::Integrity
-    );
-    assert_eq!(
-        CopyRefusal::CrossDevice.boundary_class(),
-        BoundaryClass::Authority
-    );
-    assert_eq!(CopyRefusal::TooLarge.boundary_class(), BoundaryClass::None);
-    assert_eq!(CopyRefusal::TooMany.boundary_class(), BoundaryClass::None);
-    assert_eq!(CopyRefusal::TooDeep.boundary_class(), BoundaryClass::None);
 }
 
 impl From<FsError> for CopyRefusal {
@@ -584,7 +673,9 @@ pub(super) fn copy_tree(
     budget: &mut Budget,
     sessions_only: bool,
 ) -> Result<(), CopyRefusal> {
-    for name in listed(from, &mut budget.entries)?.ok_or(CopyRefusal::TooMany)? {
+    for name in listed(from, &mut budget.entries)?
+        .ok_or(CopyRefusal::Limit(ContinuationCopyLimit::Entries))?
+    {
         if name
             .as_encoded_bytes()
             .starts_with(run::TOMBSTONE.as_bytes())
@@ -605,7 +696,9 @@ pub(super) fn copy_tree(
         before_open(&name);
         match metadata.kind {
             FileKind::Directory => {
-                let depth = depth.checked_sub(1).ok_or(CopyRefusal::TooDeep)?;
+                let depth = depth
+                    .checked_sub(1)
+                    .ok_or(CopyRefusal::Limit(ContinuationCopyLimit::Depth))?;
                 let child = match from.open_directory(&name) {
                     Ok(child) => child,
                     Err(error) if changed_entry(&error) => continue,
@@ -651,7 +744,7 @@ pub(super) fn copy_tree(
                     source,
                 })?;
                 if copied > budget.bytes {
-                    return Err(CopyRefusal::TooLarge);
+                    return Err(CopyRefusal::Limit(ContinuationCopyLimit::Bytes));
                 }
                 budget.bytes -= copied;
                 if opened.mode & 0o100 != 0 {
@@ -659,6 +752,129 @@ pub(super) fn copy_tree(
                 }
             }
             FileKind::Symlink | FileKind::Other => {}
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn retained_state_copy_refusals_require_inventoried_settings_and_followable_remedies()
+-> Result<(), Box<dyn std::error::Error>> {
+    use provenant_records::diagnostic::{
+        BoundaryClass, ContinuationCopyLimit, Diagnostic, ResourceFact, SettingSource,
+    };
+    let temp = tempfile::tempdir()?;
+    let base = std::fs::canonicalize(temp.path())?;
+    let retained = base.join("TOKEN_SENTINEL");
+    let source = retained.join("candidate-0");
+    std::fs::create_dir_all(source.join("a/b"))?;
+    std::fs::write(source.join("a/b/session"), "state")?;
+    let inventory = include_str!("../../../../run/assets/launch-guards.toml")
+        .parse::<toml_edit::DocumentMut>()?;
+    let guards = inventory["guard"].as_array_of_tables().unwrap();
+    // Exercise real refusal paths rather than constructing their resource facts.
+    for (field, value, expected_setting) in [
+        (
+            "continuation_copy_limit_bytes",
+            4,
+            ContinuationCopyLimit::Bytes,
+        ),
+        (
+            "continuation_copy_entries",
+            1,
+            ContinuationCopyLimit::Entries,
+        ),
+        ("continuation_copy_depth", 1, ContinuationCopyLimit::Depth),
+    ] {
+        for configured in [false, true] {
+            let policy = if configured {
+                std::fs::write(
+                    base.join("config.toml"),
+                    format!("schema_version=1\n[domains.run]\n{field}={value}\n"),
+                )?;
+                StateCopyPolicy::read(&base)
+            } else {
+                let limits = match expected_setting {
+                    ContinuationCopyLimit::Bytes => StateLimits {
+                        bytes: value,
+                        ..RETAINED_STATE
+                    },
+                    ContinuationCopyLimit::Entries => StateLimits {
+                        entries: value as u32,
+                        ..RETAINED_STATE
+                    },
+                    ContinuationCopyLimit::Depth => StateLimits {
+                        depth: value as u32,
+                        ..RETAINED_STATE
+                    },
+                };
+                StateCopyPolicy::shipped(limits)
+            };
+            let target = base.join(format!("copy-{field}-{configured}"));
+            let error = copy_state_classified(&source, &target, policy, false).unwrap_err();
+            let continuation = ContinuationError::StateCopy(error);
+            assert_eq!(continuation.boundary_class(), BoundaryClass::None);
+            let fact = continuation
+                .resource_fact()
+                .expect("a class-none policy refusal must carry a configurable resource fact");
+            assert!(
+                matches!(fact, ResourceFact::ContinuationCopy { setting, limit, origin, .. }
+                if setting == expected_setting && limit == value && origin == if configured { SettingSource::Configuration } else { SettingSource::ShippedDefault })
+            );
+            let diagnostic = fact.project(Diagnostic::new("REFUSED"));
+            let detail = diagnostic.detail.as_deref().unwrap();
+            assert!(detail.contains(expected_setting.setting()));
+            assert!(detail.contains(if configured {
+                "host configuration"
+            } else {
+                "shipped default"
+            }));
+            assert!(!detail.contains("TOKEN_SENTINEL"));
+            assert!(
+                diagnostic
+                    .next
+                    .as_deref()
+                    .unwrap()
+                    .contains(expected_setting.setting())
+            );
+            assert!(
+                guards.iter().any(|row| {
+                    row.get("site").and_then(|v| v.as_str())
+                        == Some("cli/src/run/provider/continuation.rs#copy_state_classified")
+                        && row.get("boundary").and_then(|v| v.as_str())
+                            == Some("configurable_default")
+                        && row.get("code").and_then(|v| v.as_str())
+                            == Some(diagnostic.code.as_str())
+                        && row.get("setting").and_then(|v| v.as_str())
+                            == Some(expected_setting.setting())
+                }),
+                "actual refusal lacks an inventory classification: {field}"
+            );
+            assert!(!target.exists(), "no partial provider state may survive");
+            // The search uses the same policy and retains the precise exhausted budget.
+            if expected_setting != ContinuationCopyLimit::Bytes {
+                let exhausted =
+                    find_session_state_within(&retained, "session", policy.limits).unwrap_err();
+                let search_error = StateCopyError::resource(policy.fact(exhausted.limit(), None));
+                assert!(
+                    matches!(search_error.resource, Some(ResourceFact::ContinuationCopy { setting, .. }) if setting == expected_setting)
+                );
+            }
+            // Follow the printed setting remedy against the very same tree.
+            std::fs::write(
+                base.join("config.toml"),
+                format!("schema_version=1\n[domains.run]\n{field}=16\n"),
+            )?;
+            copy_state_classified(&source, &target, StateCopyPolicy::read(&base), false)?;
+            assert_eq!(std::fs::read(target.join("a/b/session"))?, b"state");
+            assert_eq!(
+                find_session_state_within(
+                    &retained,
+                    "session",
+                    StateCopyPolicy::read(&base).limits
+                ),
+                Ok(Some(source.clone()))
+            );
         }
     }
     Ok(())

@@ -4606,9 +4606,12 @@ fn retained_state_copy_refuses_state_past_its_byte_budget() -> Result<(), Box<dy
         bytes: LIMIT,
         ..RETAINED_STATE
     };
-    let refusal = Err(format!(
-        "retained provider state exceeds its {LIMIT} byte copy budget"
-    ));
+    let assert_byte_refusal = |result: Result<(), String>| {
+        let error = result.expect_err("copy byte ceiling must refuse");
+        assert!(error.contains("domains.run.continuation_copy_limit_bytes"));
+        assert!(error.contains(&LIMIT.to_string()));
+        assert!(error.contains("shipped default"));
+    };
     let temp = tempfile::tempdir()?;
     let base = std::fs::canonicalize(temp.path())?;
     // A sparse file costs the lane no blocks but claims far past the budget.
@@ -4616,7 +4619,7 @@ fn retained_state_copy_refuses_state_past_its_byte_budget() -> Result<(), Box<dy
     std::fs::create_dir(&sparse)?;
     std::fs::File::create(sparse.join("rollout.jsonl"))?.set_len(64 * LIMIT)?;
     let copied = base.join("sparse-copy");
-    assert_eq!(copy_state_within(&sparse, &copied, limits, false), refusal);
+    assert_byte_refusal(copy_state_within(&sparse, &copied, limits, false));
     assert!(
         !copied.join("rollout.jsonl").exists(),
         "the partial copy is removed"
@@ -4627,10 +4630,12 @@ fn retained_state_copy_refuses_state_past_its_byte_budget() -> Result<(), Box<dy
     let half = vec![b'x'; usize::try_from(LIMIT / 2 + 1)?];
     std::fs::write(split.join("history.jsonl"), &half)?;
     std::fs::write(split.join("sessions/rollout.jsonl"), &half)?;
-    assert_eq!(
-        copy_state_within(&split, &base.join("split-copy"), limits, false),
-        refusal
-    );
+    assert_byte_refusal(copy_state_within(
+        &split,
+        &base.join("split-copy"),
+        limits,
+        false,
+    ));
     // State of exactly the budget still copies whole.
     let exact = base.join("exact");
     std::fs::create_dir(&exact)?;
@@ -4667,20 +4672,16 @@ fn retained_state_copy_refuses_trees_past_its_entry_and_depth_budget()
 
     let deep = base.join("deep");
     std::fs::create_dir_all(deep.join("a/b/c"))?;
-    assert_eq!(
-        copy_state_within(&deep, &base.join("deep-copy"), limits, false),
-        Err("retained provider state nests deeper than 2 directories".into())
-    );
+    let error = copy_state_within(&deep, &base.join("deep-copy"), limits, false).unwrap_err();
+    assert!(error.contains("domains.run.continuation_copy_depth is 2"));
 
     let wide = base.join("wide");
     std::fs::create_dir(&wide)?;
     for name in ["1", "2", "3", "4", "5"] {
         std::fs::write(wide.join(name), "lane")?;
     }
-    assert_eq!(
-        copy_state_within(&wide, &base.join("wide-copy"), limits, false),
-        Err("retained provider state exceeds 4 entries".into())
-    );
+    let error = copy_state_within(&wide, &base.join("wide-copy"), limits, false).unwrap_err();
+    assert!(error.contains("domains.run.continuation_copy_entries is 4"));
     Ok(())
 }
 
@@ -4703,12 +4704,9 @@ fn retained_state_copy_leaves_nothing_when_refused() -> Result<(), Box<dyn std::
     let state = base.join("provider-state");
     let copied = state.join("candidate-0");
     std::fs::create_dir_all(&copied)?;
-    assert_eq!(
-        copy_state_within(&source, &copied, limits, false),
-        Err(format!(
-            "retained provider state exceeds its {LIMIT} byte copy budget"
-        ))
-    );
+    let error = copy_state_within(&source, &copied, limits, false).unwrap_err();
+    assert!(error.contains("domains.run.continuation_copy_limit_bytes"));
+    assert!(error.contains(&LIMIT.to_string()));
     let names = |path: &Path| -> std::io::Result<Vec<_>> {
         std::fs::read_dir(path)?
             .map(|entry| entry.map(|entry| entry.file_name()))
@@ -4741,7 +4739,7 @@ fn session_search_reports_its_spent_entry_budget() -> Result<(), Box<dyn std::er
     // An unfinished search is not a missing session.
     assert_eq!(
         find_session_state_within(&state, "fixture-session", limits),
-        Err(SearchExhausted)
+        Err(SearchExhausted::Entries)
     );
     std::fs::remove_file(state.join("candidate-0/sessions/3"))?;
     assert_eq!(

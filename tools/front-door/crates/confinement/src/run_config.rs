@@ -26,6 +26,9 @@ profile_limit_bytes = 524288
 grant_limit = 128
 write_grant_limit_bytes = 262144
 argv_prompt_limit_bytes = 65536
+continuation_copy_limit_bytes = 4294967296
+continuation_copy_entries = 100000
+continuation_copy_depth = 32
 
 [projects]
 "#;
@@ -80,6 +83,15 @@ pub struct RunConfig {
     /// Prompt bytes passed directly to argv before the file-backed fallback.
     #[serde(default = "default_argv_prompt_limit_bytes")]
     pub argv_prompt_limit_bytes: usize,
+    /// Maximum bytes copied from retained provider state into a continuation.
+    #[serde(default = "default_continuation_copy_limit_bytes")]
+    pub continuation_copy_limit_bytes: u64,
+    /// Maximum entries searched or copied from retained provider state.
+    #[serde(default = "default_continuation_copy_entries")]
+    pub continuation_copy_entries: u32,
+    /// Maximum directory depth searched or copied from retained provider state.
+    #[serde(default = "default_continuation_copy_depth")]
+    pub continuation_copy_depth: u32,
     #[serde(default)]
     pub projects: BTreeMap<String, ProjectRunConfig>,
 }
@@ -96,6 +108,15 @@ fn default_write_grant_limit_bytes() -> u64 {
 }
 fn default_argv_prompt_limit_bytes() -> usize {
     DEFAULT_ARGV_PROMPT_LIMIT_BYTES
+}
+fn default_continuation_copy_limit_bytes() -> u64 {
+    4 << 30
+}
+fn default_continuation_copy_entries() -> u32 {
+    100_000
+}
+fn default_continuation_copy_depth() -> u32 {
+    32
 }
 fn default_true() -> bool {
     true
@@ -141,6 +162,9 @@ impl Default for RunConfig {
             writer_token_budget: None,
             write_grant_limit_bytes: default_write_grant_limit_bytes(),
             argv_prompt_limit_bytes: default_argv_prompt_limit_bytes(),
+            continuation_copy_limit_bytes: default_continuation_copy_limit_bytes(),
+            continuation_copy_entries: default_continuation_copy_entries(),
+            continuation_copy_depth: default_continuation_copy_depth(),
             projects: BTreeMap::new(),
         }
     }
@@ -345,6 +369,28 @@ impl DomainConfig for RunConfig {
                 code: "range",
             });
         }
+        for (field, value) in [
+            (
+                "continuation_copy_limit_bytes",
+                self.continuation_copy_limit_bytes,
+            ),
+            (
+                "continuation_copy_entries",
+                u64::from(self.continuation_copy_entries),
+            ),
+            (
+                "continuation_copy_depth",
+                u64::from(self.continuation_copy_depth),
+            ),
+        ] {
+            if value == 0 {
+                errors.push(SectionError {
+                    detail: None,
+                    field: field.into(),
+                    code: "range",
+                });
+            }
+        }
         valid_patterns("review_exempt", &self.review_exempt, &mut errors);
         valid_writer_writes("writer_writes", &self.writer_writes, &mut errors);
         for (project, settings) in &self.projects {
@@ -398,6 +444,9 @@ pub const FIELD_METADATA: &[FieldMetadata] = &[
         provenant_records::run::MAX_WRITE_GRANT_BYTES_CEILING as i64,
     ),
     FieldMetadata::new("argv_prompt_limit_bytes", "int"),
+    FieldMetadata::new("continuation_copy_limit_bytes", "int"),
+    FieldMetadata::new("continuation_copy_entries", "int"),
+    FieldMetadata::new("continuation_copy_depth", "int"),
     FieldMetadata::new("push_conflict_markers", "bool"),
     FieldMetadata::new("brief_read_root_warnings", "bool"),
     FieldMetadata::new("warn_brief_read_roots", "bool"),
@@ -440,6 +489,17 @@ mod tests {
             DEFAULT_ARGV_PROMPT_LIMIT_BYTES
         );
         assert_eq!(defaults.profile_limit_bytes, 512 * 1024);
+        assert_eq!(defaults.continuation_copy_limit_bytes, 4 << 30);
+        assert_eq!(defaults.continuation_copy_entries, 100_000);
+        assert_eq!(defaults.continuation_copy_depth, 32);
+        for key in [
+            "continuation_copy_limit_bytes",
+            "continuation_copy_entries",
+            "continuation_copy_depth",
+        ] {
+            let invalid: RunConfig = toml_edit::de::from_str(&format!("{key} = 0"))?;
+            assert!(invalid.validate().iter().any(|error| error.field == key));
+        }
         let raised: RunConfig = toml_edit::de::from_str(
             "grant_limit = 2048\nprofile_limit_bytes = 2097152\nargv_prompt_limit_bytes = 131072\n",
         )?;
