@@ -210,6 +210,11 @@ boundary = "authority"
 reason = "A handoff must use the selected worktree and held custody binding; fenced, unknown or invalid custody cannot be granted to another attempt."
 
 [[guard]]
+site = "supervisor/src/custody.rs#PublicationReservation::prepare"
+boundary = "authority"
+reason = "Existing launch or exit evidence fences an attempt against a second execution."
+
+[[guard]]
 site = "run/src/controls.rs#RunStore::check_writer_lineage"
 boundary = "authority"
 reason = "A continuation must retain its recorded worktree ownership and cannot take custody from a nonterminal predecessor."

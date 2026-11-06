@@ -56,6 +56,20 @@ fn typed_local(phase: &str, error: &RunError) -> HandOff {
     }
 }
 
+fn custody_local(phase: &str, error: &custody::CustodyError) -> HandOff {
+    let message = format!("{phase}: {error}");
+    match error {
+        custody::CustodyError::Fenced
+        | custody::CustodyError::UnknownIdentity
+        | custody::CustodyError::InvalidRecord => HandOff::Boundary {
+            message,
+            class: provenant_records::diagnostic::BoundaryClass::Authority,
+            cause: None,
+        },
+        _ => HandOff::Local(message),
+    }
+}
+
 fn custody_refusal(
     e: crate::writer::WriterCustodyError,
     writer_path: Option<std::path::PathBuf>,
@@ -73,21 +87,10 @@ fn custody_refusal(
             attempt,
             worktree: writer_path.unwrap_or_default(),
         },
-        crate::writer::WriterCustodyError::Admission(
-            error @ (custody::CustodyError::Fenced
-            | custody::CustodyError::UnknownIdentity
-            | custody::CustodyError::InvalidRecord),
-        ) => HandOff::Boundary {
-            message: format!("custody: {error}"),
-            class: provenant_records::diagnostic::BoundaryClass::Authority,
-            cause: None,
-        },
         crate::writer::WriterCustodyError::Admission(custody::CustodyError::Admission(error)) => {
             typed_local("custody", &RunError::Admission(error))
         }
-        crate::writer::WriterCustodyError::Admission(error) => {
-            HandOff::Local(format!("custody: {error}"))
-        }
+        crate::writer::WriterCustodyError::Admission(error) => custody_local("custody", &error),
         crate::writer::WriterCustodyError::Withdrawal { admission, release } => HandOff::Protected(
             format!("custody admission: {admission}; custody withdrawal: {release}"),
         ),
@@ -136,7 +139,7 @@ impl RunStore {
             call.cancel,
             call.clock,
         )
-        .map_err(|e| local("publication reservation", &e))?;
+        .map_err(|e| custody_local("publication reservation", &e))?;
         // Clone before acquiring custody: failure leaves no writer reservation.
         let held = if self.sealed_requester.is_some() {
             Some((
@@ -548,6 +551,13 @@ mod tests {
             custody::CustodyError::InvalidRecord,
         ] {
             assert!(matches!(
+                custody_local("publication reservation", &error),
+                HandOff::Boundary {
+                    class: BoundaryClass::Authority,
+                    ..
+                }
+            ));
+            assert!(matches!(
                 custody_refusal(WriterCustodyError::Admission(error), None),
                 HandOff::Boundary {
                     class: BoundaryClass::Authority,
@@ -569,6 +579,34 @@ mod tests {
             ),
             HandOff::Local(_)
         ));
+    }
+
+    #[test]
+    fn existing_launch_evidence_refuses_publication_with_authority_boundary()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        std::fs::write(temp.path().join("launch.json"), b"fixture")?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        let directory = provenant_os::fs::Directory::open_anchor(temp.path())?;
+        let error = match PublicationReservation::prepare(
+            directory,
+            call.lock_budget(),
+            call.cancel,
+            call.clock,
+        ) {
+            Ok(_) => panic!("existing launch evidence must fence publication"),
+            Err(error) => error,
+        };
+        assert!(matches!(error, custody::CustodyError::Fenced));
+        assert!(matches!(
+            custody_local("publication reservation", &error),
+            HandOff::Boundary {
+                class: provenant_records::diagnostic::BoundaryClass::Authority,
+                ..
+            }
+        ));
+        Ok(())
     }
 
     #[test]
