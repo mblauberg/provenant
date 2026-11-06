@@ -13,6 +13,7 @@ use std::{
 #[derive(Default)]
 pub(crate) struct GitWrapper {
     pub(crate) scrub: bool,
+    pub(crate) identity_config: Option<PathBuf>,
     include: Option<String>,
     git: Option<PathBuf>,
     pub(crate) bound: Option<BoundGit>,
@@ -241,7 +242,21 @@ pub(crate) fn git_wrapper(git: &Path, options: &GitWrapper) -> Result<Vec<u8>, P
     }
     let mut bytes = b"#!/bin/sh\n".to_vec();
     if options.scrub {
-        bytes.extend_from_slice(b"GIT_CONFIG_GLOBAL=/dev/null\nGIT_CONFIG_NOSYSTEM=1\nexport GIT_CONFIG_GLOBAL GIT_CONFIG_NOSYSTEM\n");
+        let global = if let Some(config) = &options.identity_config {
+            let config = config.to_str().ok_or(ProviderError::InvalidPath)?;
+            if config.chars().any(char::is_control) {
+                return Err(ProviderError::InvalidPath);
+            }
+            shell_quote(config)
+        } else {
+            "'/dev/null'".to_owned()
+        };
+        bytes.extend_from_slice(
+            format!(
+                "GIT_CONFIG_GLOBAL={global}\nGIT_CONFIG_NOSYSTEM=1\nexport GIT_CONFIG_GLOBAL GIT_CONFIG_NOSYSTEM\n"
+            )
+            .as_bytes(),
+        );
         if let Some(bound) = &options.bound {
             bytes.extend_from_slice(bound_exports(bound)?.as_bytes());
         }
@@ -541,7 +556,8 @@ impl LaneRuntime<'_> {
     ) -> Result<(), ProviderError> {
         // Pin the CLI's context in its launcher too: providers may replace
         // HOME or scrub the shell environment. Children still use the host's
-        // configuration and identity, with custody in their private Run store.
+        // configuration; writer Git identity is installed into a lane-private config
+        // after adapter preparation, with custody in the private Run store.
         let entry = self.mcp(Harness::Codex)?;
         let mut script = String::from("#!/bin/sh\n");
         for (key, value) in entry["env"].as_object().ok_or(ProviderError::Malformed)? {
@@ -646,6 +662,8 @@ fn claude_shell(env: &[(OsString, OsString)]) -> Vec<u8> {
         "CARGO_BUILD_JOBS",
         "CARGO_INCREMENTAL",
         "CARGO_PROFILE_DEV_DEBUG",
+        "GIT_CONFIG_GLOBAL",
+        "GIT_CONFIG_NOSYSTEM",
     ] {
         if let Some((_, value)) = env.iter().find(|(key, _)| key == name) {
             script.extend_from_slice(format!("export {name}='").as_bytes());
@@ -893,7 +911,8 @@ mod tests {
         fs::write(
             &git,
             format!(
-                "#!/bin/sh\nprintf called > {}\nexec {} \"$@\"\n",
+                "#!/bin/sh\nif [ -z \"$GIT_CONFIG_GLOBAL\" ]; then GIT_CONFIG_GLOBAL={}; export GIT_CONFIG_GLOBAL; fi\nprintf called > {}\nexec {} \"$@\"\n",
+                shell_quote(home.join(".gitconfig").to_str().ok_or("global config")?),
                 shell_quote(marker.to_str().ok_or("marker")?),
                 shell_quote(real_git.to_str().ok_or("git")?)
             ),
@@ -972,12 +991,172 @@ mod tests {
                 _ => {}
             }
         }
-        fs::write(repo.join("file"), "lane object")?;
-        let run = |args: &[&str]| -> Result<std::process::Output, Box<dyn std::error::Error>> {
+        let identity_config = spec
+            .env
+            .iter()
+            .find(|(key, _)| key == "GIT_CONFIG_GLOBAL")
+            .map(|(_, value)| PathBuf::from(value))
+            .ok_or("lane Git identity config")?;
+        let use_config_only = Command::new(&real_git)
+            .args(["config", "--file"])
+            .arg(&identity_config)
+            .args(["--get", "user.useConfigOnly"])
+            .output()?;
+        assert_eq!(use_config_only.stdout, b"true\n");
+
+        // Absolute Git receives the same host identity from the lane config,
+        // including from a subdirectory. A repository-local identity remains
+        // higher priority, and an empty lane identity cannot synthesize one.
+        let absolute_repo = root.join("absolute-git-repo");
+        let nested = absolute_repo.join("nested");
+        fs::create_dir_all(&nested)?;
+        let absolute = |args: &[&str], cwd: &Path| {
+            Command::new(&real_git)
+                .args(args)
+                .current_dir(cwd)
+                .env_clear()
+                .envs(spec.env.iter().cloned())
+                .output()
+        };
+        assert!(absolute(&["init", "-q"], &absolute_repo)?.status.success());
+        fs::write(nested.join("file"), "absolute Git identity")?;
+        assert!(absolute(&["add", "file"], &nested)?.status.success());
+        let host_name = Command::new(&real_git)
+            .args(["config", "--file"])
+            .arg(&identity_config)
+            .args(["--get", "user.name"])
+            .output()?;
+        let host_email = Command::new(&real_git)
+            .args(["config", "--file"])
+            .arg(&identity_config)
+            .args(["--get", "user.email"])
+            .output()?;
+        let host_commit = absolute(&["commit", "-m", "absolute Git"], &nested)?;
+        let host_commit_identity = absolute(&["log", "-1", "--format=%an <%ae>"], &nested)?;
+        if host_name.status.success() && host_email.status.success() {
+            assert!(
+                host_commit.status.success()
+                    && host_commit_identity.stdout
+                        == [
+                            host_name
+                                .stdout
+                                .strip_suffix(b"\n")
+                                .unwrap_or(&host_name.stdout),
+                            b" <".as_slice(),
+                            host_email
+                                .stdout
+                                .strip_suffix(b"\n")
+                                .unwrap_or(&host_email.stdout),
+                            b">\n".as_slice()
+                        ]
+                        .concat(),
+                "absolute Git did not use the host's configured identity"
+            );
+        } else {
+            assert!(!host_commit.status.success());
+        }
+
+        assert!(
+            absolute(&["config", "user.name", "Repository Identity"], &nested)?
+                .status
+                .success()
+        );
+        assert!(
+            absolute(
+                &["config", "user.email", "repository@example.test"],
+                &nested
+            )?
+            .status
+            .success()
+        );
+        fs::write(nested.join("local"), "repository identity")?;
+        assert!(absolute(&["add", "local"], &nested)?.status.success());
+        assert!(
+            absolute(&["commit", "-m", "local identity"], &nested)?
+                .status
+                .success()
+        );
+        let local_identity = absolute(&["log", "-1", "--format=%an <%ae>"], &nested)?;
+        assert_eq!(
+            local_identity.stdout,
+            b"Repository Identity <repository@example.test>\n"
+        );
+
+        fs::write(
+            &identity_config,
+            "[user]\n useConfigOnly = true\n name = Fixture Host\n email = fixture-host@example.test\n",
+        )?;
+        let unbound_repo = root.join("unbound-wrapper-repo");
+        fs::create_dir(&unbound_repo)?;
+        let unbound_path = format!("{}:/usr/bin:/bin", scratch.join("bin").display());
+        let unbound = |script: &str| -> Result<std::process::Output, Box<dyn std::error::Error>> {
+            Ok(Command::new("/bin/sh")
+                .args(["-c", script])
+                .current_dir(&unbound_repo)
+                .env_clear()
+                .env("HOME", &home)
+                .env("PATH", &unbound_path)
+                .output()?)
+        };
+        assert!(unbound("git init -q")?.status.success());
+        fs::write(unbound_repo.join("file"), "unbound wrapper identity")?;
+        assert!(
+            unbound("git add file && git commit -qm wrapper")?
+                .status
+                .success()
+        );
+        let unbound_identity = unbound("git log -1 --format='%an <%ae>'")?;
+        assert_eq!(
+            unbound_identity.stdout,
+            b"Fixture Host <fixture-host@example.test>\n"
+        );
+
+        let empty_identity = root.join("empty-identity.gitconfig");
+        fs::write(&empty_identity, "[user]\n useConfigOnly = true\n")?;
+        let no_identity = root.join("no-identity-repo");
+        fs::create_dir(&no_identity)?;
+        let no_identity_env = spec
+            .env
+            .iter()
+            .filter(|(key, _)| key != "GIT_CONFIG_GLOBAL")
+            .cloned()
+            .collect::<Vec<_>>();
+        let init = Command::new(&real_git)
+            .args(["init", "-q"])
+            .current_dir(&no_identity)
+            .env_clear()
+            .envs(no_identity_env.iter().cloned())
+            .env("GIT_CONFIG_GLOBAL", &empty_identity)
+            .output()?;
+        assert!(init.status.success());
+        fs::write(no_identity.join("file"), "missing identity")?;
+        let add = Command::new(&real_git)
+            .args(["add", "file"])
+            .current_dir(&no_identity)
+            .env_clear()
+            .envs(no_identity_env.iter().cloned())
+            .env("GIT_CONFIG_GLOBAL", &empty_identity)
+            .output()?;
+        assert!(add.status.success());
+        let refused_commit = Command::new(&real_git)
+            .args(["commit", "-m", "must refuse"])
+            .current_dir(&no_identity)
+            .env_clear()
+            .envs(no_identity_env.iter().cloned())
+            .env("GIT_CONFIG_GLOBAL", &empty_identity)
+            .output()?;
+        assert!(!refused_commit.status.success());
+
+        let lane_subdir = repo.join("nested");
+        fs::create_dir(&lane_subdir)?;
+        fs::write(lane_subdir.join("file"), "lane object")?;
+        let run_at = |cwd: &Path,
+                      args: &[&str]|
+         -> Result<std::process::Output, Box<dyn std::error::Error>> {
             Ok(Command::new("/bin/sh")
                 .args(["-c", "exec git \"$@\"", "sh"])
                 .args(args)
-                .current_dir(&repo)
+                .current_dir(cwd)
                 .env_clear()
                 .env("HOME", &home)
                 .env(
@@ -986,8 +1165,9 @@ mod tests {
                 )
                 .output()?)
         };
+        let run = |args: &[&str]| run_at(&repo, args);
         for args in [&["add", "file"][..], &["commit", "-m", "lane"][..]] {
-            let output = run(args)?;
+            let output = run_at(&lane_subdir, args)?;
             assert!(
                 output.status.success(),
                 "{adapter}: {}",
@@ -1571,17 +1751,22 @@ mod tests {
                 ("CARGO_BUILD_JOBS".into(), "4".into()),
                 ("CARGO_INCREMENTAL".into(), "0".into()),
                 ("CARGO_PROFILE_DEV_DEBUG".into(), "line-tables-only".into()),
+                ("GIT_CONFIG_GLOBAL".into(), "/lane/gitconfig".into()),
+                ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
             ]),
         )
         .unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
         let result = std::process::Command::new(path)
             .env_clear()
-            .arg("printf '%s\\n' \"$CARGO_BUILD_JOBS\" \"$CARGO_INCREMENTAL\" \"$CARGO_PROFILE_DEV_DEBUG\" 'quoted argument'")
+            .arg("printf '%s\\n' \"$CARGO_BUILD_JOBS\" \"$CARGO_INCREMENTAL\" \"$CARGO_PROFILE_DEV_DEBUG\" \"$GIT_CONFIG_GLOBAL\" \"$GIT_CONFIG_NOSYSTEM\" 'quoted argument'")
             .output()
             .unwrap();
         assert!(result.status.success());
-        assert_eq!(result.stdout, b"4\n0\nline-tables-only\nquoted argument\n");
+        assert_eq!(
+            result.stdout,
+            b"4\n0\nline-tables-only\n/lane/gitconfig\n1\nquoted argument\n"
+        );
     }
 
     #[test]

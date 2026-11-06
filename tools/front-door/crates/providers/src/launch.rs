@@ -544,9 +544,41 @@ pub(crate) fn private_git_objects(
     }
     let scratch = &input.confined.permissions().scratch.path;
     let private = scratch.join("git-common");
-    // The binding and the lane's commit identity stay out of the ambient
-    // environment, so a fixture's `git init` in a temporary directory neither
-    // reads nor commits to the lane. The Git shim applies them inside the worktree.
+    let config = scratch.join("gitconfig");
+    let identity = provenant_os::sys::git_global_identity(input.provenant.git);
+    let identity = identity
+        .iter()
+        .filter(|(key, _)| matches!(key.to_str(), Some("GIT_AUTHOR_NAME" | "GIT_AUTHOR_EMAIL")))
+        .collect::<Vec<_>>();
+    let mut config_text = String::from("[user]\n\tuseConfigOnly = true\n");
+    for (key, value) in &identity {
+        let name = match key.to_str() {
+            Some("GIT_AUTHOR_NAME") => "name",
+            Some("GIT_AUTHOR_EMAIL") => "email",
+            _ => continue,
+        };
+        let value = value.to_str().ok_or(ProviderError::InvalidPath)?;
+        config_text.push_str(&format!("\t{name} = {}\n", git_config_quote(value)));
+    }
+    spec.setup.push(SetupStep::WriteFile {
+        path: config.clone(),
+        bytes: config_text.into_bytes(),
+    });
+    for (key, value) in [
+        ("GIT_CONFIG_GLOBAL", config.as_os_str()),
+        ("GIT_CONFIG_NOSYSTEM", std::ffi::OsStr::new("1")),
+    ] {
+        if let Some((_, current)) = spec.env.iter_mut().find(|(name, _)| name == key) {
+            *current = value.to_owned();
+        } else {
+            spec.env.push((key.into(), value.to_owned()));
+        }
+    }
+    // The repository binding and explicit identity variables stay out of the
+    // ambient environment. Git's private global config carries the host
+    // identity to any Git executable, while `useConfigOnly` prevents fallback
+    // to a generated hostname identity. The wrapper keeps the private binding
+    // limited to this worktree.
     let mut bound = vec![
         ("GIT_DIR".into(), private.clone().into()),
         ("GIT_COMMON_DIR".into(), private.into()),
@@ -556,6 +588,7 @@ pub(crate) fn private_git_objects(
             scratch.join("git-objects").into(),
         ),
     ];
+    spec.git_wrapper.identity_config = Some(config);
     spec.env.retain(|(key, value)| {
         let identity = matches!(
             key.to_str(),
@@ -588,6 +621,32 @@ pub(crate) fn private_git_objects(
         .process_executables
         .extend([exact("/bin/sh"), exact(input.provenant.git)]);
     Ok(())
+}
+
+/// Quote a value for a Git config file. The config always enables
+/// `user.useConfigOnly`, so an absent or malformed host identity cannot fall
+/// back to Git's generated username and hostname.
+fn git_config_quote(value: &str) -> String {
+    let mut quoted = String::from("\"");
+    for character in value.chars() {
+        match character {
+            '\\' => quoted.push_str("\\\\"),
+            '"' => quoted.push_str("\\\""),
+            '\n' => quoted.push_str("\\n"),
+            '\t' => quoted.push_str("\\t"),
+            '\r' => quoted.push_str("\\r"),
+            '\u{0008}' => quoted.push_str("\\b"),
+            '\u{000c}' => quoted.push_str("\\f"),
+            control if control.is_control() => {
+                for byte in control.to_string().bytes() {
+                    quoted.push_str(&format!("\\x{byte:02x}"));
+                }
+            }
+            character => quoted.push(character),
+        }
+    }
+    quoted.push('"');
+    quoted
 }
 
 /// Let the lane read and run the helpers (`git-remote-https`) in the exec path

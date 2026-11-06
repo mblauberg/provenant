@@ -419,6 +419,15 @@ fn prepared_writer_git_environment_is_private_for_every_adapter() -> Result<(), 
                 }
             }
             if access == Access::WorktreeWrite {
+                assert!(spec.env.iter().any(|(key, value)| {
+                    key == "GIT_CONFIG_GLOBAL" && value == "/fixture/scratch/gitconfig"
+                }));
+                assert!(spec.setup.iter().any(|step| matches!(
+                    step,
+                    SetupStep::WriteFile { path, bytes }
+                        if path == Path::new("/fixture/scratch/gitconfig")
+                            && bytes.starts_with(b"[user]\n\tuseConfigOnly = true\n")
+                )));
                 let path = &spec.env.iter().find(|(key, _)| key == "PATH").unwrap().1;
                 assert_eq!(
                     std::env::split_paths(path).next().unwrap(),
