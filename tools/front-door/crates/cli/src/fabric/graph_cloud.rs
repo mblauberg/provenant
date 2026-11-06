@@ -165,6 +165,7 @@ impl provenant_providers::cloud_cli::CloudCli for BudgetCli<'_> {
 
 /// The production graph edge selects a transport from the sealed placement.
 #[allow(clippy::disallowed_methods)] // The installed transport consumes a real-time graph budget.
+#[allow(clippy::too_many_arguments)] // One boundary carries the sealed attempt, transport budget and stop state.
 pub fn installed(
     store: &provenant_run::RunStore,
     id: AttemptId,

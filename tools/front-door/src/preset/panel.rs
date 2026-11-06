@@ -56,15 +56,12 @@ pub struct ShapeHint {
     pub groups: Vec<ReviewReviewer>,
     /// Which lenses fill the slots for the stage's change kind.
     pub plan: LensPlan,
-    /// The review size, measured or given; `None` when unknown.
-    pub size: Option<String>,
     /// Measurement problems; the size was left unknown.
     pub warnings: Vec<String>,
     /// Lenses that any changed-path rule or test marker may add at launch.
     pub possible_additions: Vec<String>,
     /// Lenses required by the path floors for this pinned subject.
     pub required_floor_lenses: Vec<String>,
-    pub floor_classes: Vec<String>,
     pub floor_min_reviewers: usize,
     /// Candidates used when a review supplies no explicit lens list.
     pub default_lenses: Vec<String>,
@@ -285,9 +282,7 @@ fn review_selector_with_git(
             ),
             floor_min_reviewers: if floors.tier.is_some() { selected.shape.reviewers.iter().map(|row| row.count).sum() } else { 0 },
             required_floor_lenses: floors.lenses,
-            floor_classes: floors.classes,
             plan,
-            size: size.map(str::to_owned),
             warnings,
             groups: selected.shape.reviewers.clone(),
             default_lenses: review

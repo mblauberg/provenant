@@ -21,9 +21,9 @@ use support::{Result, TestRig};
 type Crash = provenant_fabric_runtime::coordination::facade::FacadeError;
 
 fn crash() -> Crash {
-    Crash::LaunchUnknown {
-        operation_id: provenant_core::OperationId::parse("op").expect("operation id"),
-    }
+    provenant_core::OperationId::parse("op")
+        .map(|operation_id| Crash::LaunchUnknown { operation_id })
+        .unwrap_or(Crash::StateCorrupt)
 }
 
 /// Fake provider host. Script entries are consumed per observation of a route;
@@ -250,9 +250,8 @@ fn assert_same_story(events: &[GraphEvent], checkpoint: &GraphCheckpoint) {
     if checkpoint.cancelled {
         assert_eq!(codes(events, GraphEventKind::Cancellation), ["cancelled"]);
     }
-    assert_eq!(
-        codes(events, GraphEventKind::Checkpoint).is_empty(),
-        false,
+    assert!(
+        !codes(events, GraphEventKind::Checkpoint).is_empty(),
         "every save is logged"
     );
 }

@@ -446,7 +446,9 @@ fn lane_edit_admits_revision_through_host_relay() -> Result {
     let relay = match relay {
         Ok(relay) => relay,
         Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
-            eprintln!("native lane socket unavailable: {error}");
+            provenant_test_support::skip_sandbox_dependent_test(format!(
+                "native lane socket unavailable: {error}"
+            ))?;
             return Ok(());
         }
         Err(error) => return Err(error.into()),

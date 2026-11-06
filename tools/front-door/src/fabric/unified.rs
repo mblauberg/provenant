@@ -120,7 +120,7 @@ impl Factory {
             &mut graph_owner,
             &mut journal,
         ) {
-            first_error.get_or_insert_with(|| FacadeError::InvalidInput { detail: None });
+            first_error.get_or_insert(FacadeError::InvalidInput { detail: None });
         }
         if let Some(error) = first_error {
             return Err(error);
@@ -296,7 +296,8 @@ pub(crate) fn unified_graph_command(
         GraphCommand::Stop { .. } => "stop",
         GraphCommand::Retry { .. } => "retry",
     };
-    let result = (|| -> Result<Option<(Value, String, bool)>, Box<dyn std::error::Error>> {
+    type CommandView = Option<(Value, String, bool)>;
+    let result = (|| -> Result<CommandView, Box<dyn std::error::Error>> {
         let factory = if matches!(command, GraphCommand::Status { .. }) {
             match read_factory(globals, workers) {
                 Ok(factory) => factory,
@@ -435,10 +436,7 @@ pub(crate) fn unified_graph_steer(
         if references.is_empty() {
             return Err(FacadeError::invalid(InvalidInputDetail::Field("target".into())).into());
         }
-        let text = provenant_os::sys::hook_io::read_stdin(
-            4096,
-            Instant::now() + std::time::Duration::from_secs(5),
-        )?;
+        let text = read_steering_stdin()?;
         let text = String::from_utf8(text)?;
         let cancel = CancelToken::new();
         let budget = WaitBudget::cli(factory.clock.mono_now(), 55)?;
@@ -802,6 +800,23 @@ pub(crate) fn read_status_rows(
     Ok(Some(rows))
 }
 
+
+fn missing_graph_context(error: &(dyn std::error::Error + 'static)) -> bool {
+    matches!(
+        error.downcast_ref::<provenant_cli::fabric::EdgeError>(),
+        Some(provenant_cli::fabric::EdgeError::Invalid)
+    )
+}
+
+// Stdin's bounded I/O API takes a real-time deadline at this transport edge.
+#[allow(clippy::disallowed_methods, reason = "sample the real-time stdin transport deadline")]
+fn read_steering_stdin() -> std::io::Result<Vec<u8>> {
+    provenant_os::sys::hook_io::read_stdin(
+        4096,
+        Instant::now() + std::time::Duration::from_secs(5),
+    )
+}
+
 #[cfg(test)]
 #[allow(dead_code, unused_imports, reason = "the custom worktree driver omits libtest functions")]
 mod tests {
@@ -988,11 +1003,4 @@ mod tests {
         assert!(resolve_target(&roots.state, project, "missing")?.is_none());
         Ok(())
     }
-}
-
-fn missing_graph_context(error: &(dyn std::error::Error + 'static)) -> bool {
-    matches!(
-        error.downcast_ref::<provenant_cli::fabric::EdgeError>(),
-        Some(provenant_cli::fabric::EdgeError::Invalid)
-    )
 }

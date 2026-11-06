@@ -794,6 +794,7 @@ pub fn publish<T: Serialize>(value: &CommandResult<T>, roots: &Roots) -> io::Res
 #[cfg(test)]
 mod tests {
     #[test]
+    #[allow(clippy::disallowed_methods)] // Dedicated fixture subprocess isolates lane-only environment variables.
     fn lane_publication_uses_private_scratch() -> Result<(), Box<dyn std::error::Error>> {
         use provenant_core::RootInputs;
         const FIXTURE: &str = "PROVENANT_TEST_LANE_PUBLICATION";

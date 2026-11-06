@@ -446,7 +446,7 @@ pub fn wait_for_children(
     within: std::time::Duration,
 ) -> Result<Value, ServiceError> {
     while_waiting(cancel, within, || {
-        poll_children(cancel, within, |remaining| {
+        poll_children(cancel, within, &provenant_os::clock::SystemClock::new(), |remaining| {
             from_lane(&RelayOp::Children, cancel, remaining)
         })
     })
@@ -455,15 +455,18 @@ pub fn wait_for_children(
 fn poll_children(
     cancel: &CancelToken,
     within: std::time::Duration,
+    clock: &dyn Clock,
     mut poll: impl FnMut(std::time::Duration) -> Result<Value, ServiceError>,
 ) -> Result<Value, ServiceError> {
-    let started = std::time::Instant::now();
+    let started = clock.mono_now();
     loop {
         if cancel.is_cancelled() {
             return Err(refused("cancelled", "child wait cancelled"));
         }
         let remaining = within
-            .checked_sub(started.elapsed())
+            .checked_sub(std::time::Duration::from_micros(
+                clock.mono_now().as_micros().saturating_sub(started.as_micros()),
+            ))
             .filter(|remaining| !remaining.is_zero())
             .ok_or_else(|| refused("timeout", "child wait timed out"))?;
         let value = poll(remaining)?;
@@ -473,7 +476,7 @@ fn poll_children(
         if children.iter().all(|child| child["settled"] == true) {
             return Ok(value);
         }
-        std::thread::sleep(remaining.min(std::time::Duration::from_millis(100)));
+        provenant_os::sys::wait_pause(remaining.min(std::time::Duration::from_millis(100)));
     }
 }
 
@@ -532,7 +535,7 @@ fn wait_for_admission(
     while send()?["reclaiming"] == true {
         // Each frame releases the graph lock. Retain the completed child-wait
         // result in with_waiting until the parent has admission again.
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        provenant_os::sys::wait_pause(std::time::Duration::from_millis(100));
     }
     Ok(())
 }
@@ -659,7 +662,7 @@ mod child_wait_tests {
                     Ok(())
                 },
                 || {
-                    poll_children(&cancel, std::time::Duration::from_secs(2), |_| {
+                    poll_children(&cancel, std::time::Duration::from_secs(2), &provenant_os::clock::SystemClock::new(), |_| {
                         polls += 1;
                         if cancelled {
                             cancel.cancel();
@@ -693,7 +696,7 @@ mod child_wait_tests {
         let result = with_waiting(
             |_| Ok(()),
             || {
-                poll_children(&CancelToken::new(), std::time::Duration::ZERO, |_| {
+                poll_children(&CancelToken::new(), std::time::Duration::ZERO, &provenant_os::clock::SystemClock::new(), |_| {
                     panic!("expired")
                 })
             },

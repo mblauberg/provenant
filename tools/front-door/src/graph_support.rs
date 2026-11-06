@@ -100,7 +100,7 @@ pub(crate) fn project_worktrees(directory: &Path) -> Vec<PathBuf> {
 }
 
 /// Whether a read root is exactly one `${parameter}`, with nothing around it.
-fn bare_placeholder(text: &str) -> bool {
+pub(crate) fn bare_placeholder(text: &str) -> bool {
     text.strip_prefix("${")
         .and_then(|rest| rest.strip_suffix('}'))
         .is_some_and(|name| !name.is_empty() && !name.contains(['$', '{', '}']))
