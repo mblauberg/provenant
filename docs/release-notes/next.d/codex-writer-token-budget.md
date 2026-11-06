@@ -1,4 +1,4 @@
 ## Fixes
 ### Lanes and settlement
 
-- Codex writer lanes now stop at their token budget when a completed turn takes them past it, and the host commits their work. Codex reports usage only at `turn.completed`, so a single long turn is not stopped mid-turn. A budget stop leaves a cherry-pick, revert or rebase in progress uncommitted, with a settlement note, as it already did for a merge (#2992).
+- The writer token budget does not stop Codex writers: `codex exec` reports usage only when its one turn has finished. A budget stop leaves a cherry-pick, revert or rebase in progress uncommitted, with a settlement note, as it already did for a merge. Skipped and failed commits remain reported alongside the budget outcome (#2992).
