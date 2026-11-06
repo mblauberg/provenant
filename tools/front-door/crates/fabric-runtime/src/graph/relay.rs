@@ -50,6 +50,16 @@ pub struct ChildRequest {
     pub reason: Option<String>,
 }
 
+/// One graph frame from a lane, tagged by `op`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+pub enum RelayOp {
+    /// Add a child of the calling node.
+    Add(ChildRequest),
+    /// Mark the calling node as waiting on its children, or working again.
+    Wait { waiting: bool },
+}
+
 fn task() -> String {
     "task".into()
 }

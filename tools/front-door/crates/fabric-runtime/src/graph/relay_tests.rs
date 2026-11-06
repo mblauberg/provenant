@@ -1,5 +1,7 @@
 use super::*;
-use relay::{ChildRequest, admit_child, cancel_subtree, child_depth, parent_of_attempt, set_waiting};
+use relay::{
+    ChildRequest, admit_child, cancel_subtree, child_depth, parent_of_attempt, set_waiting,
+};
 use serde_json::{Value, json};
 
 fn live(limits: Option<Value>) -> (GraphDocument, GraphCheckpoint) {
@@ -12,13 +14,18 @@ fn live(limits: Option<Value>) -> (GraphDocument, GraphCheckpoint) {
     .unwrap();
     document.limits = limits;
     let mut owner = FakeOwner::default();
-    owner.observations.push_back(AttemptObservation::Pending { attempt_ref: Some("attempt-a".into()) });
-    let checkpoint = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap().checkpoint;
+    owner.observations.push_back(AttemptObservation::Pending {
+        attempt_ref: Some("attempt-a".into()),
+    });
+    let checkpoint = advance(&document, &mut owner, &mut MemoryJournal::default())
+        .unwrap()
+        .checkpoint;
     (document, checkpoint)
 }
 
 fn child(id: &str, key: &str) -> ChildRequest {
-    serde_json::from_value(json!({"id":id, "brief":"Fix the parser", "idempotency_key":key})).unwrap()
+    serde_json::from_value(json!({"id":id, "brief":"Fix the parser", "idempotency_key":key}))
+        .unwrap()
 }
 
 fn add(
@@ -30,17 +37,35 @@ fn add(
     let library = template::TemplateLibrary::bundled();
     let resolvers = Default::default();
     let limits = plans::generous();
-    let context = patch::PatchContext { library: &library, resolvers: &resolvers, scan: &|_| Ok(()), limits: &limits };
-    admit_child(&mut patch::LiveGraph { document, checkpoint }, parent, request, &context)
+    let context = patch::PatchContext {
+        library: &library,
+        resolvers: &resolvers,
+        scan: &|_| Ok(()),
+        limits: &limits,
+    };
+    admit_child(
+        &mut patch::LiveGraph {
+            document,
+            checkpoint,
+        },
+        parent,
+        request,
+        &context,
+    )
 }
 
 fn ids(document: &GraphDocument, checkpoint: &GraphCheckpoint) -> Vec<String> {
-    plans::expand(document, &checkpoint.extensions, &checkpoint.expansions, &plans::generous())
-        .unwrap()
-        .nodes
-        .into_iter()
-        .map(|node| node.id)
-        .collect()
+    plans::expand(
+        document,
+        &checkpoint.extensions,
+        &checkpoint.expansions,
+        &plans::generous(),
+    )
+    .unwrap()
+    .nodes
+    .into_iter()
+    .map(|node| node.id)
+    .collect()
 }
 
 fn progress<'a>(checkpoint: &'a GraphCheckpoint, id: &str) -> &'a NodeProgress {
@@ -48,39 +73,74 @@ fn progress<'a>(checkpoint: &'a GraphCheckpoint, id: &str) -> &'a NodeProgress {
 }
 
 fn mark_running(checkpoint: &mut GraphCheckpoint, id: &str) {
-    checkpoint.nodes.iter_mut().find(|node| node.id == id).unwrap().state = NodeState::Running;
+    checkpoint
+        .nodes
+        .iter_mut()
+        .find(|node| node.id == id)
+        .unwrap()
+        .state = NodeState::Running;
 }
 
 #[test]
 fn lane_child_joins_the_same_graph_with_an_idempotent_receipt() {
     let (document, mut checkpoint) = live(None);
     // The relay names the attempt; the host finds the node that owns it.
-    let parent = parent_of_attempt(&checkpoint, "attempt-a").unwrap().to_owned();
+    let parent = parent_of_attempt(&checkpoint, "attempt-a")
+        .unwrap()
+        .to_owned();
     assert_eq!(parent, "a");
     assert_eq!(parent_of_attempt(&checkpoint, "someone-else"), None);
 
     let request = child("fix", "lane-a-fix-1");
     let receipt = add(&document, &mut checkpoint, &parent, &request).unwrap();
-    assert_eq!((receipt.graph_id.as_str(), receipt.node.as_str()), ("live", "a--fix"));
-    assert_eq!((receipt.revision, receipt.replayed, receipt.worktree), (1, false, None));
+    assert_eq!(
+        (receipt.graph_id.as_str(), receipt.node.as_str()),
+        ("live", "a--fix")
+    );
+    assert_eq!(
+        (receipt.revision, receipt.replayed, receipt.worktree),
+        (1, false, None)
+    );
     assert!(ids(&document, &checkpoint).contains(&"a--fix".to_owned()));
     let record = checkpoint.expansions[0].patch.as_ref().unwrap();
-    assert_eq!((record.parent.as_deref(), record.key.as_deref()), (Some("a"), Some("lane-a-fix-1")));
+    assert_eq!(
+        (record.parent.as_deref(), record.key.as_deref()),
+        (Some("a"), Some("lane-a-fix-1"))
+    );
     assert_eq!(checkpoint.expansions[0].uses[0].name, "task");
     assert_eq!(progress(&checkpoint, "a--fix").state, NodeState::Pending);
 
     // A retried relay call replays the receipt; a different child under the
     // same key is refused.
     let replay = add(&document, &mut checkpoint, "a", &request).unwrap();
-    assert_eq!((replay.node.as_str(), replay.revision, replay.replayed), ("a--fix", 1, true));
+    assert_eq!(
+        (replay.node.as_str(), replay.revision, replay.replayed),
+        ("a--fix", 1, true)
+    );
     assert_eq!(checkpoint.expansions.len(), 1);
     let other = child("other", "lane-a-fix-1");
-    assert_eq!(add(&document, &mut checkpoint, "a", &other).unwrap_err().code, "idempotency_conflict");
+    assert_eq!(
+        add(&document, &mut checkpoint, "a", &other)
+            .unwrap_err()
+            .code,
+        "idempotency_conflict"
+    );
     for bad in ["", "a--b", "has space"] {
-        assert_eq!(add(&document, &mut checkpoint, "a", &child(bad, "k")).unwrap_err().code, "invalid", "{bad:?}");
+        assert_eq!(
+            add(&document, &mut checkpoint, "a", &child(bad, "k"))
+                .unwrap_err()
+                .code,
+            "invalid",
+            "{bad:?}"
+        );
     }
     // Only a running parent adds children.
-    assert_eq!(add(&document, &mut checkpoint, "b", &child("late", "k2")).unwrap_err().code, "parent_settled");
+    assert_eq!(
+        add(&document, &mut checkpoint, "b", &child("late", "k2"))
+            .unwrap_err()
+            .code,
+        "parent_settled"
+    );
 }
 
 #[test]
@@ -92,14 +152,29 @@ fn writer_children_get_their_own_worktree_and_depth_is_bounded() {
     request.write_scope = vec!["src/parser".into()];
     let receipt = add(&document, &mut checkpoint, "a", &request).unwrap();
     assert_eq!(receipt.worktree.as_deref(), Some(".worktrees/live-a--impl"));
-    let expanded = plans::expand(&document, &checkpoint.extensions, &checkpoint.expansions, &plans::generous()).unwrap();
-    let writer = expanded.nodes.iter().find(|node| node.id == "a--impl").unwrap();
+    let expanded = plans::expand(
+        &document,
+        &checkpoint.extensions,
+        &checkpoint.expansions,
+        &plans::generous(),
+    )
+    .unwrap();
+    let writer = expanded
+        .nodes
+        .iter()
+        .find(|node| node.id == "a--impl")
+        .unwrap();
     assert_eq!(writer.access, AccessMode::WorktreeWrite);
     assert_eq!(writer.worktree.as_deref(), Some(".worktrees/live-a--impl"));
     assert_eq!(writer.write_scope, ["src/parser"]);
     let mut scoped_reader = child("read", "r1");
     scoped_reader.write_scope = vec!["src".into()];
-    assert_eq!(add(&document, &mut checkpoint, "a", &scoped_reader).unwrap_err().code, "invalid");
+    assert_eq!(
+        add(&document, &mut checkpoint, "a", &scoped_reader)
+            .unwrap_err()
+            .code,
+        "invalid"
+    );
 
     // `limits.child_depth` overrides the default.
     let (document, mut checkpoint) = live(Some(json!({"child_depth": 2})));
@@ -108,7 +183,13 @@ fn writer_children_get_their_own_worktree_and_depth_is_bounded() {
     mark_running(&mut checkpoint, "a--one");
     add(&document, &mut checkpoint, "a--one", &child("two", "d2")).unwrap();
     mark_running(&mut checkpoint, "a--one--two");
-    let error = add(&document, &mut checkpoint, "a--one--two", &child("three", "d3")).unwrap_err();
+    let error = add(
+        &document,
+        &mut checkpoint,
+        "a--one--two",
+        &child("three", "d3"),
+    )
+    .unwrap_err();
     assert_eq!(error.code, "child_depth", "{}", error.message);
     assert!(error.message.contains("limits.child_depth=2"));
 }
@@ -117,18 +198,32 @@ fn writer_children_get_their_own_worktree_and_depth_is_bounded() {
 fn a_waiting_parent_yields_its_slot_to_its_child() {
     let (document, mut checkpoint) = live(None);
     add(&document, &mut checkpoint, "a", &child("fix", "y1")).unwrap();
-    let limits = crate::config::GraphLimits { concurrency: Some(1), ..Default::default() };
+    let limits = crate::config::GraphLimits {
+        concurrency: Some(1),
+        ..Default::default()
+    };
     let run = |checkpoint: &GraphCheckpoint| {
         let mut owner = FakeOwner {
             observations: [
-                AttemptObservation::Pending { attempt_ref: Some("attempt-a".into()) },
-                AttemptObservation::Pending { attempt_ref: Some("attempt-fix".into()) },
+                AttemptObservation::Pending {
+                    attempt_ref: Some("attempt-a".into()),
+                },
+                AttemptObservation::Pending {
+                    attempt_ref: Some("attempt-fix".into()),
+                },
             ]
             .into(),
             ..Default::default()
         };
         let mut journal = MemoryJournal(Some(checkpoint.clone()));
-        let run = advance_with_budget(&document, &mut owner, &mut journal, &limits, &Default::default()).unwrap();
+        let run = advance_with_budget(
+            &document,
+            &mut owner,
+            &mut journal,
+            &limits,
+            &Default::default(),
+        )
+        .unwrap();
         (run.checkpoint, owner.calls.len())
     };
     // The parent holds the only slot while it works.
@@ -169,11 +264,36 @@ fn cancelling_a_parent_cancels_its_subtree_except_detached_children() {
     assert_eq!(detached, ["a--keep", "a--keep--under"]);
     assert!(cancelled.running.is_empty());
     let one = progress(&checkpoint, "a--one");
-    assert_eq!((one.state, one.cancelled_from), (NodeState::Skipped, Some(NodeState::Running)));
+    assert_eq!(
+        (one.state, one.cancelled_from),
+        (NodeState::Skipped, Some(NodeState::Running))
+    );
     assert_eq!(one.skip_reason.as_deref(), Some("parent a cancelled"));
     assert_eq!(progress(&checkpoint, "a--keep").state, NodeState::Running);
-    assert_eq!(progress(&checkpoint, "a--keep--under").state, NodeState::Pending);
+    assert_eq!(
+        progress(&checkpoint, "a--keep--under").state,
+        NodeState::Pending
+    );
     // The parent and unrelated nodes are the caller's business.
     assert_eq!(progress(&checkpoint, "a").state, NodeState::Running);
     assert_eq!(progress(&checkpoint, "b").state, NodeState::Pending);
+}
+
+#[test]
+fn relay_frames_are_tagged_and_strict() {
+    let add: relay::RelayOp = serde_json::from_value(
+        json!({"op":"add","id":"fix","brief":"Fix","idempotency_key":"k","writer":true}),
+    )
+    .unwrap();
+    assert!(
+        matches!(add, relay::RelayOp::Add(ref request) if request.writer && request.template == "task")
+    );
+    let wait: relay::RelayOp = serde_json::from_value(json!({"op":"wait","waiting":true})).unwrap();
+    assert_eq!(wait, relay::RelayOp::Wait { waiting: true });
+    assert!(
+        serde_json::from_value::<relay::RelayOp>(
+            json!({"op":"add","id":"x","brief":"b","idempotency_key":"k","host":"elsewhere"})
+        )
+        .is_err()
+    );
 }

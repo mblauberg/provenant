@@ -116,7 +116,11 @@ pub(crate) fn start_fabric_relay(
         )
         .map_err(|e| e.to_string())?,
     );
-    provenant_fabric_mcp::lane::HostRelay::start(
+    let ctx = std::sync::Arc::new(ctx);
+    let graph_ctx = std::sync::Arc::clone(&ctx);
+    let attempt = context.attempt_id.to_string();
+    let graph_clock = provenant_os::clock::SystemClock::new();
+    provenant_fabric_mcp::lane::HostRelay::start_with_graph(
         LaneRuntime::fabric_socket(context.attempt_id),
         provenant_records::Limits {
             max_bytes: ctx.config.limits.input_frame_bytes,
@@ -137,6 +141,17 @@ pub(crate) fn start_fabric_relay(
                 cancel,
             )?;
             call.execute_lane_coordination(&coordination, &ctx.config.limits, budget, cancel)
+        },
+        move |arguments, cancel: &CancelToken, within| {
+            let budget = provenant_fabric_mcp::lane::host_budget(&graph_clock, within)?;
+            crate::fabric::graph_relay::serve(
+                &graph_ctx,
+                &attempt,
+                arguments,
+                budget,
+                cancel,
+                &graph_clock,
+            )
         },
     )
     .map_err(|e| e.to_string())
