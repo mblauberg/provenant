@@ -124,6 +124,8 @@ impl PermissionError {
             Self::GitControlHardLinked(_)
             | Self::GitWriteAuthorityMissing
             | Self::Repository(_) => B::LaneGit,
+            // A required path that cannot be encoded cannot be enforced in
+            // SBPL. Optional discoveries are filtered before compilation.
             Self::AnchorMismatch
             | Self::AnchorMismatchAt { .. }
             | Self::InvalidFixture
@@ -131,6 +133,7 @@ impl PermissionError {
             | Self::ProtectedOverlap
             | Self::InvalidReadOnlyPolicy
             | Self::ProcessPolicyMissing
+            | Self::NonUtf8Path
             | Self::BackendUnavailable
             | Self::BackendNotAvailable(_)
             | Self::NestedConfinementUnsupported => B::Authority,
@@ -186,6 +189,7 @@ mod repository_error_tests {
             ),
             (PermissionError::GitWriteAuthorityMissing, B::LaneGit),
             (PermissionError::AnchorMismatch, B::Authority),
+            (PermissionError::NonUtf8Path, B::Authority),
             (
                 PermissionError::ProfileTooLarge { bytes: 2, limit: 1 },
                 B::None,
