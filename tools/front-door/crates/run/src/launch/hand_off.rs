@@ -413,6 +413,14 @@ mod tests {
                 ..
             }
         ));
+        assert!(matches!(
+            typed_local("lane Git objects", &RunError::WriterHeadNotLaneBranch),
+            HandOff::Boundary {
+                class: BoundaryClass::LaneGit,
+                cause: None,
+                ..
+            }
+        ));
     }
 
     #[test]

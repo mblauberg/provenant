@@ -511,6 +511,7 @@ impl RunError {
     pub fn boundary_class(&self) -> provenant_records::diagnostic::BoundaryClass {
         use provenant_records::diagnostic::BoundaryClass as B;
         match self {
+            Self::WriterHeadNotLaneBranch | Self::WriterSourceMismatch { .. } => B::LaneGit,
             Self::Confinement(error) => error.boundary_class(),
             Self::Plan(provenant_confinement::PlanError::Permission(error)) => {
                 error.boundary_class()
@@ -903,6 +904,10 @@ mod diagnostic_projection_tests {
         }));
         let invalid_roots = RunError::Plan(provenant_confinement::PlanError::InvalidRoots);
         assert_eq!(invalid_roots.boundary_class(), BoundaryClass::Authority);
+        assert_eq!(
+            RunError::WriterHeadNotLaneBranch.boundary_class(),
+            BoundaryClass::LaneGit
+        );
         assert_eq!(
             RefusalKind::HandoffBoundary(BoundaryClass::Authority).boundary_class(),
             BoundaryClass::Authority

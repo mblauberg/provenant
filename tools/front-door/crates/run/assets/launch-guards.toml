@@ -169,6 +169,16 @@ boundary = "lane_git"
 reason = "A retained writer import keeps its worktree fenced until the protected Git state is reconciled."
 
 [[guard]]
+site = "run/src/writer.rs#WriterLaunch::snapshot"
+boundary = "lane_git"
+reason = "The writer HEAD must match the selected lane branch before protected Git state is captured."
+
+[[guard]]
+site = "run/src/writer.rs#WriterLaunch::require_continuation_source"
+boundary = "lane_git"
+reason = "The selected source and continuation head must match the pinned commit and its ancestry before the writer is launched."
+
+[[guard]]
 site = "run/src/launch/hand_off.rs#RunStore::hand_off"
 boundary = "authority"
 reason = "A handoff must use the selected worktree and its held custody binding; a busy writer cannot be granted to another attempt."
