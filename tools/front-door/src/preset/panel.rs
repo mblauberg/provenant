@@ -872,15 +872,7 @@ impl StageBuilder<'_> {
             min_successful: group
                 .get("min_successful")
                 .map(|value| {
-                    let count = if group.get("zero_minimum").and_then(Value::as_str)
-                        == Some("all_but_one")
-                    {
-                        super::interpolate(value, &self.parameters, self.prompt, 1)?
-                            .as_u64()
-                            .ok_or("min_successful must be a non-negative integer")?
-                    } else {
-                        self.minimum_successful(value)?
-                    };
+                    let count = self.minimum_successful(value)?;
                     usize::try_from(count).map_err(|_| "min_successful is too large".to_owned())
                 })
                 .transpose()?,
