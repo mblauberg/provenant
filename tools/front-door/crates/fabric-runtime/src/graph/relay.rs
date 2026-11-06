@@ -60,6 +60,8 @@ pub struct ChildRequest {
 pub enum RelayOp {
     /// Add a child of the calling node.
     Add(ChildRequest),
+    /// Apply a revisioned patch to the calling lane's graph.
+    Edit { id: String, patch: Patch },
     /// Mark the calling node as waiting on its children, or working again.
     Wait { waiting: bool },
     /// Observe the calling node's children.

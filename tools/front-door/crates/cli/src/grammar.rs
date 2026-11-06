@@ -95,6 +95,9 @@ pub enum Command {
     /// Show graph, node and attempt status
     #[command(add = crate::metadata::CoreCommand(1, "provenant status"))]
     Status(Status),
+    /// Report graph attempt efficiency
+    #[command(hide = true)]
+    Stats(GraphStats),
     /// Merge on green CI and prune the merged worktree
     #[command(add = crate::metadata::CoreCommand(8, "provenant land 1947 --wait"))]
     Land {
@@ -1716,6 +1719,15 @@ pub(crate) fn duration_seconds(value: &str) -> Result<u64, &'static str> {
         .filter(|n| (1..=provenant_core::MAX_LANE_RUNTIME_SECONDS).contains(n))
         .ok_or("duration must be 1s to 4h; run `provenant help` for examples")
 }
+#[derive(Debug, Args)]
+pub struct GraphStats {
+    /// Graph ID, node or attempt selector
+    pub id: Option<String>,
+    /// Group efficiency by requested tier or template
+    #[arg(long, value_parser = ["tier", "template"], default_value = "template")]
+    pub by: String,
+}
+
 #[derive(Debug, Args)]
 pub struct Status {
     /// Stream a bounded attempt inventory page for the session collector.

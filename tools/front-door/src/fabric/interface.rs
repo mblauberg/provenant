@@ -208,7 +208,20 @@ impl Factory {
             if operation == "run" {
                 return self.relay_document(&input, budget, cancel);
             }
-            if matches!(operation, "edit" | "stop" | "retry") {
+            if operation == "edit" {
+                let patch: Patch = serde_json::from_value(input["patch"].clone())
+                    .map_err(|error| FacadeError::invalid(error.to_string()))?;
+                let op = provenant_fabric_runtime::graph::relay::RelayOp::Edit {
+                    id: required(&input, "id")?.to_owned(),
+                    patch,
+                };
+                let within = std::time::Duration::from_micros(
+                    budget.remaining(self.clock.mono_now()).as_micros(),
+                );
+                return provenant_cli::fabric::graph_relay::from_lane(&op, cancel, within)
+                    .map_err(|error| FacadeError::invalid(error.to_string()));
+            }
+            if matches!(operation, "stop" | "retry") {
                 return Err(FacadeError::ConfinementRefused);
             }
         }

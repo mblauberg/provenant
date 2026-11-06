@@ -1,6 +1,6 @@
 //! CLI documents for the shared graph service.
 use crate::fabric;
-use provenant_cli::{Edit, Globals, GraphRunArgs, Status, Templates};
+use provenant_cli::{Edit, Globals, GraphRunArgs, GraphStats, Status, Templates};
 use provenant_confinement::worktrees::WorkerObserver;
 use provenant_core::{CancelToken, Clock, WaitBudget};
 use provenant_records::{CommandResult, Outcome};
@@ -24,11 +24,12 @@ fn invoke(
 ) -> u8 {
     let result = (|| -> Result<Value, Box<dyn std::error::Error>> {
         let input = input?;
-        let factory = if input["explain"] == true || matches!(command, "templates" | "status") {
-            fabric::read_factory(globals, workers)?
-        } else {
-            fabric::factory(globals, workers)?
-        };
+        let factory =
+            if input["explain"] == true || matches!(command, "templates" | "status" | "stats") {
+                fabric::read_factory(globals, workers)?
+            } else {
+                fabric::factory(globals, workers)?
+            };
         let wait_seconds = input["wait_seconds"].as_u64().unwrap_or(55).max(55);
         let budget = WaitBudget::cli(factory.clock.mono_now(), wait_seconds)?;
         Ok(factory.graph_document(input, budget, &CancelToken::new())?)
@@ -48,7 +49,7 @@ fn invoke(
                 ),
                 globals,
                 &human,
-                command == "templates" || command == "status",
+                matches!(command, "templates" | "status" | "stats"),
             )
         }
         Err(error) => {
@@ -169,6 +170,19 @@ pub(crate) fn stats(
 ) -> u8 {
     invoke(
         "status",
+        Ok(json!({"op":"status","id":request.id,"stats":true,"by":request.by})),
+        globals,
+        workers,
+    )
+}
+
+pub(crate) fn graph_stats(
+    request: GraphStats,
+    globals: &Globals,
+    workers: &'static dyn WorkerObserver,
+) -> u8 {
+    invoke(
+        "stats",
         Ok(json!({"op":"status","id":request.id,"stats":true,"by":request.by})),
         globals,
         workers,
