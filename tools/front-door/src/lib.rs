@@ -1059,9 +1059,26 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
         }),
         Command::Review(cmd) => review::run(cmd, globals, process.workers()),
         Command::Status(cmd) if cmd.wait.is_some() => status_wait::run(cmd, globals),
-        Command::Status(cmd) => run_edge(&inv.leaf, globals, |edge| {
-            provenant_cli::run::status(cmd, globals.json, edge)
-        }),
+        Command::Status(cmd) => {
+            if let Some(id) = &cmd.id
+                && let Some(code) = fabric::unified_graph_command(
+                    id,
+                    fabric::GraphCommand::Status { wait: None },
+                    globals,
+                    process.workers(),
+                )
+            {
+                return code;
+            }
+            run_edge(&inv.leaf, globals, |edge| {
+                let all_graphs = cmd.id.is_none();
+                let mut reply = provenant_cli::run::status(cmd, globals.json, edge);
+                if all_graphs {
+                    fabric::append_graph_status(&mut reply, globals, process.workers());
+                }
+                reply
+            })
+        }
         Command::Land {
             numbers,
             head,
@@ -1112,14 +1129,49 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
             provenant_cli::run::lanes(cmd, edge)
         }),
         Command::Output(cmd) => run_edge(&inv.leaf, globals, |edge| {
+            if let Some(reply) =
+                fabric::unified_graph_output(&cmd, edge, globals, process.workers())
+            {
+                return reply;
+            }
             provenant_cli::run::output(cmd, edge)
         }),
-        Command::Cancel(cmd) => run_edge(&inv.leaf, globals, |edge| {
-            provenant_cli::run::cancel(cmd, edge)
-        }),
-        Command::Resume(cmd) => run_edge(&inv.leaf, globals, |edge| {
-            provenant_cli::run::resume(cmd, edge)
-        }),
+        Command::Cancel(cmd) => {
+            if let Some(code) = fabric::unified_graph_command(
+                &fabric::target_text(&cmd.target),
+                fabric::GraphCommand::Stop {
+                    reason: cmd.reason.clone(),
+                    wait: cmd.wait,
+                },
+                globals,
+                process.workers(),
+            ) {
+                return code;
+            }
+            run_edge(&inv.leaf, globals, |edge| {
+                provenant_cli::run::cancel(cmd, edge)
+            })
+        }
+        Command::Resume(cmd) => {
+            if let Some(code) = fabric::unified_graph_command(
+                &fabric::target_text(&cmd.attempt.0),
+                fabric::GraphCommand::Retry {
+                    extend: &cmd.extend,
+                    node: cmd.node,
+                    brief: cmd.brief.as_deref(),
+                    legacy_prompt: cmd.prompt.prompt_file.is_some() || cmd.prompt.prompt_stdin,
+                    no_fallback: cmd.no_fallback,
+                    wait: cmd.wait,
+                },
+                globals,
+                process.workers(),
+            ) {
+                return code;
+            }
+            run_edge(&inv.leaf, globals, |edge| {
+                provenant_cli::run::resume(cmd, edge)
+            })
+        }
         Command::Lane(cmd) => run_edge(&inv.leaf, globals, |edge| {
             let mut reply = provenant_cli::run::lane(cmd, edge);
             if let Err(error) =
@@ -1183,11 +1235,16 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
                 provenant_cli::mileage::run(cmd, edge)
             })
         }
-        Command::Steer(args) => human_inbox(
-            provenant_cli::inbox::HumanCommand::Steer(args),
-            &inv.leaf,
-            globals,
-        ),
+        Command::Steer(args) => {
+            if let Some(code) = fabric::unified_graph_steer(&args, globals, process.workers()) {
+                return code;
+            }
+            human_inbox(
+                provenant_cli::inbox::HumanCommand::Steer(args),
+                &inv.leaf,
+                globals,
+            )
+        }
         Command::Chair(provenant_cli::Chair::Message(args)) => human_inbox(
             provenant_cli::inbox::HumanCommand::ChairMessage(args),
             &inv.leaf,

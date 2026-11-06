@@ -52,7 +52,7 @@ pub enum Fabric {
     #[command(hide = true)]
     PeerAgent,
     /// Run and track task graphs
-    #[command(subcommand)]
+    #[command(skip)]
     Graph(Graph),
     /// Send and read inbox messages
     #[command(subcommand)]

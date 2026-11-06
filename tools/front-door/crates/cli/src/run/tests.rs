@@ -3918,6 +3918,57 @@ fn trace_store(
 }
 
 #[test]
+fn retry_reuses_the_retained_brief_and_accepts_a_replacement()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let root = std::fs::canonicalize(temp.path())?;
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let call = request(&clock, &cancel).map_err(|f| f.message)?;
+    let store = trace_store(&temp, &call)?;
+    let prepared = trace_run(10, AttemptId::from_bytes([9; 16]), clock.wall_now()?)?;
+    let prior = prepared.attempts[0].attempt_id;
+    store.create(&prepared, &call)?;
+    let mut roots = provenant_core::RootInputs::new(root.join("home"), root.join("checkout"));
+    roots.state_dir = Some(root.join("state"));
+    let context = run::ExecutionContext {
+        state_root: roots.resolve(&provenant_os::fs::SystemPathResolver)?.state,
+        project_id: provenant_core::ProjectId::from_bytes([1; 16]),
+        actor_id: ActorId::from_bytes([2; 16]),
+        read_prompts: true,
+    };
+    let session = Session { store, context };
+    let mut command = crate::Resume {
+        attempt: crate::Attempt(Target {
+            selection: None,
+            run: None,
+            task: None,
+            attempt: Some(prior),
+        }),
+        operation_id: OperationId::parse("retry-brief")?,
+        node: false,
+        brief: None,
+        extend: vec![],
+        no_fallback: false,
+        prompt: crate::Prompt {
+            prompt_file: None,
+            prompt_stdin: false,
+        },
+        wait: None,
+    };
+    assert_eq!(
+        resume::retry_prompt(&command, &session, prior, &call).map_err(|f| f.message)?,
+        "p"
+    );
+    command.brief = Some("repair the parser".into());
+    assert_eq!(
+        resume::retry_prompt(&command, &session, prior, &call).map_err(|f| f.message)?,
+        "repair the parser"
+    );
+    Ok(())
+}
+
+#[test]
 fn cloud_job_survives_reopening_owned_attempt() -> Result<(), Box<dyn std::error::Error>> {
     use provenant_providers::cloud::{
         CloudProvider, CloudResult, CloudSubmission, RemoteJob, RemoteState,
@@ -4644,13 +4695,13 @@ fn render_lanes_removes_peer_terminal_controls() -> Result<(), Box<dyn std::erro
     assert_eq!(data["lanes"][0]["state"], "model_unavailable");
     assert!(human.contains("(provider capacity: Selected model is at capacity)"));
     assert!(human.contains(&format!(
-        "continue: provenant resume {} --prompt-file PROMPT",
+        "continue: provenant retry {} --prompt-file PROMPT",
         lane.attempt_id
     )));
     lane.session = None;
     let (_, human) =
         render_lanes_without_cooldowns(std::slice::from_ref(&lane), &[], None, Path::new("/state"));
-    assert!(!human.contains("provenant resume"));
+    assert!(!human.contains("provenant retry"));
     assert!(human.contains("redispatch with another model"));
     lane.session = Some("session".into());
     if let run::AttemptState::Terminal { reason, .. } = &mut lane.state {
@@ -4658,7 +4709,7 @@ fn render_lanes_removes_peer_terminal_controls() -> Result<(), Box<dyn std::erro
     }
     let (_, human) =
         render_lanes_without_cooldowns(std::slice::from_ref(&lane), &[], None, Path::new("/state"));
-    assert!(!human.contains("provenant resume"));
+    assert!(!human.contains("provenant retry"));
     assert!(human.contains("redispatch with a corrected model"));
     lane.state = run::AttemptState::Terminal {
         extra: Default::default(),

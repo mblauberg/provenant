@@ -1356,7 +1356,7 @@ pub(super) fn resolve_prefix(
         return Err(Fail::new(
             Status::Invalid,
             ErrorKind::Invalid,
-            "peer history exceeds its enumeration limit; run `provenant lanes --host PEER --all` and use a full attempt ID",
+            "peer history exceeds its enumeration limit; use a full attempt ID from the peer's `provenant status --all`",
         ));
     }
     let candidates = records
@@ -1612,7 +1612,7 @@ fn chunk_response(
 pub(super) fn cancel(command: &Cancel, placement: &Placement, edge: &Edge<'_>) -> Reply {
     let mut status = Status::Ok;
     let mut out = reply(
-        "cancel",
+        "stop",
         (|| {
             let target = &command.target;
             let selected = placement.select_target(target)?;

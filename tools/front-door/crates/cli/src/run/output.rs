@@ -132,7 +132,7 @@ pub(super) fn output_summary(data: &Value, text: &str, headed: bool) -> crate::S
                 data["part"].as_str().unwrap_or("result")
             ))
         } else if matches!(state, "queued" | "starting" | "running" | "settling") {
-            Some(format!("provenant lanes --id {target} --wait 4m"))
+            Some(format!("provenant status {target} --wait=4m"))
         } else {
             None
         }

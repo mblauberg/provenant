@@ -2,6 +2,11 @@
 mod graph_human;
 mod graph_inputs;
 mod graph_status;
+mod unified;
+pub(crate) use unified::{
+    GraphCommand, append_graph_status, read_status_rows, target_text, unified_graph_command,
+    unified_graph_output, unified_graph_steer,
+};
 pub(crate) mod landing;
 pub(crate) mod owner;
 mod peer;
@@ -1017,12 +1022,27 @@ pub(crate) fn factory(
     globals: &provenant_cli::Globals,
     workers: &'static dyn WorkerObserver,
 ) -> Result<Factory, Box<dyn std::error::Error>> {
+    factory_mode(globals, workers, false)
+}
+
+fn read_factory(
+    globals: &provenant_cli::Globals,
+    workers: &'static dyn WorkerObserver,
+) -> Result<Factory, Box<dyn std::error::Error>> {
+    factory_mode(globals, workers, true)
+}
+
+fn factory_mode(
+    globals: &provenant_cli::Globals,
+    workers: &'static dyn WorkerObserver,
+    read_only: bool,
+) -> Result<Factory, Box<dyn std::error::Error>> {
     let resolved = crate::roots::resolve(
         globals,
         crate::roots::Workspace::Project,
         crate::roots::Product::Required,
     )?;
-    let context = if provenant_cli::fabric::in_lane() {
+    let context = if read_only || provenant_cli::fabric::in_lane() {
         Context::open_read_only(resolved.roots, &resolved.home, &resolved.project)?
     } else {
         Context::open(resolved.roots, &resolved.home, &resolved.project)?

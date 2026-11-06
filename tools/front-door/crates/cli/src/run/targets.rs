@@ -277,7 +277,7 @@ pub(super) fn choose(
             super::Status::Invalid,
             super::ErrorKind::NotFound,
             format!(
-                "no lane matches {selection}; use a unique prefix of 8 or more characters or the full ID, as `provenant lanes --all` lists them"
+                "no lane matches {selection}; use a unique prefix of 8 or more characters or the full ID, as `provenant status --all` lists them"
             ),
         )),
         1 => Ok(selected.remove(0)),
@@ -314,7 +314,7 @@ pub(super) fn resolve(
     target: &Target,
     allow_run: bool,
 ) -> Result<Candidate, Fail> {
-    let mut selection = text(target);
+    let mut selection = text(target).to_ascii_lowercase();
     if let Some((qualifier, attempt)) = selection.split_once('/')
         && !attempt.contains('/')
         && let Ok(qualifier) = qualifier.parse()
