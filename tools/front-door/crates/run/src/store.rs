@@ -56,6 +56,7 @@ pub struct PreparedRun {
 /// composition edge, after secret scanning. This storage API never launches.
 #[derive(Clone)]
 pub struct TerminalPublication<'a> {
+    pub terminal_cause: Option<TerminalCause>,
     pub outcome: Outcome,
     pub finished_at: WallTime,
     pub started_at: Option<WallTime>,
@@ -934,6 +935,7 @@ impl RunStore {
         };
         old.preparation_failure = preparation_failure;
         let publication = TerminalPublication {
+            terminal_cause: None,
             outcome,
             finished_at,
             started_at: None,
@@ -1099,8 +1101,16 @@ impl RunStore {
             complete: publication.complete,
             redacted: publication.redacted,
         });
+        let mut terminal_extra = provenant_records::ExtraFields::default();
+        if let Some(cause) = publication.terminal_cause {
+            terminal_extra.insert(
+                "terminal_cause".into(),
+                serde_json::to_value(cause)
+                    .map_err(|_| RunError::Validation("terminal cause could not be encoded"))?,
+            );
+        }
         next.state = AttemptState::Terminal {
-            extra: Default::default(),
+            extra: terminal_extra,
             outcome: publication.outcome,
             exit_code: outcome_exit,
             finished_at: publication.finished_at,
@@ -1689,7 +1699,15 @@ fn validate_request(input: &PreparedRun) -> Result<()> {
         prompt_bytes += new.prompt.len() as u64;
     }
     if prompt_bytes > RECORD_LIMIT {
-        return Err(RunError::TooLarge {
+        let task_index = input.request.tasks.iter().position(|task| {
+            input
+                .attempts
+                .iter()
+                .find(|attempt| attempt.task_id == task.task_id)
+                .is_some_and(|attempt| attempt.prompt.len() as u64 > RECORD_LIMIT)
+        });
+        return Err(RunError::PromptTooLarge {
+            task_index,
             limit: RECORD_LIMIT,
         });
     }

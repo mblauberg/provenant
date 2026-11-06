@@ -21,10 +21,10 @@ fn reexec_test_in_lane(name: &str) -> Result<bool, Box<dyn std::error::Error>> {
         .filter(|(key, _)| !removed.contains(&key.as_os_str()))
         .collect();
     let cwd = std::env::current_dir()?;
-    let timeout = if name == "run::tests::wait_handles_a_stale_default_cursor" {
-        300
-    } else {
-        30
+    let timeout = match name {
+        "run::tests::wait_handles_a_stale_default_cursor" => 300,
+        "run::tests::dispatch_reuses_only_free_lane_or_unowned_worktree" => 90,
+        _ => 30,
     };
     let mut options = ExecOptions::new(&argv, &cwd, Duration::from_secs(timeout));
     options.env = Some(&env);
@@ -1251,6 +1251,7 @@ fn model_policy_results_check_sections_and_bound_continuations()
     let task = &input.request.tasks[0];
     let policies = provenant_routing::ModelPolicies::default();
     let mut decoded = run::Decoded {
+        terminal_cause: None,
         outcome: run::Outcome::Succeeded,
         result: "   \n".into(),
         complete: true,
@@ -1471,6 +1472,7 @@ fn host_native_attempts_do_not_resume_implicitly_or_explicitly()
         .ok_or("host resume accepted")?;
     assert_eq!(error.kind, ErrorKind::ContinuationUnsupported);
     let mut decoded = run::Decoded {
+        terminal_cause: None,
         outcome: run::Outcome::ModelUnavailable,
         result: String::new(),
         complete: false,
@@ -1598,6 +1600,7 @@ fn capacity_and_quota_settlements_retry_within_their_bounds()
     };
     let config = provenant_routing::RoutingConfig::default();
     let decoded = |outcome, session: Option<&str>, reason: &str| run::Decoded {
+        terminal_cause: None,
         outcome,
         result: String::new(),
         complete: false,
@@ -1836,6 +1839,36 @@ fn host_delivery_limit_keeps_its_text_as_typed_io_detail() {
         Some(provenant_records::diagnostic::DiagnosticFact::DeliveryStage(_))
     ));
     assert_eq!(detail.detail.as_deref(), Some(failure.message.as_str()));
+}
+
+#[test]
+fn cli_io_projection_omits_untrusted_sources_in_both_formats()
+-> Result<(), Box<dyn std::error::Error>> {
+    for source in [
+        "TOKEN_SENTINEL\u{1b}".to_owned(),
+        format!("TOKEN_SENTINEL{}", "é".repeat(2048)),
+    ] {
+        let failure = super::Fail::from(run::RunError::Io(std::io::Error::other(source)));
+        let reply = super::reply("run", Err(failure));
+        for mode in [
+            crate::render::RenderMode::Human {
+                text: &reply.human,
+                summary: None,
+                read_only: false,
+            },
+            crate::render::RenderMode::Json,
+        ] {
+            let mut output = Vec::new();
+            crate::render::render(&reply.result, mode, &mut output)?;
+            let text = String::from_utf8(output)?;
+            assert!(text.contains("IO"));
+            assert!(!text.contains("TOKEN_SENTINEL"));
+            assert!(!text.chars().any(|c| c.is_control() && c != '\n'));
+            assert!(text.len() < 4096);
+        }
+        assert!(reply.result.error.as_ref().unwrap().repair.is_some());
+    }
+    Ok(())
 }
 
 #[test]
@@ -2674,6 +2707,69 @@ fn dispatch_reuses_only_free_lane_or_unowned_worktree() -> Result<(), Box<dyn st
     );
     let writer = run::resolve_writer(roots.state.as_path(), &project, &native_path)?;
     assert_eq!(writer.worktree, native_path);
+
+    // Exercise the actual CLI branch refusal and follow its shell-quoted
+    // remedy through the normal worktree admission and custody checks.
+    allow_any_free_disk(&edge)?;
+    let mut branch_command = parsed_run(&[
+        "--branch",
+        "native-branch",
+        "--base",
+        "HEAD",
+        "--model",
+        "codex/gpt-6-luna",
+        "--prompt-file",
+        prompt.to_str().ok_or("prompt")?,
+    ])?;
+    branch_command.wait = None;
+    let branch_reply = super::submit::with_deferred_provider_launch(|| {
+        dispatch_with_workers(branch_command, &edge, &Unknown)
+    });
+    let branch_error = branch_reply.result.error.as_ref().ok_or("branch refusal")?;
+    let remedy = branch_error.repair.as_deref().ok_or("branch remedy")?;
+    let (_, quoted) = remedy
+        .rsplit_once("--worktree ")
+        .ok_or("worktree argument")?;
+    use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination};
+    let argv = [
+        OsString::from("/bin/sh"),
+        OsString::from("-c"),
+        format!("set -- {quoted}; printf '%s' \"$1\"").into(),
+    ];
+    let mut options = ExecOptions::new(&argv, &project, Duration::from_secs(10));
+    options.stdout = StreamPolicy::Capture { limit: 4096 };
+    let output = SystemExecutor::new(1)?.execute(options)?;
+    assert_eq!(output.termination, Termination::Exit(0), "{remedy}");
+    let selected = String::from_utf8(output.stdout.bytes)?;
+    assert_eq!(std::path::Path::new(&selected), native_path);
+    let mut worktree_command = parsed_run(&[
+        "--worktree",
+        &selected,
+        "--model",
+        "codex/gpt-6-luna",
+        "--prompt-file",
+        prompt.to_str().ok_or("prompt")?,
+    ])?;
+    worktree_command.wait = None;
+    let accepted = super::submit::with_deferred_provider_launch(|| {
+        dispatch_with_workers(worktree_command, &edge, &Free)
+    });
+    assert_eq!(
+        accepted.result.status,
+        Status::Ok,
+        "{:?}",
+        accepted.result.error
+    );
+    let run_id = accepted.result.data["run_id"]
+        .as_str()
+        .ok_or("run id")?
+        .parse()?;
+    let request = _session.store.request(run_id, &call)?;
+    assert_eq!(
+        request.tasks[0].writer.as_ref().ok_or("writer")?.worktree,
+        native_path
+    );
+
     for origin in [
         None,
         Some(WorktreeOrigin::Lane),
@@ -3167,7 +3263,14 @@ fn own_worktree_pending_reservation_takes_precedence_over_census()
     );
     let refusal = super::Fail::from(run::RunError::Writer(census_unknown));
     assert!(refusal.message.contains(&path.display().to_string()));
-    assert!(refusal.message.contains("injected census incomplete"));
+    assert!(!refusal.message.contains("injected census incomplete"));
+    assert!(
+        refusal
+            .projection
+            .as_ref()
+            .and_then(|diagnostic| diagnostic.next.as_ref())
+            .is_some()
+    );
 
     let observer = LiveObserver(path.clone(), std::sync::atomic::AtomicUsize::new(0));
     let live_policy = worktrees::CensusPolicyWorkers::for_run(&observer, &roots)?;
@@ -4805,7 +4908,7 @@ fn delivery_state_text_retains_known_details_without_extensions() {
 fn render_lanes_removes_peer_terminal_controls() -> Result<(), Box<dyn std::error::Error>> {
     let reason = "\x1b[31mreason\x1b[0m";
     let account = "\x1b]0;account\x07";
-    let detail = "skip\n\r\t\u{0008}\u{202e}detail";
+    let detail = "TOKEN_SENTINEL /private/source\n\r\t\u{0008}\u{202e}detail";
     let remote = "or\x1bigin";
     let branch = "main\u{009b}line";
     let now = WallTime::from_micros(100)?;
@@ -4842,10 +4945,30 @@ fn render_lanes_removes_peer_terminal_controls() -> Result<(), Box<dyn std::erro
     }))?;
     let (data, human) =
         render_lanes_without_cooldowns(std::slice::from_ref(&lane), &[], None, Path::new("/state"));
+    let mut stale = lane.clone();
+    stale.skipped_routes[0].cause =
+        Some(provenant_records::RouteExclusionReason::StaleAvailability);
+    let (stale_data, stale_human) = render_lanes_without_cooldowns(
+        std::slice::from_ref(&stale),
+        &[],
+        None,
+        Path::new("/state"),
+    );
+    let stale_skip = &stale_data["lanes"][0]["skipped_routes"][0];
+    assert!(stale_skip["detail"].as_str().unwrap().contains("stale"));
+    assert!(
+        stale_skip["next"]
+            .as_str()
+            .unwrap()
+            .contains("provenant quota tick")
+    );
+    assert!(stale_human.contains("stale"));
+    assert!(!stale_skip.to_string().contains("TOKEN_SENTINEL"));
+    assert!(!stale_human.contains("/private/source"));
     assert_eq!(
         human,
         format!(
-            "{}/{}/{} Reviewchanges failed fixture/[32mmodel account=]0;account ([31mreason[0m)\n  skipped fixture/[33mfallback Unavailable: skipdetail\n  delivery origin:mainline NotAttempted head=unknown\n",
+            "{}/{}/{} Reviewchanges failed fixture/[32mmodel account=]0;account (the lane failed; inspect its result and local evidence)\n  skipped fixture/[33mfallback Unavailable: the selected route is unavailable; check route readiness with `provenant quota tick`\n  delivery origin:mainline NotAttempted head=unknown\n",
             RunId::from_bytes([2; 16]),
             TaskId::from_bytes([4; 16]),
             AttemptId::from_bytes([1; 16])
@@ -4862,7 +4985,18 @@ fn render_lanes_removes_peer_terminal_controls() -> Result<(), Box<dyn std::erro
         render_lanes_without_cooldowns(std::slice::from_ref(&lane), &[], None, Path::new("/state"));
     assert_eq!(different["lanes"][0]["priority"], 15);
     assert_eq!(different["lanes"][0]["requested_priority"], 10);
-    assert_eq!(data["lanes"][0]["reason"], json!(reason));
+    assert!(
+        data["lanes"][0]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("lane failed")
+    );
+    assert!(
+        !data["lanes"][0]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("reason")
+    );
     assert_eq!(data["lanes"][0]["write_grants"][0]["source"], "write_root");
     assert_eq!(data["lanes"][0]["write_grants"][0]["scope"], "subtree");
     assert_eq!(
@@ -4878,10 +5012,20 @@ fn render_lanes_removes_peer_terminal_controls() -> Result<(), Box<dyn std::erro
         json!(provenant_core::Digest::from_bytes([6; 32]))
     );
     assert_eq!(data["lanes"][0]["account"], json!(account));
-    assert_eq!(
-        data["lanes"][0]["skipped_routes"][0]["detail"],
-        json!(detail)
+    let skipped = &data["lanes"][0]["skipped_routes"][0];
+    assert_eq!(skipped["code"], "REFUSED");
+    assert!(skipped["detail"].as_str().unwrap().contains("unavailable"));
+    assert!(
+        skipped["next"]
+            .as_str()
+            .unwrap()
+            .contains("provenant quota tick")
     );
+    let skipped_wire = skipped.to_string();
+    for text in [human.as_str(), skipped_wire.as_str()] {
+        assert!(!text.contains("TOKEN_SENTINEL"));
+        assert!(!text.contains("/private/source"));
+    }
     assert_eq!(data["lanes"][0]["delivery"]["remote"], json!(remote));
     assert_eq!(data["lanes"][0]["delivery"]["branch"], json!(branch));
     assert_eq!(
@@ -4900,7 +5044,8 @@ fn render_lanes_removes_peer_terminal_controls() -> Result<(), Box<dyn std::erro
     let (data, human) =
         render_lanes_without_cooldowns(std::slice::from_ref(&lane), &[], None, Path::new("/state"));
     assert_eq!(data["lanes"][0]["state"], "model_unavailable");
-    assert!(human.contains("(provider capacity: Selected model is at capacity)"));
+    assert!(human.contains("the model is unavailable"));
+    assert!(!human.contains("Selected model is at capacity"));
     assert!(human.contains(&format!(
         "continue: provenant resume {} --prompt-file PROMPT",
         lane.attempt_id
@@ -5063,11 +5208,12 @@ fn lanes_render_retry_lineage() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(
         human,
         format!(
-            "{}/{}/{} failed → retrying ({}) unresolved\n{}/{}/{} queued (retry of {}) unresolved\n",
+            "{}/{}/{} failed → retrying ({}) unresolved ({})\n{}/{}/{} queued (retry of {}) unresolved\n",
             failed.run_id,
             failed.task_id,
             failed.attempt_id,
             retry.attempt_id,
+            run::Outcome::Failed.diagnostic_reason(),
             retry.run_id,
             retry.task_id,
             retry.attempt_id,
@@ -5100,7 +5246,16 @@ fn lanes_give_a_settled_lane_its_settlement_reason() -> Result<(), Box<dyn std::
     )?;
     let (data, _) =
         render_lanes_without_cooldowns(&[failed, queued], &[], None, Path::new("/state"));
-    assert_eq!(data["lanes"][0]["settlement"]["reason"], "provider failed");
+    assert_eq!(
+        data["lanes"][0]["settlement"]["reason"],
+        run::Outcome::Failed.diagnostic_reason()
+    );
+    assert!(
+        !data["lanes"][0]["settlement"]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("provider failed")
+    );
     assert_eq!(data["lanes"][1]["settlement"], Value::Null);
     assert_eq!(data["lanes"][1]["reason"], Value::Null);
     Ok(())
@@ -5134,12 +5289,15 @@ fn lanes_distinguish_exhausted_continuations_from_a_retry() -> Result<(), Box<dy
         &successors,
     );
     assert_eq!(data["lanes"][0]["superseded_by"], json!(next));
+    assert_eq!(data["lanes"][1]["state"], "failed");
+    assert!(data["lanes"][1]["superseded_by"].is_null());
     assert_eq!(
         data["lanes"][1]["reason"],
-        "model reported unfinished work; continuations exhausted"
+        run::Outcome::Failed.diagnostic_reason()
     );
     assert!(human.contains("retrying"));
-    assert!(human.contains("continuations exhausted"));
+    assert!(!human.contains("model reported unfinished work"));
+    assert!(!human.contains("continuations exhausted"));
     Ok(())
 }
 
@@ -5288,14 +5446,19 @@ fn render_lanes_omits_account_when_unresolved() -> Result<(), Box<dyn std::error
             "{}/{}/{} rejected unresolved ({reason})\n",
             RunId::from_bytes([2; 16]),
             TaskId::from_bytes([4; 16]),
-            AttemptId::from_bytes([1; 16])
+            AttemptId::from_bytes([1; 16]),
+            reason = run::Outcome::Rejected.diagnostic_reason(),
         )
     );
     assert!(!human.contains("account="));
     assert!(data["lanes"][0].get("title").is_none());
     assert!(data["lanes"][0]["account"].is_null());
     assert_eq!(data["lanes"][0]["state"], "rejected");
-    assert_eq!(data["lanes"][0]["reason"], json!(reason));
+    assert_eq!(
+        data["lanes"][0]["reason"],
+        json!(run::Outcome::Rejected.diagnostic_reason())
+    );
+    assert!(!human.contains(reason));
     assert!(data["lanes"][0]["applied_route"].is_null());
     Ok(())
 }
@@ -5649,7 +5812,8 @@ fn render_lanes_surfaces_provider_silence_while_running() -> Result<(), Box<dyn 
     Ok(())
 }
 #[test]
-fn render_lanes_shows_uncommitted_with_its_dirty_paths() -> Result<(), Box<dyn std::error::Error>> {
+fn render_lanes_reports_uncommitted_without_echoing_dirty_path_prose()
+-> Result<(), Box<dyn std::error::Error>> {
     let reason = "writer left uncommitted edits and no new commit: src/a.rs, b.txt";
     let now = WallTime::from_micros(100)?;
     let lane: run::AttemptRecord = serde_json::from_value(json!({
@@ -5684,11 +5848,20 @@ fn render_lanes_shows_uncommitted_with_its_dirty_paths() -> Result<(), Box<dyn s
     assert_eq!(settled(&lane.state), (true, false));
     let (data, human) = render_lanes_without_cooldowns(&[lane], &[], None, Path::new("/state"));
     assert!(
-        human.contains(&format!(" uncommitted unresolved ({reason})\n")),
+        human.contains(&format!(
+            " uncommitted unresolved ({})\n",
+            run::Outcome::Uncommitted.diagnostic_reason()
+        )),
         "{human}"
     );
     assert_eq!(data["lanes"][0]["state"], "uncommitted");
-    assert_eq!(data["lanes"][0]["reason"], json!(reason));
+    assert_eq!(
+        data["lanes"][0]["reason"],
+        json!(run::Outcome::Uncommitted.diagnostic_reason())
+    );
+    assert!(!human.contains("src/a.rs"));
+    assert!(!human.contains("b.txt"));
+    assert!(!serde_json::to_string(&data)?.contains(reason));
     Ok(())
 }
 #[test]
@@ -6193,7 +6366,7 @@ fn paged_output_never_splits_a_character() {
     assert_eq!(chunk.encoding, "utf8");
 }
 #[test]
-fn quota_reason_uses_provider_message_without_exposing_known_secret_shapes() {
+fn quota_reason_uses_safe_fact_without_provider_message() {
     let exit = ExitObservation {
         publication: PublicationState::Durable,
         scope: Scope {
@@ -6234,13 +6407,13 @@ fn quota_reason_uses_provider_message_without_exposing_known_secret_shapes() {
         host: None,
         cancel: None,
     };
-    for (message, expected) in [
+    for (message, _expected) in [
         (
             "Free allowance exhausted. See https://opencode.ai/go\\quota",
             "Free allowance exhausted. See https://opencode.ai/go\\quota",
         ),
         (
-            "Free allowance exhausted for ghp_abcdefghijklmnopqrstuvwxyz0123456789",
+            "Free allowance exhausted TOKEN_SENTINEL /private/source \u{1b} ghp_abcdefghijklmnopqrstuvwxyz0123456789",
             "Free allowance exhausted for [REDACTED]",
         ),
     ] {
@@ -6254,7 +6427,18 @@ fn quota_reason_uses_provider_message_without_exposing_known_secret_shapes() {
             )
             .unwrap();
         assert_eq!(decoded.outcome, run::Outcome::QuotaLimited);
-        assert_eq!(decoded.reason.as_deref(), Some(format!("{expected}; free tier exhausted; use a paid route or wait for its allowance reset").as_str()));
+        assert_eq!(
+            decoded.terminal_cause,
+            Some(run::TerminalCause::FreePoolQuota)
+        );
+        let reason = decoded.reason.as_deref().unwrap();
+        assert!(reason.contains("free tier exhausted"));
+        assert!(reason.contains("wait"));
+        assert!(!reason.contains(message));
+        assert!(!reason.contains("ghp_"));
+        assert!(!reason.contains("TOKEN_SENTINEL"));
+        assert!(!reason.contains("/private/source"));
+        assert!(!reason.contains('\u{1b}'));
     }
     let event = json!({"type":"provider.quota","message":"☀".repeat(300_000)});
     let decoded = registry
@@ -6271,7 +6455,9 @@ fn quota_reason_uses_provider_message_without_exposing_known_secret_shapes() {
         reason.len() <= 8192,
         "reason must leave room in the terminal record"
     );
-    assert!(reason.ends_with('☀'));
+    assert!(!reason.contains('☀'));
+    assert!(reason.contains("quota"));
+    assert!(reason.contains("wait"));
 }
 
 fn clean_exit() -> ExitObservation {
@@ -6440,11 +6626,8 @@ fn opencode_unavailable_model_reaches_the_decoded_outcome() {
         .unwrap();
     assert_eq!(decoded.outcome, run::Outcome::ModelUnavailable);
     let reason = decoded.reason.as_deref().unwrap();
-    assert!(
-        reason
-            .starts_with("provider model unavailable: Model unavailable: opencode/misspelt-free;"),
-        "{reason}"
-    );
+    assert!(reason.starts_with("provider model unavailable"), "{reason}");
+    assert!(!reason.contains("opencode/misspelt-free"), "{reason}");
     assert!(reason.contains("nearest catalogued IDs:"));
     assert!(decoded.observed_route.is_none());
 }
@@ -6482,7 +6665,7 @@ fn codex_capacity_reaches_the_decoded_outcome() {
     let stream = format!(
         "{}\n{}\n",
         json!({"type":"thread.started","thread_id":"01234567-89ab-cdef-0123-456789abcdef"}),
-        json!({"type":"turn.failed","error":{"message":"Selected model is at capacity. Please try a different model.","codex_error_info":"server_overloaded"}})
+        json!({"type":"turn.failed","error":{"message":"Selected model is at capacity. TOKEN_SENTINEL /private/source","codex_error_info":"server_overloaded"}})
     );
     let decoded = Registry::default()
         .decode(&route, stream.as_bytes(), &exit, Path::new("/nonexistent"))
@@ -6490,7 +6673,9 @@ fn codex_capacity_reaches_the_decoded_outcome() {
     assert_eq!(decoded.outcome, run::Outcome::ModelUnavailable);
     assert_eq!(
         decoded.reason.as_deref(),
-        Some("provider capacity: Selected model is at capacity. Please try a different model.")
+        Some(
+            "provider capacity: the selected model is overloaded; wait or choose an eligible route"
+        )
     );
     assert_eq!(
         decoded.session.as_deref(),
@@ -6552,7 +6737,9 @@ fn capacity_store_failure_does_not_change_settlement() -> Result<(), Box<dyn std
     assert_eq!(decoded.outcome, run::Outcome::ModelUnavailable);
     assert_eq!(
         decoded.reason.as_deref(),
-        Some("provider capacity: at capacity")
+        Some(
+            "provider capacity: the selected model is overloaded; wait or choose an eligible route"
+        )
     );
     Ok(())
 }
@@ -6612,7 +6799,9 @@ fn nested_capacity_settlement_does_not_write_shared_cooldown()
     assert_eq!(decoded.outcome, run::Outcome::ModelUnavailable);
     assert_eq!(
         decoded.reason.as_deref(),
-        Some("provider capacity: at capacity")
+        Some(
+            "provider capacity: the selected model is overloaded; wait or choose an eligible route"
+        )
     );
     assert!(!roots.state.as_path().join("quota").exists());
     Ok(())
@@ -6932,7 +7121,9 @@ fn capacity_guardian_context_records_and_reports_config_failure()
     let disabled = decode()?;
     assert_eq!(
         disabled.reason.as_deref(),
-        Some("provider capacity: at capacity")
+        Some(
+            "provider capacity: the selected model is overloaded; wait or choose an eligible route"
+        )
     );
     assert!(!state.join("quota").exists());
     std::fs::remove_file(state.join("config.toml"))?;
@@ -6999,7 +7190,7 @@ fn claude_and_opencode_overload_reach_the_decoded_outcome() {
                 .reason
                 .as_deref()
                 .unwrap()
-                .starts_with("provider capacity: Overloaded")
+                .starts_with("provider capacity: the selected model is overloaded")
         );
         assert!(decoded.session.is_some());
     }
@@ -7015,13 +7206,13 @@ fn codex_rate_limit_reaches_the_decoded_outcome() {
         ..Default::default()
     };
     let registry = Registry::default();
-    for (message, expected) in [
+    for (message, _expected) in [
         (
             "exceeded retry limit, last status: 429 Too Many Requests".to_owned(),
             "exceeded retry limit, last status: 429 Too Many Requests".to_owned(),
         ),
         (
-            "429 Too Many Requests for ghp_abcdefghijklmnopqrstuvwxyz0123456789".into(),
+            "429 Too Many Requests TOKEN_SENTINEL /private/source \u{1b} ghp_abcdefghijklmnopqrstuvwxyz0123456789".into(),
             "429 Too Many Requests for [REDACTED]".into(),
         ),
         (
@@ -7040,8 +7231,15 @@ fn codex_rate_limit_reaches_the_decoded_outcome() {
             .decode(&route, stream.as_bytes(), &exit, Path::new("/nonexistent"))
             .unwrap();
         assert_eq!(decoded.outcome, run::Outcome::RateLimited);
-        assert_eq!(decoded.reason.as_deref(), Some(expected.as_str()));
-        assert!(decoded.reason.unwrap().len() <= 8192);
+        let reason = decoded.reason.as_deref().unwrap();
+        assert!(reason.contains("rate limited"));
+        assert!(reason.contains("wait"));
+        assert!(!reason.contains(&message));
+        assert!(!reason.contains("ghp_"));
+        assert!(!reason.contains("TOKEN_SENTINEL"));
+        assert!(!reason.contains("/private/source"));
+        assert!(!reason.contains('\u{1b}'));
+        assert!(reason.len() <= 1024);
     }
 }
 
@@ -7052,7 +7250,8 @@ fn agy_denials_preserve_answers_and_prior_failures() {
         model: Some("agy/gemini-3.8-flash".into()),
         ..Default::default()
     };
-    let fixture = include_str!("../../../../tests/fixtures/providers/agy/denied-result.jsonl");
+    let fixture = include_str!("../../../../tests/fixtures/providers/agy/denied-result.jsonl")
+        .replace("RunCommand", "TOKEN_SENTINEL/private/source");
     let recovered = fixture.replace("\"response\":\"\"", "\"response\":\"Recovered answer\"");
     let registry = Registry::default();
     let decoded = registry
@@ -7067,7 +7266,7 @@ fn agy_denials_preserve_answers_and_prior_failures() {
     assert_eq!(decoded.result, "Recovered answer");
     assert_eq!(
         decoded.reason.as_deref(),
-        Some("provider denied: RunCommand")
+        Some("provider denied an action; check account access and inspect the result")
     );
     let decoded = registry
         .decode(
@@ -7080,7 +7279,7 @@ fn agy_denials_preserve_answers_and_prior_failures() {
     assert_eq!(decoded.outcome, run::Outcome::Failed);
     assert_eq!(
         decoded.reason.as_deref(),
-        Some("provider denied: RunCommand")
+        Some("provider denied an action; check account access and inspect the result")
     );
     let mut failed_exit = clean_exit();
     failed_exit.termination = Some(provenant_os::exec::Termination::Exit(1));
@@ -7133,7 +7332,7 @@ fn codex_rollout_error_reaches_the_decoded_reason() {
     assert!(decoded.observed_route.is_none());
     assert_eq!(
         decoded.reason.as_deref(),
-        Some("Codex rollout identity: provider continuation identity is unknown")
+        Some("Codex rollout identity could not be verified; inspect the local session evidence")
     );
 }
 
@@ -7276,7 +7475,7 @@ fn opencode_without_a_session_record_observes_no_model() {
     assert!(decoded.observed_route.is_none());
     assert_eq!(
         decoded.reason.as_deref(),
-        Some("OpenCode session identity: provider continuation identity is unknown")
+        Some("OpenCode session identity could not be verified; inspect the local session evidence")
     );
 }
 
@@ -7422,7 +7621,7 @@ fn a_claude_success_that_hit_its_token_limit_is_flagged_not_failed() {
     assert_eq!(decoded.partial_signals, [run::PartialSignal::ProviderStop]);
     assert_eq!(
         decoded.reason.as_deref(),
-        Some("provider stopped early: stop_reason max_tokens")
+        Some("provider stopped early; inspect the result and resume if needed")
     );
     assert_ne!(decoded.outcome, run::Outcome::Failed);
 }
@@ -8359,7 +8558,7 @@ fn every_adapter_sign_in_failure_settles_auth_required() -> Result<(), Box<dyn s
                 .reason
                 .as_deref()
                 .unwrap()
-                .contains("account-specific login remedy unavailable")
+                .contains("provenant quota tick")
         );
     }
     Ok(())
@@ -8402,14 +8601,8 @@ fn settled_auth_uses_only_the_selected_registered_account() -> Result<(), Box<dy
     assert_eq!(decoded.outcome, run::Outcome::AuthRequired);
     let reason = decoded.reason.unwrap();
     assert!(reason.contains("work [codex]"), "{reason}");
-    assert!(
-        reason.contains("CODEX_HOME='/fixture/work' codex login"),
-        "{reason}"
-    );
-    assert!(
-        reason.contains("last successful observation unknown"),
-        "{reason}"
-    );
+    assert!(reason.contains("codex login"), "{reason}");
+    assert!(reason.contains("/fixture/work"), "{reason}");
     Ok(())
 }
 
@@ -8543,6 +8736,7 @@ fn reconcile_reports_publish_error_and_explicitly_abandons_a_writer_fence()
                     id,
                     session.store.record(id, &call)?.revision,
                     &run::TerminalPublication {
+                        terminal_cause: None,
                         outcome: run::Outcome::Unsettled,
                         finished_at: clock.wall_now()?,
                         started_at: None,

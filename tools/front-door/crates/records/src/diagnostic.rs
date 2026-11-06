@@ -16,6 +16,195 @@ pub enum BoundaryClass {
     Authority,
 }
 
+/// Where a configurable admission threshold came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SettingSource {
+    Configuration,
+    ShippedDefault,
+}
+
+impl SettingSource {
+    pub fn description(self) -> &'static str {
+        match self {
+            Self::Configuration => "host configuration",
+            Self::ShippedDefault => "shipped default",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PressureLevel {
+    Normal,
+    Warning,
+    Critical,
+}
+impl PressureLevel {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Normal => "normal",
+            Self::Warning => "warning",
+            Self::Critical => "critical",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PressureThreshold {
+    Warning,
+    Critical,
+    Never,
+}
+impl PressureThreshold {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Warning => "warning",
+            Self::Critical => "critical",
+            Self::Never => "never",
+        }
+    }
+}
+
+/// The ledger limit that actually prevented a lease.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LaneLimit {
+    HostWriters,
+    ProjectWriters,
+    HostTotal,
+    ProjectTotal,
+}
+
+impl LaneLimit {
+    pub fn setting(self) -> &'static str {
+        match self {
+            Self::HostWriters => "domains.fabric.lanes.max_writer_lanes",
+            Self::ProjectWriters => "domains.fabric.lanes.max_project_writer_lanes",
+            Self::HostTotal => "domains.fabric.lanes.max_lanes",
+            Self::ProjectTotal => "domains.fabric.lanes.max_project_lanes",
+        }
+    }
+
+    pub fn description(self) -> &'static str {
+        match self {
+            Self::HostWriters => "host writer lanes",
+            Self::ProjectWriters => "project writer lanes",
+            Self::HostTotal => "host lanes",
+            Self::ProjectTotal => "project lanes",
+        }
+    }
+}
+
+/// Closed resource facts safe to project across host boundaries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ResourceFact {
+    MemoryPressure {
+        level: PressureLevel,
+        threshold: PressureThreshold,
+        origin: SettingSource,
+    },
+    LaneCap {
+        active: u64,
+        limit: u64,
+        lane_limit: LaneLimit,
+        origin: SettingSource,
+    },
+    Processes {
+        used: u64,
+        limit: u64,
+        reserved: u64,
+    },
+}
+
+impl ResourceFact {
+    pub fn project(&self, diagnostic: Diagnostic) -> Diagnostic {
+        match self {
+            Self::MemoryPressure { level, threshold, origin } => diagnostic
+                .detail(format!("host memory pressure is {}; domains.fabric.lanes.memory_pressure_threshold is {} (source: {})", level.name(), threshold.name(), origin.description()))
+                .next("reduce host memory pressure before retrying"),
+            Self::LaneCap { active, limit, lane_limit, origin } => {
+                let description = lane_limit.description();
+                let setting = lane_limit.setting();
+                diagnostic
+                    .detail(format!("{active} of {limit} {description} are active; {setting} (source: {})", origin.description()))
+                    .next(format!("wait for an active lane to finish or adjust {setting}"))
+            }
+            Self::Processes { used, limit, reserved } => diagnostic
+                .detail(format!("host user process count is {used} of the operating system RLIMIT_NPROC soft limit {limit}; shipped reserved headroom is {reserved}"))
+                .next("reduce host process use or raise the per-user process limit before retrying"),
+        }
+    }
+}
+
+/// Provider failure facts that can be shown without copying captured text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderFailureFact {
+    Quota { free_pool: bool },
+    RateLimit,
+    ModelUnavailable,
+    Capacity,
+    Denied,
+    AuthRequired,
+    EarlyStop,
+    CodexIdentity,
+    OpenCodeIdentity,
+}
+
+impl ProviderFailureFact {
+    pub fn reason(self) -> &'static str {
+        match self {
+            Self::Quota { free_pool: true } => {
+                "provider quota exhausted; free tier exhausted; use a paid route or wait for its allowance reset"
+            }
+            Self::Quota { free_pool: false } => {
+                "provider quota exhausted; wait for the allowance to reset or select an eligible route"
+            }
+            Self::RateLimit => {
+                "provider rate limited; wait for the allowance to reset before retrying"
+            }
+            Self::ModelUnavailable => {
+                "provider model unavailable; check the selected model and choose an eligible route"
+            }
+            Self::Capacity => {
+                "provider capacity: the selected model is overloaded; wait or choose an eligible route"
+            }
+            Self::Denied => {
+                "provider denied an action; check account access and inspect the result"
+            }
+            Self::AuthRequired => {
+                "provider requires login; sign in to the selected account and run `provenant quota tick`"
+            }
+            Self::EarlyStop => "provider stopped early; inspect the result and resume if needed",
+            Self::CodexIdentity => {
+                "Codex rollout identity could not be verified; inspect the local session evidence"
+            }
+            Self::OpenCodeIdentity => {
+                "OpenCode session identity could not be verified; inspect the local session evidence"
+            }
+        }
+    }
+}
+
+/// I/O facts whose field and reason are safe to disclose.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IoFact {
+    InputUnreadable,
+}
+
+impl IoFact {
+    pub fn project(self, diagnostic: Diagnostic) -> Diagnostic {
+        match self {
+            Self::InputUnreadable => diagnostic
+                .detail("input could not be read")
+                .next("inspect the input source and retry"),
+        }
+    }
+}
+
 /// An explicitly recognised delivery command and its enforced output limit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -54,8 +243,14 @@ pub enum DiagnosticFact {
         available: u64,
         floor: u64,
         reclaimed: u64,
+        origin: SettingSource,
     },
     DiskUnobserved,
+    PromptLimit {
+        task_index: Option<usize>,
+        limit: u64,
+    },
+    Resource(ResourceFact),
 }
 impl DeliveryLimit {
     pub fn new(
@@ -160,11 +355,16 @@ impl Diagnostic {
     }
 }
 
+fn terminal_control(character: char) -> bool {
+    character.is_control()
+        || matches!(character, '\u{061c}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
+}
+
 /// Escape terminal controls and truncate at a UTF-8 boundary after escaping.
 pub fn safe_text(value: &str) -> String {
     let mut output = String::new();
     for character in value.chars() {
-        let part = if character.is_control() {
+        let part = if terminal_control(character) {
             character.escape_default().to_string()
         } else {
             character.to_string()
@@ -206,7 +406,7 @@ pub fn safe_path(path: &Path, destination: Destination<'_>) -> Option<String> {
     if display
         .chars()
         .map(|c| {
-            if c.is_control() {
+            if terminal_control(c) {
                 c.escape_default().to_string().len()
             } else {
                 c.len_utf8()
@@ -222,7 +422,7 @@ pub fn safe_path(path: &Path, destination: Destination<'_>) -> Option<String> {
 
 /// Quote a path as one shell argument after applying destination disclosure.
 pub fn shell_path(path: &Path, destination: Destination<'_>) -> Option<String> {
-    if !matches!(destination, Destination::Local) || path.to_str()?.chars().any(char::is_control) {
+    if !matches!(destination, Destination::Local) || path.to_str()?.chars().any(terminal_control) {
         return None;
     }
     let path = safe_path(path, destination)?;
@@ -233,6 +433,83 @@ pub fn shell_path(path: &Path, destination: Destination<'_>) -> Option<String> {
 mod tests {
     use super::*;
     #[test]
+    fn route_exclusions_have_bounded_causes_and_actions() {
+        use crate::RouteExclusionReason as Cause;
+        for cause in [
+            Cause::Disabled,
+            Cause::MissingExecutable,
+            Cause::UnknownAvailability,
+            Cause::StaleAvailability,
+            Cause::UnknownAccount,
+            Cause::DisclosureDenied,
+            Cause::ConfinementUnavailable,
+            Cause::UnsupportedEffort,
+            Cause::Exhausted,
+            Cause::PacingReserve,
+            Cause::UnknownPartialHeadroom,
+            Cause::AuthRequired,
+            Cause::LoginExpired,
+            Cause::UnverifiedModel,
+            Cause::AccountMismatch,
+            Cause::FreeTierRefused,
+            Cause::ProviderRefused,
+            Cause::InvalidAccountEvidence,
+        ] {
+            let diagnostic = cause.diagnostic("REFUSED");
+            assert_eq!(diagnostic.code, "REFUSED");
+            for text in [diagnostic.detail.unwrap(), diagnostic.next.unwrap()] {
+                assert!(!text.is_empty());
+                assert!(text.len() <= MAX_DIAGNOSTIC_BYTES);
+                assert!(!text.chars().any(char::is_control));
+            }
+        }
+    }
+
+    #[test]
+    fn skipped_route_projects_typed_readiness_without_source_text() {
+        use crate::{
+            RouteExclusionReason,
+            run::{SkipKind, SkippedRoute},
+        };
+        let mut route = SkippedRoute {
+            extra: Default::default(),
+            route: "fixture/model".into(),
+            kind: SkipKind::Unavailable,
+            cause: None,
+            detail: "TOKEN_SENTINEL /private/source \u{1b}".into(),
+        };
+        let initial = serde_json::to_string(&route.diagnostic()).unwrap();
+        assert!(!initial.contains("TOKEN_SENTINEL"));
+        assert!(!initial.contains("/private/source"));
+        route.set_cause(RouteExclusionReason::StaleAvailability);
+        assert!(route.detail.contains("stale"));
+        assert!(route.detail.contains("provenant quota tick"));
+        assert!(!route.detail.contains("TOKEN_SENTINEL"));
+        assert!(route.detail.len() <= 2 * MAX_DIAGNOSTIC_BYTES + 2);
+    }
+
+    #[test]
+    fn provider_failure_facts_have_bounded_safe_actions() {
+        for fact in [
+            ProviderFailureFact::Quota { free_pool: false },
+            ProviderFailureFact::Quota { free_pool: true },
+            ProviderFailureFact::RateLimit,
+            ProviderFailureFact::ModelUnavailable,
+            ProviderFailureFact::Capacity,
+            ProviderFailureFact::Denied,
+            ProviderFailureFact::AuthRequired,
+            ProviderFailureFact::EarlyStop,
+            ProviderFailureFact::CodexIdentity,
+            ProviderFailureFact::OpenCodeIdentity,
+        ] {
+            let reason = fact.reason();
+            assert!(reason.len() <= MAX_DIAGNOSTIC_BYTES);
+            assert!(!reason.chars().any(char::is_control));
+            assert!(reason.contains(';'));
+        }
+    }
+
+    #[test]
     fn projection_has_code_and_optional_bounded_safe_fields() {
         let empty = serde_json::to_value(Diagnostic::new("INVALID")).unwrap();
         assert_eq!(empty, serde_json::json!({"code":"INVALID"}));
@@ -242,6 +519,9 @@ mod tests {
         assert!(text.len() <= MAX_DIAGNOSTIC_BYTES);
         assert!(!text.chars().any(char::is_control));
         assert!(text.contains("\\u{1b}"));
+        let bidi = safe_text("before\u{202e}after");
+        assert!(bidi.contains("\\u{202e}"));
+        assert!(!bidi.contains('\u{202e}'));
     }
     #[test]
     fn destination_paths_require_anchors_and_shell_quotes() {
@@ -262,6 +542,13 @@ mod tests {
         assert_eq!(
             shell_path(Path::new("/repo/a'b"), Destination::Local).as_deref(),
             Some("'/repo/a'\\''b'")
+        );
+        let bidi_path = Path::new("/repo/a\u{202e}b");
+        assert_eq!(shell_path(bidi_path, Destination::Local), None);
+        assert!(
+            safe_path(bidi_path, Destination::Local)
+                .unwrap()
+                .contains("\\u{202e}")
         );
     }
 

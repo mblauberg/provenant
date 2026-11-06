@@ -142,6 +142,18 @@ pub enum ConfigError {
     ProjectBindingFilesystem(#[from] provenant_os::fs::FsError),
 }
 
+impl ConfigError {
+    /// A stable domain refusal code, when its owner provides one.
+    pub fn refusal_code(&self) -> Option<&'static str> {
+        match self {
+            Self::Domain { source, .. } if source.code == shared_settings::NEVER_SYNCED_CODE => {
+                Some(source.code)
+            }
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Origin {

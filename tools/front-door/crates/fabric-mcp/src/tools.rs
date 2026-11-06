@@ -101,7 +101,7 @@ pub enum ChairInput {
 
 impl ConsoleInput {
     fn validate(&self) -> Result<(), InputError> {
-        let bad = |path: &str| InputError { path: path.into() };
+        let bad = |path: &str| InputError::new(path);
         match self {
             Self::Sessions { limit, .. } | Self::Board { limit, .. }
                 if !(1..=100).contains(limit) =>
@@ -126,7 +126,7 @@ impl ConsoleInput {
 
 impl ChairInput {
     fn validate(&self) -> Result<(), InputError> {
-        let bad = |path: &str| InputError { path: path.into() };
+        let bad = |path: &str| InputError::new(path);
         match self {
             Self::SummaryDiff { from, .. } if *from == 0 => Err(bad("from")),
             Self::SummaryDiff { to: Some(0), .. } => Err(bad("to")),
@@ -198,6 +198,8 @@ pub enum InvalidInput {
     UnknownTool,
     #[error("invalid tool argument at {path}")]
     Arguments { path: String },
+    #[error("{0}")]
+    Validated(InputError),
 }
 
 impl ToolCall {
@@ -234,36 +236,28 @@ impl ToolCall {
     fn validate_limits(&self, limits: &Limits) -> Result<(), InputError> {
         let body = |value: &str, path: &str| {
             if u64::try_from(value.len()).unwrap_or(u64::MAX) > limits.body_bytes {
-                Err(InputError {
-                    path: path.to_owned(),
-                })
+                Err(InputError::new(path))
             } else {
                 Ok(())
             }
         };
         let page = |value: u64| {
             if value > limits.page_rows {
-                Err(InputError {
-                    path: "limit".to_owned(),
-                })
+                Err(InputError::new("limit"))
             } else {
                 Ok(())
             }
         };
         let lease = |value: u64| {
             if value > limits.lease_seconds {
-                Err(InputError {
-                    path: "lease_seconds".to_owned(),
-                })
+                Err(InputError::new("lease_seconds"))
             } else {
                 Ok(())
             }
         };
         let output = |value: u64| {
             if value > limits.output_bytes {
-                Err(InputError {
-                    path: "max_bytes".to_owned(),
-                })
+                Err(InputError::new("max_bytes"))
             } else {
                 Ok(())
             }
@@ -642,22 +636,14 @@ impl ToolCall {
             };
         macro_rules! parse {
             ($ty:ty, $variant:ident $(, $metadata:expr)*) => {
-                serde_json::from_value::<$ty>(arguments.clone())
-                    .and_then(|input| {
-                        input
-                            .validate_input(WaitTransport::Mcp)
-                            .map_err(serde::de::Error::custom)?;
-                        Ok(Self::$variant(input $(, $metadata)*))
+                <$ty>::decode_for_transport(arguments.clone(), WaitTransport::Mcp)
+                    .map_err(|_| InvalidInput::Arguments {
+                        path: schema::invalid_path(name, &arguments)
+                            .unwrap_or_else(|| "arguments".to_owned()),
                     })
-                    .map_err(|error| InvalidInput::Arguments {
-                        path: schema::invalid_path(name, &arguments).unwrap_or_else(|| {
-                            let message = error.to_string();
-                            message
-                                .strip_prefix("invalid input field `")
-                                .and_then(|path| path.strip_suffix('`'))
-                                .map(|path| format!("arguments.{path}"))
-                                .unwrap_or_else(|| "arguments".to_owned())
-                        }),
+                    .and_then(|input| {
+                        let input = input.map_err(InvalidInput::Validated)?;
+                        Ok(Self::$variant(input $(, $metadata)*))
                     })
             };
         }
@@ -677,7 +663,18 @@ impl ToolCall {
                 }
             }
             Some(schema::ToolKind::Identity) if operation == "hosts" => parse!(HostsInput, Hosts),
-            Some(schema::ToolKind::Inbox) => parse!(InboxInput, Inbox, host),
+            Some(schema::ToolKind::Inbox) => {
+                serde_json::from_value::<InboxInput>(arguments.clone())
+                    .map_err(|_| InvalidInput::Arguments {
+                        path: "arguments".into(),
+                    })
+                    .and_then(|input| {
+                        input
+                            .validate_input(WaitTransport::Mcp)
+                            .map_err(InvalidInput::Validated)?;
+                        Ok(Self::Inbox(input, host))
+                    })
+            }
             Some(schema::ToolKind::Console | schema::ToolKind::Chair) => {
                 if let Some(path) = schema::invalid_path(name, &arguments) {
                     return Err(InvalidInput::Arguments { path });
@@ -1379,6 +1376,21 @@ impl ServiceError {
     /// Stable structured error data. Uncertain mutations carry their
     /// idempotency key; prompts, tokens and raw source errors are omitted.
     pub fn structured_error(&self) -> Value {
+        if let Self::Invalid(error) = self {
+            let projection = error.diagnostic();
+            let mut value = serde_json::to_value(&projection)
+                .unwrap_or_else(|_| serde_json::json!({"code": error.code()}));
+            value["path"] = serde_json::json!(error.safe_path());
+            value["message"] =
+                serde_json::json!(projection.detail.as_deref().unwrap_or(error.code()));
+            value["hint"] = serde_json::json!(
+                projection
+                    .next
+                    .as_deref()
+                    .unwrap_or("check the input and retry")
+            );
+            return value;
+        }
         if let Self::Facade(error) = self {
             let projection = error.diagnostic();
             let mut value = serde_json::to_value(&projection)
@@ -1410,17 +1422,46 @@ impl ServiceError {
             }
             return value;
         }
-        if let Self::Coordination(CoordinationError::Store(error)) = self {
-            if let provenant_fabric_runtime::StoreError::Invalid(field) = error {
-                return serde_json::json!({"code":self.code(),"field":field,"message":error.to_string(),"hint":"Check the field and retry."});
+        if let Self::Coordination(error) = self {
+            let projection = error.diagnostic();
+            let mut value = serde_json::to_value(&projection)
+                .unwrap_or_else(|_| serde_json::json!({"code": self.code()}));
+            value["message"] = Value::String(
+                projection
+                    .detail
+                    .clone()
+                    .unwrap_or_else(|| projection.code.clone()),
+            );
+            value["hint"] = Value::String(
+                projection
+                    .next
+                    .clone()
+                    .unwrap_or_else(|| "Inspect the current state before retrying.".into()),
+            );
+            match error {
+                CoordinationError::Store(provenant_fabric_runtime::StoreError::Invalid(field)) => {
+                    value["field"] =
+                        serde_json::json!(provenant_records::diagnostic::safe_text(field));
+                }
+                CoordinationError::Input(error) => {
+                    value["path"] = serde_json::json!(error.safe_path());
+                }
+                CoordinationError::Peer(provenant_fabric_runtime::hosts::PeerError::Unknown {
+                    operation_id,
+                }) => {
+                    value["operation_id"] = serde_json::json!(operation_id);
+                }
+                _ => {}
             }
-            let facade = FacadeError::from(error);
-            if matches!(
-                facade,
-                FacadeError::UpgradeRequired { .. } | FacadeError::Io { .. }
-            ) {
-                return Self::Facade(facade).structured_error();
+            if let FacadeError::Io { operation, .. } = FacadeError::from(error)
+                && operation == "access Fabric store"
+            {
+                value["operation"] = Value::String(operation);
             }
+            if self.code() == "busy" {
+                value["retryable"] = Value::Bool(true);
+            }
+            return value;
         }
         if let Self::Mutation {
             operation_id,
@@ -1451,25 +1492,8 @@ impl ServiceError {
                 }
                 value
             }
-            Self::Invalid(error) => serde_json::json!({"code":self.code(),"path":error.path}),
-            Self::Coordination(CoordinationError::LaneMutation) => {
-                serde_json::json!({"code":self.code(),"message":self.to_string()})
-            }
-            Self::Coordination(CoordinationError::Peer(
-                provenant_fabric_runtime::hosts::PeerError::ProtocolMismatch { .. },
-            )) => {
-                serde_json::json!({"code":self.code(),"message":self.to_string()})
-            }
-            Self::Coordination(CoordinationError::Input(error)) => {
-                serde_json::json!({"code":self.code(),"path":error.path})
-            }
             Self::Inbox(InboxError::Invalid(field)) => {
                 serde_json::json!({"code":self.code(),"field":field})
-            }
-            Self::Coordination(CoordinationError::Peer(
-                provenant_fabric_runtime::hosts::PeerError::Unknown { operation_id },
-            )) => {
-                serde_json::json!({"code":self.code(),"operation_id":operation_id})
             }
             _ => serde_json::json!({"code":self.code()}),
         };

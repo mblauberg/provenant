@@ -443,6 +443,10 @@ pub struct Lanes {
     #[serde(default, deserialize_with = "provenant_config::deserialize_auto")]
     pub cargo_build_jobs: Option<u64>,
     #[serde(default, deserialize_with = "provenant_config::deserialize_auto")]
+    pub max_lanes: Option<u64>,
+    #[serde(default, deserialize_with = "provenant_config::deserialize_auto")]
+    pub max_project_lanes: Option<u64>,
+    #[serde(default, deserialize_with = "provenant_config::deserialize_auto")]
     pub max_writer_lanes: Option<u64>,
     #[serde(default, deserialize_with = "provenant_config::deserialize_auto")]
     pub max_project_writer_lanes: Option<u64>,
@@ -498,7 +502,7 @@ impl Default for Settlement {
 impl Lanes {
     pub fn build_settings(&self) -> provenant_config::LaneBuildSettings {
         provenant_config::LaneBuildSettings {
-            memory_pressure_threshold: self.memory_pressure_threshold,
+            memory_pressure_threshold: Some(self.memory_pressure_threshold),
             max_concurrent_builds: self.max_concurrent_builds,
             cargo_build_jobs: self.cargo_build_jobs,
             cargo_incremental: self.cargo_incremental,
@@ -506,6 +510,8 @@ impl Lanes {
             build_dir_max_bytes: self.build_dir_max_bytes,
             build_dir_grace_seconds: self.build_dir_grace_seconds,
             build_dir_survey_interval_seconds: self.build_dir_survey_interval_seconds,
+            max_lanes: self.max_lanes,
+            max_project_lanes: self.max_project_lanes,
             max_writer_lanes: self.max_writer_lanes,
             max_project_writer_lanes: self.max_project_writer_lanes,
             build_wait_minutes: self.build_wait_minutes,
@@ -646,6 +652,7 @@ impl DomainConfig for FabricConfig {
         let mut errors = Vec::new();
         let mut reject = |field: String| {
             errors.push(SectionError {
+                detail: None,
                 field,
                 code: "range",
             })
@@ -857,6 +864,8 @@ pub const FIELD_METADATA: &[FieldMetadata] = &[
     ),
     FieldMetadata::int("lanes.max_concurrent_builds", 1, 64),
     FieldMetadata::int("lanes.cargo_build_jobs", 1, 1024),
+    FieldMetadata::int("lanes.max_lanes", 1, 64),
+    FieldMetadata::int("lanes.max_project_lanes", 1, 32),
     FieldMetadata::int("lanes.max_writer_lanes", 1, 64),
     FieldMetadata::int("lanes.max_project_writer_lanes", 1, 32),
     FieldMetadata::int("lanes.build_wait_minutes", 1, 1440),
@@ -1005,6 +1014,8 @@ mod tests {
         let mut config = config();
         config.lanes.max_concurrent_builds = Some(0);
         config.lanes.cargo_build_jobs = Some(1025);
+        config.lanes.max_lanes = Some(65);
+        config.lanes.max_project_lanes = Some(0);
         config.lanes.max_writer_lanes = Some(65);
         config.lanes.max_project_writer_lanes = Some(0);
         config.lanes.build_wait_minutes = Some(0);
@@ -1017,6 +1028,8 @@ mod tests {
         );
         assert!(errors.iter().any(|e| e.field == "lanes.cargo_build_jobs"));
         for key in [
+            "max_lanes",
+            "max_project_lanes",
             "max_writer_lanes",
             "max_project_writer_lanes",
             "build_wait_minutes",

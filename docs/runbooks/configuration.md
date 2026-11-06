@@ -186,13 +186,13 @@ of a version 1 ledger that recorded a start holds each class for one spacing.
 Spacing is enforced at admission, not at provider spawn, so a guardian
 suspended between the two can spawn alongside a later lane. The host
 caps writer lanes at `max_writer_lanes` (default 40) and at
-`max_project_writer_lanes` per project (default 30), inside fixed ceilings of
-64 active lanes per host and 32 per project. A writer at a cap waits until the
-admission deadline and is then refused with a reason that names the cap, its
-scope and the key to raise. On macOS it defers starts at critical kernel
-memory pressure by default. Set `domains.fabric.lanes.memory_pressure_threshold`
+`max_project_writer_lanes` per project (default 30). All lanes also count
+against `max_lanes` (host, default 64) and `max_project_lanes` (project,
+default 32), bounded by hard ceilings of 64 and 32. A lane at a cap waits until
+the admission deadline and is then refused with the cap, setting and source. On
+macOS it defers starts at critical kernel memory pressure by default. Set `domains.fabric.lanes.memory_pressure_threshold`
 to `warning` to defer at warning and critical, or `never` to disable this gate.
-The 5 % memory floor applies on every platform and the disk floor
+The 5 % memory floor warns on every platform; the disk floor
 applies to both classes. `lanes` shows a queued or starting lane's
 class and what it is waiting for, such as `read-only startup spacing: 1.2 s
 left of 2.0 s`.
@@ -213,7 +213,7 @@ do not inherit project defaults. `--capability` adds a grant and
 `--no-capability` removes it for an invocation.
 
 Build slots gate builds, not lanes. A writer is admitted on the writer caps
-and the memory and disk floors alone, however many writers are live, so one
+and configured resource guards, however many writers are live, so one
 project's idle writers never block another's. The slots are a build throttle,
 not a hard cap and not a security boundary: they share CPU and memory fairly
 among our own lanes. `max_concurrent_builds` is the number of cargo builds
@@ -297,6 +297,8 @@ half the available cores, at least one. Set host overrides in `config.toml`:
 max_concurrent_builds = 2
 cargo_build_jobs = 5
 build_wait_minutes = 30
+max_lanes = 64
+max_project_lanes = 32
 max_writer_lanes = 40
 max_project_writer_lanes = 30
 lane_port_base = 30000
@@ -308,8 +310,9 @@ Omit a key from `config.toml` to select its default. The host settings are
 not workflow knobs managed by `provenant config set`; edit the
 `[domains.fabric.lanes]` table directly. The value `-1` also selects automatic
 behaviour. `max_concurrent_builds` is 1 to 64, `cargo_build_jobs` 1 to 1024,
-`build_wait_minutes` 1 to 1440, `max_writer_lanes` 1 to 64 and
-`max_project_writer_lanes` 1 to 32 and, when set, at most `max_writer_lanes`
+`build_wait_minutes` 1 to 1440, `max_lanes` 1 to 64 and
+`max_project_lanes` 1 to 32 (at most `max_lanes`); `max_writer_lanes` is 1 to
+64 and `max_project_writer_lanes` is 1 to 32 and, when set, at most `max_writer_lanes`
 (left unset it follows the host cap down, as the smaller of 30 and the host
 cap). `lane_port_base` is 1024 to 65535, `lane_port_block` 1 to 1024 and
 `lane_port_blocks` 0 to 1024 (0 turns off the per-lane port blocks described in

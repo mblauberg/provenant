@@ -958,7 +958,14 @@ pub(super) fn render_lanes_with_view(
                     ..
                 }
             ) {
-                let capacity = reason.as_deref().is_some_and(capacity_reason);
+                // Preserve the existing capacity presentation decision while
+                // the displayed reason comes from the safe typed projection.
+                let capacity = match &lane.state {
+                    run::AttemptState::Terminal { reason, .. } => {
+                        reason.as_deref().is_some_and(capacity_reason)
+                    }
+                    _ => false,
+                };
                 if capacity
                     && lane
                         .session
@@ -976,11 +983,16 @@ pub(super) fn render_lanes_with_view(
                 }
             }
             for skipped in &lane.skipped_routes {
+                let diagnostic = skipped.diagnostic();
                 human.push_str(&format!(
-                    "  skipped {} {:?}: {}\n",
+                    "  skipped {} {:?}: {}; {}\n",
                     plain_text(&skipped.route, usize::MAX),
                     skipped.kind,
-                    plain_text(&skipped.detail, usize::MAX)
+                    diagnostic.detail.as_deref().unwrap_or(&diagnostic.code),
+                    diagnostic
+                        .next
+                        .as_deref()
+                        .unwrap_or("inspect the current state")
                 ));
             }
             let review_required = matches!(

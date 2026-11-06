@@ -450,7 +450,22 @@ Run refusals may include `category`, `detail` and `next` alongside the
 established error envelope. These are bounded, terminal-safe facts selected by
 the owner. The local CLI can name an absolute worktree or refused grant;
 remote diagnostics need a repository or home anchor or use an inspection
-action. A writer with unknown custody remains refused until custody is checked.
+action. Provider and skipped-route reasons project typed facts, without copying
+captured output, account directories or source errors into diagnostic fields.
+Unknown account references use `UNKNOWN_ACCOUNT`; pacing profiles
+that resolve to the same account use `DUPLICATE_PACING_PROFILE`. Identity or
+credential settings that cannot be synced use `SHARED_SETTINGS_NEVER_SYNCED`;
+the shared-settings owner supplies the corrective action. Resource
+projections name the observed limits and the relevant setting or operating-system
+limit; disk-floor, memory-pressure and configured writer-lane refusals identify
+the host configuration or shipped default that supplied the limit. Total-lane and writer-lane caps
+identify their separate configured settings. A
+process-limit projection names the operating-system soft limit and shipped
+reserved headroom. Actions name the condition to correct. A writer
+with unknown custody remains refused until custody is checked.
+A stale selected-account availability observation emits `STALE_READINESS` as
+a warning and is re-probed once. A healthy recheck keeps the selected route
+and its fallback receipt; account and quota guards still apply.
 - Why: agents and tests act on the code, and a reworded message must break
   neither.
 - Test: `crates/run/src/service_tests.rs::each_refusal_has_its_own_stable_code`;

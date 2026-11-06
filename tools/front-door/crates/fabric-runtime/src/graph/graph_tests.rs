@@ -100,6 +100,7 @@ struct FakeOwner {
         std::collections::BTreeMap<String, provenant_records::run::PreparationFailure>,
     omit_fallback_evidence: bool,
     fail_fallback_evidence: bool,
+    fallback_cause: Option<provenant_records::RouteExclusionReason>,
 }
 
 /// An inbox reply from `chair`, choosing `option` or sending `text`.
@@ -162,6 +163,14 @@ impl AttemptOwner for FakeOwner {
                 .ok()
                 .map(|oid| oid.to_string())
         }))
+    }
+
+    fn preparation_refusal_cause(
+        &mut self,
+        _: &AttemptKey,
+        _: &str,
+    ) -> Result<Option<provenant_records::RouteExclusionReason>, Self::Error> {
+        Ok(self.fallback_cause.clone())
     }
 
     fn resolve_review(
@@ -4070,7 +4079,9 @@ fn composite_expansion_reports_the_bound_and_owner() {
         nodes: 1,
         ..Default::default()
     };
-    let reason = composites::expand(&document, &limits).unwrap_err();
+    let reason = composites::expand(&document, &limits)
+        .unwrap_err()
+        .to_string();
     assert!(reason.contains("limits.nodes"), "{reason}");
     assert!(reason.contains("composite expansion"), "{reason}");
 }
@@ -4101,7 +4112,7 @@ fn loop_expansion_safety_refusal_names_bound_and_owner_at_each_boundary() {
             && reason.contains("internal loop expansion safety")
     );
     assert_eq!(document.check_composites(&limits).unwrap_err(), reason);
-    assert_eq!(document.admit(&limits).unwrap_err(), reason);
+    assert_eq!(document.admit(&limits).unwrap_err().to_string(), reason);
     let mut owner = FakeOwner::default();
     let result = advance_with_budget(
         &document,
@@ -4110,7 +4121,9 @@ fn loop_expansion_safety_refusal_names_bound_and_owner_at_each_boundary() {
         &limits,
         &Default::default(),
     );
-    assert!(matches!(result, Err(GraphError::Invalid(ref actual)) if actual == &reason));
+    assert!(
+        matches!(result, Err(GraphError::Admission(AdmissionError::Composite(ref actual))) if actual == &reason)
+    );
     assert!(owner.calls.is_empty());
 
     let mut too_many_rounds = document.clone();
@@ -4126,7 +4139,10 @@ fn loop_expansion_safety_refusal_names_bound_and_owner_at_each_boundary() {
         too_many_rounds.check_composites(&limits).unwrap_err(),
         reason
     );
-    assert_eq!(too_many_rounds.admit(&limits).unwrap_err(), reason);
+    assert_eq!(
+        too_many_rounds.admit(&limits).unwrap_err().to_string(),
+        reason
+    );
     let result = advance_with_budget(
         &too_many_rounds,
         &mut owner,
@@ -4134,7 +4150,9 @@ fn loop_expansion_safety_refusal_names_bound_and_owner_at_each_boundary() {
         &limits,
         &Default::default(),
     );
-    assert!(matches!(result, Err(GraphError::Invalid(ref actual)) if actual == &reason));
+    assert!(
+        matches!(result, Err(GraphError::Admission(AdmissionError::Composite(ref actual))) if actual == &reason)
+    );
     assert!(owner.calls.is_empty());
 
     let mut zero_rounds = document.clone();
@@ -4144,7 +4162,7 @@ fn loop_expansion_safety_refusal_names_bound_and_owner_at_each_boundary() {
         reason.contains("repair") && reason.contains("loop.max_rounds"),
         "{reason}"
     );
-    assert_eq!(zero_rounds.admit(&limits).unwrap_err(), reason);
+    assert_eq!(zero_rounds.admit(&limits).unwrap_err().to_string(), reason);
     let result = advance_with_budget(
         &zero_rounds,
         &mut owner,
@@ -4152,7 +4170,9 @@ fn loop_expansion_safety_refusal_names_bound_and_owner_at_each_boundary() {
         &limits,
         &Default::default(),
     );
-    assert!(matches!(result, Err(GraphError::Invalid(ref actual)) if actual == &reason));
+    assert!(
+        matches!(result, Err(GraphError::Admission(AdmissionError::Composite(ref actual))) if actual == &reason)
+    );
     assert!(owner.calls.is_empty());
 }
 
@@ -4183,7 +4203,7 @@ fn composite_depth_uses_the_same_bound_in_preflight_and_runtime() {
     assert!(document.admit(&boundary).is_ok());
     let reason = limits.expansion_depth_bound().refusal(2).unwrap();
     assert_eq!(document.check_composites(&limits).unwrap_err(), reason);
-    assert_eq!(document.admit(&limits).unwrap_err(), reason);
+    assert_eq!(document.admit(&limits).unwrap_err().to_string(), reason);
     let mut owner = FakeOwner::default();
     let run = advance_with_budget(
         &document,
@@ -4214,11 +4234,15 @@ fn composite_expansion_identifies_duplicate_and_invalid_child_ids() {
     .unwrap();
     let limits = crate::config::GraphLimits::default();
     let error = composites::expand(&document, &limits).unwrap_err();
+    assert!(matches!(error, AdmissionError::Composite(_)));
+    let error = error.to_string();
     assert!(error.contains("group--same"), "{error}");
     assert!(error.contains("duplicated"), "{error}");
     let children = &mut document.nodes[0].composite.as_mut().unwrap().nodes;
     children[1].id = "bad name".into();
     let error = composites::expand(&document, &limits).unwrap_err();
+    assert!(matches!(error, AdmissionError::Composite(_)));
+    let error = error.to_string();
     assert!(error.contains("group--bad name"), "{error}");
     assert!(error.contains("ASCII"), "{error}");
     assert!(error.contains("shorten"), "{error}");
@@ -5590,6 +5614,7 @@ fn gate_reachability_accepts_a_limit_sized_graph_and_rejects_lower_limits() {
     assert!(
         validate_plan_with_limits(&document, &smaller)
             .unwrap_err()
+            .to_string()
             .contains("limits.nodes")
     );
     smaller = limits;
@@ -5597,6 +5622,7 @@ fn gate_reachability_accepts_a_limit_sized_graph_and_rejects_lower_limits() {
     assert!(
         validate_plan_with_limits(&document, &smaller)
             .unwrap_err()
+            .to_string()
             .contains("limits.edges")
     );
 }
@@ -6058,7 +6084,7 @@ fn structural_limit_pauses_and_host_limit_change_resumes() {
         Some("structural_limit")
     );
     let reason = limits.nodes_bound().refusal(2).unwrap();
-    assert_eq!(document.admit(&limits).unwrap_err(), reason);
+    assert_eq!(document.admit(&limits).unwrap_err().to_string(), reason);
     assert_eq!(
         paused.checkpoint.pause_reason.as_deref(),
         Some(reason.as_str())
@@ -6113,7 +6139,7 @@ fn fan_out_and_depth_pause_before_launch() {
         );
         if limits.expansion_depth == 1 {
             let reason = limits.expansion_depth_bound().refusal(2).unwrap();
-            assert_eq!(document.admit(&limits).unwrap_err(), reason);
+            assert_eq!(document.admit(&limits).unwrap_err().to_string(), reason);
             assert_eq!(
                 run.checkpoint.pause_reason.as_deref(),
                 Some(reason.as_str())
@@ -7832,6 +7858,7 @@ fn live_fallback_without_release_proof_stops() {
             AttemptOutcome::AuthRequired,
         )]),
         omit_fallback_evidence: true,
+        fallback_cause: Some(provenant_records::RouteExclusionReason::StaleAvailability),
         ..Default::default()
     };
     let result = advance(
@@ -7842,6 +7869,11 @@ fn live_fallback_without_release_proof_stops() {
     .unwrap();
     assert_eq!(result.checkpoint.nodes[0].state, NodeState::Failed);
     assert_eq!(owner.calls.len(), 1);
+    let reason = result.checkpoint.nodes[0].advance_error.as_deref().unwrap();
+    assert!(reason.contains("authentication"));
+    assert!(reason.contains("custody"));
+    assert!(reason.contains("stale"));
+    assert!(reason.contains("provenant quota tick"));
 }
 
 #[test]
@@ -7881,6 +7913,12 @@ fn resumed_fallback_requires_current_local_custody_evidence() {
         Some("fallback_evidence_unavailable")
     );
     assert!(restarted.calls.is_empty());
+    let reason = stopped.checkpoint.nodes[0]
+        .advance_error
+        .as_deref()
+        .unwrap();
+    assert!(reason.contains("authentication"));
+    assert!(reason.contains("custody"));
 }
 
 #[test]
@@ -10188,8 +10226,14 @@ fn a_host_git_limit_reason_reaches_the_graph_retry_and_the_blocked_node() {
     )
     .unwrap();
     let reason = fact.detail();
-    let error =
-        || crate::coordination::facade::FacadeError::HostDeliveryLimit { fact: fact.clone() };
+    let error = || crate::coordination::facade::FacadeError::Io {
+        operation: "TOKEN_SENTINEL".into(),
+        path: Some("/private/host".into()),
+        delivery_stage: Some(provenant_records::run::WriterDeliveryStage::Prepare),
+        resource: None,
+        input_failure: None,
+        delivery_limit: Some(fact.clone()),
+    };
     let document = graph(vec![node("one", route("first"))]);
     let mut owner = ErrorLauncher {
         now: Some(at(0)),
@@ -10200,7 +10244,7 @@ fn a_host_git_limit_reason_reaches_the_graph_retry_and_the_blocked_node() {
     advance(&document, &mut owner, &mut journal).unwrap();
     let retry = retry_of(journal.0.as_ref().unwrap());
     assert_eq!(retry.failures, 1);
-    assert_eq!(retry.reason.as_deref(), Some(reason.as_str()));
+    assert!(retry.reason.as_deref().unwrap().contains(&reason));
 
     let mut owner = ErrorLauncher {
         now: Some(at(0)),
@@ -10219,6 +10263,13 @@ fn a_host_git_limit_reason_reaches_the_graph_retry_and_the_blocked_node() {
     assert_eq!(progress.state, NodeState::Blocked);
     let text = progress.advance_error.as_deref().unwrap();
     assert!(text.contains(&reason), "{text}");
+    assert!(text.contains("[io]"));
+    assert!(text.contains("git worktree list"));
+    assert!(text.contains("8388608"));
+    assert!(text.contains("inspect host delivery"));
+    assert!(!text.contains("host capacity"));
+    assert!(!text.contains("TOKEN_SENTINEL"));
+    assert!(!text.contains("/private/host"));
 }
 
 #[test]
@@ -10409,7 +10460,7 @@ fn a_saved_attempt_reference_never_gains_a_launch_retry_or_a_second_row() {
         now: Some(at(0)),
         errors: [(
             2,
-            crate::coordination::facade::FacadeError::ConfinementRefused,
+            crate::coordination::facade::FacadeError::ConfinementRefused { resource: None },
         )]
         .into(),
         observations: VecDeque::from([
@@ -10464,6 +10515,8 @@ fn launch_retry_kinds_are_decided_from_the_typed_error_only() {
         FacadeError::Io {
             delivery_limit: None,
             delivery_stage: None,
+            resource: None,
+            input_failure: None,
             operation: "read file".into(),
             path: None,
         },
@@ -10475,7 +10528,7 @@ fn launch_retry_kinds_are_decided_from_the_typed_error_only() {
     }
     for permanent in [
         FacadeError::InvalidInput { detail: None },
-        FacadeError::ConfinementRefused,
+        FacadeError::ConfinementRefused { resource: None },
         FacadeError::WriterBusy { holder: None },
         FacadeError::DispatchRefused {
             fact: None,
@@ -10707,6 +10760,25 @@ fn composite_truncates_over_cap_findings_and_reaches_downstream() {
             .find(|n| n.id == "reviews")
             .unwrap();
         assert_eq!(composite.state, NodeState::Succeeded);
+        assert!(matches!(
+            composite.truncation_cause,
+            Some(NodeDecisionCause::CompositeFindingsTruncated { .. })
+        ));
+        let decoded: GraphCheckpoint =
+            serde_json::from_slice(&serde_json::to_vec(&run.checkpoint).unwrap()).unwrap();
+        assert_eq!(decoded, run.checkpoint);
+        let mut forged = run.checkpoint.clone();
+        forged
+            .nodes
+            .iter_mut()
+            .find(|node| node.id == "reviews")
+            .unwrap()
+            .truncation_cause = None;
+        let mut forged_journal = MemoryJournal(Some(forged));
+        assert!(matches!(
+            advance(&document, &mut FakeOwner::default(), &mut forged_journal),
+            Err(GraphError::BadCheckpoint { .. })
+        ));
         let outputs = composite.outputs.as_ref().unwrap();
         assert_eq!(outputs.findings_available, Some(false));
         assert!(outputs.findings.len() < 2 * count);
@@ -10735,6 +10807,19 @@ fn composite_truncates_over_cap_findings_and_reaches_downstream() {
         assert!(owner.prompts[2].contains("composite findings truncated"));
         if !long {
             let (plan, positions) = validate_plan(&document).unwrap();
+            let mut spoofed = run.checkpoint.clone();
+            let source = &mut spoofed.nodes[positions["reviews"]];
+            source.truncation_cause = None;
+            source.outputs.as_mut().unwrap().warnings =
+                vec!["composite findings truncated: TOKEN_SPOOF".into()];
+            let (prompt, _) = render_input(
+                &plan.nodes[positions["verify"]],
+                &plan,
+                &spoofed,
+                &positions,
+                usize::MAX,
+            );
+            assert!(!prompt.contains("TOKEN_SPOOF"));
             let mut checkpoint = run.checkpoint.clone();
             checkpoint.nodes[positions["reviews--a"]]
                 .outputs
@@ -11498,9 +11583,7 @@ fn admitted_invalid_launch_projects_safe_schema_reason_and_action() {
         errors: [(
             1,
             crate::coordination::facade::FacadeError::InvalidInput {
-                detail: Some(
-                    "graph document schema_version is invalid TOKEN_SENTINEL\u{1b}".into(),
-                ),
+                detail: Some(crate::coordination::facade::InvalidInputDetail::Schema),
             },
         )]
         .into(),
@@ -11519,31 +11602,236 @@ fn admitted_invalid_launch_projects_safe_schema_reason_and_action() {
 }
 
 #[test]
-fn launch_projection_omits_untrusted_error_sources() {
-    let document = graph(vec![node("one", route("first"))]);
+fn admitted_invalid_launch_reports_input_failure_reason() {
+    use crate::coordination::facade::{FacadeError, InvalidInputDetail};
+    for (detail, expected) in [
+        (InvalidInputDetail::InputTooLarge, "1 MiB"),
+        (InvalidInputDetail::InputUnreadable, "unreadable"),
+    ] {
+        let document = graph(vec![node("one", route("first"))]);
+        let mut owner = ErrorLauncher {
+            now: Some(at(0)),
+            errors: [(1, FacadeError::invalid(detail))].into(),
+            ..Default::default()
+        };
+        let mut journal = MemoryJournal::default();
+        let run = advance(&document, &mut owner, &mut journal).unwrap();
+        let node = &run.checkpoint.nodes[0];
+        assert_eq!(node.state, NodeState::Blocked);
+        let reason = node.advance_error.as_deref().unwrap();
+        assert!(reason.contains("invalid_input"));
+        assert!(reason.contains("input"));
+        assert!(reason.contains(expected));
+        assert!(reason.contains("retry"));
+        assert!(!reason.contains("TOKEN_SENTINEL"));
+    }
+}
+
+#[test]
+fn admitted_launch_projects_typed_prompt_field_and_limit() {
+    use crate::coordination::input::ValidateInput;
+    use crate::coordination::{
+        CoordinationError,
+        facade::{FacadeError, SubmitInput},
+    };
+    let mut input: SubmitInput = serde_json::from_value(serde_json::json!({
+        "op":"submit", "operation_id":"field-limit",
+        "tasks":[{"prompt":"valid", "route":{"kind":"named", "name":"utility"}, "timeout_seconds":1}]
+    })).unwrap();
+    let SubmitInput::Submit { tasks, .. } = &mut input;
+    tasks[0].prompt = format!("TOKEN_SENTINEL{}", "é".repeat(524_289));
+    let cause = input
+        .validate_input(provenant_core::WaitTransport::Cli)
+        .unwrap_err();
+    let error = FacadeError::from(&CoordinationError::Input(cause));
     let mut owner = ErrorLauncher {
         now: Some(at(0)),
-        errors: [(
-            1,
-            crate::coordination::facade::FacadeError::Io {
-                delivery_limit: None,
-                delivery_stage: None,
-                operation: "TOKEN_SENTINEL\u{1b}".into(),
-                path: Some("/private/host".into()),
-            },
-        )]
-        .into(),
+        errors: [(1, error)].into(),
         ..Default::default()
     };
     let mut journal = MemoryJournal::default();
-    advance(&document, &mut owner, &mut journal).unwrap();
+    let run = advance(
+        &graph(vec![node("one", route("first"))]),
+        &mut owner,
+        &mut journal,
+    )
+    .unwrap();
+    let reason = run.checkpoint.nodes[0].advance_error.as_deref().unwrap();
+    assert!(reason.contains("tasks[0].prompt"));
+    assert!(reason.contains("1048576"));
+    assert!(reason.contains("retry"));
+    assert!(!reason.contains("TOKEN_SENTINEL"));
+    assert!(reason.len() <= MAX_ADVANCE_ERROR_BYTES);
+}
+
+#[test]
+fn memory_pressure_launch_refusal_names_source_and_action() {
+    use crate::coordination::facade::FacadeError;
+    use provenant_records::diagnostic::{
+        PressureLevel, PressureThreshold, ResourceFact, SettingSource,
+    };
+    let error = FacadeError::ConfinementRefused {
+        resource: Some(ResourceFact::MemoryPressure {
+            level: PressureLevel::Critical,
+            threshold: PressureThreshold::Critical,
+            origin: SettingSource::ShippedDefault,
+        }),
+    };
+    let mut owner = ErrorLauncher {
+        now: Some(at(0)),
+        errors: [(1, error)].into(),
+        ..Default::default()
+    };
+    let mut journal = MemoryJournal::default();
+    let run = advance(
+        &graph(vec![node("one", route("first"))]),
+        &mut owner,
+        &mut journal,
+    )
+    .unwrap();
+    let reason = run.checkpoint.nodes[0].advance_error.as_deref().unwrap();
+    assert!(reason.contains("memory_pressure_threshold"));
+    assert!(reason.contains("shipped default"));
+    assert!(reason.contains("reduce host memory pressure"));
+}
+
+#[test]
+fn process_limit_launch_projection_keeps_io_and_resource_reason() {
+    let error = crate::coordination::facade::FacadeError::Io {
+        operation: "TOKEN_SENTINEL".into(),
+        path: Some("/private/host".into()),
+        delivery_limit: None,
+        delivery_stage: None,
+        resource: Some(Box::new(
+            provenant_records::diagnostic::ResourceFact::Processes {
+                used: 950,
+                limit: 1000,
+                reserved: 100,
+            },
+        )),
+        input_failure: None,
+    };
+    let mut owner = ErrorLauncher {
+        now: Some(at(0)),
+        errors: [(1, error)].into(),
+        ..Default::default()
+    };
+    let mut journal = MemoryJournal::default();
+    advance(
+        &graph(vec![node("one", route("first"))]),
+        &mut owner,
+        &mut journal,
+    )
+    .unwrap();
     let reason = retry_of(journal.0.as_ref().unwrap())
         .reason
         .as_deref()
         .unwrap();
+    assert!(reason.contains("io"));
+    assert!(reason.contains("RLIMIT_NPROC"));
+    assert!(reason.contains("process"));
     assert!(!reason.contains("TOKEN_SENTINEL"));
     assert!(!reason.contains("/private/host"));
-    assert!(!reason.chars().any(char::is_control));
+}
+
+#[test]
+fn unreadable_launch_input_keeps_io_code_and_safe_reason() {
+    let error = || crate::coordination::facade::FacadeError::Io {
+        operation: "TOKEN_SENTINEL".into(),
+        path: Some("/private/host".into()),
+        delivery_limit: None,
+        delivery_stage: None,
+        resource: None,
+        input_failure: Some(provenant_records::diagnostic::IoFact::InputUnreadable),
+    };
+    let mut owner = ErrorLauncher {
+        now: Some(at(0)),
+        errors: (1..=4).map(|call| (call, error())).collect(),
+        ..Default::default()
+    };
+    let mut journal = MemoryJournal::default();
+    advance(
+        &graph(vec![node("one", route("first"))]),
+        &mut owner,
+        &mut journal,
+    )
+    .unwrap();
+    let reason = retry_of(journal.0.as_ref().unwrap())
+        .reason
+        .as_deref()
+        .unwrap();
+    assert!(reason.contains("io"));
+    assert!(reason.contains("input could not be read"));
+    assert!(reason.contains("retry"));
+    assert!(!reason.contains("TOKEN_SENTINEL"));
+    assert!(!reason.contains("/private/host"));
+    for now in [6, 17, 38, 3600] {
+        owner.now = Some(at(now));
+        advance(
+            &graph(vec![node("one", route("first"))]),
+            &mut owner,
+            &mut journal,
+        )
+        .unwrap();
+    }
+    let node = &journal.0.as_ref().unwrap().nodes[0];
+    assert_eq!(node.state, NodeState::Blocked);
+    let reason = node.advance_error.as_deref().unwrap();
+    assert!(reason.contains("input could not be read"));
+    assert!(reason.contains("io"));
+    assert!(!reason.contains("TOKEN_SENTINEL"));
+    assert!(!reason.contains("/private/host"));
+}
+
+#[test]
+fn launch_projection_omits_untrusted_error_sources() {
+    let document = graph(vec![node("one", route("first"))]);
+    for operation in [
+        "TOKEN_SENTINEL\u{1b}".to_owned(),
+        format!("TOKEN_SENTINEL{}", "é".repeat(2048)),
+    ] {
+        let mut owner = ErrorLauncher {
+            now: Some(at(0)),
+            errors: [(
+                1,
+                crate::coordination::facade::FacadeError::Io {
+                    delivery_limit: None,
+                    delivery_stage: None,
+                    resource: None,
+                    input_failure: None,
+                    operation,
+                    path: Some("/private/host".into()),
+                },
+            )]
+            .into(),
+            ..Default::default()
+        };
+        let mut journal = MemoryJournal::default();
+        advance(&document, &mut owner, &mut journal).unwrap();
+        let reason = retry_of(journal.0.as_ref().unwrap())
+            .reason
+            .as_deref()
+            .unwrap();
+        assert!(!reason.contains("TOKEN_SENTINEL"));
+        assert!(!reason.contains("/private/host"));
+        assert!(!reason.chars().any(char::is_control));
+        assert!(reason.len() <= MAX_ADVANCE_ERROR_BYTES);
+    }
+}
+
+#[test]
+fn graph_advance_preserves_typed_admission_refusal() {
+    let mut document = graph(vec![node("one", route("first"))]);
+    document.schema_version = 99;
+    let mut journal = MemoryJournal::default();
+    let error = advance(&document, &mut FakeOwner::default(), &mut journal).unwrap_err();
+    assert_eq!(error.code(), "invalid_graph");
+    assert!(matches!(
+        error,
+        GraphError::Admission(AdmissionError::Schema(_))
+    ));
+    assert_eq!(error.to_string(), "invalid graph: schema version");
+    assert!(journal.0.is_none());
 }
 
 #[test]
@@ -11703,8 +11991,8 @@ fn admission_rejects_review_without_space_for_expanded_ids() {
         }]
     })).unwrap();
     let error = document.admit(&Default::default()).unwrap_err();
-    assert!(
-        error.contains("insufficient room for expanded review ids"),
-        "{error}"
-    );
+    assert!(matches!(
+        error,
+        AdmissionError::Plan(reason) if reason.contains("insufficient room for expanded review ids")
+    ));
 }

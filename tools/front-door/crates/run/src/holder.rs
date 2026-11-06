@@ -1084,6 +1084,7 @@ impl RunStore {
         let mut decoded = match (&record.applied_route, exit.never_spawned) {
             // Cancelled before spawn; keep the guardian's own reason too.
             (_, true) if cancelled => Decoded {
+                terminal_cause: None,
                 outcome: Outcome::Cancelled,
                 result: String::new(),
                 complete: true,
@@ -1099,6 +1100,7 @@ impl RunStore {
                 )),
             },
             (_, true) => Decoded {
+                terminal_cause: Some(TerminalCause::SpawnFailure),
                 outcome: Outcome::Rejected,
                 result: String::new(),
                 complete: true,
@@ -1132,6 +1134,9 @@ impl RunStore {
             }
             (None, false) => return Err(RunError::Validation("running attempt lacks a route")),
         };
+        if !cancelled && matches!(exit.termination, Some(Termination::Signal(_))) {
+            decoded.terminal_cause = Some(TerminalCause::ProcessCrash);
+        }
         // Provider-owned session transcripts record tool output, so a printed
         // credential can survive there after capture and result filtering.
         // Scrub before publication so a retry never starts from new plaintext.
@@ -1156,9 +1161,13 @@ impl RunStore {
             }
             decoded.result.push_str(&note);
             decoded.result.push('\n');
+            // The provider's note is captured output, not an approved safe fact.
+            // Keep it in the explicit result, but do not project it as a reason.
+            const FAILURE_NOTE: &str =
+                "provider reported a failure; inspect the captured output for details";
             decoded.reason = Some(match decoded.reason.take() {
-                Some(reason) => format!("{reason}; {note}"),
-                None => note,
+                Some(reason) => format!("{reason}; {FAILURE_NOTE}"),
+                None => FAILURE_NOTE.into(),
             });
         }
         // A provider can report a tool denial even when the provider itself
@@ -1217,9 +1226,9 @@ impl RunStore {
             .ok_or(RunError::Validation("terminal task missing from request"))?;
         // A stop at the runtime deadline is a typed timeout, whatever partial
         // output the provider left, and the lane stays resumable.
-        if decoded.outcome == Outcome::TimedOut
-            && exit.stop_reason == Some(StopReason::WallDeadline)
-        {
+        let typed_deadline = decoded.outcome == Outcome::TimedOut
+            && exit.stop_reason == Some(StopReason::WallDeadline);
+        if typed_deadline {
             let limit = format!(
                 "runtime deadline exceeded: provider stopped after {}s",
                 task.provider_timeout_seconds
@@ -1376,6 +1385,7 @@ impl RunStore {
                     );
                     seal_import_refusal(attempt, exit.scope, &writer.worktree, &reason)?;
                     decoded.outcome = Outcome::Failed;
+                    decoded.terminal_cause = Some(TerminalCause::SettlementFailure);
                     decoded.reason = Some(reason);
                 }
                 _ if refused => {}
@@ -1540,10 +1550,6 @@ impl RunStore {
             decoded.outcome = Outcome::Cancelled;
             // A typed runtime deadline stays the reason when cancellation also
             // applies, and a legacy scope-only record adds no invented cause.
-            let typed_deadline = decoded
-                .reason
-                .as_deref()
-                .is_some_and(|reason| reason.starts_with("runtime deadline exceeded"));
             if let Some(reason) = cancellation_reason(cancellation.as_deref())
                 && !typed_deadline
                 && !crate::store::import_cancelled(
@@ -1778,10 +1784,11 @@ impl RunStore {
         }
         // A denial is a diagnostic, not part of the provider's answer: the
         // handoff, findings and verdict blocks must stay as the provider wrote them.
-        if let Some(note) = denial {
+        if let Some(denial) = denial {
+            let note = denial.diagnostic();
             decoded.reason = Some(match decoded.reason.take() {
                 Some(reason) => format!("{reason}; {note}"),
-                None => note,
+                None => note.into(),
             });
         }
         // External delivery runs only from the committed decision below.
@@ -1831,8 +1838,15 @@ impl RunStore {
         } else if cancelled {
             decoded.outcome = Outcome::Cancelled;
         }
+        if matches!(
+            decoded.outcome,
+            Outcome::Cancelled | Outcome::Lost | Outcome::Unsettled
+        ) {
+            decoded.terminal_cause = None;
+        }
         let decoded_reason = decoded.reason.take().map(bounded_reason);
         let publication = TerminalPublication {
+            terminal_cause: decoded.terminal_cause,
             outcome: decoded.outcome,
             finished_at,
             started_at: record.started_at,
@@ -1947,18 +1961,31 @@ fn reports_verdict(result: &str) -> bool {
 const UNREDACTABLE_RESULT: &str = "[result withheld: redaction failed]";
 const REDACTION_FAILED_REASON: &str = "redaction failed; result withheld";
 
-/// Preserve a path-bearing OS denial as evidence, not a definitive diagnosis:
-/// filesystem permissions and other sandboxes can produce the same errors.
-fn path_denial_hint(stderr: &[u8]) -> Option<String> {
+/// Captured text can suggest a denial, but cannot establish its source or
+/// supply a path safe for a remote diagnostic.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ObservedAccessDenial {
+    Path,
+}
+
+impl ObservedAccessDenial {
+    fn diagnostic(self) -> &'static str {
+        match self {
+            Self::Path => {
+                "A path access denial was observed; check the declared access grant and filesystem permissions, then inspect the captured output locally if needed"
+            }
+        }
+    }
+}
+
+fn path_denial_hint(stderr: &[u8]) -> Option<ObservedAccessDenial> {
     let text = String::from_utf8_lossy(stderr);
-    let line = text.lines().find(|line| {
-        line.contains('/')
-            && (line.contains("Permission denied") || line.contains("Operation not permitted"))
-    })?;
-    Some(format!(
-        "Path access was denied; the missing access grant may be for this path (also check filesystem permissions): {}",
-        provenant_confinement::redact::bounded_line(line, 240)
-    ))
+    text.lines()
+        .any(|line| {
+            line.contains('/')
+                && (line.contains("Permission denied") || line.contains("Operation not permitted"))
+        })
+        .then_some(ObservedAccessDenial::Path)
 }
 
 /// Terminal evidence refuses a longer reason, so every published reason fits.
@@ -2006,15 +2033,17 @@ mod host_clock_tests {
     }
 
     #[test]
-    fn path_denial_hints_require_a_path_and_redact_known_tokens() {
-        assert!(path_denial_hint(b"Permission denied").is_none());
-        assert!(path_denial_hint(b"/fixture/path: unrelated error").is_none());
-        let hint = path_denial_hint(
-            b"/fixture/path: Operation not permitted ghp_abcdefghijklmnopqrstuvwxyz0123456789",
-        )
-        .expect("path denial");
-        assert!(hint.contains("/fixture/path"));
-        assert!(!hint.contains("ghp_abcdefghijklmnopqrstuvwxyz0123456789"));
+    fn path_denial_hints_do_not_project_captured_text() {
+        assert_eq!(path_denial_hint(b"Permission denied"), None);
+        assert_eq!(path_denial_hint(b"/fixture/path: unrelated error"), None);
+        let cause =
+            path_denial_hint(b"/private/host: Operation not permitted TOKEN_SENTINEL \x1b[31m")
+                .expect("path denial");
+        let hint = cause.diagnostic();
+        assert!(hint.contains("access grant"));
+        assert!(!hint.contains("/private/host"));
+        assert!(!hint.contains("TOKEN_SENTINEL"));
+        assert!(!hint.contains('\u{1b}'));
     }
 
     #[test]
@@ -2218,11 +2247,13 @@ mod disk_admission_tests {
         assert!(matches!(
             custody_error(RunError::Admission(AdmissionError::Disk {
                 free: 99,
-                floor: 100
+                floor: 100,
+                origin: provenant_records::diagnostic::SettingSource::Configuration,
             })),
             CustodyError::Admission(AdmissionError::Disk {
                 free: 99,
-                floor: 100
+                floor: 100,
+                origin: provenant_records::diagnostic::SettingSource::Configuration,
             })
         ));
     }

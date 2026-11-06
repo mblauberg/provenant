@@ -135,3 +135,16 @@ slow-timeout = { period = "30s", terminate-after = 4 }
 [[profile.ci.overrides]]
 filter = 'test(=review_fans_out_and_collects_fake_provider)'
 slow-timeout = { period = "30s", terminate-after = 2 }
+
+# This real-Git fixture creates several worktrees and follows the CLI remedy.
+[[profile.default.overrides]]
+filter = 'test(=run::tests::dispatch_reuses_only_free_lane_or_unowned_worktree)'
+slow-timeout = { period = "30s", terminate-after = 4 }
+
+[[profile.ci.overrides]]
+filter = 'test(=run::tests::dispatch_reuses_only_free_lane_or_unowned_worktree)'
+slow-timeout = { period = "30s", terminate-after = 4 }
+
+[[profile.lane.overrides]]
+filter = 'test(=run::tests::dispatch_reuses_only_free_lane_or_unowned_worktree)'
+slow-timeout = { period = "30s", terminate-after = 4 }

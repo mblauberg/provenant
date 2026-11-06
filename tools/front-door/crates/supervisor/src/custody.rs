@@ -67,23 +67,33 @@ pub enum AdmissionError {
     GuardianIdentity,
     /// Numeric host observations are safe to publish as the lane's refusal.
     #[error(
-        "insufficient disk space: {free} bytes available, gc.free_floor {floor} bytes; run `provenant gc --apply`"
+        "insufficient disk space: {free} bytes available, gc.free_floor {floor} bytes (source: {source_label}); run `provenant gc --apply`",
+        source_label = .origin.description()
     )]
-    Disk { free: u64, floor: u64 },
-    #[error("memory pressure is {level}; wait for host memory pressure to fall")]
-    MemoryPressure { level: String },
+    Disk {
+        free: u64,
+        floor: u64,
+        origin: provenant_records::diagnostic::SettingSource,
+    },
+    #[error("memory pressure is {level:?}; domains.fabric.lanes.memory_pressure_threshold is {threshold_label} (source: {source_label}); wait for host memory pressure to fall", threshold_label = .threshold.name(), source_label = .origin.description())]
+    MemoryPressure {
+        level: provenant_records::diagnostic::PressureLevel,
+        threshold: provenant_records::diagnostic::PressureThreshold,
+        origin: provenant_records::diagnostic::SettingSource,
+    },
     #[error(
         "user process count {used} of {limit}; wait for processes to exit or raise the per-user process limit"
     )]
     Processes { used: u64, limit: u64 },
     #[error(
-        "writer lane cap reached: {active} of {limit} {scope} writer lanes are active; wait for a writer to finish or raise domains.fabric.lanes.{key}",
-        key = if *scope == "project" { "max_project_writer_lanes" } else { "max_writer_lanes" }
+        "lane cap reached: {active} of {limit} {description} are active; {setting} (source: {source_label}); wait for a lane to finish",
+        description = .kind.description(), setting = .kind.setting(), source_label = .origin.description()
     )]
     LaneCap {
         active: u64,
         limit: u64,
-        scope: &'static str,
+        kind: provenant_records::diagnostic::LaneLimit,
+        origin: provenant_records::diagnostic::SettingSource,
     },
 }
 pub type Result<T> = std::result::Result<T, CustodyError>;

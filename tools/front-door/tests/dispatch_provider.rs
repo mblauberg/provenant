@@ -692,12 +692,16 @@ fn run_refuses_pacing_reserve() -> Result {
         "--json",
     ])?;
     assert_ne!(code(&output), 0, "{output:?}");
-    let response = format!(
-        "{}{}",
-        String::from_utf8_lossy(&output.stdout.bytes),
-        String::from_utf8_lossy(&output.stderr.bytes)
+    let response: Value = serde_json::from_slice(&output.stdout.bytes)?;
+    assert_eq!(response["status"], "refused", "{response}");
+    assert_eq!(response["error"]["code"], "REFUSED", "{response}");
+    let (_, next) = provenant_records::RouteExclusionReason::PacingReserve.diagnostic_parts();
+    assert!(
+        response["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains(next)),
+        "{response}"
     );
-    assert!(response.contains("PacingReserve"), "{output:?}");
     Ok(())
 }
 
@@ -2149,12 +2153,9 @@ fn codex_dispatch_observes_rollout() -> Result {
         let lane = rows.first().ok_or_else(|| format!("lane: {value}"))?;
         if !cfg!(target_os = "macos") {
             assert_eq!(lane["state"], "rejected", "{lane}");
-            assert!(
-                lane["reason"]
-                    .as_str()
-                    .is_some_and(|r| r.contains("UnsupportedPlatform")),
-                "{lane}"
-            );
+            assert_eq!(lane["cause"], "pre_launch_refusal", "{lane}");
+            assert!(lane["started_at"].is_null(), "{lane}");
+            assert!(lane["applied_route"].is_null(), "{lane}");
             rig.assert_legacy_unchanged()?;
             cleanup.disarm();
             return Ok(());
@@ -2454,12 +2455,9 @@ fn opus_writer_dispatch_advises_a_cheaper_route() -> Result {
         let result: Value = serde_json::from_slice(&lanes.stdout.bytes)?;
         let lane = &result["data"]["lanes"][0];
         assert_eq!(lane["state"], "rejected", "{lane}");
-        assert!(
-            lane["reason"].as_str().is_some_and(|message| message
-                .contains("pacing.accounts.pro.deadline.reset_of")
-                && message.contains("removed")),
-            "{lane}"
-        );
+        assert_eq!(lane["cause"], "pre_launch_refusal", "{lane}");
+        assert!(lane["started_at"].is_null(), "{lane}");
+        assert!(lane["applied_route"].is_null(), "{lane}");
         cleanup.disarm();
     }
     for (model, writer, suppress) in [
@@ -2781,10 +2779,8 @@ fn host_native_preparation_uses_the_provider_contract() -> Result {
         provenant_run::Providers::prepare(&registry, &absent, "fixture host-native", &paths, None)
             .err()
             .ok_or("unconfigured host-native entry was accepted")?;
-    assert_eq!(
-        error.to_string(),
-        "host-native absent is not configured in domains.fabric.host_native"
-    );
+    assert!(error.to_string().contains("domains.fabric.host_native"));
+    assert!(!error.to_string().contains("absent"));
     assert_eq!(
         error.fallback_outcome,
         Some(provenant_records::run::PreparationFailure::AdapterUnavailable)
@@ -3017,12 +3013,9 @@ fn claude_dispatch(host_native: bool, pool: bool) -> Result {
     let lane = &lanes["data"]["lanes"][0];
     if !cfg!(target_os = "macos") {
         assert_eq!(lane["state"], "rejected", "{lane}");
-        assert!(
-            lane["reason"]
-                .as_str()
-                .is_some_and(|r| r.contains("UnsupportedPlatform")),
-            "{lane}"
-        );
+        assert_eq!(lane["cause"], "pre_launch_refusal", "{lane}");
+        assert!(lane["started_at"].is_null(), "{lane}");
+        assert!(lane["applied_route"].is_null(), "{lane}");
         assert!(account.join("refreshed").exists());
         rig.assert_legacy_unchanged()?;
         cleanup.disarm();
@@ -4153,10 +4146,13 @@ fn codex_capacity_settles_without_quota_refusal() -> Result {
             ..
         }
     ));
-    // A staged settlement retry appends its note after the typed reason.
-    assert!(
-        matches!(&terminal.state, provenant_run::AttemptState::Terminal { reason: Some(reason), .. } if reason.starts_with(&format!("provider capacity: {message}")))
-    );
+    // A staged settlement retry appends its note after the safe owner reason.
+    assert!(matches!(
+        &terminal.state,
+        provenant_run::AttemptState::Terminal { reason: Some(reason), .. }
+            if reason.starts_with(provenant_records::diagnostic::ProviderFailureFact::Capacity.reason())
+                && !reason.contains(message)
+    ));
     let record = provenant_quota::AccountRecord::decode(&fs::read(
         rig.state.join("quota/codex-fixture/codex.json"),
     )?)?;
@@ -4562,6 +4558,7 @@ fn persisted_attempt_with(
             attempt_id,
             running.revision,
             &provenant_run::TerminalPublication {
+                terminal_cause: None,
                 outcome: provenant_run::Outcome::Succeeded,
                 finished_at: clock.wall_now()?,
                 started_at: running.started_at,
@@ -4634,7 +4631,19 @@ fn cancel_wait_settles_stalled_import_with_durable_exit() -> Result {
     let lanes: Value = serde_json::from_slice(&lanes.stdout.bytes)?;
     let lane = &lanes["data"]["lanes"][0];
     assert_eq!(lane["state"], "cancelled", "{lanes}");
-    assert_eq!(lane["reason"], "cancelled during Git import", "{lanes}");
+    assert_eq!(lane["cause"], "cancelled", "{lanes}");
+    assert_eq!(lane["exit_code"], 0, "{lanes}");
+    let database = rusqlite::Connection::open(rig.state.join("run.sqlite3"))?;
+    let retained: Vec<u8> = database.query_row(
+        "SELECT record FROM attempts WHERE id=?1",
+        [running.attempt_id.to_string()],
+        |row| row.get(0),
+    )?;
+    let retained: provenant_run::AttemptRecord = serde_json::from_slice(&retained)?;
+    assert_eq!(
+        retained.terminal_evidence,
+        Some(provenant_run::TerminalEvidence::ImportCancellation)
+    );
     Ok(())
 }
 
@@ -4901,7 +4910,7 @@ fn receipt_output_reports_unknown_route_for_settled_lost_attempt() -> Result {
     Ok(())
 }
 
-fn agy_denial_result_reaches_terminal_reason() -> Result {
+fn agy_denial_result_stays_out_of_terminal_diagnostics() -> Result {
     let (rig, terminal) = persisted_attempt(
         "agy",
         "agy/gemini-3.8-flash",
@@ -4926,14 +4935,26 @@ fn agy_denial_result_reaches_terminal_reason() -> Result {
     ])?;
     assert_eq!(code(&lanes), 0, "{:?}", lanes.stderr.bytes);
     let lanes: Value = serde_json::from_slice(&lanes.stdout.bytes)?;
-    assert_eq!(
-        lanes["data"]["lanes"][0]["reason"],
-        "provider denied: RunCommand"
-    );
+    let lane = &lanes["data"]["lanes"][0];
+    assert_eq!(lane["state"], "failed");
+    assert_eq!(lane["cause"], "failed");
+    for diagnostic in [&lane["reason"], &lane["settlement"]["reason"]] {
+        let diagnostic = diagnostic.as_str().ok_or("failure diagnostic")?;
+        assert!(!diagnostic.is_empty());
+        assert!(!diagnostic.contains("RunCommand"));
+    }
+    let captured = rig
+        .state
+        .join("runs")
+        .join(terminal.run_id.to_string())
+        .join("attempts")
+        .join(terminal.attempt_id.to_string())
+        .join("stdout.log");
+    assert!(fs::read_to_string(captured)?.contains("RunCommand"));
     Ok(())
 }
 
-fn agy_denied_command_reaches_result_and_terminal_reason() -> Result {
+fn agy_denied_command_reaches_result_without_entering_terminal_diagnostics() -> Result {
     let denial = include_bytes!("fixtures/providers/agy/command-denied.stderr");
     // Synthetic partial stdout and the real stderr-only failure case.
     let partial = br#"{"event":"step_update","step_update":{"conversation_id":"fixture-session","step_type":"agent_response","text_delta":"I verified part of the claim."}}"#;
@@ -4967,10 +4988,15 @@ fn agy_denied_command_reaches_result_and_terminal_reason() -> Result {
         ])?;
         assert_eq!(code(&lanes), 0, "{:?}", lanes.stderr.bytes);
         let lanes: Value = serde_json::from_slice(&lanes.stdout.bytes)?;
-        let reason = lanes["data"]["lanes"][0]["reason"]
-            .as_str()
-            .ok_or("terminal reason")?;
-        assert!(reason.contains(r#""command" permission"#), "{lanes}");
+        let lane = &lanes["data"]["lanes"][0];
+        assert_eq!(lane["state"], "failed");
+        assert_eq!(lane["cause"], "failed");
+        for diagnostic in [&lane["reason"], &lane["settlement"]["reason"]] {
+            let diagnostic = diagnostic.as_str().ok_or("failure diagnostic")?;
+            assert!(!diagnostic.is_empty());
+            assert!(!diagnostic.contains(r#""command" permission"#), "{lanes}");
+            assert!(!diagnostic.contains("jetski:"), "{lanes}");
+        }
         let output = rig.command(&["output", &terminal.attempt_id.to_string(), "--json"])?;
         assert_eq!(code(&output), 0, "{:?}", output.stderr.bytes);
         let output: Value = serde_json::from_slice(&output.stdout.bytes)?;
@@ -5065,9 +5091,8 @@ fn opencode_free_pool_cools_second_model() -> Result {
             pools: &pools,
         }
         .check(&second),
-        Err(provenant_quota::QuotaError::Refused(
-            "free tier exhausted; use a paid route or wait for its allowance reset"
-        ))
+        Err(provenant_quota::QuotaError::Refused(reason))
+            if reason == provenant_quota::AccountBlock::FreeTierRefusal.repair()
     ));
     Ok(())
 }
@@ -5131,9 +5156,8 @@ fn opencode_free_reset_cools_pool_until_reset_and_restores() -> Result {
         for route in [&first, &second] {
             assert!(matches!(
                 admit(route, at),
-                Err(provenant_quota::QuotaError::Refused(
-                    "free tier exhausted; use a paid route or wait for its allowance reset"
-                ))
+                Err(provenant_quota::QuotaError::Refused(reason))
+                    if reason == provenant_quota::AccountBlock::FreeTierRefusal.repair()
             ));
         }
     }
@@ -5243,9 +5267,8 @@ fn agy_individual_quota_cools_model_until_reset() -> Result {
     for at in [now, now + 3600, resets - 1] {
         assert!(matches!(
             admit(&route, at),
-            Err(provenant_quota::QuotaError::Refused(
-                "scoped provider refusal"
-            ))
+            Err(provenant_quota::QuotaError::Refused(reason))
+                if reason == provenant_quota::AccountBlock::ScopedRefusal.repair()
         ));
     }
     admit(&route, resets)?;
@@ -5708,8 +5731,8 @@ fn main() -> ExitCode {
                 "opencode_free_pool_cools_second_model",
                 "opencode_free_reset_cools_pool_until_reset_and_restores",
                 "agy_individual_quota_cools_model_until_reset",
-                "agy_denied_command_reaches_result_and_terminal_reason",
-                "agy_denial_result_reaches_terminal_reason",
+                "agy_denied_command_reaches_result_without_entering_terminal_diagnostics",
+                "agy_denial_result_stays_out_of_terminal_diagnostics",
                 "codex_capacity_settles_without_quota_refusal",
                 "capacity_holder_persists_and_explicit_and_resume_ignore_cooldown",
             ],
@@ -5800,11 +5823,11 @@ fn main() -> ExitCode {
                     "agy_individual_quota_cools_model_until_reset" => {
                         agy_individual_quota_cools_model_until_reset()
                     }
-                    "agy_denied_command_reaches_result_and_terminal_reason" => {
-                        agy_denied_command_reaches_result_and_terminal_reason()
+                    "agy_denied_command_reaches_result_without_entering_terminal_diagnostics" => {
+                        agy_denied_command_reaches_result_without_entering_terminal_diagnostics()
                     }
-                    "agy_denial_result_reaches_terminal_reason" => {
-                        agy_denial_result_reaches_terminal_reason()
+                    "agy_denial_result_stays_out_of_terminal_diagnostics" => {
+                        agy_denial_result_stays_out_of_terminal_diagnostics()
                     }
                     "codex_capacity_settles_without_quota_refusal" => {
                         codex_capacity_settles_without_quota_refusal()

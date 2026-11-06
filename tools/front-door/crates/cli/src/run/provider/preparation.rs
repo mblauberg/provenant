@@ -40,6 +40,28 @@ pub(super) fn provider_preparation_fallback(
     }
 }
 
+/// Refresh failures retain login guidance only when the credential owner has
+/// classified the cause. Other provider errors cannot supply diagnostic text.
+pub(super) fn credential_failure_skip(
+    route: &str,
+    error: &provenant_providers::ProviderError,
+    label: &str,
+    directory: &Path,
+) -> SkippedRoute {
+    use provenant_providers::ProviderError;
+    let mut skipped = skip(route, SkipKind::AuthRequired, "credential refresh failed");
+    let cause = match error {
+        ProviderError::CredentialNotFound => provenant_records::RouteExclusionReason::AuthRequired,
+        ProviderError::CredentialExpired => provenant_records::RouteExclusionReason::LoginExpired,
+        _ => return skipped,
+    };
+    skipped.set_cause(cause);
+    skipped.detail = provenant_records::diagnostic::safe_text(&credential_failure_message(
+        error, label, directory,
+    ));
+    skipped
+}
+
 // Resolve only PATH, leaving the rest of the daemon environment intact. The
 // login shell runs from the account home, never the writer's checkout.
 fn host_dependency_path(
@@ -425,9 +447,7 @@ pub(super) fn prepare_with_wait(
             .map_err(|error| error.to_string())?;
         let native = config.domains.fabric.host_native.get(name).ok_or_else(|| {
             PrepareError::Candidates {
-                message: format!(
-                    "host-native {name} is not configured in domains.fabric.host_native"
-                ),
+                message: "the requested host-native route is not configured in domains.fabric.host_native; select a configured route".into(),
                 plans: Vec::new(),
                 skipped_routes: Vec::new(),
                 fallback_outcome: Some(
@@ -499,6 +519,320 @@ pub(super) fn prepare_with_wait(
 /// the account may clear it; a plain "logged in" answer must not.
 pub(super) fn login_check_can_clear(adapter: &str, mismatch: bool) -> bool {
     !mismatch || AdapterSpec::get(adapter).is_some_and(|spec| spec.login_check_names_account)
+}
+
+/// Only the already-selected account may be refreshed. A replacement cannot
+/// grant another account's identity or revive a different catalogue revision.
+fn stale_observation_index(
+    route: &ResolvedRoute,
+    availability: &[provenant_providers::AvailabilityRecord],
+    now: i64,
+    catalogue_revision: &str,
+) -> Option<usize> {
+    if !matches!(
+        route.readiness,
+        provenant_records::RouteReadiness::Unavailable {
+            reason: provenant_records::RouteExclusionReason::StaleAvailability,
+            ..
+        }
+    ) {
+        return None;
+    }
+    let key = route.account_key.as_ref()?;
+    availability.iter().position(|record| {
+        record.adapter == route.adapter
+            && record.account_key.as_ref() == Some(key)
+            && (record.catalogue_revision != catalogue_revision
+                || record.observed_unix_seconds > now
+                || record.expires_unix_seconds <= now)
+    })
+}
+
+fn retry_stale_selected(
+    availability: &mut [provenant_providers::AvailabilityRecord],
+    route: &ResolvedRoute,
+    now: i64,
+    catalogue_revision: &str,
+    reprobe: impl FnOnce() -> Result<provenant_providers::AvailabilityRecord, AccountObservationError>,
+    resolve: impl FnOnce(&[provenant_providers::AvailabilityRecord]) -> Option<ResolvedRoute>,
+) -> Result<Option<ResolvedRoute>, AccountObservationError> {
+    let Some(index) = stale_observation_index(route, availability, now, catalogue_revision) else {
+        return Ok(None);
+    };
+    let old = availability[index].clone();
+    let fresh = reprobe()?;
+    if fresh.adapter != old.adapter
+        || fresh.account_key != old.account_key
+        || fresh.catalogue_revision != catalogue_revision
+        || fresh.observed_unix_seconds > now
+        || fresh.expires_unix_seconds <= now
+    {
+        return Ok(None);
+    }
+    availability[index] = fresh;
+    let next = resolve(availability).and_then(|next| same_selected_ready(route, next));
+    match next {
+        Some(next) => Ok(Some(next)),
+        None => {
+            availability[index] = old;
+            Ok(None)
+        }
+    }
+}
+
+fn same_selected_ready(route: &ResolvedRoute, next: ResolvedRoute) -> Option<ResolvedRoute> {
+    if next.adapter != route.adapter
+        || next.model != route.model
+        || next.effort != route.effort
+        || next.account_key != route.account_key
+        || next.host != route.host
+        || next.catalogue_revision != route.catalogue_revision
+        || next.eligibility != route.eligibility
+        || next.confidentiality != route.confidentiality
+        || !matches!(
+            next.readiness,
+            provenant_records::RouteReadiness::Ready { .. }
+        )
+    {
+        return None;
+    }
+    // Preserve the route, alternatives and receipt while updating readiness.
+    let mut original = route.clone();
+    original.readiness = next.readiness;
+    Some(original)
+}
+
+#[cfg(test)]
+mod stale_readiness_tests {
+    use super::*;
+    use std::cell::Cell;
+
+    #[test]
+    fn stale_selected_account_is_reprobed_once_without_changing_route() {
+        let route: ResolvedRoute = serde_json::from_value(serde_json::json!({
+            "adapter":"claude", "model":"model", "effort":null,
+            "catalogue_revision":"revision", "account_key":"account", "host":"local",
+            "alternatives":[], "exclusions":[], "eligibility":"eligible",
+            "readiness":{"status":"unavailable","reason":"stale_availability"},
+            "confidentiality":{"evidence_ref":"evidence"}
+        }))
+        .unwrap();
+        let stale = provenant_providers::AvailabilityRecord {
+            schema_version: 1,
+            adapter: "claude".into(),
+            executable: "/private/TOKEN_SENTINEL".into(),
+            version: "1".into(),
+            last_update: None,
+            fixture_ref: "installed/claude/version".into(),
+            catalogue_revision: "revision".into(),
+            account_key: Some("account".into()),
+            observed_models: vec![],
+            observed_unix_seconds: 10,
+            expires_unix_seconds: 20,
+        };
+        let fresh = provenant_providers::AvailabilityRecord {
+            observed_unix_seconds: 30,
+            expires_unix_seconds: 330,
+            ..stale.clone()
+        };
+        let calls = Cell::new(0);
+        let mut records = vec![stale.clone()];
+        let result = retry_stale_selected(
+            &mut records,
+            &route,
+            30,
+            "revision",
+            || {
+                calls.set(calls.get() + 1);
+                Ok(fresh.clone())
+            },
+            |records| {
+                assert_eq!(records[0].expires_unix_seconds, 330);
+                let mut ready = route.clone();
+                ready.extra.insert(
+                    "redraw".into(),
+                    serde_json::json!("must not replace original"),
+                );
+                ready.readiness = provenant_records::RouteReadiness::Ready {
+                    extra: Default::default(),
+                    availability_ref: "installed/claude/version".into(),
+                    expires_unix_seconds: 330,
+                };
+                Some(ready)
+            },
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(calls.get(), 1);
+        assert_eq!(result.account_key, route.account_key);
+        assert_eq!(result.extra, route.extra);
+        assert!(matches!(
+            result.readiness,
+            provenant_records::RouteReadiness::Ready { .. }
+        ));
+        assert_eq!(records[0], fresh);
+
+        let mut records = vec![stale.clone()];
+        let next = retry_stale_selected(
+            &mut records,
+            &route,
+            30,
+            "revision",
+            || Ok(fresh),
+            |_| {
+                let mut other = route.clone();
+                other.account_key = Some("other".into());
+                other.readiness = provenant_records::RouteReadiness::Ready {
+                    extra: Default::default(),
+                    availability_ref: "installed/claude/version".into(),
+                    expires_unix_seconds: 330,
+                };
+                Some(other)
+            },
+        )
+        .unwrap();
+        assert!(next.is_none());
+        assert_eq!(records[0], stale);
+        let calls = Cell::new(0);
+        let failed = retry_stale_selected(
+            &mut records,
+            &route,
+            30,
+            "revision",
+            || {
+                calls.set(calls.get() + 1);
+                Err(AccountObservationError::AuthRequired(
+                    "login required".into(),
+                ))
+            },
+            |_| panic!("a failed probe must not resolve"),
+        );
+        assert!(matches!(
+            failed,
+            Err(AccountObservationError::AuthRequired(_))
+        ));
+        assert_eq!(calls.get(), 1);
+        assert_eq!(records[0], stale);
+        let mut ready = route.clone();
+        ready.readiness = provenant_records::RouteReadiness::Ready {
+            extra: Default::default(),
+            availability_ref: "installed/claude/version".into(),
+            expires_unix_seconds: 330,
+        };
+        let untouched = retry_stale_selected(
+            &mut records,
+            &ready,
+            30,
+            "revision",
+            || panic!("fresh routes must not be re-probed"),
+            |_| None,
+        )
+        .unwrap();
+        assert!(untouched.is_none());
+        assert_eq!(records[0], stale);
+        let diagnostic = run::ErrorKind::StaleReadiness.diagnostic();
+        assert_eq!(diagnostic.code, "STALE_READINESS");
+        assert_eq!(diagnostic.category.as_deref(), Some("warning"));
+        assert_eq!(
+            run::ErrorKind::StaleReadiness.boundary_class(),
+            provenant_records::diagnostic::BoundaryClass::None
+        );
+        assert!(
+            diagnostic
+                .next
+                .as_deref()
+                .unwrap()
+                .contains("provenant quota tick")
+        );
+        assert!(
+            !serde_json::to_string(&diagnostic)
+                .unwrap()
+                .contains("TOKEN_SENTINEL")
+        );
+    }
+
+    #[test]
+    fn refreshed_selected_route_rechecks_routing_and_access_guards() {
+        use provenant_routing::{
+            AccessContext, Catalogue, Fallback, ModelId, RouteChoice, RouteRequest, RoutingConfig,
+            RoutingContext,
+        };
+        let catalogue = Catalogue::bundled().unwrap();
+        let config = RoutingConfig::default();
+        let request = RouteRequest {
+            intent: Default::default(),
+            choice: RouteChoice::Model(ModelId::parse("codex/gpt-6-luna").unwrap()),
+            effort: None,
+            confidential: false,
+            fallback: Fallback::None,
+        };
+        let stale = provenant_providers::AvailabilityRecord {
+            schema_version: 1,
+            adapter: "codex".into(),
+            executable: "/fixture/codex".into(),
+            version: "1".into(),
+            last_update: None,
+            fixture_ref: "installed/codex/version".into(),
+            catalogue_revision: catalogue.revision().into(),
+            account_key: Some("work".into()),
+            observed_models: vec![],
+            observed_unix_seconds: 10,
+            expires_unix_seconds: 20,
+        };
+        let fresh = provenant_providers::AvailabilityRecord {
+            observed_unix_seconds: 30,
+            expires_unix_seconds: 330,
+            ..stale.clone()
+        };
+        let access = [AccessContext {
+            adapter: "codex",
+            disclosure_ref: "grant",
+            confinement_ref: "grant",
+        }];
+        let resolve = |records: &[provenant_providers::AvailabilityRecord],
+                       access: &[AccessContext<'_>]| {
+            let context = RoutingContext {
+                choice_context: None,
+                policy_account_hint: None,
+                catalogue: &catalogue,
+                config: &config,
+                registry: REGISTRY,
+                availability: records,
+                quota: &[],
+                capacity_cooldowns: &[],
+                accounts: &[],
+                quota_policies: &[],
+                readiness: None,
+                access,
+                now: provenant_core::WallTime::from_micros(30_000_000).unwrap(),
+                host: "local",
+            };
+            provenant_routing::resolve(&request, &context).unwrap()
+        };
+        // Availability expiry is advisory; it does not override current route guards.
+        let route = resolve(std::slice::from_ref(&stale), &access);
+        assert!(matches!(
+            route.readiness,
+            provenant_records::RouteReadiness::Ready { .. }
+        ));
+        assert!(stale_observation_index(&route, &[stale], 30, catalogue.revision()).is_none());
+        let ready = same_selected_ready(&route, resolve(std::slice::from_ref(&fresh), &access))
+            .expect("same selected account remains eligible");
+        assert_eq!(ready.account_key, route.account_key);
+        assert!(matches!(
+            ready.readiness,
+            provenant_records::RouteReadiness::Ready { .. }
+        ));
+        let denied = resolve(std::slice::from_ref(&fresh), &[]);
+        assert!(matches!(
+            denied.readiness,
+            provenant_records::RouteReadiness::Unavailable {
+                reason: provenant_records::RouteExclusionReason::DisclosureDenied,
+                ..
+            }
+        ));
+        assert!(same_selected_ready(&route, denied).is_none());
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -880,20 +1214,22 @@ pub(super) fn prepare_candidates(
     }
     // Availability is diagnostic evidence; admission uses the in-memory records.
     // A failed publication must not prevent a correctly prepared lane launching.
-    let _ = (|| -> Result<(), String> {
-        let attempt_dir =
-            Directory::open_anchor(paths.scratch.parent().ok_or("attempt path unavailable")?)
-                .map_err(|e| e.to_string())?;
-        attempt_dir
-            .atomic_write(
-                std::ffi::OsStr::new("availability.json"),
-                "availability",
-                &serde_json::to_vec(&availability).map_err(|e| e.to_string())?,
-                PublishMode::Replace,
-            )
-            .and_then(|p| p.require_durable())
-            .map_err(|e| e.to_string())
-    })();
+    let publish_availability =
+        |records: &[provenant_providers::AvailabilityRecord]| -> Result<(), String> {
+            let attempt_dir =
+                Directory::open_anchor(paths.scratch.parent().ok_or("attempt path unavailable")?)
+                    .map_err(|e| e.to_string())?;
+            attempt_dir
+                .atomic_write(
+                    std::ffi::OsStr::new("availability.json"),
+                    "availability",
+                    &serde_json::to_vec(records).map_err(|e| e.to_string())?,
+                    PublishMode::Replace,
+                )
+                .and_then(|p| p.require_durable())
+                .map_err(|e| e.to_string())
+        };
+    let _ = publish_availability(&availability);
     let digest = task.authority_digest.to_string();
     let mut access = Vec::new();
     let mut plan_errors = std::collections::BTreeMap::new();
@@ -954,7 +1290,7 @@ pub(super) fn prepare_candidates(
                     && requested_adapter.is_none_or(|adapter| e.adapter == adapter)
             });
             let entry = matching.next().ok_or_else(|| PrepareError::Candidates {
-                message: format!("account {label} is not registered for the requested route"),
+                message: "the selected account is not registered for the requested route; run `provenant accounts list`".into(),
                 plans: Vec::new(),
                 skipped_routes: Vec::new(),
                 fallback_outcome: Some(
@@ -962,9 +1298,9 @@ pub(super) fn prepare_candidates(
                 ),
             })?;
             if matching.any(|other| other.key != entry.key || other.adapter != entry.adapter) {
-                return Err(PrepareError::Other(format!(
-                    "account alias {label} is ambiguous; use its exact registered key"
-                )));
+                return Err(PrepareError::Other(
+                    "account alias is ambiguous; use its exact registered key".into(),
+                ));
             }
             Ok(entry.key.as_str())
         })
@@ -1003,14 +1339,15 @@ pub(super) fn prepare_candidates(
         )),
         _ => None,
     };
-    let resolve = |rejected: &[provenant_routing::ModelId]| {
+    let resolve = |availability: &[provenant_providers::AvailabilityRecord],
+                   rejected: &[provenant_routing::ModelId]| {
         crate::route::resolve_dispatch_rejecting(
             &request,
             roots,
             provider_registry,
             selected,
             (paths.operation_id.as_str(), paths.task_index),
-            &availability,
+            availability,
             &access,
             &host,
             family_constraints,
@@ -1021,7 +1358,7 @@ pub(super) fn prepare_candidates(
             }),
         )
     };
-    let resolved = resolve(&[]).map_err(|error| error.to_string())?;
+    let resolved = resolve(&availability, &[]).map_err(|error| error.to_string())?;
     let named_pool = resolved.pool_selection.is_some() && resume.is_none();
     if let Some(selection) = &resolved.pool_selection {
         for redraw in &selection.redraws {
@@ -1038,6 +1375,7 @@ pub(super) fn prepare_candidates(
     let mut previous_outcome = provenant_routing::FallbackOutcome::Other;
     let mut queue: std::collections::VecDeque<_> = candidates(resolved).into();
     let mut rejected = Vec::new();
+    let mut reprobed_accounts = std::collections::BTreeSet::new();
     let mut candidate = 0usize;
     let mut redraws = 0u8;
     loop {
@@ -1063,7 +1401,7 @@ pub(super) fn prepare_candidates(
                 }
                 break;
             }
-            let Ok(next) = resolve(&rejected) else {
+            let Ok(next) = resolve(&availability, &rejected) else {
                 if previous_outcome == provenant_routing::FallbackOutcome::AuthRequired
                     && let Some(last) = reasons.last_mut()
                 {
@@ -1074,7 +1412,7 @@ pub(super) fn prepare_candidates(
             redraws += 1;
             queue.extend(candidates(next));
         }
-        let Some(route) = queue.pop_front() else {
+        let Some(mut route) = queue.pop_front() else {
             break;
         };
         let model =
@@ -1192,6 +1530,116 @@ pub(super) fn prepare_candidates(
             continue;
         };
         let adapter = registration.adapter;
+        if matches!(
+            route.readiness,
+            provenant_records::RouteReadiness::Unavailable {
+                reason: provenant_records::RouteExclusionReason::StaleAvailability,
+                ..
+            }
+        ) {
+            if let Some(key) = route.account_key.clone() {
+                let mut exact = request.clone();
+                exact.choice = provenant_routing::RouteChoice::Model(
+                    provenant_routing::ModelId::parse(&label).map_err(|error| error.to_string())?,
+                );
+                exact.effort = route.effort.clone();
+                exact.fallback = provenant_routing::Fallback::None;
+                let revalidate = |records: &[provenant_providers::AvailabilityRecord]| {
+                    crate::route::resolve_dispatch_rejecting(
+                        &exact,
+                        roots,
+                        provider_registry,
+                        Some(&key),
+                        (paths.operation_id.as_str(), paths.task_index),
+                        records,
+                        &access,
+                        &host,
+                        family_constraints,
+                        &rules,
+                        &[],
+                        task.context.as_ref().and_then(|context| {
+                            Some((context.risk_tier.as_deref()?, context.task_kind.as_deref()?))
+                        }),
+                    )
+                    .ok()
+                };
+                let observed_at = clock.unix_seconds();
+                if let Some(index) = stale_observation_index(
+                    &route,
+                    &availability,
+                    observed_at,
+                    catalogue.revision(),
+                ) {
+                    if reprobed_accounts.insert((route.adapter.clone(), key.clone())) {
+                        let old = availability[index].clone();
+                        if let Some(entry) = entries.iter().find(|entry| {
+                            entry.adapter == old.adapter
+                                && Some(&entry.key) == old.account_key.as_ref()
+                        }) {
+                            let recheck_probe = Probe {
+                                roots: None,
+                                executor: probe.executor,
+                                home: probe.home,
+                                user: probe.user,
+                                scratch: probe.scratch,
+                            };
+                            if let Ok(Some(rechecked)) = retry_stale_selected(
+                                &mut availability,
+                                &route,
+                                observed_at,
+                                catalogue.revision(),
+                                || {
+                                    locate(&entry.adapter)
+                                        .map_err(AccountObservationError::from)
+                                        .and_then(|executable| {
+                                            observe_account(
+                                                entry,
+                                                &executable,
+                                                &recheck_probe,
+                                                catalogue.revision(),
+                                                observed_at,
+                                            )
+                                        })
+                                        .map(|mut fresh| {
+                                            fresh.last_update = old.last_update.clone();
+                                            fresh
+                                        })
+                                },
+                                revalidate,
+                            ) {
+                                route = rechecked;
+                                let _ = publish_availability(&availability);
+                            }
+                        }
+                    }
+                } else if let Some(rechecked) =
+                    revalidate(&availability).and_then(|next| same_selected_ready(&route, next))
+                {
+                    // Another route of this account may reuse the already
+                    // refreshed observation without running a second probe.
+                    route = rechecked;
+                }
+            }
+            if matches!(
+                route.readiness,
+                provenant_records::RouteReadiness::Unavailable {
+                    reason: provenant_records::RouteExclusionReason::StaleAvailability,
+                    ..
+                }
+            ) {
+                let diagnostic = run::ErrorKind::StaleReadiness.diagnostic();
+                let _ = writeln!(
+                    std::io::stderr().lock(),
+                    "warning [{}]: {}; next: {}",
+                    diagnostic.code,
+                    diagnostic
+                        .detail
+                        .as_deref()
+                        .unwrap_or("account readiness is stale"),
+                    diagnostic.next.as_deref().unwrap_or("re-probe the account")
+                );
+            }
+        }
         if let provenant_records::RouteReadiness::Unavailable { reason, .. } = &route.readiness {
             if matches!(
                 reason,
@@ -1203,7 +1651,16 @@ pub(super) fn prepare_candidates(
                     } else {
                         provenant_routing::FallbackOutcome::AdapterUnavailable
                     };
-                    reasons.push(skip(&label, *kind, detail));
+                    let mut skipped = skip(&label, *kind, detail);
+                    skipped.set_cause(if *kind == SkipKind::AuthRequired {
+                        provenant_records::RouteExclusionReason::AuthRequired
+                    } else {
+                        reason.clone()
+                    });
+                    if *kind == SkipKind::AuthRequired {
+                        skipped.detail = provenant_records::diagnostic::safe_text(detail);
+                    }
+                    reasons.push(skipped);
                     continue;
                 }
                 let relevant: Vec<_> = entries
@@ -1222,11 +1679,13 @@ pub(super) fn prepare_candidates(
                     && !relevant.is_empty()
                 {
                     previous_outcome = provenant_routing::FallbackOutcome::AdapterUnavailable;
-                    reasons.push(skip(
+                    let mut skipped = skip(
                         &label,
                         SkipKind::Account,
                         relevant.into_iter().cloned().collect::<Vec<_>>().join("; "),
-                    ));
+                    );
+                    skipped.set_cause(reason.clone());
+                    reasons.push(skipped);
                     continue;
                 }
             }
@@ -1234,17 +1693,19 @@ pub(super) fn prepare_candidates(
             if outcome == provenant_routing::FallbackOutcome::AuthRequired {
                 previous_outcome = outcome;
                 let key = selected.or(route.account_key.as_deref());
-                reasons.push(skip(
-                    &label,
-                    SkipKind::AuthRequired,
-                    crate::quota::account_login_diagnostic(
-                        entries.iter(),
-                        &diagnostic_records,
-                        &route.adapter,
-                        key,
-                        reason,
-                    ),
-                ));
+                let detail = crate::quota::account_login_diagnostic(
+                    entries.iter(),
+                    &diagnostic_records,
+                    &route.adapter,
+                    key,
+                    reason,
+                );
+                let mut skipped = skip(&label, SkipKind::AuthRequired, &detail);
+                skipped.set_cause(reason.clone());
+                // This detail is assembled from registered account facts, not
+                // provider output. Remote projections still use typed facts.
+                skipped.detail = provenant_records::diagnostic::safe_text(&detail);
+                reasons.push(skipped);
                 continue;
             }
             if matches!(
@@ -1254,7 +1715,10 @@ pub(super) fn prepare_candidates(
                 unavailable_auth_detail(&route, selected, &entries, &auth_failures)
             {
                 previous_outcome = provenant_routing::FallbackOutcome::AuthRequired;
-                reasons.push(skip(&label, SkipKind::AuthRequired, detail));
+                let mut skipped = skip(&label, SkipKind::AuthRequired, &detail);
+                skipped.set_cause(provenant_records::RouteExclusionReason::AuthRequired);
+                skipped.detail = provenant_records::diagnostic::safe_text(&detail);
+                reasons.push(skipped);
                 continue;
             }
             previous_outcome = outcome;
@@ -1287,7 +1751,9 @@ pub(super) fn prepare_candidates(
                         format!("confinement plan: {error}")
                     },
                 );
-            reasons.push(skip(&label, SkipKind::Unavailable, detail));
+            let mut skipped = skip(&label, SkipKind::Unavailable, detail);
+            skipped.set_cause(reason.clone());
+            reasons.push(skipped);
             continue;
         }
         if let Err(error) = crate::route::check_dispatch_candidate(roots, &route, provider_registry)
@@ -1526,14 +1992,11 @@ pub(super) fn prepare_candidates(
                 Ok(token) => Some(token),
                 Err(error) => {
                     previous_outcome = provenant_routing::FallbackOutcome::AuthRequired;
-                    reasons.push(skip(
+                    reasons.push(credential_failure_skip(
                         &label,
-                        SkipKind::AuthRequired,
-                        credential_failure_message(
-                            &error,
-                            entry.map_or("unknown", |e| e.label.as_str()),
-                            account.directory(),
-                        ),
+                        &error,
+                        entry.map_or("unknown", |e| e.label.as_str()),
+                        account.directory(),
                     ));
                     continue;
                 }

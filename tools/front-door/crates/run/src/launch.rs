@@ -155,6 +155,7 @@ fn applied_write_grants(
 }
 /// Provider-decoded facts from a completed capture.
 pub struct Decoded {
+    pub terminal_cause: Option<TerminalCause>,
     pub outcome: Outcome,
     pub result: String,
     pub complete: bool,
@@ -175,6 +176,16 @@ pub struct PrepareRefusal {
     pub fallback_outcome: Option<provenant_records::run::PreparationFailure>,
 }
 impl PrepareRefusal {
+    fn kind(&self) -> RefusalKind {
+        if self.skipped_routes.iter().any(|route| {
+            route.cause == Some(provenant_records::RouteExclusionReason::PacingReserve)
+        }) {
+            RefusalKind::PacingReserve
+        } else {
+            RefusalKind::Preparation
+        }
+    }
+
     pub fn auth_required(&self) -> bool {
         !self.skipped_routes.is_empty()
             && self
@@ -491,6 +502,7 @@ pub enum Started {
 pub enum RefusalKind {
     Policy,
     Preparation,
+    PacingReserve,
     WorktreeBusy,
     PriorityUnavailable,
     StoredPromptUnreadable,
@@ -1663,7 +1675,7 @@ impl RunStore {
                             }),
                         )
                         .map(|plan| (plan, priority))
-                        .map_err(|reason| (RefusalKind::Preparation, reason))
+                        .map_err(|reason| (reason.kind(), reason))
                 });
             let (mut plan, priority) = match prepared {
                 Ok(prepared) => prepared,

@@ -12,7 +12,7 @@ fn fragments_cannot_inject_persisted_topology_through_extra_fields() {
         let run = advance(&planner(1), &mut fixture_owner(&[&output]), &mut MemoryJournal::default()).unwrap();
         assert!(run.checkpoint.expansions.is_empty());
         assert_eq!(run.checkpoint.pause_code.as_deref(), Some("invalid_plan_expansion"));
-        assert!(run.checkpoint.pause_reason.as_deref().unwrap().contains("computed topology fields are reserved"));
+        assert!(run.checkpoint.pause_reason.as_deref().unwrap().contains("invalid fragment"));
     }
 }
 
@@ -31,7 +31,7 @@ fn admission_planner_fragment_capability() {
     let run = advance(&planner(4), &mut owner, &mut MemoryJournal::default()).unwrap();
     assert_eq!(run.status, GraphStatus::Paused);
     assert_eq!(run.checkpoint.pause_code.as_deref(), Some("invalid_plan_expansion"));
-    assert!(run.checkpoint.pause_reason.as_deref().unwrap().contains("schema version"), "{:?}", run.checkpoint.pause_reason);
+    assert!(run.checkpoint.pause_reason.as_deref().unwrap().contains("invalid fragment"), "{:?}", run.checkpoint.pause_reason);
     assert!(run.checkpoint.expansions.is_empty());
 }
 
@@ -224,7 +224,7 @@ fn failed_planner_runs_static_fallback_and_records_reason() {
     let mut owner = FakeOwner {
         observations: [
             terminal_with_result(AttemptOutcome::Succeeded, "prepared result"),
-            terminal_with_result(AttemptOutcome::TaskFailed, "planner rejected the brief"),
+            terminal_with_result(AttemptOutcome::TaskFailed, "TOKEN_SENTINEL /private/source \u{1b}"),
             terminal_with_result(AttemptOutcome::Succeeded, "static result"),
             terminal_with_result(AttemptOutcome::Succeeded, "done"),
         ]
@@ -244,9 +244,12 @@ fn failed_planner_runs_static_fallback_and_records_reason() {
     assert_eq!(plan.state, NodeState::Succeeded);
     assert_eq!(
         serde_json::to_value(plan).unwrap()["outputs"]["plan"]["fallback_reason"],
-        "planner attempt failed (TaskFailed): planner rejected the brief"
+        "planner attempt failed: TaskFailed"
     );
     let summary = plan.deterministic_summary().unwrap();
+    assert!(!summary.contains("TOKEN_SENTINEL"));
+    assert!(!summary.contains("/private/source"));
+    assert!(!summary.contains('\u{1b}'));
     assert_eq!(
         summary,
         include_str!("../fixtures/plan-fallback-output.txt")
@@ -474,6 +477,16 @@ fn missing_fragment_fallback_retries_after_raising_the_structural_limit() {
         .fragment
         .is_none());
     assert!(paused.checkpoint.expansions.is_empty());
+    let plan = paused.checkpoint.nodes.iter().find(|node| node.id == "plan").unwrap();
+    assert!(matches!(&plan.expansion_cause,
+        Some(NodeDecisionCause::PlanExpansionPaused { fragment_error: Some(PlanFailureFact::MissingBlock), .. })));
+    assert!(!plan.expansion_pause.as_deref().unwrap().contains("planner-fragment-retry-context"));
+    let decoded: GraphCheckpoint = serde_json::from_slice(&serde_json::to_vec(&paused.checkpoint).unwrap()).unwrap();
+    assert_eq!(decoded, paused.checkpoint);
+    let mut forged = paused.checkpoint.clone();
+    forged.nodes.iter_mut().find(|node| node.id == "plan").unwrap().expansion_cause = None;
+    let mut forged_journal = MemoryJournal(Some(forged));
+    assert!(matches!(advance_with_budget(&document, &mut fixture_owner(&[]), &mut forged_journal, &limits, &Default::default()), Err(GraphError::BadCheckpoint { .. })));
 
     let mut owner = fixture_owner(&["first result", "second result", "done"]);
     let resumed = resume_with_budget(
@@ -677,7 +690,7 @@ fn refused_planner_fragment_retries_after_file_journal_reopen() {
 
 #[test]
 fn malformed_optional_handoff_warns_and_still_delivers() {
-    for output in ["```handoff\n{}\n```".to_owned(), format!("{STOP}\n{STOP}"), STOP.replace("stopped_early", "invalid"), STOP.trim_end_matches("\n```").to_owned(), format!("```handoff\n{}\n```", json!({"schema_version":1,"status":"stopped_early","note":"x".repeat(4097)}))] {
+    for output in ["```handoff\n{}\n```".to_owned(), format!("{STOP}\n{STOP}"), STOP.replace("stopped_early", "TOKEN_SENTINEL/private"), STOP.trim_end_matches("\n```").to_owned(), format!("```handoff\n{}\n```", json!({"schema_version":1,"status":"stopped_early","note":"x".repeat(4097)}))] {
         let mut doc = writer_graph();
         doc.nodes[0].required_verdict = None;
         doc.delivery = Some(provenant_records::run::DeliveryMode::Pr);
@@ -688,7 +701,9 @@ fn malformed_optional_handoff_warns_and_still_delivers() {
         assert_eq!(run.status, GraphStatus::Complete);
         assert!(run.checkpoint.successful());
         assert!(run.checkpoint.expansions.is_empty());
-        assert!(run.checkpoint.nodes[0].outputs.as_ref().unwrap().warnings.iter().any(|w| w.contains("ignored optional handoff")));
+        let warnings = &run.checkpoint.nodes[0].outputs.as_ref().unwrap().warnings;
+        assert!(warnings.iter().any(|warning| warning.contains("ignored optional handoff")));
+        assert!(warnings.iter().all(|warning| !warning.contains("TOKEN_SENTINEL") && !warning.contains("/private")));
         assert_eq!(owner.deliveries, 1);
         assert_eq!(advance(&doc, &mut owner, &mut journal).unwrap().checkpoint, run.checkpoint);
     }
@@ -943,6 +958,34 @@ fn plan_patterns_refuse_unlisted_invalid_and_widening_instances() {
 }
 
 #[test]
+fn captured_fragment_text_does_not_become_a_pause_diagnostic() {
+    let doc = pattern_planner(4);
+    let instance = json!({"id":"impl", "pattern":"TOKEN_SENTINEL/private/host\u{1b}"});
+    let mut owner = fixture_owner(&[&pattern_result(instance)]);
+    let run = advance(&doc, &mut owner, &mut MemoryJournal::default()).unwrap();
+    let reason = run.checkpoint.pause_reason.as_deref().unwrap();
+    assert!(reason.contains("invalid fragment"));
+    assert!(!reason.contains("TOKEN_SENTINEL"));
+    assert!(!reason.contains("/private/host"));
+    assert!(!reason.contains('\u{1b}'));
+    let node = run.checkpoint.nodes.iter().find(|node| node.id == "plan").unwrap();
+    let cause = serde_json::to_string(&node.expansion_cause).unwrap();
+    assert!(!cause.contains("TOKEN_SENTINEL"));
+    assert!(!cause.contains("/private/host"));
+
+    let document = two_step_fallback_document();
+    let limits = crate::config::GraphLimits { nodes: 3, ..Default::default() };
+    let mut owner = fixture_owner(&[&pattern_result(json!({"id":"impl", "pattern":"TOKEN_SENTINEL/private/host"}))]);
+    let paused = advance_with_budget(&document, &mut owner, &mut MemoryJournal::default(), &limits, &Default::default()).unwrap();
+    let node = paused.checkpoint.nodes.iter().find(|node| node.id == "plan").unwrap();
+    assert!(matches!(node.expansion_cause, Some(NodeDecisionCause::PlanExpansionPaused { fragment_error: Some(PlanFailureFact::InvalidFragment), .. })));
+    for text in [paused.checkpoint.pause_reason.as_deref().unwrap(), node.expansion_pause.as_deref().unwrap()] {
+        assert!(!text.contains("TOKEN_SENTINEL"));
+        assert!(!text.contains("/private/host"));
+    }
+}
+
+#[test]
 fn refused_pattern_instantiation_raises_a_pause_decision() {
     let mut doc = pattern_planner(4);
     doc.decision_session = Some("chair-session".into());
@@ -978,13 +1021,13 @@ fn assert_pattern_parameter_error(
     case: &str,
     doc: &GraphDocument,
     parameters: Value,
-    reason: &str,
+    _reason: &str,
 ) {
     let mut owner = fixture_owner(&[&pattern_result(json!({"id":"impl", "pattern":"generator", "parameters":parameters}))]);
     let run = advance(doc, &mut owner, &mut MemoryJournal::default()).unwrap();
     assert_eq!(run.status, GraphStatus::Paused, "{case}");
     assert_eq!(run.checkpoint.pause_code.as_deref(), Some("invalid_plan_expansion"), "{case}");
-    assert!(run.checkpoint.pause_reason.as_deref().unwrap_or_default().contains(reason), "{case}: {:?}", run.checkpoint.pause_reason);
+    assert!(run.checkpoint.pause_reason.as_deref().unwrap_or_default().contains("invalid fragment"), "{case}: {:?}", run.checkpoint.pause_reason);
     assert!(run.checkpoint.expansions.is_empty(), "{case}");
 }
 

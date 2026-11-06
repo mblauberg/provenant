@@ -382,7 +382,7 @@ impl Context {
                 PeerFailure::new(FacadeError::HomeUnavailable, "peer host is not configured")
             })?;
         let project = ProjectLocator::new(&self.identity, &self.home)
-            .map_err(|_| PeerFailure::from(FacadeError::ConfinementRefused))?;
+            .map_err(|_| PeerFailure::from(FacadeError::ConfinementRefused { resource: None }))?;
         let request = PeerRequest::new(
             host,
             self.identity.host,
@@ -632,7 +632,7 @@ pub fn facade_outcome(error: &FacadeError) -> (Outcome, provenant_run::ErrorKind
         FacadeError::NotTerminal => (Outcome::Refused, ErrorKind::Nonterminal),
         FacadeError::OperationConflict => (Outcome::Refused, ErrorKind::OperationConflict),
         FacadeError::Busy => (Outcome::Refused, ErrorKind::QueueFull),
-        FacadeError::ConfinementRefused => (Outcome::Refused, ErrorKind::Refused),
+        FacadeError::ConfinementRefused { .. } => (Outcome::Refused, ErrorKind::Refused),
         FacadeError::WriterBusy { .. } => (Outcome::Refused, ErrorKind::WriterBusy),
         FacadeError::WriterLockBusy => (Outcome::Refused, ErrorKind::WriterLockBusy),
         FacadeError::WriterUnknown => (Outcome::Refused, ErrorKind::WriterUnknown),

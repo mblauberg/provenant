@@ -464,11 +464,18 @@ pub(super) fn set_cargo_profile(
 }
 
 /// A candidate that did not launch, typed by why it was skipped.
-pub(super) fn skip(route: &str, kind: SkipKind, detail: impl Into<String>) -> SkippedRoute {
+pub(super) fn skip(route: &str, kind: SkipKind, _detail: impl Into<String>) -> SkippedRoute {
+    let diagnostic = kind.diagnostic();
+    let detail = format!(
+        "{}; {}",
+        diagnostic.detail.unwrap_or_default(),
+        diagnostic.next.unwrap_or_default()
+    );
     SkippedRoute {
         extra: Default::default(),
         route: route.to_owned(),
         kind,
-        detail: detail.into(),
+        cause: None,
+        detail,
     }
 }

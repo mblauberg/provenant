@@ -342,6 +342,7 @@ mod tests {
         });
         let task = &input.request.tasks[0];
         let mut decoded = run::Decoded {
+            terminal_cause: None,
             outcome: run::Outcome::Succeeded,
             result: String::new(),
             complete: true,

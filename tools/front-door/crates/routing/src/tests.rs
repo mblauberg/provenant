@@ -4681,10 +4681,19 @@ fn account_evidence_reasons_carry_their_repair_text() {
             "scoped provider refusal",
         ),
         (RouteExclusionReason::InvalidAccountEvidence, "invalid"),
+        (
+            RouteExclusionReason::UnknownAvailability,
+            "provenant quota tick",
+        ),
+        (RouteExclusionReason::StaleAvailability, "stale"),
+        (RouteExclusionReason::AuthRequired, "sign in"),
     ] {
         assert!(exclusion_detail(&reason).contains(text), "{reason:?}");
     }
-    assert!(exclusion_detail(&RouteExclusionReason::Exhausted).contains("reset"));
+    let exhausted = exclusion_detail(&RouteExclusionReason::Exhausted);
+    assert!(exhausted.contains("exhausted"));
+    assert!(exhausted.contains("wait"));
+    assert!(exhausted.contains("reset"));
 }
 
 #[test]

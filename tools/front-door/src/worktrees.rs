@@ -483,7 +483,14 @@ pub fn run_gc(command: Gc, globals: &Globals, workers: &dyn WorkerObserver) -> u
             let result = gc_failure(&data, &failure, globals.json);
             emit(&result, globals, "", command.dry_run)
         }
-        Err(error) => fail("gc", error.outcome(), "GC", &error.local_message(), globals),
+        Err(error) => crate::fail_with_repair(
+            "gc",
+            error.outcome(),
+            "GC",
+            &error.local_message(),
+            Some(GC_REPAIR),
+            globals,
+        ),
     }
 }
 

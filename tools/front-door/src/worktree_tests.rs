@@ -5325,6 +5325,7 @@ fn resume_refuses_low_disk_writer() -> Result {
         id,
         store.record(id, &call)?.revision,
         &provenant_run::TerminalPublication {
+            terminal_cause: None,
             outcome: provenant_run::Outcome::Succeeded,
             started_at: Some(input.created_at),
             finished_at: clock.wall_now()?,

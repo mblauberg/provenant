@@ -765,6 +765,50 @@ mod result_tests {
     }
 
     #[test]
+    fn graph_status_renders_invalid_input_field_and_reason() {
+        let mut run = graph_status_fixture();
+        let node = &mut run.checkpoint.nodes[0];
+        node.state = provenant_fabric_runtime::graph::NodeState::Blocked;
+        node.advance_error = Some("node ordinary: the launch failed [invalid_input]: input exceeds the 1 MiB limit; check the named input field and retry".into());
+        let human = super::graph_human(&run);
+        let machine = serde_json::to_value(&run).unwrap();
+        for text in [human, machine.to_string()] {
+            assert!(text.contains("input"));
+            assert!(text.contains("1 MiB"));
+            assert!(text.contains("retry"));
+        }
+    }
+
+    #[test]
+    fn graph_status_renders_unreadable_input_without_source_text() {
+        use provenant_fabric_runtime::coordination::facade::FacadeError;
+        use provenant_records::diagnostic::IoFact;
+        let diagnostic = FacadeError::Io {
+            operation: "TOKEN_SENTINEL".into(),
+            path: Some("/private/host".into()),
+            delivery_limit: None,
+            delivery_stage: None,
+            resource: None,
+            input_failure: Some(IoFact::InputUnreadable),
+        }.diagnostic();
+        let mut run = graph_status_fixture();
+        let node = &mut run.checkpoint.nodes[0];
+        node.state = provenant_fabric_runtime::graph::NodeState::Blocked;
+        node.advance_error = Some(format!(
+            "node ordinary: the launch failed: [{}] {}; {}",
+            diagnostic.code, diagnostic.next.unwrap(), diagnostic.detail.unwrap()
+        ));
+        let human = super::graph_human(&run);
+        let machine = serde_json::to_value(&run).unwrap().to_string();
+        for text in [human, machine] {
+            assert!(text.contains("input could not be read"));
+            assert!(text.contains("retry"));
+            assert!(!text.contains("TOKEN_SENTINEL"));
+            assert!(!text.contains("/private/host"));
+        }
+    }
+
+    #[test]
     fn graph_status_shows_review_substitution_for_a_completed_member() {
         let mut run = graph_status_fixture();
         let member = &mut run.checkpoint.nodes[2];
@@ -1718,7 +1762,7 @@ mod result_tests {
         }
         assert_eq!(
             super::decode_graph_document(br#"{"schema_version":0}"#).unwrap_err(),
-            super::FacadeError::invalid("graph document schema_version must be 1 or 2")
+            super::FacadeError::invalid(provenant_fabric_runtime::coordination::facade::InvalidInputDetail::Schema)
         );
     }
 

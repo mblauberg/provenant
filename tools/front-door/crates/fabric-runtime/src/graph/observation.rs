@@ -129,8 +129,10 @@ pub(super) fn fallback_denial(
     launched: bool,
     access: AccessMode,
     unreadable: bool,
-) -> (&'static str, &'static str) {
-    if launched && access == AccessMode::WorktreeWrite {
+    outcome: AttemptOutcome,
+    cause: Option<&provenant_records::RouteExclusionReason>,
+) -> (&'static str, String) {
+    let (code, denial) = if launched && access == AccessMode::WorktreeWrite {
         (
             "fallback_launched_writer",
             "A launched writer may have effects; route fallback is denied.",
@@ -145,7 +147,21 @@ pub(super) fn fallback_denial(
             "fallback_evidence_unavailable",
             "Cannot verify local preparation and released custody for route fallback.",
         )
-    }
+    };
+    let reason = match outcome {
+        AttemptOutcome::AuthRequired => "The lane requires authentication.",
+        AttemptOutcome::UsageLimited => "The lane reached a usage limit.",
+        AttemptOutcome::AdapterUnavailable => "The lane's adapter is unavailable.",
+        _ => "The lane failed.",
+    };
+    let detail = cause.map(provenant_routing::exclusion_detail);
+    (
+        code,
+        match detail {
+            Some(detail) => format!("{reason} {detail}. {denial}"),
+            None => format!("{reason} {denial}"),
+        },
+    )
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -141,9 +141,14 @@ fn set_writes_clears_and_resolves_by_id_and_label() -> Result {
     };
     let (status, _) = run(&["accounts", "set", "alpha", "--order", "1", "--json"])?;
     assert_ne!(status, 0, "ambiguous label must be refused");
-    assert_ne!(
-        run(&["accounts", "set", "missing", "--order", "1", "--json"])?.0,
-        0
+    let (status, missing) = run(&["accounts", "set", "missing", "--order", "1", "--json"])?;
+    assert_ne!(status, 0);
+    assert_eq!(missing["error"]["code"], "UNKNOWN_ACCOUNT");
+    assert!(
+        missing["error"]["next"]
+            .as_str()
+            .unwrap()
+            .contains("provenant accounts list")
     );
     assert_ne!(run(&["accounts", "set", "beta", "--json"])?.0, 0);
     assert_ne!(

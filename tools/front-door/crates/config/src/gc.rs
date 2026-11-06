@@ -5,7 +5,7 @@ use std::{
     path::{Component, Path},
 };
 
-/// Kernel pressure level at which new lanes wait. The memory floor still applies.
+/// Kernel pressure level at which new lanes wait. The memory floor is advisory.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MemoryPressureThreshold {
@@ -15,6 +15,14 @@ pub enum MemoryPressureThreshold {
     Never,
 }
 impl MemoryPressureThreshold {
+    pub fn diagnostic_value(self) -> provenant_records::diagnostic::PressureThreshold {
+        match self {
+            Self::Warning => provenant_records::diagnostic::PressureThreshold::Warning,
+            Self::Critical => provenant_records::diagnostic::PressureThreshold::Critical,
+            Self::Never => provenant_records::diagnostic::PressureThreshold::Never,
+        }
+    }
+
     pub fn defers(self, pressure: provenant_os::sys::resources::MemoryPressure) -> bool {
         use provenant_os::sys::resources::MemoryPressure;
         matches!(
@@ -32,11 +40,17 @@ impl MemoryPressureThreshold {
 #[serde(default)]
 pub struct LaneBuildSettings {
     /// Kernel pressure threshold for admission; Critical unless set.
-    pub memory_pressure_threshold: MemoryPressureThreshold,
+    pub memory_pressure_threshold: Option<MemoryPressureThreshold>,
     #[serde(default, deserialize_with = "deserialize_auto")]
     pub max_concurrent_builds: Option<u64>,
     #[serde(default, deserialize_with = "deserialize_auto")]
     pub cargo_build_jobs: Option<u64>,
+    /// Most lanes of any class live at once across the host.
+    #[serde(default, deserialize_with = "deserialize_auto")]
+    pub max_lanes: Option<u64>,
+    /// Most lanes of any class live at once for one project.
+    #[serde(default, deserialize_with = "deserialize_auto")]
+    pub max_project_lanes: Option<u64>,
     /// Most writer lanes live at once across the host.
     #[serde(default, deserialize_with = "deserialize_auto")]
     pub max_writer_lanes: Option<u64>,
@@ -124,6 +138,17 @@ pub fn deserialize_auto<'de, D: serde::Deserializer<'de>>(
     }
 }
 impl LaneBuildSettings {
+    pub fn memory_pressure_threshold(&self) -> MemoryPressureThreshold {
+        self.memory_pressure_threshold.unwrap_or_default()
+    }
+
+    pub fn memory_pressure_source(&self) -> provenant_records::diagnostic::SettingSource {
+        if self.memory_pressure_threshold.is_some() {
+            provenant_records::diagnostic::SettingSource::Configuration
+        } else {
+            provenant_records::diagnostic::SettingSource::ShippedDefault
+        }
+    }
     pub fn read(state: &Path) -> std::io::Result<Self> {
         crate::loader::read_settings(state, "domains.fabric.lanes", |settings: &Self| {
             if settings.invalid_keys().is_empty() {
@@ -143,6 +168,16 @@ impl LaneBuildSettings {
         }
         if !in_range(self.cargo_build_jobs, 1024) {
             invalid.push("cargo_build_jobs");
+        }
+        if !in_range(self.max_lanes, WRITER_LANES_CEILING) {
+            invalid.push("max_lanes");
+        }
+        if !in_range(self.max_project_lanes, PROJECT_WRITER_LANES_CEILING)
+            || self
+                .max_project_lanes
+                .is_some_and(|project| project > self.total_lanes())
+        {
+            invalid.push("max_project_lanes");
         }
         if !in_range(self.max_writer_lanes, WRITER_LANES_CEILING) {
             invalid.push("max_writer_lanes");
@@ -239,6 +274,20 @@ impl LaneBuildSettings {
         let by_memory = total_bytes / (6 * 1024_u64.pow(3));
         by_cpu.min(by_memory).clamp(1, 64)
     }
+    /// Total caps retain the existing fixed ceilings as shipped defaults.
+    pub fn total_lanes(&self) -> u64 {
+        self.max_lanes
+            .unwrap_or(WRITER_LANES_CEILING)
+            .clamp(1, WRITER_LANES_CEILING)
+    }
+
+    pub fn project_total_lanes(&self) -> u64 {
+        self.max_project_lanes
+            .unwrap_or(PROJECT_WRITER_LANES_CEILING)
+            .clamp(1, PROJECT_WRITER_LANES_CEILING)
+            .min(self.total_lanes())
+    }
+
     pub fn writer_lanes(&self) -> u64 {
         self.max_writer_lanes
             .unwrap_or(DEFAULT_MAX_WRITER_LANES)
@@ -478,7 +527,7 @@ mod tests {
         assert_eq!(lanes.cargo_build_jobs, None);
         assert_eq!(lanes.max_concurrent_builds, Some(3));
         assert_eq!(
-            lanes.memory_pressure_threshold,
+            lanes.memory_pressure_threshold(),
             super::MemoryPressureThreshold::Critical
         );
         assert!(lanes.invalid_keys().is_empty());
@@ -683,23 +732,44 @@ mod build_tests {
     #[test]
     fn memory_pressure_accepts_host_policy() {
         use provenant_os::sys::resources::MemoryPressure;
+        use provenant_records::diagnostic::SettingSource;
+        assert_eq!(
+            LaneBuildSettings::default().memory_pressure_source(),
+            SettingSource::ShippedDefault
+        );
+        let defaults: LaneBuildSettings =
+            toml_edit::de::from_str("memory_pressure_threshold = 'critical'").unwrap();
+        assert_eq!(
+            defaults.memory_pressure_source(),
+            SettingSource::Configuration
+        );
+        assert!(
+            !defaults
+                .memory_pressure_threshold()
+                .defers(MemoryPressure::Warning)
+        );
+        assert!(
+            defaults
+                .memory_pressure_threshold()
+                .defers(MemoryPressure::Critical)
+        );
         let warning: LaneBuildSettings =
             toml_edit::de::from_str("memory_pressure_threshold = 'warning'").unwrap();
         assert!(
             warning
-                .memory_pressure_threshold
+                .memory_pressure_threshold()
                 .defers(MemoryPressure::Warning)
         );
         assert!(
             !warning
-                .memory_pressure_threshold
+                .memory_pressure_threshold()
                 .defers(MemoryPressure::Normal)
         );
         let never: LaneBuildSettings =
             toml_edit::de::from_str("memory_pressure_threshold = 'never'").unwrap();
         assert!(
             !never
-                .memory_pressure_threshold
+                .memory_pressure_threshold()
                 .defers(MemoryPressure::Critical)
         );
         assert!(
@@ -808,6 +878,26 @@ mod build_tests {
         };
         assert_eq!(wild.build_limit(0), 1);
     }
+    #[test]
+    fn total_lane_caps_preserve_defaults_and_validate_host_policy() {
+        let defaults = LaneBuildSettings::default();
+        assert_eq!(defaults.total_lanes(), crate::WRITER_LANES_CEILING);
+        assert_eq!(
+            defaults.project_total_lanes(),
+            crate::PROJECT_WRITER_LANES_CEILING
+        );
+        let configured: LaneBuildSettings =
+            toml_edit::de::from_str("max_lanes = 12\nmax_project_lanes = 5").unwrap();
+        assert!(configured.invalid_keys().is_empty());
+        assert_eq!(configured.total_lanes(), 12);
+        assert_eq!(configured.project_total_lanes(), 5);
+        let invalid: LaneBuildSettings =
+            toml_edit::de::from_str("max_lanes = 3\nmax_project_lanes = 4").unwrap();
+        assert!(invalid.invalid_keys().contains(&"max_project_lanes"));
+        let host_only: LaneBuildSettings = toml_edit::de::from_str("max_lanes = 3").unwrap();
+        assert_eq!(host_only.project_total_lanes(), 3);
+    }
+
     #[test]
     fn cargo_profile_defaults_and_overrides() {
         let settings = LaneBuildSettings::default();

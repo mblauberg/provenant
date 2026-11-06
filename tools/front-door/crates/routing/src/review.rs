@@ -967,7 +967,13 @@ impl ReviewConfig {
         catalogue: Option<&Catalogue>,
         errors: &mut Vec<SectionError>,
     ) {
-        let mut error = |field: String, code| errors.push(SectionError { field, code });
+        let mut error = |field: String, code| {
+            errors.push(SectionError {
+                field,
+                code,
+                detail: None,
+            })
+        };
         if self.shapes.len() > 128 {
             error("review.shapes".into(), "limit");
         }

@@ -1115,24 +1115,12 @@ fn account_reason<'q>(
 /// How a route's unavailability reads to a person. Account evidence carries the
 /// quota repair text, so a refused or mismatched account says what to do next.
 pub fn exclusion_detail(reason: &RouteExclusionReason) -> String {
-    if let Some(block) = provenant_quota::AccountBlock::from_exclusion_reason(reason) {
-        return block.repair().to_owned();
-    }
-    match reason {
-        RouteExclusionReason::Exhausted => {
-            "exhausted; wait for the quota reset or select another account".to_owned()
-        }
-        RouteExclusionReason::AuthRequired => {
-            "authentication required; sign in to the selected account".to_owned()
-        }
-        RouteExclusionReason::LoginExpired => {
-            "login expired; check the selected account with `provenant quota`".to_owned()
-        }
-        RouteExclusionReason::InvalidAccountEvidence => {
-            "invalid persisted account evidence; repair or re-register the account".to_owned()
-        }
-        other => format!("{other:?}"),
-    }
+    let diagnostic = reason.diagnostic("REFUSED");
+    format!(
+        "{}; {}",
+        diagnostic.detail.unwrap_or_default(),
+        diagnostic.next.unwrap_or_default()
+    )
 }
 /// Persisted mismatch or refusal evidence, assessed by the same quota function
 /// that admission rechecks before launch. Invalid evidence excludes only the

@@ -1462,11 +1462,12 @@ fn published_disk_admission_refusal_names_figures_and_repair() {
         super::AdmissionError::Disk {
             free: 99,
             floor: 100,
+            origin: provenant_records::diagnostic::SettingSource::Configuration,
         },
     ));
     assert_eq!(
         reason,
-        "insufficient disk space: 99 bytes available, gc.free_floor 100 bytes; run `provenant gc --apply`"
+        "insufficient disk space: 99 bytes available, gc.free_floor 100 bytes (source: host configuration); run `provenant gc --apply`"
     );
 }
 

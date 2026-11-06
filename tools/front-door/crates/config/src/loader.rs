@@ -196,6 +196,7 @@ fn validate_entry(entry: &crate::DomainSection, table: &Table) -> Vec<SectionErr
             .is_some_and(|limits| limits.contains_key("bundle_bytes"))
     {
         return vec![SectionError {
+            detail: None,
             field: "limits.bundle_bytes".into(),
             code: "retired.bundle_bytes",
         }];
@@ -783,6 +784,7 @@ fn boundary_issue<T>(issue: &Issue, sections: &DomainSections<T>) -> bool {
         };
         field.is_some_and(|field| {
             (entry.boundary)(&SectionError {
+                detail: None,
                 field: field.to_owned(),
                 code: issue
                     .source
@@ -1545,6 +1547,7 @@ impl Overrides<'_> {
             ),
             rule,
             source: (graph_policy || retired_key).then(|| SectionError {
+                detail: None,
                 field: if retired_key {
                     path[2..].join(".")
                 } else {
@@ -1763,6 +1766,7 @@ impl Overrides<'_> {
                         && issue.location.key_path == path.join(".")
                     {
                         issue.source = Some(SectionError {
+                            detail: None,
                             field: issue.location.key_path.clone(),
                             code: "row_type",
                         });
@@ -2439,6 +2443,7 @@ mod warning_tests {
             ),
             rule: "invalid",
             source: Some(SectionError {
+                detail: None,
                 field: String::new(),
                 code: "moved_to_schedule.expires",
             }),
