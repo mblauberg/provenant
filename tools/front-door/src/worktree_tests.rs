@@ -4335,8 +4335,8 @@ if (process.argv[2] === 'child') {
             Err(error) => Err(error.into()),
         }
     };
-    // Startup spacing is host-wide: the child would otherwise wait out the
-    // default 20 s after the parent's own start, past this test's deadline.
+    // Startup spacing is host-wide: the child would otherwise wait out any
+    // spacing after the parent's own start, past this test's deadline.
     // Clear only the last-start time; the lease counts stay real.
     let ledger = state.join("admission.sqlite3");
     if ledger.exists() {

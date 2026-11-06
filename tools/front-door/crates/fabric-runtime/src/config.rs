@@ -862,6 +862,7 @@ pub const FIELD_METADATA: &[FieldMetadata] = &[
         "lanes.memory_pressure_threshold",
         &["warning", "critical", "never"],
     ),
+    FieldMetadata::int("lanes.start_spacing_ms", 0, 600_000),
     FieldMetadata::int("lanes.max_concurrent_builds", 1, 64),
     FieldMetadata::int("lanes.cargo_build_jobs", 1, 1024),
     FieldMetadata::int("lanes.max_lanes", 1, 64),

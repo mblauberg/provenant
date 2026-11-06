@@ -334,7 +334,8 @@ impl RunStore {
             active: false,
             memory_floor_basis_points: self.policy.memory_floor_basis_points,
             disk_floor_bytes,
-            startup_spacing_ms: provenant_config::LaneBuildSettings::read(&self.writer_registry)?
+            startup_spacing_ms: provenant_config::LaneBuildSettings::read(&self.writer_registry)
+                .unwrap_or_default()
                 .start_spacing_ms
                 .unwrap_or_else(|| self.policy.spacing_ms(class)),
             lane_class: class,

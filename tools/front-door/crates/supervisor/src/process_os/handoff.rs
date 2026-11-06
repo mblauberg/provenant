@@ -166,11 +166,6 @@ pub(crate) fn spawn(
     {
         guardian_environment.push((crate::FIXTURE_OWNER_ENV.into(), identity.into()));
     }
-    // The guardian also submits successor lanes, so it keeps a fixture's spacing cap.
-    #[cfg(debug_assertions)]
-    if let Some(spacing) = std::env::var_os(crate::STARTUP_SPACING_ENV) {
-        guardian_environment.push((crate::STARTUP_SPACING_ENV.into(), spacing));
-    }
     command
         .env_clear()
         .envs(guardian_environment.iter().cloned())

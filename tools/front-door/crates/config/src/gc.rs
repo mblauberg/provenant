@@ -93,6 +93,8 @@ pub struct LaneBuildSettings {
     /// minutes unless set.
     pub build_dir_survey_interval_seconds: Option<u64>,
 }
+/// Longest configurable gap between lane starts: ten minutes.
+pub const MAX_START_SPACING_MS: u64 = 600_000;
 pub const DEFAULT_MAX_WRITER_LANES: u64 = 40;
 pub const DEFAULT_MAX_PROJECT_WRITER_LANES: u64 = 30;
 pub const DEFAULT_BUILD_WAIT_MINUTES: u64 = 30;
@@ -163,6 +165,12 @@ impl LaneBuildSettings {
         let in_range = |value: Option<u64>, max: u64| value.is_none_or(|n| (1..=max).contains(&n));
         if !in_range(self.max_concurrent_builds, 64) {
             invalid.push("max_concurrent_builds");
+        }
+        if self
+            .start_spacing_ms
+            .is_some_and(|spacing| spacing > MAX_START_SPACING_MS)
+        {
+            invalid.push("start_spacing_ms");
         }
         if !in_range(self.cargo_build_jobs, 1024) {
             invalid.push("cargo_build_jobs");
@@ -499,6 +507,23 @@ pub fn parse_cache_size(text: &str) -> Result<u64, &'static str> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn start_spacing_above_the_ceiling_is_invalid() {
+        let spacing = |ms| super::LaneBuildSettings {
+            start_spacing_ms: Some(ms),
+            ..Default::default()
+        };
+        assert!(
+            spacing(super::MAX_START_SPACING_MS)
+                .invalid_keys()
+                .is_empty()
+        );
+        assert_eq!(
+            spacing(super::MAX_START_SPACING_MS + 1).invalid_keys(),
+            ["start_spacing_ms"]
+        );
+    }
+
     #[test]
     fn direct_settings_reads_recover_invalid_optional_values()
     -> Result<(), Box<dyn std::error::Error>> {
