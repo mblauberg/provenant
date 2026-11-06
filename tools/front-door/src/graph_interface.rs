@@ -5,6 +5,7 @@ use provenant_confinement::worktrees::WorkerObserver;
 use provenant_core::{CancelToken, Clock, WaitBudget};
 use provenant_records::{CommandResult, Outcome};
 use serde_json::{Value, json};
+use std::io::Write;
 use std::path::Path;
 
 fn document(path: &Path) -> Result<Value, String> {
@@ -104,11 +105,20 @@ fn invoke(
         }
     }
 }
+#[allow(clippy::print_stderr)]
 pub(crate) fn run(
-    request: GraphRunArgs,
+    mut request: GraphRunArgs,
     globals: &Globals,
     workers: &'static dyn WorkerObserver,
 ) -> u8 {
+    if let Some(value) = request.ambiguous_wait_brief().map(str::to_owned) {
+        let message = format!("`--wait` has no value; use `--wait={value}`");
+        let _ = writeln!(std::io::stderr().lock(), "warning: {message}");
+        request.brief = None;
+        if request.file.is_none() {
+            return invoke("run", Err(message), globals, workers);
+        }
+    }
     invoke("run", run_input(request), globals, workers)
 }
 
@@ -275,6 +285,7 @@ mod tests {
             detached: false,
             explain: false,
             wait: None,
+            bare_wait_value: None,
         }
     }
 
