@@ -229,10 +229,15 @@ fn a_waiting_parent_yields_its_slot_to_its_child() {
         )
         .unwrap();
         if progress(&run.checkpoint, "a--fix").state == NodeState::Running {
-            assert!(owner.permissions.contains(&(
-                AccessMode::WorktreeWrite,
-                Some(".worktrees/live-a--fix".into())
-            )));
+            let binding = progress(&run.checkpoint, "a--fix")
+                .writer_binding
+                .as_ref()
+                .unwrap();
+            assert!(
+                owner
+                    .permissions
+                    .contains(&(AccessMode::WorktreeWrite, Some(binding.worktree.clone())))
+            );
         }
         (run.checkpoint, owner.calls.len())
     };
