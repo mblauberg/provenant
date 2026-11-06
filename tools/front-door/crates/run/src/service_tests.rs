@@ -5,12 +5,11 @@ use provenant_core::{CancelToken, OperationId, TaskId};
 type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
 
 #[test]
-fn cloud_placement_survives_request_reopen() -> TestResult {
+fn dispatch_preserves_launch_fields_on_request_reopen() -> TestResult {
     let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());
     let call = call(&clock, &cancel);
     let store = RunStore::open(&context(temp.path())?, &call)?;
-    let mut request = submission("run a test");
     let placement = provenant_records::run::CloudPlacement {
         target: "verify".into(),
         provider: "fake".into(),
@@ -21,12 +20,24 @@ fn cloud_placement_survives_request_reopen() -> TestResult {
         effort: None,
         deadline_seconds: 3600,
     };
-    request.tasks[0].cloud = Some(placement.clone());
-    let run = Service::new(&store).dispatch(request, temp.path(), &call)?;
-    assert_eq!(
-        store.request(run.run_id, &call)?.tasks[0].cloud,
-        Some(placement)
-    );
+    for (name, roots) in [
+        ("read", vec![]),
+        ("write", vec![temp.path().join("shared")]),
+    ] {
+        let mut request = submission("run a test");
+        request.operation_id = OperationId::parse(name)?;
+        request.tasks[0].cloud = Some(placement.clone());
+        request.tasks[0].account = Some("account-a".into());
+        request.tasks[0].build_heavy = true;
+        request.tasks[0].access.write_roots = roots.clone();
+        let run = Service::new(&store).dispatch(request, temp.path(), &call)?;
+        let reopened = store.request(run.run_id, &call)?;
+        let task = &reopened.tasks[0];
+        assert_eq!(task.cloud, Some(placement.clone()));
+        assert_eq!(task.account.as_deref(), Some("account-a"));
+        assert!(task.build_heavy);
+        assert_eq!(task.access.write_roots, roots);
+    }
     Ok(())
 }
 
