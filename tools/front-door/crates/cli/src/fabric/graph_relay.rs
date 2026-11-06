@@ -349,6 +349,18 @@ fn provision_child(
     source: &str,
     cancel: &CancelToken,
 ) -> Result<(), ServiceError> {
+    let branch = path.strip_prefix(".worktrees/").ok_or_else(|| refused("writer_worktree", "invalid managed worktree path"))?;
+    provision_writer(context, path, branch, source, cancel)
+}
+
+/// Provision a graph-owned writer at its checkpointed source commit.
+pub fn provision_writer(
+    context: &Context,
+    path: &str,
+    branch: &str,
+    source: &str,
+    cancel: &CancelToken,
+) -> Result<(), ServiceError> {
     use provenant_confinement::worktrees;
     worktrees::with_context(
         &context.roots,
@@ -356,7 +368,7 @@ fn provision_child(
         &context.cwd,
         &provenant_os::clock::SystemClock::new(),
         cancel,
-        |worktree_context| provision_in_context(worktree_context, path, source, cancel),
+        |worktree_context| provision_in_context(worktree_context, path, branch, source, cancel),
     )
     .map_err(|error| refused("writer_worktree", error.to_string()))
 }
@@ -364,13 +376,14 @@ fn provision_child(
 fn provision_in_context(
     context: &provenant_confinement::worktrees::WorktreeContext<'_>,
     path: &str,
+    branch: &str,
     source: &str,
     cancel: &CancelToken,
 ) -> Result<(), provenant_confinement::worktrees::WorktreeError> {
     use provenant_confinement::worktrees::{self, WorktreeCreate, WorktreeError};
-    let branch = path
-        .strip_prefix(".worktrees/")
-        .ok_or(WorktreeError::InvalidRequest)?;
+    if path != format!(".worktrees/{}", branch.replace('/', "-")) {
+        return Err(WorktreeError::InvalidRequest);
+    }
     let expected = context.repo.root_path().join(path);
     if let Some(existing) = worktrees::list(context, cancel)?
         .into_iter()
@@ -775,6 +788,16 @@ mod provisioning_tests {
         let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
         let context = Context::open(roots, &home, &project)?;
         let cancel = CancelToken::new();
+        // Explicit top-level writer branches use the same managed path rules
+        // as worktree creation, preserving slashes in the Git branch itself.
+        provision_writer(&context, ".worktrees/topic-fix", "topic/fix", &source, &cancel)?;
+        let branch = provenant_os::fixture::git_command()
+            .current_dir(project.join(".worktrees/topic-fix"))
+            .args(["rev-parse", "--abbrev-ref", "HEAD"])
+            .output()?;
+        assert!(branch.status.success());
+        assert_eq!(String::from_utf8(branch.stdout)?.trim(), "topic/fix");
+        assert!(provision_writer(&context, ".worktrees/topic-fix", "other", &source, &cancel).is_err());
         let path = ".worktrees/graph-parent--child";
         provision_child(&context, path, &source, &cancel)?;
         let output = provenant_os::fixture::git_command()
@@ -808,7 +831,7 @@ mod provisioning_tests {
                 &provenant_os::clock::SystemClock::new(),
                 &cancel,
                 &census,
-                |ctx| provision_in_context(ctx, path, &source, &cancel),
+                |ctx| provision_in_context(ctx, path, path.trim_start_matches(".worktrees/"), &source, &cancel),
             )
         };
         provision()?;
@@ -827,13 +850,13 @@ mod provisioning_tests {
                 &cancel,
                 &Census(occupancy),
                 |ctx| {
-                    provision_in_context(ctx, path, &source, &cancel)?;
+                    provision_in_context(ctx, path, path.trim_start_matches(".worktrees/"), &source, &cancel)?;
                     let _held = provenant_confinement::worktrees::cache_writer_guard(
                         ctx.project_state,
                         &project.join(path),
                     )
                     .map_err(provenant_confinement::worktrees::custody_refusal)?;
-                    let held = provision_in_context(ctx, path, &source, &cancel);
+                    let held = provision_in_context(ctx, path, path.trim_start_matches(".worktrees/"), &source, &cancel);
                     assert!(
                         matches!(
                             held,

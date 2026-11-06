@@ -1038,6 +1038,20 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
         ))
     }
 
+    fn provision_writer_worktree(
+        &mut self,
+        path: &str,
+        branch: &str,
+        base: &str,
+    ) -> Result<Option<provenant_fabric_runtime::graph::WriterWorktreeBinding>, Self::Error> {
+        provenant_cli::fabric::graph_relay::provision_writer(
+            &self.factory.context, path, branch, base, self.cancel,
+        ).map_err(|error| FacadeError::DispatchRefused {
+            fact: None, disk: None, reason: error.to_string(),
+        })?;
+        self.bind_writer_worktree(path)
+    }
+
     fn bound_graph_bases(
         &self,
     ) -> (
