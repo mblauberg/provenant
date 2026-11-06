@@ -264,7 +264,7 @@ fn deadline_free_graph_tick_launches_waiting_fake_provider() -> Result {
     )?
     .ok_or("checkpoint")?;
     if checkpoint.nodes[0].state == graph::NodeState::Failed {
-        let lanes = rig.command(&["lanes", "--all", "--json"])?;
+        let lanes = rig.command(&["status", "--all", "--json"])?;
         panic!(
             "fake provider failed: {}",
             String::from_utf8_lossy(&lanes.stdout.bytes)
