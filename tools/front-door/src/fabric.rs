@@ -11,7 +11,7 @@ pub(crate) use unified::{
 pub(crate) mod landing;
 pub(crate) mod owner;
 mod peer;
-mod preset_graph;
+mod graph_document;
 pub(crate) mod run_owner;
 pub(crate) mod settlement;
 
@@ -28,14 +28,7 @@ pub(crate) use graph_human::graph_human;
 use graph_human::graph_summary;
 use graph_status::{graph_snapshot, graph_status_elapsed, redact_checkout_paths};
 pub use peer::{hosts, peer};
-#[cfg(test)]
-#[allow(unused_imports)] // unused where integration tests include this file
-pub(crate) use preset_graph::ScratchPreparationError;
-#[allow(unused_imports)]
-pub(crate) use preset_graph::publish_preset_graph;
-#[cfg(test)]
-#[allow(unused_imports)] // unused where integration tests include this file
-pub(crate) use preset_graph::{PreparedScratch, retry_scratch_poll, scratch_prepare_error_message};
+pub(crate) use graph_document::publish_graph_document;
 pub(crate) use settlement::advance_live_graph;
 
 #[cfg(test)]
@@ -225,7 +218,6 @@ impl stdio::Factory for Factory {
     }
     type Facade<'a> = BoundFacade<'a>;
     fn preflight(&self, call: &provenant_fabric_mcp::tools::ToolCall) -> Result<(), ServiceError> {
-        use provenant_fabric_mcp::tools::ToolCall;
         if let provenant_fabric_mcp::tools::ToolCall::Inbox(input, _) = call {
             let ctx = &self.context;
             provenant_fabric_runtime::inbox::validate_request(
@@ -234,13 +226,6 @@ impl stdio::Factory for Factory {
                 ctx.in_lane,
                 input,
             )?;
-        }
-        if matches!(
-            call,
-            ToolCall::Submit(SubmitInput::Submit { host: None, .. })
-                | ToolCall::SubmitWait(SubmitInput::Submit { host: None, .. }, ..)
-        ) {
-            provenant_cli::run::nested_dispatch_context(&self.context.roots).map_err(fail_error)?;
         }
         Ok(())
     }
@@ -713,25 +698,10 @@ impl F3Facade for BoundFacade<'_> {
         }
         Ok(self.factory.context.identity.clone())
     }
-    // F3 binds run submit/query/controls once the run owner lands on main.
     fn submit(
-        &mut self,
-        input: SubmitInput,
-        budget: WaitBudget,
-        cancel: &CancelToken,
+        &mut self, _input: SubmitInput, _budget: WaitBudget, _cancel: &CancelToken,
     ) -> Result<SubmissionReceipt, FacadeError> {
-        BinaryRunOwner {
-            factory: self.factory,
-            allow_remote: true,
-            actor: None,
-            chair: Some(provenant_run::ChairBinding {
-                extra: Default::default(),
-                session: provenant_cli::fabric::current_session(),
-                host: self.factory.context.identity.inbox.host,
-                actor: self.factory.context.identity.inbox.actor,
-            }),
-        }
-        .submit(input, budget, cancel)
+        Err(FacadeError::invalid(InvalidInputDetail::Field("submit".into())))
     }
     fn run(
         &mut self,
@@ -2013,7 +1983,7 @@ impl Factory {
         &self,
         cancel: &CancelToken,
         budget: WaitBudget,
-    ) -> Result<PathBuf, preset_graph::ScratchPreparationError> {
+    ) -> Result<PathBuf, provenant_confinement::worktrees::WorktreeError> {
         provenant_confinement::worktrees::with_context(
             &self.context.roots,
             &self.home,
@@ -2035,7 +2005,6 @@ impl Factory {
                 )
             },
         )
-        .map_err(preset_graph::ScratchPreparationError)
     }
 }
 
@@ -2400,6 +2369,14 @@ pub fn events(
 )]
 mod test_presentation {
     use super::*;
+    fn shell_path(path: &std::path::Path) -> String {
+        let value = path.to_string_lossy();
+        if value.chars().all(|character| character.is_ascii_alphanumeric() || "_./-".contains(character)) {
+            value.into_owned()
+        } else {
+            format!("'{}'", value.replace('\'', "'\\''"))
+        }
+    }
     pub(super) fn graph_display(
         run: &provenant_fabric_runtime::graph::GraphRun,
         command: &str,
@@ -2427,11 +2404,11 @@ mod test_presentation {
         if let Some(state_dir) = &globals.state_dir {
             status.push_str(&format!(
                 " --state-dir {}",
-                preset_graph::shell_path(state_dir)
+                shell_path(state_dir)
             ));
         }
         if let Some(project) = &globals.project {
-            status.push_str(&format!(" --project {}", preset_graph::shell_path(project)));
+            status.push_str(&format!(" --project {}", shell_path(project)));
         }
         status.push_str(&format!(" fabric graph status {}", run.checkpoint.graph_id));
         format!(

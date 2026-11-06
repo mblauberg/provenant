@@ -1662,7 +1662,7 @@ fn assert_refused_into_fallback(run: &GraphRun) {
 
 fn planned_fixture(name: &str) -> GraphDocument {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join(format!("../../assets/presets/fixtures/{name}.plan.json"));
+        .join(format!("assets/test-fixtures/plans/{name}.plan.json"));
     let text = std::fs::read_to_string(&path)
         .unwrap()
         .replace("\"commit\": \"HEAD\"", "\"commit\": \"0123456789abcdef0123456789abcdef01234567\"");
@@ -1837,7 +1837,7 @@ fn pattern_result_all(instances: Vec<Value>) -> String {
 #[test]
 fn planned_big_batch_refuses_overlapping_waves_and_budgets_over_the_lane_deadline() {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../assets/presets/fixtures/big-batch.plan.json");
+        .join("assets/test-fixtures/plans/big-batch.plan.json");
     let mut doc: GraphDocument = serde_json::from_str(
         &std::fs::read_to_string(&path)
             .unwrap()

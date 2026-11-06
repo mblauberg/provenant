@@ -283,7 +283,6 @@ pub(crate) fn enrich_status_rows(
             &record,
             &[],
             context.roots.state.as_path(),
-            &Default::default(),
             clock.wall_now().ok(),
             false,
         );
