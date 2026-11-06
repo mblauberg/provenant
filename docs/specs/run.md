@@ -376,7 +376,8 @@ On macOS, Critical kernel memory pressure defers both classes by default.
 `domains.fabric.lanes.memory_pressure_threshold` accepts `critical`, `warning`
 (Warning or Critical) or `never`. An unavailable or unknown pressure sample is
 logged. Low available memory warns on both classes without holding admission.
-The disk floor applies to both classes. Build slots do not gate
+The disk floor holds writers; read-only lanes below it warn once with free space,
+the floor and its source, then proceed. Build slots do not gate
 admission: a host-wide build throttle (not a hard cap), by default
 max(1, min(cores / cargo_build_jobs, GiB of RAM / 6)) slots, gates each
 compiling cargo command a lane runs (`provenant_os::build_slots`, reached
@@ -386,7 +387,7 @@ count. Writer lanes are capped separately by `max_writer_lanes` (host, default
 cap queues to the admission deadline and is then refused with a reason naming
 the cap, its scope and the key to raise. All lanes also count against the
 configured total caps. At expiry, disk floor, known pressure and the applicable
-lane cap have distinct refusal reasons with their setting and source. Disk-floor
+lane cap have distinct refusal reasons with their setting and source. For writers, disk-floor
 refusal takes precedence when disk and pressure are both insufficient. A failed
 memory sample or a floor-only memory shortage does not by itself refuse admission.
 The ledger associates new leases
@@ -426,7 +427,7 @@ judged: host clock or boot identity unreadable`), which the guardian publishes
 as the lane's never-spawned reason, rather than judged on the wall clock;
 `lanes` then names no spacing wait. The wall clock is kept only as the `started_at` a lane displays. The
 memory floor (5 %) warns for both classes; the live `gc.free_floor` disk floor
-can refuse both classes.
+can refuse writers; read-only lanes below it warn once and proceed.
 The disk default is 10 % of the state volume, with a 50 GiB minimum. A ticket with no class is a writer; opening a version 1 ledger upgrades it in
 place, in one transaction, carrying any wall-time start across as a start of now under the current boot
 for each class, whatever its age and without reading the wall clock, so the
@@ -1464,6 +1465,8 @@ Named route pools skip members with fresh, unreset exhaustion. Stale spent
 observations rank a member behind other ready members, but never refuse a launch.
 When every member has fresh exhaustion, refusal identifies the members
 and their earliest known resets. An exact model request keeps its model.
-A quota refusal before any generated work may retry the same alias;
-the successor attempt retains the spent members in its routing exclusions and
-links to the prior attempt. Generated output prevents this redraw. A writer with a session also needs explicit zero output usage.
+A quota stop may retry the same alias even after generated work, within
+`settlement_retries` and the attempt limit. The successor attempt retains spent
+members in its routing exclusions and links to the prior attempt. Writers keep
+the same worktree; the successor is instructed to inspect its files and commits
+and continue the work rather than restart. Read-only lanes retry the original task.

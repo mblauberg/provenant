@@ -53,7 +53,6 @@ lane_row! {
         partial_signals: Value => any();
         usage: Value => any();
         delivery_id: Option<String> => nullable(string());
-        write_grants: Value => nullable(array(grant_schema()));
         read_only_writable: Value => nullable(array(nullable(super::schema::worktree_path())));
         git_grants_digest: Option<String> => nullable(string());
         head: Option<String> => nullable(string());
@@ -65,7 +64,8 @@ lane_row! {
         transcript: Option<LaneTranscript> => nullable(object(&[("adapter", string()), ("session", string()), ("path", nullable(super::schema::worktree_path()))], &[]));
     }
     optional {
-        terminal_cause: crate::run::TerminalCause => choices(&["unsupported_platform", "unknown_pacing_account", "unregistered_account", "delivery_prepare_credential_helper", "spawn_failure", "process_crash", "settlement_failure", "provider_early_stop", "free_pool_quota", "command_unavailable", "host_native_unconfigured", "identity_unobserved"]);
+        write_grants: Value => nullable(array(grant_schema()));
+        terminal_cause: crate::run::TerminalCause => choices(&["preparation_refused", "account_login_required", "route_resolution_refused", "access_policy_refused", "stored_prompt_unreadable", "write_grants_refused", "worktree_busy", "handoff_refused", "retained_writer_import", "unsupported_platform", "unknown_pacing_account", "unregistered_account", "delivery_prepare_credential_helper", "spawn_failure", "process_crash", "settlement_failure", "provider_early_stop", "free_pool_quota", "command_unavailable", "host_native_unconfigured", "identity_unobserved"]);
         host: String => string();
         resolved_route: Value => any();
         title: String => string();
@@ -365,7 +365,7 @@ impl LaneRow {
             partial_signals: json!(lane.partial_signals),
             usage: json!(lane.usage),
             delivery_id: lane.delivery_id.map(|id| id.to_string()),
-            write_grants: json!(write_grants),
+            write_grants: Some(json!(write_grants)),
             read_only_writable: json!(read_only_writable),
             git_grants_digest: lane.git_grants_digest.map(|digest| digest.to_string()),
             head: lane.head.map(|head| head.to_string()),
@@ -463,6 +463,15 @@ mod terminal_cause_tests {
     #[test]
     fn terminal_reasons_use_typed_causes_without_provider_text() {
         for cause in [
+            TerminalCause::PreparationRefused,
+            TerminalCause::AccountLoginRequired,
+            TerminalCause::RouteResolutionRefused,
+            TerminalCause::AccessPolicyRefused,
+            TerminalCause::StoredPromptUnreadable,
+            TerminalCause::WriteGrantsRefused,
+            TerminalCause::WorktreeBusy,
+            TerminalCause::HandoffRefused,
+            TerminalCause::RetainedWriterImport,
             TerminalCause::UnsupportedPlatform,
             TerminalCause::UnknownPacingAccount,
             TerminalCause::UnregisteredAccount,

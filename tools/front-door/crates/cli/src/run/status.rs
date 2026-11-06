@@ -1444,8 +1444,23 @@ pub(super) fn lanes_inner(
     );
     append_provider_errors(&session, &lanes, &mut data, &mut human);
     attach_handoffs(&session, &lanes, &mut data);
+    omit_listing_write_grants(&command.id, &mut data);
     attach_cloud_jobs(&session.store, &lanes, &mut data, &mut human, &call)?;
     Ok((data, human, false))
+}
+
+/// Full confinement evidence belongs to an explicit lane selection. Large
+/// grant sets otherwise multiply across a page and can exhaust the JSON limit.
+pub(super) fn omit_listing_write_grants(targets: &[Target], data: &mut Value) {
+    if targets.is_empty()
+        && let Some(rows) = data["lanes"].as_array_mut()
+    {
+        for row in rows {
+            if let Some(row) = row.as_object_mut() {
+                row.remove("write_grants");
+            }
+        }
+    }
 }
 
 pub(super) fn attach_cloud_jobs(

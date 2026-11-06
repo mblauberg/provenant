@@ -672,11 +672,14 @@ impl RunStore {
         let attempt = self.attempt_dir(lane.run_id, lane.attempt_id, false).ok()?;
         // The guardian samples sealed state, cwd and cache volumes. A listing
         // cannot reconstruct those private launch inputs from the attempt path.
-        let observed = crate::artifacts::read_sealed_observed(&attempt, "admission-disk.json", 1024)
-            .ok().flatten()
-            .and_then(|raw| serde_json::from_slice::<AdmissionDiskSample>(&raw).ok())
-            .filter(|sample| sample.generation == lane.generation);
-        let free = observed.map(|sample| sample.free)
+        let observed =
+            crate::artifacts::read_sealed_observed(&attempt, "admission-disk.json", 1024)
+                .ok()
+                .flatten()
+                .and_then(|raw| serde_json::from_slice::<AdmissionDiskSample>(&raw).ok())
+                .filter(|sample| sample.generation == lane.generation);
+        let free = observed
+            .map(|sample| sample.free)
             .or_else(|| resources.disk(&attempt).ok())?;
         let (floor, origin) = disk_floor(&self.writer_registry).ok()?;
         (free < floor).then(|| format!(
@@ -975,13 +978,18 @@ impl RunStore {
                         below_floor = below_floor.saturating_add(1);
                     }
                     if writer {
-                        let sample = AdmissionDiskSample { generation: ticket.generation, free: disk };
+                        let sample = AdmissionDiskSample {
+                            generation: ticket.generation,
+                            free: disk,
+                        };
                         if last_disk_sample != Some(sample) {
                             // Status evidence only: publication failure must not
                             // alter admission. No paths or private context escape.
                             if let Ok(raw) = serde_json::to_vec(&sample) {
                                 let _ = attempt.atomic_write(
-                                    "admission-disk.json".as_ref(), ".admission-disk-", &raw,
+                                    "admission-disk.json".as_ref(),
+                                    ".admission-disk-",
+                                    &raw,
                                     provenant_os::fs::PublishMode::Replace,
                                 );
                             }

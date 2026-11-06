@@ -888,6 +888,10 @@ impl RunStore {
         ) {
             return Err(RunError::Validation("withdrawal outcome"));
         }
+        // A rejection must remain actionable even when an older preparation
+        // seam supplies only a display message. That message is never projected.
+        let terminal_cause = terminal_cause
+            .or((outcome == Outcome::Rejected).then_some(TerminalCause::PreparationRefused));
         let defer_writer_cleanup = matches!(expected, AttemptState::Starting { .. });
         let old = self.record(id, call)?;
         let dir = self.run_dir(old.run_id, false)?;

@@ -417,6 +417,41 @@ impl PrepareError {
         }
     }
 }
+/// Retain a closed resolver classification, never its freely formatted error.
+fn route_resolution_refusal(error: crate::route::DispatchError) -> PrepareError {
+    use crate::route::{DispatchError, EdgeError};
+    use provenant_records::run::TerminalCause;
+    let message = error.to_string();
+    let (cause, code) = match &error {
+        DispatchError::Edge(error) => match error.as_ref() {
+            EdgeError::AccountProfile {
+                kind: crate::route::AccountProfileError::Unknown,
+                ..
+            } => (
+                TerminalCause::UnknownPacingAccount,
+                "unknown_pacing_account",
+            ),
+            EdgeError::Routing(error) => (TerminalCause::RouteResolutionRefused, error.code()),
+            EdgeError::Unresolved { .. } => {
+                (TerminalCause::RouteResolutionRefused, "unresolved_selector")
+            }
+            _ => (
+                TerminalCause::RouteResolutionRefused,
+                "route_configuration_or_observation",
+            ),
+        },
+        DispatchError::Catalogue(error) => (TerminalCause::RouteResolutionRefused, error.code()),
+        DispatchError::FamilySeparation(..) => {
+            (TerminalCause::RouteResolutionRefused, "family_separation")
+        }
+    };
+    PrepareError::Refusal {
+        message,
+        cause,
+        note: Some(format!("route resolver classification: {code}")),
+    }
+}
+
 impl From<String> for PrepareError {
     fn from(message: String) -> Self {
         Self::Other(message)
@@ -1440,20 +1475,7 @@ pub(super) fn prepare_candidates(
             }),
         )
     };
-    let resolved = resolve(&availability, &[]).map_err(|error| match error {
-        crate::route::DispatchError::Edge(error) => match *error {
-            crate::route::EdgeError::AccountProfile {
-                kind: crate::route::AccountProfileError::Unknown,
-                message,
-            } => PrepareError::Refusal {
-                message,
-                cause: provenant_records::run::TerminalCause::UnknownPacingAccount,
-                note: None,
-            },
-            other => PrepareError::Other(other.to_string()),
-        },
-        other => PrepareError::Other(other.to_string()),
-    })?;
+    let resolved = resolve(&availability, &[]).map_err(route_resolution_refusal)?;
     let named_pool = resolved.pool_selection.is_some() && resume.is_none();
     if let Some(selection) = &resolved.pool_selection {
         for redraw in &selection.redraws {
@@ -3085,5 +3107,37 @@ mod attachment_tests {
         assert!(warning.contains("cursor") && warning.contains("image_input"));
         assert!(image_input_warning("claude", &images).is_none());
         assert!(image_input_warning("cursor", &[]).is_none());
+    }
+}
+
+#[cfg(test)]
+mod refusal_cause_tests {
+    use super::*;
+
+    #[test]
+    fn resolver_refusal_retains_closed_classification_without_error_text() {
+        let error = crate::route::DispatchError::Catalogue(
+            provenant_routing::RoutingError::UnsupportedEffort {
+                model: "PROVIDER_SECRET_SENTINEL".into(),
+                effort: "PROVIDER_SECRET_SENTINEL".into(),
+                support: "PROVIDER_SECRET_SENTINEL".into(),
+            },
+        );
+        let refusal = route_resolution_refusal(error).into_refusal();
+        assert_eq!(
+            refusal.terminal_cause,
+            Some(provenant_records::run::TerminalCause::RouteResolutionRefused)
+        );
+        assert_eq!(
+            refusal.terminal_note.as_deref(),
+            Some("route resolver classification: unsupported_effort")
+        );
+        assert!(refusal.skipped_routes.is_empty());
+        assert!(
+            !refusal
+                .terminal_note
+                .unwrap()
+                .contains("PROVIDER_SECRET_SENTINEL")
+        );
     }
 }

@@ -547,6 +547,15 @@
                       },
                       "terminal_cause": {
                         "enum": [
+                          "preparation_refused",
+                          "account_login_required",
+                          "route_resolution_refused",
+                          "access_policy_refused",
+                          "stored_prompt_unreadable",
+                          "write_grants_refused",
+                          "worktree_busy",
+                          "handoff_refused",
+                          "retained_writer_import",
                           "unsupported_platform",
                           "unknown_pacing_account",
                           "unregistered_account",
@@ -832,7 +841,6 @@
                       "partial_signals",
                       "usage",
                       "delivery_id",
-                      "write_grants",
                       "read_only_writable",
                       "git_grants_digest",
                       "head",

@@ -829,6 +829,8 @@ mod delivery_tests;
 #[cfg(test)]
 mod dispatch_tests;
 #[cfg(test)]
+mod launch_refusal_tests;
+#[cfg(test)]
 mod tests;
 
 #[cfg(all(test, feature = "fixture"))]

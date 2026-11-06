@@ -8952,3 +8952,48 @@ fn malformed_claude_result_preserves_provider_error_in_settlement() {
         }
     }
 }
+
+#[test]
+fn lane_listing_omits_large_grants_but_id_retains_them() -> Result<(), Box<dyn std::error::Error>> {
+    let mut lane = lane_fixture(
+        1,
+        1,
+        run::AttemptState::Queued {
+            extra: Default::default(),
+        },
+    )?;
+    lane.write_grants = (0..600).map(|index| {
+        serde_json::from_value(json!({
+            "source": "tool_write",
+            "path": {"relative_to_root": {"encoding":"utf8", "path": format!("home/fixture/.cache/build/{index}/{}output", "directory/".repeat(8))}},
+            "scope":"subtree"
+        }))
+    }).collect::<Result<_, _>>()?;
+    let lanes = vec![lane.clone(); 25];
+    let (mut data, _) = render_lanes(&lanes, &[], None, Path::new("/state"), None);
+    let full_bytes = serde_json::to_vec(&data)?.len();
+    assert!(
+        full_bytes > 1024 * 1024,
+        "fixture must reproduce the oversized listing: {full_bytes}"
+    );
+    let grants = data["lanes"][0]["write_grants"].clone();
+    assert!(serde_json::to_vec(&grants)?.len() * 25 > 1024 * 1024);
+    let targets = [Target {
+        selection: None,
+        run: Some(lane.run_id),
+        task: None,
+        attempt: Some(lane.attempt_id),
+    }];
+    status::omit_listing_write_grants(&targets, &mut data);
+    assert_eq!(data["lanes"][0]["write_grants"], grants);
+    status::omit_listing_write_grants(&[], &mut data);
+    assert!(
+        data["lanes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|row| row.get("write_grants").is_none())
+    );
+    assert!(serde_json::to_vec(&data)?.len() < 1024 * 1024);
+    Ok(())
+}

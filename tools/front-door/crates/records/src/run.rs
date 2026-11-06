@@ -786,6 +786,15 @@ impl From<Outcome> for crate::AttemptOutcome {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TerminalCause {
+    PreparationRefused,
+    AccountLoginRequired,
+    RouteResolutionRefused,
+    AccessPolicyRefused,
+    StoredPromptUnreadable,
+    WriteGrantsRefused,
+    WorktreeBusy,
+    HandoffRefused,
+    RetainedWriterImport,
     UnsupportedPlatform,
     UnknownPacingAccount,
     UnregisteredAccount,
@@ -803,7 +812,36 @@ pub enum TerminalCause {
 impl TerminalCause {
     pub fn reason(self) -> &'static str {
         match self {
-            Self::UnsupportedPlatform => "sandbox backend is unavailable: UnsupportedPlatform",
+            Self::AccountLoginRequired => {
+                crate::diagnostic::ProviderFailureFact::AuthRequired.reason()
+            }
+            Self::PreparationRefused => {
+                "local launch preparation refused the lane; inspect route and account configuration and local launch evidence before retrying"
+            }
+            Self::RouteResolutionRefused => {
+                "route resolution refused the lane; check the model, effort, exclusions and availability with `provenant route resolve` and `provenant quota tick`"
+            }
+            Self::AccessPolicyRefused => {
+                "launch access policy refused the lane; correct the request and declared access grants before retrying"
+            }
+            Self::StoredPromptUnreadable => {
+                "launch preparation could not read the stored prompt; inspect the run's local files and resubmit the request"
+            }
+            Self::WriteGrantsRefused => {
+                "launch preparation refused the write grants; check grant paths and domains.run.write_grant_limit_bytes before retrying"
+            }
+            Self::WorktreeBusy => {
+                "the worktree is busy; wait for its writer to finish or select another worktree"
+            }
+            Self::HandoffRefused => {
+                "the host refused the launch handoff; inspect local launch evidence and host configuration before retrying"
+            }
+            Self::RetainedWriterImport => {
+                "a retained writer import blocks launch; reconcile the earlier writer's import before retrying"
+            }
+            Self::UnsupportedPlatform => {
+                "sandbox backend is unavailable: UnsupportedPlatform; select a host with a supported sandbox backend before retrying"
+            }
             Self::UnknownPacingAccount => {
                 "pacing configuration references an unregistered account; correct the pacing profile"
             }

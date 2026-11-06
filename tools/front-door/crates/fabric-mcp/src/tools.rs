@@ -1566,7 +1566,7 @@ pub(crate) fn project_run(value: &mut Value, detailed: bool) -> Result<(), Servi
         );
         if !detailed {
             // Compact MCP observations do not expose local filesystem grants.
-            row.write_grants = Value::Null;
+            row.write_grants = Some(Value::Null);
             row.read_only_writable = Value::Null;
             row.protected_paths = Value::Null;
             row.delivery = Value::Null;

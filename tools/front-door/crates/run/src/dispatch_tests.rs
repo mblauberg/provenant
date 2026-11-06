@@ -8342,7 +8342,10 @@ fn admission_uses_configured_gc_floor_and_reports_the_fix() -> TestResult {
             // a full cwd/cache volume through its sealed LaneResources.
             let record = store.record(id, &call)?;
             let waits = store.lane_waits_with_resources(&[record], &call, &Disk(u64::MAX));
-            assert_eq!(waits[0].waiting_for, "host capacity: disk space: 99 bytes available; gc.free_floor is 100 bytes (source: host configuration)");
+            assert_eq!(
+                waits[0].waiting_for,
+                "host capacity: disk space: 99 bytes available; gc.free_floor is 100 bytes (source: host configuration)"
+            );
         }
         if !writer || free == 100 {
             assert_eq!(
