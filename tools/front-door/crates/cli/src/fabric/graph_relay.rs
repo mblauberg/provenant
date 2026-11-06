@@ -117,20 +117,18 @@ pub fn serve(
                 scan: &scan_for_secrets,
                 limits: &context.config.graph.limits,
             };
-            let writer_base = if request.writer {
-                let path = relay::parent_worktree(
+            let writer_base = if request.has_writers() {
+                let parent_path = relay::parent_worktree(
                     &document,
                     &checkpoint,
                     &parent,
                     &context.config.graph.limits,
                 )
-                .map_err(|error| refused("invalid_graph", error))?
-                .ok_or_else(|| {
-                    refused(
-                        "writer_parent_required",
-                        "writer children require a parent worktree",
-                    )
-                })?;
+                .map_err(|error| refused("invalid_graph", error))?;
+                if let (None, Some(branch), Some(source)) = (&parent_path, &document.integration_branch, &checkpoint.bound_integration_base) {
+                    Some((branch.clone(), source.clone()))
+                } else {
+                let path = parent_path.clone().unwrap_or_else(|| context.cwd.to_string_lossy().into_owned());
                 let writer = provenant_run::resolve_writer(
                     state.as_path(),
                     &context.cwd,
@@ -139,14 +137,12 @@ pub fn serve(
                 .map_err(|error| refused("writer_parent_required", error.to_string()))?;
                 let launch = provenant_run::prepare_writer(&writer, state.as_path(), project)
                     .map_err(|error| refused("writer_parent_required", error.to_string()))?;
-                Some((
-                    launch
-                        .branch
-                        .as_str()
-                        .trim_start_matches("refs/heads/")
-                        .to_owned(),
-                    launch.source_commit().to_string(),
-                ))
+                let branch = if parent_path.is_none() { document.integration_branch.clone() } else { None }
+                    .unwrap_or_else(|| launch.branch.as_str().trim_start_matches("refs/heads/").to_owned());
+                let source = if parent_path.is_none() { checkpoint.bound_integration_base.clone() } else { None }
+                    .unwrap_or_else(|| launch.source_commit().to_string());
+                Some((branch, source))
+                }
             } else {
                 None
             };
@@ -183,6 +179,7 @@ pub fn serve(
                 provision_child(context, path, &source, cancel)?;
                 relay::clear_provisioning(&mut checkpoint, &receipt.node);
             }
+            provision_added_writers(context, &mut journal, &mut checkpoint, &[], cancel)?;
             serde_json::to_value(receipt)?
         }
         RelayOp::Edit { id, patch } => {
@@ -226,6 +223,7 @@ pub fn serve(
                 },
             )
             .map_err(|error| refused(error.code, error.message))?;
+            provision_added_writers(context, &mut journal, &mut checkpoint, &admitted.added, cancel)?;
             json!({"graph_id":graph_id,"revision":admitted.revision,"replayed":admitted.replayed,"added":admitted.added})
         }
         RelayOp::Children => {
@@ -261,6 +259,53 @@ pub fn serve(
     };
     journal.save(&checkpoint).map_err(journal_error)?;
     Ok(value)
+}
+
+/// Fence provisionable writer leaves from a new revision before any Git effect.
+fn provision_added_writers(
+    context: &Context,
+    journal: &mut FileJournal,
+    checkpoint: &mut provenant_fabric_runtime::graph::GraphCheckpoint,
+    added: &[String],
+    cancel: &CancelToken,
+) -> Result<(), ServiceError> {
+    use provenant_fabric_runtime::graph::{AccessMode, SourceBinding};
+    let writers: Vec<_> = checkpoint.expansions.iter().flat_map(|expansion| &expansion.nodes)
+        .filter(|node| (added.is_empty() || added.contains(&node.id))
+            && node.access == AccessMode::WorktreeWrite
+            && node.extra.get("provision_worktree").and_then(Value::as_bool) == Some(true)
+            && !checkpoint.nodes.iter().any(|progress| (progress.worktree == node.worktree && progress.writer_binding.is_some()) || (progress.id == node.id && !progress.attempts.is_empty())))
+        .cloned().collect();
+    for node in writers {
+        let Some(path) = node.worktree.as_deref() else { continue };
+        let source = if let Some(source) = checkpoint.nodes.iter().find(|progress| progress.id == node.id)
+            .and_then(|progress| progress.extra.get("provisioned_source"))
+            .and_then(Value::as_str) {
+            source.to_owned()
+        } else { match node.source {
+            Some(SourceBinding::Commit { commit }) => commit,
+            // These sources become available only when dependencies settle.
+            Some(_) => continue,
+            None => match checkpoint.bound_integration_base.clone() {
+                Some(source) => source,
+                None => {
+                    let request = provenant_run::resolve_writer(context.roots.state.as_path(), &context.cwd, &context.cwd)
+                        .map_err(|error| refused("writer_source", error.to_string()))?;
+                    provenant_run::prepare_writer(&request, context.roots.state.as_path(), context.identity.project)
+                        .map_err(|error| refused("writer_source", error.to_string()))?.source_commit().to_string()
+                }
+            }
+        }};
+        if let Some(progress) = checkpoint.nodes.iter_mut().find(|progress| progress.id == node.id) {
+            progress.extra.insert("provisioned_source".into(), source.clone().into());
+        }
+        relay::fence_provisioning(checkpoint, &node.id, path, &source);
+    }
+    if !relay::pending_provisioning(checkpoint).is_empty() {
+        journal.save(checkpoint).map_err(journal_error)?;
+        recover_provisioning(context, journal, checkpoint, cancel)?;
+    }
+    Ok(())
 }
 
 /// Redo every fenced provisioning, then save the cleared fences.
@@ -343,7 +388,7 @@ pub fn launch_resolvers(
     Ok(resolvers)
 }
 
-fn provision_child(
+pub fn provision_child(
     context: &Context,
     path: &str,
     source: &str,
@@ -855,6 +900,63 @@ mod provisioning_tests {
     }
 
     #[test]
+    fn readonly_parent_add_and_edit_provision_writers_at_the_pinned_graph_source()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_fabric_runtime::graph::{GraphCheckpoint, GraphDocument, GraphExecution};
+        let root = tempfile::tempdir()?;
+        let home = root.path().join("home");
+        let project = home.join("project");
+        std::fs::create_dir_all(&project)?;
+        let git = |args: &[&str]| -> Result<String, Box<dyn std::error::Error>> {
+            let output = provenant_os::fixture::git_command().current_dir(&project).args(args).output()?;
+            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+            Ok(String::from_utf8(output.stdout)?.trim().to_owned())
+        };
+        git(&["init", "-q"])?;
+        git(&["commit", "--allow-empty", "-qm", "base"])?;
+        let source = git(&["rev-parse", "HEAD"])?;
+        let branch = git(&["symbolic-ref", "--short", "HEAD"])?;
+        let mut inputs = provenant_core::RootInputs::new(home.clone(), project.clone());
+        inputs.state_dir = Some(root.path().join("state"));
+        let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+        let context = Context::open(roots, &home, &project)?;
+        let cancel = CancelToken::new();
+        let clock = provenant_os::clock::SystemClock::new();
+        let budget = WaitBudget::cli(clock.mono_now(), 30)?;
+        let document: GraphDocument = serde_json::from_value(json!({
+            "schema_version":2,"graph_id":"g-writers","integration_branch":branch,
+            "nodes":[{"id":"parent","access":"read_only","prompt":"Go","route":{"alias":"senior"}}]
+        }))?;
+        let reference = format!("{}/caller", context.identity.host);
+        let checkpoint: GraphCheckpoint = serde_json::from_value(json!({
+            "schema_version":1,"graph_id":"g-writers","plan_digest":"fixture","bound_integration_base":source,
+            "nodes":[{"id":"parent","state":"running","worktree":null,"attempts":[{
+                "launched":true,"key":{"graph_id":"g-writers","node_id":"parent","route_index":0},
+                "route":{"alias":"senior"},"state":"running","attempt_ref":reference,"outcome":null,"launch_actor":"fixture"
+            }]}]
+        }))?;
+        {
+            let mut journal = FileJournal::open(&context.roots.state, context.identity.project, "g-writers", budget, &cancel, &clock)?;
+            journal.bind(GraphExecution { review_base: None, extra: Default::default(), integration_base: Some(source.parse()?), directory: project.clone(), document })?;
+            journal.save(&checkpoint)?;
+        }
+        git(&["commit", "--allow-empty", "-qm", "move host head"])?;
+        let request = json!({"op":"add","id":"writer","use":"implement","brief":"Write","writer":true,"write_scope":["src"],"idempotency_key":"write"});
+        let receipt = serve(&context, "caller", request.clone(), budget, &cancel, &clock)?;
+        let path = receipt["worktree"].as_str().ok_or("missing worktree")?;
+        assert_eq!(git(&["-C", path, "rev-parse", "HEAD"])?, source);
+        let replay = serve(&context, "caller", request, budget, &cancel, &clock)?;
+        assert_eq!(replay["node"], receipt["node"]);
+        assert_eq!(replay["replayed"], true);
+        let edit = json!({"op":"edit","id":"g-writers","patch":{"schema_version":1,"idempotency_key":"edit-writer","nodes":[{
+            "id":"edited","use":"implement","brief":"Edit","write_scope":["other"]
+        }]}});
+        let _ = serve(&context, "caller", edit, budget, &cancel, &clock)?;
+        assert_eq!(git(&["-C", ".worktrees/g-writers-parent--edited", "rev-parse", "HEAD"])?, source);
+        Ok(())
+    }
+
+    #[test]
     fn crash_after_the_fence_is_recovered_by_the_next_serve()
     -> Result<(), Box<dyn std::error::Error>> {
         use provenant_fabric_runtime::graph::{GraphCheckpoint, GraphExecution};
@@ -915,6 +1017,13 @@ mod provisioning_tests {
         assert!(relay::pending_provisioning(&reloaded).is_empty());
         let saved = journal.load("g-crash")?.expect("checkpoint");
         assert!(relay::pending_provisioning(&saved).is_empty());
+        // A crash after the Git effect but before the fence clear reuses the
+        // exact clean checkout and source, rather than creating another writer.
+        relay::fence_provisioning(&mut reloaded, "a--w", path, &source);
+        journal.save(&reloaded)?;
+        recover_provisioning(&context, &mut journal, &mut reloaded, &cancel)?;
+        assert_eq!(git(&["-C", path, "rev-parse", "HEAD"])?, source);
+        assert!(relay::pending_provisioning(&reloaded).is_empty());
         Ok(())
     }
 }
