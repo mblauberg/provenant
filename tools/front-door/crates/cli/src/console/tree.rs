@@ -318,6 +318,8 @@ mod tests {
             },
             &call,
         )?;
+        request.parent = None;
+        request.parent_attempt = None;
         other_store.create(&prepared(4, 4, request)?, &call)?;
         let tree = read(&roots, None, 3, 100, false)?;
         assert_eq!(tree["totals"]["attempts"], 4);
