@@ -509,7 +509,10 @@ fn lane_run_submission_adds_graph_children_instead_of_attempts() -> Result<(), B
     let timed_out = ToolCall::parse("fabric_run", timed_out)?
         .execute(&mut service, &CancelToken::new())?
         .structured_content;
-    assert_eq!(timed_out["receipt"]["idempotency_key"], first["receipt"]["idempotency_key"]);
+    assert_eq!(
+        timed_out["receipt"]["idempotency_key"],
+        first["receipt"]["idempotency_key"]
+    );
     assert!(timed_out.get("observation_error").is_some());
     let mut no_wait = input.clone();
     no_wait
@@ -519,7 +522,10 @@ fn lane_run_submission_adds_graph_children_instead_of_attempts() -> Result<(), B
     let no_wait = ToolCall::parse("fabric_run", no_wait)?
         .execute(&mut service, &CancelToken::new())?
         .structured_content;
-    assert_eq!(no_wait["idempotency_key"], first["receipt"]["idempotency_key"]);
+    assert_eq!(
+        no_wait["idempotency_key"],
+        first["receipt"]["idempotency_key"]
+    );
     assert!(no_wait.get("wait").is_none());
     assert!(no_wait.get("children").is_none());
     assert!(no_wait.get("observation_error").is_none());
