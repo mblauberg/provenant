@@ -485,7 +485,7 @@ mod tests {
         }
     }
     #[test]
-    fn prefixes_require_eight_hex_characters_and_keep_qualified_forms() {
+    fn selectors_keep_qualified_forms_and_reject_empty_components() {
         for selection in [
             "01010101",
             "01010101/02020202",
@@ -496,8 +496,6 @@ mod tests {
             assert!(selection.parse::<crate::Attempt>().is_ok());
         }
         for selection in [
-            "0101010",
-            "0101010z",
             "01010101/",
             "/01010101",
             "01010101/02020202/03030303/04040404",

@@ -3946,7 +3946,7 @@ fn retry_reuses_the_retained_brief_and_accepts_a_replacement()
             attempt: Some(prior),
         }),
         operation_id: OperationId::parse("retry-brief")?,
-        node: false,
+        node: None,
         brief: None,
         extend: vec![],
         no_fallback: false,

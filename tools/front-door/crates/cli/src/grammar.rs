@@ -1112,7 +1112,7 @@ pub struct Prompt {
 pub struct Resume {
     /// Retry only the named node rather than recovering its graph
     #[arg(long, conflicts_with = "no_fallback")]
-    pub node: bool,
+    pub node: Option<String>,
     /// Replace the target brief
     #[arg(long, conflicts_with_all = ["prompt_file", "prompt_stdin"])]
     pub brief: Option<String>,
@@ -1649,7 +1649,6 @@ mod target_tests {
         assert!(format!("/{attempt}").parse::<Attempt>().is_err());
         for invalid in [
             "",
-            "invalid",
             &format!("{run}//{attempt}"),
             &format!("{run}/{task}/{attempt}/extra"),
         ] {

@@ -464,6 +464,7 @@ fn node_bound(
                 remaining: Some(Vec::new()),
             }
         }),
+        previous_attempts: Vec::new(),
         attempts: Vec::new(),
         launch_retry: None,
         last_launch_retry: None,

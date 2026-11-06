@@ -51,10 +51,81 @@ impl Factory {
                 cancel,
             );
         };
-        let _ = parent;
-        Err(FacadeError::invalid(
-            "stopping a graph node subtree with immutable attempt history requires runtime support; stop the whole graph instead",
-        ))
+        use provenant_fabric_runtime::graph::GraphJournal;
+        let mut journal = FileJournal::open(
+            &self.context.roots.state,
+            self.context.identity.project,
+            &target.graph,
+            budget,
+            cancel,
+            &self.clock,
+        )
+        .map_err(graph_journal_error)?;
+        let execution = FileJournal::execution(
+            &self.context.roots.state,
+            self.context.identity.project,
+            &target.graph,
+        )
+        .map_err(graph_journal_error)?
+        .ok_or(FacadeError::NotFound)?;
+        let mut checkpoint = journal
+            .load(&target.graph)
+            .map_err(graph_journal_error)?
+            .ok_or(FacadeError::NotFound)?;
+        let subtree = provenant_fabric_runtime::graph::cancel_node_subtree(
+            &execution.document,
+            &mut checkpoint,
+            parent,
+            reason.as_deref(),
+        )
+        .map_err(FacadeError::invalid)?;
+        // Persist the subtree fence before stopping any external process.
+        journal.save(&checkpoint).map_err(graph_journal_error)?;
+        let mut owner = BinaryRunOwner {
+            factory: self,
+            allow_remote: true,
+            actor: None,
+            chair: None,
+        };
+        let mut first_error = None;
+        for node in &checkpoint.nodes {
+            if &node.id != parent && !subtree.running.contains(&node.id) {
+                continue;
+            }
+            for attempt in node
+                .attempts
+                .iter()
+                .filter(|a| a.state != AttemptState::Terminal)
+            {
+                if let Err(error) = self.cancel_graph_attempt(&mut owner, attempt, budget, cancel) {
+                    first_error.get_or_insert(error);
+                }
+            }
+        }
+        let mut graph_owner = BoundGraphOwner {
+            factory: self,
+            integration_base: None,
+            integration_branch: None,
+            network: None,
+            capability_overrides: Default::default(),
+            exclude: Vec::new(),
+            budget,
+            cancel,
+            prices: None,
+            tick: false,
+        };
+        if let Err(error) = provenant_fabric_runtime::graph::settle_stopped_subtrees(
+            &execution.document,
+            &mut checkpoint,
+            &mut graph_owner,
+            &mut journal,
+        ) {
+            first_error.get_or_insert_with(|| FacadeError::invalid(error.to_string()));
+        }
+        if let Some(error) = first_error {
+            return Err(error);
+        }
+        Ok(graph_snapshot(checkpoint))
     }
 }
 
@@ -104,7 +175,7 @@ pub(crate) fn status_rows(run: &GraphRun, target: &GraphTarget) -> Vec<Value> {
                     .or(node.skip_reason.as_deref()),
             ));
         }
-        for attempt in &node.attempts {
+        for attempt in node.recorded_attempts() {
             let Some(reference) = &attempt.attempt_ref else {
                 continue;
             };
@@ -135,7 +206,7 @@ pub(crate) enum GraphCommand<'a> {
     },
     Retry {
         extend: &'a [String],
-        node: bool,
+        node: Option<&'a str>,
         brief: Option<&'a str>,
         legacy_prompt: bool,
         no_fallback: bool,
@@ -165,9 +236,19 @@ pub(crate) fn unified_graph_command(
         } else {
             factory(globals, workers)?
         };
-        let Some(target) = factory.graph_target(selector)? else {
+        let Some(mut target) = factory.graph_target(selector)? else {
             return Ok(None);
         };
+        if let GraphCommand::Retry { node: Some(id), .. } = &command {
+            if target
+                .node
+                .as_deref()
+                .is_some_and(|selected| selected != *id)
+            {
+                return Err(FacadeError::invalid("node selector conflicts with --node").into());
+            }
+            target.node = Some((*id).to_owned());
+        }
         let cancel = CancelToken::new();
         let budget = WaitBudget::cli(factory.clock.mono_now(), 55)?;
         let status = || {
@@ -196,11 +277,25 @@ pub(crate) fn unified_graph_command(
                 if let Some(seconds) = wait {
                     let wait_budget = WaitBudget::cli(factory.clock.mono_now(), *seconds)?;
                     loop {
-                        let observed = status()?;
+                        let observed = if target.node.is_some() {
+                            factory.stop_target(&target, reason.clone(), budget, &cancel)?
+                        } else {
+                            status()?
+                        };
                         let live = observed
                             .checkpoint
                             .nodes
                             .iter()
+                            .filter(|node| {
+                                matches!(node.state, NodeState::Pending | NodeState::Running)
+                            })
+                            .filter(|node| {
+                                target.node.as_ref().is_none_or(|id| {
+                                    &node.id == id
+                                        || node.extra.get("subtree_cancel").and_then(Value::as_str)
+                                            == Some(id.as_str())
+                                })
+                            })
                             .flat_map(|node| &node.attempts)
                             .any(|attempt| attempt.state != AttemptState::Terminal);
                         let remaining = wait_budget.remaining(factory.clock.mono_now());
@@ -228,30 +323,63 @@ pub(crate) fn unified_graph_command(
                 no_fallback,
                 wait,
             } => {
-                if *legacy_prompt || *no_fallback {
-                    return Err(FacadeError::invalid("graph retry accepts --extend; prompt source and provider continuation options apply only to attempts").into());
-                }
-                let before = status()?;
-                if !before.checkpoint.cancelled
-                    && (before.status == provenant_fabric_runtime::graph::GraphStatus::Complete
-                        || target.node.as_ref().is_some_and(|id| {
-                            before.checkpoint.nodes.iter().any(|node| {
-                                &node.id == id
-                                    && !matches!(
-                                        node.state,
-                                        NodeState::Pending | NodeState::Running
-                                    )
-                                    && node.expansion_pause.is_none()
-                            })
-                        }))
-                {
-                    return Err(FacadeError::invalid("retrying a settled graph node requires node restart support; its recorded attempts were preserved").into());
-                }
-                if *node || brief.is_some() {
+                if !extend.is_empty() && (node.is_some() || brief.is_some()) {
                     return Err(FacadeError::invalid(
-                        "node redo and brief replacement require a graph patch",
+                        "apply --extend separately before redoing a node",
                     )
                     .into());
+                }
+                if *legacy_prompt || *no_fallback {
+                    return Err(FacadeError::invalid("graph retry accepts --extend, --node and --brief; prompt source and provider continuation options apply only to attempts").into());
+                }
+                if let Some(id) = node
+                    .or(target.node.as_deref())
+                    .filter(|_| node.is_some() || brief.is_some())
+                {
+                    use provenant_fabric_runtime::graph::{
+                        GraphJournal, patch, template::TemplateLibrary,
+                    };
+                    let mut journal = FileJournal::open(
+                        &factory.context.roots.state,
+                        factory.context.identity.project,
+                        &target.graph,
+                        budget,
+                        &cancel,
+                        &factory.clock,
+                    )
+                    .map_err(graph_journal_error)?;
+                    let execution = FileJournal::execution(
+                        &factory.context.roots.state,
+                        factory.context.identity.project,
+                        &target.graph,
+                    )
+                    .map_err(graph_journal_error)?
+                    .ok_or(FacadeError::NotFound)?;
+                    let mut checkpoint = journal
+                        .load(&target.graph)
+                        .map_err(graph_journal_error)?
+                        .ok_or(FacadeError::NotFound)?;
+                    patch::retry_node(
+                        &mut patch::LiveGraph {
+                            document: &execution.document,
+                            checkpoint: &mut checkpoint,
+                        },
+                        id,
+                        *brief,
+                        &patch::PatchContext {
+                            library: &TemplateLibrary::bundled(),
+                            resolvers: &Default::default(),
+                            limits: &factory.context.config.graph.limits,
+                            scan: &patch::scan_for_secrets,
+                            journal: None,
+                        },
+                    )
+                    .map_err(|e| FacadeError::invalid(e.to_string()))?;
+                    journal.save(&checkpoint).map_err(graph_journal_error)?;
+                } else if brief.is_some() {
+                    return Err(
+                        FacadeError::invalid("--brief requires a node target or --node N").into(),
+                    );
                 }
                 let resumed = factory.graph(
                     GraphInput::Resume {
@@ -540,8 +668,7 @@ pub(crate) fn unified_graph_output(
             .filter_map(|node| {
                 if let Some(reference) = &target.attempt {
                     return node
-                        .attempts
-                        .iter()
+                        .recorded_attempts()
                         .find(|attempt| attempt.attempt_ref.as_ref() == Some(reference))
                         .and_then(|attempt| attempt.attempt_ref.clone());
                 }
@@ -674,7 +801,7 @@ fn resolve_target(
                     attempt: None,
                 });
             }
-            for attempt in &node.attempts {
+            for attempt in node.recorded_attempts() {
                 if let Some(reference) = &attempt.attempt_ref
                     && (selector == reference || reference.rsplit('/').next() == Some(selector))
                 {
@@ -774,7 +901,7 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_subtree_stop_preserves_the_checkpoint_and_trace()
+    fn subtree_stop_preserves_detached_children_and_unrelated_nodes()
     -> Result<(), Box<dyn std::error::Error>> {
         struct FreeWorkers;
         impl WorkerObserver for FreeWorkers {
@@ -818,28 +945,30 @@ mod tests {
             directory: rig.project.clone(),
             document: document("g"),
         })?;
-        let before = checkpoint("g");
+        let mut before = checkpoint("g");
+        before.nodes[0].attempts.clear();
         journal.save(&before)?;
         drop(journal);
         let events = FileJournal::read_events(&roots.state, project, "g")?;
-        let error = factory
-            .stop_target(
-                &GraphTarget {
-                    graph: "g".into(),
-                    node: Some("parent".into()),
-                    attempt: None,
-                },
-                None,
-                budget,
-                &cancel,
-            )
-            .unwrap_err();
-        assert!(matches!(error, FacadeError::InvalidInput { .. }));
+        let stopped = factory.stop_target(
+            &GraphTarget {
+                graph: "g".into(),
+                node: Some("parent".into()),
+                attempt: None,
+            },
+            None,
+            budget,
+            &cancel,
+        )?;
+        assert_eq!(stopped.checkpoint.nodes[0].state, NodeState::Skipped);
+        assert_eq!(stopped.checkpoint.nodes[1].state, NodeState::Skipped);
+        assert_eq!(stopped.checkpoint.nodes[2], before.nodes[2]);
+        assert_eq!(stopped.checkpoint.nodes[3], before.nodes[3]);
         assert_eq!(
             FileJournal::read_checkpoint(&roots.state, project, "g")?,
-            Some(before)
+            Some(stopped.checkpoint)
         );
-        assert_eq!(
+        assert_ne!(
             FileJournal::read_events(&roots.state, project, "g")?,
             events
         );
