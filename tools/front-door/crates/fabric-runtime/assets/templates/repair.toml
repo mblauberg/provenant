@@ -1,7 +1,7 @@
-doc = "Fix qualified findings, then review the delta, until the review passes. Use with `repeat = { until = \"accepted\", max_rounds = N }`."
+doc = "Fix qualified findings, then have their raising lens review the delta. Use with `repeat = { until = \"accepted\", max_rounds = N }`, at most three rounds. Supply the initial findings as inputs and the raising lens as a parameter."
 nodes = [
-  { id = "fix", use = "implement.fix", worktree = "${worktree}", write_scope = "${write_scope}" },
-  { id = "check", use = "review", after = ["fix"], with = { lens = "delta" } },
+  { id = "fix", use = "implement.fix", worktree = "${worktree}", write_scope = "${write_scope}", inputs = [{ node = "previous.check", outputs = ["findings"] }] },
+  { id = "check", use = "review", after = ["fix"], source = { type = "node", node = "fix" }, inputs = [{ node = "fix", outputs = ["result"] }], with = { lens = "${lens}" }, brief = "Review the repair delta at the pinned head through the ${lens} lens. Check the findings in the repair report and report any remaining defects with their IDs and evidence. End with VERDICT: PASS if all blocking findings are resolved, VERDICT: FAIL if any remain, or VERDICT: INCONCLUSIVE if evidence is insufficient." },
   { id = "accepted", kind = "gate", access = "read_only", after = ["check"], inputs = [{ node = "check", outputs = ["verdict"] }], condition = { type = "verdict", expected = "VERDICT: PASS", threshold = "all" } },
 ]
 exports = [{ node = "accepted", outputs = ["result"] }]
@@ -14,3 +14,7 @@ doc = "Registered worktree the fix writes in"
 type = "list"
 min = 1
 doc = "Relative paths the fix may write"
+
+[parameters.lens]
+type = "string"
+doc = "Lens that raised the findings"

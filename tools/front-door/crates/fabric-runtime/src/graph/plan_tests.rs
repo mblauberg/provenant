@@ -2078,3 +2078,18 @@ fn planner_fragments_may_emit_composites_and_loops() {
         assert!(ids.contains(&id), "{ids:?}");
     }
 }
+
+#[test]
+fn bundled_plan_admits_a_fragment_patch() {
+    let library = TemplateLibrary::bundled();
+    let node = template::Compiler::new(&library)
+        .compile(&json!({"id":"plan", "use":"plan"}))
+        .unwrap();
+    let mut document = planner(8);
+    document.nodes[0] = node;
+    let output = result(vec![slice("slice", &[])]);
+    let run = advance(&document, &mut fixture_owner(&[&output]), &mut MemoryJournal::default()).unwrap();
+    assert!(run.checkpoint.pause_reason.is_none(), "{:?}", run.checkpoint.pause_reason);
+    assert!(run.checkpoint.nodes.iter().any(|node| node.id == "plan--slice"));
+    assert!(run.checkpoint.expansions[0].patch.is_some());
+}

@@ -1,2 +1,2 @@
 doc = "Fix qualified findings at their cause."
-brief = "Fix each qualified finding at its cause, add a regression check, commit and end with a handoff block."
+brief = "Repair the blocking qualified findings in the inputs at their cause. Use their IDs, lenses, severity, locations, evidence and proposed fixes; preserve the IDs in your report for delta review. Explain anything that cannot be resolved within the approved scope. Add a regression check, run targeted checks, commit and end with a handoff block."
