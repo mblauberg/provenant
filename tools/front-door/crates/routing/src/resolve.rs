@@ -2050,16 +2050,31 @@ fn classify_pool(
         let spent = context
             .availability
             .iter()
-            .filter(|a| a.adapter == member.model.adapter()
-                && provenant_records::AdapterSpec::get(member.model.adapter()).is_none_or(|spec| {
-                    a.account_key.as_deref().is_none_or(|key| spec.account_serves_model(key, member.model.model()))
-                }))
+            .filter(|a| {
+                a.adapter == member.model.adapter()
+                    && provenant_records::AdapterSpec::get(member.model.adapter()).is_none_or(
+                        |spec| {
+                            a.account_key.as_deref().is_none_or(|key| {
+                                spec.account_serves_model(key, member.model.model())
+                            })
+                        },
+                    )
+            })
             .map(|a| latest_reading(&member.model, a, context, false))
             .collect::<Vec<_>>();
         let exhausted = !spent.is_empty()
-            && spent
-                .iter()
-                .all(|q| q.is_some_and(|q| reading_exhausted(&q.snapshot, &member.model, context)));
+            && spent.iter().all(|q| {
+                q.is_some_and(|q| {
+                    reading_exhausted(&q.snapshot, &member.model, context)
+                        || provenant_quota::partial_headroom(
+                            &q.snapshot,
+                            member.model.adapter(),
+                            member.model.model(),
+                            &context.catalogue.admission_pools(&member.model),
+                            context.now_seconds(),
+                        ) == provenant_quota::PartialHeadroom::Exhausted
+                })
+            });
         let reset = spent
             .iter()
             .filter_map(|q| *q)

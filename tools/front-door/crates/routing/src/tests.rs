@@ -6272,6 +6272,14 @@ fn alias_skips_known_spent_members_and_refuses_all_with_resets()
         resolve(&request("codex/gpt-6-luna")?, &ctx)?.model,
         "gpt-6-luna"
     );
+    let mut partial = spent("codex/gpt-6-luna", 400)?;
+    partial.snapshot.status = QuotaStatus::Available;
+    let partial_readings = [partial];
+    let partial_ctx = RoutingContext {
+        quota: &partial_readings,
+        ..ctx
+    };
+    assert_eq!(resolve(&alias, &partial_ctx)?.model, "gpt-6.1-sol");
     let readings = [first, spent("codex/gpt-6.1-sol", 300)?];
     let ctx = RoutingContext {
         quota: &readings,
