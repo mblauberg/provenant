@@ -70,11 +70,11 @@ pub(crate) fn writer_binding_reason(id: &str, error: &(dyn Error + 'static)) -> 
             "node {}: cannot bind writer [{}]: {}; {}",
             provenant_records::diagnostic::safe_text(id),
             diagnostic.code,
-            diagnostic.detail.as_deref().unwrap_or(&diagnostic.code),
             diagnostic
                 .next
                 .as_deref()
-                .unwrap_or("inspect writer custody before retrying")
+                .unwrap_or("inspect writer custody before retrying"),
+            diagnostic.detail.as_deref().unwrap_or(&diagnostic.code)
         ),
         MAX_ADVANCE_ERROR_BYTES,
     )
@@ -200,7 +200,7 @@ pub(crate) fn apply_launch_disposition(
     };
     progress.advance_error = Some(bounded(
         &format!(
-            "node {}: the launch failed [{}]: {detail}; {action}{recovery}",
+            "node {}: the launch failed [{}]: {action}; {detail}{recovery}",
             provenant_records::diagnostic::safe_text(id),
             projected.code
         ),

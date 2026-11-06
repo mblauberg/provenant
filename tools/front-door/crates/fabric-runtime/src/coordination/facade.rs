@@ -182,6 +182,7 @@ bounded_input! {
 pub enum DispatchRefusalFact {
     DetachedWriter,
     DirtyWriter,
+    CheckedOutWriter,
     GraphSchema,
     GraphComposite,
     GraphPlan,
@@ -611,6 +612,7 @@ impl FacadeError {
                 let (detail, action) = match fact {
                     DispatchRefusalFact::DetachedWriter => unreachable!(),
                     DispatchRefusalFact::DirtyWriter => ("the writer worktree has uncommitted edits", "preserve or commit the edits before retrying"),
+                    DispatchRefusalFact::CheckedOutWriter => ("the branch is already checked out", "run `provenant worktree list`, inspect custody, then select the existing checkout with --worktree"),
                     DispatchRefusalFact::GraphSchema => ("graph document schema_version is invalid", "use a schema version that supports the document fields"),
                     DispatchRefusalFact::GraphComposite => ("graph composite or loop expansion is invalid", "inspect the composite or loop definition"),
                     DispatchRefusalFact::GraphPlan => ("graph plan is invalid", "inspect the graph plan and node dependencies"),

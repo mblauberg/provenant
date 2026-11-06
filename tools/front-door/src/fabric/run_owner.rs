@@ -87,6 +87,18 @@ pub(crate) fn events_within<T: serde::Serialize>(
 pub(crate) fn run_error(error: provenant_run::RunError) -> FacadeError {
     if matches!(
         &error,
+        provenant_run::RunError::Writer(
+            provenant_confinement::worktrees::WorktreeError::CheckedOut
+        )
+    ) {
+        return FacadeError::DispatchRefused {
+            fact: Some(provenant_fabric_runtime::coordination::facade::DispatchRefusalFact::CheckedOutWriter),
+            disk: None,
+            reason: String::new(),
+        };
+    }
+    if matches!(
+        &error,
         provenant_run::RunError::Writer(provenant_confinement::worktrees::WorktreeError::Dirty(_))
     ) {
         return FacadeError::DispatchRefused {
