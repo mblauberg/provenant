@@ -1145,6 +1145,8 @@ impl Driver<'_> {
                 if let Some(disk) = hooks.disk {
                     match disk.below_floor(&self.holder_context) {
                         Ok(paused) => {
+                            // Crossing the floor must pause running builds promptly.
+                            census_event_pending |= paused && !disk_paused;
                             disk_paused = paused;
                             disk_warning_active = false;
                         }
