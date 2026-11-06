@@ -580,16 +580,21 @@ fn private_loose_objects_are_verified_and_imported_for_both_hash_formats() -> Te
 
 #[test]
 fn private_loose_blob_and_commit_hash_mismatches_refuse_before_publication() -> TestResult {
-    for corrupt_commit in [false, true] {
-        let fixture = Fixture::new("sha1")?;
-        let (target, donor) = if corrupt_commit {
-            (fixture.head, fixture.base)
-        } else {
-            (fixture.blob, fixture.base_blob)
-        };
-        fixture.replace_private(target, donor)?;
-        assert!(fixture.import().is_err(), "corrupt_commit={corrupt_commit}");
-        fixture.assert_not_published();
+    for format in ["sha1", "sha256"] {
+        for corrupt_commit in [false, true] {
+            let fixture = Fixture::new(format)?;
+            let (target, donor) = if corrupt_commit {
+                (fixture.head, fixture.base)
+            } else {
+                (fixture.blob, fixture.base_blob)
+            };
+            fixture.replace_private(target, donor)?;
+            assert!(
+                fixture.import().is_err(),
+                "format={format}, corrupt_commit={corrupt_commit}"
+            );
+            fixture.assert_not_published();
+        }
     }
     Ok(())
 }

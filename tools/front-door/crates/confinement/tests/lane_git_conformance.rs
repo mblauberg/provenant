@@ -476,6 +476,18 @@ fn lane_git_supports_stash_rebase_and_merge_with_shared_metadata_read_only()
             .output()
             .expect("run object probe")
     };
+    // A writer may execute a program it created in its own checkout, with the
+    // same filesystem restrictions as the provider process.
+    let program = lane.join("ordinary-shell");
+    fs::write(&program, "#!/bin/sh\nprintf 'ordinary shell command\\n'\n")?;
+    fs::set_permissions(&program, fs::Permissions::from_mode(0o700))?;
+    let ordinary = shell("\"$1\"", &program, &scratch);
+    assert!(
+        ordinary.status.success(),
+        "{}",
+        String::from_utf8_lossy(&ordinary.stderr)
+    );
+    assert_eq!(ordinary.stdout, b"ordinary shell command\n");
     let created = shell("/bin/mkdir \"$1\"", &new_staging, &scratch);
     assert!(
         !created.status.success(),

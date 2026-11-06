@@ -147,73 +147,32 @@ fn bash_guard_denies_bad_input_and_allows_process_control() -> Result {
 }
 
 #[test]
-fn bash_guard_rules_deny_with_a_remedy_and_follow_config() -> Result {
+fn shell_commands_are_left_to_confinement_even_with_unreadable_config() -> Result {
     let rig = TestRig::new()?;
     let mut input: serde_json::Value = serde_json::from_slice(&recording("pre-tool-use.json")?)?;
     input["cwd"] = rig.project.to_str().ok_or("project path")?.into();
-    let mut decide = |command: &str| -> Result<Option<String>> {
+    fs::create_dir_all(&rig.state)?;
+    // No shell rule policy is loaded, including when host config cannot be read.
+    fs::remove_file(rig.state.join("config.toml"))?;
+    fs::create_dir(rig.state.join("config.toml"))?;
+    for command in [
+        "git push --force-with-lease origin topic",
+        "git push --force origin main",
+        "git reset --hard; git clean -fd",
+        "sleep 30; pkill -f cargo",
+        "rm -rf build",
+        "rm -rf ../state",
+        "bash -c 'git push -f origin main'",
+        "git push -f origin main $(",
+    ] {
         input["tool_input"]["command"] = command.into();
         let output = rig.execute(
             Path::new(env!("CARGO_BIN_EXE_provenant")),
             &["hook", "claude", "pre-tool-use"],
             Some(&serde_json::to_vec(&input)?),
         )?;
-        assert_eq!(code(&output), 0);
-        if output.stdout.bytes.is_empty() {
-            return Ok(None);
-        }
-        let deny: serde_json::Value = serde_json::from_slice(&output.stdout.bytes)?;
-        Ok(deny["hookSpecificOutput"]["permissionDecisionReason"]
-            .as_str()
-            .map(str::to_owned))
-    };
-    let remedy = decide("git push --force origin main")?.ok_or("force push allowed")?;
-    assert!(remedy.contains("open a PR"), "{remedy}");
-    assert!(remedy.contains("`git push origin my-topic`"), "{remedy}");
-    assert!(decide("git push --force origin topic")?.is_none());
-    assert!(decide("git stash")?.is_none());
-    assert!(decide("rm -rf ~")?.is_none());
-
-    fs::create_dir_all(&rig.state)?;
-    fs::write(
-        rig.state.join("config.toml"),
-        "schema_version = 1\n[domains.guard]\ndeny = ['rm-state']\n",
-    )?;
-    assert!(decide("git push --force origin main")?.is_none());
-    Ok(())
-}
-#[test]
-fn unreadable_guard_config_keeps_the_default_rules_on() -> Result {
-    let rig = TestRig::new()?;
-    let mut input: serde_json::Value = serde_json::from_slice(&recording("pre-tool-use.json")?)?;
-    input["cwd"] = rig.project.to_str().ok_or("project path")?.into();
-    input["tool_input"]["command"] = "git push --force origin main".into();
-    fs::create_dir_all(&rig.state)?;
-    // A directory at `config.toml` is a deterministic read failure.
-    for config in [
-        Some("schema_version = 1\n[domains.guard]\ndeny = 'force-push'\n"),
-        Some("schema_version = 1\n[domains.guard\n"),
-        None,
-    ] {
-        let path = rig.state.join("config.toml");
-        match config {
-            Some(text) => fs::write(&path, text)?,
-            None => {
-                fs::remove_file(&path)?;
-                fs::create_dir(&path)?;
-            }
-        }
-        let output = rig.execute(
-            Path::new(env!("CARGO_BIN_EXE_provenant")),
-            &["hook", "claude", "pre-tool-use"],
-            Some(&serde_json::to_vec(&input)?),
-        )?;
-        assert_eq!(code(&output), 0);
-        let deny: serde_json::Value = serde_json::from_slice(&output.stdout.bytes)?;
-        assert_eq!(
-            deny["hookSpecificOutput"]["permissionDecision"], "deny",
-            "{config:?}"
-        );
+        assert_eq!(code(&output), 0, "{command}");
+        assert!(output.stdout.bytes.is_empty(), "{command}");
     }
     Ok(())
 }
@@ -695,7 +654,16 @@ fn hook_recovers_committed_offers_and_advances_past_an_oversized_head_page() -> 
             "console",
         ],
     )?;
-    let denied = hook("rm -rf /")?;
+    // A malformed event must not consume queued answers. Shell command
+    // policy is owned by confinement, so a valid command is not a denial probe.
+    let denied = rig.execute(
+        Path::new(env!("CARGO_BIN_EXE_provenant")),
+        &["hook", "claude", "pre-tool-use"],
+        Some(&serde_json::to_vec(&json!({
+            "hook_event_name":"PreToolUse", "tool_name":"Bash",
+            "tool_input":{"command":null}, "session_id":"chair", "cwd":rig.project,
+        }))?),
+    )?;
     assert_eq!(code(&denied), 0);
     let denial: serde_json::Value = serde_json::from_slice(&denied.stdout.bytes)?;
     assert_eq!(denial["hookSpecificOutput"]["permissionDecision"], "deny");

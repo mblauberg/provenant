@@ -14,6 +14,50 @@ use std::path::{Path, PathBuf};
 
 #[cfg(any(target_os = "macos", feature = "snapshot"))]
 #[test]
+fn writer_programs_keep_filesystem_and_credential_boundaries() -> Result<(), PermissionError> {
+    let (mut plan, mut profile) = write_grants_fixture();
+    plan.read_only = None;
+    plan.mode = AccessMode::WorktreeWrite(Box::new(WorktreeWriteAuthority {
+        git_grants_digest: [0; 32],
+        publishing: false,
+        common_git_dir: Some("/fixture/repo/.git".into()),
+        cargo_cache: PathGrant {
+            path: "/fixture/cache".into(),
+            scope: PathScope::Subtree,
+        },
+    }));
+    profile.spec.deny_keychain_access = true;
+    let worktree = WorktreeWriteGrants::from_paths(
+        Path::new("/fixture/worktrees/lane"),
+        Path::new("/fixture/repo/.git/worktrees/lane"),
+        Path::new("/fixture/repo/.git"),
+        "lane",
+    );
+    let grants = GrantSet::build(&plan, &profile, Path::new("/fixture/home"), Some(worktree))?;
+    let source = render(&grants)?;
+    assert!(source.contains("(deny default)"));
+    let exec = source.find("(allow process-exec)\n").expect("writer exec");
+    assert!(source.contains("(allow process-fork)\n"));
+    assert!(source.contains("(allow pseudo-tty)\n"));
+    assert!(
+        source
+            .find("(deny process-exec (literal \"/usr/bin/security\"))")
+            .expect("keychain denied")
+            > exec
+    );
+    for deny in [
+        "(deny file-write* (subpath \"/fixture/repo/.git\"))",
+        "(deny file-read* (subpath \"/fixture/home/.ssh\"))",
+        "(deny file-read* (subpath \"/fixture/home/.config/gh\"))",
+        "(deny file-write* (literal \"/fixture/worktrees/lane/.git\"))",
+    ] {
+        assert!(source.contains(deny), "{deny}");
+    }
+    Ok(())
+}
+
+#[cfg(any(target_os = "macos", feature = "snapshot"))]
+#[test]
 fn profile_path_representability_matches_encoder() {
     use std::os::unix::ffi::OsStringExt;
     let unrepresentable =

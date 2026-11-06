@@ -623,9 +623,9 @@ fn prepare(
     let web = plan.network == NetworkAccess::Open;
     let (mode, tools) = match access {
         Access::ReadOnly => ("dontAsk", "Read,Grep,Glob,Bash,Skill"),
-        Access::WorktreeWrite => ("default", "Read,Grep,Glob,Edit,Write,Bash,Skill"),
+        Access::WorktreeWrite => ("bypassPermissions", "default"),
     };
-    let tools = if web {
+    let tools = if web && !shell {
         format!("{tools},WebFetch,WebSearch")
     } else {
         tools.to_owned()
@@ -668,69 +668,45 @@ fn prepare(
     let mut package_omissions = Vec::new();
     let package = package_grant(input.executable, &mut package_omissions);
     let scratch = &plan.scratch.path;
-    let allowed_tools = if shell && input.images.is_empty() {
-        "Read,Grep,Glob,Edit,Write,Bash,Skill,mcp__fabric__*"
-    } else if shell {
-        "Grep,Glob,Edit,Write,Bash,Skill,mcp__fabric__*"
+    // Filesystem confinement owns writer path access; native permission prompts
+    // would refuse tools that cannot ask for approval in a headless lane.
+    let allowed_tools = if web {
+        "Bash,Skill,mcp__fabric__*,WebFetch,WebSearch"
     } else {
         "Bash,Skill,mcp__fabric__*"
     };
-    let allowed_tools = if web {
-        format!("{allowed_tools},WebFetch,WebSearch")
+    let image_rules = if shell {
+        Vec::new()
     } else {
-        allowed_tools.to_owned()
+        input
+            .images
+            .iter()
+            .map(|image| {
+                let path = image.to_str().ok_or(ProviderError::InvalidPath)?;
+                if !image.is_absolute() {
+                    return Err(ProviderError::InvalidPath);
+                }
+                // Read rules use gitignore patterns; escape metacharacters in filenames.
+                let escaped: String = path
+                    .chars()
+                    .flat_map(|c| {
+                        if matches!(c, '*' | '?' | '[' | ']' | '\\' | ' ') {
+                            vec!['\\', c]
+                        } else {
+                            vec![c]
+                        }
+                    })
+                    .collect();
+                Ok(format!("Read(/{escaped})"))
+            })
+            .collect::<Result<Vec<_>, ProviderError>>()?
     };
-    let mut image_rules = input
-        .images
-        .iter()
-        .map(|image| {
-            let path = image.to_str().ok_or(ProviderError::InvalidPath)?;
-            if !image.is_absolute() {
-                return Err(ProviderError::InvalidPath);
-            }
-            // Read rules use gitignore patterns; escape metacharacters in filenames.
-            let escaped: String = path
-                .chars()
-                .flat_map(|c| {
-                    if matches!(c, '*' | '?' | '[' | ']' | '\\' | ' ') {
-                        vec!['\\', c]
-                    } else {
-                        vec![c]
-                    }
-                })
-                .collect();
-            Ok(format!("Read(/{escaped})"))
-        })
-        .collect::<Result<Vec<_>, ProviderError>>()?;
-    if shell && !input.images.is_empty() {
-        // Keep reads of the lane's other roots approved without a blanket Read
-        // rule, which would also approve siblings of an attached image.
-        for root in &plan.read_roots {
-            if input.images.contains(&root.path) {
-                continue;
-            }
-            let path = root.path.to_str().ok_or(ProviderError::InvalidPath)?;
-            let escaped: String = path
-                .chars()
-                .flat_map(|c| {
-                    if matches!(c, '*' | '?' | '[' | ']' | '\\' | ' ') {
-                        vec!['\\', c]
-                    } else {
-                        vec![c]
-                    }
-                })
-                .collect();
-            let suffix = if root.scope == provenant_confinement::permissions::PathScope::Subtree {
-                "/**"
-            } else {
-                ""
-            };
-            image_rules.push(format!("Read(/{escaped}{suffix})"));
-        }
-    }
-    let mut setup = input
-        .provenant
-        .claude(scratch, &mut argv, &allowed_tools, &image_rules)?;
+    let mut setup = input.provenant.claude(
+        scratch,
+        &mut argv,
+        (!shell).then_some(allowed_tools),
+        &image_rules,
+    )?;
 
     let toolchain = shell || web;
     let path = crate::launch::tool_search_path(input.home, toolchain);

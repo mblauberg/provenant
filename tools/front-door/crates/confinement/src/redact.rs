@@ -821,21 +821,26 @@ mod tests {
     }
 
     #[test]
-    fn known_secret_split_across_chunks_is_never_emitted() {
-        let mut redactor = Redactor::new([b"token-123".to_vec()]).expect("valid secret");
-        let output = joined(&mut redactor, &[b"prefix tok", b"en-123 suffix"]);
-        assert!(
-            !output
-                .windows(b"token-123".len())
-                .any(|window| window == b"token-123")
-        );
-        assert!(output.starts_with(b"prefix "));
-        assert!(output.ends_with(b" suffix"));
-        assert!(
-            output
-                .windows(REDACTED.len())
-                .any(|window| window == REDACTED)
-        );
+    fn shell_output_secrets_split_across_chunks_are_never_emitted() {
+        for prefix in [
+            b"git push --force origin main\nstdout: ".as_slice(),
+            b"rm -rf ../state\nstderr: ".as_slice(),
+        ] {
+            let mut redactor = Redactor::new([b"token-123".to_vec()]).expect("valid secret");
+            let output = joined(&mut redactor, &[prefix, b"tok", b"en-123 suffix"]);
+            assert!(
+                !output
+                    .windows(b"token-123".len())
+                    .any(|window| window == b"token-123")
+            );
+            assert!(output.starts_with(prefix));
+            assert!(output.ends_with(b" suffix"));
+            assert!(
+                output
+                    .windows(REDACTED.len())
+                    .any(|window| window == REDACTED)
+            );
+        }
     }
 
     #[test]

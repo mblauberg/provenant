@@ -677,23 +677,16 @@ denial cannot be written it exits 2. It never echoes or persists input.
   `::denial_write_failure_uses_recorded_exit_two_fallback`
 - Owner: `crates/cli/src/hooks.rs`, `src/hooks.rs`
 
-### Bash guard policy
+### Shell commands use confinement
 
-The guard refuses only irreversible actions, naming the alternative with an
-accepted one-line example: a force
-push to the default branch, and recursive `rm` of the Provenant state
-directory or a parent of it. It
-applies the configured rule IDs `force-push` and `rm-state` to every
-simple command, looking through wrappers and shells. Process control, dynamic
-command names, `sleep`, `git stash`, `reset --hard`, `clean -f` and branch
-changes are allowed. Unreadable or invalid config keeps the default rules on.
-The guard is advisory: confinement and custody stay authoritative.
-- Why: an aligned model is trusted with everything it can undo; config damage
-  must not disable protection.
-- Test: `tests/hooks.rs::unreadable_guard_config_keeps_the_default_rules_on`;
-  `crates/confinement/src/guard.rs::force_pushes_to_the_default_branch_are_refused`;
-  `::every_refusal_shows_an_accepted_example`
-- Owner: `crates/confinement/src/guard.rs`, `src/hooks.rs`
+The pre-tool-use hook validates its bounded event envelope and delivers pending
+answers. It does not inspect shell syntax, load a shell-rule policy or refuse
+commands by shape. Writer lanes rely on private Git, filesystem confinement,
+credential custody, object verification and host authority gates.
+- Why: shell command tables block ordinary work without enforcing ADR 0035's
+  four boundaries.
+- Test: `tests/hooks.rs::shell_commands_are_left_to_confinement_even_with_unreadable_config`
+- Owner: `src/hooks.rs`
 
 ### Pre-push refuses data loss
 

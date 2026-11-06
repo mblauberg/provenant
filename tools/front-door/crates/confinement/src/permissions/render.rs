@@ -635,6 +635,7 @@ fn render_profile_with_limit(
     // launch prerequisites and provider profiles aligned.
     source.push_str(DYLD_BOOTSTRAP_RULES);
     source.push_str(RUNTIME_BASELINE_RULES);
+    let writer = matches!(plan.mode, AccessMode::WorktreeWrite(_));
     if profile.spec.allow_database_ipc {
         source.push_str("(allow ipc-sysv-shm)\n(allow ipc-sysv-sem)\n");
     }
@@ -656,37 +657,30 @@ fn render_profile_with_limit(
             "warning: invalid discovery paths were omitted"
         );
     }
-    for executable in &profile.spec.process_executables {
-        push_rule(
-            &mut source,
-            "allow",
-            "process-exec",
-            &executable.path,
-            PathScope::Exact,
-        )?;
-    }
-    for root in &profile.spec.tool_exec_roots {
-        push_rule(&mut source, "allow", "process-exec", &root.path, root.scope)?;
-    }
-    // Writers run build scripts in configured write roots and fixture binaries
-    // in their own attempt tmp/candidate-N. Scratch already has a read grant.
-    if matches!(plan.mode, AccessMode::WorktreeWrite(_)) {
-        for root in &plan.write_roots {
+    if writer {
+        // Shell tools may execute any readable program, including a binary
+        // produced in the worktree. File grants and the later credential and
+        // keychain denials still apply to every descendant.
+        source.push_str("(allow process-exec)\n(allow process-fork)\n");
+        source.push_str("(allow file-read* (subpath \"/dev/fd\"))\n");
+    } else {
+        for executable in &profile.spec.process_executables {
+            push_rule(
+                &mut source,
+                "allow",
+                "process-exec",
+                &executable.path,
+                PathScope::Exact,
+            )?;
+        }
+        for root in &profile.spec.tool_exec_roots {
             push_rule(&mut source, "allow", "process-exec", &root.path, root.scope)?;
         }
-        push_rule(
-            &mut source,
-            "allow",
-            "process-exec",
-            &plan.scratch.path,
-            PathScope::Subtree,
-        )?;
-        source.push_str("(allow file-read* (subpath \"/dev/fd\"))\n");
+        if profile.spec.allow_process_fork {
+            source.push_str("(allow process-fork)\n");
+        }
     }
-    if profile.spec.allow_process_fork {
-        source.push_str("(allow process-fork)\n");
-    }
-    if profile.spec.allow_pseudo_tty {
+    if writer || profile.spec.allow_pseudo_tty {
         source.push_str(PSEUDO_TTY_RULES);
     }
     if profile.spec.deny_keychain_access {
