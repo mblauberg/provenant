@@ -406,7 +406,7 @@ fn command_dispatch_launches_when_the_store_fails_fast() -> Result {
         |ready| *ready,
     )?;
     let evidence = fs::read_to_string(exit)?;
-    let waited = rig.command(&["status", "pass", "--wait=30s", "--json"])?;
+    let waited = rig.command(&["status", "pass", "--wait=30s", "--until", "all", "--json"])?;
     assert_eq!(code(&waited), 0, "{waited:?}");
     let lane = settled(&rig, id)?;
     assert_eq!(
@@ -538,7 +538,7 @@ fn command_timeout_cleans_descendants_and_running_replay_keeps_one_attempt() -> 
     );
     let second = dispatch_with(&rig, "slow", 10, None, false)?;
     assert_eq!(id, attempt_id(&second)?);
-    let waited = rig.command(&["status", "slow", "--wait=30s", "--json"])?;
+    let waited = rig.command(&["status", "slow", "--wait=30s", "--until", "all", "--json"])?;
     assert_eq!(code(&waited), 0, "{waited:?}");
     let lane = settled(&rig, id)?;
     assert_eq!(lane["state"], "timed_out", "{lane}");
