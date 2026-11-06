@@ -192,12 +192,23 @@ pub(super) fn reason(
     extensions: &[String],
     plan: &PlannedGraph,
 ) -> Option<String> {
+    admit(document, expansions, extensions, plan)
+        .err()
+        .map(|error| error.to_string())
+}
+
+pub(super) fn admit(
+    document: &GraphDocument,
+    expansions: &[Expansion],
+    extensions: &[String],
+    plan: &PlannedGraph,
+) -> Result<(), AdmissionError> {
     let bound = checkpoint_bound(document, expansions, extensions, plan);
-    (bound > MAX_CHECKPOINT_BYTES as usize).then(|| {
-        format!(
-            "graph checkpoint could reach {bound} bytes, over its {MAX_CHECKPOINT_BYTES}-byte limit; split the graph into smaller batches, or use fewer nodes, routes, loop rounds or extensions, or smaller prompts"
-        )
-    })
+    if bound > MAX_CHECKPOINT_BYTES as usize {
+        Err(AdmissionError::Envelope(GraphEnvelopeLimit { bound }))
+    } else {
+        Ok(())
+    }
 }
 
 pub(super) fn latest() -> provenant_core::WallTime {
@@ -384,11 +395,30 @@ fn node_bound(
         fragment: (node.plan.is_some() && !admitted).then(String::new),
         handoff: plans::writer(node).then(String::new),
         expansion_pause: expands.then(String::new),
+        expansion_cause: expands.then_some(NodeDecisionCause::PlanExpansionPaused {
+            active: false,
+            fallback: false,
+            fragment_error: Some(PlanFailureFact::Structural(GraphStructuralLimit {
+                key: GraphLimitKey::GraphPromptBytes,
+                actual: usize::MAX,
+                max: usize::MAX,
+            })),
+        }),
         loop_pause: node.loop_body.as_ref().map(|_| String::new()),
         loop_pause_code: node
             .loop_body
             .as_ref()
             .map(|_| "c".repeat(REFUSAL_CODE_BYTES)),
+        loop_cause: node
+            .loop_body
+            .as_ref()
+            .map(|_| NodeDecisionCause::InvalidLoopDecision),
+        truncation_cause: node.composite.as_ref().map(|_| {
+            NodeDecisionCause::CompositeFindingsTruncated {
+                warning_indices: vec![usize::MAX; MAX_WARNINGS],
+                notice_lines: usize::MAX,
+            }
+        }),
         round: node.round.clone(),
         gate: gate.then(|| GateResult {
             extra: Default::default(),

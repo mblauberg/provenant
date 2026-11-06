@@ -2,7 +2,57 @@
 use super::*;
 use std::collections::BTreeMap;
 
-const FALLBACK_RETRY_CONTEXT: &str = "\n[planner-fragment-retry-context:";
+fn set_expansion_pause(
+    checkpoint: &mut GraphCheckpoint,
+    index: usize,
+    reason: String,
+    fallback: bool,
+    fragment_error: Option<PlanFailureFact>,
+) {
+    checkpoint.nodes[index].expansion_pause = Some(reason.clone());
+    checkpoint.nodes[index].expansion_cause = Some(NodeDecisionCause::PlanExpansionPaused {
+        active: false,
+        fallback,
+        fragment_error,
+    });
+    checkpoint.activate_expansion_pause(index);
+    checkpoint.pause_reason = Some(reason);
+    checkpoint.pause_code = Some("invalid_plan_expansion".into());
+}
+
+fn clear_expansion_pause(checkpoint: &mut GraphCheckpoint, index: usize, refresh: bool) {
+    let active_expansion = checkpoint.nodes.iter().any(|node| {
+        matches!(
+            node.expansion_cause,
+            Some(NodeDecisionCause::PlanExpansionPaused { active: true, .. })
+        )
+    });
+    let keep_active = matches!(
+        checkpoint.nodes[index].expansion_cause,
+        Some(NodeDecisionCause::PlanExpansionPaused { active: true, .. })
+    );
+    checkpoint.nodes[index].expansion_pause = None;
+    if !keep_active {
+        checkpoint.nodes[index].expansion_cause = None;
+    }
+    if refresh && active_expansion {
+        let next = checkpoint
+            .nodes
+            .iter()
+            .enumerate()
+            .find_map(|(index, node)| {
+                node.expansion_pause
+                    .as_ref()
+                    .map(|reason| (index, reason.clone()))
+            });
+        checkpoint.deactivate_expansion_pauses();
+        checkpoint.pause_reason = next.as_ref().map(|(_, reason)| reason.clone());
+        checkpoint.pause_code = next.as_ref().map(|_| "invalid_plan_expansion".into());
+        if let Some((next, _)) = next {
+            checkpoint.activate_expansion_pause(next);
+        }
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlanSpec {
@@ -423,7 +473,8 @@ pub(super) fn expand(
     expansions: &[Expansion],
     limits: &crate::config::GraphLimits,
 ) -> Result<GraphDocument, String> {
-    let mut expanded = loops::expand(document, extensions, limits)?;
+    let mut expanded =
+        loops::expand(document, extensions, limits).map_err(|error| error.to_string())?;
     let mut sources = std::collections::BTreeSet::new();
     for addition in expansions {
         if addition.nodes.is_empty()
@@ -1705,10 +1756,10 @@ fn fragment(
     };
     // Pattern wrappers are ordinary static composites. Expand them before the
     // fragment is validated so the host limits see every child.
-    let local = composites::expand(&local, &generous())?;
-    validate_schema(&local).map_err(str::to_owned)?;
-    let (plan, _) = validate_flat_plan(&local, &generous()).map_err(str::to_owned)?;
-    validate_output_kinds(&local)?;
+    let local = composites::expand(&local, &generous()).map_err(|error| error.to_string())?;
+    validate_schema(&local).map_err(|error| error.to_string())?;
+    let (plan, _) = validate_flat_plan(&local, &generous()).map_err(|error| error.to_string())?;
+    validate_output_kinds(&local).map_err(|error| error.to_string())?;
     let mut nodes: Vec<GraphNode> = plan
         .nodes
         .iter()
@@ -2084,13 +2135,16 @@ pub(super) fn settle(
             .iter()
             .position(|progress| progress.id == node.id)?;
         let reason = fallback_reason(&checkpoint.nodes[index]);
+        let mut safe_fallback_error =
+            "fallback graph is invalid; check the declared graph constraints".to_owned();
         let built = (|| {
             let addition = fallback_expansion(&node.id, spec, source, node.require_skill_location)?;
             let mut preview = document.clone();
             append(&mut preview, &addition);
             let (plan, positions) =
-                validate_flat_plan(&preview, &generous()).map_err(str::to_owned)?;
+                validate_flat_plan(&preview, &generous()).map_err(|error| error.to_string())?;
             if let Some(reason) = structural_limit_reason(&preview, &plan, limits) {
+                safe_fallback_error = reason.clone();
                 return Err(reason);
             }
             let mut expansions = checkpoint.expansions.clone();
@@ -2098,26 +2152,28 @@ pub(super) fn settle(
             if let Some(reason) =
                 graph_envelope_reason(source, &expansions, &checkpoint.extensions, &plan)
             {
+                safe_fallback_error = reason.clone();
                 return Err(reason);
             }
             Ok((addition, plan, positions, preview))
         })();
         let (addition, plan, positions, preview) = match built {
             Ok(built) => built,
-            Err(reason) => {
+            Err(_reason) => {
                 // Same diagnostic as a rejected planner expansion: pause with a reason.
                 let reason = bounded(
-                    &format!("node {} fallback expansion paused: {reason}", node.id),
+                    &format!(
+                        "node {} fallback expansion paused: {safe_fallback_error}",
+                        node.id
+                    ),
                     MAX_ADVANCE_ERROR_BYTES,
                 );
-                checkpoint.nodes[index].expansion_pause = Some(reason.clone());
-                checkpoint.pause_reason = Some(reason);
-                checkpoint.pause_code = Some("invalid_plan_expansion".into());
+                set_expansion_pause(checkpoint, index, reason, true, None);
                 return None;
             }
         };
         checkpoint.nodes[index].state = NodeState::Succeeded;
-        checkpoint.nodes[index].expansion_pause = None;
+        clear_expansion_pause(checkpoint, index, false);
         let outputs = checkpoint.nodes[index]
             .outputs
             .get_or_insert_with(|| super::outputs::make_outputs(None, None, None, None, None));
@@ -2134,21 +2190,36 @@ pub(super) fn settle(
         .nodes
         .iter()
         .position(|n| n.id == node.id && n.state == NodeState::Succeeded)?;
+    // Source and deserialisation errors can contain captured provider output.
+    // Retain a closed, safe explanation for status and fallback diagnostics.
+    let mut safe_reason = PlanFailureFact::InvalidGraph;
     let addition = if node.plan.is_some() {
         let json = if let Some(capture) = capture {
-            block(capture, "fragment")
-                .and_then(|json| json.ok_or_else(|| "fragment block missing".into()))
-                .map(|json| {
+            match block(capture, "fragment") {
+                Ok(Some(json)) => {
                     checkpoint.nodes[index].fragment = Some(json.to_owned());
-                    json.to_owned()
-                })
+                    Ok(json.to_owned())
+                }
+                Ok(None) => {
+                    safe_reason = PlanFailureFact::MissingBlock;
+                    Err("fragment block missing".into())
+                }
+                Err(error) => {
+                    safe_reason = PlanFailureFact::InvalidBlock;
+                    Err(error)
+                }
+            }
         } else {
-            checkpoint.nodes[index]
-                .fragment
-                .clone()
-                .ok_or_else(|| "planner result missing".into())
+            checkpoint.nodes[index].fragment.clone().ok_or_else(|| {
+                safe_reason = PlanFailureFact::MissingResult;
+                "planner result missing".into()
+            })
         };
-        json.and_then(|json| fragment(node, document, checkpoint, &json))
+        json.and_then(|json| {
+            fragment(node, document, checkpoint, &json).inspect_err(|_| {
+                safe_reason = PlanFailureFact::InvalidFragment;
+            })
+        })
     } else if writer(node) {
         let handoff = capture
             .map(handoff)
@@ -2156,15 +2227,16 @@ pub(super) fn settle(
         match handoff {
             Ok(Some(note)) => {
                 checkpoint.nodes[index].handoff = Some(note.clone());
-                continuation(node, document, checkpoint, &note, limits)
+                continuation(node, document, checkpoint, &note, limits).inspect_err(|_| {
+                    safe_reason = PlanFailureFact::InvalidContinuation;
+                })
             }
             Ok(None) => return None,
-            Err(reason) => {
+            Err(_) => {
                 if let Some(outputs) = &mut checkpoint.nodes[index].outputs {
-                    outputs.warnings.push(bounded(
-                        &format!("ignored optional handoff: {reason}"),
-                        WARNING_BYTES,
-                    ));
+                    outputs.warnings.push(
+                        "ignored optional handoff: invalid handoff; inspect the result".into(),
+                    );
                 }
                 return None;
             }
@@ -2201,65 +2273,67 @@ pub(super) fn settle(
                 return Err("loop writers must share one worktree".into());
             }
         }
-        validate_schema(&preview).map_err(str::to_owned)?;
-        let (plan, positions) = validate_flat_plan(&preview, &generous()).map_err(str::to_owned)?;
-        validate_output_kinds(&preview)?;
-        if let Some(reason) = structural_limit_reason(&preview, &plan, limits) {
-            return Err(reason);
+        validate_schema(&preview).map_err(|error| {
+            safe_reason = PlanFailureFact::Schema;
+            error.to_string()
+        })?;
+        let (plan, positions) = validate_flat_plan(&preview, &generous()).map_err(|error| {
+            safe_reason = PlanFailureFact::InvalidGraph;
+            error.to_string()
+        })?;
+        validate_output_kinds(&preview).map_err(|error| {
+            safe_reason = PlanFailureFact::OutputKind;
+            error.to_string()
+        })?;
+        if let Some(limit) = structural_limit(&preview, &plan, limits) {
+            safe_reason = PlanFailureFact::Structural(limit);
+            return Err(limit.to_string());
         }
         let mut expansions = checkpoint.expansions.clone();
         expansions.push(addition.clone());
-        if let Some(reason) =
-            graph_envelope_reason(source, &expansions, &checkpoint.extensions, &plan)
-        {
-            return Err(reason);
+        let bound = graph_envelope_bound(source, &expansions, &checkpoint.extensions, &plan);
+        if bound > MAX_CHECKPOINT_BYTES as usize {
+            let limit = GraphEnvelopeLimit { bound };
+            safe_reason = PlanFailureFact::Envelope(limit);
+            return Err(limit.to_string());
         }
         Ok((addition, plan, positions, preview))
     });
     match result {
         Ok((addition, plan, positions, preview)) => {
             checkpoint.nodes[index].fragment = None;
-            checkpoint.nodes[index].expansion_pause = None;
-            if checkpoint
-                .pause_reason
-                .as_ref()
-                .is_some_and(|r| r.starts_with("node ") && r.contains(" expansion paused:"))
-            {
-                checkpoint.pause_reason = checkpoint
-                    .nodes
-                    .iter()
-                    .find_map(|n| n.expansion_pause.clone());
-                checkpoint.pause_code = checkpoint
-                    .pause_reason
-                    .as_ref()
-                    .map(|_| "invalid_plan_expansion".into());
-            }
+            clear_expansion_pause(checkpoint, index, true);
             checkpoint.expansions.push(addition);
             loops::reconcile(checkpoint, &plan);
             remaining(checkpoint, &preview, limits);
             Some((preview, plan, positions))
         }
-        Err(reason) => {
+        Err(_reason) => {
             if let Some(spec) = node.plan.as_ref().filter(|spec| spec.fallback.is_some()) {
-                let fragment_error = checkpoint.nodes[index]
-                    .expansion_pause
-                    .as_deref()
-                    .and_then(retry_fragment_error)
-                    .unwrap_or_else(|| bounded(&reason, NOTE_BYTES));
+                let fragment_error = match &checkpoint.nodes[index].expansion_cause {
+                    Some(NodeDecisionCause::PlanExpansionPaused {
+                        fragment_error: Some(error),
+                        ..
+                    }) => *error,
+                    _ => safe_reason,
+                };
                 let fallback_reason = bounded(
                     &format!("planner fragment invalid: {fragment_error}"),
                     NOTE_BYTES,
                 );
+                let mut safe_fallback_error =
+                    "fallback graph is invalid; check the declared graph constraints".to_owned();
                 let fallback = (|| {
                     let addition =
                         fallback_expansion(&node.id, spec, source, node.require_skill_location)?;
                     let mut preview = document.clone();
                     append(&mut preview, &addition);
-                    validate_schema(&preview).map_err(str::to_owned)?;
-                    let (plan, positions) =
-                        validate_flat_plan(&preview, &generous()).map_err(str::to_owned)?;
-                    validate_output_kinds(&preview)?;
+                    validate_schema(&preview).map_err(|error| error.to_string())?;
+                    let (plan, positions) = validate_flat_plan(&preview, &generous())
+                        .map_err(|error| error.to_string())?;
+                    validate_output_kinds(&preview).map_err(|error| error.to_string())?;
                     if let Some(reason) = structural_limit_reason(&preview, &plan, limits) {
+                        safe_fallback_error = reason.clone();
                         return Err(reason);
                     }
                     let mut expansions = checkpoint.expansions.clone();
@@ -2267,6 +2341,7 @@ pub(super) fn settle(
                     if let Some(reason) =
                         graph_envelope_reason(source, &expansions, &checkpoint.extensions, &plan)
                     {
+                        safe_fallback_error = reason.clone();
                         return Err(reason);
                     }
                     Ok((addition, plan, positions, preview))
@@ -2274,21 +2349,8 @@ pub(super) fn settle(
                 match fallback {
                     Ok((addition, plan, positions, preview)) => {
                         checkpoint.nodes[index].state = NodeState::Succeeded;
-                        checkpoint.nodes[index].expansion_pause = None;
                         checkpoint.nodes[index].fragment = None;
-                        if checkpoint.pause_reason.as_ref().is_some_and(|reason| {
-                            reason.starts_with("node ") && reason.contains(" expansion paused:")
-                        }) {
-                            checkpoint.pause_reason = checkpoint.nodes.iter().find_map(|node| {
-                                node.expansion_pause
-                                    .as_deref()
-                                    .map(pause_reason_for_display)
-                            });
-                            checkpoint.pause_code = checkpoint
-                                .pause_reason
-                                .as_ref()
-                                .map(|_| "invalid_plan_expansion".into());
-                        }
+                        clear_expansion_pause(checkpoint, index, true);
                         let outputs = checkpoint.nodes[index].outputs.get_or_insert_with(|| {
                             super::outputs::make_outputs(None, None, None, None, None)
                         });
@@ -2301,33 +2363,29 @@ pub(super) fn settle(
                         remaining(checkpoint, &preview, limits);
                         return Some((preview, plan, positions));
                     }
-                    Err(fallback_error) => {
-                        let display_fragment_error = bounded(&fragment_error, 350);
-                        let display_fallback_error = bounded(&fallback_error, 350);
+                    Err(_fallback_error) => {
+                        let display_fragment_error = bounded(&fragment_error.to_string(), 350);
+                        let display_fallback_error = bounded(&safe_fallback_error, 350);
                         let display_reason = format!(
                             "node {} expansion paused: planner fragment invalid: {display_fragment_error}; fallback expansion paused: {display_fallback_error}",
                             node.id
                         );
-                        let retry_context =
-                            provenant_core::hex(bounded(&fragment_error, 1500).as_bytes());
-                        let persisted_reason = bounded(
-                            &format!("{display_reason}{FALLBACK_RETRY_CONTEXT}{retry_context}"),
-                            MAX_ADVANCE_ERROR_BYTES,
+                        set_expansion_pause(
+                            checkpoint,
+                            index,
+                            bounded(&display_reason, MAX_ADVANCE_ERROR_BYTES),
+                            false,
+                            Some(fragment_error),
                         );
-                        checkpoint.nodes[index].expansion_pause = Some(persisted_reason);
-                        checkpoint.pause_reason = Some(display_reason);
-                        checkpoint.pause_code = Some("invalid_plan_expansion".into());
                         return None;
                     }
                 }
             }
             let reason = bounded(
-                &format!("node {} expansion paused: {reason}", node.id),
+                &format!("node {} expansion paused: {safe_reason}", node.id),
                 MAX_ADVANCE_ERROR_BYTES,
             );
-            checkpoint.nodes[index].expansion_pause = Some(reason.clone());
-            checkpoint.pause_reason = Some(reason);
-            checkpoint.pause_code = Some("invalid_plan_expansion".into());
+            set_expansion_pause(checkpoint, index, reason, false, None);
             None
         }
     }
@@ -2397,32 +2455,14 @@ fn fallback_reason(progress: &NodeProgress) -> String {
             || "unknown failure".to_owned(),
             |outcome| format!("{outcome:?}"),
         );
+    // A result excerpt is captured output, not an approved diagnostic fact.
     let detail = progress
         .advance_error
         .as_deref()
-        .or_else(|| {
-            progress
-                .outputs
-                .as_ref()
-                .and_then(|outputs| outputs.result.as_ref())
-                .map(|result| result.excerpt.as_str())
-        })
         .filter(|detail| !detail.trim().is_empty());
     let reason = detail.map_or_else(
         || format!("planner attempt failed: {outcome}"),
         |detail| format!("planner attempt failed ({outcome}): {detail}"),
     );
     bounded(&reason, NOTE_BYTES)
-}
-
-fn retry_fragment_error(pause: &str) -> Option<String> {
-    let (_, context) = pause.rsplit_once(FALLBACK_RETRY_CONTEXT)?;
-    String::from_utf8(provenant_core::unhex(context)?).ok()
-}
-
-pub(super) fn pause_reason_for_display(reason: &str) -> String {
-    reason
-        .rsplit_once(FALLBACK_RETRY_CONTEXT)
-        .map_or(reason, |(display, _)| display)
-        .to_owned()
 }

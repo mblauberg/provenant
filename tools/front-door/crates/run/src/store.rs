@@ -1105,7 +1105,8 @@ impl RunStore {
         if let Some(cause) = publication.terminal_cause {
             terminal_extra.insert(
                 "terminal_cause".into(),
-                serde_json::to_value(cause).expect("serialise terminal cause"),
+                serde_json::to_value(cause)
+                    .map_err(|_| RunError::Validation("terminal cause could not be encoded"))?,
             );
         }
         next.state = AttemptState::Terminal {

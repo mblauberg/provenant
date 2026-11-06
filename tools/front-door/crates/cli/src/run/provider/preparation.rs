@@ -13,7 +13,6 @@ pub(super) fn image_input_warning(adapter: &str, attachments: &[PathBuf]) -> Opt
     })
 }
 
-
 pub(super) fn violates_account_pin(
     selected_key: Option<&str>,
     selected_adapter: Option<&str>,

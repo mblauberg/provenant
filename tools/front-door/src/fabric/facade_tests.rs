@@ -35,6 +35,91 @@ fn scratch_prepare_io_error_retains_its_cause() {
 }
 
 #[test]
+fn prompt_limit_refusal_keeps_safe_field_and_existing_code() {
+    let error = run_error(provenant_run::RunError::PromptTooLarge {
+        task_index: Some(0),
+        limit: 1_048_576,
+    });
+    let projection = error.diagnostic();
+    assert_eq!(projection.code, "invalid_input");
+    let detail = projection.detail.unwrap();
+    assert!(detail.contains("tasks[0].prompt"));
+    assert!(detail.contains("1048576"));
+    assert!(projection.next.is_some());
+}
+
+#[test]
+fn memory_pressure_refusal_keeps_source_and_resource_action() {
+    use provenant_records::diagnostic::{PressureLevel, PressureThreshold, SettingSource};
+    let error = run_error(provenant_run::RunError::Admission(
+        provenant_run::AdmissionError::MemoryPressure {
+            level: PressureLevel::Critical,
+            threshold: PressureThreshold::Warning,
+            origin: SettingSource::Configuration,
+        },
+    ));
+    let projection = error.diagnostic();
+    assert_eq!(projection.code, "confinement_refused");
+    assert!(projection.detail.unwrap().contains("host configuration"));
+    assert!(projection.next.unwrap().contains("memory"));
+
+    let fail = provenant_cli::run::Fail::from(provenant_run::RunError::Admission(
+        provenant_run::AdmissionError::MemoryPressure {
+            level: PressureLevel::Critical,
+            threshold: PressureThreshold::Warning,
+            origin: SettingSource::Configuration,
+        },
+    ));
+    let error = dispatch_refused(fail);
+    let wire = serde_json::to_vec(&error).unwrap();
+    let decoded: FacadeError = serde_json::from_slice(&wire).unwrap();
+    let projection = decoded.diagnostic();
+    assert_eq!(projection.code, "dispatch_refused");
+    assert!(projection.detail.unwrap().contains("host configuration"));
+    assert!(projection.next.unwrap().contains("memory"));
+}
+
+#[test]
+fn lane_cap_refusal_retains_the_setting_through_both_adapters() {
+    use provenant_records::diagnostic::{LaneLimit, SettingSource};
+    let failure = || provenant_run::RunError::Admission(provenant_run::AdmissionError::LaneCap {
+        active: 3,
+        limit: 3,
+        kind: LaneLimit::ProjectWriters,
+        origin: SettingSource::Configuration,
+    });
+    for error in [run_error(failure()), dispatch_refused(failure().into())] {
+        let decoded: FacadeError = serde_json::from_slice(&serde_json::to_vec(&error).unwrap()).unwrap();
+        let projection = decoded.diagnostic();
+        assert!(projection.detail.as_deref().unwrap().contains("max_project_writer_lanes"));
+        assert!(projection.detail.as_deref().unwrap().contains("host configuration"));
+        assert!(projection.next.as_deref().unwrap().contains("writer lane"));
+    }
+}
+
+#[test]
+fn process_limit_retains_io_code_and_safe_resource_facts() {
+    let failure = || provenant_run::RunError::Admission(provenant_run::AdmissionError::Processes {
+        used: 950,
+        limit: 1000,
+    });
+    for (error, code) in [
+        (run_error(failure()), "io"),
+        (dispatch_refused(failure().into()), "dispatch_refused"),
+    ] {
+        let decoded: FacadeError = serde_json::from_slice(&serde_json::to_vec(&error).unwrap()).unwrap();
+        let projection = decoded.diagnostic();
+        assert_eq!(projection.code, code);
+        let detail = projection.detail.unwrap();
+        assert!(detail.contains("RLIMIT_NPROC"));
+        assert!(detail.contains("950"));
+        assert!(detail.contains("1000"));
+        assert!(detail.contains("100"));
+        assert!(projection.next.unwrap().contains("process"));
+    }
+}
+
+#[test]
 fn tick_wakes_graph_without_deadline_but_respects_future_deadline()
 -> Result<(), Box<dyn std::error::Error>> {
     let mut checkpoint: provenant_fabric_runtime::graph::GraphCheckpoint =
@@ -2667,7 +2752,7 @@ pub(crate) mod peer_tests {
             "protected push was admitted: {result:?}"
         );
         assert!(
-            matches!(result, Err(FacadeError::ConfinementRefused)),
+            matches!(result, Err(FacadeError::ConfinementRefused { .. })),
             "{result:?}"
         );
         Ok(())
@@ -3885,6 +3970,8 @@ pub(crate) mod peer_tests {
             super::FacadeError::Io {
             delivery_limit: None,
             delivery_stage: None,
+            resource: None,
+            input_failure: None,
                 operation: "submit: access Fabric database".into(),
                 path: None,
             }
@@ -3896,6 +3983,8 @@ pub(crate) mod peer_tests {
         let peer_error = super::FacadeError::Io {
             delivery_limit: None,
             delivery_stage: None,
+            resource: None,
+            input_failure: None,
             operation: "submit: open writer repository".into(),
             path: Some("/repo".into()),
         };
@@ -3905,6 +3994,8 @@ pub(crate) mod peer_tests {
             super::FacadeError::Io {
             delivery_limit: None,
             delivery_stage: None,
+            resource: None,
+            input_failure: None,
                 operation: "submit: open writer repository".into(),
                 path: Some("/repo".into()),
             }
@@ -3913,6 +4004,8 @@ pub(crate) mod peer_tests {
         let local_error = super::FacadeError::Io {
             delivery_limit: None,
             delivery_stage: None,
+            resource: None,
+            input_failure: None,
             operation: "open writer repository".into(),
             path: Some("/repo".into()),
         };
@@ -3922,6 +4015,8 @@ pub(crate) mod peer_tests {
             super::FacadeError::Io {
             delivery_limit: None,
             delivery_stage: None,
+            resource: None,
+            input_failure: None,
                 operation: "submit: open writer repository".into(),
                 path: Some("/repo".into()),
             }
@@ -3997,6 +4092,8 @@ pub(crate) mod peer_tests {
             super::FacadeError::Io {
             delivery_limit: None,
             delivery_stage: None,
+            resource: None,
+            input_failure: None,
                 operation: "openat directory".into(),
                 path: Some("/state/worktrees".into()),
             },
@@ -4443,4 +4540,31 @@ pub(crate) mod peer_tests {
 
         Ok(())
     }
+}
+
+#[test]
+fn fallback_cause_uses_only_unanimous_typed_facts() {
+    use provenant_records::{
+        RouteExclusionReason as Cause,
+        run::{SkipKind, SkippedRoute},
+    };
+    let route = |cause| SkippedRoute {
+        extra: Default::default(),
+        route: "/private/token".into(),
+        kind: SkipKind::Unavailable,
+        cause,
+        detail: "prompt token \u{1b} /private/secret".into(),
+    };
+    let first = route(Some(Cause::StaleAvailability));
+    let first: SkippedRoute = serde_json::from_slice(&serde_json::to_vec(&first).unwrap()).unwrap();
+    assert_eq!(
+        unanimous_preparation_cause(std::slice::from_ref(&first)),
+        Some(Cause::StaleAvailability)
+    );
+    assert_eq!(unanimous_preparation_cause(&[first.clone(), route(None)]), None);
+    assert_eq!(
+        unanimous_preparation_cause(&[first, route(Some(Cause::AuthRequired))]),
+        None
+    );
+    assert_eq!(unanimous_preparation_cause(&[]), None);
 }

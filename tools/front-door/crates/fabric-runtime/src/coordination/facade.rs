@@ -178,6 +178,12 @@ bounded_input! {
 #[serde(rename_all = "snake_case")]
 pub enum DispatchRefusalFact {
     DetachedWriter,
+    GraphSchema,
+    GraphComposite,
+    GraphPlan,
+    GraphStructuralLimit(crate::graph::GraphStructuralLimit),
+    GraphEnvelope,
+    GraphOutputKind(crate::graph::GraphOutputField),
     Resource(provenant_records::diagnostic::ResourceFact),
 }
 
@@ -192,6 +198,7 @@ pub enum InvalidInputDetail {
     InputUnreadable,
     InputTooLarge,
     InputInvalidUtf8,
+    GraphDocumentTooLarge,
 }
 
 impl InvalidInputDetail {
@@ -204,6 +211,10 @@ impl InvalidInputDetail {
             }
             Self::InputTooLarge => Some("input exceeds the 1 MiB limit".into()),
             Self::InputInvalidUtf8 => Some("input is not UTF-8".into()),
+            Self::GraphDocumentTooLarge => {
+                let bound = crate::config::GraphLimits::document_bytes_bound();
+                Some(format!("limits.{}={} reached; set by {}", bound.name, bound.maximum, bound.owner))
+            }
             Self::Field(path) => {
                 safe_input_field(path).map(|path| format!("invalid input field `{path}`"))
             }
@@ -320,7 +331,7 @@ pub enum FacadeError {
         "writer base is not reachable from the peer's remotes after a fetch; push it, or check the peer's Git access"
     )]
     BaseUnreachable,
-    #[error("writer branch already exists on the peer; choose another --branch")]
+    #[error("writer branch already exists on the peer and was kept; choose another --branch")]
     BranchExists,
     #[error("artifact exceeds max_bytes; page it with an output read")]
     OutputTooLarge,
@@ -507,6 +518,28 @@ impl FacadeError {
             .next(action)
     }
 
+    /// Retain the typed admission stage while keeping its original refusal text.
+    pub fn graph_admission(error: crate::graph::AdmissionError) -> Self {
+        use crate::graph::AdmissionError;
+        let fact = match &error {
+            AdmissionError::Schema(_) => DispatchRefusalFact::GraphSchema,
+            AdmissionError::Composite(_) => DispatchRefusalFact::GraphComposite,
+            AdmissionError::Plan(_) => DispatchRefusalFact::GraphPlan,
+            AdmissionError::StructuralLimit(limit) => {
+                DispatchRefusalFact::GraphStructuralLimit(*limit)
+            }
+            AdmissionError::Envelope(_) => DispatchRefusalFact::GraphEnvelope,
+            AdmissionError::OutputKind { field, .. } => {
+                DispatchRefusalFact::GraphOutputKind(*field)
+            }
+        };
+        Self::DispatchRefused {
+            reason: error.to_string(),
+            disk: None,
+            fact: Some(fact),
+        }
+    }
+
     /// Project only facts selected by the owning refusal, never its source text.
     pub fn diagnostic(&self) -> provenant_records::diagnostic::Diagnostic {
         use provenant_records::diagnostic::Diagnostic;
@@ -529,8 +562,25 @@ impl FacadeError {
                 projected = projected.detail("writer needs a branch")
                     .next("create a branch for the worktree before retrying");
             }
+            Self::DispatchRefused { fact: Some(DispatchRefusalFact::GraphStructuralLimit(limit)), .. } => {
+                projected = projected.detail(limit.to_string()).next("reduce the graph or adjust the named graph limit");
+            }
             Self::DispatchRefused { fact: Some(DispatchRefusalFact::Resource(fact)), .. } => {
                 projected = fact.project(projected);
+            }
+            Self::DispatchRefused { fact: Some(fact), .. } => {
+                let (detail, action) = match fact {
+                    DispatchRefusalFact::DetachedWriter => unreachable!(),
+                    DispatchRefusalFact::GraphSchema => ("graph document schema_version is invalid", "use a schema version that supports the document fields"),
+                    DispatchRefusalFact::GraphComposite => ("graph composite or loop expansion is invalid", "inspect the composite or loop definition"),
+                    DispatchRefusalFact::GraphPlan => ("graph plan is invalid", "inspect the graph plan and node dependencies"),
+                    DispatchRefusalFact::GraphStructuralLimit(_) => unreachable!(),
+                    DispatchRefusalFact::Resource(_) => unreachable!(),
+                    DispatchRefusalFact::GraphEnvelope => ("graph checkpoint would exceed its size limit", "split the graph into smaller runs"),
+                    DispatchRefusalFact::GraphOutputKind(crate::graph::GraphOutputField::Input) => ("graph inputs[].outputs selects an unavailable output kind", "select an output supplied by the source node"),
+                    DispatchRefusalFact::GraphOutputKind(crate::graph::GraphOutputField::CompositeExport) => ("graph composite.exports[].outputs selects an unavailable output kind", "select an output supplied by the source node"),
+                };
+                projected = projected.detail(detail).next(action);
             }
             Self::DispatchRefused { disk: Some(disk), .. } => {
                 projected = projected.detail(format!("insufficient disk space on the limiting volume: {} bytes available, floor {} bytes; gc.free_floor from {}; bounded GC reported {} bytes reclaimed", disk.available, disk.floor, disk.origin.description(), disk.reclaimed))
@@ -572,7 +622,7 @@ impl FacadeError {
             Self::StaleFence => "stale_fence",
             Self::HomeUnavailable => "home_unavailable",
             Self::PeerVersion | Self::PeerProtocolMismatch { .. } => "peer_version",
-            Self::LaunchUnknown { .. } => "launch_unknown",
+            Self::LaunchUnknown { .. } => "LAUNCH_UNKNOWN",
             Self::ContinuationUnsupported => "continuation_unsupported",
             Self::ProviderStateExpired => "provider_state_expired",
             Self::LaneDepth => "lane_depth",
@@ -704,6 +754,13 @@ fn deserialise_invalid_detail<'de, D: serde::Deserializer<'de>>(
         }
         "input exceeds the 1 MiB limit" => Some(InvalidInputDetail::InputTooLarge),
         "input is not UTF-8" => Some(InvalidInputDetail::InputInvalidUtf8),
+        _ if Some(detail.as_str())
+            == InvalidInputDetail::GraphDocumentTooLarge
+                .safe_text()
+                .as_deref() =>
+        {
+            Some(InvalidInputDetail::GraphDocumentTooLarge)
+        }
         _ => detail
             .strip_prefix("invalid input field `")
             .and_then(|rest| {
@@ -933,8 +990,6 @@ mod diagnostic_tests {
             FacadeError::StateCorrupt
         );
     }
-
-
 
     #[test]
     fn directory_permissions_projection_respects_destination() {
@@ -1197,6 +1252,12 @@ mod diagnostic_tests {
         let wire = serde_json::to_value(&detailed).unwrap();
         assert_eq!(wire["detail"], "graph document schema_version is invalid");
         assert!(!wire.to_string().contains("31m"));
+        let oversized = FacadeError::invalid(super::InvalidInputDetail::GraphDocumentTooLarge);
+        let received: FacadeError =
+            serde_json::from_value(serde_json::to_value(&oversized).unwrap()).unwrap();
+        assert_eq!(received, oversized);
+        assert_eq!(received.code(), "invalid_input");
+        assert!(received.diagnostic().next.is_some());
         let untrusted: FacadeError = serde_json::from_value(serde_json::json!({
             "code": "invalid_input", "detail": "schema version TOKEN_SENTINEL\u{1b}"
         }))
