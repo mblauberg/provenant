@@ -5007,72 +5007,58 @@ fn legacy_partial_output_replays_with_warnings_and_truncated_authored_text() {
 
 #[test]
 fn qualified_findings_survive_reduction_and_model_synthesis() {
-    let document: GraphDocument = serde_json::from_value(serde_json::json!({
+    for dispositions in [vec![], vec!["accepted"]] {
+        let document: GraphDocument = serde_json::from_value(serde_json::json!({
         "schema_version":1,"graph_id":"qualified-findings","nodes":[
             {"id":"lenses","kind":"composite","access":"read_only",
              "composite":{"min_successful":1,"nodes":[
-                 {"id":"tests","role":"lens.tests","access":"read_only","prompt":"review","route":{"alias":"first"}}
+                 {"id":"tests","template":"review.tests","review_lens":"tests","access":"read_only","prompt":"review","route":{"alias":"first"}}
              ],"exports":[{"node":"tests","outputs":["findings"]}]}},
-            {"id":"synthesis","access":"read_only","prompt":"synthesise","route":{"alias":"second"},
-             "depends_on":["lenses"],"dispositions":["accepted"],
+            {"id":"synthesis","kind":"synthesise","access":"read_only","prompt":"synthesise","route":{"alias":"second"},
+             "depends_on":["lenses"],"dispositions":dispositions,
              "inputs":[{"node":"lenses","outputs":["findings"]}]}
         ]
     })).unwrap();
-    let finding = entry(
-        ",\"lens\":\"wrong\",\"evidence\":\"observed failure\",\"proposed_fix\":\"repair branch\"",
-    );
-    let mut owner = FakeOwner {
-        observations: VecDeque::from([
-            terminal_with_result(AttemptOutcome::Succeeded, &findings_text(&finding)),
-            terminal_with_result(
-                AttemptOutcome::Succeeded,
-                &findings_text(r#"{"id":"F1","disposition":"accepted","reason":"verified"}"#),
-            ),
-        ]),
-        ..Default::default()
-    };
-    let mut journal = MemoryJournal::default();
-    let run = advance(&document, &mut owner, &mut journal).unwrap();
-    for id in ["lenses", "synthesis"] {
-        let node = run
-            .checkpoint
-            .nodes
-            .iter()
-            .find(|node| node.id == id)
-            .unwrap();
-        let finding = &node.outputs.as_ref().unwrap().findings[0];
-        assert!(finding.id.ends_with(":F1"));
-        assert_eq!(finding.severity, "high");
-        assert_eq!((finding.file.as_str(), finding.line), ("a.rs", None));
-        assert_eq!(finding.extra["lens"], "tests");
-        assert_eq!(finding.extra["evidence"], "observed failure");
-        assert_eq!(finding.extra["proposed_fix"], "repair branch");
-    }
-    assert!(owner.prompts[1].contains("\"lens\":\"tests\""));
-    assert!(owner.prompts[1].contains("\"evidence\":\"observed failure\""));
-    assert!(owner.prompts[1].contains("\"proposed_fix\":\"repair branch\""));
-    assert_eq!(
-        advance(&document, &mut FakeOwner::default(), &mut journal)
-            .unwrap()
-            .checkpoint,
-        run.checkpoint
-    );
-    // A checkpoint produced before lens tagging remains replayable.
-    let checkpoint = journal.0.as_mut().unwrap();
-    for node in &mut checkpoint.nodes {
-        if let Some(outputs) = &mut node.outputs {
-            for finding in &mut outputs.findings {
-                finding.extra.remove("lens");
-            }
+        let finding = entry(
+            ",\"lens\":\"wrong\",\"evidence\":\"observed failure\",\"proposed_fix\":\"repair branch\"",
+        );
+        let mut owner = FakeOwner {
+            observations: VecDeque::from([
+                terminal_with_result(AttemptOutcome::Succeeded, &findings_text(&finding)),
+                terminal_with_result(
+                    AttemptOutcome::Succeeded,
+                    &findings_text(r#"{"id":"F1","disposition":"accepted","reason":"verified"}"#),
+                ),
+            ]),
+            ..Default::default()
+        };
+        let mut journal = MemoryJournal::default();
+        let run = advance(&document, &mut owner, &mut journal).unwrap();
+        for id in ["lenses", "synthesis"] {
+            let node = run
+                .checkpoint
+                .nodes
+                .iter()
+                .find(|node| node.id == id)
+                .unwrap();
+            let finding = &node.outputs.as_ref().unwrap().findings[0];
+            assert!(finding.id.ends_with(":F1"));
+            assert_eq!(finding.severity, "high");
+            assert_eq!((finding.file.as_str(), finding.line), ("a.rs", None));
+            assert_eq!(finding.extra["lens"], "tests");
+            assert_eq!(finding.extra["evidence"], "observed failure");
+            assert_eq!(finding.extra["proposed_fix"], "repair branch");
         }
+        assert!(owner.prompts[1].contains("\"lens\":\"tests\""));
+        assert!(owner.prompts[1].contains("\"evidence\":\"observed failure\""));
+        assert!(owner.prompts[1].contains("\"proposed_fix\":\"repair branch\""));
+        assert_eq!(
+            advance(&document, &mut FakeOwner::default(), &mut journal)
+                .unwrap()
+                .checkpoint,
+            run.checkpoint
+        );
     }
-    let old = checkpoint.clone();
-    assert_eq!(
-        advance(&document, &mut FakeOwner::default(), &mut journal)
-            .unwrap()
-            .checkpoint,
-        old
-    );
 }
 
 #[test]
@@ -9189,7 +9175,7 @@ fn upstream_data_boundary_cannot_be_closed_by_result_content() {
 }
 
 #[test]
-fn synthesise_receives_selected_reviewer_findings_and_emits_typed_output() {
+fn synthesise_retains_selected_reviewer_findings_when_model_omits_them() {
     let mut synthesis = node("synthesis", route("fixture"));
     synthesis.kind = Some(NodeKind::Synthesise);
     synthesis.prompt = "Deduplicate overlapping findings".into();
@@ -9233,8 +9219,14 @@ fn synthesise_receives_selected_reviewer_findings_and_emits_typed_output() {
     assert!(prompt.contains("untrusted upstream output"));
     let outputs = run.checkpoint.nodes[3].outputs.as_ref().unwrap();
     assert_eq!(outputs.schema_version, 2);
-    assert_eq!(outputs.findings.len(), 1);
-    assert_eq!(outputs.findings[0].id, "F1");
+    assert_eq!(
+        outputs
+            .findings
+            .iter()
+            .map(|finding| finding.id.as_str())
+            .collect::<Vec<_>>(),
+        ["F1", "F2", "F3"]
+    );
     assert_eq!(advance(&document, &mut owner, &mut journal).unwrap(), run);
 }
 

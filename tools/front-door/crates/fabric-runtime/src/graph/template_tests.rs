@@ -334,3 +334,17 @@ fn templates_refuse_undeclared_parameters_and_authority_by_parameter() {
     let value: Value = serde_json::to_value(&widening).unwrap();
     assert_eq!(value["name"], "wide");
 }
+
+#[test]
+fn review_templates_record_the_raising_lens() {
+    let bundled = library();
+    for name in ["review", "review.tests", "review.security"] {
+        let lowered = Compiler::new(&bundled)
+            .lower(&json!({"id":"check", "use":name}))
+            .unwrap();
+        let lens = lowered["review_lens"].as_str().unwrap();
+        assert!(!lens.is_empty());
+        assert!(lowered["prompt"].as_str().unwrap().contains(lens));
+        assert_eq!(lowered["require_findings"], true);
+    }
+}

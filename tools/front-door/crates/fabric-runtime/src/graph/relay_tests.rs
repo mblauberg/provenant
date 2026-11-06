@@ -318,7 +318,6 @@ fn detached_children_do_not_gate_their_parents_dependants() {
         resolvers: &resolvers,
         limits: &limits,
         scan: &|_| Ok(()),
-        journal: None,
     };
     patch::admit_patch(
         &mut patch::LiveGraph {
