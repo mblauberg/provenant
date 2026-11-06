@@ -241,6 +241,75 @@ pub(crate) struct Allowance {
 }
 
 impl RunStore {
+    /// Yield admission while waiting on children, or try to reclaim it before
+    /// resuming. False means reclaim must be retried; the running attempt and
+    /// its output remain intact and its state records the admission wait.
+    pub fn set_child_wait(&self, id: AttemptId, waiting: bool, call: &Request<'_>) -> Result<bool> {
+        self.set_child_wait_observed(id, waiting, call, &SystemResources)
+    }
+
+    pub(crate) fn set_child_wait_observed(
+        &self,
+        id: AttemptId,
+        waiting: bool,
+        call: &Request<'_>,
+        resources: &dyn Resources,
+    ) -> Result<bool> {
+        let ledger = crate::ledger::open(&self.writer_registry, call)?;
+        self.write(call, |tx| {
+            let old = self.record(id, call)?;
+            let AttemptState::Running { .. } = &old.state else {
+                return Err(RunError::Refused);
+            };
+            let mut ticket = self.ticket(tx, id)?;
+            let mut next = old.clone();
+            let AttemptState::Running { extra } = &mut next.state else {
+                unreachable!();
+            };
+            let admitted = if waiting {
+                crate::ledger::yield_lease(&ledger, self.context.state_root.as_path(), id, call)?;
+                ticket.active = false;
+                extra.insert("child_wait".into(), "children".into());
+                true
+            } else {
+                // The ledger may have committed a yield before a failed store
+                // commit. Always recheck it, even if this ticket says active.
+                let active: i64 = tx.query_row(
+                    "SELECT COUNT(*) FROM admission WHERE active=1 AND run=?1 AND attempt<>?2",
+                    params![old.run_id.to_string(), id.to_string()],
+                    |r| r.get(0),
+                )?;
+                let reclaimed = active < sql_int(ticket.run_concurrency)?
+                    && crate::ledger::lease(
+                        &ledger,
+                        self.context.state_root.as_path(),
+                        &ticket,
+                        self.lane_caps(),
+                        call.clock,
+                        call,
+                        resources,
+                    )?
+                    .is_some();
+                ticket.active = reclaimed;
+                if reclaimed {
+                    extra.remove("child_wait");
+                } else {
+                    extra.insert("child_wait".into(), "admission".into());
+                }
+                reclaimed
+            };
+            tx.execute(
+                "UPDATE admission SET active=?1,record=?2 WHERE attempt=?3",
+                params![ticket.active, bytes(&ticket)?, id.to_string()],
+            )?;
+            if next.state != old.state {
+                next.revision = next.revision.checked_add(1).ok_or(RunError::Conflict)?;
+                update_attempt(tx, &old, &next)?;
+            }
+            Ok(admitted)
+        })
+    }
+
     pub fn admission_policy(&self) -> AdmissionPolicy {
         self.policy
     }
@@ -455,7 +524,17 @@ impl RunStore {
                 let waiting_for = if stalled {
                     "host_stalled: supervisor is in uninterruptible sleep".to_owned()
                 } else if matches!(lane.state, AttemptState::Running { .. }) {
-                    self.disk_pause_wait(lane, resources)
+                    match &lane.state {
+                        AttemptState::Running { extra } => extra.get("child_wait")
+                            .and_then(|wait| wait.as_str())
+                            .map(|wait| if wait == "children" {
+                                "children: host and project admission yielded".to_owned()
+                            } else {
+                                "admission: reclaiming host and project capacity or startup spacing".to_owned()
+                            }),
+                        _ => None,
+                    }
+                        .or_else(|| self.disk_pause_wait(lane, resources))
                         .or_else(|| self.build_slot_wait(lane, call, &slot_queue))
                         .or_else(|| {
                             lane.provider_silent_for_ms.0
@@ -1028,7 +1107,7 @@ impl RunStore {
         )
         .ok()?
     }
-    fn claim_observed(
+    pub(crate) fn claim_observed(
         &self,
         id: AttemptId,
         clock: &dyn Clock,
