@@ -725,7 +725,16 @@ record, including a refusal before launch, carries a `settlement_reason`
 `uncommitted_work`, `pre_launch_refusal`, `cancelled`, `lost`, `unsettled`,
 `failed`), derived once where the terminal decision is committed
 (`RunStore::commit_terminal`, or `commit_lost` for an attempt whose record was
-lost). A lost or unsettled outcome names its reason whatever evidence it
+lost). Lane rows expose that settlement classification as `cause`. When a
+specific typed terminal cause was recorded, `terminal_cause` identifies it and
+`reason` uses fixed text from that cause. Pre-launch causes distinguish an
+unsupported platform, an unknown pacing account, an unregistered selected
+account and a credential-helper failure at delivery Prepare. These projections
+never copy raw preparation errors or provider output. A refused resume retains
+the specific preparation reason without consuming a continuation or creating a
+new run.
+
+A lost or unsettled outcome names its reason whatever evidence it
 carries; the process may have run even though custody was not proven. A failed, cancelled or lost
 lane whose final answer declares a stop records `declared_stop` (with any
 provider stop it already reported) and no other partial signal. The settled outcome is

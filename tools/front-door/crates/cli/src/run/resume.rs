@@ -376,7 +376,16 @@ pub fn continue_attempt_mode(
     };
     let run = accepted.map_err(|error| {
         if matches!(error, run::RunError::ContinuationRefused { .. }) {
-            return Fail::from(error);
+            let mut fail = Fail::from(error);
+            if cleanup_failure.is_some() {
+                let retained = "fresh fallback worktree cleanup failed; inspect retained worktrees with `provenant worktree list` before retrying or running `provenant gc`";
+                fail.message.push_str(&format!("; {retained}"));
+                if let Some(projection) = &mut fail.projection {
+                    let detail = projection.detail.get_or_insert_with(String::new);
+                    detail.push_str(&format!("; {retained}"));
+                }
+            }
+            return fail;
         }
         Fail::new(
             Status::Refused,

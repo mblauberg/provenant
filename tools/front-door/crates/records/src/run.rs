@@ -802,7 +802,7 @@ impl TerminalCause {
         match self {
             Self::UnsupportedPlatform => "sandbox backend is unavailable: UnsupportedPlatform",
             Self::UnknownPacingAccount => {
-                "pacing deadline reset_of references an unregistered account; correct the pacing profile"
+                "pacing configuration references an unregistered account; correct the pacing profile"
             }
             Self::UnregisteredAccount => {
                 "the selected account is not registered for the requested route; run `provenant accounts list`"

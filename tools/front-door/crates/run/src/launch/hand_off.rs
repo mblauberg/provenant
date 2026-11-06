@@ -402,6 +402,9 @@ mod tests {
         );
         match result {
             Err(HandOff::Local(reason)) => assert!(reason.contains("lane priority"), "{reason}"),
+            Err(HandOff::TypedLocal { message, cause }) => {
+                panic!("unexpected typed refusal {cause:?}: {message}")
+            }
             Err(HandOff::Busy) => panic!("custody busy"),
             Err(HandOff::RetainedImport { .. }) => {
                 panic!("unexpected refusal")
@@ -438,6 +441,9 @@ mod tests {
             Err(HandOff::Protected(reason)) => assert!(reason.contains("fixture"), "{reason}"),
             Err(HandOff::Uncertain(reason)) => panic!("uncertain: {reason}"),
             Err(HandOff::Local(reason)) => panic!("local: {reason}"),
+            Err(HandOff::TypedLocal { message, cause }) => {
+                panic!("unexpected typed refusal {cause:?}: {message}")
+            }
             Err(HandOff::Busy) => panic!("busy"),
             Err(HandOff::RetainedImport { .. }) => {
                 panic!("unexpected refusal")
@@ -471,6 +477,9 @@ mod tests {
             }
             Err(HandOff::Uncertain(reason)) => panic!("uncertain: {reason}"),
             Err(HandOff::Local(reason)) => panic!("local: {reason}"),
+            Err(HandOff::TypedLocal { message, cause }) => {
+                panic!("unexpected typed refusal {cause:?}: {message}")
+            }
             Err(HandOff::Busy) => panic!("busy"),
             Err(HandOff::RetainedImport { .. }) => {
                 panic!("unexpected refusal")
