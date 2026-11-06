@@ -463,3 +463,55 @@ fn child_timeout_is_preserved_in_the_admitted_graph_node() {
         "invalid"
     );
 }
+
+#[test]
+fn composite_child_timeout_reaches_every_provider_leaf_and_retains_template_evidence() {
+    let (document, mut checkpoint) = live(None);
+    let mut request = child("chain", "chain-1");
+    request.template = "task-chain".into();
+    request.timeout_seconds = Some(23);
+    request.tier = Some("junior".into());
+    add(&document, &mut checkpoint, "a", &request).unwrap();
+    let expanded = plans::expand(
+        &document,
+        &checkpoint.extensions,
+        &checkpoint.expansions,
+        &plans::generous(),
+    )
+    .unwrap();
+    let leaves: Vec<_> = expanded
+        .nodes
+        .iter()
+        .filter(|node| node.id.starts_with("a--chain--") && node.composite.is_none())
+        .collect();
+    assert_eq!(leaves.len(), 2);
+    for leaf in leaves {
+        assert_eq!(leaf.deadline_seconds, Some(23));
+        assert_eq!(leaf.prompt, request.brief);
+    }
+    let evidence = &checkpoint.expansions[0].uses[0];
+    assert_eq!(evidence.name, "task-chain");
+    assert_eq!(evidence.parameters["brief"], request.brief);
+    assert!(
+        add(&document, &mut checkpoint, "a", &request)
+            .unwrap()
+            .replayed
+    );
+    let mut unbound = child("panel", "panel-1");
+    unbound.template = "review-panel".into();
+    assert_eq!(
+        add(&document, &mut checkpoint, "a", &unbound)
+            .unwrap_err()
+            .code,
+        "invalid"
+    );
+    request.id = "writerchain".into();
+    request.idempotency_key = "writerchain-1".into();
+    request.writer = true;
+    assert_eq!(
+        add(&document, &mut checkpoint, "a", &request)
+            .unwrap_err()
+            .code,
+        "invalid"
+    );
+}
