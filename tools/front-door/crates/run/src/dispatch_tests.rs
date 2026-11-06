@@ -4707,7 +4707,12 @@ fn lane_waits_count_spacing_on_the_host_clock_and_say_nothing_when_it_is_unreada
     assert!(store.claim(first, &host, &call)?.is_some());
     let wait = |host: &Stepped| -> Result<String> {
         let records = [store.record(second, &call)?];
-        let waits = store.lane_waits(&records, &stepped_call(host, &cancel));
+        // Isolate the host-clock contract from the runner's disk and pressure.
+        let waits = store.lane_waits_with_resources(
+            &records,
+            &stepped_call(host, &cancel),
+            &HostFacts::new(100),
+        );
         Ok(waits
             .first()
             .map(|w| w.waiting_for.clone())

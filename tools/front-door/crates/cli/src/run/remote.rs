@@ -1022,11 +1022,12 @@ pub(super) fn dispatch(
         None => (lanes, None),
     };
     // A waited report makes no peer read after the wait's deadline.
-    let (mut data, human) = if met.is_some() {
+    let (mut data, mut human) = if met.is_some() {
         render_with_waits(&lanes, &[], &selected, edge.roots.state.as_path())
     } else {
         render(&peer, &lanes, &selected, edge)
     };
+    super::expand_lane_details(&mut data, &mut human, &lanes, &[]);
     data["run_id"] = json!(run_id);
     data["operation_id"] = json!(batch.operation_id);
     data["host"] = json!(host);
@@ -1138,7 +1139,8 @@ pub(super) fn lanes(
         .filter(|lane| since.is_none_or(|since| lane.queued_at >= since))
         .take(usize::try_from(command.limit).unwrap_or(usize::MAX))
         .collect();
-    let (data, human) = render(&peer, &lanes, &selected, edge);
+    let (mut data, mut human) = render(&peer, &lanes, &selected, edge);
+    super::expand_lane_details(&mut data, &mut human, &lanes, &[]);
     Ok(Some((data, human, false)))
 }
 
@@ -1204,12 +1206,15 @@ fn armed(
         Duration::from_secs(seconds),
         POLL,
     )?;
-    let (mut data, human) = render_with_waits(
+    let (mut data, mut human) = render_with_waits(
         &waited.lanes,
         &[],
         &hosts(&waited.lanes),
         edge.roots.state.as_path(),
     );
+    if !command.id.is_empty() {
+        super::expand_lane_details(&mut data, &mut human, &waited.lanes, &[]);
+    }
     data["condition_met"] = json!(waited.met);
     if let Some(id) = waited.silent_lane {
         data["timed_out"] = json!(false);

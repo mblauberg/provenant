@@ -423,6 +423,27 @@ pub(super) fn lane_detail(lane: &run::AttemptRecord, waits: &[run::LaneWait]) ->
         })
 }
 
+/// Expand a direct launch response or explicit selection, never a listing.
+/// Uses retained typed facts only, with no extra host or peer observations.
+pub(super) fn expand_lane_details(
+    data: &mut Value,
+    human: &mut String,
+    lanes: &[run::AttemptRecord],
+    waits: &[run::LaneWait],
+) {
+    if let Some(rows) = data["lanes"].as_array_mut() {
+        for (row, lane) in rows.iter_mut().zip(lanes) {
+            if let Some(detail) = lane_detail(lane, waits) {
+                human.push_str(&format!("  detail: {}\n", plain_text(&detail, usize::MAX)));
+                if row["settlement"].is_object() {
+                    row["settlement"]["reason"] = json!(detail);
+                }
+                row["reason"] = json!(detail);
+            }
+        }
+    }
+}
+
 /// One lane as the compact views show it.
 pub(super) struct LaneLine {
     id: String,
@@ -1504,15 +1525,8 @@ pub(super) fn lanes_inner(
     append_provider_errors(&session, &lanes, &mut data, &mut human);
     attach_handoffs(&session, &lanes, &mut data);
     omit_listing_write_grants(&command.id, &mut data);
-    if !command.id.is_empty()
-        && let Some(rows) = data["lanes"].as_array_mut()
-    {
-        for (row, lane) in rows.iter_mut().zip(&lanes) {
-            if let Some(detail) = lane_detail(lane, &waits) {
-                human.push_str(&format!("  detail: {}\n", plain_text(&detail, usize::MAX)));
-                row["reason"] = json!(detail);
-            }
-        }
+    if !command.id.is_empty() {
+        expand_lane_details(&mut data, &mut human, &lanes, &waits);
     }
     attach_cloud_jobs(&session.store, &lanes, &mut data, &mut human, &call)?;
     Ok((data, human, false))

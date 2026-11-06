@@ -529,7 +529,7 @@ pub(super) fn prepare_with_wait(
                 .get(name)
                 .ok_or_else(|| PrepareError::Refusal {
                     message: provenant_records::run::TerminalCause::HostNativeUnconfigured
-                        .reason()
+                        .detail()
                         .into(),
                     cause: provenant_records::run::TerminalCause::HostNativeUnconfigured,
                     note: None,

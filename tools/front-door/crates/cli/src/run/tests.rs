@@ -9171,6 +9171,7 @@ fn lane_detail_and_output_retain_safe_refusal_remedies() -> Result<(), Box<dyn s
 #[test]
 fn disk_wait_rows_stay_compact_and_explicit_output_keeps_the_sample()
 -> Result<(), Box<dyn std::error::Error>> {
+    use std::os::unix::fs::OpenOptionsExt;
     let now = WallTime::from_micros(100)?;
     let reason = "host capacity: disk space: 23622320128 bytes available; gc.free_floor is 32212254720 bytes (source: host configuration)";
     let lanes: Vec<_> = (1..=20)
@@ -9254,14 +9255,22 @@ fn disk_wait_rows_stay_compact_and_explicit_output_keeps_the_sample()
                 )?,
                 1
             );
-            std::fs::write(
-                artifact(
+            // Admission reads private guardian checkpoints. Match their mode
+            // rather than inheriting the test runner's umask.
+            let mut sample = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(artifact(
                     session.context.state_root.as_path(),
                     &lane,
                     "admission-disk.json",
-                ),
-                serde_json::to_vec(&json!({"generation":lane.generation,"free":23622320128_u64}))?,
+                ))?;
+            std::io::Write::write_all(
+                &mut sample,
+                &serde_json::to_vec(&json!({"generation":lane.generation,"free":23622320128_u64}))?,
             )?;
+            drop(sample);
             let target = Target {
                 selection: None,
                 run: Some(lane.run_id),

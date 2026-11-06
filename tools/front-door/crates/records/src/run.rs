@@ -830,7 +830,7 @@ impl TerminalCause {
             Self::UnknownPacingAccount => "pacing account unknown; provenant output ID",
             Self::UnregisteredAccount => "account unregistered; provenant output ID",
             Self::DeliveryPrepareCredentialHelper => {
-                "credential helper failed; provenant output ID"
+                "Prepare (credential helper) failed; provenant output ID"
             }
             Self::SpawnFailure => "provider spawn failed; provenant output ID",
             Self::ProcessCrash => "provider crashed; provenant output ID",
