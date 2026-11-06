@@ -932,27 +932,6 @@ pub(super) fn decode_checkpoint(
     }) {
         return Err(JournalError::RetiredLoopCheckpoint);
     }
-    if stored.checkpoint.nodes.iter().any(|node| {
-        node.attempts
-            .iter()
-            .take(node.attempts.len().saturating_sub(1))
-            .any(|attempt| attempt.launched)
-            || (node.state == NodeState::Running
-                && node.attempts.last().is_some_and(|attempt| {
-                    attempt.state == AttemptState::Terminal
-                        && attempt.launched
-                        && attempt.outcome.is_some_and(|outcome| {
-                            matches!(
-                                outcome,
-                                AttemptOutcome::AuthRequired
-                                    | AttemptOutcome::UsageLimited
-                                    | AttemptOutcome::AdapterUnavailable
-                            )
-                        })
-                }))
-    }) {
-        return Err(JournalError::RetiredFallbackCheckpoint);
-    }
     let limits = crate::config::GraphLimits {
         nodes: usize::MAX,
         edges: usize::MAX,
