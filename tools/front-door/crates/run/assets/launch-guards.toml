@@ -61,6 +61,11 @@ boundary = "authority"
 reason = "A continuation must match its recorded route and grant identity."
 
 [[guard]]
+site = "cli/src/run/provider/continuation.rs#continuation_for"
+boundary = "authority"
+reason = "A continuation requires its recorded session, applied route and account identity and must match the selected route."
+
+[[guard]]
 site = "run/src/launch.rs#child_access_within_impl"
 boundary = "authority"
 reason = "A child cannot exceed its parent access or select another graph source."

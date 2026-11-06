@@ -34,6 +34,12 @@ pub(super) fn continuation_request(
 pub(super) enum ContinuationError {
     #[error("route differs from the prior attempt's provider, model or account")]
     RouteMismatch,
+    #[error("the prior attempt recorded no provider session")]
+    MissingSession,
+    #[error("the prior attempt recorded no applied route")]
+    MissingRoute,
+    #[error(transparent)]
+    Provider(#[from] provenant_providers::ProviderError),
     #[error("{0}")]
     Other(String),
 }
@@ -42,7 +48,10 @@ impl ContinuationError {
     pub(super) fn boundary_class(&self) -> provenant_records::diagnostic::BoundaryClass {
         use provenant_records::diagnostic::BoundaryClass;
         match self {
-            Self::RouteMismatch => BoundaryClass::Authority,
+            Self::RouteMismatch | Self::MissingSession | Self::MissingRoute => {
+                BoundaryClass::Authority
+            }
+            Self::Provider(error) => error.boundary_class(),
             Self::Other(_) => BoundaryClass::None,
         }
     }
@@ -55,6 +64,14 @@ fn continuation_route_mismatch_is_a_typed_authority_boundary() {
         ContinuationError::RouteMismatch.boundary_class(),
         BoundaryClass::Authority
     );
+    for error in [
+        ContinuationError::MissingSession,
+        ContinuationError::MissingRoute,
+        ContinuationError::Provider(provenant_providers::ProviderError::IdentityMismatch),
+        ContinuationError::Provider(provenant_providers::ProviderError::UnknownIdentity),
+    ] {
+        assert_eq!(error.boundary_class(), BoundaryClass::Authority);
+    }
     assert_eq!(
         ContinuationError::Other("unavailable".into()).boundary_class(),
         BoundaryClass::None
@@ -87,11 +104,11 @@ pub(super) fn continuation_for(
     let session = prior
         .session
         .as_deref()
-        .ok_or("the prior attempt recorded no provider session")?;
+        .ok_or(ContinuationError::MissingSession)?;
     let applied = prior
         .applied_route
         .as_ref()
-        .ok_or("the prior attempt recorded no applied route")?;
+        .ok_or(ContinuationError::MissingRoute)?;
     if applied.provider.as_deref() != Some(route.adapter.as_str())
         || applied.model.as_deref() != Some(format!("{}/{}", route.adapter, route.model).as_str())
         || applied.account_key != route.account_key
@@ -99,8 +116,7 @@ pub(super) fn continuation_for(
         return Err(ContinuationError::RouteMismatch);
     }
     let continuation =
-        provenant_providers::Continuation::retained(&route.adapter, session, route, grant_digest)
-            .map_err(|error| error.to_string())?;
+        provenant_providers::Continuation::retained(&route.adapter, session, route, grant_digest)?;
     let prior_state = state_root
         .join("runs")
         .join(prior.run_id.to_string())
