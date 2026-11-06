@@ -402,7 +402,7 @@ fn admit_patch_for_retry(
     }
 }
 
-/// Redo a settled leaf, retaining its earlier attempts and journalling its brief.
+/// Redo a settled node or container, retaining prior attempts and journalling the reset.
 /// The caller holds the graph lock and saves the result before advancing.
 pub fn retry_node(
     graph: &mut LiveGraph<'_>,
@@ -428,6 +428,47 @@ pub fn retry_node(
         .iter()
         .position(|node| node.id == id)
         .ok_or_else(|| PatchError::invalid(format!("unknown node {id}")))?;
+    let container = node.composite.is_some() || node.loop_body.is_some();
+    if container && brief.is_some() {
+        return Err(PatchError::invalid(
+            "container retry requires per-leaf brief edits",
+        ));
+    }
+    let prefix = format!("{id}--");
+    let mut reset_ids = BTreeSet::from([id.to_owned()]);
+    if container {
+        reset_ids.extend(
+            expanded
+                .nodes
+                .iter()
+                .filter(|node| node.id.starts_with(&prefix))
+                .map(|node| node.id.clone()),
+        );
+        // Prior producer output remains immutable history. Re-running the producer
+        // admits its next generation; re-running its old children would duplicate work.
+        for expansion in &graph.checkpoint.expansions {
+            if reset_ids.contains(&expansion.source) {
+                for child in &expansion.nodes {
+                    reset_ids.remove(&child.id);
+                }
+            }
+        }
+    }
+    for progress in &graph.checkpoint.nodes {
+        if (reset_ids.contains(&progress.id) || container && progress.id.starts_with(&prefix))
+            && progress
+                .attempts
+                .iter()
+                .any(|attempt| attempt.state != AttemptState::Terminal)
+            && !(progress.state == NodeState::Skipped && progress.cancelled_from.is_some())
+            && !(progress.id == id
+                && progress.advance_error_code.as_deref() == Some("launch_refused"))
+        {
+            return Err(PatchError::invalid(
+                "node retry requires settled subtree attempts",
+            ));
+        }
+    }
     let old = &graph.checkpoint.nodes[index];
     // An explicit pre-launch refusal leaves its durable attempt in Starting.
     // It has no process to stop; retain it as history without cancelling siblings.
@@ -481,29 +522,9 @@ pub fn retry_node(
             }
         }
     }
-    let generation = old
-        .extra
-        .get("retry_generation")
-        .and_then(Value::as_u64)
-        .unwrap_or(0)
-        .checked_add(1)
-        .ok_or_else(|| PatchError::invalid("retry generation exhausted"))?;
-    let mut previous = old
-        .previous_attempts
-        .iter()
-        .map(serde_json::to_value)
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| PatchError::invalid(e.to_string()))?;
-    previous.extend(
-        old.attempts
-            .iter()
-            .map(serde_json::to_value)
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| PatchError::invalid(e.to_string()))?,
-    );
-    // Already settled consumers retain evidence for the generation they observed.
-    // Their own redo clears these snapshots; pending consumers see the new result.
-    let mut affected = std::collections::BTreeSet::from([id.to_owned()]);
+    // Settled consumers keep the generations they observed, including any
+    // internal outputs they selected directly. Pending consumers see the redo.
+    let mut affected = reset_ids.clone();
     loop {
         let before = affected.len();
         for node in &expanded.nodes {
@@ -515,45 +536,50 @@ pub fn retry_node(
             break;
         }
     }
-    let mut prior = serde_json::to_value(old).map_err(|e| PatchError::invalid(e.to_string()))?;
-    if let Some(fields) = prior.as_object_mut() {
-        fields.remove("settled_dependency_snapshots");
-        fields.remove("previous_attempts");
-    }
     for consumer in &mut candidate.nodes {
-        if consumer.id != id && affected.contains(&consumer.id) && consumer.state.settled() {
+        if !reset_ids.contains(&consumer.id)
+            && affected.contains(&consumer.id)
+            && consumer.state.settled()
+        {
             let snapshots = consumer
                 .extra
                 .entry("settled_dependency_snapshots".into())
-                .or_insert_with(|| serde_json::json!({}));
-            snapshots
+                .or_insert_with(|| serde_json::json!({}))
                 .as_object_mut()
-                .ok_or_else(|| PatchError::invalid("invalid dependency snapshots"))?
-                .entry(id.to_owned())
-                .or_insert_with(|| prior.clone());
+                .ok_or_else(|| PatchError::invalid("invalid dependency snapshots"))?;
+            for prior in graph
+                .checkpoint
+                .nodes
+                .iter()
+                .filter(|node| reset_ids.contains(&node.id) && node.state.settled())
+            {
+                let mut value =
+                    serde_json::to_value(prior).map_err(|e| PatchError::invalid(e.to_string()))?;
+                let fields = value.as_object_mut().unwrap();
+                fields.remove("settled_dependency_snapshots");
+                fields.remove("previous_attempts");
+                snapshots.entry(prior.id.clone()).or_insert(value);
+            }
         }
     }
-    let mut reset = serde_json::to_value(old).map_err(|e| PatchError::invalid(e.to_string()))?;
-    // Keep placement and source bindings; clear all per-execution results and fences.
-    let fields = reset.as_object_mut().unwrap();
-    fields.retain(|key, _| {
-        matches!(
-            key.as_str(),
-            "id" | "worktree"
-                | "writer_binding"
-                | "source_binding"
-                | "source_commit"
-                | "review_base"
-                | "round"
-                | "title"
-        )
-    });
-    fields.insert("state".into(), "pending".into());
-    fields.insert("attempts".into(), serde_json::json!([]));
-    fields.insert("previous_attempts".into(), previous.into());
-    fields.insert("retry_generation".into(), generation.into());
-    candidate.nodes[index] =
-        serde_json::from_value(reset).map_err(|e| PatchError::invalid(e.to_string()))?;
+    for progress in &mut candidate.nodes {
+        if reset_ids.contains(&progress.id) {
+            *progress = reset_progress(progress, container)?;
+        }
+    }
+    if container {
+        // Terminal loop decisions belong to the old execution, while explicit
+        // round allowances remain part of the graph's configured limits.
+        candidate.extensions.retain(|extension| {
+            !reset_ids
+                .iter()
+                .any(|id| extension.starts_with(&format!("loop.{id}.decision=")))
+        });
+        candidate
+            .asks
+            .retain(|ask| ask.node.as_ref().is_none_or(|id| !reset_ids.contains(id)));
+        loops::refresh_pause(&mut candidate);
+    }
     let patch = Patch {
         schema_version: PATCH_SCHEMA_VERSION,
         expected_revision: Some(revision(graph.checkpoint)),
@@ -574,6 +600,43 @@ pub fn retry_node(
     asks::refresh_wake(&mut candidate);
     *graph.checkpoint = candidate;
     Ok(admitted)
+}
+
+fn reset_progress(old: &NodeProgress, container: bool) -> Result<NodeProgress, PatchError> {
+    let generation = old
+        .extra
+        .get("retry_generation")
+        .and_then(Value::as_u64)
+        .unwrap_or(0)
+        .checked_add(1)
+        .ok_or_else(|| PatchError::invalid("retry generation exhausted"))?;
+    let mut previous = old.previous_attempts.clone();
+    previous.extend(old.attempts.iter().cloned());
+    let mut reset = serde_json::to_value(old).map_err(|e| PatchError::invalid(e.to_string()))?;
+    let fields = reset.as_object_mut().unwrap();
+    fields.retain(|key, _| {
+        matches!(
+            key.as_str(),
+            "id" | "worktree"
+                | "writer_binding"
+                | "source_binding"
+                | "source_commit"
+                | "review_base"
+                | "round"
+                | "title"
+        )
+    });
+    fields.insert("state".into(), "pending".into());
+    fields.insert("attempts".into(), serde_json::json!([]));
+    fields.insert(
+        "previous_attempts".into(),
+        serde_json::to_value(previous).unwrap(),
+    );
+    fields.insert("retry_generation".into(), generation.into());
+    if container {
+        fields.insert("container_retry".into(), true.into());
+    }
+    serde_json::from_value(reset).map_err(|e| PatchError::invalid(e.to_string()))
 }
 
 /// Retain the initial mutation alongside the immutable submitted topology.
@@ -992,10 +1055,10 @@ pub(super) fn prepare(
             comparable.prompt = target.prompt.clone();
             comparable.round = target.round.clone();
             comparable.after_expansion = target.after_expansion.clone();
+            comparable.composite_members = target.composite_members.clone();
             comparable == *target
-                && target.composite.is_none()
-                && target.loop_body.is_none()
-                && target.composite_members.is_empty()
+                && (target.composite.is_none() && target.loop_body.is_none()
+                    || node.prompt == target.prompt)
         };
         if (structural(target) || structural(&node)) && !same_retry {
             return Err(PatchError::new(

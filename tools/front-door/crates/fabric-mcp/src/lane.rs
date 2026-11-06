@@ -662,6 +662,114 @@ mod tests {
     }
 
     #[test]
+    fn lost_child_add_reply_replays_the_durable_receipt_over_the_relay()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_fabric_runtime::graph::{
+            GraphCheckpoint, GraphDocument, patch, relay, template,
+        };
+        use serde_json::json;
+        let document: GraphDocument = serde_json::from_value(json!({
+            "schema_version":1,"graph_id":"relay-replay","nodes":[{
+                "id":"parent","access":"read_only","prompt":"Work","route":{"alias":"senior"}
+            }]
+        }))?;
+        let checkpoint: GraphCheckpoint = serde_json::from_value(json!({
+            "schema_version":1,"graph_id":"relay-replay","plan_digest":"unused",
+            "nodes":[{"id":"parent","state":"running","worktree":null,"attempts":[]}]
+        }))?;
+        // Only serialised checkpoint bytes cross calls, like reopening the host
+        // journal after an acknowledgement is lost.
+        let stored = Mutex::new(serde_json::to_vec(&checkpoint)?);
+        let handler = |arguments: Value, _: &CancelToken, _: Duration| {
+            let request: relay::ChildRequest =
+                serde_json::from_value(arguments).map_err(|_| FacadeError::StateCorrupt)?;
+            let mut bytes = stored.lock().map_err(|_| FacadeError::StateCorrupt)?;
+            let mut checkpoint: GraphCheckpoint =
+                serde_json::from_slice(&bytes).map_err(|_| FacadeError::StateCorrupt)?;
+            let library = template::TemplateLibrary::bundled();
+            let limits = Default::default();
+            let resolvers = Default::default();
+            let context = patch::PatchContext {
+                library: &library,
+                resolvers: &resolvers,
+                limits: &limits,
+                scan: &|_| Ok(()),
+                journal: None,
+            };
+            let receipt = relay::admit_child(
+                &mut patch::LiveGraph {
+                    document: &document,
+                    checkpoint: &mut checkpoint,
+                },
+                "parent",
+                &request,
+                &context,
+            )
+            .map_err(|error| ServiceError::Cli {
+                code: error.code.into(),
+                message: error.message,
+                data: Value::Null,
+            })?;
+            *bytes = serde_json::to_vec(&checkpoint)?;
+            Ok(serde_json::to_value(receipt)?)
+        };
+        let request = Request {
+            tool: GRAPH_TOOL.into(),
+            arguments: json!({
+                "id":"writer","brief":"Fix parser","writer":true,"idempotency_key":"add-1"
+            }),
+        };
+        let first = {
+            let (mut client, mut server) = UnixStream::pair()?;
+            thread::scope(|scope| -> Result<Value, Box<dyn std::error::Error>> {
+                let serving = scope.spawn(|| {
+                    serve_one_with(
+                        &mut server,
+                        provenant_records::Limits::CONFIG,
+                        &|_, _, _| Err(FacadeError::StateCorrupt.into()),
+                        &handler,
+                        &CancelToken::new(),
+                    )
+                });
+                let receipt = exchange(&mut client, &request, &CancelToken::new())?;
+                serving.join().unwrap()?;
+                Ok(receipt)
+            })?
+        };
+        // The lane did not retain the first acknowledgement and retries the add.
+        let (mut client, mut server) = UnixStream::pair()?;
+        let replay = thread::scope(|scope| -> Result<Value, Box<dyn std::error::Error>> {
+            let serving = scope.spawn(|| {
+                serve_one_with(
+                    &mut server,
+                    provenant_records::Limits::CONFIG,
+                    &|_, _, _| Err(FacadeError::StateCorrupt.into()),
+                    &handler,
+                    &CancelToken::new(),
+                )
+            });
+            let receipt = exchange(&mut client, &request, &CancelToken::new())?;
+            serving.join().unwrap()?;
+            Ok(receipt)
+        })?;
+        assert_eq!(first["replayed"], false);
+        assert_eq!(replay["replayed"], true);
+        assert_eq!(replay["revision"], first["revision"]);
+        assert_eq!(replay["worktree"], ".worktrees/relay-replay-parent--writer");
+        let checkpoint: GraphCheckpoint = serde_json::from_slice(&stored.into_inner().unwrap())?;
+        assert_eq!(
+            checkpoint
+                .nodes
+                .iter()
+                .filter(|node| node.id == "parent--writer")
+                .count(),
+            1
+        );
+        assert_eq!(checkpoint.expansions.len(), 1);
+        Ok(())
+    }
+
+    #[test]
     fn oversized_response_is_reported() -> Result<(), Box<dyn std::error::Error>> {
         let (mut client, mut server) = UnixStream::pair()?;
         thread::scope(|scope| {
