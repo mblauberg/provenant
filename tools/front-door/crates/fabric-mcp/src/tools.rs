@@ -1523,7 +1523,10 @@ pub fn lane_run_request(
         timeout_seconds: None,
         writer,
         write_scope,
-        detached: field("detached").map(|value| value.as_bool().ok_or_else(invalid)).transpose()?.unwrap_or(false),
+        detached: field("detached")
+            .map(|value| value.as_bool().ok_or_else(invalid))
+            .transpose()?
+            .unwrap_or(false),
         idempotency_key,
         reason: Some("run".into()),
     }))

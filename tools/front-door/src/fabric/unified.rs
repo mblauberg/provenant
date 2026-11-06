@@ -1064,13 +1064,8 @@ mod tests {
                 .clone(),
         )?;
         for (record, waits) in [(&attempt, &waits), (&peer_attempt, &peer_waits)] {
-            let projected = provenant_cli::run::project_lane(
-                record,
-                waits,
-                Path::new("/unused"),
-                None,
-                false,
-            );
+            let projected =
+                provenant_cli::run::project_lane(record, waits, Path::new("/unused"), None, false);
             assert_eq!(projected.waiting_for.as_deref(), Some(sample));
             let reason = projected.reason.ok_or("disk remedy missing")?;
             assert!(reason.contains(sample));
