@@ -158,6 +158,22 @@ pub(super) fn make_outputs_with_upstream(
                 .then(|| "verdict malformed, repeated or not final".to_owned())
         }
     });
+    let assessed_risk = result
+        .filter(|capture| !capture.source_truncated && findings_available == Some(true))
+        .and_then(|capture| findings_block(capture).ok())
+        .and_then(|block| serde_json::from_str::<serde_json::Value>(block).ok())
+        .and_then(|block| {
+            block
+                .get("risk_tier")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        })
+        .filter(|tier| {
+            matches!(
+                tier.as_str(),
+                "routine" | "substantial" | "crucial" | "terminal"
+            )
+        });
     let result = result.map(|capture| {
         let excerpt = bounded(&capture.excerpt, RESULT_EXCERPT_BYTES);
         ResultOutput {
@@ -172,7 +188,10 @@ pub(super) fn make_outputs_with_upstream(
     });
     let remaining = handoff_remaining;
     NodeOutputs {
-        extra: Default::default(),
+        extra: assessed_risk
+            .map(|tier| ("risk_tier".into(), tier.into()))
+            .into_iter()
+            .collect(),
         verdict_error,
         schema_version: 2,
         result,

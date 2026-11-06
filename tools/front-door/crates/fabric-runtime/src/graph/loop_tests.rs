@@ -1995,16 +1995,17 @@ fn repair_cycle_budget_cannot_exceed_three_or_be_accepted_without_review() {
 #[test]
 fn delta_review_runs_only_the_lens_that_raised_findings() {
     let mut document = review_repair_document();
+    document.context = Some(serde_json::from_value(serde_json::json!({"risk_tier":"substantial"})).unwrap());
     let check = serde_json::from_value(serde_json::json!({
         "id":"check","kind":"composite","access":"read_only","depends_on":["fix"],
         "composite":{"nodes":[
-            {"id":"correctness","repair_lens":"correctness","access":"read_only","prompt":"correctness delta","route":{"alias":"senior"},"require_findings":true},
-            {"id":"security","repair_lens":"security","access":"read_only","prompt":"security delta","route":{"alias":"senior"},"require_findings":true}
+            {"id":"correctness","repair_lens":"correctness","repair_risk_assessment":true,"access":"read_only","prompt":"correctness delta","route":{"alias":"senior"},"require_findings":true},
+            {"id":"security","repair_lens":"security","repair_risk_assessment":true,"access":"read_only","prompt":"security delta","route":{"alias":"senior"},"require_findings":true}
         ],"exports":[{"node":"correctness","outputs":["findings","verdict"]},{"node":"security","outputs":["findings"]}]}
     })).unwrap();
     document.nodes[1].loop_body.as_mut().unwrap().body[1] = check;
     let finding = repair_finding(false);
-    let pass = "```findings\n{\"schema_version\":1,\"findings\":[]}\n```\nVERDICT: PASS";
+    let pass = "```findings\n{\"schema_version\":1,\"risk_tier\":\"substantial\",\"findings\":[]}\n```\nVERDICT: PASS";
     let mut owner = reviews(&[&finding, "fixed", pass]);
     if let AttemptObservation::Terminal { commit, .. } = &mut owner.observations[1] {
         *commit = Some("a".repeat(40));
@@ -2081,11 +2082,27 @@ fn risk_or_scope_growth_cannot_pass_the_original_panel() {
 }
 
 #[test]
+fn omitted_delta_risk_assessment_cannot_accept_repair() {
+    let mut document = review_repair_document();
+    document.nodes[1].loop_body.as_mut().unwrap().max_rounds = 1;
+    document.nodes[1].loop_body.as_mut().unwrap().body[1].extra.insert("repair_risk_assessment".into(), true.into());
+    let initial = repair_finding(false);
+    let pass = "```findings\n{\"schema_version\":1,\"findings\":[]}\n```\nVERDICT: PASS";
+    let mut owner = reviews(&[&initial, "fix", pass, "principal options"]);
+    if let AttemptObservation::Terminal { commit, .. } = &mut owner.observations[1] { *commit = Some("a".repeat(40)); }
+    let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
+    let gate = run.checkpoint.nodes.iter().find(|node| node.id == "repair--r1--accepted").unwrap();
+    assert_eq!(gate.state, NodeState::Failed);
+    assert!(gate.gate.as_ref().unwrap().reason.as_deref().unwrap().contains("omitted a valid risk tier"));
+}
+
+#[test]
 fn repair_growth_resolves_and_runs_a_fresh_panel() {
-    for (field, reviewer_passes) in [("risk_grew", true), ("scope_grew", true), ("risk_grew", false), ("host_detected", true)] {
-        let document = review_repair_document();
+    for (field, reviewer_passes) in [("risk_grew", true), ("scope_grew", true), ("risk_grew", false), ("host_detected", true), ("assessed_tier", true)] {
+        let mut document = review_repair_document();
+        document.context = Some(serde_json::from_value(serde_json::json!({"risk_tier":"substantial"})).unwrap());
         let initial = repair_finding(false);
-        let growth = if field == "host_detected" { initial.clone() } else { initial.replace("\"design_defect\":false", &format!("\"design_defect\":false,\"{field}\":true")) };
+        let growth = if field == "assessed_tier" { "```findings\n{\"schema_version\":1,\"risk_tier\":\"crucial\",\"findings\":[]}\n```\nVERDICT: PASS".to_owned() } else if field == "host_detected" { initial.clone() } else { initial.replace("\"design_defect\":false", &format!("\"design_defect\":false,\"{field}\":true")) };
         let pass = "```findings\n{\"schema_version\":1,\"findings\":[]}\n```\nVERDICT: PASS";
         let fail = "```findings\n{\"schema_version\":1,\"findings\":[]}\n```\nVERDICT: FAIL";
         let mut owner = reviews(&[&initial, "fix", &growth, pass, if reviewer_passes { pass } else { fail }, "principal options"]);

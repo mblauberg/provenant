@@ -1740,6 +1740,12 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                 let reported = repair::growth_in_round(node, &plan, &checkpoint, &positions);
                 let mut growth = reported;
                 if repair::is_repair_gate(node, &plan, &positions) {
+                    if !reported && repair::risk_assessment_missing(node, &plan, &checkpoint) {
+                        replan_error = Some(
+                            "cannot assess repair growth: delta reviewer omitted a valid risk tier"
+                                .into(),
+                        );
+                    }
                     if let Some(value) = checkpoint.nodes[node_index]
                         .extra
                         .get("repair_growth")
