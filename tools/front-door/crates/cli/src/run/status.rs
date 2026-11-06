@@ -1198,17 +1198,23 @@ pub fn status_session_stream(
     edge: &Edge<'_>,
     out: &mut dyn std::io::Write,
 ) -> Reply {
-    let result = session_inventory_page(command.all, command.limit, edge, &mut |line| {
-        out.write_all(line.as_bytes())
-            .and_then(|_| out.flush())
-            .map_err(|_| {
-                Fail::new(
-                    Status::Error,
-                    ErrorKind::Io,
-                    "cannot write session attempt stream",
-                )
-            })
-    });
+    let result = session_inventory_page(
+        command.all,
+        command.limit,
+        command.cursor.unwrap_or(0),
+        edge,
+        &mut |line| {
+            out.write_all(line.as_bytes())
+                .and_then(|_| out.flush())
+                .map_err(|_| {
+                    Fail::new(
+                        Status::Error,
+                        ErrorKind::Io,
+                        "cannot write session attempt stream",
+                    )
+                })
+        },
+    );
     let mut response = reply("status", result);
     response.read_only = true;
     response
@@ -1234,12 +1240,13 @@ fn session_lane_page(
             "invalid session lane stream",
         ));
     }
-    session_inventory_page(command.all, command.limit, edge, out)
+    session_inventory_page(command.all, command.limit, 0, edge, out)
 }
 
 fn session_inventory_page(
     all: bool,
     limit: u64,
+    after: u64,
     edge: &Edge<'_>,
     out: &mut dyn FnMut(&str) -> Result<(), Fail>,
 ) -> Result<(Value, String), Fail> {
@@ -1255,7 +1262,7 @@ fn session_inventory_page(
     // Match the normal listing's recovery of a dead guardian before observing
     // the page; the hook reports only records this read actually completed.
     let _ = session.store.reap(&call);
-    let mut query = lane_query(&session, &[], all, limit, 0, &call)?;
+    let mut query = lane_query(&session, &[], all, limit, after, &call)?;
     query.newest_first = all;
     let mut failed = false;
     session.store.lanes_streaming(&query, &call, |total, entry, next| {
