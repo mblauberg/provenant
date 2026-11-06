@@ -1,5 +1,4 @@
 use super::*;
-use std::io::Write;
 
 /// Bind declared lane capabilities to the provider's confinement profile.
 pub(in crate::run) fn apply_lane_capabilities(
@@ -393,13 +392,6 @@ pub(super) fn read_only_plan(
             .ok()
             .and_then(|out| String::from_utf8(out.stdout.bytes).ok())
             .and_then(|text| provenant_core::GitOid::parse(text.trim()).ok());
-            if !isolated
-                && let Some(head) = head
-                && let Some(warning) =
-                    read_only_staleness_warning(&executor, &repo, &utility, budget, &cancel, head)
-            {
-                let _ = writeln!(std::io::stderr().lock(), "warning: {warning}");
-            }
             let plan = if live {
                 run::live_read_only_plan(&repo, &binding, request)
             } else if isolated {
@@ -425,41 +417,79 @@ pub(super) fn read_only_plan(
     }
 }
 
-/// Compare this checkout with the last fetched origin default ref. This is an
-/// advisory read only: no fetch occurs here, and absent or unusable Git data
-/// must not block a reader from launching.
-pub(in crate::run) fn read_only_staleness_warning(
+/// Advisory freshness of the checkout a read-only lane reads, for the launch
+/// warnings. The lane reads `source`: the `--worktree` checkout, or the caller's
+/// checkout when none is named. Absent or unusable Git data yields no warning.
+pub(in crate::run) fn read_only_checkout_warning(state: &Path, source: &Path) -> Option<String> {
+    use provenant_confinement::{GitRead, UtilityBudget, UtilityRuntime, run_read_utility};
+    use provenant_os::exec::SystemExecutor;
+
+    let git = provenant_os::git::git_executable()?;
+    let utility_home = host_git_home(state).ok()?;
+    let utility = UtilityRuntime::new(&git, utility_home.path()).ok()?;
+    let executor = SystemExecutor::new(1).ok()?;
+    let budget = UtilityBudget::bounded(std::time::Duration::from_secs(5)).ok()?;
+    let cancel = provenant_core::CancelToken::new();
+    let ancestor = source.ancestors().find(|path| path.join(".git").exists())?;
+    let repo = utility
+        .open_read_repo(&executor, ancestor, budget, &cancel)
+        .ok()?;
+    let head = run_read_utility(
+        &executor,
+        GitRead::RevParseHead,
+        &repo,
+        &utility,
+        budget,
+        &cancel,
+    )
+    .ok()
+    .and_then(|out| String::from_utf8(out.stdout.bytes).ok())
+    .and_then(|text| provenant_core::GitOid::parse(text.trim()).ok())?;
+    let count = commits_behind_default(&executor, &repo, &utility, budget, &cancel, head)?;
+    Some(format!(
+        "{} is {count} commit{} behind origin's default branch; read-only lane will read {head}",
+        source.display(),
+        if count == 1 { "" } else { "s" }
+    ))
+}
+
+/// Compare `head` with the remote's default branch as last fetched. This never
+/// fetches. The remote is asked only when no `origin/HEAD` is recorded, and only
+/// within the utility budget.
+fn commits_behind_default(
     executor: &dyn provenant_os::exec::Executor,
     repo: &provenant_confinement::ReadOnlyRepo,
     utility: &provenant_confinement::UtilityRuntime,
     budget: provenant_confinement::UtilityBudget,
     cancel: &provenant_core::CancelToken,
     head: provenant_core::GitOid,
-) -> Option<String> {
-    use provenant_confinement::GitRead;
+) -> Option<u64> {
+    use provenant_confinement::{GitRead, run_read_utility, utility::advertised_default_branch};
     use provenant_os::exec::Termination;
 
-    let default = ["refs/remotes/origin/HEAD", "refs/remotes/origin/main"]
-        .into_iter()
-        .find_map(|reference| {
-            let default = provenant_confinement::run_read_utility(
-                executor,
-                GitRead::ResolveRevision {
-                    revision: provenant_confinement::repo::GitRevision::new(reference).ok()?,
-                },
-                repo,
-                utility,
-                budget,
-                cancel,
-            )
-            .ok()?;
-            if default.termination != Termination::Exit(0) {
-                return None;
-            }
-            provenant_core::GitOid::parse(std::str::from_utf8(&default.stdout.bytes).ok()?.trim())
-                .ok()
-        })?;
-    let behind = provenant_confinement::run_read_utility(
+    let resolve = |reference: &str| {
+        let out = run_read_utility(
+            executor,
+            GitRead::ResolveRevision {
+                revision: provenant_confinement::repo::GitRevision::new(reference).ok()?,
+            },
+            repo,
+            utility,
+            budget,
+            cancel,
+        )
+        .ok()?;
+        if out.termination != Termination::Exit(0) {
+            return None;
+        }
+        provenant_core::GitOid::parse(std::str::from_utf8(&out.stdout.bytes).ok()?.trim()).ok()
+    };
+    let default = resolve("refs/remotes/origin/HEAD").or_else(|| {
+        let branch =
+            advertised_default_branch(executor, repo, utility, "origin", budget, cancel).ok()??;
+        resolve(&format!("refs/remotes/origin/{}", branch.short_name()))
+    })?;
+    let behind = run_read_utility(
         executor,
         GitRead::AncestorCount {
             base: head,
@@ -474,16 +504,12 @@ pub(in crate::run) fn read_only_staleness_warning(
     if behind.termination != Termination::Exit(0) {
         return None;
     }
-    let count = std::str::from_utf8(&behind.stdout.bytes)
+    std::str::from_utf8(&behind.stdout.bytes)
         .ok()?
         .trim()
         .parse::<u64>()
-        .ok()?;
-    (count > 0).then(|| {
-        format!(
-            "checkout is {count} commit{} behind origin's default branch; read-only lane will read {head}", if count == 1 { "" } else { "s" }
-        )
-    })
+        .ok()
+        .filter(|count| *count > 0)
 }
 
 /// Publishing hands the lane the GitHub credential, so it needs the explicit

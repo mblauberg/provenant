@@ -20,11 +20,15 @@ fn base_requires_a_writer_branch_or_worktree_target() {
         )
         .is_none()
     );
+    // The pinned diff form (`--head` with `--base`) and an explicit worktree
+    // reader are shipped forms; the integration suite proves they launch.
+    assert!(dispatch::base_target_refusal(Some("main"), None, None, None, Some("HEAD")).is_none());
     assert!(dispatch::base_target_refusal(None, None, None, None, None).is_none());
 }
 
 #[test]
-fn dispatch_accepts_reader_diff_base_only_with_a_head() -> Result<(), Box<dyn std::error::Error>> {
+fn dispatch_refuses_reader_base_without_a_head_or_writer_target()
+-> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
     let root = temp.path();
     let project = root.join("project");
@@ -35,35 +39,28 @@ fn dispatch_accepts_reader_diff_base_only_with_a_head() -> Result<(), Box<dyn st
         root,
         &project,
         |edge| -> Result<(), Box<dyn std::error::Error>> {
-            for pinned in [false, true] {
-                let mut command = parsed_run(&[
-                    "--model",
-                    "codex/gpt-6-luna",
-                    "--mode",
-                    "read-only",
-                    "--base",
-                    "main",
-                    "--prompt-file",
-                    prompt.to_str().ok_or("prompt")?,
-                ])?;
-                if pinned {
-                    command.head = Some("HEAD".into());
-                }
-                let reply = dispatch::dispatch(command, edge);
-                let message = reply
-                    .result
-                    .error
-                    .map(|error| error.message)
-                    .unwrap_or_default();
-                assert_eq!(
-                    message.contains("--base requires a writer target"),
-                    !pinned,
-                    "{message}"
-                );
-                if !pinned {
-                    assert!(message.contains("diff base"), "{message}");
-                }
-            }
+            let command = parsed_run(&[
+                "--model",
+                "codex/gpt-6-luna",
+                "--mode",
+                "read-only",
+                "--base",
+                "main",
+                "--prompt-file",
+                prompt.to_str().ok_or("prompt")?,
+            ])?;
+            let reply = dispatch::dispatch(command, edge);
+            let message = reply
+                .result
+                .error
+                .map(|error| error.message)
+                .ok_or("base without a target must refuse")?;
+            assert!(
+                message.contains("--base requires a writer target"),
+                "{message}"
+            );
+            assert!(message.contains("--branch"), "{message}");
+            assert!(message.contains("--worktree"), "{message}");
             Ok(())
         },
     )??;
@@ -2636,9 +2633,13 @@ fn dispatch_reuses_only_free_lane_or_unowned_worktree() -> Result<(), Box<dyn st
         .enumerate()
     {
         let operation = format!("protected-integration-{index}");
-        let mut args: Vec<OsString> = ["dispatch", "--operation-id", &operation, "--base", "HEAD"]
+        let mut args: Vec<OsString> = ["dispatch", "--operation-id", &operation]
             .map(OsString::from)
             .into();
+        // A manifest names its own targets; a bare `--base` there is refused as ignored.
+        if placement != "manifest" {
+            args.extend(["--base", "HEAD"].map(OsString::from));
+        }
         let mode = if delivery == "integrate" {
             run::DeliveryMode::Integrate(target.into())
         } else {

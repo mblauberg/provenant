@@ -1924,11 +1924,19 @@ pub(super) fn dispatch_inner(
         .collect();
     brief_warnings.extend(worktree_warnings);
     brief_warnings.extend(capability_warnings);
-    if command.head.is_none()
-        && matches!(command.access.mode(), Mode::ReadOnly)
-        && let Some(warning) = checkout_staleness_warning(edge.cwd)
-    {
-        brief_warnings.push(warning);
+    // A pinned `--head` names its commit; otherwise the lane reads the checkout
+    // selected by `--worktree`, or the caller's checkout when none is named.
+    if command.head.is_none() && matches!(command.access.mode(), Mode::ReadOnly) {
+        let source = lane_access
+            .source_root
+            .clone()
+            .unwrap_or_else(|| edge.cwd.to_path_buf());
+        if let Some(warning) = super::provider::confinement::read_only_checkout_warning(
+            edge.roots.state.as_path(),
+            &source,
+        ) {
+            brief_warnings.push(warning);
+        }
     }
     if matches!(command.access.mode(), Mode::WorktreeWrite) {
         let budget = config
@@ -2109,37 +2117,6 @@ pub(super) fn dispatch_inner(
         data["worktree"] = worktree;
     }
     Ok((data, human, timed_out || cloud_wait_timed_out))
-}
-
-fn checkout_staleness_warning(cwd: &Path) -> Option<String> {
-    use provenant_confinement::{GitRead, UtilityBudget, UtilityRuntime, run_read_utility};
-    let git = provenant_os::git::git_executable()?;
-    let utility = UtilityRuntime::read_only(git).ok()?;
-    let executor = provenant_os::exec::SystemExecutor::new(1).ok()?;
-    let budget = UtilityBudget::bounded(Duration::from_secs(5)).ok()?;
-    let cancel = CancelToken::new();
-    let repo = cwd.ancestors().find_map(|path| {
-        utility
-            .open_read_repo(&executor, path, budget, &cancel)
-            .ok()
-    })?;
-    let output = run_read_utility(
-        &executor,
-        GitRead::RevParseHead,
-        &repo,
-        &utility,
-        budget,
-        &cancel,
-    )
-    .ok()?;
-    let head = std::str::from_utf8(&output.stdout.bytes)
-        .ok()?
-        .trim()
-        .parse()
-        .ok()?;
-    super::provider::confinement::read_only_staleness_warning(
-        &executor, &repo, &utility, budget, &cancel, head,
-    )
 }
 
 /// Carry submit-time warnings as `data["warnings"]`, so JSON consumers see them.
