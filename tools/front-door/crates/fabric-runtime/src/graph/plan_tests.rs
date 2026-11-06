@@ -3751,7 +3751,6 @@ fn ordinary_agent_final_patch_follows_earlier_live_children_once() {
     assert_eq!(checkpoint.expansions.len(), 2);
 }
 
-
 #[test]
 fn planner_template_overrides_cannot_invent_capabilities() {
     for node in [
@@ -3763,10 +3762,23 @@ fn planner_template_overrides_cannot_invent_capabilities() {
         }}),
     ] {
         let output = result(vec![node]);
-        let run = advance(&planner(8), &mut fixture_owner(&[&output]), &mut MemoryJournal::default()).unwrap();
+        let run = advance(
+            &planner(8),
+            &mut fixture_owner(&[&output]),
+            &mut MemoryJournal::default(),
+        )
+        .unwrap();
         assert_eq!(run.status, GraphStatus::Paused);
         assert!(run.checkpoint.expansions.is_empty());
-        assert!(run.checkpoint.pause_reason.as_deref().unwrap().contains("postgres"), "{:?}", run.checkpoint.pause_reason);
+        assert!(
+            run.checkpoint
+                .pause_reason
+                .as_deref()
+                .unwrap()
+                .contains("postgres"),
+            "{:?}",
+            run.checkpoint.pause_reason
+        );
     }
 }
 
@@ -3779,25 +3791,46 @@ fn planner_admits_bundled_batch_and_deliver_through_the_patch_path() {
         ("review-advice-correctness".into(), vec![String::new()]),
     ]);
     let limits = plans::generous();
-    let context = PatchContext { library: &library, resolvers: &resolvers,
-        scan: &patch::scan_for_secrets, journal: None, limits: &limits };
+    let context = PatchContext {
+        library: &library,
+        resolvers: &resolvers,
+        scan: &patch::scan_for_secrets,
+        journal: None,
+        limits: &limits,
+    };
     for name in ["batch", "deliver"] {
         let mut document = planner(128);
         document.schema_version = 2;
         document.integration_branch = Some("batch/integration".into());
         let mut owner = FakeOwner::default();
-        owner.observations.push_back(AttemptObservation::Pending { attempt_ref: None });
-        let mut checkpoint = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap().checkpoint;
+        owner
+            .observations
+            .push_back(AttemptObservation::Pending { attempt_ref: None });
+        let mut checkpoint = advance(&document, &mut owner, &mut MemoryJournal::default())
+            .unwrap()
+            .checkpoint;
         let patch = host_patch(json!({"schema_version":1, "nodes":[{
             "id":"delivery", "use":name,
             "with":{"worktree":".worktrees/slice", "write_scope":["src"]}
         }]}));
-        let admitted = admit_patch(&mut LiveGraph { document: &document, checkpoint: &mut checkpoint },
-            Some("plan"), &patch, &context).unwrap_or_else(|error| panic!("{name}: {error}"));
+        let admitted = admit_patch(
+            &mut LiveGraph {
+                document: &document,
+                checkpoint: &mut checkpoint,
+            },
+            Some("plan"),
+            &patch,
+            &context,
+        )
+        .unwrap_or_else(|error| panic!("{name}: {error}"));
         assert!(admitted.added.contains(&"plan--delivery".to_owned()));
         let nodes = &checkpoint.expansions[0].nodes;
         assert!(nodes.iter().any(|node| node.source.is_some()));
-        assert!(nodes.iter().any(|node| node.access == AccessMode::WorktreeWrite));
+        assert!(
+            nodes
+                .iter()
+                .any(|node| node.access == AccessMode::WorktreeWrite)
+        );
         assert!(nodes.iter().any(|node| node.delivery.is_some()));
     }
 }
