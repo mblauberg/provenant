@@ -1346,7 +1346,7 @@ impl RunStore {
                 && !crate::token_budget::enforces(p)
             {
                 let note = format!(
-                    "token budget is not enforced for provider {p}: mid-turn usage is not reported"
+                    "token budget is not enforced for provider {p}: usage is not reported while it runs"
                 );
                 decoded.reason = Some(match decoded.reason.take() {
                     Some(existing) => format!("{existing}; {note}"),
@@ -2890,8 +2890,22 @@ mod writer_recovery_tests {
         budget_stop_case(BudgetStopCase::SymlinkObjects)
     }
 
+    #[test]
+    fn writer_token_budget_commit_leaves_a_cherry_pick_uncommitted()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        budget_stop_case(BudgetStopCase::InProgress("cherry-pick"))
+    }
+
+    #[test]
+    fn writer_token_budget_commit_leaves_a_rebase_uncommitted()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        budget_stop_case(BudgetStopCase::InProgress("rebase"))
+    }
+
     #[derive(Clone, Copy)]
     enum BudgetStopCase {
+        /// An operation Git left in progress: `cherry-pick` or `rebase`.
+        InProgress(&'static str),
         Commit,
         CommitFailure,
         CustodyPresent,
@@ -3103,6 +3117,17 @@ mod writer_recovery_tests {
                 b"existing Git lock",
             )?;
         }
+        if let BudgetStopCase::InProgress(operation) = case {
+            let git_dir = candidate.join("git-common");
+            if operation == "rebase" {
+                std::fs::create_dir(git_dir.join("rebase-merge"))?;
+            } else {
+                std::fs::write(
+                    git_dir.join("CHERRY_PICK_HEAD"),
+                    format!("{}\n", launch.base),
+                )?;
+            }
+        }
         let mut observed = crate::tests::exit();
         observed.scope = scope;
         observed.stop_reason = Some(StopReason::TokenBudget);
@@ -3130,6 +3155,23 @@ mod writer_recovery_tests {
             reason_text.contains("token budget reached: provider stopped after passing"),
             "reason: {reason_text}"
         );
+        if let BudgetStopCase::InProgress(operation) = case {
+            assert!(
+                reason_text.contains(&format!(
+                    "budget commit skipped: in-progress {operation} left uncommitted"
+                )),
+                "reason: {reason_text}"
+            );
+            assert_eq!(
+                crate::objects::resolve_ref(&git, launch.worktree.repo(), launch.branch.as_str())?,
+                launch.base
+            );
+            assert_eq!(
+                std::fs::read_to_string(fixture.writer.worktree.join("budget-work.txt"))?,
+                "uncommitted work before budget stop\n"
+            );
+            return Ok(());
+        }
         if matches!(case, BudgetStopCase::CommitFailure) {
             assert!(
                 reason_text.contains("budget commit failed:"),

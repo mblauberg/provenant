@@ -830,7 +830,7 @@ pub(super) fn dispatch_inner(
                         text.push_str("token budget: off\n");
                     } else {
                         text.push_str(&format!(
-                            "token budget: {} tokens ({}); enforced for {}, which report usage while running; not enforced for other providers\n",
+                            "token budget: {} tokens ({}); enforced for {}, which report usage while running (Codex only at turn.completed); not enforced for other providers\n",
                             budget.tokens,
                             budget.source.as_str(),
                             enforced.join(", ")
@@ -1826,7 +1826,7 @@ pub(super) fn dispatch_inner(
                     && !enforced.contains(&p)
                 {
                     brief_warnings.push(format!(
-                        "token budget is not enforced for provider {p}: mid-turn usage is not reported"
+                        "token budget is not enforced for provider {p}: usage is not reported while it runs"
                     ));
                 }
             }
