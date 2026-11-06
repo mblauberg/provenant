@@ -2000,14 +2000,18 @@ fn opencode_dispatch_observes_v2_wal_session() -> Result {
                 assert!(
                     lane["reason"]
                         .as_str()
-                        .is_some_and(|reason| reason.starts_with("Free usage limit reached.")),
+                        .is_some_and(|reason| reason.starts_with("provider quota exhausted; ")),
                     "{lane}"
                 );
             } else {
+                // The provider's own message is not projected; the typed
+                // outcome and its fixed sentence are.
+                assert_eq!(lane["state"], "model_unavailable", "{lane}");
                 assert_eq!(
                     lane["reason"],
-                    "provider model unavailable: Model unavailable: opencode/misspelt-free"
+                    "the model is unavailable; check the selected model or wait for capacity"
                 );
+                assert!(!lane["reason"].to_string().contains("misspelt"), "{lane}");
             }
         }
         rig.assert_legacy_unchanged()?;
@@ -2201,10 +2205,11 @@ fn codex_dispatch_observes_rollout() -> Result {
             assert_eq!(code(&settled), 0, "{settled:?}");
         } else {
             assert_eq!(lane["state"], "failed", "{lane}");
+            assert_eq!(lane["terminal_cause"], "identity_unobserved", "{lane}");
             assert!(
                 lane["reason"]
                     .as_str()
-                    .is_some_and(|r| r.starts_with("provider identity was not observed: ")),
+                    .is_some_and(|r| r.starts_with("provider identity was not observed; ")),
                 "{lane}"
             );
         }
@@ -2683,8 +2688,12 @@ fn unconfigured_host_native_repair_launches_alias_fallback() -> Result {
         .ok_or("host-native attempt")?;
     assert_eq!(refused["state"], "rejected", "{refused}");
     assert_eq!(
+        refused["terminal_cause"], "host_native_unconfigured",
+        "{refused}"
+    );
+    assert_eq!(
         refused["reason"],
-        "host-native absent is not configured in domains.fabric.host_native"
+        "the requested host-native route is not configured in domains.fabric.host_native; select a configured route"
     );
     let launched = lanes
         .iter()
@@ -3495,7 +3504,7 @@ fn graph_without_deadline_launches_on_tick() -> Result {
     Ok(())
 }
 
-fn graph_read_only_alias_does_not_redraw_after_launch_quota() -> Result {
+fn graph_read_only_alias_retries_another_member_after_empty_launch_quota() -> Result {
     if !graph_fixture_available()? {
         return Ok(());
     }
@@ -3535,7 +3544,11 @@ fn graph_read_only_alias_does_not_redraw_after_launch_quota() -> Result {
         let status = rig.command(&["fabric", "graph", "status", "quota-redraw", "--json"])?;
         assert_eq!(code(&status), 0, "{status:?}");
         let status: Value = serde_json::from_slice(&status.stdout.bytes)?;
-        if status["data"]["checkpoint"]["nodes"][0]["state"] == "failed" {
+        if status["data"]["status"] == "complete" {
+            assert_eq!(
+                status["data"]["checkpoint"]["nodes"][0]["state"], "succeeded",
+                "{status}"
+            );
             break status;
         }
         assert!(
@@ -3544,6 +3557,8 @@ fn graph_read_only_alias_does_not_redraw_after_launch_quota() -> Result {
         );
         std::thread::park_timeout(std::time::Duration::from_millis(50));
     };
+    // The graph never redraws: one attempt. The lane layer retries the alias
+    // once, because the quota stop came before any work was done.
     let attempts = status["data"]["checkpoint"]["nodes"][0]["attempts"]
         .as_array()
         .ok_or("attempts")?;
@@ -3552,8 +3567,27 @@ fn graph_read_only_alias_does_not_redraw_after_launch_quota() -> Result {
     assert_eq!(code(&lanes), 0, "{lanes:?}");
     let lanes: Value = serde_json::from_slice(&lanes.stdout.bytes)?;
     let rows = lanes["data"]["lanes"].as_array().ok_or("lanes")?;
-    assert_eq!(rows.len(), 1, "{lanes}");
-    assert_eq!(rows[0]["state"], "quota_limited", "{lanes}");
+    assert_eq!(rows.len(), 2, "{lanes}");
+    let first = rows
+        .iter()
+        .find(|row| row["attempt_number"] == 1)
+        .ok_or("first attempt")?;
+    let second = rows
+        .iter()
+        .find(|row| row["attempt_number"] == 2)
+        .ok_or("retry attempt")?;
+    assert_eq!(first["state"], "quota_limited", "{lanes}");
+    assert_eq!(
+        first["applied_route"]["model"], "codex/gpt-6-luna",
+        "{lanes}"
+    );
+    assert_eq!(first["superseded_by"], second["attempt_id"], "{lanes}");
+    assert_eq!(second["retry_of"], first["attempt_id"], "{lanes}");
+    assert_eq!(second["state"], "succeeded", "{lanes}");
+    assert_eq!(
+        second["applied_route"]["model"], "codex/gpt-6.1-terra",
+        "the spent member is excluded: {lanes}"
+    );
     cleanup.disarm();
     Ok(())
 }
@@ -5723,7 +5757,7 @@ fn main() -> ExitCode {
                 "host_native_dispatch_uses_the_declared_agent_and_refuses_resume",
                 "host_native_preparation_uses_the_provider_contract",
                 "unconfigured_host_native_repair_launches_alias_fallback",
-                "graph_read_only_alias_does_not_redraw_after_launch_quota",
+                "graph_read_only_alias_retries_another_member_after_empty_launch_quota",
                 "direct_writer_launches_second_eligible_pool_member",
                 "graph_writer_launches_second_eligible_pool_member",
                 "graph_retries_real_registry_lock_and_runs_writer",
@@ -5804,7 +5838,7 @@ fn main() -> ExitCode {
                     "unconfigured_host_native_repair_launches_alias_fallback" => {
                         unconfigured_host_native_repair_launches_alias_fallback()
                     }
-                    "graph_read_only_alias_does_not_redraw_after_launch_quota" => graph_read_only_alias_does_not_redraw_after_launch_quota(),
+                    "graph_read_only_alias_retries_another_member_after_empty_launch_quota" => graph_read_only_alias_retries_another_member_after_empty_launch_quota(),
                     "direct_writer_launches_second_eligible_pool_member" => direct_writer_launches_second_eligible_pool_member(),
                     "graph_writer_launches_second_eligible_pool_member" => graph_writer_launches_second_eligible_pool_member(),
                     "graph_retries_real_registry_lock_and_runs_writer" => graph_retries_real_registry_lock_and_runs_writer(),

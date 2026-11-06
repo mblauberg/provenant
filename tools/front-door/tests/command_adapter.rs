@@ -449,7 +449,13 @@ fn command_pass_fail_truncation_and_spawn_failure_settle_without_models() -> Res
         let lane = settled(&rig, id)?;
         assert_eq!(lane["state"], expected, "{lane}");
         if name == "missing" {
-            assert!(lane.to_string().contains("/missing/command"), "{lane}");
+            assert_eq!(lane["terminal_cause"], "command_unavailable", "{lane}");
+            assert!(
+                lane["reason"]
+                    .as_str()
+                    .is_some_and(|reason| reason.ends_with("; executable /missing/command")),
+                "{lane}"
+            );
         }
         assert!(lane["applied_route"]["model"].is_null(), "{lane}");
         if !verdict.is_empty() {
