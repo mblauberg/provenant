@@ -5,9 +5,7 @@ description: "Use when work is new or unsettled and needs a spec: acceptance cri
 
 # Scope
 
-Scope is the front human gate. Humans spend their effort here; after approval the
-agents work without them. A good spec lets a fresh agent build and verify the work
-without asking.
+Scope settles intent and authority so a fresh agent can build and verify the work.
 
 ## Spec gate
 
@@ -69,7 +67,7 @@ map evidence, `research` for dated primary sources and `design` for options:
 
 ```sh
 provenant run --use plan --file brief.md --explain
-provenant run --use explore --over src --file questions.md --explain
+provenant run --use explore --route junior --over src --file questions.md --explain
 ```
 
 Compose nodes with `after` and `inputs`; use `synthesise` to reconcile returns.

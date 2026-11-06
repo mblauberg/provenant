@@ -244,7 +244,7 @@ pub(crate) fn run(gate: Gate<'_>) -> i32 {
                 Ok(slot) => held = Some(slot),
                 Err(SlotError::Timeout { held, .. }) => {
                     return report(&format!(
-                        "gave up waiting for a build slot after {} min: all {} are held ({held} in use). Run `provenant lanes` to find the lanes holding them, or raise domains.fabric.lanes.max_concurrent_builds or build_wait_minutes",
+                        "gave up waiting for a build slot after {} min: all {} are held ({held} in use). Run `provenant status` to find the lanes holding them, or raise domains.fabric.lanes.max_concurrent_builds or build_wait_minutes",
                         began.elapsed().as_secs().div_ceil(60),
                         settings.slots
                     ));
@@ -312,7 +312,7 @@ fn wait_for_lock(env: &[(OsString, OsString)], settings: &Settings) -> Result<()
     })
     .map_err(|error| {
         format!(
-            "gave up after {error}. Run `provenant lanes` to find the lane building in the same target directory, or raise domains.fabric.lanes.build_wait_minutes"
+            "gave up after {error}. Run `provenant status` to find the lane building in the same target directory, or raise domains.fabric.lanes.build_wait_minutes"
         )
     })
 }
@@ -327,7 +327,7 @@ fn mark(settings: &Settings, kind: WaitKind) {
 }
 
 /// Tell the host this build waits for a slot, with when it began and how many
-/// of the slots are held, so `provenant lanes` can show its place in the queue.
+/// of the slots are held, so `provenant status` can show its place in the queue.
 fn mark_slot(settings: &Settings, held: u64, waited: Duration) {
     let Some(marker) = &settings.marker else {
         return;

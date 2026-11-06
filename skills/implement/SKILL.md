@@ -5,8 +5,7 @@ description: "Use to build an approved software change through the deliver loop:
 
 # Implement
 
-The `deliver` composite is the default loop. This skill covers what the composite
-does not: what to hand it, how to map work onto its nodes, and when to stop.
+Use `implement` for a slice and `deliver` for the full delivery loop.
 
 ## Entry
 
@@ -15,27 +14,33 @@ verified, non-goals, risk tier and write authority (the tracker issue or the
 scope digest). Missing inputs go back to `scope`. Do not invent owner decisions;
 record an engineering call as `Decided (<source>): <reason>` and proceed.
 
-Before starting an issue, show tracker lint advice and proceed even if checks
-are unavailable. If the entry path already supplied advice, use that; otherwise
-run `provenant tracker lint N` (or `--file PATH` for a local spec).
+Show `provenant tracker lint N` advice before starting an issue unless already
+supplied; unavailable checks do not block work.
 
-Repository specifics (verify commands, commit and PR rules, review ladder) come
-from the repo's own `AGENTS.md`, `CONTRIBUTING` and runbooks. Look there first.
-Where the repository defines test tiers, use T0 for touched work, T1 for
-named targets, and leave T2 and T3 to CI or a configured host.
+Read repository checks, commit rules and review floors in `AGENTS.md` and
+runbooks. Run targeted checks locally; leave full suites to CI.
 
 ## How it runs
 
-```sh
-provenant run --use deliver --file ISSUE.md --explain
+Register a writer worktree first (`provenant worktree create slice --base BASE`).
+Save `slice.toml`, replacing the path, scope and brief:
+
+```toml
+use = "implement"
+tier = "junior"
+worktree = "/absolute/project/.worktrees/slice"
+write_scope = ["src"]
+brief = "Meet the approved criteria; run the named checks, commit and report."
 ```
 
-Check authority, write scopes, CI, review and landing gates in the explanation,
+Run `provenant run --route junior --file slice.toml --explain`, then omit
+`--explain` to submit.
+
+Check authority, write scopes and gates in the explanation,
 then submit without `--explain`. `deliver` is the default composite; use
 `implement` for one slice, `implement.fix` for a known defect, and `batch` for
 parallel slices into one integration branch. Use `plan` when the shape is open.
-See [templates](../../docs/runbooks/presets.md) and the
-[planner brief](../orchestrate/references/planner.md).
+See [templates](../../docs/runbooks/presets.md).
 
 Follow `provenant status`, collect `provenant output TARGET`, and use `retry`
 for unfinished work. `edit` changes unstarted nodes. Landing uses

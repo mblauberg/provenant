@@ -21,6 +21,6 @@ Run focused tests locally and the project's exact-head CI gates. For risky logic
 
 ## How it runs
 
-For substantial work, use `generator-evaluator` with `--set 'parameters.lenses=[{name="tests"}]'` for an independent test review. Its lens reviews the writer's commit; it does not write acceptance tests. Arrange an independent acceptance author separately.
+For substantial work, use `provenant run --use review.tests --file review.md --explain` with a pinned writer commit. Arrange an independent acceptance-test author separately.
 
-For pruning, classify tests with read-only `fan-out`, then use `big-batch` with a registered writer worktree and disjoint scope per crate. Supply the brief and required worktree or lane parameters to `provenant run --preset NAME --prompt-file BRIEF --explain` before submission.
+For pruning, use `explore` over crates, then `batch` with disjoint writer worktrees and write_scope bindings into one integration branch (`orchestrate`). Inspect `provenant run --use batch --file batch.toml --explain` before submission.

@@ -5,9 +5,7 @@ description: "Use for independent read-only review of PRs, diffs, commits and re
 
 # Code review
 
-With little or no human diff review, an independent review panel plus CI on
-the exact head is the check on the code. The panel must prove its coverage,
-and "clean" must mean something.
+Review independently at a pinned head and prove coverage alongside CI.
 
 Conventions and the review ladder come from the repo's own `AGENTS.md`,
 `CONTRIBUTING` and runbooks. Look there first.

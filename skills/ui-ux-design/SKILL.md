@@ -11,10 +11,10 @@ Review is read-only: inspect source and rendered surfaces without changing proje
 
 Scale proof to the risk and changed surfaces. Choose representative viewports, states and input modes from the criteria. View every capture; screenshots alone do not establish keyboard operation, accessibility conformance or behaviour. Record the evidence path, what was tested and what was not. Separate observed facts from design judgement.
 
-For independent read-only capture lanes, use orchestrate and the `fan-out` preset. Inspect the plan before submission:
+For independent capture questions, use `explore` over named areas. Inspect the plan before submission:
 
 ```sh
-provenant run --preset fan-out --prompt-file brief.md --set 'parameters.width=3' --explain
+provenant run --use explore --route junior --over desktop,mobile --file brief.md --explain
 ```
 
 Retained visual prototypes live in the repository and are indexed through engineering-docs. A private Claude artifact can present an authorised prototype; the repository file remains the source. Uploads need authority.

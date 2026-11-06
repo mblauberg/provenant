@@ -407,7 +407,7 @@ fn a_wait_gives_up_after_the_configured_time_naming_the_slots() -> Result {
         "{stderr}"
     );
     assert!(stderr.contains("all 1 are held"), "{stderr}");
-    assert!(stderr.contains("provenant lanes"), "{stderr}");
+    assert!(stderr.contains("provenant status"), "{stderr}");
     assert!(!rig.started("start"), "the build never ran");
     holder.kill()?;
     holder.wait()?;
@@ -434,7 +434,7 @@ fn a_held_cargo_lock_wait_is_bounded_too() -> Result {
         "{stderr}"
     );
     assert!(stderr.contains("gave up"), "{stderr}");
-    assert!(stderr.contains("provenant lanes"), "{stderr}");
+    assert!(stderr.contains("provenant status"), "{stderr}");
     assert!(!rig.started("start"));
     // Released, the same command runs.
     drop(lock);

@@ -15,7 +15,7 @@ provenant hosts doctor
 provenant fabric peer
 provenant fabric peer-agent
 provenant help run
-provenant lanes --host workshop
+provenant status --all
 provenant workflow session handoff --help
 ```
 
@@ -36,462 +36,30 @@ configuration; the peer must hold the same project key. Peer calls run
 non-interactive `PATH`. The hidden `fabric peer` command is the fixed SSH
 protocol entrypoint; the hidden `fabric peer-agent` command is the macOS
 LaunchAgent that runs it in the login session (see below). Remote dispatch uses
-top-level `dispatch --host`. The Rust CLI grammar lives in
+work bindings in template documents. The Rust CLI grammar lives in
 `tools/front-door/crates/cli/src/grammar.rs` and
 `tools/front-door/crates/cli/src/fabric.rs`.
 
 ## Local graphs
 
-Before upgrading across the prepared-operation replay change, finish or cancel
-active graphs with the old binary and wait for their attempts to settle. A
-prepared graph operation from the older binary may otherwise need a new graph
-ID after the upgrade; inspect the existing attempts and their custody first.
-Checkpoints with pre-node-ask loop state or incomplete expansion topology are
-unreadable after the upgrade.
-If one remains, use `provenant fabric graph status <id>` to see the remedy and
-`provenant fabric graph cancel <id>` to retire its record.
-Retirement does not cancel its attempts or close old inbox requests; inspect
-and settle those first.
-
-Use a graph for a writer followed by a review. Create and register the writer's
-worktree first with `provenant worktree create`, then save the following
-as a graph file in the project:
-
-```json
-{
-  "schema_version": 1,
-  "graph_id": "write-review",
-  "nodes": [
-    {
-      "id": "write",
-      "title": "Implement change",
-      "prompt": "Implement the approved change and commit it.",
-      "access": "worktree_write",
-      "worktree": ".worktrees/feature",
-      "route": {"alias": "senior"}
-    },
-    {
-      "id": "review",
-      "title": "Review change",
-      "prompt": "Review the change in .worktrees/feature.",
-      "access": "read_only",
-      "depends_on": ["write"],
-      "inputs": [{"node": "write", "outputs": ["result", "branch"]}],
-      "route": {
-        "adapter": "claude",
-        "model": "claude/claude-sonnet-5-5",
-        "effort": "medium",
-        "account": "pro"
-      }
-    }
-  ]
-}
-```
-
-Add a deterministic check after a review with a gate such as:
-
-```json
-{
-  "id": "accept-review",
-  "kind": "gate",
-  "access": "read_only",
-  "depends_on": ["review"],
-  "inputs": [{"node": "review", "outputs": ["verdict"]}],
-  "condition": {"type": "verdict", "expected": "VERDICT: PASS", "threshold": "all"}
-}
-```
-
-Ask each reviewer to put its findings first and finish with exactly one
-standalone verdict, for example `VERDICT: PASS` or `VERDICT: FAIL`. The token
-must contain only uppercase ASCII letters, digits, underscores or hyphens;
-the entire line must fit within 1024 bytes. Do not quote or repeat verdict
-markers in prose. Multiple markers, malformed lines or a non-final verdict
-fail the gate, even if other inputs satisfy its threshold. An incomplete
-artifact fails the reviewer before the gate can consume it.
-
-For threshold decisions, let reviewers report either verdict without a
-`required_verdict` contract. A valid negative verdict then counts as a
-non-match, so `any` or `majority` can tolerate it. A failed required-verdict
-contract fails the reviewer and blocks its dependants before the gate can
-evaluate; such contracts cannot express a tolerated negative review and do
-not make ambiguous typed verdicts safe.
-Thresholds are `all`, `any`, `majority` or `{"count": 2}`.
-A gate has no route, prompt, writer worktree or
-delivery configuration. Use `condition: {"type": "budget"}` without `inputs`
-to check settled usage against the host's configured per-node and graph
-budgets. This is a point-in-time check over settled attempts; it excludes
-still-running branches and does not reserve future budget. Make the gate
-depend on all nodes whose settled usage it should check before admitting the
-work it guards. Reaching a budget or missing telemetry for a configured
-metric fails that check; without a configured budget it passes.
-
-Use a CI gate to wait for the checks on a pull request or branch:
-
-```json
-{
-  "id": "ci",
-  "kind": "gate",
-  "access": "read_only",
-  "condition": {"type": "ci", "target": "123", "checks": ["build", "test"], "timeout_seconds": 7200}
-}
-```
-
-The `condition` fields for this gate are:
-
-| Field | Meaning |
-| --- | --- |
-| `type` | `ci` |
-| `target` | Non-empty pull request number or branch name, as a string |
-| `checks` | Optional array of required check names |
-| `timeout_seconds` | Optional timeout from 1 to 604800 seconds; defaults to 7200 |
-
-Every explicitly named check must pass. When `checks` is omitted, the host
-uses required checks from branch protection or rulesets if it can resolve them.
-Otherwise every reported check must pass or be skipped, with at least one pass.
-The gate records the policy it applied with its evidence. Failed checks fail
-the gate. Missing checks, an unknown pull request or an API error fail with
-reason `unavailable`. Pending checks leave the gate waiting until
-they settle or the timeout expires. The checkpoint records the first observation,
-last state and check summary. Pending gates are re-evaluated by `fabric graph run`
-or `fabric graph resume` and when an attempt settles. Graph status reads the saved
-snapshot; it does not advance the graph. No background timer re-checks the gate.
-
-Set `on_fail` to a recovery node ID and include the gate in that node's
-`depends_on`. The recovery path runs only on failure; the ordinary dependants
-run only on success. Inactive paths become `skipped`. A failed gate without
-recovery prevents delivery. Dependencies are conjunctive; a join that requires
-both success and failure paths is rejected as unreachable. A successful
-recovery permits final graph delivery; the usual budget admission fence still
-applies to any recovery agent. Replay
-retains a saved decision; use a new graph ID to evaluate it again.
-
-Configure the `senior` routing pool and register `pro` with `provenant accounts
-register` before running the graph. An alias-only route resolves its adapter
-through the same routing configuration as `dispatch --route`. Explicit
-adapter and model routes also work. A route must include an adapter or alias;
-`route` selects one route, while `routes` provides an ordered fallback list
-that can mix both forms. Both forms accept `account`. A node's optional `title`
-appears in `lanes` and graph status; it defaults to the node ID and must pass
-the task title validation, including the prohibition on control characters.
-
-`inputs` selects outputs from direct dependencies to include in the node's
-brief. The available selectors are `result`, `verdict`, `findings`, `branch`
-and `commit`. Omit `inputs` for ordering without passing data. The result has a
-SHA-256 digest of the complete stored result, a bounded credential-redacted
-excerpt and a run-file path when available. The digest identifies the raw
-stored artifact; hashing the redacted output may yield a different digest.
-The path is available in status for a local attempt with a result; remote
-attempts may have no local path. Paths are omitted from downstream briefs.
-Selected outputs appear in a block marked as untrusted data. The rendered brief
-is bounded by the effective `node_prompt_bytes` limit. If the prompt leaves no
-room for the block or the selected data does not fit, the node fails before its
-next attempt is admitted and reports an advance error. A failure before a
-fallback preserves the previous attempt without creating a fallback attempt.
-An admitted node without selected inputs replays its full prompt even if the
-limit is lowered. Increase the limit in the host configuration and start a new graph to
-retry a failed node. A document prompt over a structural limit instead pauses
-the graph, which can be resumed after the limit is extended. Inspect node
-outputs with `provenant fabric graph status --json`.
-
-To combine outputs with an agent configured for synthesis, set
-`"kind": "synthesise"`, give its prompt the purpose, and select at least one
-dependency. For example:
-
-```json
-{
-  "id": "synthesis", "kind": "synthesise", "access": "read_only",
-  "prompt": "Deduplicate and rank the review findings.",
-  "route": {"alias": "senior"}, "depends_on": ["review"],
-  "inputs": [{"node": "review", "outputs": ["findings"]}]
-}
-```
-
-Omitting `kind` or using `"task"` keeps task behaviour. All nodes require an
-explicit `access`; gates require `"read_only"`.
-
-### Plan a small graph
-
-On a configured host with the default limits, save this as
-`.provenant/scratch/graphs/plan-example.json`:
-
-```json
-{
-  "schema_version": 1, "graph_id": "plan-example",
-  "nodes": [{
-    "id": "plan", "kind": "plan", "access": "read_only",
-    "route": {"alias": "senior"},
-    "plan": {"kinds": ["task"], "max_nodes": 2},
-    "prompt": "Emit one read-only task with id inspect, goal Summarise README.md, write_scope [README.md], acceptance_checks [Identify the documented entry points], and depends_on []."
-  }]
-}
-```
+Use the [template runbook](presets.md) for graph composition, review panels,
+repair loops and decisions. The public document is a collection of template
+nodes; compiled graph kinds are internal.
 
 ```sh
-provenant fabric graph run --document .provenant/scratch/graphs/plan-example.json
-provenant fabric graph status plan-example --json
+provenant run --route junior --file brief.md --explain
+provenant run --use plan --file brief.md
+provenant status GRAPH
+provenant output GRAPH --trace
+provenant retry GRAPH
+provenant stop GRAPH
 ```
 
-The runtime supplies the planner's result contract. A complete result looks
-like this; keep the JSON within 12 KiB and the final block within the retained
-result tail:
-
-````text
-```fragment
-{"schema_version":1,"nodes":[{"id":"inspect","goal":"Summarise README.md","access":"read_only","write_scope":["README.md"],"acceptance_checks":["Identify the documented entry points"],"depends_on":[]}]}
-```
-````
-
-The task defaults to `senior`. Status shows `plan--inspect`, the validated
-definitions under `checkpoint.expansions`, and `checkpoint.remaining`.
-Dependencies and selected inputs in a fragment use local IDs. A planner may
-declare `task`, `plan`, `synthesise` or `gate` children. Gates use the existing
-condition schema. Presets and review shapes remain future extensions.
-Planner prompts use the JSON kind names and require `worktree` for writers,
-`inputs` for synthesis, and `acceptance_checks` for agent children. Keep the
-planner ID, `--` and child ID within the 64-byte node ID limit.
-
-For writers, create and register their worktrees first. Add
-`"integration_branch": "integration"` to the graph and optionally
-`"delivery": "pr"` for one final PR. Emitted writer nodes specify
-`"access": "worktree_write"` and their registered `worktree`. The integration
-branch must differ from the checked-out writer branch. Overlapping literal
-file/directory scopes share the first writer's checkout and run serially with
-`integrate:integration`; disjoint scopes in separate checkouts may run together.
-Scopes use `.` for the whole repository and do not accept globs or `..`.
-The admission fence also covers original graph writers; omitted scopes are
-conservative and overlap all scopes. Skipped recovery writers do not constrain
-later checkout selection. Plans inside loops must keep one writer checkout.
-
-A writer that has committed a useful partial result can finish successfully
-with this structured note instead of its completion verdict:
-
-````text
-```handoff
-{"schema_version":2,"status":"stopped_early","note":"First half committed.","remaining":["Finish the second half","Run acceptance checks"],"decisions":[],"verify":["First-half targeted checks passed"]}
-```
-````
-
-Use the shared [handoff bounds](../specs/run.md#a-partial-finish-is-visible)
-and keep the same JSON current in the lane's supplied progress path.
-The continuation keeps the checkout and
-completion contract; consumers wait for it and read its selected outputs.
-Use integrate delivery or no delivery for these writers. Graph checkouts are
-retained for later work and explicit cleanup. Plain prose and failed provider
-attempts do not trigger continuation.
-Malformed optional handoffs are ignored with an output warning. The writer
-still needs its configured completion verdict unless it emits a valid handoff.
-
-The graph allows two continuations by default. Configure `continuations` in
-the host graph policy; 0 disables them. To extend a paused graph, raise the
-host limit and resume the graph.
-
-Planner fragments refused for a structural limit are retained in the
-checkpoint. Raise the named host limit to retry admission after reopening the graph. Invalid fragments still require
-a corrected plan in a new graph; increasing a limit cannot repair their JSON.
-
-Invalid planner output pauses with an explicit reason; correct the brief or
-fragment configuration and start with a new graph ID. Raw fragment JSON is
-retained for retry, but no invalid expansion is admitted. Status retains the
-original handoff if a continuation cannot fit; it can resume after the relevant
-limit is extended.
-
-### Repeat review and repair
-
-Use a `loop` node when review and repair should repeat until a gate passes.
-For example, add this node to a graph after registering `.worktrees/feature`:
-
-```json
-{
-  "id": "repair-review", "kind": "loop", "access": "read_only",
-  "loop": {
-    "max_rounds": 2,
-    "until": "approved",
-    "body": [
-      {
-        "id": "repair", "access": "worktree_write",
-        "worktree": ".worktrees/feature", "route": {"alias": "senior"},
-        "prompt": "Repair the change using previous review findings, if present. Commit it.",
-        "inputs": [{"node": "previous.review", "outputs": ["result", "findings"]}]
-      },
-      {
-        "id": "review", "access": "read_only", "route": {"alias": "senior"},
-        "prompt": "Review .worktrees/feature. Report findings and finish with VERDICT: PASS or VERDICT: FAIL.",
-        "depends_on": ["repair"],
-        "inputs": [{"node": "repair", "outputs": ["result", "branch", "commit"]}]
-      },
-      {
-        "id": "approved", "kind": "gate", "access": "read_only",
-        "depends_on": ["review"],
-        "inputs": [{"node": "review", "outputs": ["verdict"]}],
-        "condition": {"type": "verdict", "expected": "VERDICT: PASS", "threshold": "all"}
-      }
-    ]
-  }
-}
-```
-
-Round one omits `previous.review`; round two receives round one's result and
-findings. Current-round references use the local node ID, such as `repair`.
-All writers in the body must use the same worktree, so repairs continue on the
-existing branch. The `until` gate must follow the entire body. Body delivery,
-`on_fail` and nested loops are refused. A task failure fails the loop; a
-negative `until` verdict starts the next round.
-
-Configure host limits for the full expansion before running. This example
-requires seven nodes and a dependency depth of six. The default host depth
-limit is 64, which covers two rounds of the bundled `big-batch` review loop. Composite nesting counts against the
-same limit. To allow many more rounds, raise it:
-
-```toml
-[domains.fabric.graph.limits]
-expansion_depth = 64
-```
-
-Preset and graph `read_roots` must lie inside the project or its linked
-worktrees. List any other directory by absolute path:
-
-```toml
-[domains.fabric.graph]
-allowed_read_roots = ["/absolute/path/to/shared-reference"]
-```
-
-All allowed rounds count
-towards structural and prompt limits even if the first round passes. An
-extension adds to that expansion and must fit host limits. The safety bounds
-are 1024 rounds, 16384 expanded nodes and 64 bytes per expanded node ID.
-
-Inspect rounds with `provenant fabric graph status GRAPH_ID --json`. Body IDs
-include their round, for example `repair-review--r2--review`; each checkpoint
-node includes `round` metadata and its typed outputs. Passing the gate skips
-future rounds and lets dependants of `repair-review` continue. After two
-negative rounds the graph reports `paused` with an exhaustion reason.
-
-To allow two more rounds, keep the graph document unchanged and set the
-total allowance to four. The extension must fit the host limits:
-
-```sh
-provenant fabric graph resume --document graph.json \
-  --extend loop.repair-review.rounds=4
-```
-
-Loop extensions require an exhausted loop. `--extend loop.repair-review.rounds=4`
-sets the absolute round allowance. `--extend loop.repair-review.decision=stop`
-fails the loop, while `--extend loop.repair-review.decision=accept` accepts its
-current outputs and continues. The runtime checks the expanded graph against
-host limits before saving an extension. A loop can also set
-`max_extension_rounds` (default five) to cap an inbox extension; the total
-rounds remain at most 1024.
-
-### Decide nodes and graph asks
-
-Graphs use one checkpointed ask protocol for human decisions. Add a read-only
-`decide` node to ask a chair to choose an option, then route its verdict through
-a verdict gate:
-
-```json
-{
-  "schema_version": 1,
-  "graph_id": "choose-repair",
-  "decision_session": "CHAIR_SESSION_ID",
-  "nodes": [
-    {
-      "id": "choice",
-      "kind": "decide",
-      "access": "read_only",
-      "decide": {
-        "question": "Which repair should proceed?",
-        "options": [
-          {"id": "repair", "label": "Repair"},
-          {"id": "defer", "label": "Defer"}
-        ]
-      }
-    },
-    {
-      "id": "route-choice",
-      "kind": "gate",
-      "access": "read_only",
-      "depends_on": ["choice"],
-      "inputs": [{"node": "choice", "outputs": ["verdict"]}],
-      "condition": {"type": "verdict", "expected": "repair", "threshold": "all"},
-      "on_fail": "defer"
-    },
-    {
-      "id": "defer",
-      "kind": "task",
-      "access": "read_only",
-      "prompt": "Record that this work is deferred.",
-      "route": {"alias": "senior"}
-    }
-  ]
-}
-```
-
-Use the graph's `decision_session` or set `session` on the decide node. A decide
-node may also set a `default` option and positive `timeout_seconds`; the timeout
-requires a default and the graph takes that option at the saved deadline. A
-chosen option ID becomes the node's verdict. An answer that does not name an
-option is rejected and the graph asks again with the reason. Decide nodes run
-without an attempt and do not use graph concurrency.
-
-The same ask primitive handles exhausted loops and graph pauses. A loop may set
-`decision_session` in its `loop` object; its ask offers stop, extend or accept.
-An extension can add one round, or a JSON reply can add a positive number up to
-`max_extension_rounds` and host limits. A graph-level `decision_session` also
-lets a budget or structural pause ask to resume, cancel or apply budget
-extensions. To extend a budget in the inbox, reply with
-`{"decision":"extend","extensions":["budget.per_graph.tokens=2000000"]}`.
-Asks are keyed by ID in the checkpoint, so several can be open and retries
-reuse the same request. Answer through the inbox, then run
-`provenant fabric graph resume --document graph.json` to advance the checkpoint.
-See [graph asks in the inbox runbook](human-inbox.md#exhausted-graph-loops) for
-answer shapes and replay behaviour. Without a configured decision session, use
-the explicit resume extensions above.
-
-### Inspect findings and recover a graph
-
-To report findings, include a fenced `findings` block in the result containing
-JSON with `schema_version: 1` and a `findings` array. Each finding has `id`,
-`severity`, `file`, `line`, `summary` and `status`. For example:
-
-````text
-```findings
-{"schema_version":1,"findings":[{"id":"F1","severity":"high","file":"src/lib.rs","line":12,"summary":"Missing validation","status":"open"}]}
-```
-````
-
-The runtime accepts at most 32 findings. A missing or invalid block produces
-an empty list and a warning by default; a node with `require_findings = true`
-fails with `findings_required`. See the [graph spec](../specs/fabric.md#typed-node-outputs)
-for the output contract.
-
-```sh
-provenant fabric graph run --document graph.json
-provenant fabric graph status write-review
-provenant fabric graph status write-review --full
-```
-
-The full view lists every saved node, including composite and loop members, in
-checkpoint order with its state, latest route and attempt reference. `none`
-marks a missing route or attempt reference. Node errors and pending CI details
-are shown alongside the affected node.
-
-The run command returns after starting ready nodes. Settlement automatically
-starts dependants and updates the checkpoint to complete. `status` only reads
-the checkpoint. Cancellation fences new starts; it remains in effect until
-an explicit resume:
-
-```sh
-provenant fabric graph cancel write-review
-provenant fabric graph resume --document graph.json
-```
-
-After a supervisor crash, the next settlement in the project advances pending
-graphs. Use `resume` when nothing else will settle. Keep the original document
-for that recovery command; changing its plan produces a conflict. If a graph
-stays pending, `graph status` shows `advance_error` when an automatic advance
-failed. Failed writers retain their checkout for inspection. See the
-[graph spec](../specs/fabric.md#bounded-graphs-and-route-fallback) for fallback
-rules and limits.
+Inspect the explanation before starting work. `run` inside a lane adds children
+to the same graph. Children share budget, stopping and trace. Use `edit GRAPH
+--file PATCH` to change unstarted nodes; started attempts remain immutable.
+For a paused decision, use the [human inbox](human-inbox.md), then retry the
+existing graph. Preserve its checkpoint and completed outputs during recovery.
 
 ## Configure hosts
 
@@ -715,37 +283,16 @@ servers and running workers after upgrading. `not_terminal` and
 
 ## Dispatch and recovery
 
-Use `provenant run` to submit one prompt, wait and read its result tail;
-advanced `provenant dispatch` also accepts a batch manifest; `--host` names explicit placement on a configured peer, by label or
-host ID. The peer resolves the route, confines the lane and runs it in its own
-checkout of the same project, at the same path under its home directory, with
-its own provider sign-ins; a `--account` pin is checked against the peer's registrations. The calling host keeps only a placement record under
-`fabric/remote-runs/` in its state directory. `status`, `lanes --id`, `output`
-and `cancel` use that record to find the peer by ID. `run` combines submission
-with a bounded wait and result tail; its timeout prints the exact command to
-continue waiting. Advanced `lanes --wait` and `lanes --watch` observe existing
-peer runs. Lanes
-keep running after the SSH call returns. Fabric MCP `fabric_run`
-(`op: submit`) takes the same placement as an optional `host` field.
-To read a peer's own attempt without a local placement record, use
-`provenant output ATTEMPT --host workshop`, or `output HOST/ATTEMPT` with
-the host ID. Output also accepts `RUN/ATTEMPT`. The default human result is a
-settlement line and the whole final result up to 12 KiB (head and tail above
-that, naming the omitted bytes); `--full` reads the full byte window and
-`--json` retains the machine envelope. Changed files use the recorded base and final head where
-their objects remain readable; peer summaries report this evidence as
-unavailable rather than guessing a diff.
+Use `provenant run --use task --file BRIEF` for one assignment, or a composite
+such as `batch` for disjoint implementation slices. Inspect with `--explain`.
+MCP `fabric_run` calls the same host service; documents carry placement and
+work bindings. Host-specific routing and sign-in remain on the executing peer.
 
-Use `provenant fabric graph wait GRAPH --wait 5m` to observe a graph until it settles or pauses. The wait does not advance the graph; its deadline returns `waiting` with the status command.
-
-Foreground `run --preset` prepares and retains the graph document in
-`.provenant/scratch` before its first graph poll, using one preparation per
-wait. A failure there names the preparation step, path and cause. An
-already-admitted graph retries transient lock and Git probe timeouts while
-permanent path, permission and custody refusals fail immediately. Scratch lock
-acquisition is capped by the preset wait budget; Git probes retain their
-bounded utility timeout. If the wait budget expires during retries, the error
-includes the graph ID so operators can continue with `fabric graph status`.
+Use `status GRAPH` to inspect progress, `output TARGET` to collect evidence,
+`stop TARGET` to stop a subtree and `retry TARGET` to recover unfinished work.
+`status --wait=5m --target graph:GRAPH` observes a bounded wait; expiry leaves
+work running. Checkpoints preserve completed results and uncertain effects
+must be reconciled before retrying. Use `output TARGET --trace` for lineage.
 
 `--tail N` works locally and on peers, is clamped to 500 lines and retains at
 most `--max-bytes`. Peer tails page within a shared 30-second budget and
@@ -762,91 +309,16 @@ actor, observed model and catalogue family; missing fields are `unknown`. A
 `RUN/TASK/ATTEMPT`. Add `--json` for the individual fields. Receipt output
 is not supported over peer transport; run the command on the peer host.
 
-A writer on a peer names a new branch and its base instead of `--worktree`,
-which is a path on the calling host. This is the terminal path; agents use
-`fabric_run` (`op: submit`):
+Peer writers use document work bindings for placement, branch, base and write
+scope. Push the base first: the peer resolves it in its own clone and uses its
+own Git credentials. Keep one writer per worktree and collect the recorded
+branch, commit and route before integrating.
 
-```sh
-provenant run --host workshop --mode worktree-write \
-  --branch feat/x --base origin/main --route senior \
-  --prompt-file prompt.md --deliver pr
-```
-
-The peer fetches every remote with its own Git credentials, then refuses with
-`BASE_UNREACHABLE` unless a remote-tracking ref contains the base, so push the
-base first. Use a remote-tracking ref or a pushed commit: a local branch name
-resolves in the peer's clone. The peer creates the branch's registered
-worktree with its own `worktree create`. A retry reuses that worktree while
-it is clean at the base with no live writer; any other existing branch is
-`BRANCH_EXISTS`. Delivery flags run host delivery on the peer with its Git and
-`gh` credentials. Without them, the writer's commits stay in the peer's
-worktree, and the dispatch receipt's `worktree` names its path and branch.
-Replaying the operation returns the same run and worktree. One writer per
-worktree, so a manifest cannot carry a peer writer. Status, wait, output and
-cancel work as for read-only peer runs.
-
-Naming this host (`local`, `localhost`, its host ID, or a peer label that resolves to it) is local
-placement in any mode: the flag is dropped and the task runs here, where
-`--branch` does not apply. A writer naming any other unconfigured host gets `UNKNOWN_HOST`.
-Other limits on a peer run:
-
-- explicit task IDs and route fallback are refused;
-- `output` reads result, prompt, stderr and events; transcripts and receipts
-  require running the command on the peer host;
-- `cancel` does not forward `--reason`; the peer records its own;
-- `lanes` without `--id` lists only lanes on the calling host, and mixing
-  local and peer runs in one call is refused. `lanes --host workshop` lists
-  the peer's own lanes, newest first with `--all`. It takes `--state` and
-  `--since` but not `--id` or `--cursor`, and filters only the page the peer
-  returns. `lanes --host workshop --wait N` and `--watch` follow the peer's
-  newest 100 lanes, counting only those that settle after the call starts. A
-  lane seen running stays tracked until it settles, even after newer
-  dispatches push it off that page. A queued or starting lane on the peer shows
-  its `lane_class` and `waiting_for` like a local one, except in the final report
-  of any `--wait` or `--watch` (including `dispatch` and `cancel`), which makes
-  no read after its deadline; an older peer shows neither.
-
-Waiting and watching work the same on both hosts. `lanes --wait N` returns when a
-lane that was unsettled at the start, or settled since, meets `--condition`
-(`any` by default). A settled older attempt of a named run does not count; if
-every lane of the named runs settled earlier the call is refused with their
-number, so pass the attempt ID, or `--since TIME` to count earlier
-settlements. `--session LABEL` selects the lanes an agent label submitted, so
-no ID list is needed. The wait starts when the command does, so a peer lane
-that settles while the peer is unreachable still counts once it answers. The
-comparison uses the peer's recorded settlement time against this host's clock,
-so keep the hosts' clocks synchronised. For a background job or monitor, run
-`provenant lanes --watch 3600`. One poll shares a single deadline across
-all its peer reads (one per host and per 100 lanes, plus the lookup of lanes
-that left the newest page). Each read is bounded by the time the earlier reads
-left, as well as by `limits.peer_seconds`, and no read after the first starts
-at or after the deadline; the poll then fails as a transient peer error, which
-the wait retries until its own budget ends.
-Local run-store contention is also retried between polls until the wait's
-deadline. Under WAL a read rarely waits; when it does, one store operation
-waits at most `limits.store_busy_timeout_ms` (30 seconds by default) before it
-reports contention, so a poll can end up to that long after the wait's
-deadline. Persistent contention ends the wait or watch as a timeout. Optional
-wait details in the final reply use the same reads. If peer reads remain
-unavailable at the deadline, the last failure is reported.
-Run-store privacy errors identify the path relative to the state root and the
-failed check; `.` denotes the state root itself. Paths outside that root, such
-as worktree paths, are reported as given.
-The time a peer read has left covers
-the whole SSH child, including its termination and reap, so a hung `ssh` that
-ignores `TERM` is killed by the deadline. Only the first read of `--wait 0`
-keeps a one-second minimum, with a further half second of termination and reap
-if `ssh` hangs. The watch prints `STATE RUN/TASK/ATTEMPT` (and
-`host=ID` for a peer's lane) once per state change, then `end settled lanes=N`,
-or `end timeout lanes=N pending=M` with exit 124.
-
-`provenant help run` shows all route, access, placement and retry controls.
-CLI run, dispatch, cancel and resume generate and print an operation ID when
-omitted; retain an explicit `--operation-id` for planned retries. The reserved observation
-and control names are top-level `lanes`, `output`, `cancel`, `resume` and
-`reconcile`. Targets follow the
-grammar `RUN[/TASK[/ATTEMPT]]`, also accepting `RUN/ATTEMPT` and unique hex
-prefixes of at least eight characters. An ambiguous prefix lists candidates.
+Observe from the owning host with `status TARGET` and collect with `output
+TARGET`. For a monitor, use `status --wait=1h --target graph:GRAPH --follow`.
+The deadline bounds observation and leaves active work running. Reconcile
+unavailable or uncertain custody before retrying. `help --all` lists advanced
+host controls; `help run` describes the template front door.
 
 The peer transport does not silently fall back to local placement. A mutation
 whose reply is lost can return `LAUNCH_UNKNOWN`; retain its operation ID and
@@ -969,7 +441,7 @@ provenant workflow session handoff --to workshop --account work \
 ```
 
 Drop `--dry-run` once the plan looks right. Follow the peer's lanes from here
-with `provenant lanes --host workshop`.
+with `provenant status --all` on that host.
 
 ## Legacy import data
 

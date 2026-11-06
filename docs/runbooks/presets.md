@@ -11,17 +11,30 @@ landing. `explore`, `research` and `design` gather evidence or settle options;
 `verify`, `synthesise` and `repair` check claims, reconcile inputs and fix findings.
 
 ```sh
-provenant run --use deliver --file brief.md --explain
-provenant run --use deliver --file brief.md
+provenant run --route junior --file brief.md --explain
+provenant run --use deliver --file brief.md --set 'worktree="/absolute/project/.worktrees/delivery"' --set 'write_scope=["src"]' --explain
+provenant run --use deliver --file delivery.toml
 provenant status
 provenant output TARGET
+```
+
+Register the writer worktree first with `provenant worktree create delivery --base BASE`.
+Use its absolute path and literal write scope. For `delivery.toml`, bind the
+same parameters in a reusable node document:
+
+```toml
+use = "deliver"
+[with]
+worktree = "/absolute/project/.worktrees/delivery"
+write_scope = ["src"]
+brief = "Meet the approved acceptance criteria and run the named checks."
 ```
 
 `templates` inspects the library. `run [BRIEF]` accepts `--use`, `--tier`,
 `--over`, `--set`, `--file`, `--explain` and `--wait`. Inspect the resolved
 shape and authority before submitting. A wait expiry leaves work running.
 The core verbs are `run`, `status`, `output`, `steer`, `stop`, `retry`, `edit`,
-`templates`, `land`, `quota` and `trace`; `help --all` reveals the rest.
+`templates`, `land` and `quota`; `help --all` reveals the rest.
 
 ## Deliver through CI to land
 
@@ -98,8 +111,7 @@ concrete purpose.
 ## Observe and recover
 
 `status` uses one row schema for graphs, nodes and attempts. `output TARGET`
-collects evidence; `output TARGET --trace` shows the timeline. `trace` exposes
-trace inspection. Events retain identifiers, digests and cause codes for
+collects evidence; `output TARGET --trace` shows the timeline. Advanced `trace` inspection is listed in `help --all`. Events retain identifiers, digests and cause codes for
 patches, attempts, waits, gates, joins, budget and effects. Checkpoints own
 recovery; replay reconciles uncertain launches and reuses finished outputs.
 
