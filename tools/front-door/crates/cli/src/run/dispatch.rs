@@ -381,6 +381,20 @@ pub(super) fn dispatch_with_workers(
     workers: &dyn provenant_confinement::worktrees::WorkerObserver,
 ) -> Reply {
     let operation_id = command.operation_id.clone();
+    if let Some(message) = base_target_refusal(
+        command.base.as_deref(),
+        command.branch.as_deref(),
+        command.access.worktree.as_deref(),
+        command.worktree_branch.as_deref(),
+        command.head.as_deref(),
+    ) {
+        let mut out = reply(
+            "dispatch",
+            Err(Fail::new(Status::Invalid, ErrorKind::Invalid, message)),
+        );
+        operation_reply(&mut out, &operation_id);
+        return out;
+    }
     let mut created = None;
     let facts = provenant_confinement::worktrees::RepoFacts::default();
     let mut result = dispatch_inner(command, edge, &mut created, workers, &facts);
@@ -458,6 +472,17 @@ pub(super) fn dispatch_with_workers(
     let mut out = reply_waited("dispatch", result);
     operation_reply(&mut out, &operation_id);
     out
+}
+
+pub(super) fn base_target_refusal(
+    base: Option<&str>,
+    branch: Option<&str>,
+    worktree: Option<&Path>,
+    worktree_branch: Option<&str>,
+    head: Option<&str>,
+) -> Option<&'static str> {
+    (base.is_some() && branch.is_none() && worktree.is_none() && worktree_branch.is_none() && head.is_none())
+        .then_some("--base requires a writer target; use --branch with --host or --worktree, or use --head to set the reader's commit and --base as its diff base")
 }
 
 pub(super) fn created_tree_state(
@@ -1899,6 +1924,20 @@ pub(super) fn dispatch_inner(
         .collect();
     brief_warnings.extend(worktree_warnings);
     brief_warnings.extend(capability_warnings);
+    // A pinned `--head` names its commit; otherwise the lane reads the checkout
+    // selected by `--worktree`, or the caller's checkout when none is named.
+    if command.head.is_none() && matches!(command.access.mode(), Mode::ReadOnly) {
+        let source = lane_access
+            .source_root
+            .clone()
+            .unwrap_or_else(|| edge.cwd.to_path_buf());
+        if let Some(warning) = super::provider::confinement::read_only_checkout_warning(
+            edge.roots.state.as_path(),
+            &source,
+        ) {
+            brief_warnings.push(warning);
+        }
+    }
     if matches!(command.access.mode(), Mode::WorktreeWrite) {
         let budget = config
             .domains

@@ -3889,6 +3889,119 @@ fn writer_continuation_dirty_brief(committed: bool) -> Result<(), Box<dyn std::e
 }
 
 #[test]
+fn read_only_checkout_warning_measures_the_selected_checkout_against_origin_default()
+-> Result<(), Box<dyn std::error::Error>> {
+    use provenant_os::exec::{ExecOptions, Executor, SystemExecutor, Termination};
+
+    fn git(
+        executor: &SystemExecutor,
+        executable: &Path,
+        repo: &Path,
+        env: &[(std::ffi::OsString, std::ffi::OsString)],
+        args: &[&str],
+    ) -> Result<String, Box<dyn std::error::Error>> {
+        let argv: Vec<_> = std::iter::once(executable.as_os_str().to_owned())
+            .chain(args.iter().map(std::ffi::OsString::from))
+            .collect();
+        let mut options = ExecOptions::new(&argv, repo, std::time::Duration::from_secs(10));
+        options.env = Some(env);
+        let output = executor.execute(options)?;
+        if output.termination != Termination::Exit(0) {
+            return Err(format!(
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&output.stderr.bytes)
+            )
+            .into());
+        }
+        Ok(String::from_utf8(output.stdout.bytes)?.trim().to_owned())
+    }
+
+    // The remote's HEAD names master. origin/main is a different line, two
+    // commits past the shared root, so a wrong default would change the count.
+    let temp = tempfile::tempdir()?;
+    let root = temp.path();
+    let state = root.join("state");
+    std::fs::create_dir_all(&state)?;
+    let executable = provenant_os::git::git_executable().ok_or("git unavailable")?;
+    let executor = SystemExecutor::new(1)?;
+    let env: Vec<_> = std::env::vars_os()
+        .filter(|(key, _)| !key.to_string_lossy().starts_with("GIT_"))
+        .chain(provenant_os::fixture::fixture_git_settings())
+        .collect();
+    let run = |repo: &Path, args: &[&str]| git(&executor, &executable, repo, &env, args);
+
+    run(root, &["init", "-q", "--bare", "remote.git"])?;
+    run(
+        &root.join("remote.git"),
+        &["symbolic-ref", "HEAD", "refs/heads/master"],
+    )?;
+    let seed = root.join("seed");
+    std::fs::create_dir_all(&seed)?;
+    run(&seed, &["init", "-q", "-b", "master"])?;
+    for args in [
+        ["config", "user.name", "Test"],
+        ["config", "user.email", "test@example.invalid"],
+    ] {
+        run(&seed, &args)?;
+    }
+    let commit =
+        |repo: &Path, text: &str, message: &str| -> Result<String, Box<dyn std::error::Error>> {
+            std::fs::write(repo.join("file"), text)?;
+            run(repo, &["add", "file"])?;
+            run(repo, &["commit", "-q", "-m", message])?;
+            run(repo, &["rev-parse", "HEAD"])
+        };
+    let stale = commit(&seed, "one\n", "one")?;
+    run(&seed, &["checkout", "-q", "-b", "main"])?;
+    commit(&seed, "side one\n", "side one")?;
+    commit(&seed, "side two\n", "side two")?;
+    run(&seed, &["checkout", "-q", "master"])?;
+    let default = commit(&seed, "two\n", "two")?;
+    run(&seed, &["push", "-q", "../remote.git", "master", "main"])?;
+
+    run(root, &["clone", "-q", "remote.git", "checkout"])?;
+    let checkout = root.join("checkout");
+    run(&checkout, &["config", "user.name", "Test"])?;
+    run(&checkout, &["config", "user.email", "test@example.invalid"])?;
+    assert_eq!(run(&checkout, &["rev-parse", "HEAD"])?, default);
+
+    // Behind the remote default: the warning names the count, the checkout and the commit read.
+    run(&checkout, &["reset", "-q", "--hard", &stale])?;
+    let warning = confinement::read_only_checkout_warning(&state, &checkout)
+        .ok_or("behind checkout did not warn")?;
+    assert!(warning.contains("1 commit behind"), "{warning}");
+    assert!(warning.contains(&stale), "{warning}");
+    assert!(
+        warning.contains(&checkout.display().to_string()),
+        "{warning}"
+    );
+
+    // Level with, or ahead of, the default: no warning.
+    run(&checkout, &["reset", "-q", "--hard", &default])?;
+    assert!(confinement::read_only_checkout_warning(&state, &checkout).is_none());
+    run(&checkout, &["commit", "-q", "--allow-empty", "-m", "three"])?;
+    assert!(confinement::read_only_checkout_warning(&state, &checkout).is_none());
+
+    // Without origin/HEAD, the remote's advertised default is used, not origin/main.
+    run(&checkout, &["reset", "-q", "--hard", &stale])?;
+    run(
+        &checkout,
+        &["symbolic-ref", "--delete", "refs/remotes/origin/HEAD"],
+    )?;
+    let warning = confinement::read_only_checkout_warning(&state, &checkout)
+        .ok_or("advertised default did not warn")?;
+    assert!(warning.contains("1 commit behind"), "{warning}");
+
+    // An unreachable remote is advisory: the launch continues without a warning.
+    run(
+        &checkout,
+        &["remote", "set-url", "origin", "../missing.git"],
+    )?;
+    assert!(confinement::read_only_checkout_warning(&state, &checkout).is_none());
+    Ok(())
+}
+
+#[test]
 fn read_only_plan_runs_host_git_with_a_private_home_outside_the_child_store()
 -> Result<(), Box<dyn std::error::Error>> {
     use provenant_confinement::permissions::{NetworkAccess, PlanPermissions};

@@ -2134,6 +2134,206 @@ fn printed_credentials_leave_no_plaintext_in_run_files() -> Result {
     Ok(())
 }
 
+/// Bind `codex` to this test binary and register one account, so a read-only
+/// lane launches against the rig's Git checkout. Launch is macOS-only.
+fn install_codex_fixture(rig: &mut TestRig) -> Result {
+    // The production read-only profile anchors the host Rust runtime roots.
+    for path in [".cargo/bin", ".cargo/registry", ".rustup/toolchains"] {
+        fs::create_dir_all(rig.home.join(path))?;
+    }
+    fs::write(rig.home.join(".rustup/settings.toml"), "")?;
+    let bin = rig.root.join("provider/bin");
+    fs::create_dir_all(&bin)?;
+    rig.copy_executable(&std::env::current_exe()?, &bin.join("codex"))?;
+    fs::write(
+        rig.root.join("codex").join("auth.json"),
+        br#"{"tokens":{"account_id":"fixture-one"}}"#,
+    )?;
+    rig.env.retain(|(k, _)| k != "PATH");
+    rig.env.push((
+        "PATH".into(),
+        format!("{}:/usr/bin:/bin", bin.display()).into(),
+    ));
+    Ok(())
+}
+
+/// Two commits on the rig's checkout: `HEAD~1` is the old commit, `HEAD` the
+/// new one. `origin/HEAD` names `origin/main`, which points at the new commit.
+fn commit_stale_default_history(rig: &TestRig) -> Result<(String, String)> {
+    let git = provenant_os::git::git_executable().ok_or("git unavailable")?;
+    for args in [
+        vec!["commit", "--allow-empty", "-qm", "old"],
+        vec!["commit", "--allow-empty", "-qm", "new"],
+        vec!["update-ref", "refs/remotes/origin/main", "HEAD"],
+        vec![
+            "symbolic-ref",
+            "refs/remotes/origin/HEAD",
+            "refs/remotes/origin/main",
+        ],
+    ] {
+        assert_eq!(code(&rig.execute(&git, &args, None)?), 0);
+    }
+    let rev = |spec: &str| -> Result<String> {
+        let out = rig.execute(&git, &["rev-parse", spec], None)?;
+        Ok(String::from_utf8(out.stdout.bytes)?.trim().to_owned())
+    };
+    Ok((rev("HEAD~1")?, rev("HEAD")?))
+}
+
+/// The shipped pinned diff form (`--head` with `--base`) must launch its
+/// reader on the pinned commit and settle with the lane's output.
+fn codex_pinned_reader_launches_from_head_and_base() -> Result {
+    let mut rig = TestRig::new()?;
+    let cleanup = rig.process_cleanup();
+    commit_stale_default_history(&rig)?;
+    install_codex_fixture(&mut rig)?;
+    let prompt_file = rig.root.join("prompt.txt");
+    fs::write(&prompt_file, "reply OK")?;
+    let out = rig.command(&[
+        "dispatch",
+        "--model",
+        "codex/gpt-6-luna",
+        "--effort",
+        "low",
+        "--mode",
+        "read-only",
+        "--base",
+        "HEAD~1",
+        "--head",
+        "HEAD",
+        "--operation-id",
+        &format!("{:032x}", 0x3002_u32),
+        "--prompt-file",
+        prompt_file.to_str().ok_or("prompt")?,
+        "--wait",
+        "5",
+        "--json",
+    ])?;
+    if !cfg!(target_os = "macos") {
+        // Off macOS the lane is rejected before launch, as the rollout test expects.
+        assert_eq!(
+            code(&out),
+            0,
+            "{}",
+            String::from_utf8_lossy(&out.stdout.bytes)
+        );
+        let lanes = rig.command(&["lanes", "--all", "--json"])?;
+        let value: Value = serde_json::from_slice(&lanes.stdout.bytes)?;
+        let lane = value["data"]["lanes"]
+            .as_array()
+            .and_then(|rows| rows.first())
+            .ok_or_else(|| format!("lanes: {value}"))?;
+        assert_eq!(lane["state"], "rejected", "{lane}");
+        assert_eq!(lane["terminal_cause"], "unsupported_platform", "{lane}");
+        cleanup.disarm();
+        return Ok(());
+    }
+    assert_eq!(
+        code(&out),
+        0,
+        "{} {}",
+        String::from_utf8_lossy(&out.stdout.bytes),
+        String::from_utf8_lossy(&out.stderr.bytes)
+    );
+    let reply: Value = serde_json::from_slice(&out.stdout.bytes)?;
+    assert_eq!(reply["status"], "ok", "{reply}");
+    let lanes = rig.command(&["lanes", "--all", "--json"])?;
+    let value: Value = serde_json::from_slice(&lanes.stdout.bytes)?;
+    let lane = value["data"]["lanes"]
+        .as_array()
+        .and_then(|rows| rows.first())
+        .ok_or_else(|| format!("lane: {value}"))?;
+    assert_eq!(lane["state"], "succeeded", "{lane}");
+    let id = lane["attempt_id"].as_str().ok_or("attempt")?;
+    assert_eq!(
+        reply["data"]["result_tails"][id]["bytes"]["data"],
+        format!("OK{DONE_FENCE}")
+    );
+    cleanup.disarm();
+    Ok(())
+}
+
+/// The staleness warning belongs to the checkout the lane reads: the
+/// `--worktree` named, or the caller's checkout when none is named.
+fn codex_read_only_warning_names_the_checkout_the_lane_reads() -> Result {
+    let mut rig = TestRig::new()?;
+    let cleanup = rig.process_cleanup();
+    let git = provenant_os::git::git_executable().ok_or("git unavailable")?;
+    let (old, new) = commit_stale_default_history(&rig)?;
+    let fresh = rig.root.join("fresh");
+    let stale = rig.root.join("stale");
+    for (path, commit) in [(&fresh, &new), (&stale, &old)] {
+        let path = path.to_str().ok_or("worktree path")?;
+        assert_eq!(
+            code(&rig.execute(
+                &git,
+                &["worktree", "add", "-q", "--detach", path, commit],
+                None
+            )?),
+            0
+        );
+    }
+    install_codex_fixture(&mut rig)?;
+    let prompt_file = rig.root.join("prompt.txt");
+    fs::write(&prompt_file, "reply OK")?;
+    let warnings_of = |out: &provenant_os::exec::ExecOutcome| -> Result<String> {
+        let reply: Value = serde_json::from_slice(&out.stdout.bytes)?;
+        Ok(reply["data"]["warnings"].to_string())
+    };
+    let launch = |rig: &TestRig, worktree: &std::path::Path, operation: u32| -> Result<String> {
+        let out = rig.command(&[
+            "dispatch",
+            "--model",
+            "codex/gpt-6-luna",
+            "--effort",
+            "low",
+            "--mode",
+            "read-only",
+            "--worktree",
+            worktree.to_str().ok_or("worktree")?,
+            "--operation-id",
+            &format!("{operation:032x}"),
+            "--prompt-file",
+            prompt_file.to_str().ok_or("prompt")?,
+            "--wait",
+            "5",
+            "--json",
+        ])?;
+        if !cfg!(target_os = "macos") {
+            return Ok(String::new());
+        }
+        assert_eq!(
+            code(&out),
+            0,
+            "{} {}",
+            String::from_utf8_lossy(&out.stdout.bytes),
+            String::from_utf8_lossy(&out.stderr.bytes)
+        );
+        warnings_of(&out)
+    };
+
+    // A stale caller reading an up-to-date worktree: no staleness warning.
+    rig.execute(&git, &["reset", "-q", "--hard", &old], None)?;
+    let warnings = launch(&rig, &fresh, 0x3002_1)?;
+    if cfg!(target_os = "macos") {
+        assert!(!warnings.contains("behind"), "{warnings}");
+    }
+
+    // An up-to-date caller reading a stale worktree: the warning names that worktree.
+    rig.execute(&git, &["reset", "-q", "--hard", &new], None)?;
+    let warnings = launch(&rig, &stale, 0x3002_2)?;
+    if cfg!(target_os = "macos") {
+        assert!(warnings.contains("1 commit behind"), "{warnings}");
+        assert!(warnings.contains(&old), "{warnings}");
+        assert!(
+            warnings.contains(&stale.display().to_string()),
+            "{warnings}"
+        );
+    }
+    cleanup.disarm();
+    Ok(())
+}
+
 fn codex_dispatch_observes_rollout() -> Result {
     for (index, prompt) in ["reply OK", "fixture missing rollout", "mismatch"]
         .iter()
@@ -2141,6 +2341,17 @@ fn codex_dispatch_observes_rollout() -> Result {
     {
         let mut rig = TestRig::new()?;
         let cleanup = rig.process_cleanup();
+        let git = provenant_os::git::git_executable().ok_or("git unavailable")?;
+        if index == 0 {
+            for args in [
+                vec!["commit", "--allow-empty", "-qm", "old"],
+                vec!["commit", "--allow-empty", "-qm", "new"],
+                vec!["update-ref", "refs/remotes/origin/main", "HEAD"],
+                vec!["reset", "--hard", "HEAD~1"],
+            ] {
+                assert_eq!(code(&rig.execute(&git, &args, None)?), 0);
+            }
+        }
         // The production read-only profile anchors the host Rust runtime roots.
         for path in [".cargo/bin", ".cargo/registry", ".rustup/toolchains"] {
             fs::create_dir_all(rig.home.join(path))?;
@@ -2180,6 +2391,10 @@ fn codex_dispatch_observes_rollout() -> Result {
             "5",
             "--json",
         ])?;
+        if index == 0 && cfg!(target_os = "macos") {
+            let output = String::from_utf8_lossy(&out.stdout.bytes);
+            assert!(output.contains("1 commit behind"), "{output}");
+        }
         assert_eq!(
             code(&out),
             if index == 0 && !cfg!(target_os = "macos") {
@@ -5895,6 +6110,8 @@ fn main() -> ExitCode {
                 "local_wait_returns_while_writer_seed_is_held",
                 "printed_credentials_leave_no_plaintext_in_run_files",
                 "codex_dispatch_observes_rollout",
+                "codex_pinned_reader_launches_from_head_and_base",
+                "codex_read_only_warning_names_the_checkout_the_lane_reads",
                 "policy_empty_result_falls_back_without_a_chair_turn",
                 "policy_incomplete_result_continues_the_retained_session",
                 "stats_reports_partial_signals_outside_graph_groups",
@@ -5961,6 +6178,8 @@ fn main() -> ExitCode {
                     "local_wait_returns_while_writer_seed_is_held" => local_wait_returns_while_writer_seed_is_held(),
                     "printed_credentials_leave_no_plaintext_in_run_files" => printed_credentials_leave_no_plaintext_in_run_files(),
                     "codex_dispatch_observes_rollout" => codex_dispatch_observes_rollout(),
+                    "codex_pinned_reader_launches_from_head_and_base" => codex_pinned_reader_launches_from_head_and_base(),
+                    "codex_read_only_warning_names_the_checkout_the_lane_reads" => codex_read_only_warning_names_the_checkout_the_lane_reads(),
                     "policy_empty_result_falls_back_without_a_chair_turn" => policy_empty_result_falls_back_without_a_chair_turn(),
                     "policy_incomplete_result_continues_the_retained_session" => policy_incomplete_result_continues_the_retained_session(),
                     "stats_reports_partial_signals_outside_graph_groups" => stats_reports_partial_signals_outside_graph_groups(),
