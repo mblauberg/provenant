@@ -620,6 +620,11 @@ impl<'a> Compiler<'a> {
             let template = self.library.resolve(&name)?;
             let with = node.remove("with").unwrap_or(Value::Null);
             let mut parameters = template.bind(&name, &with)?;
+            // The surrounding `over` binds item throughout the instantiated
+            // template, even when it is not a declared input parameter.
+            if let Some(item) = bindings.get(ITEM) {
+                parameters.entry(ITEM).or_insert_with(|| item.clone());
+            }
             if name == "review-repair"
                 && with.get("lenses").is_none()
                 && let Some(lenses) = self.resolvers.get("review-panel")
@@ -1068,7 +1073,20 @@ fn default_exports(children: &[Value]) -> Vec<Value> {
                 .find(|child| child.get("id").and_then(Value::as_str) == Some(id))
                 .is_some_and(|child| {
                     child.get("require_findings") == Some(&Value::Bool(true))
-                        || child.get("kind").and_then(Value::as_str) == Some("composite")
+                        || child
+                            .pointer("/composite/exports")
+                            .and_then(Value::as_array)
+                            .is_some_and(|exports| {
+                                exports.iter().any(|export| {
+                                    export.get("outputs").and_then(Value::as_array).is_some_and(
+                                        |outputs| {
+                                            outputs
+                                                .iter()
+                                                .any(|output| output.as_str() == Some("findings"))
+                                        },
+                                    )
+                                })
+                            })
                 });
             let outputs = if findings {
                 serde_json::json!(["result", "findings"])

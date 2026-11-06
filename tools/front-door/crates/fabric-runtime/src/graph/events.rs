@@ -1,5 +1,6 @@
 //! Identifier-only observations written before the authoritative checkpoint.
 use super::*;
+use serde_json::Value;
 use std::io::{Seek, SeekFrom, Write};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -26,6 +27,20 @@ pub struct GraphEvent {
     pub subject: String,
     pub code: String,
     pub digest: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt: Option<AttemptEvent>,
+}
+
+/// Retained, non-prompt attempt measurements for reporting after collection.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttemptEvent {
+    pub identity: String,
+    pub tier: String,
+    pub template: String,
+    pub tokens: Option<u64>,
+    pub cost_micro_usd: Option<u64>,
+    pub wall_time_seconds: Option<u64>,
+    pub has_usage: bool,
 }
 
 fn digest(value: &impl Serialize) -> Result<String, JournalError> {
@@ -43,6 +58,7 @@ fn event(
         subject: digest(&subject)?,
         code: code.into(),
         digest: digest(value)?,
+        attempt: None,
     })
 }
 
@@ -84,7 +100,17 @@ pub(super) fn append_changes(
     id: &str,
     previous: Option<&GraphCheckpoint>,
     current: &GraphCheckpoint,
+    document: Option<&GraphDocument>,
 ) -> Result<(), JournalError> {
+    let expanded = document.and_then(|document| {
+        super::plans::expand(
+            document,
+            &current.extensions,
+            &current.expansions,
+            &super::plans::generous(),
+        )
+        .ok()
+    });
     let mut events = Vec::new();
     for node in &current.nodes {
         let old = previous.and_then(|previous| previous.nodes.iter().find(|old| old.id == node.id));
@@ -105,11 +131,16 @@ pub(super) fn append_changes(
                 &node.advance_error_code,
             )?);
         }
-        for attempt in &node.attempts {
-            let old_attempt =
-                old.and_then(|old| old.attempts.iter().find(|old| old.key == attempt.key));
+        for attempt in node.recorded_attempts() {
+            let old_attempt = old.and_then(|old| {
+                old.recorded_attempts().find(|old| {
+                    old.attempt_ref == attempt.attempt_ref
+                        && old.key == attempt.key
+                        && old.settled == attempt.settled
+                })
+            });
             if old_attempt != Some(attempt) {
-                events.push(event(
+                let mut observation = event(
                     GraphEventKind::Attempt,
                     &node.id,
                     if attempt.outcome.is_some() {
@@ -123,7 +154,37 @@ pub(super) fn append_changes(
                         &attempt.attempt_ref,
                         &attempt.outcome,
                     ),
-                )?);
+                )?;
+                let identity = match &attempt.attempt_ref {
+                    Some(reference) => digest(reference)?,
+                    None => digest(&(&attempt.key, attempt.settled))?,
+                };
+                let template = expanded
+                    .as_ref()
+                    .and_then(|graph| graph.nodes.iter().find(|candidate| candidate.id == node.id))
+                    .and_then(|node| node.extra.get("template"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown");
+                observation.attempt = Some(AttemptEvent {
+                    identity,
+                    tier: attempt
+                        .route
+                        .alias
+                        .clone()
+                        .unwrap_or_else(|| "unknown".into()),
+                    template: template.into(),
+                    tokens: attempt.usage.as_ref().and_then(|usage| usage.tokens),
+                    cost_micro_usd: attempt
+                        .usage
+                        .as_ref()
+                        .and_then(|usage| usage.cost_micro_usd),
+                    wall_time_seconds: attempt
+                        .usage
+                        .as_ref()
+                        .and_then(|usage| usage.wall_time_seconds),
+                    has_usage: attempt.usage.is_some(),
+                });
+                events.push(observation);
                 if attempt.outcome == Some(AttemptOutcome::UsageLimited) {
                     events.push(event(
                         GraphEventKind::Wait,
@@ -345,7 +406,7 @@ mod tests {
             "nodes": [{"id":"private-node-id", "state":"pending", "worktree":null, "attempts":[]}]
         }))
         .unwrap();
-        append_changes(&directory, "g", None, &checkpoint).unwrap();
+        append_changes(&directory, "g", None, &checkpoint, None).unwrap();
         let first = read(&directory, "g").unwrap();
         assert_eq!(first.len(), 2);
         let mut file = directory.open_append(&name("g")).unwrap();
@@ -354,7 +415,7 @@ mod tests {
         assert_eq!(read(&directory, "g").unwrap(), first);
         let previous = checkpoint.clone();
         checkpoint.nodes[0].state = NodeState::Running;
-        append_changes(&directory, "g", Some(&previous), &checkpoint).unwrap();
+        append_changes(&directory, "g", Some(&previous), &checkpoint, None).unwrap();
         let records = read(&directory, "g").unwrap();
         assert_eq!(records.len(), 4);
         assert_eq!(records[0], first[0]);
@@ -431,7 +492,7 @@ mod tests {
                 journaled: false,
             }),
         });
-        append_changes(&directory, "g", Some(&before), &after).unwrap();
+        append_changes(&directory, "g", Some(&before), &after, None).unwrap();
         let records = read(&directory, "g").unwrap();
         assert!(
             records.iter().any(|record| {
@@ -472,7 +533,7 @@ mod tests {
             uses: Vec::new(),
             patch: Some(record),
         });
-        append_changes(&directory, "g", Some(&before), &after).unwrap();
+        append_changes(&directory, "g", Some(&before), &after, None).unwrap();
         let patches = read(&directory, "g")
             .unwrap()
             .into_iter()

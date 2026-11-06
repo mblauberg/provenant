@@ -5,7 +5,7 @@ use provenant_fabric_runtime::graph::{
     patch::{self, LiveGraph, Patch, PatchContext},
 };
 use serde_json::{Value, json};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 fn encode(value: impl serde::Serialize) -> Result<Value, FacadeError> {
     serde_json::to_value(value).map_err(|_| FacadeError::StateCorrupt)
@@ -282,19 +282,22 @@ impl Factory {
                 "document must be an object, not a file path",
             ));
         }
-        if raw.is_some()
-            && (["brief", "use", "tier", "over"]
-                .iter()
-                .any(|field| input.get(*field).is_some_and(|value| !value.is_null()))
-                || input
-                    .get("set")
-                    .is_some_and(|value| value.as_object().is_none_or(|object| !object.is_empty())))
-        {
-            return Err(FacadeError::invalid(
-                "a document cannot be combined with brief, use, tier, over or set overrides",
-            ));
+        let has_overrides = ["brief", "use", "tier", "over"]
+            .iter()
+            .any(|field| input.get(*field).is_some_and(|value| !value.is_null()))
+            || input
+                .get("set")
+                .is_some_and(|value| value.as_object().is_none_or(|object| !object.is_empty()));
+        let lane_document =
+            raw.filter(|document| document.get("graph_id").is_none() || has_overrides);
+        let mut inline = raw
+            .and_then(|document| document.get("templates"))
+            .cloned()
+            .unwrap_or_else(|| json!({}));
+        if let Some(document) = lane_document.filter(|document| document.get("use").is_none()) {
+            inline["lane-document"] = document.clone();
         }
-        let library = self.template_library(raw.and_then(|document| document.get("templates")))?;
+        let library = self.template_library(Some(&inline))?;
         let resolver = self.launch_resolvers(raw)?;
         let context = PatchContext {
             library: &library,
@@ -316,7 +319,7 @@ impl Factory {
             .and_then(|document| document.get("graph_id"))
             .and_then(Value::as_str)
             .unwrap_or(&generated_id);
-        let mut document = if let Some(raw) = raw {
+        let mut document = if let Some(raw) = raw.filter(|_| lane_document.is_none()) {
             if raw["nodes"]
                 .as_array()
                 .is_some_and(|nodes| nodes.iter().any(|node| node.get("use").is_some()))
@@ -352,7 +355,17 @@ impl Factory {
                     .map_err(|error| FacadeError::invalid(error.to_string()))?
             }
         } else {
-            let mut node = json!({"id":"task", "use":input.get("use").and_then(Value::as_str).unwrap_or("task")});
+            let mut node = match lane_document {
+                Some(document) if document.get("use").is_some() => document.clone(),
+                Some(_) => json!({"id":"task", "use":"lane-document"}),
+                None => json!({"id":"task", "use":"task"}),
+            };
+            if node.get("id").is_none() {
+                node["id"] = json!("task");
+            }
+            if let Some(name) = input.get("use").filter(|value| !value.is_null()) {
+                node["use"] = name.clone();
+            }
             for field in ["brief", "tier", "over"] {
                 if let Some(value) = input.get(field).filter(|value| !value.is_null()) {
                     node[field] = value.clone();
@@ -361,14 +374,19 @@ impl Factory {
             let template = library
                 .resolve(node["use"].as_str().unwrap_or("task"))
                 .map_err(FacadeError::invalid)?;
-            let mut parameters = input
+            let mut parameters = node.get("with").cloned().unwrap_or_else(|| json!({}));
+            let overrides = input
                 .get("set")
                 .filter(|value| !value.is_null())
                 .cloned()
                 .unwrap_or_else(|| json!({}));
-            if !parameters.is_object() {
+            if !parameters.is_object() || !overrides.is_object() {
                 return Err(FacadeError::invalid("set must be a parameter object"));
             }
+            parameters
+                .as_object_mut()
+                .unwrap()
+                .extend(overrides.as_object().unwrap().clone());
             if template.parameters.contains_key("brief")
                 && let Some(brief) = input.get("brief").filter(|value| !value.is_null())
             {
@@ -390,7 +408,24 @@ impl Factory {
             )
             .map_err(|error| FacadeError::invalid(error.to_string()))?
         };
-        if raw.is_none()
+        if let Some(raw) = lane_document.filter(|value| value.get("graph_id").is_some()) {
+            let mut compiled = encode(&document)?;
+            for key in [
+                "limits",
+                "integration_branch",
+                "delivery",
+                "review_base",
+                "context",
+                "decision_session",
+            ] {
+                if let Some(value) = raw.get(key) {
+                    compiled[key] = value.clone();
+                }
+            }
+            document = serde_json::from_value(compiled)
+                .map_err(|error| FacadeError::invalid(error.to_string()))?;
+        }
+        if (raw.is_none() || lane_document.is_some())
             && let Some(tier) = input.get("tier").filter(|value| !value.is_null())
         {
             let tier = tier
@@ -445,7 +480,11 @@ impl Factory {
         budget: WaitBudget,
         cancel: &CancelToken,
     ) -> Result<Value, FacadeError> {
-        let id = self.resolve_graph(required(input, "id")?)?.0;
+        let selector = required(input, "id")?;
+        let id = match self.graph_target(selector)? {
+            Some(target) => target.graph,
+            None => self.resolve_graph(selector)?.0,
+        };
         let patch: Patch = serde_json::from_value(input["patch"].clone())
             .map_err(|error| FacadeError::invalid(error.to_string()))?;
         let mut journal = FileJournal::open(
@@ -737,114 +776,90 @@ impl Factory {
         if !matches!(by, "tier" | "template") {
             return Err(FacadeError::invalid("by must be tier or template"));
         }
-        let target = input
-            .get("id")
-            .and_then(Value::as_str)
-            .map(|id| {
-                self.graph_target(id)
-                    .and_then(|target| target.ok_or(FacadeError::NotFound))
-            })
-            .transpose()?;
-        let ids = match &target {
-            Some(target) => vec![target.graph.clone()],
-            None => {
-                FileJournal::graph_ids(&self.context.roots.state, self.context.identity.project)
-                    .map_err(graph_journal_error)?
+        let ids =
+            FileJournal::event_graph_ids(&self.context.roots.state, self.context.identity.project)
+                .map_err(graph_journal_error)?;
+        let selector = input.get("id").and_then(Value::as_str);
+        let target = if let Some(id) = selector {
+            if ids.iter().any(|graph| graph == id) {
+                Some(super::unified::GraphTarget {
+                    graph: id.into(),
+                    node: None,
+                    attempt: None,
+                })
+            } else {
+                Some(self.graph_target(id)?.ok_or(FacadeError::NotFound)?)
             }
+        } else {
+            None
         };
-        let mut groups = BTreeMap::<String, Value>::new();
-        let mut seen = BTreeSet::new();
+        let mut attempts = BTreeMap::new();
         for id in ids {
-            let Some(checkpoint) = FileJournal::read_status_checkpoint(
+            if target.as_ref().is_some_and(|target| target.graph != id) {
+                continue;
+            }
+            let subject = target
+                .as_ref()
+                .and_then(|target| target.node.as_ref())
+                .map(|node| {
+                    provenant_records::CanonicalV1::record_digest("fabric-graph-event", 1, node)
+                        .map(|digest| digest.to_string())
+                        .map_err(|_| FacadeError::StateCorrupt)
+                })
+                .transpose()?;
+            let selected_attempt = target
+                .as_ref()
+                .and_then(|target| target.attempt.as_ref())
+                .map(|attempt| {
+                    provenant_records::CanonicalV1::record_digest("fabric-graph-event", 1, attempt)
+                        .map(|digest| digest.to_string())
+                        .map_err(|_| FacadeError::StateCorrupt)
+                })
+                .transpose()?;
+            for event in FileJournal::read_events(
                 &self.context.roots.state,
                 self.context.identity.project,
                 &id,
             )
             .map_err(graph_journal_error)?
-            else {
-                continue;
-            };
-            let execution = FileJournal::execution(
-                &self.context.roots.state,
-                self.context.identity.project,
-                &id,
-            )
-            .map_err(graph_journal_error)?;
-            let document = execution
-                .map(|execution| {
-                    execution
-                        .document
-                        .expanded(&self.context.config.graph.limits)
-                })
-                .transpose()
-                .map_err(FacadeError::invalid)?;
-            for node in &checkpoint.nodes {
-                if target
+            {
+                if subject
                     .as_ref()
-                    .and_then(|target| target.node.as_ref())
-                    .is_some_and(|id| id != &node.id)
+                    .is_some_and(|subject| *subject != event.subject)
                 {
                     continue;
                 }
-                let template = checkpoint
-                    .expansions
-                    .iter()
-                    .rev()
-                    .flat_map(|expansion| expansion.nodes.iter())
-                    .find(|candidate| candidate.id == node.id)
-                    .or_else(|| {
-                        document.as_ref().and_then(|document| {
-                            document
-                                .nodes
-                                .iter()
-                                .find(|candidate| candidate.id == node.id)
-                        })
-                    })
-                    .and_then(|node| node.extra.get("template"))
-                    .and_then(Value::as_str)
-                    .unwrap_or("unknown");
-                for attempt in node.recorded_attempts() {
-                    if target
+                if let Some(attempt) = event.attempt {
+                    if selected_attempt
                         .as_ref()
-                        .and_then(|target| target.attempt.as_ref())
-                        .is_some_and(|id| attempt.attempt_ref.as_ref() != Some(id))
+                        .is_some_and(|selected| *selected != attempt.identity)
                     {
                         continue;
                     }
-                    // Composite totals are never added: only each actual attempt's usage.
-                    let identity = attempt.attempt_ref.clone().unwrap_or_else(|| {
-                        format!(
-                            "{}/{}/{}/{}",
-                            attempt.key.graph_id,
-                            attempt.key.node_id,
-                            attempt.key.route_index,
-                            attempt.settled
-                        )
-                    });
-                    if !seen.insert(identity) {
-                        continue;
-                    }
-                    let group = if by == "template" {
-                        template
-                    } else {
-                        attempt.route.alias.as_deref().unwrap_or("unknown")
-                    };
-                    let row = groups.entry(group.into()).or_insert_with(||json!({"name":group,"attempts":0,"tokens":0,"cost_micro_usd":0,"wall_time_seconds":0,"unknown_usage":0}));
-                    add(row, "attempts", 1);
-                    if let Some(usage) = &attempt.usage {
-                        for (key, value) in [
-                            ("tokens", usage.tokens),
-                            ("cost_micro_usd", usage.cost_micro_usd),
-                            ("wall_time_seconds", usage.wall_time_seconds),
-                        ] {
-                            if let Some(value) = value {
-                                add(row, key, value);
-                            }
-                        }
-                    } else {
-                        add(row, "unknown_usage", 1);
-                    }
+                    attempts.insert(attempt.identity.clone(), attempt);
                 }
+            }
+        }
+        let mut groups = BTreeMap::<String, Value>::new();
+        for attempt in attempts.into_values() {
+            let group = if by == "template" {
+                &attempt.template
+            } else {
+                &attempt.tier
+            };
+            let row = groups.entry(group.clone()).or_insert_with(|| json!({"name":group,"attempts":0,"tokens":0,"cost_micro_usd":0,"wall_time_seconds":0,"unknown_usage":0}));
+            add(row, "attempts", 1);
+            for (key, value) in [
+                ("tokens", attempt.tokens),
+                ("cost_micro_usd", attempt.cost_micro_usd),
+                ("wall_time_seconds", attempt.wall_time_seconds),
+            ] {
+                if let Some(value) = value {
+                    add(row, key, value);
+                }
+            }
+            if !attempt.has_usage {
+                add(row, "unknown_usage", 1);
             }
         }
         Ok(json!({"by":by,"groups":groups.into_values().collect::<Vec<_>>()}))
@@ -979,6 +994,26 @@ mod tests {
             .map(|node| Some(node.prompt.as_str()))
             .collect();
         assert_eq!(prompts, vec![Some("Inspect one"), Some("Inspect two")]);
+        let response = factory.graph_document(json!({"op":"run","document":{"use":"task","brief":"Inspect ${item}"},"over":["one","two"],"explain":true}), budget, &cancel)?;
+        let doc: GraphDocument = serde_json::from_value(response["document"].clone())?;
+        let prompts: Vec<_> = doc
+            .expanded(&factory.context.config.graph.limits)?
+            .nodes
+            .into_iter()
+            .filter(|node| node.composite.is_none())
+            .map(|node| node.prompt)
+            .collect();
+        assert_eq!(prompts, vec!["Inspect one", "Inspect two"]);
+        let response = factory.graph_document(json!({"op":"run","document":{"parameters":{"subject":{"type":"string"}},"nodes":[{"id":"one","use":"task","brief":"Inspect ${subject} ${item}"}]},"set":{"subject":"code"},"over":["a","b"],"explain":true}), budget, &cancel)?;
+        let doc: GraphDocument = serde_json::from_value(response["document"].clone())?;
+        let prompts: Vec<_> = doc
+            .expanded(&factory.context.config.graph.limits)?
+            .nodes
+            .into_iter()
+            .filter(|node| node.composite.is_none())
+            .map(|node| node.prompt)
+            .collect();
+        assert_eq!(prompts, vec!["Inspect code a", "Inspect code b"]);
         let response = factory.graph_document(
             json!({"op":"run","use":"task-once","brief":"Parameter brief","tier":"junior","set":{},"explain":true}),
             budget,
@@ -1016,7 +1051,7 @@ mod tests {
         )?;
         let id = document.graph_id.clone();
         let mut checkpoint = serde_json::from_value(
-            json!({"schema_version":1,"graph_id":id,"plan_digest":"test","nodes":[{"id":"task","worktree":null,"state":"pending","attempts":[]}]}),
+            json!({"schema_version":1,"graph_id":id,"plan_digest":"test","nodes":[{"id":"task","worktree":null,"state":"running","attempts":[]}]}),
         )?;
         let mut journal = FileJournal::open(
             &factory.context.roots.state,
@@ -1035,7 +1070,7 @@ mod tests {
         })?;
         journal.save(&checkpoint)?;
         drop(journal);
-        let edit = json!({"op":"edit","id":id,"patch":{"schema_version":1,"expected_revision":0,"idempotency_key":"add-one","nodes":[{"id":"second","use":"task","brief":"Next"}]}});
+        let edit = json!({"op":"edit","id":format!("{id}/task"),"patch":{"schema_version":1,"expected_revision":0,"idempotency_key":"add-one","nodes":[{"id":"second","use":"task","brief":"Next"}]}});
         let admitted = factory.graph_document(edit.clone(), budget, &cancel)?;
         assert_eq!(admitted["revision"], 1);
         let replayed = factory.graph_document(edit, budget, &cancel)?;
@@ -1138,6 +1173,29 @@ mod tests {
                 before
             );
         }
+        assert_eq!(
+            FileJournal::collect_terminal(
+                &factory.context.roots.state,
+                factory.context.identity.project,
+                i128::MAX,
+                &cancel,
+                &factory.clock
+            )?,
+            1
+        );
+        let retained = factory.graph_document(
+            json!({"op":"status","id":id,"stats":true,"by":"tier"}),
+            budget,
+            &cancel,
+        )?;
+        assert_eq!(retained["groups"][0]["attempts"], 1);
+        assert_eq!(retained["groups"][0]["tokens"], 100);
+        let all = factory.graph_document(
+            json!({"op":"status","stats":true,"by":"template"}),
+            budget,
+            &cancel,
+        )?;
+        assert_eq!(all["groups"][0]["attempts"], 1);
         Ok(())
     }
 }
