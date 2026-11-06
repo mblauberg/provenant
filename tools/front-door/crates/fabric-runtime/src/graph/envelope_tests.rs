@@ -17,7 +17,7 @@ fn mixed() -> GraphDocument {
     serde_json::from_value(json!({
         "schema_version":1, "graph_id":"envelope-mixed", "delivery":"pr", "integration_branch":"integration/envelope",
         "decision_session":"chair", "nodes":[
-            {"id":"plan", "kind":"plan", "access":"read_only", "prompt":"Slice the work",
+            {"id":"plan", "kind":"task", "access":"read_only", "prompt":"Slice the work",
              "route":{"alias":"senior"}, "plan":{"kinds":["task"], "max_nodes":4}},
             {"id":"review", "access":"read_only", "prompt":"Review", "routes":routes(3)},
             {"id":"choose", "kind":"decide", "access":"read_only", "depends_on":["review"],

@@ -239,7 +239,7 @@
           ]
         }
       ],
-      "kind": "plan",
+      "kind": "task",
       "plan": {
         "disjoint_waves": true,
         "fallback": {

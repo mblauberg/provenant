@@ -154,8 +154,8 @@ fn planned_fan_out_survives_checkpoint_json_and_mixed_settlement() {
 fn planner(max_nodes: usize) -> GraphDocument {
     serde_json::from_value(json!({
         "schema_version":1, "graph_id":"planned", "nodes":[
-            {"id":"plan", "kind":"plan", "access":"read_only", "prompt":"Slice the work",
-             "route":{"alias":"senior"}, "plan":{"kinds":["task", "plan", "gate"], "max_nodes":max_nodes}},
+            {"id":"plan", "kind":"task", "access":"read_only", "prompt":"Slice the work",
+             "route":{"alias":"senior"}, "plan":{"kinds":["task", "gate"], "max_nodes":max_nodes}},
             {"id":"after", "access":"read_only", "prompt":"Check all slices", "depends_on":["plan"], "route":{"alias":"senior"}}
         ]
     })).unwrap()
@@ -193,7 +193,7 @@ fn pattern_definition() -> Value {
 fn pattern_planner(max_nodes: usize) -> GraphDocument {
     serde_json::from_value(json!({
         "schema_version":1, "graph_id":"planned-patterns", "nodes":[
-            {"id":"plan", "kind":"plan", "access":"read_only", "prompt":"Slice the work",
+            {"id":"plan", "kind":"task", "access":"read_only", "prompt":"Slice the work",
              "route":{"alias":"senior"}, "plan":{"kinds":["task"], "max_nodes":max_nodes,
              "patterns":[pattern_definition()]}},
             {"id":"after", "access":"read_only", "prompt":"Check all slices",
@@ -207,7 +207,7 @@ fn failed_planner_runs_static_fallback_and_records_reason() {
     let document: GraphDocument = serde_json::from_value(json!({
         "schema_version":1, "graph_id":"planned-fallback", "nodes":[
             {"id":"before", "access":"read_only", "prompt":"Prepare inputs", "route":{"alias":"junior"}},
-            {"id":"plan", "kind":"plan", "access":"read_only", "prompt":"Plan", "require_skill_location":true,
+            {"id":"plan", "kind":"task", "access":"read_only", "prompt":"Plan", "require_skill_location":true,
              "route":{"alias":"senior"}, "depends_on":["before"],
              "inputs":[{"node":"before", "outputs":["result"]}],
              "plan":{"kinds":["task"], "max_nodes":2,
@@ -297,7 +297,7 @@ fn planner_fragment_accepts_string_shorthand_inputs_as_result_inputs() {
 fn two_step_fallback_document() -> GraphDocument {
     serde_json::from_value(json!({
         "schema_version":1, "graph_id":"planned-fallback-restart", "nodes":[
-            {"id":"plan", "kind":"plan", "access":"read_only", "prompt":"Plan",
+            {"id":"plan", "kind":"task", "access":"read_only", "prompt":"Plan",
              "route":{"alias":"senior"},
              "plan":{"kinds":["task"], "max_nodes":2, "wire_exports":true,
              "fallback":{"nodes":[
@@ -565,7 +565,7 @@ fn planner_prelaunch_failure_runs_static_fallback_without_an_attempt() {
     let document: GraphDocument = serde_json::from_value(json!({
         "schema_version":1, "graph_id":"planned-fallback-prelaunch", "nodes":[
             {"id":"before", "access":"read_only", "prompt":"Prepare", "route":{"alias":"junior"}},
-            {"id":"plan", "kind":"plan", "access":"read_only", "prompt":"Plan",
+            {"id":"plan", "kind":"task", "access":"read_only", "prompt":"Plan",
              "route":{"alias":"senior"}, "depends_on":["before"],
              "inputs":[{"node":"before", "outputs":["result"]}],
              "plan":{"kinds":["task"], "max_nodes":2,
@@ -757,7 +757,7 @@ fn planner_prompt_uses_wire_kinds_and_required_field_names() {
     let node = &document.nodes[0];
     let prompt = plans::prompt(node);
     for kind in [
-        NodeKind::Composite, NodeKind::Plan, NodeKind::Task, NodeKind::Synthesise,
+        NodeKind::Composite, NodeKind::Task, NodeKind::Synthesise,
         NodeKind::Gate, NodeKind::Loop, NodeKind::Decide, NodeKind::Land,
     ] {
         let wire = serde_json::to_value(kind).unwrap();
@@ -895,9 +895,9 @@ fn allowed_pattern_instantiation_records_parameters_and_matches_a_static_composi
         vec!["plan--impl--review", "plan--impl--write"]
     );
 
-    let write_prompt = "Do the slice\n\nWrite scope: src/a\nAcceptance checks:\nVerify the slice";
-    let review_prompt =
-        "Review the work\n\nWrite scope: src\nAcceptance checks:\nVerify the review";
+    // Composite templates retain their authored briefs and structured checks.
+    let write_prompt = "Do the slice";
+    let review_prompt = "Review the work";
     let mut static_doc = pattern_planner(4);
     static_doc.nodes.push(
         serde_json::from_value(json!({
@@ -1272,7 +1272,7 @@ fn plan_inside_loop_keeps_round_membership_after_checkpoint_serialisation() {
         "schema_version":1,"graph_id":"loop-plan","nodes":[
             {"id":"iteration","kind":"loop","access":"read_only","loop":{
                 "max_rounds":1,"until":"check","body":[
-                    {"id":"plan","kind":"plan","prompt":"Plan","access":"read_only","route":{"alias":"senior"},"plan":{"kinds":["task"],"max_nodes":1}},
+                    {"id":"plan","kind":"task","prompt":"Plan","access":"read_only","route":{"alias":"senior"},"plan":{"kinds":["task"],"max_nodes":1}},
                     {"id":"check","kind":"gate","access":"read_only","depends_on":["plan"],"condition":{"type":"budget"}}
                 ]
             }}
@@ -1317,7 +1317,7 @@ fn planner_cannot_add_separate_writer_checkouts_to_one_loop() {
 fn nested_plan_rewires_all_consumers_and_keeps_original_digest() {
     let doc = planner(1);
     let mut nested = slice("nested", &["src"]);
-    nested["kind"] = json!("plan");
+    nested["kind"] = json!("task");
     nested["plan"] = json!({"kinds":["task"],"max_nodes":1});
     let output = result(vec![nested]);
     let inner = result(vec![slice("inner", &["src"])]);
@@ -2222,4 +2222,139 @@ fn continuation_fragment_resolves_the_host_review_panel() {
             .checkpoint,
         run.checkpoint
     );
+}
+
+
+#[test]
+fn ordinary_reviewer_final_patch_adds_a_follow_up() {
+    let library = TemplateLibrary::bundled();
+    let mut document = planner(8);
+    document.nodes[0] = template::Compiler::new(&library)
+        .compile(&json!({"id":"plan", "use":"review"})).unwrap();
+    let output = format!("```findings\n{{\"schema_version\":1,\"findings\":[]}}\n```\n```patch\n{}\n```\nVERDICT: PASS", json!({"schema_version":1,
+        "nodes":[{"id":"follow-up", "use":"task", "brief":"Verify the review finding"}]}));
+    let run = advance(&document, &mut fixture_owner(&[&output]), &mut MemoryJournal::default()).unwrap();
+    assert!(run.checkpoint.pause_reason.is_none(), "{:?}", run.checkpoint.pause_reason);
+    assert!(run.checkpoint.nodes.iter().any(|node| node.id == "plan--follow-up"));
+    assert!(run.checkpoint.expansions[0].patch.is_some());
+}
+
+#[test]
+fn planner_template_defaults_satisfy_acceptance_checks() {
+    let output = result(vec![json!({"id":"leaf", "use":"task"})]);
+    let run = advance(&planner(8), &mut fixture_owner(&[&output]), &mut MemoryJournal::default()).unwrap();
+    assert!(run.checkpoint.pause_reason.is_none(), "{:?}", run.checkpoint.pause_reason);
+    assert!(run.checkpoint.nodes.iter().any(|node| node.id == "plan--leaf"));
+}
+
+#[test]
+fn planner_uses_snapshotted_repository_flavour_and_review_panel() {
+    let mut document = planner(8);
+    document.extra.insert("template_library".into(), json!({
+        "review.repository":{"brief":"Check the repository-specific contract", "tier":"senior"}
+    }));
+    document.extra.insert("template_resolvers".into(), json!({
+        "review-panel":["correctness", "tests"]
+    }));
+    let output = result(vec![
+        json!({"id":"repository", "use":"review.repository"}),
+        json!({"id":"panel", "use":"review", "over":"@review-panel", "with":{"lens":"${item}"}})
+    ]);
+    let run = advance(&document, &mut fixture_owner(&[&output]), &mut MemoryJournal::default()).unwrap();
+    assert!(run.checkpoint.pause_reason.is_none(), "{:?}", run.checkpoint.pause_reason);
+    let nodes = &run.checkpoint.expansions[0].nodes;
+    assert!(nodes.iter().any(|node| node.id == "plan--repository" && node.prompt.contains("repository-specific contract")));
+    for lens in ["correctness", "tests"] {
+        let id = format!("plan--panel--{lens}");
+        assert!(nodes.iter().any(|node| node.id == id && node.prompt.contains(lens)));
+    }
+}
+
+#[test]
+fn planner_admits_bundled_delivery_composites_without_rewriting_them() {
+    let library = TemplateLibrary::bundled();
+    let resolvers = std::collections::BTreeMap::from([
+        ("review-panel".into(), vec!["correctness".into()]),
+        ("review-topology".into(), vec!["f0-v0-s0".into()]),
+        ("review-advice-correctness".into(), vec![String::new()]),
+    ]);
+    let compiler = template::Compiler { library: &library, resolvers: &resolvers };
+    let document = planner(8);
+    let plan = validate_flat_plan(&document, &Default::default()).unwrap().0;
+    let planner = plan.nodes.iter().find(|node| node.id == "plan").unwrap();
+    let spec = planner.plan.as_ref().unwrap();
+    for name in ["batch", "deliver"] {
+        let mut node = compiler.compile(&json!({"id":"delivery", "use":name,
+            "with":{"worktree":".worktrees/slice", "write_scope":["src"]}})).unwrap();
+        let expected = node.clone();
+        plans::prepare(&mut node, planner, spec, &document, true).unwrap();
+        assert_eq!(node, expected, "{name} must retain its authored source and delivery");
+    }
+}
+
+
+#[test]
+fn ordinary_agent_patch_refusal_replays_without_growing_or_disclosing_secrets() {
+    let secret = "sk-abcdefghijklmnopqrstuvwx";
+    for payload in [
+        json!({"schema_version":1, "nodes":[{"id":"child", "use":"task.typo"}]}),
+        json!({"schema_version":secret, "nodes":[{"id":"child", "use":"task"}]}),
+    ] {
+        let mut document = planner(8);
+        document.nodes[0].plan = None;
+        let output = format!("```patch\n{payload}\n```");
+        let mut journal = MemoryJournal::default();
+        let run = advance(&document, &mut fixture_owner(&[&output]), &mut journal).unwrap();
+        assert_eq!(run.status, GraphStatus::Paused);
+        assert!(run.checkpoint.expansions.is_empty());
+        let refusal = run.checkpoint.pause_reason.as_deref().unwrap();
+        assert!(!refusal.contains(secret), "{refusal}");
+        assert!(run.checkpoint.nodes.iter().all(|node| node.fragment.as_deref().is_none_or(|fragment| !fragment.contains(secret))));
+        let warnings = &run.checkpoint.nodes[0].outputs.as_ref().unwrap().warnings;
+        assert!(warnings.iter().any(|warning| warning.contains("patch refused")));
+        assert!(warnings.iter().all(|warning| !warning.contains(secret)));
+        for _ in 0..3 {
+            journal.0 = Some(serde_json::from_slice(&serde_json::to_vec(&run.checkpoint).unwrap()).unwrap());
+            let replay = advance(&document, &mut fixture_owner(&[]), &mut journal).unwrap();
+            assert_eq!(replay.checkpoint, run.checkpoint);
+        }
+    }
+}
+
+#[test]
+fn patch_examples_inside_markdown_fences_do_not_mutate_the_graph() {
+    let patch = format!("```patch\n{}\n```", json!({"schema_version":1,
+        "nodes":[{"id":"child", "use":"task"}]}));
+    for outer in ["````", "~~~~"] {
+        let mut document = planner(8);
+        document.nodes.truncate(1);
+        document.nodes[0].plan = None;
+        let output = format!("Example only:\n{outer}markdown\n{patch}\n{outer}");
+        let run = advance(&document, &mut fixture_owner(&[&output]), &mut MemoryJournal::default()).unwrap();
+        assert_eq!(run.status, GraphStatus::Complete);
+        assert!(run.checkpoint.expansions.is_empty());
+        assert_eq!(run.checkpoint.nodes.len(), 1);
+    }
+}
+
+#[test]
+fn ordinary_agent_final_patch_follows_earlier_live_children_once() {
+    let (document, mut checkpoint) = running_graph();
+    admit_with(&document, &mut checkpoint, Some("a"), json!({"schema_version":1,
+        "nodes":[{"id":"live-child", "use":"task"}]}), &|_| Ok(())).unwrap();
+    let expanded = plans::expand(&document, &checkpoint.extensions, &checkpoint.expansions, &plans::generous()).unwrap();
+    let plan = validate_flat_plan(&expanded, &plans::generous()).unwrap().0;
+    let parent = plan.nodes.iter().find(|node| node.id == "a").unwrap();
+    checkpoint.nodes.iter_mut().find(|node| node.id == "a").unwrap().state = NodeState::Succeeded;
+    let output = format!("```patch\n{}\n```", json!({"schema_version":1,
+        "nodes":[{"id":"final-child", "use":"task"}]}));
+    let (next, _, _) = plans::settle(parent, &document, &expanded, &mut checkpoint,
+        Some(&capture(&output)), &plans::generous()).expect("final patch must follow the live patch");
+    assert_eq!(checkpoint.expansions.len(), 2);
+    for id in ["a--live-child", "a--final-child"] {
+        assert!(next.nodes.iter().any(|node| node.id == id));
+    }
+    assert!(plans::settle(parent, &document, &next, &mut checkpoint,
+        Some(&capture(&output)), &plans::generous()).is_none());
+    assert_eq!(checkpoint.expansions.len(), 2);
 }

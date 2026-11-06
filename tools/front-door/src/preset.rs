@@ -3524,7 +3524,7 @@ pub(super) fn pending_checks(
             if node.access == AccessMode::WorktreeWrite {
                 ids.insert("worktree");
             }
-            if node.kind == Some(NodeKind::Plan) {
+            if node.plan.is_some() {
                 ids.insert("planner_authority");
             }
             let agent = !matches!(

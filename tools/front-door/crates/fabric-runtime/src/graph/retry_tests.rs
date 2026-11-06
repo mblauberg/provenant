@@ -443,7 +443,7 @@ fn planner_container(graph_id: &str) -> GraphDocument {
     serde_json::from_value(json!({
         "schema_version":1,"graph_id":graph_id,"nodes":[{
             "id":"work","kind":"composite","access":"read_only","composite":{
-                "nodes":[{"id":"planner","kind":"plan","access":"read_only","prompt":"Plan work",
+                "nodes":[{"id":"planner","kind":"task","access":"read_only","prompt":"Plan work",
                     "route":{"alias":"senior"},"plan":{"kinds":["task"],"max_nodes":4}}],
                 "exports":[{"node":"planner","outputs":["result"]}]
             }
@@ -915,7 +915,7 @@ fn subtree_stop_fences_live_parent_and_children_across_replay_and_preserves_deta
 fn node_redo_planner_admits_a_new_fragment_without_losing_the_first_expansion() {
     let document: GraphDocument = serde_json::from_value(json!({
         "schema_version":1,"graph_id":"redo-plan","nodes":[{
-            "id":"work","kind":"plan","access":"read_only","prompt":"Plan work",
+            "id":"work","kind":"task","access":"read_only","prompt":"Plan work",
             "route":{"alias":"senior"},"plan":{"kinds":["task"],"max_nodes":4}
         }]
     }))
@@ -1051,7 +1051,7 @@ fn node_redo_can_launch_a_leaf_from_an_inactive_loop_round() {
 fn node_redo_repeated_planner_fallbacks_have_distinct_nodes_and_replay_without_relaunching() {
     let document: GraphDocument = serde_json::from_value(json!({
         "schema_version":1,"graph_id":"redo-fallback","nodes":[{
-            "id":"work","kind":"plan","access":"read_only","prompt":"Plan work",
+            "id":"work","kind":"task","access":"read_only","prompt":"Plan work",
             "route":{"alias":"senior"},"plan":{"kinds":["task"],"max_nodes":4,
                 "fallback":{"nodes":[{"id":"static","access":"read_only","prompt":"Fallback work","route":{"alias":"junior"}}],
                     "exports":[{"node":"static","outputs":["result"]}]}

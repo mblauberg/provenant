@@ -4813,7 +4813,7 @@ fn composite_executes_nested_children_and_exports_only_declared_outputs() {
 fn plan_fixture_expands_and_replays_without_replanning() {
     let document: GraphDocument = serde_json::from_value(serde_json::json!({
         "schema_version": 1, "graph_id": "planned", "nodes": [{
-            "id": "planner", "kind": "plan", "access": "read_only", "prompt": "Plan two slices",
+            "id": "planner", "kind": "task", "access": "read_only", "prompt": "Plan two slices",
             "plan": {"kinds": ["task"], "max_nodes": 2}, "route": {"alias": "senior"}
         }]
     }))
@@ -4849,7 +4849,7 @@ fn plan_fragment_target_is_checked_before_expansion_is_published() {
     // check and reaches the owner's target validation.
     let document: GraphDocument = serde_json::from_value(serde_json::json!({
         "schema_version": 1, "graph_id": "planned", "integration_branch": "target", "nodes": [{
-            "id": "planner", "kind": "plan", "access": "read_only", "prompt": "Plan",
+            "id": "planner", "kind": "task", "access": "read_only", "prompt": "Plan",
             "plan": {"kinds": ["task"], "max_nodes": 1}, "route": {"alias": "senior"}
         }]
     }))

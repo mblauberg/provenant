@@ -105,7 +105,7 @@ fn required_output_contract_requires_v2_and_selected_supported_kinds() {
     let planner = document(
         2,
         json!([{
-            "id":"plan", "kind":"plan", "access":"read_only", "plan":{
+            "id":"plan", "kind":"task", "access":"read_only", "plan":{
                 "kinds":[], "max_nodes":1,
                 "patterns":[{"name":"p", "nodes":[], "exports":[{"node":"x","outputs":["findings"],"required_outputs":["findings"]}]}]
             }
@@ -188,8 +188,8 @@ fn admission_schema_matrix() {
     let nested = [
         json!({"id":"c","kind":"composite","access":"read_only","composite":{"nodes":[{"id":"n","prompt":"x","access":"read_only","family_group":"g"}],"exports":[{"node":"n","outputs":["result"]}]}}),
         json!({"id":"l","kind":"loop","access":"read_only","loop":{"body":[{"id":"n","prompt":"x","access":"read_only","family_group":"g"}],"until":"done","max_rounds":1}}),
-        json!({"id":"p","kind":"plan","access":"read_only","plan":{"kinds":[],"max_nodes":1,"patterns":[],"fallback":{"nodes":[{"id":"n","prompt":"x","access":"read_only","family_group":"g"}],"exports":[]}}}),
-        json!({"id":"p","kind":"plan","access":"read_only","plan":{"kinds":[],"max_nodes":1,"patterns":[{"name":"p","nodes":[{"id":"x","family_group":"g"}],"exports":[]}]} }),
+        json!({"id":"p","kind":"task","access":"read_only","plan":{"kinds":[],"max_nodes":1,"patterns":[],"fallback":{"nodes":[{"id":"n","prompt":"x","access":"read_only","family_group":"g"}],"exports":[]}}}),
+        json!({"id":"p","kind":"task","access":"read_only","plan":{"kinds":[],"max_nodes":1,"patterns":[{"name":"p","nodes":[{"id":"x","family_group":"g"}],"exports":[]}]} }),
     ];
     for node in nested {
         assert!(validate_schema(&document(1, json!([node.clone()]))).is_err());
