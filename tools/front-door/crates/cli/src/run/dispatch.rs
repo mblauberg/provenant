@@ -3294,14 +3294,8 @@ pub fn check_launch_policy(started: &[run::Started]) -> Result<(), Fail> {
             ErrorKind::Refused,
             format!("{attempt}: {reason}"),
         );
-        if let run::RefusalKind::PolicyResource(fact)
-        | run::RefusalKind::PacingReserveResource(fact) = kind
-            && let Some(mut projection) = kind.diagnostic()
-        {
+        if let Some(mut projection) = kind.diagnostic() {
             projection.code = ErrorKind::Refused.code().into();
-            projection.fact = Some(provenant_records::diagnostic::DiagnosticFact::Resource(
-                *fact,
-            ));
             fail.projection = Some(Box::new(projection));
         }
         return Err(fail);

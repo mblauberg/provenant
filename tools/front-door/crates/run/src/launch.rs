@@ -856,7 +856,8 @@ impl RefusalKind {
             ResourceFact::Disk { .. } => ErrorKind::DiskFloor,
             ResourceFact::ArgvPromptLimit { .. } => ErrorKind::Invalid,
             ResourceFact::WriteGrantLimit { .. } => ErrorKind::Limit,
-            ResourceFact::DependencyPreparation { .. }
+            ResourceFact::ContinuationCopy { .. }
+            | ResourceFact::DependencyPreparation { .. }
             | ResourceFact::LanePorts { .. }
             | ResourceFact::PacingReserve { .. } => ErrorKind::Refused,
             ResourceFact::GrantLimit { .. } | ResourceFact::ProfileLimit { .. } => {
@@ -866,7 +867,21 @@ impl RefusalKind {
             ResourceFact::Processes { .. } => ErrorKind::Processes,
             ResourceFact::LaneCap { .. } => ErrorKind::LaneCap,
         };
-        Some(fact.project(Diagnostic::new(kind.code()).category(kind.category())))
+        Some(
+            fact.project(Diagnostic::new(kind.code()).category(kind.category()))
+                .fact(provenant_records::diagnostic::DiagnosticFact::Resource(
+                    *fact,
+                )),
+        )
+    }
+
+    /// Retain only the typed owner's safe detail and corrective action.
+    fn terminal_note(&self) -> Option<String> {
+        let diagnostic = self.diagnostic()?;
+        let fields = [diagnostic.detail, diagnostic.next];
+        Some(provenant_records::diagnostic::safe_text(
+            &fields.into_iter().flatten().collect::<Vec<_>>().join("; "),
+        ))
     }
 
     /// The boundary established by this kind alone. Generic preparation and
@@ -2094,16 +2109,17 @@ impl RunStore {
                             } else {
                                 TerminalCause::PreparationRefused
                             }));
-                    let terminal_note = refusal.terminal_note.or_else(|| {
-                        refusal.skipped_routes.first().map(|route| {
-                            let diagnostic = route.diagnostic();
-                            format!(
-                                "first candidate: {}; {}",
-                                diagnostic.detail.unwrap_or_default(),
-                                diagnostic.next.unwrap_or_default()
-                            )
-                        })
-                    });
+                    let terminal_note =
+                        kind.terminal_note().or(refusal.terminal_note).or_else(|| {
+                            refusal.skipped_routes.first().map(|route| {
+                                let diagnostic = route.diagnostic();
+                                format!(
+                                    "first candidate: {}; {}",
+                                    diagnostic.detail.unwrap_or_default(),
+                                    diagnostic.next.unwrap_or_default()
+                                )
+                            })
+                        });
                     let reason = refusal.message;
                     match self.withdraw_with_preparation_failure(
                         id,
@@ -2176,7 +2192,7 @@ impl RunStore {
                             finished_at: now()?,
                             failure: None,
                             terminal_cause: Some(TerminalCause::WriteGrantsRefused),
-                            terminal_note: None,
+                            terminal_note: kind.terminal_note(),
                         },
                         call,
                     ) {
@@ -2310,7 +2326,7 @@ impl RunStore {
                                 finished_at: now()?,
                                 failure: None,
                                 terminal_cause,
-                                terminal_note: None,
+                                terminal_note: kind.terminal_note(),
                             },
                             call,
                         ) {
@@ -2546,3 +2562,102 @@ mod retry_pin_tests {
 }
 
 pub(crate) mod hand_off;
+
+#[cfg(test)]
+mod resource_status_tests {
+    use super::*;
+    use crate::tests::{call, clock, context, input};
+    use provenant_core::CancelToken;
+    use provenant_records::diagnostic::{
+        LaneLimit, PressureLevel, PressureThreshold, ResourceFact, SettingSource,
+    };
+    use provenant_records::wire::LaneRow;
+
+    struct Dependencies;
+    impl Providers for Dependencies {
+        fn prepare(
+            &self,
+            _: &TaskRequest,
+            _: &str,
+            _: &LaunchPaths,
+            _: Option<&AttemptRecord>,
+        ) -> std::result::Result<PreparedLaunch, PrepareRefusal> {
+            let mut refusal = PrepareRefusal::from("DEPENDENCY_OUTPUT_SECRET");
+            refusal.resource = Some(ResourceFact::DependencyPreparation { configured: true });
+            Err(refusal)
+        }
+        fn decode(
+            &self,
+            _: &RouteRecord,
+            _: &[u8],
+            _: &ExitObservation,
+            _: &std::path::Path,
+        ) -> std::result::Result<Decoded, String> {
+            unreachable!()
+        }
+    }
+
+    #[test]
+    fn launch_resource_refusals_survive_withdrawal_in_retained_status()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        for handoff in [None, Some(false), Some(true)] {
+            let temp = tempfile::tempdir()?;
+            let (clock, cancel) = (clock(), CancelToken::new());
+            let call = call(&clock, &cancel);
+            let context = context(temp.path())?;
+            let store = RunStore::open(&context, &call)?;
+            let run = input();
+            let id = run.attempts[0].attempt_id;
+            store.create(&run, &call)?;
+            let started = store.start_inner(
+                run.run_id,
+                if handoff.is_some() {
+                    &crate::dispatch_tests::Ready
+                } else {
+                    &Dependencies
+                },
+                &|_, _| Ok(Vec::new()),
+                &|_, _, _| {
+                    Err(custody::CustodyError::Admission(if handoff == Some(true) {
+                        AdmissionError::LaneCap {
+                            active: 2,
+                            limit: 2,
+                            kind: LaneLimit::HostTotal,
+                            origin: SettingSource::Configuration,
+                        }
+                    } else {
+                        AdmissionError::MemoryPressure {
+                            level: PressureLevel::Critical,
+                            threshold: PressureThreshold::Warning,
+                            origin: SettingSource::Configuration,
+                        }
+                    }))
+                },
+                None,
+                None,
+                &call,
+            )?;
+            let [Started::Refused { kind, .. }] = started.as_slice() else {
+                return Err("launch did not refuse".into());
+            };
+            let expected = kind.diagnostic().ok_or("missing resource diagnostic")?;
+            assert_eq!(store.record(id, &call)?.provider_launched, Some(false));
+            drop(store);
+            let reopened = RunStore::open(&context, &call)?;
+            let record = reopened.record(id, &call)?;
+            let (state, reason) = LaneRow::state_and_reason(&record.state);
+            assert_eq!(state, "rejected");
+            let reason = reason.ok_or("missing retained status")?;
+            assert!(
+                reason.contains(expected.detail.as_deref().unwrap()),
+                "{reason}"
+            );
+            assert!(
+                reason.contains(expected.next.as_deref().unwrap()),
+                "{reason}"
+            );
+            assert!(!reason.contains("DEPENDENCY_OUTPUT_SECRET"));
+        }
+        Ok(())
+    }
+}

@@ -319,7 +319,9 @@ fn disk_policy_refusal(error: DiskCheck) -> run::PrepareRefusal {
     };
     let cause = match &error {
         DiskCheck::Low { .. } => provenant_records::run::TerminalCause::DiskFloor,
-        DiskCheck::Unobserved(_) => provenant_records::run::TerminalCause::DiskObservationUnavailable,
+        DiskCheck::Unobserved(_) => {
+            provenant_records::run::TerminalCause::DiskObservationUnavailable
+        }
     };
     let mut refusal = run::PrepareRefusal::from(String::from(error));
     refusal.terminal_cause = Some(cause);

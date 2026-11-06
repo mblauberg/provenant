@@ -413,13 +413,15 @@ fn writer_disk_policy_refusal_keeps_disk_facts_and_safe_recovery() -> Result<(),
     )
     .err()
     .ok_or("writer accepted insufficient disk")?;
-    let refusal = writer_disk_policy_refusal(check);
+    let refusal = disk_policy_refusal(check);
     assert_eq!(refusal.terminal_cause, Some(TerminalCause::DiskFloor));
     assert_eq!(
-        refusal.terminal_note.as_deref(),
-        Some(
-            "99 bytes available; gc.free_floor is 100 bytes (source: host configuration); bounded GC reported 0 bytes reclaimed"
-        )
+        refusal.resource,
+        Some(provenant_records::diagnostic::ResourceFact::Disk {
+            free: 99,
+            floor: 100,
+            origin: provenant_records::diagnostic::SettingSource::Configuration,
+        })
     );
     assert!(
         TerminalCause::DiskFloor
@@ -427,8 +429,7 @@ fn writer_disk_policy_refusal_keeps_disk_facts_and_safe_recovery() -> Result<(),
             .contains("provenant gc --apply")
     );
     assert!(!TerminalCause::DiskFloor.detail().contains("access grants"));
-    let unobserved =
-        writer_disk_policy_refusal(DiskCheck::Unobserved("HOST_ERROR_SENTINEL".into()));
+    let unobserved = disk_policy_refusal(DiskCheck::Unobserved("HOST_ERROR_SENTINEL".into()));
     assert_eq!(
         unobserved.terminal_cause,
         Some(TerminalCause::DiskObservationUnavailable)
@@ -471,4 +472,38 @@ fn retained_tree_diagnostics_preserve_condition_and_occupancy() {
     assert!(note.contains("census incomplete"));
     assert!(!note.contains("live writer"));
     assert!(!note.contains("for gc"));
+}
+
+#[test]
+fn preparation_and_handoff_resources_reach_launch_policy_projection() {
+    use provenant_records::diagnostic::{
+        PressureLevel, PressureThreshold, ResourceFact, SettingSource,
+    };
+    for kind in [
+        run::RefusalKind::PreparationResource(ResourceFact::DependencyPreparation {
+            configured: true,
+        }),
+        run::RefusalKind::HandoffResource(ResourceFact::MemoryPressure {
+            level: PressureLevel::Critical,
+            threshold: PressureThreshold::Warning,
+            origin: SettingSource::Configuration,
+        }),
+    ] {
+        let expected = kind.diagnostic().unwrap();
+        let failure = check_launch_policy(&[run::Started::Refused {
+            attempt: AttemptId::from_bytes([1; 16]),
+            kind,
+            reason: "UNSAFE_SOURCE_SENTINEL".into(),
+        }])
+        .unwrap_err();
+        let diagnostic = failure.projection.expect("typed launch refusal projection");
+        assert_eq!(diagnostic.code, "REFUSED");
+        assert_eq!(diagnostic.detail, expected.detail);
+        assert_eq!(diagnostic.next, expected.next);
+        assert!(
+            !serde_json::to_string(&diagnostic)
+                .unwrap()
+                .contains("UNSAFE_SOURCE_SENTINEL")
+        );
+    }
 }
