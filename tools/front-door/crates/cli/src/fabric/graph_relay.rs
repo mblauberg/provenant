@@ -163,7 +163,8 @@ pub fn serve(
                 // Nothing changed; the earlier admission is already journalled.
                 return Ok(serde_json::to_value(receipt)?);
             }
-            if let Some(path) = receipt.worktree.as_deref() {
+            if request.needs_worktree_provisioning()
+                && let Some(path) = receipt.worktree.as_deref() {
                 let source = relay::child_source(
                     &document,
                     &checkpoint,
@@ -388,6 +389,7 @@ pub fn launch_resolvers(
     Ok(resolvers)
 }
 
+/// Create a fenced writer checkout, or verify its clean recovery at the captured source.
 pub fn provision_child(
     context: &Context,
     path: &str,
@@ -941,6 +943,7 @@ mod provisioning_tests {
             journal.save(&checkpoint)?;
         }
         git(&["commit", "--allow-empty", "-qm", "move host head"])?;
+        git(&["checkout", "--detach", "-q"])?;
         let request = json!({"op":"add","id":"writer","use":"implement","brief":"Write","writer":true,"write_scope":["src"],"idempotency_key":"write"});
         let receipt = serve(&context, "caller", request.clone(), budget, &cancel, &clock)?;
         let path = receipt["worktree"].as_str().ok_or("missing worktree")?;
