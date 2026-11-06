@@ -471,7 +471,6 @@ lane; silence never counts as completion or settlement.
   `::read_only_lanes_are_spaced_2_seconds_apart`;
   `::memory_floor_refuses_both_lane_classes`;
   `::project_cap_allows_up_to_32_active_lanes`;
-  `::legacy_tickets_without_a_class_are_treated_as_writers`;
   `::batch_concurrency_defaults_by_lane_class_and_an_explicit_value_wins`;
   `::sixteen_read_only_lanes_run_in_one_batch_two_seconds_apart`;
   `::the_store_accepts_run_concurrency_above_the_task_count_up_to_sixteen`;
@@ -488,11 +487,6 @@ lane; silence never counts as completion or settlement.
   `::an_unreadable_host_clock_or_boot_identity_refuses_the_claim`;
   `::a_start_ahead_of_the_host_clock_in_the_same_boot_never_frees_the_class`;
   `::lane_waits_count_spacing_on_the_host_clock_and_say_nothing_when_it_is_unreadable`;
-  `::a_version_2_ledger_that_kept_wall_milliseconds_starts_every_class_free`;
-  `::upgrading_a_version_1_ledger_is_atomic`;
-  `::a_version_1_start_of_any_age_holds_each_class_one_full_spacing`;
-  `::a_version_1_ledger_with_no_start_holds_nothing`;
-  `::a_version_1_upgrade_refuses_when_the_host_clock_cannot_be_read`;
   `crates/supervisor/tests/custody.rs::the_guardian_names_an_unreadable_host_clock_in_its_admission_refusal`;
   `crates/run/src/holder.rs::host_clock_tests::an_unreadable_host_clock_reaches_the_guardian_as_itself`;
   `crates/os/src/sys/clock.rs::host_monotonic_clock_does_not_go_backwards_and_the_boot_identity_is_stable`;
