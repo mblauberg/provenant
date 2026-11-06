@@ -7979,6 +7979,159 @@ fn cancelling_a_start_that_holds_only_a_writer_fence_frees_the_writer() -> TestR
 }
 
 #[test]
+fn repeat_cancel_while_the_launcher_holds_keeps_one_request_and_settles_on_release() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let context = context(temp.path())?;
+    let store = RunStore::open(&context, &call)?;
+    let run = input();
+    let id = run.attempts[0].attempt_id;
+    store.create(&run, &call)?;
+    store.mark_starting(
+        &store.record(id, &call)?,
+        &route(),
+        &[],
+        &Default::default(),
+        None,
+        &call,
+    )?;
+    let slot = context
+        .state_root
+        .as_path()
+        .join("worktrees")
+        .join(context.project_id.to_string())
+        .join("lane");
+    std::fs::create_dir_all(&slot)?;
+    // The launcher holds the worktree writer while it prepares the lane.
+    let held = provenant_supervisor::fixture::acquire_writer(
+        Directory::open_anchor(&slot)?,
+        RunStore::scope(&store.record(id, &call)?),
+        call.lock_budget(),
+        &cancel,
+        &clock,
+    )?;
+    assert_eq!(store.cancel(id, "stop", &call)?, CancelReceipt::Requested);
+    let attempt = store.attempt_dir(run.run_id, id, false)?;
+    let first = artifacts::read_sealed(&attempt, "cancel.json", RECORD_LIMIT)?
+        .ok_or("cancel request missing")?;
+    // A repeat while the launcher still holds the writer neither settles the
+    // lane nor writes a second request.
+    assert_eq!(
+        store.cancel(id, "stop", &call)?,
+        CancelReceipt::AlreadyRequested
+    );
+    assert_eq!(
+        artifacts::read_sealed(&attempt, "cancel.json", RECORD_LIMIT)?.as_deref(),
+        Some(first.as_slice())
+    );
+    assert!(matches!(
+        store.record(id, &call)?.state,
+        AttemptState::Starting { .. }
+    ));
+    assert_eq!(store.writer_fences()?.len(), 1);
+    // Once the launcher has let go, the next repeat settles and frees the writer.
+    drop(held);
+    assert_eq!(store.cancel(id, "stop", &call)?, CancelReceipt::Cancelled);
+    assert_eq!(terminal(&store, id, &call)?, Outcome::Cancelled);
+    assert!(store.writer_fences()?.is_empty());
+    assert_eq!(
+        store.cancel(id, "stop", &call)?,
+        CancelReceipt::AlreadyTerminal
+    );
+    Ok(())
+}
+
+#[test]
+fn a_cancelled_unlaunched_start_frees_the_worktree_writer_for_the_next_run() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let context = context(temp.path())?;
+    let store = RunStore::open(&context, &call)?;
+    let first = input();
+    let first_id = first.attempts[0].attempt_id;
+    store.create(&first, &call)?;
+    store.mark_starting(
+        &store.record(first_id, &call)?,
+        &route(),
+        &[],
+        &Default::default(),
+        None,
+        &call,
+    )?;
+    let slot = context
+        .state_root
+        .as_path()
+        .join("worktrees")
+        .join(context.project_id.to_string())
+        .join("lane");
+    std::fs::create_dir_all(&slot)?;
+    let first_scope = RunStore::scope(&store.record(first_id, &call)?);
+    let held = provenant_supervisor::fixture::acquire_writer(
+        Directory::open_anchor(&slot)?,
+        first_scope,
+        call.lock_budget(),
+        &cancel,
+        &clock,
+    )?;
+
+    let mut next = input();
+    next.run_id = RunId::from_bytes([9; 16]);
+    next.operation_id = provenant_core::OperationId::parse("run-test-next")?;
+    next.attempts[0].attempt_id = AttemptId::from_bytes([10; 16]);
+    store.create(&next, &call)?;
+    let next_id = next.attempts[0].attempt_id;
+    store.mark_starting(
+        &store.record(next_id, &call)?,
+        &route(),
+        &[],
+        &Default::default(),
+        None,
+        &call,
+    )?;
+    let next_scope = RunStore::scope(&store.record(next_id, &call)?);
+    // The next run takes the writer the way a launch does: fenced, without waiting.
+    let take_writer = |directory: Directory| {
+        store.acquire_writer_fenced(
+            directory,
+            next_scope,
+            provenant_supervisor::custody::WriterBinding::read_only(),
+            &|directory, scope, binding| {
+                provenant_supervisor::custody::acquire_writer(
+                    directory,
+                    scope,
+                    binding,
+                    provenant_core::WaitBudget::nonblocking(call.clock.mono_now()),
+                    call.cancel,
+                    call.clock,
+                )
+            },
+            &call,
+        )
+    };
+    assert!(
+        take_writer(Directory::open_anchor(&slot)?).is_err(),
+        "a live launcher still holds the writer"
+    );
+    // The first launcher dies before the provider launches; cancel settles
+    // the attempt and frees its writer and fence before returning.
+    drop(held);
+    assert_eq!(
+        store.cancel(first_id, "stop", &call)?,
+        CancelReceipt::Cancelled
+    );
+    assert_eq!(terminal(&store, first_id, &call)?, Outcome::Cancelled);
+    assert!(store.writer_fences()?.is_empty());
+    let lease = match take_writer(Directory::open_anchor(&slot)?) {
+        Ok(lease) => lease,
+        Err(_) => return Err("the next run was refused after the cancel".into()),
+    };
+    drop(lease);
+    Ok(())
+}
+
+#[test]
 fn read_only_exceptions_are_recorded_and_temporary_paths_are_private_per_attempt() -> TestResult {
     use std::os::unix::ffi::OsStringExt;
     use std::os::unix::fs::PermissionsExt;
