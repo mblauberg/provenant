@@ -185,8 +185,8 @@ reason = "Agy's selected home source and private destinations must not overlap s
 
 [[guard]]
 site = "confinement/src/plan.rs#ConfinedPlan::new"
-boundary = "unclassified"
-reason = "Invalid path shapes and remaining overlapping roots need classification or a tolerant fallback."
+boundary = "authority"
+reason = "Required roots must be representable and disjoint so the selected grant and private state can be enforced."
 
 [[guard]]
 site = "confinement/src/permissions/render.rs#compile_sbpl"
@@ -210,8 +210,8 @@ reason = "Held grant anchors are verified before and after rendering so replaced
 
 [[guard]]
 site = "confinement/src/permissions/render.rs#compile_sbpl"
-boundary = "unclassified"
-reason = "Remaining missing anchors and path failures need classification or a tolerant fallback."
+boundary = "authority"
+reason = "Required anchors must be present and resolvable to enforce the selected grants."
 
 [[guard]]
 site = "providers/src/launch.rs#filter_optional_grants"
@@ -230,8 +230,8 @@ reason = "A configured optional project path whose canonical target cannot be re
 
 [[guard]]
 site = "confinement/src/permissions/render.rs#sbpl_path"
-boundary = "unclassified"
-reason = "Non-UTF-8 paths and unsupported control characters cannot be encoded in SBPL; remaining required path cases need classification while optional discoveries warn and are omitted."
+boundary = "authority"
+reason = "Required paths must be encoded losslessly to enforce the requested permissions; optional discoveries warn and are omitted."
 
 [[guard]]
 site = "confinement/src/permissions/probe.rs#system_backend"
@@ -275,8 +275,8 @@ reason = "The complete alternates declaration must be inspected before protected
 
 [[guard]]
 site = "confinement/src/repo.rs#RepoError"
-boundary = "unclassified"
-reason = "Remaining repository opening, metadata bounds and filesystem failures require caller-specific classification."
+boundary = "lane_git"
+reason = "Repository opening and complete metadata reads are prerequisites for establishing the selected worktree and its Git authority."
 
 [[guard]]
 site = "providers/src/opencode.rs#prepare"
@@ -325,8 +325,8 @@ reason = "A configured command must have non-empty argv and an absolute host-res
 
 [[guard]]
 site = "providers/src/command.rs#prepare"
-boundary = "unclassified"
-reason = "Writer capability still refuses preparation; capability eligibility is tracked separately."
+boundary = "authority"
+reason = "The command adapter only implements read-only access and cannot claim writer authority."
 
 [[guard]]
 site = "providers/src/cursor.rs#prepare"
@@ -431,8 +431,8 @@ reason = "Malformed or unrepresentable discovery-only reads are omitted before a
 
 [[guard]]
 site = "confinement/src/permissions/validation.rs#validate_profile_spec_impl"
-boundary = "unclassified"
-reason = "Remaining malformed profile paths require caller-specific classification or a tolerant fallback."
+boundary = "authority"
+reason = "Required profile paths must be representable and valid to enforce the selected permission policy."
 
 [[guard]]
 site = "providers/src/launch.rs#admit"
