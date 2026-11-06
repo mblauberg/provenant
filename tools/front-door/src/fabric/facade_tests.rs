@@ -4291,9 +4291,9 @@ esac
         Ok(())
     }
 
-    pub(crate) fn writer_quota_continuation_succeeds_and_lens_diff_base_stays_node_source()
+    pub(crate) fn writer_graph_output_preserves_lens_diff_base()
     -> Result<(), Box<dyn std::error::Error>> {
-        if host_test("writer_quota_continuation_succeeds_and_lens_diff_base_stays_node_source")? {
+        if host_test("writer_graph_output_preserves_lens_diff_base")? {
             return Ok(());
         }
         use provenant_fabric_runtime::graph::{self, AttemptOwner};
@@ -4349,7 +4349,7 @@ esac
         let dispatch = provenant_run::Service::new(&fixture.store).dispatch(
             provenant_run::DispatchRequest {
                 chair: None,
-                operation_id: "writer-quota-op".parse()?,
+                operation_id: "writer-output-op".parse()?,
                 concurrency: 1,
                 lane_depth: 1,
                 parent_attempt: None,
@@ -4405,9 +4405,7 @@ esac
 
         let worktree_str = fixture.worktree.to_str().ok_or("worktree path")?;
 
-        // Attempt 1 commits head_1 in the worktree.
-        // The fake successor writes the same tracked bytes, so it can settle
-        // successfully without an unrelated second commit obscuring the pin.
+        // The writer commits a subject distinct from its graph source.
         std::fs::write(fixture.worktree.join("writer-edited"), "writer fixture completed")?;
         std::fs::write(fixture.worktree.join("first.txt"), b"first edit\n")?;
         let output = fixture.rig.execute(&git, &["-C", worktree_str, "add", "first.txt", "writer-edited"], None)?;
@@ -4421,74 +4419,17 @@ esac
         let head_1 = provenant_run::resolve_git_base(&git, &fixture.worktree, "HEAD")?
             .parse::<provenant_core::GitOid>()?;
 
-        // Attempt 1 hits provider quota: stages a policy retry and settles QuotaLimited.
-        let retry = provenant_run::PolicyRetry {
-            schema_version: 2,
-            cause: provenant_run::PolicyCause::Quota,
-            action: provenant_run::PolicyAction::Retry,
-            route: attempt_1_record.requested_route.clone(),
-            resume: false,
-            max_attempts: 2,
-            instruction: "Continue".into(),
-            not_before_unix_seconds: None,
-        };
-        fixture.store.stage_policy_retry(&attempt_1_record, &retry, &call)?;
         publish_outcome(
             &fixture.rig,
             &fixture.store,
             &attempt_1_record,
             head_1,
-            Outcome::QuotaLimited,
+            Outcome::Succeeded,
             &call,
         )?;
 
-        // Policy retry queued attempt 2 in store.
-        let pending = fixture.store.pending_attempts(dispatch.run_id, &call)?;
-        assert_eq!(pending.len(), 1);
-        let attempt_2 = pending[0].attempt_id;
-        assert_eq!(pending[0].retry_of, Some(attempt_1));
-        // Launch the successor under real writer custody and confinement, then
-        // let the guardian publish its terminal result through RunHolder.
-        let context = provenant_run::ExecutionContext {
-            state_root: fixture.roots.state.clone(),
-            project_id: fixture.settled.project_id,
-            actor_id: fixture.settled.actor_id,
-            read_prompts: true,
-        };
-        let cleanup = crate::worktree_tests::writer_process_cleanup(&context);
-        let provider = crate::worktree_tests::WriterProvider {
-            state: fixture.rig.state.clone(),
-            home: fixture.rig.home.clone(),
-            project: context.project_id,
-            mode: "edit",
-        };
-        let holder = crate::worktree_tests::holder_context(&fixture.rig, &fixture.roots, &context);
-        if !crate::worktree_tests::writer_backend_available()? {
-            return Ok(());
-        }
-        let started = crate::worktree_tests::start_writer(
-            &fixture.store, dispatch.run_id, &provider, &holder, &call,
-        )?;
-        assert!(matches!(started.as_slice(), [provenant_run::Started::Launched(id)] if *id == attempt_2), "{started:?}");
-        let terminal = crate::worktree_tests::await_terminal(&fixture.store, attempt_2, &call)?;
-        assert!(matches!(terminal.state, AttemptState::Terminal { outcome: Outcome::Succeeded, .. }), "{terminal:?}");
-        let head_2 = terminal.head.ok_or("successor head")?;
-        assert_eq!(head_1, head_2);
-        let pins: serde_json::Value = serde_json::from_slice(&std::fs::read(
-            fixture.rig.state.join(format!("runs/{}/attempts/{attempt_2}/writer-git-pins.json", dispatch.run_id)),
-        )?)?;
-        assert_eq!(pins["base"], head_1.to_string(), "launched writer must pin predecessor head");
-        crate::worktree_tests::wait_for_writer_release(&fixture.store)?;
-        cleanup.disarm();
-
-        // Check policy tail resolves to attempt_2.
-        assert_eq!(
-            fixture.store.policy_tail(attempt_1, &call)?.attempt_id,
-            attempt_2
-        );
-
         // 2. Set up graph with writer node and dependent lens node.
-        let graph_id = "writer-quota-lens-graph";
+        let graph_id = "writer-output-lens-graph";
         let document: graph::GraphDocument = serde_json::from_value(serde_json::json!({
             "schema_version": 1,
             "graph_id": graph_id,
@@ -4562,7 +4503,7 @@ esac
         )?;
 
         // 3. Verification:
-        // - Writer node succeeded via continuation
+        // The graph observes the writer output directly.
         let writer_progress = &run.checkpoint.nodes[0];
         assert_eq!(writer_progress.state, graph::NodeState::Succeeded);
         assert_eq!(
@@ -4570,7 +4511,7 @@ esac
                 .outputs
                 .as_ref()
                 .and_then(|o| o.commit.as_ref()),
-            Some(&head_2.to_string())
+            Some(&head_1.to_string())
         );
 
         // - Lens node was submitted, and its diff base stays node_source (not head_1)
@@ -4591,7 +4532,6 @@ esac
 
         let node_source_str = node_source.to_string();
         let head_1_str = head_1.to_string();
-        let head_2_str = head_2.to_string();
         assert_eq!(
             lens_task.base.as_deref(),
             Some(node_source_str.as_str()),
@@ -4600,12 +4540,12 @@ esac
         assert_ne!(
             lens_task.base.as_deref(),
             Some(head_1_str.as_str()),
-            "lens diff base must not advance to predecessor head"
+            "lens diff base must not advance to the writer output"
         );
         assert_eq!(
             lens_task.head.as_deref(),
-            Some(head_2_str.as_str()),
-            "lens subject commit must be continuation head"
+            Some(head_1_str.as_str()),
+            "lens subject commit must be the writer output"
         );
 
         Ok(())

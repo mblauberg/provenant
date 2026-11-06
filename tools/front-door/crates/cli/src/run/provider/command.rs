@@ -142,11 +142,6 @@ pub(super) fn prepare_command(
         .ok_or("current user identity is unavailable")?
         .name;
     let runtime = canonical(&std::env::current_exe().map_err(|error| error.to_string())?)?;
-    let child_state = roots
-        .state
-        .as_path()
-        .join("children")
-        .join(paths.attempt_id.to_string());
     let route = ResolvedRoute {
         extra: [("name".into(), serde_json::Value::String(name.into()))]
             .into_iter()
@@ -199,7 +194,6 @@ pub(super) fn prepare_command(
                 executable: &runtime,
                 git: &git,
                 state: roots.state.as_path(),
-                child_state: &child_state,
                 home: &home,
                 depth: paths.lane_depth,
                 attempt: paths.attempt_id,
@@ -327,48 +321,6 @@ fn hold_command_preparation_for_fixture() {
         |released| *released,
     );
     let _ = std::fs::write(path.join("released"), b"released");
-}
-
-pub(super) fn nested_policy_fallback(
-    task: &run::TaskRequest,
-    route: &ResolvedRoute,
-    policy: &provenant_routing::ModelPolicy,
-) -> Result<run::TaskRequest, String> {
-    if run::Service::has_writes(task.writer.is_some(), &task.access.write_roots) {
-        return Err("model policy fallback requires read-only authority".into());
-    }
-    let fallback = task
-        .fallback
-        .first()
-        .cloned()
-        .or_else(|| {
-            policy.result.fallback.as_ref().map(|model| RouteRecord {
-                provider: Some(model.adapter().into()),
-                model: Some(model.as_str().into()),
-                effort: policy.result.fallback_effort.clone(),
-                ..Default::default()
-            })
-        })
-        .ok_or("restricted nested route has no result-policy fallback")?;
-    let model = provenant_routing::ModelId::parse(
-        fallback
-            .model
-            .as_deref()
-            .ok_or("policy fallback model missing")?,
-    )
-    .map_err(|error| error.to_string())?;
-    let mut task = task.clone();
-    task.route = run::RequestedRoute::Model {
-        extra: Default::default(),
-        provider: model.adapter().into(),
-        model: model.as_str().into(),
-        effort: fallback.effort,
-    };
-    if model.adapter() != route.adapter {
-        task.account = None;
-    }
-    task.fallback.clear();
-    Ok(task)
 }
 
 pub(super) fn configure_process_tree(

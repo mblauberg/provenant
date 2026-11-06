@@ -373,7 +373,7 @@ fn output_read(
     let waits = session
         .store
         .lane_waits(std::slice::from_ref(&record), call);
-    let successors = policy_successors(session, std::slice::from_ref(&record), call)?;
+    let successors = Default::default();
     let projected = project_lane(
         &record,
         &waits,

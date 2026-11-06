@@ -384,23 +384,6 @@ impl Peer {
         super::apply_lane_wait_suppression(&mut lanes, &waits);
         Ok(lanes)
     }
-    /// Read a named receipt and its current policy successor from each owner.
-    fn records_following(
-        &self,
-        selected: &[(HostId, AttemptId)],
-        remaining: Duration,
-    ) -> Result<Vec<run::AttemptRecord>, Fail> {
-        let window = Window::new(remaining);
-        let mut call = |host, action, left| self.call_within(host, action, left);
-        let mut pairs = selected.to_vec();
-        let mut lanes = read_records(&pairs, &window, &mut call)?;
-        follow_peer_successors(&mut lanes, &mut pairs, &window, &mut call)?;
-        let waits = fetch_waits(&lanes, &pairs, |host, action| {
-            call(host, action, window.next()?)
-        });
-        super::apply_lane_wait_suppression(&mut lanes, &waits);
-        Ok(lanes)
-    }
     /// The peer's newest lanes that `keep` accepts, plus every lane `tracked`
     /// has seen running that those no longer include. Both reads together take
     /// no longer than `remaining`.
@@ -414,8 +397,7 @@ impl Peer {
         let window = Window::new(remaining);
         let mut call = |host, action, left| self.call_within(host, action, left);
         let mut lanes = read_newest(host, &window, tracked, keep, &mut call)?;
-        let mut selected: Vec<_> = lanes.iter().map(|lane| (host, lane.attempt_id)).collect();
-        follow_peer_successors(&mut lanes, &mut selected, &window, &mut call)?;
+        let selected: Vec<_> = lanes.iter().map(|lane| (host, lane.attempt_id)).collect();
         lanes.retain(|lane| keep(lane));
         let waits = fetch_waits(&lanes, &selected, |owner, action| {
             call(owner, action, window.next()?)
@@ -443,7 +425,7 @@ impl Peer {
         seconds: u64,
     ) -> Result<(Vec<run::AttemptRecord>, bool), Fail> {
         poll_until(
-            |remaining| self.records_following(selected, remaining),
+            |remaining| self.records_within(selected, remaining),
             condition,
             Duration::from_secs(seconds),
             POLL,
@@ -551,40 +533,6 @@ fn read_records(
         .into_iter()
         .collect::<Option<_>>()
         .ok_or_else(corrupt)
-}
-
-/// Resolve each observed policy tail on its owner, retaining every receipt.
-fn follow_peer_successors(
-    lanes: &mut Vec<run::AttemptRecord>,
-    pairs: &mut Vec<(HostId, AttemptId)>,
-    window: &Window,
-    call: &mut Call<'_>,
-) -> Result<(), Fail> {
-    for (lane, (host, _)) in lanes.iter_mut().zip(pairs.iter()) {
-        lane.trace.host = Some(*host);
-    }
-    for _ in 0..provenant_run::POLICY_ATTEMPT_CEILING {
-        let next: BTreeSet<_> = lanes
-            .iter()
-            .filter_map(|lane| {
-                lane.superseded_by
-                    .zip(lane.trace.host)
-                    .map(|(id, host)| (host, id))
-                    .filter(|pair| !pairs.contains(pair))
-            })
-            .collect();
-        if next.is_empty() {
-            break;
-        }
-        let next: Vec<_> = next.into_iter().collect();
-        let mut records = read_records(&next, window, call)?;
-        for (lane, (host, _)) in records.iter_mut().zip(&next) {
-            lane.trace.host = Some(*host);
-        }
-        pairs.extend(next);
-        lanes.extend(records);
-    }
-    Ok(())
 }
 
 /// A peer's newest lanes that `keep` accepts, then the tracked lanes they
@@ -1012,7 +960,7 @@ pub(super) fn dispatch(
         Some(_) if remaining().is_zero() => (lanes, Some(false)),
         Some(_) => {
             let (lanes, met) = poll_until(
-                |left| peer.records_following(&selected, left),
+                |left| peer.records_within(&selected, left),
                 Condition::All,
                 remaining(),
                 POLL,
@@ -1112,7 +1060,7 @@ pub(super) fn lanes(
             explicit: true,
             snapshot: true,
         };
-        let fetch = |remaining| peer.records_following(&selected, remaining);
+        let fetch = |remaining| peer.records_within(&selected, remaining);
         let first = selected
             .first()
             .map(|(host, _)| *host)
@@ -1959,36 +1907,7 @@ mod tests {
     }
 
     #[test]
-    fn peer_wait_follows_policy_successor() -> Result {
-        let host = HostId::from_bytes([9; 16]);
-        let mut old = done(1, 10);
-        let mut retry = running(2);
-        old.superseded_by = Some(retry.attempt_id);
-        retry.retry_of = Some(old.attempt_id);
-        let mut lanes = vec![old.clone()];
-        let mut pairs = vec![(host, old.attempt_id)];
-        let window = Window::new(Duration::from_secs(10));
-        let mut call = |asked_host, action, _| {
-            assert_eq!(asked_host, host);
-            let PeerAction::RunStatuses { targets, .. } = action else {
-                return Err(corrupt());
-            };
-            assert_eq!(targets.len(), 1);
-            assert_eq!(targets[0].attempt, retry.attempt_id);
-            Ok(PeerResult::RunStatuses {
-                data: vec![retry.clone()],
-                extra: Default::default(),
-            })
-        };
-        follow_peer_successors(&mut lanes, &mut pairs, &window, &mut call)
-            .map_err(|e| e.message)?;
-        assert_eq!(lanes.len(), 2);
-        assert!(!condition_met(&lanes, Condition::Any));
-        Ok(())
-    }
-
-    #[test]
-    fn peer_lane_views_show_policy_lineage() -> Result {
+    fn peer_lane_views_show_attempt_lineage() -> Result {
         let mut old = lane(1, "queued")?;
         let mut retry = lane(2, "queued")?;
         let old_id = old.attempt_id;

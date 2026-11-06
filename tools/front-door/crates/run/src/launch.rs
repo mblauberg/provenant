@@ -197,7 +197,7 @@ impl From<&str> for PrepareRefusal {
         message.to_owned().into()
     }
 }
-/// Run-owned per-attempt paths. Allocated once, shared by explicit fallback candidates.
+/// Run-owned paths allocated for one attempt.
 pub struct LaunchPaths {
     pub attempt_id: AttemptId,
     pub operation_id: OperationId,
@@ -390,19 +390,6 @@ pub trait Providers {
     fn runtime_cap(&self, _provider: &str) -> Option<u64> {
         None
     }
-    /// Host policy can reject a result and request a bounded successor. The
-    /// store preserves authority and refuses writer route fallback.
-    fn assess_result(
-        &self,
-        _task: &TaskRequest,
-        _record: &AttemptRecord,
-        _decoded: &Decoded,
-        _handoff: Option<&provenant_records::handoff::Handoff>,
-        _context: Option<&crate::HolderContext>,
-        _policy_attempt: u64,
-    ) -> std::result::Result<crate::ResultAssessment, String> {
-        Ok(crate::ResultAssessment::default())
-    }
     /// Host-selected minimum nice value for this lane.
     fn priority(&self, task: &TaskRequest) -> std::result::Result<u8, String> {
         Ok(if task.writer.is_some() { 10 } else { 5 })
@@ -412,7 +399,7 @@ pub trait Providers {
     fn check_policy(&self, _task: &TaskRequest) -> std::result::Result<(), String> {
         Ok(())
     }
-    /// Prepare one task, trying its fallback routes in order. An error is a
+    /// Prepare one task. An error is a
     /// task-local refusal reason; siblings still launch. `resume` is the prior
     /// terminal attempt of a continuation, whose exact session must be used:
     /// without one, refuse rather than start a fresh session.
@@ -468,8 +455,7 @@ enum HandOff {
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub enum Started {
     Launched(AttemptId),
-    /// Held child custody is full, or a policy retry's launch time has not
-    /// come; the attempt stays Queued for a later scan.
+    /// Held child custody is full; the attempt stays Queued for a later scan.
     Deferred(AttemptId),
     Refused {
         attempt: AttemptId,
@@ -1489,84 +1475,8 @@ impl RunStore {
                 .enumerate()
                 .find(|(_, task)| task.task_id == record.task_id)
                 .ok_or(RunError::Validation("attempt task missing from request"))?;
-            let mut effective_task =
+            let effective_task =
                 self.effective_launch_task(&request, task, child.map(|(validated, _)| validated));
-            let policy_retry = matches!(
-                record.continuation.as_deref(),
-                Some("policy_continuation" | "policy_fallback")
-            );
-            if policy_retry {
-                if self.sealed_requester.is_some()
-                    || request.parent_attempt.is_some()
-                    || self.context.state_root.as_path() != self.writer_registry()
-                {
-                    return Err(RunError::Validation(
-                        "policy retry requires a host-owned store",
-                    ));
-                }
-                let prior = record
-                    .retry_of
-                    .map(|prior| self.record(prior, call))
-                    .transpose()?;
-                // Every launcher, the settling guardian or a later sweep, waits
-                // for the retry's sealed launch time.
-                if record.continuation.as_deref() == Some("policy_fallback") {
-                    let released = prior
-                        .as_ref()
-                        .is_some_and(|prior| self.custody_released(prior, call).unwrap_or(false));
-                    if !released {
-                        started.push(Started::Deferred(id));
-                        continue;
-                    }
-                }
-                let not_before = match &prior {
-                    Some(prior) => self
-                        .staged_policy_retry(prior)?
-                        .and_then(|retry| retry.not_before_unix_seconds),
-                    None => None,
-                };
-                if not_before.is_some_and(|not_before| {
-                    not_before > now().map_or(i64::MAX, |now| now.as_micros().div_euclid(1_000_000))
-                }) {
-                    started.push(Started::Deferred(id));
-                    continue;
-                }
-                if record.continuation.as_deref() == Some("policy_fallback")
-                    && !retry_keeps_account_pin(
-                        &record.requested_route,
-                        &task.route,
-                        prior
-                            .as_ref()
-                            .and_then(|prior| prior.applied_route.as_ref())
-                            .and_then(|route| route.provider.as_deref()),
-                    )
-                {
-                    effective_task.account = None;
-                }
-                effective_task.route = record.requested_route.clone();
-                effective_task.fallback.clear();
-                if task.writer.is_some()
-                    && let Some(prior) = &prior
-                    && let Some(h) = prior.head
-                {
-                    let h_str = h.to_string();
-                    // Even an unchanged HEAD can carry uncommitted predecessor
-                    // edits. Mark every settled writer continuation so preparation
-                    // verifies its lineage and reports those paths.
-                    effective_task.source_head = effective_task
-                        .source_head
-                        .or_else(|| effective_task.head.clone());
-                    effective_task.head = Some(h_str);
-                }
-            }
-            let policy_resume = if record.continuation.as_deref() == Some("policy_continuation") {
-                record
-                    .retry_of
-                    .map(|prior| self.record(prior, call))
-                    .transpose()?
-            } else {
-                None
-            };
             let task = &effective_task;
             let task_index = u64::try_from(task_index)
                 .map_err(|_| RunError::Validation("attempt task index"))?;
@@ -1652,16 +1562,7 @@ impl RunStore {
                 })
                 .and_then(|priority| {
                     providers
-                        .prepare(
-                            task,
-                            &prompt,
-                            &paths,
-                            policy_resume.as_ref().or(if policy_retry {
-                                None
-                            } else {
-                                resume.as_ref()
-                            }),
-                        )
+                        .prepare(task, &prompt, &paths, resume.as_ref())
                         .map(|plan| (plan, priority))
                         .map_err(|reason| (RefusalKind::Preparation, reason))
                 });
@@ -1909,22 +1810,6 @@ fn set_environment_value(environment: &mut Vec<(OsString, OsString)>, name: &str
     environment.retain(|(existing, _)| existing != &name);
     environment.push((name, OsString::from(value)));
 }
-
-/// An account pin belongs to the provider it was granted with. A redraw of the
-/// granted route keeps it, whatever that route resolves to; a fallback to
-/// another provider resolves a fresh account there.
-fn retry_keeps_account_pin(
-    retry: &RequestedRoute,
-    granted: &RequestedRoute,
-    original_provider: Option<&str>,
-) -> bool {
-    retry == granted
-        || match retry {
-            RequestedRoute::Model { provider, .. } => original_provider == Some(provider.as_str()),
-            _ => original_provider.is_none(),
-        }
-}
-
 /// The configured lane port space, or none when allocation is switched off.
 /// Writer lanes only: read-only lanes run no servers.
 fn lane_port_plan(
@@ -1969,53 +1854,4 @@ mod lane_environment_tests {
         );
     }
 }
-
-#[cfg(test)]
-mod retry_pin_tests {
-    use super::*;
-
-    #[test]
-    fn redraws_of_a_pinned_granted_route_keep_the_pin() {
-        let named = RequestedRoute::Named {
-            extra: Default::default(),
-            name: "implement".into(),
-            effort: None,
-        };
-        let pool = RequestedRoute::Review {
-            extra: Default::default(),
-            name: "review".into(),
-            effort: None,
-            excluded_families: Vec::new(),
-            distinct_families: false,
-            preferred_families: vec![],
-            require_distinct: false,
-        };
-        let model = |provider: &str| RequestedRoute::Model {
-            extra: Default::default(),
-            provider: provider.into(),
-            model: format!("{provider}/model"),
-            effort: None,
-        };
-        // A sessionless capacity redraw of a pinned named or pool route stays
-        // on the pinned account, even after the first draw named a provider.
-        for granted in [&named, &pool] {
-            assert!(retry_keeps_account_pin(granted, granted, Some("codex")));
-            assert!(retry_keeps_account_pin(granted, granted, None));
-        }
-        // The applied model on the same provider keeps it too.
-        assert!(retry_keeps_account_pin(
-            &model("codex"),
-            &named,
-            Some("codex")
-        ));
-        // A fallback to another provider resolves a fresh account there.
-        assert!(!retry_keeps_account_pin(
-            &model("claude"),
-            &named,
-            Some("codex")
-        ));
-        assert!(!retry_keeps_account_pin(&pool, &named, Some("codex")));
-    }
-}
-
 pub(crate) mod hand_off;

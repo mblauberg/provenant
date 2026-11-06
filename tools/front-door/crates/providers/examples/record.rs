@@ -1154,7 +1154,6 @@ fn main() -> Result<()> {
                 executable: &args.provenant,
                 git: &git,
                 state: &args.root.join("provenant-state"),
-                child_state: &args.root.join("provenant-state/children/recording"),
                 home: &home,
                 depth: 1,
                 attempt: provenant_core::AttemptId::from_bytes(nonce),

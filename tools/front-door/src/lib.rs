@@ -612,7 +612,6 @@ fn supervise(descriptors: &[u64], globals: &provenant_cli::Globals, process: &dy
         let hooks = provenant_supervisor::GuardianHooks {
             disk: Some(&disk),
             holder: Some(&holder),
-            nested_children: Some(&holder),
             stdout_decoder: Some(holder.stdout_decoder()),
             stderr_decoder: Some(holder.stderr_decoder()),
             stdout_filter: Some(&mut stdout_filter),
@@ -1021,7 +1020,7 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
             }
         }
         Command::Preset(cmd) => preset::command(cmd, globals),
-        Command::Run(cmd) => {
+        Command::Run(cmd) | Command::Dispatch(cmd) => {
             if std::env::var_os("PROVENANT_PARENT_ATTEMPT_ID").is_some() {
                 run_edge(&inv.leaf, globals, |edge| {
                     provenant_cli::run::run(*cmd, edge)
@@ -1075,19 +1074,6 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
             globals,
             process.workers(),
         ),
-        Command::Dispatch(cmd) => run_edge(&inv.leaf, globals, |edge| {
-            let mut reply = provenant_cli::run::dispatch(*cmd, edge);
-            if let Err(error) =
-                fabric::settle_dispatched_attempts(edge, &mut reply, process.workers())
-            {
-                reply
-                    .human
-                    .push_str(&format!("worktree retained: {error}\n"));
-                reply.result.data["worktree_settlement_error"] =
-                    serde_json::json!(error.to_string());
-            }
-            reply
-        }),
         Command::Lanes(cmd) if cmd.watch.is_some() || cmd.session_stream => {
             run_edge(&inv.leaf, globals, |edge| {
                 provenant_cli::run::lanes_streaming(
