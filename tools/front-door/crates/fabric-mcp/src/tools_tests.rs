@@ -220,23 +220,25 @@ fn result_limit_preserves_mutation_receipts_and_rejects_oversized_observations()
 }
 
 #[test]
-fn graph_control_operations_are_strict_and_cancel_is_a_mutation() {
-    for (op, arguments) in [
-        ("run", json!({"op":"run","document":"graph.json"})),
-        ("resume", json!({"op":"resume","document":"graph.json"})),
-        ("status", json!({"op":"status","id":"g-test"})),
-        (
-            "cancel",
-            json!({"op":"cancel","id":"g-test","reason":"maintenance"}),
-        ),
+fn graph_documents_use_the_run_interface_and_paths_are_rejected() {
+    for arguments in [
+        json!({"op":"run","document":{"id":"test","nodes":[]}}),
+        json!({"op":"run","brief":"Inspect the parser","use":"explore"}),
+        json!({"op":"edit","id":"test","patch":{"nodes":[]}}),
+        json!({"op":"status","id":"test","stats":true,"by":"tier","wait_seconds":1}),
+        json!({"op":"status","stats":true,"by":"template"}),
+        json!({"op":"stop","id":"test","reason":"maintenance","wait_seconds":1}),
+        json!({"op":"retry","id":"test","node":"task","wait_seconds":1}),
+        json!({"op":"templates"}),
     ] {
-        let call = ToolCall::parse("fabric_graph", arguments.clone()).expect(op);
-        assert_eq!(call.is_mutation(), op != "status");
+        let call = ToolCall::parse("fabric_run", arguments.clone()).unwrap();
+        assert!(matches!(call, ToolCall::GraphDocument(_)));
         let mut unknown = arguments;
         unknown["extra"] = json!(true);
-        assert!(ToolCall::parse("fabric_graph", unknown).is_err());
+        assert!(ToolCall::parse("fabric_run", unknown).is_err());
     }
-    assert!(ToolCall::parse("fabric_graph", json!({"op":"status","id":"../escape"})).is_err());
+    assert!(ToolCall::parse("fabric_graph", json!({"op":"status","id":"test"})).is_err());
+    assert!(ToolCall::parse("fabric_run", json!({"op":"run","document":"graph.json"})).is_err());
 }
 
 #[test]

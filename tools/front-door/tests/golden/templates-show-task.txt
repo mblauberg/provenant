@@ -1,0 +1,17 @@
+{
+  "templates": [
+    {
+      "layer": "bundled",
+      "name": "task",
+      "template": {
+        "access": "read_only",
+        "brief": "Do the brief and report what changed, with evidence.",
+        "doc": "Do the brief.",
+        "outputs": [
+          "result"
+        ],
+        "tier": "senior"
+      }
+    }
+  ]
+}

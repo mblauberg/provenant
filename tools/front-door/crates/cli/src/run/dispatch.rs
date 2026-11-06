@@ -73,7 +73,10 @@ fn run_in_lane(
         &CancelToken,
         Duration,
     ) -> Result<Value, provenant_fabric_mcp::tools::ServiceError>,
-    wait: impl FnOnce(&CancelToken, Duration) -> Result<Value, provenant_fabric_mcp::tools::ServiceError>,
+    wait: impl FnOnce(
+        &CancelToken,
+        Duration,
+    ) -> Result<Value, provenant_fabric_mcp::tools::ServiceError>,
 ) -> Reply {
     let result = (|| {
         let op = lane_add(command)?;
@@ -3162,20 +3165,21 @@ pub(super) fn check_launch_policy(started: &[run::Started]) -> Result<(), Fail> 
 mod graph_launch_tests {
     use super::*;
 
+    #[derive(clap::Parser)]
+    struct DispatchFixture {
+        #[command(flatten)]
+        request: Dispatch,
+    }
+
     fn command(path: &Path, extra: &[&str]) -> Dispatch {
+        use clap::Parser;
         let mut args = vec![
-            "run".into(),
+            "fixture".into(),
             "--prompt-file".into(),
             path.as_os_str().to_owned(),
         ];
         args.extend(extra.iter().map(std::ffi::OsString::from));
-        let crate::ParseOutcome::Invocation(invocation) = crate::parse(args) else {
-            panic!("valid run arguments");
-        };
-        let crate::Command::Run(command) = invocation.command else {
-            panic!("run command");
-        };
-        *command
+        DispatchFixture::try_parse_from(args).unwrap().request
     }
 
     #[test]
@@ -3197,18 +3201,22 @@ mod graph_launch_tests {
             ],
         );
         command.wait = None;
-        let result = run_in_lane(&command, |op, _, _| {
-            let provenant_fabric_runtime::graph::relay::RelayOp::Add(child) = op else {
-                panic!("add operation");
-            };
-            assert_eq!(child.template, "task");
-            assert_eq!(child.brief, "Implement the scoped change");
-            assert_eq!(child.tier.as_deref(), Some("senior"));
-            assert!(child.writer);
-            assert_eq!(child.write_scope, ["src"]);
-            assert_eq!(child.idempotency_key, "child-test");
-            Ok(json!({"graph_id":"parent-graph", "node":"parent--child", "revision":2}))
-        }, |_, _| panic!("no wait requested"));
+        let result = run_in_lane(
+            &command,
+            |op, _, _| {
+                let provenant_fabric_runtime::graph::relay::RelayOp::Add(child) = op else {
+                    panic!("add operation");
+                };
+                assert_eq!(child.template, "task");
+                assert_eq!(child.brief, "Implement the scoped change");
+                assert_eq!(child.tier.as_deref(), Some("senior"));
+                assert!(child.writer);
+                assert_eq!(child.write_scope, ["src"]);
+                assert_eq!(child.idempotency_key, "child-test");
+                Ok(json!({"graph_id":"parent-graph", "node":"parent--child", "revision":2}))
+            },
+            |_, _| panic!("no wait requested"),
+        );
         assert!(result.result.error.is_none());
         assert_eq!(result.result.data["graph_id"], "parent-graph");
         assert_eq!(result.result.data["revision"], 2);
@@ -3260,7 +3268,11 @@ mod graph_launch_tests {
         let path = temp.path().join("brief");
         std::fs::write(&path, "Map the affected module").unwrap();
         let command = command(&path, &["--use", "explore", "--explain", "--wait", "7s"]);
-        let result = run_in_lane(&command, |_, _, _| panic!("explain must not send"), |_, _| panic!("explain must not wait"));
+        let result = run_in_lane(
+            &command,
+            |_, _, _| panic!("explain must not send"),
+            |_, _| panic!("explain must not wait"),
+        );
         assert!(result.result.error.is_none());
         assert_eq!(result.result.data["op"], "add");
         assert_eq!(result.result.data["use"], "explore");

@@ -19,21 +19,19 @@ pub(crate) enum ToolKind {
     Claim,
     Run,
     Output,
-    Graph,
     Discover,
     Inbox,
     Console,
     Chair,
 }
 
-pub(crate) const TOOL_NAMES: [(ToolKind, &str); 12] = [
+pub(crate) const TOOL_NAMES: [(ToolKind, &str); 11] = [
     (ToolKind::Identity, "fabric_context"),
     (ToolKind::Mail, "fabric_mail"),
     (ToolKind::Task, "fabric_task"),
     (ToolKind::Events, "fabric_events"),
     (ToolKind::Claim, "fabric_lease"),
     (ToolKind::Run, "fabric_run"),
-    (ToolKind::Graph, "fabric_graph"),
     (ToolKind::Output, "fabric_output"),
     (ToolKind::Discover, "fabric_discover"),
     (ToolKind::Inbox, "fabric_inbox"),
@@ -202,7 +200,7 @@ fn build_strict() -> Vec<Value> {
         "options?":array(object(json!({"id":reference("OperationId"),"label":text(256),"description":text(1024)})),0,16),
         "recommended_option_id?":nullable(reference("OperationId")),"proceeding_with?":nullable(text(1024))
     }));
-    let tools: [(&str, Value); 12] = [
+    let tools: [(&str, Value); 11] = [
         (
             "Inspect the authenticated Fabric identity or list peer hosts.",
             json!({"inspect":{},"hosts":{"after?":nullable(reference("Id")),"limit":page.clone()}}),
@@ -242,20 +240,13 @@ fn build_strict() -> Vec<Value> {
             }),
         ),
         (
-            "Submit and wait for results, list, inspect, wait for, cancel or resume runs. List returns compact attempts newest first; pass next_after as after to continue. Set detail for full records.",
+            "Run template briefs or graph documents, edit graphs, inspect templates and report status or trace. Documents and patches are JSON objects, never file paths. Attempt submissions and observations use the run service.",
             json!({
                 "submit":{"operation_id?":reference("OperationId"),"wait_seconds?":wait.clone(),"detail?":{"type":"boolean"},"tasks":array(object(json!({"context?":nullable(reference("WorkContext")),"build_heavy?":{"type":"boolean"},"prompt":text(MAX_TEXT_BYTES),"title?":nullable(text(256)),"base?":nullable(text(1024)),"head?":nullable(text(64)),"account?":nullable(text(64)),"access?":choices(&["read_only","worktree_write"]),"capabilities?":nullable(array(text(64),0,16)),"worktree?":nullable(text(MAX_ARTIFACT_PATH_BYTES)),"route":reference("Route"),"timeout_seconds":integer(1,provenant_core::MAX_LANE_RUNTIME_SECONDS),"delivery_id?":nullable(reference("Id")),"deliver?":nullable(object(json!({"remote":text(64),"branch":text(1024),"open_pr?":{"type":"boolean"}})))})),1,64),"concurrency?":nullable(integer(1,16)),"knobs?":array(text(256),0,64),"host?":nullable(reference("Id"))},
                 "list":{"after?":nullable(reference("AttemptTarget")),"limit?":page},"status":{"target":reference("AttemptTarget"),"detail?":{"type":"boolean"}},
                 "wait":{"targets":array(reference("AttemptTarget"),1,100),"condition":choices(&["any","all"]),"wait_seconds":wait,"detail?":{"type":"boolean"}},
                 "cancel":{"target":reference("AttemptTarget"),"operation_id?":reference("OperationId"),"detail?":{"type":"boolean"}},
                 "resume":{"target":reference("AttemptTarget"),"operation_id?":reference("OperationId"),"prompt":text(MAX_TEXT_BYTES),"expected_generation":count.clone(),"no_fallback?":{"type":"boolean"}}
-            }),
-        ),
-        (
-            "Run, inspect, cancel or resume a checkpointed graph. Run and resume take a project-local document path.",
-            json!({
-                "run":{"document":text(MAX_ARTIFACT_PATH_BYTES)},"status":{"id":pattern("^[A-Za-z0-9._-]{1,64}$")},
-                "cancel":{"id":pattern("^[A-Za-z0-9._-]{1,64}$"),"reason?":nullable(text_allowing_empty(provenant_fabric_runtime::graph::MAX_CANCEL_REASON_BYTES))},"resume":{"document":text(MAX_ARTIFACT_PATH_BYTES),"extend?":array(json!({"type":"string","minLength":3,"maxLength":256,"pattern":r"^[^=\u0000]+=[^\u0000]+$","x-provenant-maxUtf8Bytes":256}),0,64)}
             }),
         ),
         (
@@ -308,6 +299,22 @@ fn build_strict() -> Vec<Value> {
         .zip(tools)
         .map(|((kind, name), (description, operations))| {
             let mut input = tagged("op", operations);
+            if *kind == ToolKind::Run {
+                let graph = tagged("op", json!({
+                    "run":{"document?":{"type":"object"},"brief?":text(MAX_TEXT_BYTES),"use?":text(128),"tier?":text(128),"over?":{"anyOf":[{"type":"array","items":text(1024)},text(128)]},"set?":{"type":"object"},"explain?":{"type":"boolean"},"wait_seconds?":integer(1,crate::MAX_WAIT_SECONDS)},
+                    "status":{"id?":text(200),"stats?":{"type":"boolean"},"by?":choices(&["tier","template"]),"wait_seconds?":integer(1,crate::MAX_WAIT_SECONDS)},
+                    "stop":{"id":text(200),"reason?":text_allowing_empty(provenant_fabric_runtime::graph::MAX_CANCEL_REASON_BYTES),"wait_seconds?":integer(1,crate::MAX_WAIT_SECONDS)},
+                    "retry":{"id":text(200),"node?":text(200),"brief?":text(MAX_TEXT_BYTES),"extend?":array(text(256),0,64),"wait_seconds?":integer(1,crate::MAX_WAIT_SECONDS)},
+                    "edit":{"id":text(200),"patch":{"type":"object"}},
+                    "templates":{"name?":text(128),"templates?":{"type":"object"}},
+                    "output":{"id":text(200),"trace":{"const":true}}
+                }));
+                input["oneOf"].as_array_mut().unwrap().extend(graph["oneOf"].as_array().unwrap().iter().cloned());
+            }
+            if *kind == ToolKind::Output {
+                let trace = tagged("op", json!({"trace":{"id":text(200)}}));
+                input["oneOf"].as_array_mut().unwrap().extend(trace["oneOf"].as_array().unwrap().iter().cloned());
+            }
             if matches!(
                 kind,
                 ToolKind::Mail
@@ -522,7 +529,6 @@ fn is_advanced(name: &Value) -> bool {
             "fabric_task"
                 | "fabric_events"
                 | "fabric_lease"
-                | "fabric_graph"
                 | "fabric_inbox"
                 | "fabric_console"
                 | "fabric_chair"
@@ -569,6 +575,34 @@ pub fn near_argument(name: &str, value: &Value, path: &str) -> Option<String> {
     let normalised = path.replace('[', ".").replace(']', "");
     let segments: Vec<&str> = normalised.split('.').skip(1).collect();
     let (given, parents) = segments.split_last()?;
+    if parents.is_empty()
+        && let Some(options) = root["oneOf"].as_array()
+    {
+        let matching: Vec<_> = options
+            .iter()
+            .filter(|option| {
+                value
+                    .get("op")
+                    .is_some_and(|op| option["properties"]["op"]["const"] == *op)
+            })
+            .collect();
+        if matching.len() > 1 {
+            let fields: std::collections::BTreeSet<_> = matching
+                .iter()
+                .flat_map(|variant| {
+                    variant["properties"]
+                        .as_object()
+                        .into_iter()
+                        .flat_map(|fields| fields.keys().map(String::as_str))
+                })
+                .collect();
+            return if fields.contains(*given) {
+                None
+            } else {
+                nearest(given, fields.into_iter()).map(str::to_owned)
+            };
+        }
+    }
     let (holder, owner) = locate(root, value, parents)?;
     let object = settle(root, holder, owner);
     if let Some(variants) = object["oneOf"].as_array() {
@@ -576,10 +610,11 @@ pub fn near_argument(name: &str, value: &Value, path: &str) -> Option<String> {
             return None;
         }
         let typed = owner.get(*given)?.as_str()?;
-        let choices = variants
+        let choices: std::collections::BTreeSet<_> = variants
             .iter()
-            .filter_map(|variant| variant["properties"][*given]["const"].as_str());
-        return nearest(typed, choices).map(str::to_owned);
+            .filter_map(|variant| variant["properties"][*given]["const"].as_str())
+            .collect();
+        return nearest(typed, choices.into_iter()).map(str::to_owned);
     }
     let fields = object["properties"].as_object()?;
     if fields.contains_key(*given) {
@@ -781,13 +816,22 @@ fn structural_path(root: &Value, schema: &Value, value: &Value, path: &str) -> O
         return structural_path(root, root.pointer(pointer.strip_prefix('#')?)?, value, path);
     }
     if let Some(options) = schema["anyOf"].as_array() {
-        return if value.is_null() {
+        return if options
+            .iter()
+            .any(|option| structural_path(root, option, value, path).is_none())
+        {
             None
         } else {
             structural_path(root, &options[0], value, path)
         };
     }
     if let Some(options) = schema["oneOf"].as_array() {
+        if options
+            .iter()
+            .any(|option| structural_path(root, option, value, path).is_none())
+        {
+            return None;
+        }
         for tag in ["op", "scope", "kind"] {
             if let Some(selected) = value.get(tag) {
                 let option = options

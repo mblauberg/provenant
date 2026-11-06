@@ -23,6 +23,8 @@ use std::{
 };
 
 pub struct Context {
+    /// An in-memory context for observation; mutation services must refuse it.
+    pub inspection_only: bool,
     pub roots: Roots,
     pub identity: Identity,
     pub config: FabricConfig,
@@ -189,6 +191,7 @@ impl Context {
             key,
         )?;
         Ok(Self {
+            inspection_only: false,
             roots,
             identity,
             config,
@@ -231,6 +234,65 @@ impl Context {
             key,
         )?;
         Ok(Self {
+            inspection_only: false,
+            roots,
+            identity,
+            config,
+            graph_prompt_limit_source,
+            in_lane: in_lane(),
+            executor,
+            home: home.to_path_buf(),
+            cwd: cwd.to_path_buf(),
+        })
+    }
+    /// Inspect templates and compile explanations before this host has an identity.
+    /// The placeholder identity is never persisted or used to launch work.
+    pub fn open_inspection(roots: Roots, home: &Path, cwd: &Path) -> Result<Self, EdgeError> {
+        let resolved = provenant_config::read_with_domains(&roots, &crate::domains::SECTIONS)?;
+        let graph_prompt_limit_source = prompt_limit_source(&resolved.origins);
+        let config = resolved.domains.fabric;
+        let git = provenant_os::git::git_executable().ok_or(EdgeError::GitUnavailable)?;
+        let runtime = provenant_confinement::UtilityRuntime::read_only(git)?;
+        let executor = SystemExecutor::new(1)?;
+        let budget = provenant_confinement::UtilityBudget::bounded(Duration::from_secs(5))?;
+        let discovered = runtime.project_location(&executor, cwd, budget, &CancelToken::new())?;
+        let state_present = roots.state.as_path().try_exists()?;
+        let binding = if state_present {
+            provenant_config::lookup_project(&roots, &discovered.location)?
+        } else {
+            None
+        };
+        let host = if state_present {
+            provenant_config::lookup_host(&roots)?
+        } else {
+            None
+        }
+        .unwrap_or_else(|| HostId::from_bytes([0; 16]));
+        let common_dir = discovered.location.common_dir();
+        let digest =
+            provenant_records::CanonicalV1::file_digest(common_dir.as_os_str().as_encoded_bytes());
+        let mut bytes = [0; 16];
+        bytes.copy_from_slice(&digest.bytes()[..16]);
+        let project = binding.map_or_else(
+            || provenant_core::ProjectId::from_bytes(bytes),
+            |binding| binding.project_id(),
+        );
+        let identity = Identity {
+            project,
+            host,
+            inbox: provenant_fabric_runtime::identity::inbox_address(
+                host,
+                &config,
+                std::env::var_os("PROVENANT_AGENT_LABEL").as_deref(),
+                None,
+            )?,
+            client: config.client_label.clone(),
+            cwd: AbsolutePath::new(cwd).map_err(|_| EdgeError::Invalid)?,
+            common_dir: AbsolutePath::new(common_dir).map_err(|_| EdgeError::Invalid)?,
+            federation: None,
+        };
+        Ok(Self {
+            inspection_only: true,
             roots,
             identity,
             config,
@@ -269,6 +331,7 @@ impl Context {
             key,
         )?;
         Ok(Self {
+            inspection_only: false,
             roots,
             identity,
             config,
