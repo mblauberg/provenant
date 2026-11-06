@@ -413,6 +413,17 @@ fn admit_patch_for_retry(
     }
 }
 
+/// Redo a selected node and its transitive consumers as one atomic mutation.
+/// The host saves the resulting patch and state transitions to the events journal.
+pub fn retry_node_and_dependants(
+    graph: &mut LiveGraph<'_>,
+    id: &str,
+    brief: Option<&str>,
+    context: &PatchContext<'_>,
+) -> Result<Admitted, PatchError> {
+    retry_node_scope(graph, id, brief, context, true)
+}
+
 /// Redo a settled node or container, retaining prior attempts and journalling the reset.
 /// The caller holds the graph lock and saves the result before advancing.
 pub fn retry_node(
@@ -420,6 +431,16 @@ pub fn retry_node(
     id: &str,
     brief: Option<&str>,
     context: &PatchContext<'_>,
+) -> Result<Admitted, PatchError> {
+    retry_node_scope(graph, id, brief, context, false)
+}
+
+fn retry_node_scope(
+    graph: &mut LiveGraph<'_>,
+    id: &str,
+    brief: Option<&str>,
+    context: &PatchContext<'_>,
+    dependants: bool,
 ) -> Result<Admitted, PatchError> {
     let expanded = plans::expand(
         graph.document,
@@ -445,6 +466,12 @@ pub fn retry_node(
             "container retry requires per-leaf brief edits",
         ));
     }
+    // Enclosing joins depend on their members, but redoing one member must
+    // only recompute those joins, rather than retiring the selected member.
+    let redo_container = |node: &GraphNode| {
+        (node.composite.is_some() || node.loop_body.is_some())
+            && (node.id == id || !id.starts_with(&format!("{}--", node.id)))
+    };
     let prefix = format!("{id}--");
     let mut reset_ids = BTreeSet::from([id.to_owned()]);
     if container {
@@ -455,6 +482,27 @@ pub fn retry_node(
                 .filter(|node| node.id.starts_with(&prefix))
                 .map(|node| node.id.clone()),
         );
+    }
+    if dependants {
+        loop {
+            let before = reset_ids.len();
+            let prefixes: Vec<_> = expanded
+                .nodes
+                .iter()
+                .filter(|node| reset_ids.contains(&node.id) && redo_container(node))
+                .map(|node| format!("{}--", node.id))
+                .collect();
+            for node in &expanded.nodes {
+                if node.dependencies().any(|parent| reset_ids.contains(parent))
+                    || prefixes.iter().any(|prefix| node.id.starts_with(prefix))
+                {
+                    reset_ids.insert(node.id.clone());
+                }
+            }
+            if reset_ids.len() == before {
+                break;
+            }
+        }
     }
     for progress in &graph.checkpoint.nodes {
         if reset_ids.contains(&progress.id)
@@ -541,12 +589,19 @@ pub fn retry_node(
     }
     // A producer's old descendants cannot share names and dependency edges
     // with a new execution, so their expansions retire in this same candidate.
-    let retired = if container {
-        super::retire::dynamic_subtree(&mut candidate, id, &format!("retry node {id}"))
-            .map_err(PatchError::invalid)?
-    } else {
-        BTreeSet::new()
-    };
+    let mut retired = BTreeSet::new();
+    for container in expanded.nodes.iter().filter(|node| {
+        reset_ids.contains(&node.id) && (redo_container(node) || dependants && node.plan.is_some())
+    }) {
+        retired.extend(
+            super::retire::dynamic_subtree(
+                &mut candidate,
+                &container.id,
+                &format!("retry node {id}"),
+            )
+            .map_err(PatchError::invalid)?,
+        );
+    }
     if !retired.is_empty() {
         // The container's own spec loses the wiring the retired expansions added.
         node = plans::expand(
@@ -559,13 +614,22 @@ pub fn retry_node(
         .into_iter()
         .find(|node| node.id == id)
         .ok_or_else(|| PatchError::invalid(format!("unknown node {id}")))?;
+        if let Some(brief) = brief {
+            node.prompt = brief.to_owned();
+        }
     }
     for progress in &mut candidate.nodes {
         if reset_ids.contains(&progress.id) {
+            let container = expanded.nodes.iter().any(|node| {
+                reset_ids.contains(&node.id)
+                    && redo_container(node)
+                    && (node.id == progress.id
+                        || progress.id.starts_with(&format!("{}--", node.id)))
+            });
             *progress = reset_progress(progress, container)?;
         }
     }
-    if container {
+    if container || dependants {
         // Terminal loop decisions belong to the old execution, while explicit
         // round allowances remain part of the graph's configured limits.
         candidate.extensions.retain(|extension| {

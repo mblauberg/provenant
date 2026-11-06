@@ -771,7 +771,7 @@ impl Factory {
                 .ok_or(FacadeError::NotFound)?;
             let library = self.template_library(None)?;
             let resolver = self.launch_resolvers(Some(&encode(&execution.document)?))?;
-            patch::retry_node(
+            patch::retry_node_and_dependants(
                 &mut LiveGraph {
                     document: &execution.document,
                     checkpoint: &mut checkpoint,

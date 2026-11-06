@@ -1001,11 +1001,41 @@ mod provisioning_tests {
         relay::fence_provisioning(&mut checkpoint, "a--w", path, &source);
         journal.save(&checkpoint)?;
         assert!(!project.join(path).exists());
-        // The next serve reloads the checkpoint and finishes the provisioning.
+        // Process death releases the journal lock. Recover using a fresh host.
+        drop(journal);
+        let mut journal = FileJournal::open(
+            &context.roots.state,
+            context.identity.project,
+            "g-crash",
+            budget,
+            &cancel,
+            &clock,
+        )?;
         let mut reloaded = journal.load("g-crash")?.expect("checkpoint");
         recover_provisioning(&context, &mut journal, &mut reloaded, &cancel)?;
         assert_eq!(git(&["-C", path, "rev-parse", "HEAD"])?, source);
         assert!(relay::pending_provisioning(&reloaded).is_empty());
+        let saved = journal.load("g-crash")?.expect("checkpoint");
+        assert!(relay::pending_provisioning(&saved).is_empty());
+
+        // Git finished, but the host crashed before saving the cleared fence.
+        // Reusing the same path must not allocate another tree or branch.
+        relay::fence_provisioning(&mut reloaded, "a--w", path, &source);
+        journal.save(&reloaded)?;
+        drop(journal);
+        let before = git(&["worktree", "list", "--porcelain"])?;
+        let mut journal = FileJournal::open(
+            &context.roots.state,
+            context.identity.project,
+            "g-crash",
+            budget,
+            &cancel,
+            &clock,
+        )?;
+        let mut reloaded = journal.load("g-crash")?.expect("checkpoint");
+        recover_provisioning(&context, &mut journal, &mut reloaded, &cancel)?;
+        assert_eq!(git(&["worktree", "list", "--porcelain"])?, before);
+        assert_eq!(git(&["-C", path, "rev-parse", "HEAD"])?, source);
         let saved = journal.load("g-crash")?.expect("checkpoint");
         assert!(relay::pending_provisioning(&saved).is_empty());
         Ok(())
