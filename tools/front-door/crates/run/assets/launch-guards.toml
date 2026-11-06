@@ -503,6 +503,7 @@ reason = "Request digest and host-owned retry checks bind launch to the validate
 site = "confinement/src/permissions/validation.rs#validate_profile_spec_impl"
 boundary = "configurable_default"
 setting = "domains.run.grant_limit"
+code = "CONFINEMENT"
 reason = "Profile family counts use the configured grant limit and name its origin in a refusal; authentication and native controls preserve historical minimum caps of 16 and 64."
 
 [[guard]]
