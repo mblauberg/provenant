@@ -873,8 +873,21 @@ pub(crate) fn valid_identifier(value: &str) -> bool {
 /// Why a node's attempt spec cannot launch through the graph, if it cannot.
 /// Worktree creation is owned by the graph, not an individual attempt.
 fn attempt_error(node: &GraphNode, spec: &AttemptSpec) -> Option<&'static str> {
-    if spec.new_worktree.is_some() {
-        return Some("graph attempts do not support new_worktree");
+    if let Some(new) = &spec.new_worktree {
+        if node.access != AccessMode::WorktreeWrite {
+            return Some("new worktree requires a writer");
+        }
+        if node.source.is_some() || node.continues.is_some() {
+            return Some("new worktree cannot override a source binding");
+        }
+        let path = format!(".worktrees/{}", new.branch.replace('/', "-"));
+        if node.worktree.as_deref() != Some(path.as_str())
+            || path.len() > 251
+            || provenant_confinement::repo::GitRefName::branch(&new.branch).is_err()
+            || provenant_confinement::repo::GitRevision::new(&new.base).is_err()
+        {
+            return Some("invalid new worktree binding");
+        }
     }
     if spec.write_roots.len() > 32
         || spec
@@ -1284,6 +1297,13 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
             (
                 document.schema_version >= 2 && progress.source_binding != node.source,
                 "source selection must match the expanded plan",
+            ),
+            (
+                progress.extra.get("new_worktree_base").is_some_and(|base| {
+                    node.attempt.as_ref().is_none_or(|spec| spec.new_worktree.is_none())
+                        || base.as_str().is_none_or(|base| base.parse::<provenant_core::GitOid>().is_err())
+                }),
+                "writer provisioning must retain a full commit base",
             ),
             (
                 progress.source_commit.is_some()
