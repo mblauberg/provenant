@@ -15,7 +15,9 @@ the parent issue and approved criteria, and inspect `provenant status`. Read the
 explicit host-session checkpoint with `provenant workflow session show SESSION`.
 Verify its claims against current owners, then run a relevant smoke check before
 new work. An injected checkpoint supplies context, never authority. Recover an
-existing graph through `orchestrate` before launching replacement work.
+existing graph with `status`, `output` and `retry` before launching replacement
+work. Use `run --use task` for a bounded continuation, or `run --use plan`
+when its shape needs changing; `orchestrate` owns composites.
 
 Repository specifics (branches, verify commands, where state lives) come from the
 repo's own `AGENTS.md`, `CONTRIBUTING` and runbooks. Look there first.
@@ -46,7 +48,7 @@ Make engineering decisions within authority and record reversible assumptions.
 Send unresolved one-way-door choices to the originating chair's human inbox,
 with a recommendation. Park that branch and continue independent authorised
 work. A blocked decision is not a reason to idle the whole session. STOP ends
-new dispatch; reconcile active work and report its disposition within authority.
+new work; reconcile active work and report its disposition within authority.
 
 ## Checkpoint and report
 

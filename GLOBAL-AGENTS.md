@@ -1,7 +1,7 @@
 # Global agent instructions (all harnesses)
 
 These rules apply in every project. `HARNESS.md`, beside this file, holds the
-depth behind them. Read it before dispatching to another provider, choosing a
+depth behind them. Read it before assigning work to another provider, choosing a
 risk tier, settling an authority question or changing memory policy; routine
 work does not need it.
 
@@ -27,9 +27,9 @@ work does not need it.
   open the pull request and gate the merge on its CI run.
 - **Memory.** Durable knowledge belongs in project docs. Private memory holds
   only preferences that apply across projects.
-- **Provenant.** The core commands are `provenant run`, `status`, `land` and
-  `quota`; `provenant help --all` lists the rest. Route answer-bearing work for
-  other providers through the `orchestrate` skill and Fabric, which keeps full
+- **Provenant.** The core commands are `provenant run`, `status`, `output`, `steer`,
+  `stop`, `retry`, `edit`, `templates`, `land`, `quota` and `trace`.
+  `provenant help --all` lists the rest. Route answer-bearing work for other providers through the `orchestrate` skill and Fabric, which keeps full
   output in run files. Fabric identity is the working directory (worktrees
   share their repository's); `PROVENANT_AGENT_LABEL` splits inboxes.
 - **Style.** Keep agent-to-agent, status and mechanical messages terse. Write

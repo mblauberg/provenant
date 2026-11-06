@@ -1,6 +1,6 @@
 # Reviewer context
 
-Every lens reviewer receives the same context, in a Fabric preset or a manual
+Every lens reviewer receives the same context, in a template composite or a manual
 council.
 
 - You have read access to the whole repository. The diff stat and per-file

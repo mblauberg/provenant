@@ -1,75 +1,42 @@
 ---
 name: orchestrate
-description: "Use for Fabric graphs, presets, fan-out, councils, repair loops and agent batches. Not for single-owner work or coupled defects (diagnose). Session owns continuing goals and STOP missions."
+description: "Use for template graphs, composites, parallel work, review panels and bounded repair loops. Not for single-owner work or coupled defects (diagnose). Session owns continuing goals and STOP missions."
 ---
 
 # Orchestrate
 
-Parallelise independent reads, reviews, hypotheses and disjoint writes. Keep
-coupled writes in one lane. Start with 3 to 5 lanes unless the work is
-mechanical; each lane needs a checkable return that earns its coordination cost.
+Use `task` for one bounded assignment, `plan` when the shape is unsettled,
+`batch` for parallel implementation and `deliver` for implementation through
+landing. A composite is a template containing nodes; dotted names select
+flavours such as `review.security` and `implement.fix`.
 
-## Choose the graph
+```sh
+provenant run --use plan --file brief.md --explain
+provenant run --use batch --file approved-work.md
+```
 
-| Job | Preset | Key parameters under `parameters` |
-|---|---|---|
-| Map unfamiliar ground | `scout-swarm` | `width`, `external`, `read_roots` |
-| Reconcile independent views | `fan-out-synthesise` | `width`, `route` |
-| Gather independent returns | `fan-out` | `width`, `route` |
-| Scope, then build with authority | `scope-then-run` | `worktree`, `write_scope`, `spec` |
-| Implement one approved slice | `generator-evaluator` | `worktree`, `scope`, `lenses` |
-| Review a pinned subject | `review` | `subject.commit`, `risk_tier`, `risk_tags` |
-| Integrate several writer lanes | `big-batch` | `lanes`, `batch_worktree`, `integration_branch` |
-| Write through CI, repair and land | `deliver` | `worktree`, `max_iterations`, `land`, `decision_session` |
-| One bounded task or two sequential passes | `single`, `chain` | `route` |
+Inspect the explanation before submitting. Choose `explore` over named areas
+when evidence is thin, `research` for dated primary sources, and `review` for
+a pinned head. Use nodes with `over` for independent questions or slices,
+`after` for dependencies and `inputs` for evidence. Templates live in bundled,
+user, repository and inline layers; repository templates belong under
+`.provenant/templates/`. See the [template runbook](../../docs/runbooks/presets.md).
 
-`scope-then-run` includes a writer: use it only when building is authorised.
-`deliver` opens a PR and can land by default; check those actions against the
-envelope. `single`, `chain` and the fan-out primitives default to read-only.
+Give every writer a separate worktree and literal write scope. Integrate slices
+into one branch, then review its combined head. The [planner brief](references/planner.md)
+owns slicing and tier choices; [brief and collect](references/dispatch.md)
+owns the hand-off. Keep coupled writes with one owner.
 
-## How it runs
+Use `provenant status` to orient and `provenant output TARGET` to collect.
+Use `steer` for a message, `stop` for a subtree, `retry` for unfinished work,
+and `edit` for a graph patch. Inside a worker, `run --use TEMPLATE` adds a child
+to the same graph, sharing budget, stopping and trace. Any agent may return a
+patch; started attempts stay immutable.
 
-Inspect `provenant preset list`, `provenant preset show P` and `provenant preset explain P`.
-Preview `provenant run --preset scout-swarm --prompt-file brief.md --set 'parameters.width=3' --explain`.
-Submit the same command without `--explain`; add `--params-file lanes.toml`, `--concurrency N` or `--wait 30m` as needed.
-For reviews pass `--plan on` by default and check the plan against the HARNESS
-floors; supplement coverage the runtime cannot select or enforce. For large
-batches leave `--plan` at its `auto` default or pass `--plan on`: a principal planner shapes `big-batch` lanes and waves, `scout-swarm`, `fan-out*` and `scope-then-run` scouts or workers (question, route, width, or no scout) and a large `review`'s lenses (only the panel's, with tiers) from the preset's catalogue, and `--explain` shows `plan: auto -> on|off (reason)`; `--plan off` keeps the static graph. `deliver --plan on` plans its review panel at launch against the pinned writer head. Pass `width`, `lanes` or `lenses` yourself when the brief already fixes the shape: the chair plans what it states, the planner what is left open.
-Use `provenant status` to orient, then wait once across outstanding work with
-`provenant status --wait --target lane:ID --target graph:ID --target pr:N`.
-The default returns on any observed transition; `--until all` waits for every
-target to settle and `--follow --json` streams until all are terminal. The
-bounded timeout comes from `[domains.wait].timeout_seconds`; override it with
-`--wait=30m`. An expiry leaves work running. Collect evidence with
-`provenant output TARGET` and the returned graph continuation command; waiting
-does not resume a paused graph. Replace repeated status calls and sleep loops
-with this mixed-target wait. See [mixed waits](../../docs/runbooks/lane-lifecycle.md#wait-on-mixed-work).
-
-The CLI expands presets; MCP `fabric_graph` accepts graph documents, not preset
-names. Keep custom compositions in `.provenant/presets/*.toml`. See the
-[preset runbook](../../docs/runbooks/presets.md) for nodes and role overrides.
-
-## Brief and collect
-
-Each brief states outcome, acceptance evidence, source revision, read roots,
-literal write scope, prohibited actions, authority, output location and stop
-conditions. Give independent reviewers the base, subject and spec, leaving the
-author's hypothesis out. `code-review` owns the rubric.
-
-For `big-batch`, stack dependent batches; independent lanes stay separate PRs. See the [stacked PR workflow](../../docs/runbooks/github-workflow.md#stacked-pull-requests).
-
-Register a separate worktree per writer. For `big-batch`, bind both lane
-worktrees and the serial batch worktree; integrate into the named branch before
-reviewing its combined head. Check returned commits, changed paths and tests
-against retained output. A fluent report or idle pane proves no criterion.
-
-Use deterministic gates for executable checks, bounded loops for repairs and
-councils for questions without a decisive oracle. Inspect recorded family
-separation before counting an independent review; HARNESS owns the ladder.
-Record unavailable legs and substitutions. The chair reconciles evidence and
-keeps authority, user communication and final acceptance.
-
-Load [dispatch](references/dispatch.md) for briefs, continuation and ready queues,
-[routing](references/routing-and-tiers.md) for councils and degradation, and
-[lane safety](references/lane-safety.md) for writer boundaries. Interactive pane
-operation belongs in the [Herdr runbook](../../docs/runbooks/herdr.md).
+Verify commits, changed paths, checks and actual routes against retained output.
+A synthesis cannot certify a failed gate. Use deterministic checks where an
+oracle exists and bounded repair with independent delta review otherwise.
+HARNESS owns review floors and authority; the chair keeps user communication
+and acceptance. Load [routing](references/routing-and-tiers.md) for tier and
+independence decisions and [writer boundaries](references/lane-safety.md) for
+confinement. Interactive observation belongs in the [Herdr runbook](../../docs/runbooks/herdr.md).
