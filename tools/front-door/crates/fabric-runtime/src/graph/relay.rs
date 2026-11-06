@@ -62,6 +62,8 @@ pub enum RelayOp {
     Add(ChildRequest),
     /// Mark the calling node as waiting on its children, or working again.
     Wait { waiting: bool },
+    /// Observe the calling node's children.
+    Children,
 }
 
 fn task() -> String {
@@ -126,6 +128,17 @@ pub fn admit_child(
     request: &ChildRequest,
     context: &PatchContext<'_>,
 ) -> Result<ChildReceipt, PatchError> {
+    admit_child_bound(graph, parent, request, context, None)
+}
+
+/// Host-bound writer destination and source; these are never lane arguments.
+pub fn admit_child_bound(
+    graph: &mut LiveGraph<'_>,
+    parent: &str,
+    request: &ChildRequest,
+    context: &PatchContext<'_>,
+    writer_base: Option<(&str, &str)>,
+) -> Result<ChildReceipt, PatchError> {
     let invalid = |message: String| PatchError {
         code: "invalid",
         message,
@@ -145,7 +158,21 @@ pub fn admit_child(
     let graph_id = graph.document.graph_id.clone();
     let node = format!("{parent}{SEPARATOR}{}", request.id);
     let worktree = request.writer.then(|| child_worktree(&graph_id, &node));
-    let patch = child_patch(request, worktree.as_deref(), context)?;
+    let mut patch = child_patch(request, worktree.as_deref(), context)?;
+    if let Some((branch, commit)) = writer_base {
+        let node = patch.nodes[0].as_object_mut().unwrap();
+        node.insert(
+            "delivery".into(),
+            serde_json::to_value(provenant_records::run::DeliveryMode::Integrate(
+                branch.into(),
+            ))
+            .unwrap(),
+        );
+        node.insert(
+            "source".into(),
+            serde_json::json!({"type":"commit", "commit":commit}),
+        );
+    }
     // A replay is answered before the parent's state is checked, so a retry
     // after the parent settles still gets its receipt.
     let replay = graph
@@ -154,6 +181,26 @@ pub fn admit_child(
         .iter()
         .filter_map(|expansion| expansion.patch.as_ref())
         .any(|record| record.key.as_deref() == Some(&request.idempotency_key));
+    if replay && writer_base.is_some() {
+        // The parent's head may have advanced since admission. Replay the
+        // captured host binding while still checking the lane's request digest.
+        let expanded = plans::expand(
+            graph.document,
+            &graph.checkpoint.extensions,
+            &graph.checkpoint.expansions,
+            context.limits,
+        )
+        .map_err(invalid)?;
+        if let Some(previous) = expanded.nodes.iter().find(|previous| previous.id == node) {
+            let patch_node = patch.nodes[0].as_object_mut().unwrap();
+            if let Some(delivery) = &previous.delivery {
+                patch_node.insert("delivery".into(), serde_json::to_value(delivery).unwrap());
+            }
+            if let Some(source) = &previous.source {
+                patch_node.insert("source".into(), serde_json::to_value(source).unwrap());
+            }
+        }
+    }
     if !replay {
         let progress = graph
             .checkpoint
@@ -474,4 +521,60 @@ pub(super) fn settle_subtrees<R: AttemptOwner, J: GraphJournal>(
         Some(error) => Err(GraphError::Run(error)),
         None => Ok(()),
     }
+}
+
+/// Child states visible to their parent, including terminal delivery outcomes.
+pub fn child_states(checkpoint: &GraphCheckpoint, parent: &str) -> Value {
+    let prefix = format!("{parent}--");
+    let children: Vec<_> = checkpoint
+        .nodes
+        .iter()
+        .filter(|node| node.id.starts_with(&prefix))
+        .map(|node| {
+            serde_json::json!({"node":node.id, "state":node.state,
+            "settled":node.state.settled()})
+        })
+        .collect();
+    serde_json::json!({"children":children})
+}
+
+/// Resolve the running parent's worktree from the current graph revision.
+pub fn parent_worktree(
+    document: &GraphDocument,
+    checkpoint: &GraphCheckpoint,
+    parent: &str,
+    limits: &crate::config::GraphLimits,
+) -> Result<Option<String>, String> {
+    Ok(plans::expand(
+        document,
+        &checkpoint.extensions,
+        &checkpoint.expansions,
+        limits,
+    )?
+    .nodes
+    .into_iter()
+    .find(|node| node.id == parent)
+    .and_then(|node| node.worktree))
+}
+
+/// Captured writer source used when provisioning or recovering a child checkout.
+pub fn child_source(
+    document: &GraphDocument,
+    checkpoint: &GraphCheckpoint,
+    child: &str,
+    limits: &crate::config::GraphLimits,
+) -> Result<Option<String>, String> {
+    Ok(plans::expand(
+        document,
+        &checkpoint.extensions,
+        &checkpoint.expansions,
+        limits,
+    )?
+    .nodes
+    .into_iter()
+    .find(|node| node.id == child)
+    .and_then(|node| match node.source {
+        Some(SourceBinding::Commit { commit }) => Some(commit),
+        _ => None,
+    }))
 }
