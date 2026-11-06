@@ -94,8 +94,6 @@ pub struct Expansion {
     /// Requested routes replaced by a fallback, for example a missing web route.
     pub substitutions: Vec<Value>,
     pub warnings: Vec<String>,
-    /// The planner decision, for a preset that declares planner patterns.
-    pub plan: Option<planner::Decision>,
 }
 
 /// Decode a lowered node and attach its stage and field to a type error.
@@ -1180,35 +1178,7 @@ pub fn expand_with(
         )
         .map_err(|error| format!("{error}; valid parameter and slot paths: {valid}"))?;
     }
-    let mut plan = None;
-    let mut catalogue = None;
-    if let Some(context) = &layers.plan {
-        plan = planner::decide(layers, context, name, &config, &origins, prompt)?;
-        if plan.as_ref().is_some_and(|decision| decision.applied) {
-            *layers.delegated_plan_stage.borrow_mut() = config
-                .pointer("/plan/delegate")
-                .and_then(Value::as_str)
-                .map(str::to_owned);
-        }
-        if plan.as_ref().is_some_and(|decision| decision.applied)
-            && config.pointer("/plan/delegate").is_none()
-        {
-            apply_shape_stages(layers, name, &mut config, &origins, prompt)?;
-            catalogue = Some(planner::apply(
-                layers,
-                context,
-                name,
-                &mut config,
-                &origins,
-                prompt,
-            )?);
-        }
-    }
-    if !plan.as_ref().is_some_and(|decision| decision.applied)
-        || config.pointer("/plan/delegate").is_some()
-    {
-        apply_shape_stages(layers, name, &mut config, &origins, prompt)?;
-    }
+    apply_shape_stages(layers, name, &mut config, &origins, prompt)?;
     let mut nodes = Vec::new();
     build(
         layers,
@@ -1222,28 +1192,6 @@ pub fn expand_with(
         &mut origins,
         &mut repo_files,
     )?;
-    fn has_deferred_planner(value: &Value) -> bool {
-        match value {
-            Value::Object(map) => {
-                map.contains_key("review_planner") || map.values().any(has_deferred_planner)
-            }
-            Value::Array(items) => items.iter().any(has_deferred_planner),
-            _ => false,
-        }
-    }
-    if config.pointer("/plan/delegate").is_some()
-        && !nodes.iter().any(has_deferred_planner)
-        && let Some(decision) = plan.as_mut().filter(|decision| decision.applied)
-    {
-        let reason = "delegated review cannot be planned; using deterministic selection".to_owned();
-        decision.applied = false;
-        decision.reason = reason.clone();
-        decision.degraded = Some(reason.clone());
-        decision.warnings.push(reason);
-    }
-    if let Some(catalogue) = catalogue {
-        planner::attach(&mut nodes, catalogue)?;
-    }
     // Request bindings affect how inputs reach parameters, not the graph itself.
     origins.retain(|path, _| {
         !path.ends_with("$scope_read_only")
@@ -1359,18 +1307,7 @@ pub fn expand_with(
     ));
     let roles: BTreeMap<String, Value> = layers.used_roles.take().into_iter().collect();
     let substitutions = layers.substitutions.take();
-    let mut warnings = layers.warnings.take();
-    if let Some(why) = plan
-        .as_ref()
-        .and_then(|decision| decision.degraded.as_ref())
-    {
-        warnings.push(format!(
-            "planner unavailable, running the preset's deterministic defaults: {why}"
-        ));
-    }
-    if let Some(decision) = &plan {
-        warnings.extend(decision.warnings.iter().cloned());
-    }
+    let warnings = layers.warnings.take();
     for (role, used) in &roles {
         origins.insert(
             format!("roles.{role}"),
@@ -1380,16 +1317,13 @@ pub fn expand_with(
     // Provenance rides in the graph document so it is hashed into the graph
     // identity and retained with the run: where each value came from, which
     // roles (with digests) were used and any route substituted.
-    let mut provenance = json!({
+    let provenance = json!({
         "preset": name,
         "origins": origins,
         "roles": roles,
         "substitutions": substitutions,
         "warnings": warnings,
     });
-    if let Some(decision) = &plan {
-        provenance["plan"] = decision.to_json();
-    }
     typed.extra.insert("provenance".into(), provenance);
     let mut document = serde_json::to_value(&typed).map_err(|error| error.to_string())?;
     let map = document.as_object_mut().ok_or("graph must be a table")?;
@@ -1427,7 +1361,6 @@ pub fn expand_with(
         roles,
         substitutions,
         warnings,
-        plan,
     })
 }
 
@@ -2363,7 +2296,6 @@ fn build_stages(
                 "decision_session",
                 "retry",
                 "pattern",
-                "plan",
                 "shape_stages",
             ]
             .contains(&key.as_str())
@@ -4616,12 +4548,6 @@ fn explain(
     if let Some(shape) = &expansion.review_shape {
         human.push_str(&format!("Review shape: {shape}\n"));
     }
-    if let Some(decision) = &expansion.plan {
-        human.push_str(&format!("{}\n", decision.line()));
-        if decision.requested != provenant_fabric_runtime::config::PlanMode::Off {
-            human.push_str(&format!("Planner route: {}\n", decision.route));
-        }
-    }
     for item in &pending {
         human.push_str(&format!("Pending {}: {}\n", item["id"], item["reason"]));
     }
@@ -4650,7 +4576,7 @@ fn explain(
     for warning in &expansion.warnings {
         human.push_str(&format!("Warning: {warning}\n"));
     }
-    let mut data = json!({"roles": expansion.roles, "substitutions": expansion.substitutions, "graph": expansion.document, "origins": expansion.origins, "limits":limits,"admission":admission,"inspection":metrics,"pending":pending,"review_shape":expansion.review_shape,"plan":expansion.plan.as_ref().map(planner::Decision::to_json)});
+    let mut data = json!({"roles": expansion.roles, "substitutions": expansion.substitutions, "graph": expansion.document, "origins": expansion.origins, "limits":limits,"admission":admission,"inspection":metrics,"pending":pending,"review_shape":expansion.review_shape});
     data["tier_mix"] = json!({"junior":tier_mix[0], "senior":tier_mix[1], "principal":tier_mix[2], "inverted":inverted, "line":tier_mix_line, "warning":tier_mix_warning});
     if !brief_warnings.is_empty() {
         data["warnings"] = json!(brief_warnings);
