@@ -80,7 +80,7 @@ for the first graph-cutover upgrade, run the new `install.sh --upgrade` without
 `--yes` on each host to see and act on its preflight before proceeding.
 
 The core commands are `run`, `status`, `output`, `steer`, `stop`, `retry`,
-`edit`, `templates`, `land`, `quota` and `trace`. Use `run --use task` for a
+`edit`, `templates`, `land` and `quota`. Use `run --use task` for a
 bounded assignment or `run --use deliver` for implementation through landing;
 see [templates](presets.md). `provenant help --all` lists advanced commands.
 

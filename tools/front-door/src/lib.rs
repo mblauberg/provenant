@@ -361,7 +361,9 @@ fn sync_registered_account(
 /// What a config command does: show, describe the schema, edit, or list history.
 enum ConfigAction<'a> {
     Show,
-    Schema,
+    Schema {
+        all: bool,
+    },
     Edit(provenant_config::KnobEdit<'a>),
     Apply {
         patch: &'a std::path::Path,
@@ -402,9 +404,15 @@ fn config_command(command: &str, action: ConfigAction, globals: &provenant_cli::
                 value["revision"] = revision.into();
                 value
             }
-            ConfigAction::Schema => {
+            ConfigAction::Schema { all } => {
                 let (resolved, revision) = config::show(&roots, sections)?;
-                serde_json::to_value(config::schema(&resolved, sections, revision)?)?
+                let mut schema = config::schema(&resolved, sections, revision)?;
+                if !all {
+                    schema
+                        .fields
+                        .retain(|field| config::documented_field(&field.path));
+                }
+                serde_json::to_value(schema)?
             }
             ConfigAction::Edit(edit) => {
                 let edited =
@@ -860,8 +868,8 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
         Command::Config(provenant_cli::Config::Show) => {
             config_command("config show", ConfigAction::Show, globals)
         }
-        Command::Config(provenant_cli::Config::Schema) => {
-            config_command("config schema", ConfigAction::Schema, globals)
+        Command::Config(provenant_cli::Config::Schema { all }) => {
+            config_command("config schema", ConfigAction::Schema { all }, globals)
         }
         Command::Config(provenant_cli::Config::Apply {
             file,

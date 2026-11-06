@@ -24,6 +24,17 @@ class ReferenceTests(unittest.TestCase):
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
 
+    def test_compact_configuration_keeps_advanced_fields_discoverable(self):
+        data = {"documented_fields": ["lanes.max_depth"], "knobs": {
+            "lanes.max_depth": {"default": 8, "effect": "Bound child depth"},
+            "config.history_max_bytes": {"default": 1024, "effect": "Bound history"}}}
+        compact = GEN['config_reference'](data)
+        self.assertIn('`lanes.max_depth`', compact)
+        self.assertNotIn('config.history_max_bytes', compact)
+        self.assertIn('config schema --all', compact)
+        self.assertIn('config.history_max_bytes', GEN['config_reference'](data, all_fields=True))
+
+
     def test_missing_sources_are_named_without_losing_available_sources(self):
         source = self.root / GEN['KNOBS']
         source.parent.mkdir(parents=True)

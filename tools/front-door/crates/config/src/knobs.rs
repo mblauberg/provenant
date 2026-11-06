@@ -13,6 +13,7 @@ const REGISTRY: &str = include_str!("../../../../../config/harness-knobs.json");
 #[derive(Deserialize)]
 pub(crate) struct Registry {
     pub(crate) knobs: BTreeMap<String, Spec>,
+    documented_fields: Vec<String>,
     pub(crate) presets: BTreeMap<String, Preset>,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -436,4 +437,24 @@ mod ceiling_tests {
             provenant_core::MAX_LANE_RUNTIME_SECONDS
         );
     }
+}
+
+/// Whether a field belongs to the compact agent-facing configuration surface.
+/// Full schema validation always includes advanced fields.
+pub fn documented_field(path: &str) -> bool {
+    registry().is_ok_and(|registry| {
+        registry.documented_fields.iter().any(|field| {
+            let mut expected = field.split('.');
+            let mut actual = path.split('.');
+            loop {
+                match (expected.next(), actual.next()) {
+                    (None, None) => return true,
+                    (Some(pattern), Some(value))
+                        if pattern == value
+                            || (pattern.starts_with('{') && pattern.ends_with('}')) => {}
+                    _ => return false,
+                }
+            }
+        })
+    })
 }

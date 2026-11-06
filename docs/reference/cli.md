@@ -518,12 +518,23 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 
 | Argument | Contract |
 |---|---|
+| `--all` | `{"defaults": ["false"], "description": "Include advanced configuration fields", "name": "all", "values": ["true", "false"]}` |
 | `--help` | `{"description": "Print help", "name": "help"}` |
 | `--version` | `{"description": "Print version", "name": "version"}` |
 
 ```json
 {
-  "description": "List each editable field with its type, bounds, default, effective value, source layer and whether a restart is needed"
+  "description": "List each editable field with its type, bounds, default, effective value, source layer and whether a restart is needed",
+  "groups": [
+    {
+      "arguments": [
+        "all"
+      ],
+      "multiple": true,
+      "name": "Schema",
+      "required": false
+    }
+  ]
 }
 ```
 

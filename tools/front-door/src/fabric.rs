@@ -2377,7 +2377,7 @@ mod test_presentation {
         command: &str,
         globals: &provenant_cli::Globals,
     ) -> String {
-        if command == "fabric graph status" && globals.full && !globals.json {
+        if command == "status" && globals.full && !globals.json {
             graph_human::graph_human_full(run)
         } else {
             graph_human(run)
@@ -2402,7 +2402,7 @@ mod test_presentation {
         if let Some(project) = &globals.project {
             status.push_str(&format!(" --project {}", shell_path(project)));
         }
-        status.push_str(&format!(" fabric graph status {}", run.checkpoint.graph_id));
+        status.push_str(&format!(" status {}", run.checkpoint.graph_id));
         format!(
             "Graph {}: waiting ({in_flight} nodes in flight); status: {status}\n{}",
             run.checkpoint.graph_id,
@@ -2414,7 +2414,7 @@ mod test_presentation {
         command: &str,
         run: provenant_fabric_runtime::graph::GraphRun,
     ) -> provenant_records::CommandResult<provenant_fabric_runtime::graph::GraphRun> {
-        let outcome = if command == "fabric graph wait"
+        let outcome = if command == "status wait"
             && run.status == provenant_fabric_runtime::graph::GraphStatus::Pending
         {
             provenant_records::Outcome::Waiting

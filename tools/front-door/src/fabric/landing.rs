@@ -178,7 +178,7 @@ pub fn landing(
                 ),
                 globals,
                 &human,
-                matches!(command, "fabric graph status"),
+                matches!(command, "status"),
                 Some(&summary),
             )
         }

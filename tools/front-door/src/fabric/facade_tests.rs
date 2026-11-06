@@ -749,13 +749,13 @@ pub(crate) mod peer_tests {
         let pause = Advance { clock: &clock, settle: std::cell::RefCell::new(None) };
         let pending = super::wait_graph(&clock, &pause, 1, &cancel, observe)?;
         assert_eq!(pending.status, GraphStatus::Pending);
-        let waited = serde_json::to_value(super::graph_command_result("fabric graph wait", pending.clone()))?;
-        let status = serde_json::to_value(super::graph_command_result("fabric graph status", pending.clone()))?;
+        let waited = serde_json::to_value(super::graph_command_result("status wait", pending.clone()))?;
+        let status = serde_json::to_value(super::graph_command_result("status", pending.clone()))?;
         assert_eq!(waited["status"], "waiting");
         assert_eq!(waited["data"]["checkpoint"]["graph_id"], "wait-test");
         assert_eq!(waited["data"], status["data"]);
         let human = super::graph_waiting_human(&pending, &provenant_cli::Globals::default());
-        assert!(human.contains("fabric graph status wait-test"));
+        assert!(human.contains("status wait-test"));
         assert!(!human.contains("graph resume"));
         assert_eq!(clock.mono_now().as_micros(), 1_000_000);
         checkpoint.nodes[0].state = NodeState::Succeeded;

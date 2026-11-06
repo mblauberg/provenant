@@ -15,4 +15,4 @@ Decide engineering calls and record them; assume reversible owner calls. For an 
 
 ## How it runs
 
-For independent hypotheses use `fan-out-synthesise` with `--set 'parameters.width=3'`, one falsifiable hypothesis per branch. Run `provenant run --preset fan-out-synthesise --prompt-file BRIEF --set 'parameters.width=3' --explain` before submission. Reconcile the results into one reproducer; the graph does not itself prove a cause.
+Test independent hypotheses with `provenant run --use explore --route junior --over hypothesis-a,hypothesis-b --file BRIEF --explain`. Reconcile evidence into one reproducer; a graph does not prove a cause.

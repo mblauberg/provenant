@@ -544,7 +544,11 @@ pub enum Config {
     Show,
     /// List each editable field with its type, bounds, default, effective
     /// value, source layer and whether a restart is needed.
-    Schema,
+    Schema {
+        /// Include advanced configuration fields
+        #[arg(long)]
+        all: bool,
+    },
     /// Validate a JSON patch of `{"field": value}` (null clears a field) and
     /// commit all of it or none, if the configuration is still at the revision.
     Apply {
@@ -643,7 +647,7 @@ pub struct GraphRunArgs {
     /// Select a layered template [default: task]
     #[arg(long = "use")]
     pub template: Option<String>,
-    /// Override the template's named route tier
+    /// Override the template's route tier
     #[arg(long, visible_alias = "route")]
     pub tier: Option<String>,
     /// Access for a plain task; writer targets imply worktree-write

@@ -1187,7 +1187,7 @@ mod tests {
             "Inspect the code",
             "--use",
             "explore",
-            "--tier",
+            "--route",
             "junior",
             "--over",
             "cli",
@@ -1217,6 +1217,9 @@ mod tests {
         valid(&["status", "--stats", "--by", "template"]);
         invalid(&["status", "--by", "tier"]);
         invalid(&["status", "--stats", "--by", "node"]);
+        valid(&["config", "schema", "--all"]);
+        valid(&["run", "--tier", "junior"]);
+        invalid(&["run", "--tier", "senior", "--route", "junior"]);
         valid(&["templates"]);
         valid(&["templates", "review.security", "--file", "inline.toml"]);
         valid(&["edit", "example", "--file", "patch.toml"]);
@@ -1225,7 +1228,6 @@ mod tests {
             "--preset",
             "--prompt-file",
             "--model",
-            "--route",
             "--manifest",
             "--plan",
         ] {

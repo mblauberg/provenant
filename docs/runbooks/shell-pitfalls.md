@@ -56,13 +56,10 @@ clean when the command in fact never ran, or ran on the wrong input.
   commit exists upstream, which is sound grounds to drop work. A `+` only
   means none was found; work redone with a different shape still reads `+`.
   Settle a `+` by reading what upstream code now does.
-- **Use the bounded CLI run path.** `provenant run --prompt-file brief.md
-  --route senior` submits, waits up to 240 seconds and prints a result tail.
-  Its `--wait` accepts durations such as `30m` and `3600s`; put long waits in
-  the background. A timeout leaves the lane running and prints the exact
-  command to keep waiting. Follow that command rather than dispatching again.
-  Use `provenant status` after a restart and `provenant help run` for advanced
-  flags.
+- **Use a bounded wait.** `provenant run --route junior --file brief.md --wait=30m`
+  starts a template and waits up to 30 minutes. Expiry leaves work running.
+  Collect with `output TARGET` and observe with `status --wait=30m --target
+  graph:ID`. Recover the existing graph with `retry ID` after checking its state.
 - **Long waits can outlive the command window.** If a foreground shell call
   approaches its roughly ten-minute cap, the process may continue without its
   result reaching the caller. Prefer the harness's own background run, which

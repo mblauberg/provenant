@@ -49,7 +49,7 @@ with rates; a checks gate without a configured pool uses the check issuer app
 slug. Unknown cost never refuses, and the cap refuses only priced spend.
 Post-merge follow raises an `unsettled` alarm if checks remain pending at its
 timeout. Choose a cap appropriate to the project's spending authority. See the
-[settings reference](../reference/config-keys.md#host-land-settings) for the
+[settings reference](../reference/config-keys-all.md#host-land-settings) for the
 remaining options and per-project and tier overrides.
 
 Run the existing lander as the publisher while evaluating the same ordered PRs

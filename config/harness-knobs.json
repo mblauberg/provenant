@@ -1,5 +1,33 @@
 {
   "schema_version": 1,
+  "documented_fields": [
+      "profile",
+      "lanes.max_concurrency",
+      "lanes.max_concurrency_read_only",
+      "lanes.max_depth",
+      "lanes.silence_seconds",
+      "lanes.slot_wait_seconds",
+      "lanes.publish",
+      "routing.exclude",
+      "routing.graph_exclude",
+      "fabric.accept_handoff",
+      "usage.project_attribution",
+      "domains.run.writer_token_budget",
+      "domains.pr.land.integration",
+      "domains.pr.land.batch_size",
+      "domains.pr.land.gate.checks",
+      "domains.pr.land.gate.timeout_seconds",
+      "domains.pr.land.local_gate.mode",
+      "domains.pr.land.local_gate.commands",
+      "domains.fabric.graph.limits.nodes",
+      "domains.fabric.graph.limits.expansion_depth",
+      "domains.fabric.graph.limits.concurrency",
+      "domains.fabric.lanes.max_concurrent_builds",
+      "domains.fabric.lanes.build_wait_minutes",
+      "providers.{provider}.update",
+      "providers.{provider}.runtime_deadline_seconds",
+      "gc.graph_checkpoint_days"
+  ],
   "host_gc_settings": {
     "path": "gc",
     "settings": {
@@ -155,8 +183,8 @@
       "ci_poll_backoff.initial_seconds": {"type": "int", "allowed": "seconds, 0 or more", "default": "0", "effect": "Initial delay after a pending CI observation. Each later observation doubles the delay up to max_seconds; the remaining CI timeout takes precedence. Zero makes the gate eligible at the next tick."},
       "ci_poll_backoff.max_seconds": {"type": "int", "allowed": "seconds, 0 or more", "default": "0", "effect": "Maximum per-gate polling delay. The 60-second scheduler interval determines the earliest automatic re-check."},
       "ci_poll_overrides.<node_id>": {"type": "table", "allowed": "initial_seconds and max_seconds", "default": "empty", "effect": "Override the host CI polling policy for one node ID. Values and origins appear in config show."},
-      "allowed_read_roots": {"type": "string_list", "allowed": "absolute directory paths", "default": "empty (read roots stay inside the project and its registered worktrees)", "effect": "Absolute host directories that graph and preset `read_roots` may name besides the project's own registered worktrees."},
-      "limits.expansion_depth": {"type": "int", "allowed": "1 or more", "default": "64", "effect": "Longest dependency chain in edges, root nodes at depth 0, and deepest composite nesting a graph may expand to. The bundled `big-batch` preset needs 33. Graph documents cannot raise it."},
+      "allowed_read_roots": {"type": "string_list", "allowed": "absolute directory paths", "default": "empty (read roots stay inside the project and its registered worktrees)", "effect": "Absolute host directories that template `read_roots` may name besides the project's own registered worktrees."},
+      "limits.expansion_depth": {"type": "int", "allowed": "1 or more", "default": "64", "effect": "Longest dependency chain in edges, root nodes at depth 0, and deepest composite nesting a graph may expand to. Graph documents cannot raise it."},
       "limits.continuations": {"type": "int", "allowed": "0 or more", "default": "2", "effect": "Graph continuations limit."},
       "limits.nodes": {"type": "int", "allowed": "1 or more", "default": "512", "effect": "Graph nodes limit."},
       "limits.edges": {"type": "int", "allowed": "1 or more", "default": "4096", "effect": "Graph edges limit."},
@@ -166,17 +194,6 @@
       "limits.graph_prompt_bytes": {"type": "int", "allowed": "1 or more", "default": "4194304", "effect": "Graph graph prompt bytes limit."},
       "limits.fan_out_width": {"type": "int", "allowed": "1 or more", "default": "32", "effect": "Graph fan out width limit."},
       "limits.concurrency": {"type": "int", "allowed": "0 or more", "default": "0", "effect": "Graph concurrency limit. Zero uses host lane caps."}
-    }
-  },
-  "host_plan_settings": {
-    "path": "domains.fabric.plan",
-    "settings": {
-      "mode": {"type": "enum", "allowed": "auto, on or off", "default": "auto", "effect": "Default for `provenant run --preset --plan`. on puts a principal planner node in front of the preset graph so it can shape the graph from the preset's pattern catalogue; off keeps the preset's static graph; auto stays off when the preset's shape parameter has any non-bundled origin and otherwise plans when the subject is large or its shape is unset; for big-batch unset lanes always force on, so the auto.* thresholds only change the recorded reason. `--explain` prints the decision and its reason."},
-      "route": {"type": "string", "allowed": "a pool alias", "default": "principal", "effect": "Route alias the planner node runs on. When it is unavailable (undefined, excluded, exhausted or unauthenticated) the run falls back to the preset's deterministic defaults and records the reason; a weaker planner is never substituted."},
-      "max_nodes": {"type": "int", "min": 1, "max": 512, "default": "24", "effect": "Most nodes and pattern instances one plan may emit, within the host graph limits."},
-      "auto.acceptance_items": {"type": "int", "min": 1, "default": "6", "effect": "`auto` turns planning on when the subject lists more acceptance items than this (nested sub-bullets are not counted). For big-batch unset lanes already force on, so this only changes the reason."},
-      "auto.write_crates": {"type": "int", "min": 1, "default": "2", "effect": "`auto` turns planning on when the subject's write scope touches more crates than this. For big-batch unset lanes already force on, so this only changes the reason."},
-      "auto.batch_issues": {"type": "int", "min": 1, "default": "2", "effect": "`auto` turns planning on when one batch names at least this many distinct issues (`#N`, decimal, at most six digits). For big-batch unset lanes already force on, so this only changes the reason."}
     }
   },
   "host_model_policy_settings": {
@@ -338,13 +355,13 @@
     "routing.flag_exclude": {
       "type": "string_list", "default": [], "strict": true, "status": "wired",
       "reader": "tools/front-door/crates/cli/src/route.rs",
-      "effect": "The exclusion list one dispatch carries, set by `--exclude` on `run` and `review`. Same selectors as `routing.exclude`; refusals and `--explain` name the flag as the source.",
+      "effect": "The exclusion list one dispatch carries, set by advanced route resolution. Same selectors as `routing.exclude`; refusals and `--explain` name the flag as the source.",
       "trade_off": "Applies to this dispatch only; the standing `routing.exclude` list and a graph's list still apply."
     },
     "routing.graph_exclude": {
       "type": "string_list", "default": [], "strict": true, "status": "wired",
       "reader": "tools/front-door/crates/cli/src/route.rs",
-      "effect": "The exclusion list a graph passes to each node it launches, set from `run --exclude` on a preset or graph. Same selectors as `routing.exclude`; refusals and `--explain` name the graph as the source.",
+      "effect": "The exclusion list a graph passes to each node it launches, set from graph routing policy. Same selectors as `routing.exclude`; refusals and `--explain` name the graph as the source.",
       "trade_off": "Applies to every node's named-route pool; a node's pinned model is never affected."
     },
     "usage.project_attribution": {
