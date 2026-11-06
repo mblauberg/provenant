@@ -123,7 +123,9 @@ fn identity_mail_tasks_and_events_use_durable_scoped_receipts() -> Result {
         "event-1",
     ];
     assert_eq!(call(&rig, &note, 0)?, call(&rig, &note, 0)?);
+    assert!(!rig.state.join("run.sqlite3").exists());
     let events = call(&rig, &["fabric", "events", "read", "--after", "0"], 0)?;
+    assert!(!rig.state.join("run.sqlite3").exists());
     assert!(
         !events["data"]["page"]["items"]
             .as_array()
