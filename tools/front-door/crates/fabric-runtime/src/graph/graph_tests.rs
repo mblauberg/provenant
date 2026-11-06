@@ -11728,13 +11728,29 @@ fn launched_reader_fallback_reopens_file_checkpoint() {
     task.route = None;
     task.routes = Some(vec![route("first"), route("second")]);
     let document = graph(vec![task]);
-    let mut journal = FileJournal::open(&root, project, &document.graph_id, budget, &cancel, &clock).unwrap();
-    journal.bind(GraphExecution { extra: Default::default(), review_base: None, integration_base: None, directory: base, document: document.clone() }).unwrap();
-    let mut owner = FakeOwner { observations: VecDeque::from([terminal(AttemptOutcome::UsageLimited), terminal(AttemptOutcome::Succeeded)]), ..Default::default() };
+    let mut journal =
+        FileJournal::open(&root, project, &document.graph_id, budget, &cancel, &clock).unwrap();
+    journal
+        .bind(GraphExecution {
+            extra: Default::default(),
+            review_base: None,
+            integration_base: None,
+            directory: base,
+            document: document.clone(),
+        })
+        .unwrap();
+    let mut owner = FakeOwner {
+        observations: VecDeque::from([
+            terminal(AttemptOutcome::UsageLimited),
+            terminal(AttemptOutcome::Succeeded),
+        ]),
+        ..Default::default()
+    };
     let run = advance(&document, &mut owner, &mut journal).unwrap();
     assert_eq!(run.checkpoint.nodes[0].attempts.len(), 2);
     drop(journal);
-    let mut journal = FileJournal::open(&root, project, &document.graph_id, budget, &cancel, &clock).unwrap();
+    let mut journal =
+        FileJournal::open(&root, project, &document.graph_id, budget, &cancel, &clock).unwrap();
     let replay = advance(&document, &mut FakeOwner::default(), &mut journal).unwrap();
     assert_eq!(replay.checkpoint.nodes[0].state, NodeState::Succeeded);
 }
@@ -11750,5 +11766,8 @@ fn admission_rejects_review_without_space_for_expanded_ids() {
         }]
     })).unwrap();
     let error = document.admit(&Default::default()).unwrap_err();
-    assert!(error.contains("insufficient room for expanded review ids"), "{error}");
+    assert!(
+        error.contains("insufficient room for expanded review ids"),
+        "{error}"
+    );
 }
