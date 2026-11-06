@@ -326,6 +326,57 @@ pub(super) type PreparedReadPlan = (
     Option<PathBuf>,
 );
 
+#[derive(Debug, thiserror::Error)]
+pub(super) enum ReadOnlyPlanError {
+    #[error(transparent)]
+    Run(#[from] run::RunError),
+    #[error(transparent)]
+    Plan(#[from] provenant_confinement::PlanError),
+    #[error("repository does not match dispatch project binding")]
+    BindingMismatch,
+    #[error("{0}")]
+    Other(String),
+}
+
+impl From<String> for ReadOnlyPlanError {
+    fn from(value: String) -> Self {
+        Self::Other(value)
+    }
+}
+impl From<&str> for ReadOnlyPlanError {
+    fn from(value: &str) -> Self {
+        Self::Other(value.into())
+    }
+}
+impl ReadOnlyPlanError {
+    pub(super) fn boundary_class(&self) -> provenant_records::diagnostic::BoundaryClass {
+        use provenant_records::diagnostic::BoundaryClass;
+        match self {
+            Self::Run(error) => error.boundary_class(),
+            Self::Plan(error) => error.boundary_class(),
+            Self::BindingMismatch => BoundaryClass::Authority,
+            Self::Other(_) => BoundaryClass::None,
+        }
+    }
+}
+
+#[test]
+fn read_only_plan_preserves_typed_authority_failures() {
+    use provenant_records::diagnostic::BoundaryClass;
+    assert_eq!(
+        ReadOnlyPlanError::BindingMismatch.boundary_class(),
+        BoundaryClass::Authority
+    );
+    assert_eq!(
+        ReadOnlyPlanError::Other("unavailable".into()).boundary_class(),
+        BoundaryClass::None
+    );
+    assert_eq!(
+        ReadOnlyPlanError::Run(run::RunError::WriterHeadNotLaneBranch).boundary_class(),
+        BoundaryClass::LaneGit
+    );
+}
+
 pub(super) fn read_only_plan(
     roots: &provenant_core::Roots,
     project: ProjectId,
@@ -334,7 +385,7 @@ pub(super) fn read_only_plan(
     request: PlanRequest,
     isolated: bool,
     live: bool,
-) -> Result<PreparedReadPlan, String> {
+) -> Result<PreparedReadPlan, ReadOnlyPlanError> {
     use provenant_confinement::{GitRead, UtilityBudget, UtilityRuntime, run_read_utility};
     use provenant_os::exec::SystemExecutor;
 
@@ -362,7 +413,7 @@ pub(super) fn read_only_plan(
                 break;
             }
             Err(error) if error.is_not_found() => {}
-            Err(error) => return Err(error.to_string()),
+            Err(error) => return Err(error.to_string().into()),
         }
     }
     let location = provenant_config::ProjectLocation::new(
@@ -375,7 +426,7 @@ pub(super) fn read_only_plan(
         .map_err(|error| error.to_string())?
         .ok_or("dispatch project binding missing")?;
     if binding.project_id() != project {
-        return Err("repository does not match dispatch project binding".into());
+        return Err(ReadOnlyPlanError::BindingMismatch);
     }
     match repository {
         Some(repo) => {
@@ -407,13 +458,13 @@ pub(super) fn read_only_plan(
                     Some(repo.private_git_dir().to_owned()),
                 )
             })
-            .map_err(|error| error.to_string())
+            .map_err(ReadOnlyPlanError::from)
         }
         // Non-Git workspaces have no Git metadata or repository exceptions.
         None if isolated => Err("pinned source requires a Git repository".into()),
         None => ConfinedPlan::new(request)
             .map(|plan| (plan, None, None, None))
-            .map_err(|error| error.to_string()),
+            .map_err(ReadOnlyPlanError::from),
     }
 }
 

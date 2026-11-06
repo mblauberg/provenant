@@ -395,6 +395,8 @@ pub(super) enum PrepareError {
     Prompt(#[from] LaunchPromptError),
     #[error(transparent)]
     Run(#[from] run::RunError),
+    #[error(transparent)]
+    ReadOnly(#[from] ReadOnlyPlanError),
     #[error("write grants overlap a host index")]
     HostIndexOverlap,
     #[error("write grants overlap the host target seed store")]
@@ -477,6 +479,12 @@ impl PrepareError {
                     skipped_routes,
                     fallback_outcome,
                 }
+            }
+            Self::ReadOnly(error) => {
+                let boundary_class = error.boundary_class();
+                let mut refusal = run::PrepareRefusal::from(error.to_string());
+                refusal.boundary_class = boundary_class;
+                refusal
             }
             Self::Run(error) => {
                 let boundary_class = error.boundary_class();
@@ -601,6 +609,8 @@ pub(super) enum PlanCheckError {
     Plan(#[from] provenant_confinement::PlanError),
     #[error("{0}")]
     Other(String),
+    #[error(transparent)]
+    ReadOnly(#[from] ReadOnlyPlanError),
 }
 
 #[cfg(any(test, feature = "fixture"))]
@@ -2232,27 +2242,35 @@ pub(super) fn prepare_candidates(
                 isolated,
                 task.access.source_live,
             )
+            .map_err(PlanCheckError::from)
             .and_then(|mut planned| {
                 if isolated {
                     planned.1 = Some(
                         task.head
                             .as_deref()
-                            .ok_or("graph source head missing")?
+                            .ok_or_else(|| {
+                                PlanCheckError::Other("graph source head missing".into())
+                            })?
                             .parse()
-                            .map_err(|_| "invalid graph source head")?,
+                            .map_err(|_| {
+                                PlanCheckError::Other("invalid graph source head".into())
+                            })?,
                     );
                     planned.3 = Some(cwd.join(".git"));
                 } else {
-                    require_source_head(task, planned.1)?;
+                    require_source_head(task, planned.1).map_err(PlanCheckError::Other)?;
                 }
                 Ok(planned)
-            })
-            .map_err(PlanCheckError::Other),
+            }),
         }) {
             Ok(planned) => planned,
             Err(error) => {
-                if let PlanCheckError::Plan(ref cause) = error {
-                    let class = cause.boundary_class();
+                let class = match &error {
+                    PlanCheckError::Plan(cause) => cause.boundary_class(),
+                    PlanCheckError::ReadOnly(cause) => cause.boundary_class(),
+                    PlanCheckError::Other(_) => provenant_records::diagnostic::BoundaryClass::None,
+                };
+                {
                     if class != provenant_records::diagnostic::BoundaryClass::None {
                         reason_boundaries.insert(reasons.len(), class);
                     }
@@ -2733,7 +2751,7 @@ pub(super) fn prepare_candidates(
             .filter(|(adapter, _)| reported_plan_errors.contains(*adapter))
             .filter_map(|(_, error)| match error {
                 PlanCheckError::Plan(error) => Some(error),
-                PlanCheckError::Other(_) => None,
+                PlanCheckError::Other(_) | PlanCheckError::ReadOnly(_) => None,
             })
             .collect(),
         candidate_boundary,
