@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 use std::io::Write;
 use std::path::Path;
 
-fn document(path: &Path) -> Result<Value, provenant_records::diagnostic::Diagnostic> {
+fn document(path: &Path) -> Result<Value, Box<provenant_records::diagnostic::Diagnostic>> {
     let text = std::fs::read_to_string(path).map_err(|_| file_input_error(path))?;
     decode(&text).map_err(|_| cli_input_error("graph document is invalid"))
 }
@@ -33,13 +33,15 @@ fn response_outcome(command: &str, data: &Value) -> Outcome {
     Outcome::Ok
 }
 
-fn cli_input_error(detail: &str) -> provenant_records::diagnostic::Diagnostic {
-    provenant_records::diagnostic::Diagnostic::new("invalid_input")
-        .detail(detail)
-        .next("check the named input field and retry")
+fn cli_input_error(detail: &str) -> Box<provenant_records::diagnostic::Diagnostic> {
+    Box::new(
+        provenant_records::diagnostic::Diagnostic::new("invalid_input")
+            .detail(detail)
+            .next("check the named input field and retry"),
+    )
 }
 
-fn file_input_error(path: &Path) -> provenant_records::diagnostic::Diagnostic {
+fn file_input_error(path: &Path) -> Box<provenant_records::diagnostic::Diagnostic> {
     let path = provenant_records::diagnostic::safe_path(
         path,
         provenant_records::diagnostic::Destination::Local,
@@ -52,7 +54,7 @@ fn file_input_error(path: &Path) -> provenant_records::diagnostic::Diagnostic {
 
 fn invoke(
     command: &str,
-    input: Result<Value, provenant_records::diagnostic::Diagnostic>,
+    input: Result<Value, Box<provenant_records::diagnostic::Diagnostic>>,
     globals: &Globals,
     workers: &'static dyn WorkerObserver,
 ) -> u8 {
@@ -61,7 +63,7 @@ fn invoke(
         Err(projection) => {
             let mut result = CommandResult::new(command, Outcome::Invalid, Value::Null);
             result.error = Some(provenant_records::CommandError {
-                diagnostic: Some((&projection).into()),
+                diagnostic: Some(projection.as_ref().into()),
                 code: projection.code.clone(),
                 message: projection
                     .detail
@@ -126,7 +128,7 @@ fn invoke(
                         .downcast_ref::<provenant_cli::fabric::EdgeError>()
                         .and_then(provenant_cli::fabric::edge_diagnostic)
                 })
-                .unwrap_or_else(|| cli_input_error("graph input could not be processed"));
+                .unwrap_or_else(|| *cli_input_error("graph input could not be processed"));
             let outcome = error
                 .downcast_ref::<provenant_fabric_runtime::coordination::facade::FacadeError>()
                 .map_or(
@@ -196,7 +198,9 @@ pub(crate) fn run(
     invoke("run", run_input(request), globals, workers)
 }
 
-fn run_input(request: GraphRunArgs) -> Result<Value, provenant_records::diagnostic::Diagnostic> {
+fn run_input(
+    request: GraphRunArgs,
+) -> Result<Value, Box<provenant_records::diagnostic::Diagnostic>> {
     (|| {
         let mut input = json!({"op":"run","explain":request.explain,"detached":request.detached});
         for (field, value) in [

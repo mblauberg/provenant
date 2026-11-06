@@ -3335,11 +3335,10 @@ pub(crate) fn restore_scratch_source(
 
 #[cfg(test)]
 mod journal_error_tests {
-    use super::*;
-
     #[test]
     fn graph_refusal_replays_before_preparation_and_rejects_changed_intent()
     -> Result<(), Box<dyn std::error::Error>> {
+        use super::*;
         if super::super::peer_tests::host_test(
             "fabric::owner::journal_error_tests::graph_refusal_replays_before_preparation_and_rejects_changed_intent",
         )? {
