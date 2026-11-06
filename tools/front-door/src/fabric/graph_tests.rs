@@ -749,6 +749,21 @@ mod result_tests {
         };
         assert_eq!(owner.resolve_review_base("HEAD", Some(lane.to_str().ok_or("lane path")?))?, Some(original));
         assert_eq!(owner.resolve_review_base("HEAD", None)?, Some(moved));
+        // The graph's selected checkout uses the same command scalar cap.
+        owner.repo_facts = provenant_confinement::worktrees::RepoFacts::with_limits(
+            provenant_os::exec::DEFAULT_CAPTURE_LIMIT, 1,
+        )?;
+        assert!(matches!(
+            owner.resolve_review_base("HEAD", Some(lane.to_str().ok_or("lane path")?)),
+            Err(FacadeError::Io { operation, .. })
+                if operation == provenant_fabric_runtime::coordination::facade::REPOSITORY_FACT_LIMIT_OPERATION
+        ));
+        owner.integration_branch = Some(crate::worktree_tests::git(&rig, &["symbolic-ref", "--short", "HEAD"])?);
+        assert!(matches!(
+            owner.integration_head(),
+            Err(FacadeError::Io { operation, .. })
+                if operation == provenant_fabric_runtime::coordination::facade::REPOSITORY_FACT_LIMIT_OPERATION
+        ));
         Ok(())
     }
 

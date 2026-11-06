@@ -1791,9 +1791,10 @@ pub(crate) mod peer_tests {
                 "timeout_seconds":factory.context.config.limits.graph_timeout_seconds
             }], "concurrency":1, "knobs":["routing.graph_exclude=[\"codex/gpt-6-luna\"]"]
         }))?;
-        let receipt = run_owner.submit_with_access(input, budget, &cancel, Default::default(), None)?;
+        let facts = provenant_confinement::worktrees::RepoFacts::default();
+        let receipt = run_owner.submit_with_access(input, budget, &cancel, Default::default(), None, &facts)?;
         let target = receipt.targets.first().ok_or("target")?;
-        let mut graph_owner = BoundGraphOwner { repo_facts: Default::default(),
+        let mut graph_owner = BoundGraphOwner { repo_facts: facts,
             factory: &factory,
             integration_base: None,
             integration_branch: None,
