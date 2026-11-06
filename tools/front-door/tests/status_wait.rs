@@ -184,10 +184,12 @@ fn refused_operation_wait_returns_immediately_with_nonzero_status() -> Result {
         cancel: &cancel,
     };
     let task = TaskId::from_bytes([3; 16]);
-    let request: CanonicalRequest = serde_json::from_value(json!({"schema_version":1,"tasks":[{
+    let request: CanonicalRequest = serde_json::from_value(
+        json!({"schema_version":1,"chair": {"host":identity["data"]["inbox"]["host"],"actor":identity["data"]["inbox"]["actor"]},"tasks":[{
         "task_id":task,"prompt_digest":provenant_records::CanonicalV1::file_digest(b"refused fixture"),
         "route":{"kind":"model","provider":"fixture","model":"fixture/model","effort":null},
-        "fallback":[],"authority_digest":Digest::from_bytes([5;32]),"provider_timeout_seconds":30,"delivery_id":null}],"concurrency":1,"parent":null}))?;
+        "fallback":[],"authority_digest":Digest::from_bytes([5;32]),"provider_timeout_seconds":30,"delivery_id":null}],"concurrency":1,"parent":null}),
+    )?;
     let store = RunStore::open(&context, &call)?;
     store.record_refusal(
         &PreparedRun {
@@ -235,6 +237,37 @@ fn refused_operation_wait_returns_immediately_with_nonzero_status() -> Result {
         "UNSUPPORTED"
     );
     assert_eq!(lines.last().ok_or("end")?["condition_met"], true);
+    // Simulate a crash after recording the refusal but before its notice.
+    // Reconciliation retries it, and a second pass must not duplicate mail.
+    assert_eq!(store.pending_refusal_notices(10, &call)?.len(), 1);
+    for _ in 0..2 {
+        let output = rig.command(&["reconcile", "--json"])?;
+        assert_eq!(
+            output.termination,
+            provenant_os::exec::Termination::Exit(0),
+            "{}",
+            String::from_utf8_lossy(&output.stderr.bytes)
+        );
+    }
+    assert!(store.pending_refusal_notices(10, &call)?.is_empty());
+    let mail_call = provenant_fabric_store::Request {
+        clock: &clock,
+        cancel: &cancel,
+    };
+    let mail = provenant_fabric_store::Store::open(&context.state_root, &mail_call)?;
+    let page = mail.read_mail(
+        context.project_id,
+        context.actor_id,
+        Some(0),
+        50,
+        &mail_call,
+    )?;
+    let notices: Vec<_> = page
+        .items
+        .iter()
+        .filter(|item| item.message.body.contains("refused-fixture"))
+        .collect();
+    assert_eq!(notices.len(), 1);
     graph(&rig, true)?;
     let output = rig.command(&[
         "status",

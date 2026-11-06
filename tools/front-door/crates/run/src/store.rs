@@ -88,6 +88,55 @@ pub(crate) struct Withdrawal<'a> {
 }
 
 impl RunStore {
+    /// Mark a frozen refusal's notice complete after its idempotent inbox write.
+    pub fn complete_refusal_notice(
+        &self,
+        expected: &OperationRecord,
+        call: &Request<'_>,
+    ) -> Result<()> {
+        self.write(call, |tx| {
+            let raw: Vec<u8> = tx
+                .query_row(
+                    "SELECT record FROM operations WHERE project=?1 AND actor=?2 AND operation=?3",
+                    params![
+                        self.context.project_id.to_string(),
+                        self.context.actor_id.to_string(),
+                        expected.operation_id.as_str()
+                    ],
+                    |row| row.get(0),
+                )
+                .optional()?
+                .ok_or(RunError::NotFound)?;
+            let mut current: OperationRecord = decode(&raw)?;
+            if current.project_id != self.context.project_id
+                || current.actor_id != self.context.actor_id
+                || current.operation_id != expected.operation_id
+                || current.run_id != expected.run_id
+                || current.kind != expected.kind
+                || current.state != OperationState::Refused
+                || current.request_digest != expected.request_digest
+                || current.refusal != expected.refusal
+                || current.refusal_chair != expected.refusal_chair
+                || current.refused_at != expected.refused_at
+                || current.extra.get("refusal_notice") != expected.extra.get("refusal_notice")
+            {
+                return Err(RunError::Conflict);
+            }
+            current
+                .extra
+                .insert("refusal_notice_done".into(), serde_json::json!(true));
+            tx.execute(
+                "UPDATE operations SET record=?1 WHERE project=?2 AND actor=?3 AND operation=?4",
+                params![
+                    bytes(&current)?,
+                    self.context.project_id.to_string(),
+                    self.context.actor_id.to_string(),
+                    expected.operation_id.as_str()
+                ],
+            )?;
+            Ok(())
+        })
+    }
     /// Persist a refusal against the same request digest used for admission.
     /// A competing or replayed operation cannot replace its first outcome.
     pub fn record_refusal(

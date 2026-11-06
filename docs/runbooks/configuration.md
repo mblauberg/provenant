@@ -67,8 +67,9 @@ continuations keep that stamp.
 `chair.refusal_notice` accepts `inbox` (the default) or `off`. For a recorded
 pre-admission refusal with a bound chair, the dispatch response posts a
 path-free notice to that chair's inbox. Retrying the same operation reuses the
-message identity. If posting fails, the response reports a notice check error;
-retry the same operation after restoring inbox access.
+message identity. If posting fails or the dispatcher stops before sending,
+restore inbox access and run `provenant reconcile` from the submitting session.
+Reconcile retries up to 320 pending notices and reports when more remain.
 
 ## Graph launch retries
 

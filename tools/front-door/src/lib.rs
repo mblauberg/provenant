@@ -1150,7 +1150,32 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
             reply
         }),
         Command::Reconcile(cmd) => run_edge(&inv.leaf, globals, |edge| {
-            provenant_cli::run::reconcile(cmd, edge)
+            let all = cmd.id.is_empty() && cmd.abandon.is_none();
+            let mut reply = provenant_cli::run::reconcile(cmd, edge);
+            if all {
+                let issue = match settlement::reconcile_refusal_notices(edge) {
+                    Ok(false) => None,
+                    Ok(true) => Some("more refusal notices remain; rerun `provenant reconcile`"),
+                    Err(_) => Some(
+                        "refusal notice recovery failed; restore inbox access and rerun `provenant reconcile`",
+                    ),
+                };
+                if let Some(message) = issue {
+                    reply.human.push_str(&format!("{message}\n"));
+                    reply.result.data["refusal_notice_recovery_pending"] = serde_json::json!(true);
+                    if reply.result.error.is_none() {
+                        reply.result.status = provenant_records::Outcome::Failed;
+                        reply.result.error = Some(provenant_records::CommandError {
+                            code: "RECONCILE_INCOMPLETE".into(),
+                            message: message.into(),
+                            cause: None,
+                            repair: Some("rerun `provenant reconcile`".into()),
+                            diagnostic: None,
+                        });
+                    }
+                }
+            }
+            reply
         }),
         Command::Telemetry(provenant_cli::Telemetry::Stats(cmd)) => {
             if stats_dispatch(&cmd) == StatsDispatch::Usage {

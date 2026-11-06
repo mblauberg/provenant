@@ -45,16 +45,70 @@ pub(crate) fn post_dispatch_refusal(
     };
     let store = provenant_run::RunStore::open(&execution, &call)?;
     if let Some(record) = store.operation(&id.parse()?, &call)? {
-        if let Some(chair) = &record.refusal_chair {
-            let actor = provenant_cli::workflow::session_actor(&context, None)
-                .map_err(std::io::Error::other)?;
-            if chair.host != context.identity.inbox.host || chair.actor != actor {
-                return Err("refusal chair binding cannot be verified".into());
-            }
-        }
-        post_refusal_notice(&record, edge.roots)?;
+        post_verified_refusal(&record, &context, &store, edge.roots, &call)?;
     }
     Ok(())
+}
+
+fn post_verified_refusal(
+    record: &provenant_run::OperationRecord,
+    context: &provenant_cli::fabric::Context,
+    store: &provenant_run::RunStore,
+    roots: &Roots,
+    call: &provenant_run::Request<'_>,
+) -> Result<(), Error> {
+    if record.state != provenant_run::OperationState::Refused
+        || record.refusal_chair.is_none()
+        || record.extra.get("refusal_notice_done") == Some(&serde_json::json!(true))
+    {
+        return Ok(());
+    }
+    let chair = record
+        .refusal_chair
+        .as_ref()
+        .ok_or("refusal chair missing")?;
+    let actor =
+        provenant_cli::workflow::session_actor(context, None).map_err(std::io::Error::other)?;
+    if chair.host != context.identity.inbox.host || chair.actor != actor {
+        return Err("refusal chair binding cannot be verified".into());
+    }
+    post_refusal_notice(record, roots)?;
+    store.complete_refusal_notice(record, call)?;
+    Ok(())
+}
+
+/// Retry a bounded page of this actor's durable refusal-notice obligations.
+/// A crash after inbox insertion is safe: its message ID is deterministic.
+pub(crate) fn reconcile_refusal_notices(
+    edge: &provenant_cli::run::Edge<'_>,
+) -> Result<bool, Error> {
+    if provenant_cli::fabric::in_lane() {
+        return Ok(false);
+    }
+    let context = provenant_cli::fabric::Context::open(edge.roots.clone(), edge.home, edge.cwd)?;
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let call = provenant_run::Request {
+        clock: &clock,
+        cancel: &cancel,
+    };
+    let execution = provenant_run::ExecutionContext {
+        state_root: edge.roots.state.clone(),
+        project_id: context.identity.project,
+        actor_id: context.identity.inbox.actor,
+        read_prompts: false,
+    };
+    let store = provenant_run::RunStore::open(&execution, &call)?;
+    for _ in 0..4 {
+        let records = store.pending_refusal_notices(80, &call)?;
+        if records.is_empty() {
+            return Ok(false);
+        }
+        for record in records {
+            post_verified_refusal(&record, &context, &store, edge.roots, &call)?;
+        }
+    }
+    Ok(!store.pending_refusal_notices(1, &call)?.is_empty())
 }
 
 /// Post a path-free refusal using a stable message ID and frozen record facts.

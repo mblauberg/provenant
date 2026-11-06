@@ -454,6 +454,71 @@ fn refused_operation_is_durable_and_replay_checks_request_identity() -> TestResu
     ));
     Ok(())
 }
+
+#[test]
+fn refusal_notice_obligation_survives_restart_and_completes_only_for_same_facts() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let context = context(temp.path())?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let mut input = input();
+    input.request.chair = Some(ChairBinding {
+        extra: Default::default(),
+        host: provenant_core::HostId::from_bytes([1; 16]),
+        actor: ActorId::from_bytes([2; 16]),
+        session: None,
+    });
+    let store = RunStore::open(&context, &call)?;
+    let record = store.record_refusal(
+        &input,
+        provenant_records::diagnostic::Diagnostic::new("REFUSED"),
+        None,
+        &call,
+    )?;
+    assert_eq!(
+        store.pending_refusal_notices(10, &call)?,
+        vec![record.clone()]
+    );
+    let mut changed = record.clone();
+    changed.refusal = Some(provenant_records::diagnostic::Diagnostic::new("OTHER"));
+    assert!(matches!(
+        store.complete_refusal_notice(&changed, &call),
+        Err(RunError::Conflict)
+    ));
+    drop(store);
+    let store = RunStore::open(&context, &call)?;
+    assert_eq!(
+        store.pending_refusal_notices(10, &call)?,
+        vec![record.clone()]
+    );
+    store.complete_refusal_notice(&record, &call)?;
+    store.complete_refusal_notice(&record, &call)?;
+    assert!(store.pending_refusal_notices(10, &call)?.is_empty());
+    assert_eq!(
+        store
+            .operation(&input.operation_id, &call)?
+            .ok_or("missing")?
+            .extra["refusal_notice_done"],
+        true
+    );
+    for n in 10_u8..91 {
+        input.operation_id = OperationId::parse(&format!("notice-{n}"))?;
+        input.run_id = RunId::from_bytes([n; 16]);
+        store.record_refusal(
+            &input,
+            provenant_records::diagnostic::Diagnostic::new("REFUSED"),
+            None,
+            &call,
+        )?;
+    }
+    let first = store.pending_refusal_notices(80, &call)?;
+    assert_eq!(first.len(), 80);
+    for pending in &first {
+        store.complete_refusal_notice(pending, &call)?;
+    }
+    assert_eq!(store.pending_refusal_notices(80, &call)?.len(), 1);
+    Ok(())
+}
 pub(super) fn route() -> RouteRecord {
     RouteRecord {
         provider: Some("fixture".into()),
