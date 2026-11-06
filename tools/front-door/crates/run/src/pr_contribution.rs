@@ -165,32 +165,6 @@ impl crate::RunStore {
         }
         Ok(())
     }
-    /// Called only after host validation of the child's derived identity.
-    pub(crate) fn capture_child_contribution(
-        &self,
-        parent: AttemptId,
-        record: &crate::AttemptRecord,
-        call: &Request<'_>,
-    ) -> Result<()> {
-        if !self.writer_registry().join(FILE).try_exists()? {
-            return Ok(());
-        }
-        let db = Contributions::open(self.writer_registry(), call)?;
-        let branch: Option<(String, i64)> =
-            db.0.query_row(
-                "SELECT branch,generation FROM branch_attempts WHERE attempt=?1 AND project=?2",
-                params![parent.to_string(), self.context.project_id.to_string()],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .optional()?;
-        if let Some((branch, generation)) = branch {
-            let mut local = record.clone();
-            // Lane-written route fields cannot establish host placement.
-            local.resolved_route = None;
-            db.capture_generation(&local, &branch, "read_only", Some(generation), call)?;
-        }
-        Ok(())
-    }
     pub(crate) fn retain_contribution_route(
         &self,
         record: &crate::AttemptRecord,
@@ -1267,23 +1241,6 @@ mod tests {
             db.capture(&queued, "other", "worker", &call),
             Err(RunError::Conflict)
         ));
-        let mut child = queued.clone();
-        child.attempt_id = AttemptId::from_bytes([10; 16]);
-        child.resolved_route = Some(crate::RouteRecord {
-            model: Some("forged/model".into()),
-            ..Default::default()
-        });
-        store.capture_child_contribution(id, &child, &call)?;
-        store.capture_child_contribution(id, &child, &call)?;
-        let rows = db.for_pr(&pr, &call)?;
-        assert_eq!(rows.len(), 3);
-        let row = rows
-            .iter()
-            .find(|row| row.attempt == child.attempt_id)
-            .ok_or("missing child")?;
-        assert_eq!(row.role.as_deref(), Some("read_only"));
-        assert!(row.model.is_none());
-        assert!(row.account.is_none());
         Ok(())
     }
     #[test]
