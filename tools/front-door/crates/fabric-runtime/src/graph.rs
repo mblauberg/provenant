@@ -2150,7 +2150,11 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                             .count()
                             >= cap
                     }) {
-                        if checkpoint.nodes[node_index].extra.insert("slot_wait".into(), serde_json::Value::Bool(true)).is_none() {
+                        if checkpoint.nodes[node_index]
+                            .extra
+                            .insert("slot_wait".into(), serde_json::Value::Bool(true))
+                            .is_none()
+                        {
                             journal.save(&checkpoint).map_err(GraphError::Journal)?;
                         }
                         break;

@@ -195,15 +195,22 @@ pub(crate) fn status_rows(run: &GraphRun, target: &GraphTarget) -> Vec<Value> {
         }
     }
     for row in &mut rows {
-        let node = row["node_id"].as_str().and_then(|id| run.checkpoint.nodes.iter().find(|node| node.id == id));
+        let node = row["node_id"]
+            .as_str()
+            .and_then(|id| run.checkpoint.nodes.iter().find(|node| node.id == id));
         let attempt = node.and_then(|node| {
             if row["kind"] == "node" {
                 node.recorded_attempts().next_back()
             } else {
-                node.recorded_attempts().find(|attempt| attempt.attempt_ref.as_deref() == row["attempt_id"].as_str())
+                node.recorded_attempts()
+                    .find(|attempt| attempt.attempt_ref.as_deref() == row["attempt_id"].as_str())
             }
         });
-        row["outcome"] = if row["kind"] == "graph" { json!(run.outcome) } else { json!(attempt.and_then(|attempt| attempt.outcome)) };
+        row["outcome"] = if row["kind"] == "graph" {
+            json!(run.outcome)
+        } else {
+            json!(attempt.and_then(|attempt| attempt.outcome))
+        };
         row["cause_code"] = json!(node.and_then(|node| node.advance_error_code.as_deref()));
         if row["cause_code"].is_null() && !row["outcome"].is_null() {
             row["cause_code"] = row["outcome"].clone();
@@ -220,12 +227,18 @@ pub(crate) fn status_rows(run: &GraphRun, target: &GraphTarget) -> Vec<Value> {
             }));
         }
         let state = row["state"].as_str().unwrap_or("");
-        let selection = node.map_or_else(|| target.graph.clone(), |node| format!("{}/{}", target.graph, node.id));
-        let failed_outcome = row["outcome"].as_str().is_some_and(|outcome| outcome != "succeeded");
+        let selection = node.map_or_else(
+            || target.graph.clone(),
+            |node| format!("{}/{}", target.graph, node.id),
+        );
+        let failed_outcome = row["outcome"]
+            .as_str()
+            .is_some_and(|outcome| outcome != "succeeded");
         row["next"] = json!(match state {
             "terminal" | "complete" if failed_outcome => format!("provenant retry {selection}"),
             "failed" | "blocked" | "paused" => format!("provenant retry {selection}"),
-            "pending" | "running" | "starting" | "unresolved" => format!("provenant status {selection} --wait"),
+            "pending" | "running" | "starting" | "unresolved" =>
+                format!("provenant status {selection} --wait"),
             _ => format!("provenant output {selection}"),
         });
     }
@@ -236,7 +249,8 @@ pub(crate) fn status_rows(run: &GraphRun, target: &GraphTarget) -> Vec<Value> {
 /// Reserve the final command before filling the body so truncation cannot hide it.
 pub(crate) fn render_graph_status(rows: &[Value]) -> String {
     fn text(value: &Value, limit: usize) -> String {
-        let mut text = provenant_fabric_runtime::hosts::plain_text(value.as_str().unwrap_or(""), limit);
+        let mut text =
+            provenant_fabric_runtime::hosts::plain_text(value.as_str().unwrap_or(""), limit);
         let mut end = limit.min(text.len());
         while !text.is_char_boundary(end) {
             end -= 1;
@@ -252,19 +266,33 @@ pub(crate) fn render_graph_status(rows: &[Value]) -> String {
         }
         match row["state"].as_str() {
             Some("failed" | "blocked" | "paused" | "unresolved") => 0,
-            Some("complete") if row["outcome"].as_str().is_some_and(|outcome| outcome != "succeeded") => 1,
+            Some("complete")
+                if row["outcome"]
+                    .as_str()
+                    .is_some_and(|outcome| outcome != "succeeded") =>
+            {
+                1
+            }
             Some("pending" | "running" | "starting") => 2,
             _ => 3,
         }
     };
     let mut ordered: Vec<_> = rows.iter().collect();
     ordered.sort_by_key(priority);
-    let next = ordered.first().map(|row| text(&row["next"], 384)).unwrap_or_default();
+    let next = ordered
+        .first()
+        .map(|row| text(&row["next"], 384))
+        .unwrap_or_default();
     let footer = format!("next: {next}\n");
     let limit = 2048usize.saturating_sub(footer.len() + 32);
     let mut human = String::new();
     for (index, row) in ordered.iter().enumerate() {
-        let mut line = format!("{} {} {}", text(&row["kind"], 16), text(&row["id"], 160), text(&row["state"], 32));
+        let mut line = format!(
+            "{} {} {}",
+            text(&row["kind"], 16),
+            text(&row["id"], 160),
+            text(&row["state"], 32)
+        );
         if !row["outcome"].is_null() {
             line.push_str(&format!(" outcome={}", text(&row["outcome"], 48)));
         }
@@ -1013,8 +1041,13 @@ mod tests {
         let mut checkpoint = checkpoint("g");
         checkpoint.nodes[0].state = NodeState::Failed;
         checkpoint.nodes[0].advance_error_code = Some("AUTH_REQUIRED".into());
-        checkpoint.nodes[0].advance_error = Some(format!("credentials unavailable {}", "界".repeat(4096)));
-        let target = GraphTarget { graph: "g".into(), node: None, attempt: None };
+        checkpoint.nodes[0].advance_error =
+            Some(format!("credentials unavailable {}", "界".repeat(4096)));
+        let target = GraphTarget {
+            graph: "g".into(),
+            node: None,
+            attempt: None,
+        };
         let rows = status_rows(&graph_snapshot(checkpoint), &target);
         let mut many = rows.clone();
         for _ in 0..100 {
