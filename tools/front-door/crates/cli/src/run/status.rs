@@ -1192,6 +1192,28 @@ pub fn lanes_streaming(
 
 /// A read-only page for the hook. Emit each record before reading the next so
 /// a timed-out child still leaves complete, bounded records in its output.
+/// Bounded session inventory moved from the retired `lanes` command to `status`.
+pub fn status_session_stream(
+    command: crate::Status,
+    edge: &Edge<'_>,
+    out: &mut dyn std::io::Write,
+) -> Reply {
+    let result = session_inventory_page(command.all, command.limit, edge, &mut |line| {
+        out.write_all(line.as_bytes())
+            .and_then(|_| out.flush())
+            .map_err(|_| {
+                Fail::new(
+                    Status::Error,
+                    ErrorKind::Io,
+                    "cannot write session attempt stream",
+                )
+            })
+    });
+    let mut response = reply("status", result);
+    response.read_only = true;
+    response
+}
+
 fn session_lane_page(
     command: &Lanes,
     edge: &Edge<'_>,
@@ -1212,6 +1234,15 @@ fn session_lane_page(
             "invalid session lane stream",
         ));
     }
+    session_inventory_page(command.all, command.limit, edge, out)
+}
+
+fn session_inventory_page(
+    all: bool,
+    limit: u64,
+    edge: &Edge<'_>,
+    out: &mut dyn FnMut(&str) -> Result<(), Fail>,
+) -> Result<(Value, String), Fail> {
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
     let call = request(&clock, &cancel)?;
@@ -1224,8 +1255,8 @@ fn session_lane_page(
     // Match the normal listing's recovery of a dead guardian before observing
     // the page; the hook reports only records this read actually completed.
     let _ = session.store.reap(&call);
-    let mut query = lane_query(&session, &[], command.all, command.limit, 0, &call)?;
-    query.newest_first = command.all;
+    let mut query = lane_query(&session, &[], all, limit, 0, &call)?;
+    query.newest_first = all;
     let mut failed = false;
     session.store.lanes_streaming(&query, &call, |total, entry, next| {
         if failed { return; }
@@ -1234,7 +1265,7 @@ fn session_lane_page(
             Some((cursor, lane)) => {
                 let (state, reason) = state_and_reason(&lane.state);
                 let reason = reason.or_else(|| {
-                    (!command.all)
+                    (!all)
                         .then(|| session.store.lane_waits(std::slice::from_ref(lane), &call))
                         .and_then(|waits| waits.first().map(|wait| wait.waiting_for.clone()))
                 });

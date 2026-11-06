@@ -72,6 +72,8 @@ fn create_lane(rig: &TestRig) -> Result<String> {
     use provenant_core::{ActorId, AttemptId, Digest, OperationId, RunId, TaskId};
     use provenant_records::CanonicalV1;
     use provenant_run as run;
+    let identity = rig.command(&["fabric", "identity", "--json"])?;
+    assert_eq!(code(&identity), 0);
     let (roots, project_id) = binding(rig)?;
     let context = run::ExecutionContext {
         state_root: roots.state,
@@ -208,20 +210,18 @@ fn session_start_warns_once_only_when_disk_is_below_headroom() -> Result {
 fn restart_hook_reports_in_flight_lanes_and_prs_named_by_the_chair() -> Result {
     let rig = TestRig::new()?;
     let lane = create_lane(&rig)?;
-    let cli = rig.command(&["--json", "lanes"])?;
+    let cli = rig.command(&["--json", "status"])?;
     assert_eq!(code(&cli), 0, "{:?}", cli.stderr.bytes);
     let cli: Value = serde_json::from_slice(&cli.stdout.bytes)?;
+    let identifiers: Vec<_> = lane.split('/').collect();
     assert!(
-        cli["data"]["lanes"].as_array().is_some_and(|lanes| {
-            lanes.iter().any(|entry| {
-                format!(
-                    "{}/{}/{}",
-                    entry["run_id"].as_str().unwrap_or("?"),
-                    entry["task_id"].as_str().unwrap_or("?"),
-                    entry["attempt_id"].as_str().unwrap_or("?")
-                ) == lane
-            })
-        }),
+        cli["data"]["rows"]
+            .as_array()
+            .is_some_and(|rows| rows.iter().any(|entry| {
+                entry["kind"] == "attempt"
+                    && entry["node_id"] == identifiers[1]
+                    && entry["attempt_id"] == identifiers[2]
+            })),
         "{cli}"
     );
     let checkpoint = store(&rig, "restart-session")?;
@@ -270,7 +270,7 @@ fn hints_from_a_hook_on_a_custom_store_carry_its_state_dir() -> Result {
         )),
         "{text}"
     );
-    assert!(text.contains(&format!("`{prefix} lanes`")), "{text}");
+    assert!(text.contains(&format!("`{prefix} status`")), "{text}");
     // No command the hook prints may name the default store.
     for line in text.lines().filter(|line| line.contains("provenant ")) {
         assert!(line.contains("--state-dir"), "{line}");
@@ -573,7 +573,7 @@ fn session_worktree_stream_reports_inventory_rows() -> Result {
 fn session_lane_stream_reports_inventory_rows() -> Result {
     let rig = TestRig::new()?;
     let lane = create_lane(&rig)?;
-    let output = rig.command(&["lanes", "--session-stream", "--json"])?;
+    let output = rig.command(&["status", "--session-stream", "--json"])?;
     assert_eq!(
         code(&output),
         0,

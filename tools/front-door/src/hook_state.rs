@@ -1,5 +1,5 @@
 //! Lane, pull request and worktree facts for Claude hooks. Each fact comes
-//! from this binary's own read commands (`lanes`, `worktree list`, `pr status`)
+//! from this binary's own read commands (`status`, `worktree list`, `pr status`)
 //! so the hooks never read another command's store directly. A command that
 //! is missing, slow or failing leaves its section marked unavailable. The
 //! calls run in parallel under one deadline.
@@ -151,7 +151,7 @@ impl<'a> Cli<'a> {
         if time < Duration::from_millis(50) {
             return Err("hook deadline reached".into());
         }
-        let mut args = vec!["lanes", "--session-stream", "--limit", LANE_PAGE];
+        let mut args = vec!["status", "--session-stream", "--limit", LANE_PAGE];
         if settled_after.is_some() {
             args.push("--all");
         }
@@ -346,23 +346,17 @@ fn route(lane: &Value) -> String {
 fn next_page(cursor: &str, settled: bool, commands: &CommandPrefix) -> String {
     let cursor: String = cursor.chars().filter(char::is_ascii_digit).collect();
     let mut command = if settled {
-        format!("lanes --all --limit {LANE_PAGE}")
+        format!("status --all --limit {LANE_PAGE}")
     } else {
-        format!("lanes --limit {LANE_PAGE}")
+        format!("status --limit {LANE_PAGE}")
     };
-    if settled {
-        for outcome in TERMINAL {
-            command.push_str(" --state ");
-            command.push_str(outcome);
-        }
-    }
     if !cursor.is_empty() {
         command.push_str(" --cursor ");
         command.push_str(&cursor);
     }
     commands.command(&command)
 }
-/// Lanes from a `lanes` listing. With `settled_after_unix`, only lanes that
+/// Lanes from a `status` listing. With `settled_after_unix`, only lanes that
 /// finished later count. The cursor, when present, names a further page the
 /// read did not take; settled lanes can finish out of queue order, so a later
 /// page may still hold some, and the cursor is reported for both listings.
@@ -815,24 +809,24 @@ esac
         let commands = |state_dir| CommandPrefix::new(state_dir, cwd);
         let command = next_page(&next.unwrap_or_default(), true, &commands(None));
         assert!(
-            command.starts_with("provenant lanes --all --limit 100 --state succeeded"),
+            command.starts_with("provenant status --all --limit 100"),
             "{command}"
         );
         assert!(command.ends_with("--cursor 1042"), "{command}");
         assert_eq!(
             next_page("1; rm -rf /", false, &commands(None)),
-            "provenant lanes --limit 100 --cursor 1"
+            "provenant status --limit 100 --cursor 1"
         );
         // A non-default state directory is repeated, safely quoted.
         let custom = next_page("7", false, &commands(Some(Path::new("/s/it's here"))));
         assert_eq!(
             custom,
-            "provenant --state-dir '/s/it'\\''s here' lanes --limit 100 --cursor 7"
+            "provenant --state-dir '/s/it'\\''s here' status --limit 100 --cursor 7"
         );
         // A relative one is made absolute against the collector's directory.
         assert_eq!(
             next_page("7", false, &commands(Some(Path::new("rel/state")))),
-            "provenant --state-dir '/work/rel/state' lanes --limit 100 --cursor 7"
+            "provenant --state-dir '/work/rel/state' status --limit 100 --cursor 7"
         );
         // Control characters and non-UTF-8 bytes give a note, never a command.
         use std::os::unix::ffi::OsStrExt;
@@ -842,7 +836,7 @@ esac
         ] {
             let note = next_page("7", false, &commands(Some(bad)));
             assert!(
-                note.starts_with("page with: provenant lanes --limit 100 --cursor 7 and")
+                note.starts_with("page with: provenant status --limit 100 --cursor 7 and")
                     && note.contains("--state-dir this hook used")
                     && !note.contains("/s/"),
                 "{note}"
@@ -882,7 +876,7 @@ esac
             "{digest}"
         );
         assert!(
-            digest.contains("this count is partial; run `provenant lanes --all"),
+            digest.contains("this count is partial; run `provenant status --all"),
             "{digest}"
         );
         // A complete listing shows a plain count and no note.

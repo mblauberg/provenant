@@ -1718,6 +1718,9 @@ pub(crate) fn duration_seconds(value: &str) -> Result<u64, &'static str> {
 }
 #[derive(Debug, Args)]
 pub struct Status {
+    /// Stream a bounded attempt inventory page for the session collector.
+    #[arg(long, hide = true, conflicts_with_all = ["stats", "wait", "id", "cursor", "target", "follow"])]
+    pub session_stream: bool,
     /// Report attempt efficiency without counting composite aggregates
     #[arg(long, conflicts_with = "wait")]
     pub stats: bool,
