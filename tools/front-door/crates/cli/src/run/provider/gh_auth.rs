@@ -16,6 +16,31 @@ pub(super) fn inject(
     }
 }
 
+/// Codex removes *TOKEN* by default. Override that filter only within the
+/// complete, already sanitised launch environment's explicit name list.
+pub(super) fn codex_shell_environment(
+    environment: &[(OsString, OsString)],
+    argv: &mut Vec<OsString>,
+) {
+    let names = environment
+        .iter()
+        .map(|(name, _)| name.to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    let Ok(names) = serde_json::to_string(&names) else {
+        return;
+    };
+    let config = [
+        OsString::from("-c"),
+        OsString::from("shell_environment_policy.ignore_default_excludes=true"),
+        OsString::from("-c"),
+        OsString::from(format!("shell_environment_policy.include_only={names}")),
+    ];
+    let index = argv
+        .len()
+        .saturating_sub(usize::from(argv.last().is_some_and(|arg| arg == "-")));
+    argv.splice(index..index, config);
+}
+
 fn token(
     executor: &dyn Executor,
     gh: &Path,
@@ -48,6 +73,36 @@ fn token(
 mod tests {
     use super::*;
     use provenant_os::exec::{CapturedStream, ExecError, ExecOutcome};
+
+    #[test]
+    fn codex_shell_policy_preserves_only_the_final_explicit_environment() {
+        let environment = vec![
+            ("PATH".into(), "/bin".into()),
+            ("GH_TOKEN".into(), "fixture-secret".into()),
+            ("PROVENANT_LANE_HEAD".into(), "fixture-head".into()),
+        ];
+        let mut argv = vec!["codex".into(), "exec".into(), "-".into()];
+        codex_shell_environment(&environment, &mut argv);
+        assert_eq!(argv.last().unwrap(), "-");
+        assert!(
+            argv.iter()
+                .any(|arg| arg == "shell_environment_policy.ignore_default_excludes=true")
+        );
+        let names = argv
+            .iter()
+            .find_map(|arg| {
+                arg.to_str()?
+                    .strip_prefix("shell_environment_policy.include_only=")
+            })
+            .unwrap();
+        let names: Vec<String> = serde_json::from_str(names).unwrap();
+        assert_eq!(names, ["PATH", "GH_TOKEN", "PROVENANT_LANE_HEAD"]);
+        assert!(
+            !argv
+                .iter()
+                .any(|arg| arg.to_string_lossy().contains("fixture-secret"))
+        );
+    }
 
     #[test]
     fn host_gh_login_is_captured_only_in_memory_and_failures_are_ignored() {

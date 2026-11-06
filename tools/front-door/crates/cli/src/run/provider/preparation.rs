@@ -1960,6 +1960,9 @@ pub(super) fn prepare_candidates(
             && let Ok(gh) = locate("gh")
         {
             super::gh_auth::inject(&executor, &gh, &home, cancel, &mut spec.env);
+            if adapter.id() == "codex" && spec.env.iter().any(|(key, _)| key == "GH_TOKEN") {
+                super::gh_auth::codex_shell_environment(&spec.env, &mut spec.argv);
+            }
         }
         return Ok(run::PreparedLaunch {
             skipped_routes: reasons,
