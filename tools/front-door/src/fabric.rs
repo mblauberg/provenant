@@ -1614,6 +1614,11 @@ fn events_within<T: serde::Serialize>(events: &[T], max_bytes: u64) -> Result<us
     Ok(events.len())
 }
 fn run_error(error: provenant_run::RunError) -> FacadeError {
+    // The unresolvable ref is the caller's own input; name it instead of
+    // collapsing to a bare "invalid input".
+    if let provenant_run::RunError::InvalidBase(base) = &error {
+        return FacadeError::invalid(format!("unresolvable base `{base}`"));
+    }
     fail_error(error.into())
 }
 fn fail_error(fail: provenant_cli::run::Fail) -> FacadeError {
@@ -7126,6 +7131,20 @@ impl Factory {
                 };
                 let git = provenant_os::git::git_executable()
                     .ok_or(FacadeError::InvalidInput { detail: None })?;
+                // A missing local integration branch starts where the batch is
+                // measured from, rather than refusing the graph.
+                if !branch.starts_with("origin/") {
+                    provenant_run::ensure_local_branch(
+                        &git,
+                        &self.cwd,
+                        branch,
+                        document
+                            .review_base
+                            .as_deref()
+                            .filter(|base| !base.is_empty()),
+                    )
+                    .map_err(run_error)?;
+                }
                 Some(
                     provenant_run::resolve_git_base(&git, &self.cwd, &reference)
                         .map_err(run_error)?
