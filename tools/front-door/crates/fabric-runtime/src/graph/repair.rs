@@ -35,9 +35,15 @@ pub(super) fn clean_start(
     !outputs.is_empty()
         && outputs.iter().all(|output| {
             output.findings_available == Some(true)
-                && output.verdict.as_deref() == Some("VERDICT: PASS")
+                && approved(output)
                 && !output.findings.iter().any(blocking)
         })
+}
+
+fn approved(outputs: &NodeOutputs) -> bool {
+    outputs.verdict_error.is_none()
+        && outputs.verdict.as_deref().and_then(provenant_records::workflow::ReviewVerdict::from_token)
+            == Some(provenant_records::workflow::ReviewVerdict::Approve)
 }
 
 fn blocking(finding: &Finding) -> bool {
@@ -219,7 +225,7 @@ pub(super) fn panel_failure(checkpoint: &GraphCheckpoint, expansion: &Expansion)
         return Some("replanned panel has no complete output".into());
     };
     if progress.state != NodeState::Succeeded || outputs.findings_available != Some(true)
-        || outputs.verdict.as_deref() != Some("VERDICT: PASS") || outputs.findings.iter().any(blocking) {
+        || !approved(outputs) || outputs.findings.iter().any(blocking) {
         return Some("replanned panel did not pass".into());
     }
     None

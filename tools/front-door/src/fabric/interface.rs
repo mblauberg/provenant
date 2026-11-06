@@ -1297,12 +1297,18 @@ mod tests {
             }
         }
         struct Owner {
+            source: String,
             commit: String,
             reviewed: BTreeMap<String, Option<String>>,
         }
         impl AttemptOwner for Owner {
             type Error = std::convert::Infallible;
             fn actor(&self) -> String { "template-review-fixture".into() }
+            fn bind_writer_worktree(&mut self, worktree: &str) -> std::result::Result<Option<graph::WriterWorktreeBinding>, Self::Error> {
+                Ok(Some(graph::WriterWorktreeBinding {
+                    extra: Default::default(), worktree: worktree.into(), head: self.source.clone(),
+                }))
+            }
             fn observe_or_start(
                 &mut self, key: &graph::AttemptKey, node: graph::NodeInput<'_>,
                 _: &graph::GraphRoute, access: graph::AccessMode, _: Option<&str>, _: graph::Replay<'_>,
@@ -1331,17 +1337,19 @@ mod tests {
         let cancel = CancelToken::new();
         let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
         for (risk, full_panel) in [("routine", false), ("substantial", true)] {
-            let response = factory.graph_document(json!({
+            let input = json!({
                 "op":"run", "explain":true,
                 "document":{
                     "schema_version":2, "graph_id":format!("writer-review-{risk}"),
                     "review_base":original, "context":{"risk_tier":risk},
                     "nodes":[
-                        {"id":"writer", "use":"implement", "worktree":rig.project, "write_scope":["."]},
+                        {"id":"writer", "use":"implement", "worktree":rig.project, "write_scope":["."], "delivery":"push"},
                         {"id":"review", "use":"review-panel", "after":["writer"], "source":{"type":"head","node":"writer"}}
                     ]
                 }
-            }), budget, &cancel)?;
+            });
+            let response = factory.graph_document(input, budget, &cancel)
+                .map_err(|error| format!("{risk} public template submission: {error:?}"))?;
             let document: GraphDocument = serde_json::from_value(response["document"].clone())?;
             let expanded = document.expanded(&factory.context.config.graph.limits)?;
             let review_stages: std::collections::BTreeSet<String> = expanded.nodes.iter()
@@ -1355,7 +1363,7 @@ mod tests {
             // the completed writer to the review template and all its stages.
             crate::worktree_tests::git(&rig, &["commit", "--allow-empty", "-m", "later head"])?;
             assert_ne!(crate::worktree_tests::git(&rig, &["rev-parse", "HEAD"])?, writer_commit);
-            let mut owner = Owner { commit: writer_commit.clone(), reviewed: BTreeMap::new() };
+            let mut owner = Owner { source: original.clone(), commit: writer_commit.clone(), reviewed: BTreeMap::new() };
             let run = graph::advance_with_budget(&document, &mut owner, &mut Journal::default(),
                 &factory.context.config.graph.limits, &factory.context.config.graph.budget)?;
             assert_eq!(run.status, graph::GraphStatus::Complete);

@@ -6,7 +6,9 @@ fn advance(
     journal: &mut MemoryJournal,
 ) -> Result<GraphRun, GraphError<NoObservation, Infallible>> {
     let limits = crate::config::GraphLimits {
-        expansion_depth: 16,
+        // Full templated review stages extend the repair DAG beyond the old
+        // direct lens fanout. Exercise the shipped host depth allowance.
+        expansion_depth: 64,
         ..Default::default()
     };
     advance_with_budget(
@@ -2129,7 +2131,7 @@ fn repair_growth_resolves_and_runs_a_fresh_panel() {
             assert_eq!(call.1.alias.as_deref(), Some(expected));
         }
         let gate = run.checkpoint.nodes.iter().find(|node| node.id == "repair--r1--accepted").unwrap();
-        assert_eq!(gate.state == NodeState::Succeeded, reviewer_passes);
+        assert_eq!(gate.state == NodeState::Succeeded, reviewer_passes, "gate: {:?}; panels: {:?}", gate.gate, run.checkpoint.nodes.iter().filter(|node| node.id.contains("--panel")).map(|node| (&node.id, node.state, &node.outputs)).collect::<Vec<_>>());
         for (call, source) in owner.calls.iter().zip(&owner.source_commits).filter(|(call, _)| call.0.node_id.contains("--panel--")) {
             assert_eq!(source.as_deref(), Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"), "{}", call.0.node_id);
         }
@@ -2400,6 +2402,7 @@ impl GraphJournal for CrashBeforeRepairGate {
 fn pending_repair_cache_and_panel_never_certify_a_redone_fix() {
     for after_panel in [false, true] {
         let document = review_repair_document();
+        let limits = crate::config::GraphLimits { expansion_depth: 64, ..Default::default() };
         let initial = repair_finding(false);
         let pass = "```findings\n{\"schema_version\":1,\"findings\":[]}\n```\nVERDICT: PASS";
         let mut owner = reviews(&[&initial, "fixed", pass, pass]);
@@ -2407,7 +2410,8 @@ fn pending_repair_cache_and_panel_never_certify_a_redone_fix() {
         owner.repair_panel = Some(vec!["correctness".into()]);
         if let AttemptObservation::Terminal { commit, .. } = &mut owner.observations[1] { *commit = Some("a".repeat(40)); }
         let mut journal = CrashBeforeRepairGate { memory: MemoryJournal::default(), after_panel, crashed: false };
-        assert!(matches!(advance(&document, &mut owner, &mut journal), Err(GraphError::Journal(_))));
+        let result = advance_with_budget(&document, &mut owner, &mut journal, &limits, &Default::default());
+        assert!(matches!(&result, Err(GraphError::Journal(_))), "after_panel={after_panel}: {:?}", result.as_ref().map(|run| run.checkpoint.nodes.iter().map(|node| (&node.id, node.state, &node.gate)).collect::<Vec<_>>()));
         assert!(journal.crashed);
         let mut checkpoint = journal.memory.0.take().unwrap();
         let before_check = checkpoint.nodes.iter().find(|node| node.id == "repair--r1--check").unwrap().outputs.clone();
@@ -2419,7 +2423,7 @@ fn pending_repair_cache_and_panel_never_certify_a_redone_fix() {
         let mut next = reviews(&["fixed differently", "principal recovery options"]);
         next.repair_growth = true;
         if let AttemptObservation::Terminal { commit, .. } = &mut next.observations[0] { *commit = Some("b".repeat(40)); }
-        let run = advance(&document, &mut next, &mut journal).unwrap();
+        let run = advance_with_budget(&document, &mut next, &mut journal, &limits, &Default::default()).unwrap();
         assert_eq!(next.repair_growth_calls, 1);
         let gate = run.checkpoint.nodes.iter().find(|node| node.id == "repair--r1--accepted").unwrap();
         assert_eq!(gate.state, NodeState::Failed);
