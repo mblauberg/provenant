@@ -239,7 +239,7 @@ impl SessionState {
                         .map(|(_, tail)| tail.chars().take_while(char::is_ascii_digit).collect())
                         .unwrap_or_default();
                     format!(
-                        "the paging command is too long or unsafe to show; run provenant lanes with this hook's --state-dir and --cursor {cursor}"
+                        "the paging command is too long or unsafe to show; run provenant status with this hook's --state-dir and --cursor {cursor}"
                     )
                 };
                 if skipped > 0 {
@@ -410,7 +410,7 @@ impl SessionState {
             self.commands.runnable("pr status"),
         ) {
             (Some(lanes), Some(pr)) => format!("`{lanes}` and `{pr}`"),
-            _ => "provenant lanes and provenant pr status with this hook's --state-dir".into(),
+            _ => "provenant status and provenant pr status with this hook's --state-dir".into(),
         };
         if !self.worktrees.is_empty() || self.worktrees_skipped > 0 {
             match self.commands.runnable("worktree list") {
@@ -499,7 +499,7 @@ fn render(title: &str, sections: &[Section], limit: usize, commands: &CommandPre
             .map(|lanes| format!("- [output bounded; list the rest with `{lanes}`]\n"))
             .filter(|marker| marker.len() <= limit)
             .unwrap_or_else(|| {
-                "- [output bounded; list the rest with provenant lanes and this hook's --state-dir]\n".to_owned()
+                "- [output bounded; list the rest with provenant status and this hook's --state-dir]\n".to_owned()
             });
         while out.len() + marker.len() > limit {
             match out[..out.len().saturating_sub(1)].rfind('\n') {
@@ -821,7 +821,7 @@ mod tests {
                 assert!(text.len() <= limit, "{}", text.len());
                 assert_eq!(
                     marker(&text),
-                    "- [output bounded; list the rest with provenant lanes and this hook's --state-dir]"
+                    "- [output bounded; list the rest with provenant status and this hook's --state-dir]"
                 );
             }
             // The default store keeps the plain command.

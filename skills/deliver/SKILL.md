@@ -19,16 +19,15 @@ needs a delivery record saves one with `provenant workflow receipt save ID
 receipt show ID`.
 
 Before starting an issue, show tracker lint advice and proceed even if checks
-are unavailable. `provenant run --preset deliver` shows it on entry; otherwise
+are unavailable. `provenant run --use deliver` shows it on entry; otherwise
 run `provenant tracker lint N` (or `--file PATH` for a local spec).
 
 ## How it runs
 
-- **Research or analysis:** `provenant run --preset scout-swarm --prompt-file
-  Q.md --set 'parameters.external=1' --explain` to gather sourced claims, then
-  the `plan.research` role to reconcile them. Every claim carries a source, a
+- **Research or analysis:** `provenant run --use research --file Q.md --explain` to gather sourced claims, then
+  `synthesise` to reconcile them. Every claim carries a source, a
   date and whether it was observed or inferred.
-- **Documents:** a read-only fidelity check through `--preset single`,
+- **Documents:** a read-only fidelity check through `run --use verify`,
   preferably on a different model family, that compares the document with its
   sources and criteria and lists unsupported claims, not stylistic edits.
 - **Agent work products:** check the output against the criteria directly;

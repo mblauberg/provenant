@@ -28,8 +28,10 @@ work does not need it.
 - **Memory.** Durable knowledge belongs in project docs. Private memory holds
   only preferences that apply across projects.
 - **Provenant.** The core commands are `provenant run`, `status`, `output`, `steer`,
-  `stop`, `retry`, `edit`, `templates`, `land`, `quota` and `trace`.
-  `provenant help --all` lists the rest. Route answer-bearing work for other providers through the `orchestrate` skill and Fabric, which keeps full
+  `stop`, `retry`, `edit`, `templates`, `land` and `quota`.
+  `help --all` lists the rest. Use `run --route junior` for bounded work and
+  `run --use plan` to shape it. Route other-provider work through `orchestrate`
+  and Fabric, which keeps full
   output in run files. Fabric identity is the working directory (worktrees
   share their repository's); `PROVENANT_AGENT_LABEL` splits inboxes.
 - **Style.** Keep agent-to-agent, status and mechanical messages terse. Write

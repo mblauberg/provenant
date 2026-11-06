@@ -973,7 +973,7 @@ mod result_tests {
         let ordinary = super::graph_human(&run);
         let globals = provenant_cli::Globals::default();
         assert_eq!(
-            super::graph_display(&run, "fabric graph status", &globals),
+            super::graph_display(&run, "status", &globals),
             ordinary
         );
         let globals = provenant_cli::Globals {
@@ -981,11 +981,11 @@ mod result_tests {
             ..Default::default()
         };
         assert_eq!(
-            super::graph_display(&run, "fabric graph status", &globals),
+            super::graph_display(&run, "status", &globals),
             super::graph_human::graph_human_full(&run)
         );
         assert_eq!(
-            super::graph_display(&run, "fabric graph run", &globals),
+            super::graph_display(&run, "run", &globals),
             ordinary
         );
         assert!(ordinary.lines().any(|row| row.starts_with("  ordinary: Failed outcome=TaskFailed ") && row.contains("wait=none disposition=terminal")));
@@ -994,7 +994,7 @@ mod result_tests {
         assert!(!ordinary.contains("loop-member"));
         assert!(!ordinary.contains(" attempt=new"));
         let result = provenant_records::CommandResult::new(
-            "fabric graph status",
+            "status",
             provenant_records::Outcome::Ok,
             &run,
         );
@@ -1006,7 +1006,7 @@ mod result_tests {
                 ..Default::default()
             };
             assert_eq!(
-                super::graph_display(&run, "fabric graph status", &globals),
+                super::graph_display(&run, "status", &globals),
                 ordinary
             );
             let mut bytes = Vec::new();
@@ -1029,7 +1029,7 @@ mod result_tests {
         run.checkpoint.pause_reason = Some("invalid planner fragment: missing nodes".into());
         run.status = provenant_fabric_runtime::graph::GraphStatus::Paused;
         let globals = provenant_cli::Globals::default();
-        for command in ["fabric graph status", "fabric graph resume"] {
+        for command in ["status", "retry"] {
             let human = super::graph_display(&run, command, &globals);
             assert!(
                 human.contains("Pause reason: invalid planner fragment: missing nodes"),
@@ -1042,7 +1042,7 @@ mod result_tests {
         }));
 
         run.checkpoint.pause_reason = Some("x".repeat(2048));
-        let human = super::graph_display(&run, "fabric graph status", &globals);
+        let human = super::graph_display(&run, "status", &globals);
         let reason_line = human
             .lines()
             .find(|line| line.starts_with("Pause reason: "))
@@ -1050,7 +1050,7 @@ mod result_tests {
         assert!(reason_line.chars().count() <= 1024 + "Pause reason: ".chars().count() + 1);
 
         run.checkpoint.pause_reason = Some("before\u{1b}[31mafter".into());
-        let human = super::graph_display(&run, "fabric graph status", &globals);
+        let human = super::graph_display(&run, "status", &globals);
         assert!(human.contains("Pause reason: before[31mafter"));
         assert!(!human.contains('\u{1b}'));
         let summary = super::graph_human::graph_summary(&serde_json::to_value(&run).unwrap());
@@ -1137,7 +1137,7 @@ mod result_tests {
         let reason = status.checkpoint.pause_reason.as_deref().unwrap();
         assert!(reason.contains("invalid fragment: missing nodes"), "{reason}");
         assert!(reason.find("invalid fragment") < reason.find("fallback expansion paused"));
-        let human = super::graph_display(&status, "fabric graph status", &provenant_cli::Globals::default());
+        let human = super::graph_display(&status, "status", &provenant_cli::Globals::default());
         assert!(human.contains("invalid fragment: missing nodes"), "{human}");
         let json = serde_json::to_value(&status)?;
         assert!(json["checkpoint"]["pause_reason"].as_str().unwrap().contains("invalid fragment: missing nodes"));
@@ -1486,7 +1486,7 @@ mod result_tests {
         assert_eq!(summary.lines[1], format!("ci running: {expected}"));
         assert_eq!(
             summary.next.as_deref(),
-            Some("provenant fabric graph status delivery")
+            Some("provenant status delivery")
         );
         assert_eq!(checkpoint.nodes[0].ci.as_ref().unwrap().elapsed_seconds, 10);
 

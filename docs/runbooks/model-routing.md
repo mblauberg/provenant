@@ -12,10 +12,10 @@ model when the task needs one. Resolve a pool with
 `provenant route resolve NAME` also accepts a route name or an unambiguous
 model name. Unknown or ambiguous names report suggestions and examples.
 
-Writer graph previews report an advisory tier mix and warn when it is inverted;
-they do not change or refuse a route. Set the `generator-evaluator` writer
-parameter or a planned `big-batch` lane route to suit the work. See
-[writer tiers](presets.md#writer-tiers) for the defaults and counting rules.
+Default bounded implementation to `provenant run --route junior --file BRIEF`.
+Use `--use plan` to shape work and `--use batch` for disjoint slices into one
+integration branch. Inspect with `--explain`; the receipt records the resolved
+route. See [writer tiers](presets.md#writer-tiers).
 
 An observed expired login projects as `login_expired` for routing; it does
 not create a quota refusal. Existing scoped quota refusals retain their own
@@ -90,15 +90,10 @@ routes automatically for a writer; a confirmed read-only attempt may switch on
 an authentication or usage-limit outcome within its retry budget. A quota-stopped
 writer with an unfinished handoff may continue on another eligible account.
 
-The settlement retry allowance is `domains.routing.settlement_retries`
-(shipped default **2**). Set `retry.retries` on a preset or graph document for
-its default, or on a node to override it: node → preset → host configuration →
-shipped default. Zero disables settlement successors. For example, a preset
-may declare `retry = { retries = 1 }`, and a leaf stage may declare
-`retry = { retries = 0 }`. `fabric graph status ID --full` shows the effective
-value and its origin. Admission seals the allowance; restart, same-key
-observation, admission reprobes and verified pre-launch preparation fallbacks
-do not renew or spend it.
+Use `retry TARGET` to continue unfinished work or redo a target. Keep the
+existing graph identity, inspect retained attempts first and raise budgets only
+within authority. The host reconciles uncertain launches before admitting
+another attempt; completed outputs are reused.
 
 `provenant quota` includes a recorded refusal's expiry in `resets_at` using
 RFC 3339 and shows its time in the host's local zone. Human output adds the
@@ -153,7 +148,7 @@ which independent review legs count. The bundled pools include `utility`,
 weighted choice, not an ordered model list. Explicit route lists and
 zero-weight fallbacks have their own ordering semantics.
 
-Use `provenant run --preset review --prompt-file brief.md --explain`
+Use `provenant run --use review --file brief.md --explain`
 to inspect roles and sources before dispatch. Inspect the recorded separation
 and substitutions after dispatch. Different model names or requested families
 alone do not establish independent answering families. Bind the resolved
@@ -291,65 +286,25 @@ noise. Cap the run (`cargo mutants --timeout` per mutant and stop after about
 15 minutes); report partial counts as timed-out or skipped, and still end with
 the verdict. This evidence is optional and never gates delivery.
 
-For example, review a commit with changed paths from a Git range:
+Pin the base, subject SHA, criteria, risk and required lenses in a brief:
 
 ```sh
-provenant review HEAD --brief-file review-brief.md --risk crucial --risk-tag security --kind code --range origin/main...HEAD --explain
-provenant --json review HEAD --brief-file review-brief.md --shape quick
+provenant run --use review --file review-brief.md --explain
+provenant run --use review --file review-brief.md
+provenant status GRAPH
+provenant output GRAPH
 ```
 
-The target must resolve to a commit. `--range` supplies changed paths and size for
-selection; without it the range defaults to `<default branch>...TARGET` (the
-branch `origin/HEAD` names, else `origin/main`, `main`, `origin/master` or
-`master`), so size and path rules apply by default. Renames are treated as a deletion
-and an addition, so rules can match either path. `--shape` overrides shape
-selection and keeps size unknown; changed paths may still be read for lens
-additions. The risk floor and integration override still apply. A changed path
-that is not UTF-8 is rejected; use
-an explicit shape when path selection cannot represent it.
-`--wait` sets the overall wait limit, defaulting to one hour, and accepts
-seconds or durations such as `30m`, from one second to four hours.
+Use dotted templates such as `review.security` for one lens. A composite uses
+`over = "@review-panel"` for the host-resolved panel. Light slice review precedes
+full review of the integrated head. Lens breadth comes before family spread;
+the chair checks HARNESS floors and records actual routes and substitutions.
+A changed head needs delta review. Qualified findings take bounded repair and
+independent re-review; a synthesis cannot waive a failed gate.
 
-An explicit shape is applied first, then raised to the risk floor: the risk tier
-sets a minimum that an explicit `--shape` or `review_shape` can raise but not
-lower. Without an explicit shape, selection uses the most specific matching
-`by_paths` pattern, then `by_risk`, `by_kind`, `by_size` and finally `default`.
-Size and kind can raise the selected count above the risk floor, except where a
-`by_paths` rule matched. Specificity is the
-number of literal bytes, followed by fewer wildcards; lexical order breaks ties.
-In path patterns, `*` and `?` do not cross directory separators; `**` does.
-The selected shape and its source appear in the review summary. Family
-distinctness is requested within each group; the summary records a substitution
-when the pool cannot provide another family. Independent reviewers are submitted
-without waiting for one another; a distinct-family group waits for each earlier
-member's route before submitting its next member. Each reviewer goes through
-normal dispatch, so pacing and quota apply per reviewer.
-
-The summary collates each reviewer's run, route, state, verdict and full output
-path without merging findings. Reviewers give findings followed by one final-line
-declaration using the [review wire grammar](../specs/fabric.md#typed-node-outputs).
-The prompt offers approval, change request or inconclusive; it does not offer
-approval with nits. The collector uses the complete verified result stream;
-duplicate declarations, an unrecognised token or an unreadable result is `unknown`.
-JSON includes verdict counts, with planned
-but `not_submitted` reviewers counted separately. The command
-exits successfully only when every reviewer succeeds and approves; a failed,
-inconclusive, change-requesting, approval-with-nits or unknown verdict is non-zero. This result
-does not itself decide delivery acceptance.
-
-Retries use deterministic reviewer operation IDs derived from the resolved
-commit, selected shape and its configuration, brief and reviewer position.
-Run the same review again to reattach to running or successful runs, resubmit
-failed or cancelled runs, and submit any remaining reviewers. Keep the commit,
-shape configuration, brief and actor identity unchanged. The actor depends on
-`PROVENANT_AGENT_LABEL` or the configured agent label; using a different label
-starts a separate review. A changed `HEAD`, shape or brief also starts a
-different review. A successful run with an unknown verdict is reattached, so
-retrying alone does not replace its output. On timeout or error, the
-summary lists all planned reviewers, including `not_submitted` entries, and
-prints commands to collect or cancel active runs. Active runs are not cancelled
-automatically. Use `provenant lanes --id RUN --wait 4m` to collect one, or
-`provenant cancel RUN` to cancel it.
+Use `status --wait=4m --target graph:GRAPH` to wait, `output GRAPH --trace` for
+lineage, `stop GRAPH` to stop the subtree and `retry GRAPH` for unfinished work.
+The [template runbook](presets.md) owns composition and recovery.
 
 ## Excluding members
 
@@ -373,8 +328,8 @@ For one dispatch, pass `--exclude` to `run`, `review` or `route resolve`. Repeat
 the flag once per selector; it takes no comma-separated list:
 
 ```sh
-provenant run --route junior --exclude claude --explain
-provenant review --exclude codex/gpt-6-luna
+provenant run --route junior --file brief.md --explain
+provenant run --use review --file brief.md
 provenant route resolve junior --exclude claude
 ```
 

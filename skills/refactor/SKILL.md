@@ -15,5 +15,4 @@ Do not add compatibility shims, legacy readers or fallback paths. Use a temporar
 
 ## How it runs
 
-Use `generator-evaluator` to land the shared seam when needed. For multiple modules, prepare registered worktrees and a `big-batch` params file with one `lanes` entry per module and an `integration_branch`.
-Run `provenant run --preset big-batch --prompt-file BRIEF --params-file LANES --explain` before submission, then run without `--explain`.
+Use `implement` for a shared seam and `batch` for disjoint modules into one integration branch. Inspect `provenant run --use batch --file BRIEF --explain`, then submit without `--explain`.

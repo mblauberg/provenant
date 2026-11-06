@@ -118,8 +118,8 @@ pub(super) fn graph_summary(run: &serde_json::Value) -> provenant_cli::Summary {
     }));
     let next = match status.as_str() {
         "complete" | "cancelled" => None,
-        "paused" => Some("provenant fabric graph resume --document DOCUMENT".to_owned()),
-        _ => Some(format!("provenant fabric graph status {id}")),
+        "paused" => Some(format!("provenant retry {id}")),
+        _ => Some(format!("provenant status {id}")),
     };
     provenant_cli::Summary::new(
         format!("graph {id} {status}: {} nodes ({tally})", nodes.len()),

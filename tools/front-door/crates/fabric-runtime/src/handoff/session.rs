@@ -436,7 +436,7 @@ pub fn deliver(delivery: Delivery<'_>, launcher: &dyn Launcher) -> HandoffReceip
         let _ = writeln!(
             prompt,
             "- Lanes started before the hand-off keep running on the source host. Watch them \
-             with `provenant lanes --host {}`, collect their results and never re-run completed \
+             with `provenant status --host {}`, collect their results and never re-run completed \
              lanes.",
             delivery.source_label
         );
