@@ -19,6 +19,11 @@ type TestResult = std::result::Result<(), Box<dyn Error>>;
 /// physical directory identities vary between installations.
 #[test]
 fn current_release_fence_fixture_preserves_uncommitted_work() -> TestResult {
+    check_release_fence_fixture(false)?;
+    check_release_fence_fixture(true)
+}
+
+fn check_release_fence_fixture(slot_root: bool) -> TestResult {
     let root = tempfile::tempdir()?;
     let path = root.path().join("writer");
     let worktree = root.path().join("worktree");
@@ -41,25 +46,34 @@ fn current_release_fence_fixture_preserves_uncommitted_work() -> TestResult {
     let evidence = Directory::open_anchor(&evidence_path)?;
     let tree = Directory::open_anchor(&worktree)?;
     let git = Directory::open_anchor(&worktree.join(".git"))?;
-    let slot_identity = evidence.metadata()?;
+    let slot_identity = if slot_root {
+        slot.metadata()?
+    } else {
+        evidence.metadata()?
+    };
     let tree_identity = tree.metadata()?;
     let git_identity = git.metadata()?;
     let fixture = r#"{"schema_version":1,"scope":{"run":"@RUN@","attempt":"@ATTEMPT@","generation":1},"launch_state":"prepared","attempt_device":null,"attempt_inode":null,"reservation_device":@SLOT_DEVICE@,"reservation_inode":@SLOT_INODE@,"binding":{"kind":"worktree","worktree_device":@TREE_DEVICE@,"worktree_inode":@TREE_INODE@,"git_device":@GIT_DEVICE@,"git_inode":@GIT_INODE@,"branch":"refs/heads/lane","base":"@BASE@"},"boot":"linux:00000000-0000-0000-0000-000000000001","guardian":null,"provider":null,"unresolved_cleanup":true,"descendants":[],"census_incomplete":true,"omitted_descendants":0}"#
-        .replace("@RUN@", &scope.run.to_string())
-        .replace("@ATTEMPT@", &scope.attempt.to_string())
-        .replace("@SLOT_DEVICE@", &slot_identity.device.to_string())
-        .replace("@SLOT_INODE@", &slot_identity.inode.to_string())
-        .replace("@TREE_DEVICE@", &tree_identity.device.to_string())
-        .replace("@TREE_INODE@", &tree_identity.inode.to_string())
-        .replace("@GIT_DEVICE@", &git_identity.device.to_string())
-        .replace("@GIT_INODE@", &git_identity.inode.to_string())
-        .replace("@BASE@", base.trim());
-    let reservation_path = evidence_path.join("reservation.json");
+    .replace("@RUN@", &scope.run.to_string())
+    .replace("@ATTEMPT@", &scope.attempt.to_string())
+    .replace("@SLOT_DEVICE@", &slot_identity.device.to_string())
+    .replace("@SLOT_INODE@", &slot_identity.inode.to_string())
+    .replace("@TREE_DEVICE@", &tree_identity.device.to_string())
+    .replace("@TREE_INODE@", &tree_identity.inode.to_string())
+    .replace("@GIT_DEVICE@", &git_identity.device.to_string())
+    .replace("@GIT_INODE@", &git_identity.inode.to_string())
+    .replace("@BASE@", base.trim());
+    let reservation_path = if slot_root {
+        path.join("reservation.json")
+    } else {
+        evidence_path.join("reservation.json")
+    };
     let marker_path = evidence_path.join("import-retained.json");
     std::fs::write(&reservation_path, fixture.as_bytes())?;
     std::fs::write(&marker_path, b"retained import evidence")?;
-    let decoded: Reservation = read_record(&evidence, "reservation.json", RECORD_LIMIT)?;
-    validate_anchor(&evidence, &decoded)?;
+    let source = if slot_root { &slot } else { &evidence };
+    let decoded: Reservation = read_record(source, "reservation.json", RECORD_LIMIT)?;
+    validate_anchor(source, &decoded)?;
     assert_eq!(decoded.scope, scope);
     assert!(matches!(
         decoded.binding,
@@ -67,7 +81,19 @@ fn current_release_fence_fixture_preserves_uncommitted_work() -> TestResult {
     ));
     assert!(reservation_present(&slot, scope)?);
     assert!(matches!(acquire(&path), Err(CustodyError::Fenced)));
-    assert_eq!(std::fs::read(&reservation_path)?, fixture.as_bytes());
+    if slot_root {
+        assert!(!reservation_path.exists());
+        let mut expected: serde_json::Value = serde_json::from_str(&fixture)?;
+        let anchor = evidence.metadata()?;
+        expected["reservation_device"] = anchor.device.into();
+        expected["reservation_inode"] = anchor.inode.into();
+        expected["slot_exclusive"] = true.into();
+        expected["slot_original_device"] = slot_identity.device.into();
+        let carried: serde_json::Value = read_record(&evidence, "reservation.json", RECORD_LIMIT)?;
+        assert_eq!(carried, expected);
+    } else {
+        assert_eq!(std::fs::read(&reservation_path)?, fixture.as_bytes());
+    }
     assert_eq!(std::fs::read(&marker_path)?, b"retained import evidence");
     assert_eq!(
         std::fs::read(worktree.join("uncommitted.txt"))?,
@@ -315,6 +341,38 @@ fn slot_reservation_cutover_replays_only_identical_published_evidence() -> TestR
     )?;
     assert_eq!(recovery.scope(), scope());
     assert!(!path.join("reservation.json").exists());
+    Ok(())
+}
+
+#[test]
+fn slot_cutover_sync_failure_retains_source_until_replay_is_durable() -> TestResult {
+    let root = tempfile::tempdir()?;
+    let slot = Directory::open_anchor(root.path())?;
+    let record = legacy_reservation(scope(), &slot.metadata()?);
+    publish_reservation(&slot, &record)?;
+    let original = slot.read_bounded(OsStr::new("reservation.json"), RECORD_LIMIT)?;
+    for _ in 0..2 {
+        let result = carry_forward_slot_reservation_with(&slot, |child| {
+            let carried: Reservation = read_record(child, "reservation.json", RECORD_LIMIT)?;
+            assert_eq!(carried.scope, scope());
+            Err(io::Error::from_raw_os_error(libc::EIO).into())
+        });
+        assert!(
+            matches!(result, Err(CustodyError::Io(error)) if error.raw_os_error() == Some(libc::EIO))
+        );
+        assert_eq!(
+            slot.read_bounded(OsStr::new("reservation.json"), RECORD_LIMIT)?,
+            original
+        );
+        assert!(reservation_present(&slot, scope())?);
+    }
+    carry_forward_slot_reservation(&slot)?;
+    assert!(!root.path().join("reservation.json").exists());
+    let child = attempt_evidence(&slot, scope())?;
+    let carried: Reservation = read_record(&child, "reservation.json", RECORD_LIMIT)?;
+    validate_anchor(&child, &carried)?;
+    assert_eq!(carried.scope, scope());
+    assert!(reservation_present(&slot, scope())?);
     Ok(())
 }
 

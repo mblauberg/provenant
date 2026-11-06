@@ -246,6 +246,20 @@ first. Recovery reconciles uncertain launches, reuses finished outputs and
 continues only unfinished work; never launch a second writer while custody
 is uncertain. Do not reset a worktree containing edits.
 
+Choose recovery by the saved cause and the work you intend to retain:
+
+| Intent | Existing command and effect |
+| --- | --- |
+| Resume unfinished work | `provenant retry GRAPH` advances the retained checkpoint, preserving completed outputs and reconciling any uncertain launch under its recorded attempt identity. |
+| Retry a node | `provenant retry GRAPH/NODE` retains prior attempts and reopens dependent work through the graph patch path. |
+| Repair with a changed brief | `provenant retry GRAPH/NODE --brief TEXT` records a replacement brief for the retried work; review and land gates still apply. |
+| Fall back to another route | Let the node's configured routes handle a typed unavailability result after custody release is confirmed. An uncertain handoff or a failed release blocks a route switch; inspect `status` and retained evidence first. |
+| Start fresh work | Submit a template with `identity = "fresh"`, or use a new operation ID in the run document. An unchanged `identity = "content"` submission reattaches even after cancellation; use `retry GRAPH` to resume that graph. |
+
+Template identity replaces the removed preset `--fresh` flag. See
+[composition rules](presets.md#composition-rules) for what participates in replay
+identity. A fresh run never clears an earlier writer's custody fence.
+
 Use `edit` for a patch to unstarted nodes, with the expected graph revision
 and an idempotency key. Started attempts stay immutable. `stop TARGET` stops
 its subtree unless a child is explicitly detached. Put repository templates
@@ -258,8 +272,12 @@ Finish or stop pending graphs and drain writers on every host before
 launches. Preserve unreadable records and report them.
 
 A retained slot-root reservation is carried to its named attempt during locked
-recovery. Unreadable or conflicting evidence continues to fence writers; retain
-it for host investigation.
+recovery. The attempt evidence is synced before the slot-root record is removed;
+a storage failure retains the source and a later recovery checks the same bytes
+before completing the cutover. `provenant reconcile --id RUN` performs this
+cutover before discovering attempts. Unreadable or conflicting evidence remains
+visible as a reservation issue and continues to fence writers; retain it for host
+investigation. Reading status does not perform the cutover.
 
 Cancelling a lane that has not launched a provider settles it as cancelled
 with nothing to import, and frees its queue place and its worktree's writer
