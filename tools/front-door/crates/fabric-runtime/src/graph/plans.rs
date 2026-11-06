@@ -1468,7 +1468,9 @@ pub(super) fn flatten_fragment(
     if let Some(parent) = parent {
         let local_ids: BTreeSet<_> = nodes.iter().map(|node| node.id.clone()).collect();
         let id = |name: &str| {
-            if external.contains(name) || (!local_ids.contains(name) && document.nodes.iter().any(|node| node.id == name)) {
+            if external.contains(name)
+                || (!local_ids.contains(name) && document.nodes.iter().any(|node| node.id == name))
+            {
                 name.to_owned()
             } else {
                 format!("{}--{name}", parent.id)
@@ -1502,18 +1504,34 @@ pub(super) fn flatten_fragment(
             for input in &mut child.inputs {
                 input.node = id(&input.node);
             }
-            if let Some(SourceBinding::Node { node: source } | SourceBinding::Head { node: source }) = &mut child.source {
+            if let Some(
+                SourceBinding::Node { node: source } | SourceBinding::Head { node: source },
+            ) = &mut child.source
+            {
                 *source = id(source);
             }
-            if let Some(GateCondition::Ci { target: CiTarget::Node { node: target, .. }, .. }) = &mut child.condition {
+            if let Some(GateCondition::Ci {
+                target: CiTarget::Node { node: target, .. },
+                ..
+            }) = &mut child.condition
+            {
                 *target = id(target);
             }
-            for writer in child.continues.iter_mut().chain(child.land.as_mut().map(|spec| &mut spec.node)) {
+            for writer in child
+                .continues
+                .iter_mut()
+                .chain(child.land.as_mut().map(|spec| &mut spec.node))
+            {
                 *writer = id(writer);
             }
             if let Some(plan) = &mut child.plan {
                 for template in &mut plan.templates {
-                    for fields in std::iter::once(&mut template.node).chain(template.nodes.iter_mut().filter_map(serde_json::Value::as_object_mut)) {
+                    for fields in std::iter::once(&mut template.node).chain(
+                        template
+                            .nodes
+                            .iter_mut()
+                            .filter_map(serde_json::Value::as_object_mut),
+                    ) {
                         if let Some(writer) = fields.get_mut("continues")
                             && let Some(name) = writer.as_str()
                         {
