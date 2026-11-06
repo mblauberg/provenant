@@ -159,6 +159,23 @@ impl RunStore {
         worktree: Option<String>,
         call: &Request<'_>,
     ) -> Result<OperationRecord> {
+        self.record_refusal_with_context(
+            input,
+            diagnostic,
+            worktree,
+            &crate::RefusalContext::default(),
+            call,
+        )
+    }
+
+    pub(crate) fn record_refusal_with_context(
+        &self,
+        input: &PreparedRun,
+        diagnostic: provenant_records::diagnostic::Diagnostic,
+        worktree: Option<String>,
+        context: &crate::RefusalContext,
+        call: &Request<'_>,
+    ) -> Result<OperationRecord> {
         validate_request(input)?;
         if worktree.as_ref().is_some_and(|name| {
             name.is_empty()
@@ -178,6 +195,9 @@ impl RunStore {
         {
             extra.insert("refusal_notice".into(), notice.clone());
         }
+        if let Some(digest) = context.intent_digest {
+            extra.insert("origin_intent_digest".into(), serde_json::json!(digest));
+        }
         let operation = OperationRecord {
             extra,
             schema_version: 1,
@@ -196,17 +216,37 @@ impl RunStore {
             refusal: Some(diagnostic),
             worktree,
             refused_at: Some(input.created_at),
-            refusal_chair: input.request.chair.clone(),
+            refusal_chair: context
+                .chair
+                .clone()
+                .or_else(|| input.request.chair.clone()),
         };
         self.insert_refusal(operation, call)
     }
 
-    /// Commit a preflight refusal whose request has not reached canonical admission.
-    pub(crate) fn insert_refusal(
+    /// Commit a trusted owner's preflight refusal before canonical admission.
+    /// The caller supplies only an already projected, safe diagnostic. The first
+    /// record wins; replays may not change its scope, kind or request identity.
+    pub fn insert_refusal(
         &self,
         operation: OperationRecord,
         call: &Request<'_>,
     ) -> Result<OperationRecord> {
+        if operation.schema_version != 1
+            || operation.project_id != self.context.project_id
+            || operation.actor_id != self.context.actor_id
+            || operation.state != OperationState::Refused
+            || operation.refusal.is_none()
+            || operation.refused_at.is_none()
+            || operation.worktree.as_ref().is_some_and(|name| {
+                name.is_empty()
+                    || name.len() > 1024
+                    || name.contains('/')
+                    || name.chars().any(char::is_control)
+            })
+        {
+            return Err(RunError::Validation("refused operation identity"));
+        }
         let digest = operation.request_digest;
         self.write(call, |tx| {
             let prior: Option<Vec<u8>> = tx
@@ -222,7 +262,12 @@ impl RunStore {
                 .optional()?;
             if let Some(prior) = prior {
                 let prior: OperationRecord = decode(&prior)?;
-                if prior.request_digest != digest {
+                if prior.project_id != self.context.project_id
+                    || prior.actor_id != self.context.actor_id
+                    || prior.operation_id != operation.operation_id
+                    || prior.kind != operation.kind
+                    || prior.request_digest != digest
+                {
                     return Err(RunError::OperationConflict);
                 }
                 return Ok(prior);

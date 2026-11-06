@@ -1974,7 +1974,7 @@ esac
         let execution_store = rig.state.join("run.sqlite3");
         assert!(!execution_store.exists());
         assert!(matches!(
-            run_owner.submit_with_access(input, budget, &cancel, grants.clone(), None, Some(accepted), &provenant_confinement::worktrees::RepoFacts::default()),
+            run_owner.submit_with_access(input, budget, &cancel, grants.clone(), None, Some(accepted), &provenant_confinement::worktrees::RepoFacts::default(), Default::default()),
             Err(FacadeError::InvalidInput { .. })
         ));
         assert!(!execution_store.exists());

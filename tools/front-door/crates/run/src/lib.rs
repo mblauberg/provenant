@@ -33,7 +33,7 @@ mod short_temporary;
 mod store;
 pub mod token_budget;
 mod transcript;
-pub use service::{DispatchRequest, DispatchTask, ErrorKind, Service};
+pub use service::{DispatchRequest, DispatchTask, ErrorKind, RefusalContext, Service};
 pub use transcript::locate as locate_transcript;
 pub mod build_dir_gc;
 mod cargo_seed;

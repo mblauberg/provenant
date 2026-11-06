@@ -273,8 +273,9 @@ launches. Preserve unreadable records and report them.
 
 A retained slot-root reservation is carried to its named attempt during locked
 recovery. The attempt evidence is synced before the slot-root record is removed;
-a storage failure retains the source and a later recovery checks the same bytes
-before completing the cutover. `provenant reconcile --id RUN` performs this
+a storage failure preserves a custody fence. If the source remains, a later
+recovery checks the same bytes before completing the cutover.
+`provenant reconcile --id RUN` performs this
 cutover before discovering attempts. Unreadable or conflicting evidence remains
 visible as a reservation issue and continues to fence writers; retain it for host
 investigation. Reconcile reports cutover storage errors in
