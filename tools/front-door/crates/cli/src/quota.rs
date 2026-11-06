@@ -2638,14 +2638,8 @@ mod tests {
         };
         let mismatch = human(ProbeFailure::AccountMismatch);
         assert!(mismatch.contains("account_mismatch"), "{mismatch}");
-        assert!(
-            mismatch.contains("signed-in account differs from the registered one"),
-            "{mismatch}"
-        );
-        assert!(
-            mismatch.contains("account-specific login remedy unavailable"),
-            "{mismatch}"
-        );
+        assert!(mismatch.contains("differs"), "{mismatch}");
+        assert!(!mismatch.contains("needs login"), "{mismatch}");
         let signed_out = human(ProbeFailure::Auth);
         assert!(signed_out.contains("needs login"), "{signed_out}");
         assert!(!signed_out.contains("differs"), "{signed_out}");
@@ -3831,6 +3825,11 @@ mod tests {
                 Some(ReadinessReason::SignedOut),
             ),
             (
+                Some(ProbeFailure::LoginExpired),
+                false,
+                Some(ReadinessReason::LoginExpired),
+            ),
+            (
                 Some(ProbeFailure::AccountMismatch),
                 false,
                 Some(ReadinessReason::AccountMismatch),
@@ -3867,6 +3866,14 @@ mod tests {
                     expiry,
                 },
             )?;
+            assert_eq!(
+                report.accounts[0].error,
+                if malformed {
+                    Some(ProbeFailure::Malformed)
+                } else {
+                    failure
+                }
+            );
             let login = report.accounts[0].login_expiry.as_ref().unwrap();
             assert_eq!(login.expires_unix_seconds, expiry);
             assert_eq!(

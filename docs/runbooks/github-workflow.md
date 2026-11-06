@@ -259,7 +259,9 @@ effort or session document owns it. Ownership of each transition:
 | `Ready` to `In progress` | Implementing agent | Work on the accepted scope starts |
 | `In progress` to `In review` | Implementing agent | The pull request, exact-head checks or independent review is active |
 | `In review` to `Awaiting user` | Implementing agent | Machine gates pass; a required user decision remains |
-| Any later state to `Done` | Merging agent or user; merge auto-closes a `Closes #N` issue | No gate remains; the terminal reason or integrated pull request is recorded |
+| Any later state to `Done` | Project workflow, when the issue closes or its pull request merges | No gate remains; the terminal reason or integrated pull request is recorded |
+
+The project's workflows also set Status: linking a pull request to an issue, merging it and closing an issue each move the item, and setting `Done` closes an open issue, so never set `Done` on work that should stay open.
 
 Move an item with the project CLI. The Status field id is stable for this
 project:

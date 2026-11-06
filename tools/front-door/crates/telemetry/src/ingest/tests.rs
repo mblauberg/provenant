@@ -60,6 +60,7 @@ impl Fixture {
                 provider: None,
                 since: since.map(str::parse).transpose()?,
                 deadline: None,
+                incremental: false,
             },
         )?)
     }
@@ -227,6 +228,7 @@ fn since_and_provider_narrow_the_import() -> Result {
             provider: Some("codex"),
             since: None,
             deadline: None,
+            incremental: false,
         },
     )?;
     assert_eq!(none.added, 0);
@@ -427,10 +429,336 @@ fn an_expired_deadline_reads_nothing_and_keeps_the_store() -> Result {
             provider: None,
             since: None,
             deadline: Some(Instant::now()),
+            incremental: false,
         },
     )?;
     assert!(report.deadline_reached);
     assert_eq!((report.files, report.added), (0, 0));
     assert_eq!(std::fs::read(&store)?, before);
+    Ok(())
+}
+
+#[test]
+fn incremental_ingest_resumes_complete_lines_and_recovers_replacements() -> Result {
+    use std::io::Write;
+    let f = Fixture::new()?;
+    let at = "2026-10-01T00:00:00Z";
+    let path = "projects/p/s1.jsonl";
+    let first = message("m1", at, 10, 0, 0, 1);
+    f.write("claude", path, &first)?;
+    let dirs = [ConfigDir {
+        account: "unattributed".into(),
+        path: f.dir("claude"),
+    }];
+    let chairs = BTreeSet::new();
+    // A recently modified long session may contain messages older than the
+    // hook's file cutoff; its cursor must not discard them.
+    let since = "2026-10-02T00:00:00Z".parse()?;
+    let run = || {
+        ingest(
+            &f.roots,
+            &Request {
+                dirs: &dirs,
+                chair_sessions: &chairs,
+                provider: None,
+                since: Some(since),
+                deadline: None,
+                incremental: true,
+            },
+        )
+    };
+    assert_eq!(run()?.added, 1);
+    assert_eq!(run()?.bytes_read, 0);
+    let update = message("m1", at, 10, 0, 0, 9);
+    let second = message("m2", at, 2, 0, 0, 3);
+    let split = second.len() / 2;
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(f.dir("claude").join(path))?;
+    file.write_all(update.as_bytes())?;
+    file.write_all(&second.as_bytes()[..split])?;
+    let partial = run()?;
+    assert_eq!((partial.added, partial.already_present), (0, 1));
+    assert_eq!(read_rows(&f.roots, &RowFilter::default())?[0].output, 9);
+    file.write_all(&second.as_bytes()[split..])?;
+    let appended = run()?;
+    assert_eq!(appended.added, 1);
+    assert_eq!(appended.bytes_read, second.len() as u64);
+    assert_eq!(run()?.bytes_read, 0);
+    drop(file);
+    // Replacing a transcript invalidates its cursor, even when it grows.
+    let replacement = message("m3", at, 5, 0, 0, 7);
+    std::fs::remove_file(f.dir("claude").join(path))?;
+    f.write("claude", path, &replacement)?;
+    assert_eq!(run()?.added, 1);
+    assert_eq!(read_rows(&f.roots, &RowFilter::default())?.len(), 3);
+    // A removed store must not leave valid cursors pointing past its contents.
+    std::fs::remove_file(f.base.join("state/ingest.jsonl"))?;
+    assert_eq!(run()?.added, 1);
+    let cursor = std::fs::read_to_string(f.base.join("state/ingest-cursors.json"))?;
+    assert!(!cursor.contains("private"));
+    assert!(!cursor.contains("projects"));
+    Ok(())
+}
+
+#[test]
+fn incremental_ingest_upgrades_existing_chair_without_rereading() -> Result {
+    let f = Fixture::new()?;
+    f.write(
+        "claude",
+        "projects/p/s1.jsonl",
+        &message("m1", "2026-10-01T00:00:00Z", 1, 0, 0, 1),
+    )?;
+    let dirs = [ConfigDir {
+        account: "a".into(),
+        path: f.dir("claude"),
+    }];
+    let chairs = BTreeSet::new();
+    let recorded_chairs = BTreeSet::from(["s1".to_owned()]);
+    let request = |chairs| Request {
+        dirs: &dirs,
+        chair_sessions: chairs,
+        provider: None,
+        since: None,
+        deadline: None,
+        incremental: true,
+    };
+    ingest(&f.roots, &request(&chairs))?;
+    assert_eq!(ingest(&f.roots, &request(&recorded_chairs))?.bytes_read, 0);
+    assert_eq!(
+        read_rows(&f.roots, &RowFilter::default())?[0].source,
+        Source::Chair
+    );
+    Ok(())
+}
+
+#[test]
+fn native_attempt_links_only_its_matching_subagent_and_updates_after_settlement() -> Result {
+    use crate::native_attempts::{self, Attempt, End, Settlement};
+    let f = Fixture::new()?;
+    let at = "2026-10-01T00:00:00Z";
+    f.write(
+        "claude",
+        "projects/p/s1/subagents/agent-a.jsonl",
+        &message("m1", at, 1, 0, 0, 4),
+    )?;
+    f.write(
+        "claude",
+        "projects/p/s1/subagents/agent-b.jsonl",
+        &message("m2", at, 2, 0, 0, 6),
+    )?;
+    f.write(
+        "other",
+        "projects/p/s1/subagents/agent-a.jsonl",
+        &message("m3", at, 3, 0, 0, 8),
+    )?;
+    let config = native_attempts::config_key(&f.dir("claude"));
+    native_attempts::start(
+        &f.roots,
+        Attempt {
+            id: "tool-1".into(),
+            alias: "reviewer".into(),
+            model: "claude/opus+1".into(),
+            effort: Some("high".into()),
+            session: "s1".into(),
+            config: config.clone(),
+            started_at: at.into(),
+            ended_at: None,
+            settlement: None,
+            agent_id: None,
+        },
+    )?;
+    let dirs = [
+        ConfigDir {
+            account: "a".into(),
+            path: f.dir("claude"),
+        },
+        ConfigDir {
+            account: "b".into(),
+            path: f.dir("other"),
+        },
+    ];
+    let chairs = BTreeSet::new();
+    let request = Request {
+        dirs: &dirs,
+        chair_sessions: &chairs,
+        provider: None,
+        since: None,
+        deadline: None,
+        incremental: true,
+    };
+    assert_eq!(ingest(&f.roots, &request)?.added, 3);
+    assert!(
+        read_rows(&f.roots, &RowFilter::default())?
+            .iter()
+            .all(|r| r.native_attempt.is_none())
+    );
+    native_attempts::end(
+        &f.roots,
+        End {
+            config: &config,
+            session: "s1",
+            id: "tool-1",
+            ended_at: "2026-10-01T00:03:00Z",
+            settlement: Settlement::Succeeded,
+            agent_id: Some("a"),
+        },
+    )?;
+    assert_eq!(ingest(&f.roots, &request)?.bytes_read, 0);
+    let rows = read_rows(&f.roots, &RowFilter::default())?;
+    let matched = rows
+        .iter()
+        .find(|r| r.message == "m1")
+        .ok_or("matched row")?;
+    let unmatched = rows
+        .iter()
+        .find(|r| r.message == "m2")
+        .ok_or("unmatched row")?;
+    assert_eq!(matched.native_attempt.as_deref(), Some("tool-1"));
+    assert_eq!(matched.buckets(), [1, 7, 0, 0, 4]);
+    assert_eq!(unmatched.native_attempt, None);
+    assert_eq!(unmatched.source, Source::Subagent);
+    let other = rows
+        .iter()
+        .find(|r| r.message == "m3")
+        .ok_or("other account")?;
+    assert_eq!(other.account, "b");
+    assert_eq!(other.native_attempt, None);
+    let native = native_attempts::report(native_attempts::read(&f.roots)?, &rows);
+    assert_eq!(native.attempts[0].attempt.alias, "reviewer");
+    assert_eq!(native.attempts[0].attempt.model, "claude/opus+1");
+    assert_eq!(native.attempts[0].models["claude-opus"][4], 4);
+    assert_eq!(native.unlinked[0].buckets[4], 14);
+    assert!(
+        !std::fs::read_to_string(f.base.join("state/native-attempts.json"))?.contains("private")
+    );
+    Ok(())
+}
+
+#[test]
+fn native_attempt_store_preserves_unknown_versions_and_rejects_ambiguous_links() -> Result {
+    use crate::native_attempts::{self, Attempt, End, Settlement};
+    let f = Fixture::new()?;
+    std::fs::create_dir_all(f.dir("claude"))?;
+    let config = native_attempts::config_key(&f.dir("claude"));
+    let attempt = |id: &str| Attempt {
+        id: id.into(),
+        alias: "reviewer".into(),
+        model: "claude-opus".into(),
+        effort: None,
+        session: "s1".into(),
+        config: config.clone(),
+        started_at: "2026-10-01T00:00:00Z".into(),
+        ended_at: None,
+        settlement: None,
+        agent_id: None,
+    };
+    native_attempts::start(&f.roots, attempt("tool-1"))?;
+    native_attempts::start(&f.roots, attempt("tool-2"))?;
+    fn end<'a>(config: &'a str, id: &'a str) -> End<'a> {
+        End {
+            config,
+            session: "s1",
+            id,
+            ended_at: "2026-10-01T00:01:00Z",
+            settlement: Settlement::Succeeded,
+            agent_id: Some("a"),
+        }
+    }
+    native_attempts::end(&f.roots, end(&config, "tool-1"))?;
+    assert!(matches!(
+        native_attempts::end(&f.roots, end(&config, "tool-2")),
+        Err(native_attempts::AttemptError::Conflict)
+    ));
+    let mut bad = attempt("tool-3");
+    bad.alias = "private prompt words".into();
+    assert!(matches!(
+        native_attempts::start(&f.roots, bad),
+        Err(native_attempts::AttemptError::Invalid)
+    ));
+    native_attempts::start(&f.roots, attempt("tool-3"))?;
+    native_attempts::end(
+        &f.roots,
+        End {
+            config: &config,
+            session: "s1",
+            id: "tool-3",
+            ended_at: "2026-10-01T00:02:00Z",
+            settlement: Settlement::Failed,
+            agent_id: None,
+        },
+    )?;
+    native_attempts::end(
+        &f.roots,
+        End {
+            config: &config,
+            session: "s1",
+            id: "tool-3",
+            ended_at: "2026-10-01T00:03:00Z",
+            settlement: Settlement::Failed,
+            agent_id: Some("b"),
+        },
+    )?;
+    assert_eq!(
+        native_attempts::read(&f.roots)?[2].agent_id.as_deref(),
+        Some("b")
+    );
+    let path = f.base.join("state/native-attempts.json");
+    let future = br#"{"schema_version":2,"attempts":[]}"#;
+    std::fs::write(&path, future)?;
+    assert!(matches!(
+        native_attempts::start(&f.roots, attempt("tool-4")),
+        Err(native_attempts::AttemptError::Store)
+    ));
+    assert_eq!(std::fs::read(&path)?, future);
+    Ok(())
+}
+
+#[test]
+fn concurrent_native_attempt_updates_wait_and_preserve_both() -> Result {
+    use crate::native_attempts::{self, Attempt};
+    use provenant_os::fs::{Directory, LockMode};
+    use std::{ffi::OsStr, sync::mpsc};
+
+    let f = Fixture::new()?;
+    let directory = Directory::open_anchor(f.roots.state.as_path())?;
+    let lock = directory.try_lock(OsStr::new("native-attempts.lock"), LockMode::Exclusive)?;
+    std::thread::scope(|scope| {
+        let (tx, rx) = mpsc::channel();
+        let handles: Vec<_> = (0..2)
+            .map(|i| {
+                let tx = tx.clone();
+                let roots = &f.roots;
+                scope.spawn(move || {
+                    tx.send(()).unwrap();
+                    native_attempts::start(
+                        roots,
+                        Attempt {
+                            id: format!("tool-{i}"),
+                            alias: "alias".into(),
+                            model: "model".into(),
+                            effort: None,
+                            session: "session".into(),
+                            config: "a".repeat(64),
+                            started_at: "2026-10-01T00:00:00Z".into(),
+                            ended_at: None,
+                            settlement: None,
+                            agent_id: None,
+                        },
+                    )
+                })
+            })
+            .collect();
+        rx.recv().unwrap();
+        rx.recv().unwrap();
+        drop(lock);
+        for handle in handles {
+            handle.join().unwrap().unwrap();
+        }
+    });
+    let attempts = native_attempts::read(&f.roots)?;
+    assert_eq!(attempts.len(), 2);
+    assert!(attempts.iter().any(|a| a.id == "tool-0"));
+    assert!(attempts.iter().any(|a| a.id == "tool-1"));
     Ok(())
 }

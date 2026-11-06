@@ -662,7 +662,7 @@ is refused.
 
 ## Prepare a batch
 
-`big-batch` groups a scout swarm, parallel senior implementation lanes, review
+`big-batch` groups a scout swarm, parallel implementation lanes, review
 lenses, principal refactoring and repair. Prepare and register distinct writer
 worktrees first. Partition their literal write scopes so writers can run
 concurrently. Integrate lane heads into the explicit batch branch, review its
@@ -694,8 +694,10 @@ provenant run --preset big-batch --prompt-file batch.md \
   --set 'parameters.integration_branch="batch/graph"' --explain
 ```
 
-Use read-only junior swarms for scouting and research. Give implementation
-lanes to seniors, and put long-horizon principal refactoring at batch end.
+Use read-only junior swarms for scouting and research. For planned implementation
+lanes, prefer junior for mechanical, well-specified work and senior for contained
+design; use at most one principal lane per wave when appropriate. Override the
+lane route as the work requires. Put long-horizon principal refactoring at batch end.
 Choose review depth from the risk and author tier.
 
 The checkpoint estimate reserves space for bounded node outputs and for each
@@ -964,4 +966,14 @@ pin `parameters.subject.commit` to select the commit. After correcting a launch
 failure, cancel the graph and use `provenant run --preset review --fresh` to
 start a new one.
 
-Writer tiers are advisory. Set `parameters.writer` for `generator-evaluator` to choose a writer alias. Planned `big-batch` lanes default to `junior`; use `senior` for contained design and reserve `principal` for at most one lane per wave when appropriate. `run --explain` reports the concrete writer tier mix and warns if higher tiers outnumber lower tiers. Exact model and route choices remain available; the mix never refuses a graph.
+## Writer tiers
+
+Writer tiers are advisory. Set `parameters.writer` for `generator-evaluator` to
+choose a writer alias; its empty default uses the layered `write.implement` role
+tier. Planned `big-batch` lanes default to `junior`; use `senior` for contained
+design and reserve `principal` for at most one lane per wave when appropriate.
+`run --explain` reports concrete writer nodes by requested tier alias and warns
+if higher tiers outnumber lower tiers. Unknown aliases and exact models are
+excluded from the count, as are lanes a planner has yet to create. JSON includes
+the counts, inversion flag and warning. The mix never refuses a graph or changes
+a route.
