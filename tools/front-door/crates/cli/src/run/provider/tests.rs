@@ -4113,13 +4113,17 @@ fn read_only_plan_runs_host_git_with_a_private_home_outside_the_child_store()
     let child_store = host_root.join("children/parent-attempt");
     let planted = child_store.join("tmp/git-home");
     std::fs::create_dir_all(&planted)?;
+    std::fs::set_permissions(&host_root, std::fs::Permissions::from_mode(0o700))?;
     std::fs::set_permissions(&planted, std::fs::Permissions::from_mode(0o777))?;
     let repo = base.join("repo");
     std::fs::create_dir_all(&repo)?;
     std::fs::create_dir_all(base.join("home"))?;
-    // The probe exercises a real Git repository, including its local config.
-    let executor = provenant_os::exec::SystemExecutor::new(1)?;
-    let real = init_fixture_repository(&executor, &repo, &base.join("home"))?;
+    let real = provenant_os::git::git_executable().ok_or("git unavailable")?;
+    // The smallest repository layout Git accepts, without spawning Git.
+    for dir in [".git/objects", ".git/refs/heads"] {
+        std::fs::create_dir_all(repo.join(dir))?;
+    }
+    std::fs::write(repo.join(".git/HEAD"), "ref: refs/heads/main\n")?;
     // A git that records the HOME and TMPDIR it was given, then runs the real one.
     let bin = base.join("bin");
     std::fs::create_dir_all(&bin)?;
