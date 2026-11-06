@@ -2148,7 +2148,10 @@ fn graph_operation(
         .map_err(|_| FacadeError::InvalidInput { detail: None })
 }
 #[cfg(test)]
-#[allow(unused_imports, reason = "the custom worktree driver omits libtest functions")]
+#[allow(
+    unused_imports,
+    reason = "the custom worktree driver omits libtest functions"
+)]
 use test_presentation::*;
 
 impl Factory {
@@ -2391,85 +2394,87 @@ pub fn events(
 }
 
 #[cfg(test)]
-#[allow(dead_code, reason = "the custom worktree driver omits libtest functions")]
+#[allow(
+    dead_code,
+    reason = "the custom worktree driver omits libtest functions"
+)]
 mod test_presentation {
     use super::*;
-pub(super) fn graph_display(
-    run: &provenant_fabric_runtime::graph::GraphRun,
-    command: &str,
-    globals: &provenant_cli::Globals,
-) -> String {
-    if command == "fabric graph status" && globals.full && !globals.json {
-        graph_human::graph_human_full(run)
-    } else {
-        graph_human(run)
-    }
-}
-
-pub(super) fn graph_waiting_human(
-    run: &provenant_fabric_runtime::graph::GraphRun,
-    globals: &provenant_cli::Globals,
-) -> String {
-    use provenant_fabric_runtime::graph::NodeState;
-    let in_flight = run
-        .checkpoint
-        .nodes
-        .iter()
-        .filter(|node| matches!(node.state, NodeState::Running | NodeState::Pending))
-        .count();
-    let mut status = String::from("provenant");
-    if let Some(state_dir) = &globals.state_dir {
-        status.push_str(&format!(
-            " --state-dir {}",
-            preset_graph::shell_path(state_dir)
-        ));
-    }
-    if let Some(project) = &globals.project {
-        status.push_str(&format!(" --project {}", preset_graph::shell_path(project)));
-    }
-    status.push_str(&format!(" fabric graph status {}", run.checkpoint.graph_id));
-    format!(
-        "Graph {}: waiting ({in_flight} nodes in flight); status: {status}\n{}",
-        run.checkpoint.graph_id,
-        graph_human(run)
-    )
-}
-
-pub(super) fn graph_command_result(
-    command: &str,
-    run: provenant_fabric_runtime::graph::GraphRun,
-) -> provenant_records::CommandResult<provenant_fabric_runtime::graph::GraphRun> {
-    let outcome = if command == "fabric graph wait"
-        && run.status == provenant_fabric_runtime::graph::GraphStatus::Pending
-    {
-        provenant_records::Outcome::Waiting
-    } else {
-        provenant_records::Outcome::Ok
-    };
-    provenant_records::CommandResult::new(command, outcome, run)
-}
-
-pub(super) fn wait_graph(
-    clock: &dyn Clock,
-    pause: &dyn provenant_core::Pause,
-    seconds: u64,
-    cancel: &CancelToken,
-    mut observe: impl FnMut() -> Result<provenant_fabric_runtime::graph::GraphRun, FacadeError>,
-) -> Result<provenant_fabric_runtime::graph::GraphRun, Box<dyn std::error::Error>> {
-    let budget = WaitBudget::cli(clock.mono_now(), seconds)?;
-    loop {
-        let run = observe()?;
-        let remaining = budget.remaining(clock.mono_now());
-        if run.status != provenant_fabric_runtime::graph::GraphStatus::Pending
-            || remaining.as_micros() == 0
-        {
-            return Ok(run);
+    pub(super) fn graph_display(
+        run: &provenant_fabric_runtime::graph::GraphRun,
+        command: &str,
+        globals: &provenant_cli::Globals,
+    ) -> String {
+        if command == "fabric graph status" && globals.full && !globals.json {
+            graph_human::graph_human_full(run)
+        } else {
+            graph_human(run)
         }
-        pause.wait(
-            provenant_core::DurationMicros::from_micros(250_000.min(remaining.as_micros())),
-            cancel,
-        );
     }
-}
 
+    pub(super) fn graph_waiting_human(
+        run: &provenant_fabric_runtime::graph::GraphRun,
+        globals: &provenant_cli::Globals,
+    ) -> String {
+        use provenant_fabric_runtime::graph::NodeState;
+        let in_flight = run
+            .checkpoint
+            .nodes
+            .iter()
+            .filter(|node| matches!(node.state, NodeState::Running | NodeState::Pending))
+            .count();
+        let mut status = String::from("provenant");
+        if let Some(state_dir) = &globals.state_dir {
+            status.push_str(&format!(
+                " --state-dir {}",
+                preset_graph::shell_path(state_dir)
+            ));
+        }
+        if let Some(project) = &globals.project {
+            status.push_str(&format!(" --project {}", preset_graph::shell_path(project)));
+        }
+        status.push_str(&format!(" fabric graph status {}", run.checkpoint.graph_id));
+        format!(
+            "Graph {}: waiting ({in_flight} nodes in flight); status: {status}\n{}",
+            run.checkpoint.graph_id,
+            graph_human(run)
+        )
+    }
+
+    pub(super) fn graph_command_result(
+        command: &str,
+        run: provenant_fabric_runtime::graph::GraphRun,
+    ) -> provenant_records::CommandResult<provenant_fabric_runtime::graph::GraphRun> {
+        let outcome = if command == "fabric graph wait"
+            && run.status == provenant_fabric_runtime::graph::GraphStatus::Pending
+        {
+            provenant_records::Outcome::Waiting
+        } else {
+            provenant_records::Outcome::Ok
+        };
+        provenant_records::CommandResult::new(command, outcome, run)
+    }
+
+    pub(super) fn wait_graph(
+        clock: &dyn Clock,
+        pause: &dyn provenant_core::Pause,
+        seconds: u64,
+        cancel: &CancelToken,
+        mut observe: impl FnMut() -> Result<provenant_fabric_runtime::graph::GraphRun, FacadeError>,
+    ) -> Result<provenant_fabric_runtime::graph::GraphRun, Box<dyn std::error::Error>> {
+        let budget = WaitBudget::cli(clock.mono_now(), seconds)?;
+        loop {
+            let run = observe()?;
+            let remaining = budget.remaining(clock.mono_now());
+            if run.status != provenant_fabric_runtime::graph::GraphStatus::Pending
+                || remaining.as_micros() == 0
+            {
+                return Ok(run);
+            }
+            pause.wait(
+                provenant_core::DurationMicros::from_micros(250_000.min(remaining.as_micros())),
+                cancel,
+            );
+        }
+    }
 }

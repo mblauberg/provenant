@@ -168,7 +168,6 @@ pub(super) fn inactive_round(
     })
 }
 
-
 /// A delta reviewer is inactive only when complete findings identify other
 /// lenses. Unknown lens metadata keeps the reviewer active.
 pub(super) fn inactive_lens(

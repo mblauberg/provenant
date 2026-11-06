@@ -108,7 +108,10 @@ pub(crate) fn apply_launch_disposition(
             &format!(
                 "[{}] {}; {}",
                 projected.code,
-                projected.next.as_deref().unwrap_or("inspect the current state before taking further action"),
+                projected
+                    .next
+                    .as_deref()
+                    .unwrap_or("inspect the current state before taking further action"),
                 projected.detail.as_deref().unwrap_or(&projected.code)
             ),
             MAX_ADVANCE_ERROR_BYTES,
@@ -156,18 +159,18 @@ pub(crate) fn apply_launch_disposition(
                 e,
                 crate::coordination::facade::FacadeError::LaunchUnknown { .. }
             )
-        }) || !progress
-        .attempts
-        .iter()
-        .filter(|attempt| attempt.state != AttemptState::Terminal)
-        .all(|attempt| {
-            attempt
-                .extra
-                .get(PRELAUNCH_REFUSAL_PROOF)
-                .and_then(serde_json::Value::as_bool)
-                == Some(true)
         })
-    {
+        || !progress
+            .attempts
+            .iter()
+            .filter(|attempt| attempt.state != AttemptState::Terminal)
+            .all(|attempt| {
+                attempt
+                    .extra
+                    .get(PRELAUNCH_REFUSAL_PROOF)
+                    .and_then(serde_json::Value::as_bool)
+                    == Some(true)
+            }) {
         String::new()
     } else if [graph_id.as_str(), id.as_str()].iter().all(|value| {
         value
@@ -233,8 +236,15 @@ pub(crate) fn launch_disposition<R: AttemptOwner, J: GraphJournal>(
                 .insert(PRELAUNCH_REFUSAL_PROOF.into(), true.into());
         }
     }
-    apply_launch_disposition(checkpoint, index, error, timing.clock, timing.admission_seconds, timing.policy)
-        .map_err(GraphError::Refused)?;
+    apply_launch_disposition(
+        checkpoint,
+        index,
+        error,
+        timing.clock,
+        timing.admission_seconds,
+        timing.policy,
+    )
+    .map_err(GraphError::Refused)?;
     journal.save(checkpoint).map_err(GraphError::Journal)
 }
 
@@ -372,22 +382,46 @@ pub(crate) fn fallback_denial(
 
 /// Automatic quota redos share an infrastructure budget; an explicit user
 /// redo starts a fresh budget while retaining older evidence for trace.
-pub(super) fn infrastructure_attempts(progress: &NodeProgress) -> impl Iterator<Item = &GraphAttempt> {
-    let archived = progress.extra.get("quota_redraw_archived")
-        .and_then(serde_json::Value::as_u64).unwrap_or(0) as usize;
-    progress.previous_attempts.iter()
+pub(super) fn infrastructure_attempts(
+    progress: &NodeProgress,
+) -> impl Iterator<Item = &GraphAttempt> {
+    let archived = progress
+        .extra
+        .get("quota_redraw_archived")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0) as usize;
+    progress
+        .previous_attempts
+        .iter()
         .skip(progress.previous_attempts.len().saturating_sub(archived))
         .chain(&progress.attempts)
 }
 
 /// The sealed allowance bounds all launched attempts across automatic redos.
 pub(super) fn quota_redraw_budget(progress: &NodeProgress) -> bool {
-    progress.extra.get("retry").and_then(|value| value["retries"].as_u64()).is_some_and(|limit| {
-        let archived = progress.extra.get("quota_redraw_spent").and_then(serde_json::Value::as_u64).unwrap_or(0);
-        let current = progress.attempts.iter().filter(|attempt| attempt.launched).count() as u64
-            + u64::from(progress.attempts.last().is_some_and(|attempt| !attempt.launched));
-        archived.saturating_add(current) <= limit
-    })
+    progress
+        .extra
+        .get("retry")
+        .and_then(|value| value["retries"].as_u64())
+        .is_some_and(|limit| {
+            let archived = progress
+                .extra
+                .get("quota_redraw_spent")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
+            let current = progress
+                .attempts
+                .iter()
+                .filter(|attempt| attempt.launched)
+                .count() as u64
+                + u64::from(
+                    progress
+                        .attempts
+                        .last()
+                        .is_some_and(|attempt| !attempt.launched),
+                );
+            archived.saturating_add(current) <= limit
+        })
 }
 
 /// Decide the next attempt disposition for a node during graph advancement.
@@ -422,7 +456,9 @@ pub(super) fn decide_next_attempt<R: AttemptOwner>(
         };
         if !accepted {
             return Ok(NextAttempt::LaunchRetryExhausted {
-                reason: retry.reason.clone().unwrap_or_else(|| "inspect the current state before taking further action".into()),
+                reason: retry.reason.clone().unwrap_or_else(|| {
+                    "inspect the current state before taking further action".into()
+                }),
             });
         }
     }
@@ -469,9 +505,18 @@ pub(super) fn decide_next_attempt<R: AttemptOwner>(
             };
             if !live_fallback_allowed(outcome, last.launched, node.access, evidence) {
                 let cause = last.attempt_ref.as_deref().and_then(|reference| {
-                    owner.preparation_refusal_cause(&last.key, reference).ok().flatten()
+                    owner
+                        .preparation_refusal_cause(&last.key, reference)
+                        .ok()
+                        .flatten()
                 });
-                let (code, message) = fallback_denial(last.launched, node.access, unreadable, outcome, cause.as_ref());
+                let (code, message) = fallback_denial(
+                    last.launched,
+                    node.access,
+                    unreadable,
+                    outcome,
+                    cause.as_ref(),
+                );
                 return Ok(NextAttempt::Fail {
                     code: Some(code),
                     message: Some(message),
@@ -500,12 +545,17 @@ pub(super) fn decide_next_attempt<R: AttemptOwner>(
     // attempt that needs another route consumes one infrastructure retry, in
     // addition to successors within a run.
     let switching = route_index > 0
-        && progress
-            .attempts
-            .last()
-            .is_some_and(|attempt| attempt.state == AttemptState::Terminal && (attempt.launched
-                || (attempt.outcome == Some(AttemptOutcome::UsageLimited)
-                    && progress.extra.get("quota_redraw_spent").and_then(serde_json::Value::as_u64).unwrap_or(0) > 0)));
+        && progress.attempts.last().is_some_and(|attempt| {
+            attempt.state == AttemptState::Terminal
+                && (attempt.launched
+                    || (attempt.outcome == Some(AttemptOutcome::UsageLimited)
+                        && progress
+                            .extra
+                            .get("quota_redraw_spent")
+                            .and_then(serde_json::Value::as_u64)
+                            .unwrap_or(0)
+                            > 0))
+        });
     if switching
         && node
             .routes
@@ -527,17 +577,28 @@ pub(super) fn decide_next_attempt<R: AttemptOwner>(
         .get("retry")
         .and_then(|value| value["retries"].as_u64());
     let mut spent = 0u64;
-    for reference in infrastructure_attempts(progress)
-        .filter_map(|attempt| attempt.attempt_ref.as_deref())
+    for reference in
+        infrastructure_attempts(progress).filter_map(|attempt| attempt.attempt_ref.as_deref())
     {
         spent = spent.saturating_add(owner.retry_successors(reference)?);
     }
-    let automatic = progress.extra.get("quota_redraw_spent").and_then(serde_json::Value::as_u64).unwrap_or(0);
-    let launched_switches = progress.attempts.iter()
-        .filter(|attempt| attempt.state == AttemptState::Terminal && (attempt.launched
-            || (automatic > 0 && attempt.outcome == Some(AttemptOutcome::UsageLimited))))
+    let automatic = progress
+        .extra
+        .get("quota_redraw_spent")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let launched_switches = progress
+        .attempts
+        .iter()
+        .filter(|attempt| {
+            attempt.state == AttemptState::Terminal
+                && (attempt.launched
+                    || (automatic > 0 && attempt.outcome == Some(AttemptOutcome::UsageLimited)))
+        })
         .count() as u64;
-    spent = spent.saturating_add(automatic).saturating_add(launched_switches);
+    spent = spent
+        .saturating_add(automatic)
+        .saturating_add(launched_switches);
     if switching && allowance.is_some_and(|limit| spent > limit) {
         return Ok(NextAttempt::Fail {
             code: Some("fallback_budget_exhausted"),
@@ -591,7 +652,12 @@ pub(super) fn settlement_fallback_decision(
     launched: bool,
     evidence: FallbackEvidence<'_>,
 ) -> SettlementFallback {
-    let FallbackEvidence { preparation: fallback_evidence, unreadable: evidence_unreadable, review_limit_reached, cause: fallback_cause } = evidence;
+    let FallbackEvidence {
+        preparation: fallback_evidence,
+        unreadable: evidence_unreadable,
+        review_limit_reached,
+        cause: fallback_cause,
+    } = evidence;
     let route = node.routes.get(route_index);
 
     if !live_fallback_allowed(outcome, launched, node.access, fallback_evidence)
@@ -624,7 +690,13 @@ pub(super) fn settlement_fallback_decision(
         if !live_fallback_allowed(outcome, launched, node.access, fallback_evidence)
             && route_index + 1 < node.routes.len()
         {
-            let (code, message) = fallback_denial(launched, node.access, evidence_unreadable, outcome, fallback_cause);
+            let (code, message) = fallback_denial(
+                launched,
+                node.access,
+                evidence_unreadable,
+                outcome,
+                fallback_cause,
+            );
             advance_error_code = Some(code.into());
             advance_error = Some(message);
         }
@@ -867,7 +939,12 @@ mod tests {
             0,
             AttemptOutcome::AuthRequired,
             false,
-            FallbackEvidence { preparation: None, unreadable: false, review_limit_reached: false, cause: None },
+            FallbackEvidence {
+                preparation: None,
+                unreadable: false,
+                review_limit_reached: false,
+                cause: None,
+            },
         );
         assert_eq!(
             decision,

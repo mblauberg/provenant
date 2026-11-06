@@ -358,7 +358,8 @@ fn admit_patch_for_retry(
         &graph.checkpoint.expansions,
         context.limits,
     )?;
-    let (plan, _) = validate_flat_plan(&expanded, &plans::generous()).map_err(|error| error.to_string())?;
+    let (plan, _) =
+        validate_flat_plan(&expanded, &plans::generous()).map_err(|error| error.to_string())?;
     let parent = match parent {
         Some(id) => Some(
             plan.nodes
@@ -527,7 +528,9 @@ pub fn retry_node(
             {
                 let mut value =
                     serde_json::to_value(prior).map_err(|e| PatchError::invalid(e.to_string()))?;
-                let fields = value.as_object_mut().ok_or_else(|| PatchError::invalid("node snapshot must be an object"))?;
+                let fields = value
+                    .as_object_mut()
+                    .ok_or_else(|| PatchError::invalid("node snapshot must be an object"))?;
                 fields.remove("settled_dependency_snapshots");
                 fields.remove("previous_attempts");
                 snapshots.entry(prior.id.clone()).or_insert(value);
@@ -628,7 +631,9 @@ fn reset_progress(old: &NodeProgress, container: bool) -> Result<NodeProgress, P
     let mut previous = old.previous_attempts.clone();
     previous.extend(old.attempts.iter().cloned());
     let mut reset = serde_json::to_value(old).map_err(|e| PatchError::invalid(e.to_string()))?;
-    let fields = reset.as_object_mut().ok_or_else(|| PatchError::invalid("node snapshot must be an object"))?;
+    let fields = reset
+        .as_object_mut()
+        .ok_or_else(|| PatchError::invalid("node snapshot must be an object"))?;
     fields.retain(|key, _| {
         matches!(
             key.as_str(),
@@ -819,7 +824,9 @@ pub fn submit(
         nodes,
     };
     document.schema_version = u64::from(minimum_schema_version(&document));
-    document.admit(context.limits).map_err(|error| classify(error.to_string()))?;
+    document
+        .admit(context.limits)
+        .map_err(|error| classify(error.to_string()))?;
     Ok(document)
 }
 

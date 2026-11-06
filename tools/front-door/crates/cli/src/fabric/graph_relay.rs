@@ -315,10 +315,17 @@ pub fn launch_resolvers(
     );
     resolvers.insert(
         "review-verifiers".into(),
-        (1..=verifiers.max(1)).map(|number| number.to_string()).collect(),
+        (1..=verifiers.max(1))
+            .map(|number| number.to_string())
+            .collect(),
     );
     for lens in panel.slots.iter().map(|slot| slot.lens.as_str()).chain([
-        "correctness", "security", "tests", "contract", "design", "adversarial",
+        "correctness",
+        "security",
+        "tests",
+        "contract",
+        "design",
+        "adversarial",
     ]) {
         let advice = if lens == "tests"
             && matches!(request.risk_tier.as_deref(), Some("crucial" | "terminal"))
@@ -379,7 +386,8 @@ fn provision_in_context(
         if matches!(
             existing.occupancy,
             worktrees::Occupancy::Unknown {
-                source: worktrees::OccupancyUnknownSource::Custody, ..
+                source: worktrees::OccupancyUnknownSource::Custody,
+                ..
             }
         ) {
             return Err(worktrees::custody_refusal(existing.occupancy));
@@ -389,19 +397,31 @@ fn provision_in_context(
                 path: existing.path.clone(),
                 detail: format!("worktree registration could not be verified: {error}"),
             })?;
-        let _writer = worktrees::cache_writer_guard(context.project_state, tree.path())
-            .map_err(|occupancy| match occupancy {
+        let _writer = worktrees::cache_writer_guard(context.project_state, tree.path()).map_err(
+            |occupancy| match occupancy {
                 worktrees::Occupancy::Held => WorktreeError::WriterBusy {
-                    holder: worktrees::load_owner(&tree).ok().flatten().and_then(|owner| owner.attempt_id),
+                    holder: worktrees::load_owner(&tree)
+                        .ok()
+                        .flatten()
+                        .and_then(|owner| owner.attempt_id),
                 },
                 other => worktrees::custody_refusal(other),
-            })?;
+            },
+        )?;
         worktrees::check_writer_terminal(tree.repo())?;
-        let reference = provenant_confinement::repo::GitRefName::new(format!("refs/heads/{branch}"))
-            .map_err(|_| WorktreeError::IdentityChanged)?;
-        let head = tree.repo().private_dir().read_stable(std::ffi::OsStr::new("HEAD"), 4096)?;
+        let reference =
+            provenant_confinement::repo::GitRefName::new(format!("refs/heads/{branch}"))
+                .map_err(|_| WorktreeError::IdentityChanged)?;
+        let head = tree
+            .repo()
+            .private_dir()
+            .read_stable(std::ffi::OsStr::new("HEAD"), 4096)?;
         if head != format!("ref: {}\n", reference.as_str()).as_bytes()
-            || context.facts.resolve_commit(context, reference, cancel)?.to_string() != source
+            || context
+                .facts
+                .resolve_commit(context, reference, cancel)?
+                .to_string()
+                != source
         {
             return Err(WorktreeError::IdentityChanged);
         }
@@ -446,9 +466,12 @@ pub fn wait_for_children(
     within: std::time::Duration,
 ) -> Result<Value, ServiceError> {
     while_waiting(cancel, within, || {
-        poll_children(cancel, within, &provenant_os::clock::SystemClock::new(), |remaining| {
-            from_lane(&RelayOp::Children, cancel, remaining)
-        })
+        poll_children(
+            cancel,
+            within,
+            &provenant_os::clock::SystemClock::new(),
+            |remaining| from_lane(&RelayOp::Children, cancel, remaining),
+        )
     })
 }
 
@@ -465,7 +488,10 @@ fn poll_children(
         }
         let remaining = within
             .checked_sub(std::time::Duration::from_micros(
-                clock.mono_now().as_micros().saturating_sub(started.as_micros()),
+                clock
+                    .mono_now()
+                    .as_micros()
+                    .saturating_sub(started.as_micros()),
             ))
             .filter(|remaining| !remaining.is_zero())
             .ok_or_else(|| refused("timeout", "child wait timed out"))?;
@@ -662,13 +688,18 @@ mod child_wait_tests {
                     Ok(())
                 },
                 || {
-                    poll_children(&cancel, std::time::Duration::from_secs(2), &provenant_os::clock::SystemClock::new(), |_| {
-                        polls += 1;
-                        if cancelled {
-                            cancel.cancel();
-                        }
-                        Ok(json!({"children":[{"node":"a--b", "settled":polls == 2}]}))
-                    })
+                    poll_children(
+                        &cancel,
+                        std::time::Duration::from_secs(2),
+                        &provenant_os::clock::SystemClock::new(),
+                        |_| {
+                            polls += 1;
+                            if cancelled {
+                                cancel.cancel();
+                            }
+                            Ok(json!({"children":[{"node":"a--b", "settled":polls == 2}]}))
+                        },
+                    )
                 },
             );
             assert_eq!(frames, [true, false]);
@@ -696,9 +727,12 @@ mod child_wait_tests {
         let result = with_waiting(
             |_| Ok(()),
             || {
-                poll_children(&CancelToken::new(), std::time::Duration::ZERO, &provenant_os::clock::SystemClock::new(), |_| {
-                    panic!("expired")
-                })
+                poll_children(
+                    &CancelToken::new(),
+                    std::time::Duration::ZERO,
+                    &provenant_os::clock::SystemClock::new(),
+                    |_| panic!("expired"),
+                )
             },
         );
         assert!(matches!(result, Err(ServiceError::Cli { code, .. }) if code == "timeout"));
@@ -780,21 +814,33 @@ mod provisioning_tests {
         provision()?;
         for occupancy in [
             provenant_confinement::worktrees::Occupancy::Observed { process: None },
-            provenant_confinement::worktrees::Occupancy::census_unknown(project.join(path), "fixture incomplete census"),
+            provenant_confinement::worktrees::Occupancy::census_unknown(
+                project.join(path),
+                "fixture incomplete census",
+            ),
         ] {
             provenant_confinement::worktrees::with_context_using_workers(
-                &context.roots, &context.home, &context.cwd,
-                &provenant_os::clock::SystemClock::new(), &cancel, &Census(occupancy),
+                &context.roots,
+                &context.home,
+                &context.cwd,
+                &provenant_os::clock::SystemClock::new(),
+                &cancel,
+                &Census(occupancy),
                 |ctx| {
                     provision_in_context(ctx, path, &source, &cancel)?;
                     let _held = provenant_confinement::worktrees::cache_writer_guard(
-                        ctx.project_state, &project.join(path),
-                    ).map_err(provenant_confinement::worktrees::custody_refusal)?;
+                        ctx.project_state,
+                        &project.join(path),
+                    )
+                    .map_err(provenant_confinement::worktrees::custody_refusal)?;
                     let held = provision_in_context(ctx, path, &source, &cancel);
-                    assert!(matches!(
-                        held,
-                        Err(provenant_confinement::worktrees::WorktreeError::WriterBusy { .. })
-                    ), "held custody must refuse reuse: {held:?}");
+                    assert!(
+                        matches!(
+                            held,
+                            Err(provenant_confinement::worktrees::WorktreeError::WriterBusy { .. })
+                        ),
+                        "held custody must refuse reuse: {held:?}"
+                    );
                     Ok(())
                 },
             )?;
@@ -856,8 +902,9 @@ mod provisioning_tests {
         // The crash: the fence was checkpointed, then the process died before
         // any Git effect.
         let path = ".worktrees/g-crash-a--w";
-        let mut checkpoint: GraphCheckpoint =
-            serde_json::from_value(json!({"schema_version":1, "graph_id":"g-crash", "plan_digest":"fixture", "nodes":[]}))?;
+        let mut checkpoint: GraphCheckpoint = serde_json::from_value(
+            json!({"schema_version":1, "graph_id":"g-crash", "plan_digest":"fixture", "nodes":[]}),
+        )?;
         relay::fence_provisioning(&mut checkpoint, "a--w", path, &source);
         journal.save(&checkpoint)?;
         assert!(!project.join(path).exists());
@@ -915,9 +962,13 @@ mod panel_tests {
             "expected_revision": 0,
             "idempotency_key": "review-child",
             "nodes": [{"id": "review", "use": "review-panel"}],
-        })).unwrap();
+        }))
+        .unwrap();
         provenant_fabric_runtime::graph::patch::admit_patch(
-            &mut LiveGraph { document: &document, checkpoint: &mut checkpoint },
+            &mut LiveGraph {
+                document: &document,
+                checkpoint: &mut checkpoint,
+            },
             None,
             &patch,
             &PatchContext {
@@ -927,6 +978,7 @@ mod panel_tests {
                 scan: &|_| Ok(()),
                 journal: None,
             },
-        ).expect("relay resolvers expand the complete review composite");
+        )
+        .expect("relay resolvers expand the complete review composite");
     }
 }

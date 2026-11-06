@@ -3698,11 +3698,7 @@ fn peer_refusal_codes_and_protocol_mismatches_reach_mcp() -> Result {
             "host":host.to_string(), "attempt":"11111111111111111111111111111111",
         }},
     }});
-    for wire in [
-        "not_terminal",
-        "operation_conflict",
-        "owner_unavailable",
-    ] {
+    for wire in ["not_terminal", "operation_conflict", "owner_unavailable"] {
         std::fs::write(
             &refusal,
             serde_json::to_vec(&json!({

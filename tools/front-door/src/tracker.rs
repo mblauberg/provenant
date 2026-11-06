@@ -6,11 +6,7 @@ use provenant_cli::{
 };
 use provenant_records::{CommandResult, Outcome};
 use serde::{Deserialize, Serialize};
-use std::{
-    collections::BTreeMap,
-    path::Path,
-    time::Duration,
-};
+use std::{collections::BTreeMap, path::Path, time::Duration};
 
 #[derive(Clone, Deserialize)]
 struct IssueType {
@@ -275,5 +271,4 @@ mod tests {
         assert!(warnings.iter().any(|s| s.contains("extra")));
         Ok(())
     }
-
 }

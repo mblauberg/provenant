@@ -3048,13 +3048,19 @@ mod writer_recovery_tests {
             crate::dispatch_tests::Fake::with_observed(Some(route()), Some(Outcome::TimedOut));
         let finished = store.finish(id, &attempt, &observed, &fake, &call)?;
         let AttemptState::Terminal {
-            extra, outcome, reason, ..
+            extra,
+            outcome,
+            reason,
+            ..
         } = finished.state
         else {
             panic!("attempt must be terminal");
         };
         assert_eq!(outcome, Outcome::TimedOut, "reason: {reason:?}");
-        assert_eq!(extra.get("terminal_cause"), Some(&serde_json::json!(TerminalCause::TokenBudget)));
+        assert_eq!(
+            extra.get("terminal_cause"),
+            Some(&serde_json::json!(TerminalCause::TokenBudget))
+        );
         let reason_text = reason.expect("terminal attempt has reason");
         assert!(
             reason_text.contains("token budget reached: provider stopped after passing"),

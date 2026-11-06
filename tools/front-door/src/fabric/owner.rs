@@ -829,8 +829,9 @@ impl BoundGraphOwner<'_> {
                 }
                 if slot.distinct_families {
                     for leaf in pattern["nodes"].as_array_mut().into_iter().flatten() {
-                        leaf["family_group"] =
-                            serde_json::json!(crate::graph_support::format_family_group(slot.group_index));
+                        leaf["family_group"] = serde_json::json!(
+                            crate::graph_support::format_family_group(slot.group_index)
+                        );
                     }
                 }
                 if let Some(base) = node.extra.get("review_base") {
@@ -1339,22 +1340,39 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
         };
         let store = owner.store(self.cancel)?;
         let call = owner.call(self.cancel);
-        let record = store.record(attempt.parse().map_err(|_| FacadeError::StateCorrupt)?, &call)
+        let record = store
+            .record(
+                attempt.parse().map_err(|_| FacadeError::StateCorrupt)?,
+                &call,
+            )
             .map_err(run_error)?;
         if record.operation_id != graph_operation("graph-attempt-operation", key)?
             || record.context.as_ref().is_none_or(|context| {
                 context.graph_id.as_deref() != Some(key.graph_id.as_str())
                     || context.node_id.as_deref() != Some(key.node_id.as_str())
             })
-            || !matches!(record.state, AttemptState::Terminal { outcome: Outcome::QuotaLimited, .. })
+            || !matches!(
+                record.state,
+                AttemptState::Terminal {
+                    outcome: Outcome::QuotaLimited,
+                    ..
+                }
+            )
             || !matches!(record.requested_route, RequestedRoute::Named { .. })
-            || record.applied_route.as_ref().and_then(|route| route.model.as_ref()).is_none()
+            || record
+                .applied_route
+                .as_ref()
+                .and_then(|route| route.model.as_ref())
+                .is_none()
             || !store.custody_released(&record, &call).map_err(run_error)?
         {
             return Ok(false);
         }
         let request = store.request(record.run_id, &call).map_err(run_error)?;
-        let task = request.tasks.iter().find(|task| task.task_id == record.task_id)
+        let task = request
+            .tasks
+            .iter()
+            .find(|task| task.task_id == record.task_id)
             .ok_or(FacadeError::StateCorrupt)?;
         let result = match store.stream_result(record.attempt_id, &call, None) {
             Ok(result) if !result.truncated && !result.source_truncated => result,
@@ -2103,7 +2121,9 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             .is_some()
             && access != provenant_fabric_runtime::graph::AccessMode::ReadOnly
         {
-            return Err(FacadeError::invalid(InvalidInputDetail::Field("node".into())));
+            return Err(FacadeError::invalid(InvalidInputDetail::Field(
+                "node".into(),
+            )));
         }
         let mut owner = BinaryRunOwner {
             factory: self.factory,
@@ -2163,28 +2183,49 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             // even when both heads agree so preparation checks dirty remnants.
             let (mut source_head, mut successor_head) = if !accepted
                 && access == provenant_fabric_runtime::graph::AccessMode::WorktreeWrite
-                && let Some(previous) = key.extra.get("previous_attempt_ref").and_then(serde_json::Value::as_str)
+                && let Some(previous) = key
+                    .extra
+                    .get("previous_attempt_ref")
+                    .and_then(serde_json::Value::as_str)
             {
                 let (host, previous) = previous.split_once('/').ok_or(FacadeError::StateCorrupt)?;
                 if host != self.factory.context.identity.host.to_string() {
                     return Err(FacadeError::OwnerUnavailable);
                 }
-                let previous = store.record(previous.parse().map_err(|_| FacadeError::StateCorrupt)?, &call)
+                let previous = store
+                    .record(
+                        previous.parse().map_err(|_| FacadeError::StateCorrupt)?,
+                        &call,
+                    )
                     .map_err(run_error)?;
                 if previous.context.as_ref().is_none_or(|context| {
                     context.graph_id.as_deref() != Some(key.graph_id.as_str())
                         || context.node_id.as_deref() != Some(key.node_id.as_str())
-                }) || !matches!(previous.state, provenant_records::run::AttemptState::Terminal { .. })
-                    || !store.custody_released(&previous, &call).map_err(run_error)?
+                }) || !matches!(
+                    previous.state,
+                    provenant_records::run::AttemptState::Terminal { .. }
+                ) || !store
+                    .custody_released(&previous, &call)
+                    .map_err(run_error)?
                 {
                     return Err(FacadeError::Conflict);
                 }
                 let request = store.request(previous.run_id, &call).map_err(run_error)?;
-                let previous_task = request.tasks.iter().find(|task| task.task_id == previous.task_id)
+                let previous_task = request
+                    .tasks
+                    .iter()
+                    .find(|task| task.task_id == previous.task_id)
                     .ok_or(FacadeError::StateCorrupt)?;
-                let original = previous_task.source_head.as_ref().or(previous_task.head.as_ref())
-                    .cloned().or_else(|| node.source_commit.map(str::to_owned));
-                let current = previous.head.map(|head| head.to_string()).or_else(|| previous_task.head.clone());
+                let original = previous_task
+                    .source_head
+                    .as_ref()
+                    .or(previous_task.head.as_ref())
+                    .cloned()
+                    .or_else(|| node.source_commit.map(str::to_owned));
+                let current = previous
+                    .head
+                    .map(|head| head.to_string())
+                    .or_else(|| previous_task.head.clone());
                 (original, current)
             } else {
                 (None, None)
@@ -3070,10 +3111,25 @@ mod journal_error_tests {
         let mut usage = provenant_records::run::UsageRecord::default();
         assert!(quota_alias_has_no_work(" ", &usage, false, Some("startup")));
         assert!(quota_alias_has_no_work("", &usage, true, None));
-        assert!(!quota_alias_has_no_work("", &usage, true, Some("writer-session")));
+        assert!(!quota_alias_has_no_work(
+            "",
+            &usage,
+            true,
+            Some("writer-session")
+        ));
         usage.output_excluding_reasoning = Some(0);
-        assert!(quota_alias_has_no_work("", &usage, true, Some("writer-session")));
-        assert!(!quota_alias_has_no_work("completed work", &usage, false, None));
+        assert!(quota_alias_has_no_work(
+            "",
+            &usage,
+            true,
+            Some("writer-session")
+        ));
+        assert!(!quota_alias_has_no_work(
+            "completed work",
+            &usage,
+            false,
+            None
+        ));
         usage.output_excluding_reasoning = Some(1);
         assert!(!quota_alias_has_no_work("", &usage, false, None));
         usage.output_excluding_reasoning = Some(0);

@@ -436,8 +436,10 @@ pub(crate) fn serve_one_with(
                 operation_id: None,
             },
             Err(_) => Reply::Error {
-                code: "invalid_input".into(), detail: Value::Null,
-                cause: None, operation_id: None,
+                code: "invalid_input".into(),
+                detail: Value::Null,
+                cause: None,
+                operation_id: None,
             },
         }
     };

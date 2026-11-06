@@ -1600,7 +1600,6 @@ pub(super) fn wait_for_writer_release(store: &provenant_run::RunStore) -> Result
         .ok_or_else(|| "writer reservation was not released after terminal publication".into())
 }
 
-
 struct ReleaseOnDrop(PathBuf);
 impl Drop for ReleaseOnDrop {
     fn drop(&mut self) {

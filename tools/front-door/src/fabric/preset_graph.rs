@@ -8,7 +8,10 @@ pub(crate) struct ScratchPreparationError(
 );
 
 #[cfg(test)]
-#[allow(dead_code, reason = "the custom worktree driver omits libtest functions")]
+#[allow(
+    dead_code,
+    reason = "the custom worktree driver omits libtest functions"
+)]
 impl ScratchPreparationError {
     fn is_transient(&self) -> bool {
         use provenant_confinement::worktrees::WorktreeError;
@@ -30,12 +33,18 @@ impl ScratchPreparationError {
 }
 
 #[cfg(test)]
-#[allow(dead_code, reason = "the custom worktree driver omits libtest functions")]
+#[allow(
+    dead_code,
+    reason = "the custom worktree driver omits libtest functions"
+)]
 #[derive(Default)]
 pub(crate) struct PreparedScratch(Option<std::path::PathBuf>);
 
 #[cfg(test)]
-#[allow(dead_code, reason = "the custom worktree driver omits libtest functions")]
+#[allow(
+    dead_code,
+    reason = "the custom worktree driver omits libtest functions"
+)]
 impl PreparedScratch {
     pub(crate) fn get_or_prepare(
         &mut self,
@@ -107,7 +116,10 @@ pub(crate) fn publish_preset_graph(
 }
 
 #[cfg(test)]
-#[allow(dead_code, reason = "the custom worktree driver omits libtest functions")]
+#[allow(
+    dead_code,
+    reason = "the custom worktree driver omits libtest functions"
+)]
 fn retry_collected_document<T, E: std::error::Error + 'static>(
     path: &std::path::Path,
     mut run: impl FnMut() -> Result<T, E>,
@@ -147,9 +159,11 @@ fn private_graph_directory_refusal(
     })
 }
 
-
 #[cfg(test)]
-#[allow(dead_code, reason = "the custom worktree driver omits libtest functions")]
+#[allow(
+    dead_code,
+    reason = "the custom worktree driver omits libtest functions"
+)]
 fn review_substitution(node: &provenant_fabric_runtime::graph::NodeProgress) -> bool {
     node.attempts.iter().any(|a| a.review_substitution)
         || node.separation.as_ref().is_some_and(|separation| {
@@ -157,9 +171,11 @@ fn review_substitution(node: &provenant_fabric_runtime::graph::NodeProgress) -> 
         })
 }
 
-
 #[cfg(test)]
-#[allow(dead_code, reason = "the custom worktree driver omits libtest functions")]
+#[allow(
+    dead_code,
+    reason = "the custom worktree driver omits libtest functions"
+)]
 fn review_verdict(
     outputs: &provenant_fabric_runtime::graph::NodeOutputs,
 ) -> Option<provenant_records::workflow::ReviewVerdict> {
@@ -172,15 +188,20 @@ fn review_verdict(
         .and_then(provenant_records::workflow::ReviewVerdict::from_token)
 }
 
-
 #[cfg(test)]
-#[allow(dead_code, reason = "the custom worktree driver omits libtest functions")]
+#[allow(
+    dead_code,
+    reason = "the custom worktree driver omits libtest functions"
+)]
 pub(crate) fn retry_scratch_poll(error: &ScratchPreparationError, graph_admitted: bool) -> bool {
     graph_admitted && error.is_transient()
 }
 
 #[cfg(test)]
-#[allow(dead_code, reason = "the custom worktree driver omits libtest functions")]
+#[allow(
+    dead_code,
+    reason = "the custom worktree driver omits libtest functions"
+)]
 pub(crate) fn scratch_prepare_error_message(
     error: &ScratchPreparationError,
     graph_id: Option<&str>,
@@ -199,7 +220,10 @@ pub(crate) fn scratch_prepare_error_message(
 }
 
 #[cfg(test)]
-#[allow(dead_code, reason = "the custom worktree driver omits libtest functions")]
+#[allow(
+    dead_code,
+    reason = "the custom worktree driver omits libtest functions"
+)]
 pub(super) fn shell_path(path: &std::path::Path) -> String {
     let value = path.to_string_lossy();
     if value
@@ -213,7 +237,11 @@ pub(super) fn shell_path(path: &std::path::Path) -> String {
 }
 
 #[cfg(test)]
-#[allow(dead_code, unused_imports, reason = "the custom worktree driver omits libtest functions")]
+#[allow(
+    dead_code,
+    unused_imports,
+    reason = "the custom worktree driver omits libtest functions"
+)]
 mod tests {
     use super::{private_graph_directory_refusal, retry_collected_document};
     use std::path::Path;
@@ -223,10 +251,7 @@ mod tests {
         use provenant_core::{CancelToken, Clock, ProjectId, RootInputs, StateRoot, WaitBudget};
         use provenant_fabric_runtime::graph::FileJournal;
         use provenant_os::{clock::SystemClock, fs::SystemPathResolver};
-        use std::{
-            sync::mpsc,
-            time::Duration,
-        };
+        use std::{sync::mpsc, time::Duration};
 
         let temp = tempfile::tempdir()?;
         let base = std::fs::canonicalize(temp.path())?;
@@ -250,7 +275,15 @@ mod tests {
                 let journal =
                     FileJournal::open(&root, project, "live-add-spike", budget, &cancel, &clock);
                 finished_tx
-                    .send((Duration::from_micros(clock.mono_now().as_micros().saturating_sub(start.as_micros())), journal.is_ok()))
+                    .send((
+                        Duration::from_micros(
+                            clock
+                                .mono_now()
+                                .as_micros()
+                                .saturating_sub(start.as_micros()),
+                        ),
+                        journal.is_ok(),
+                    ))
                     .unwrap();
             });
             started_rx.recv().unwrap();

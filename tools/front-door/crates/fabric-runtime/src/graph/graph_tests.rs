@@ -12066,43 +12066,68 @@ fn quota_alias_redraw_uses_graph_retry_keeps_spent_models_and_is_bounded() {
     alias.model = None;
     alias.alias = Some("junior".into());
     for launched in [false, true] {
-    for with_fallback in [false, true] {
-    let mut task = node("lane", alias.clone());
-    if with_fallback {
-        task.route = None;
-        task.routes = Some(vec![alias.clone(), route("fallback")]);
-    }
-    let document = graph(vec![task]);
-    let quota = |reference: &str| {
-        let mut observation = terminal(AttemptOutcome::UsageLimited);
-        if let AttemptObservation::Terminal { attempt_ref, launched: did_launch, .. } = &mut observation {
-            *attempt_ref = Some(reference.into());
-            *did_launch = launched;
+        for with_fallback in [false, true] {
+            let mut task = node("lane", alias.clone());
+            if with_fallback {
+                task.route = None;
+                task.routes = Some(vec![alias.clone(), route("fallback")]);
+            }
+            let document = graph(vec![task]);
+            let quota = |reference: &str| {
+                let mut observation = terminal(AttemptOutcome::UsageLimited);
+                if let AttemptObservation::Terminal {
+                    attempt_ref,
+                    launched: did_launch,
+                    ..
+                } = &mut observation
+                {
+                    *attempt_ref = Some(reference.into());
+                    *did_launch = launched;
+                }
+                observation
+            };
+            let mut owner = FakeOwner {
+                quota_redraw: true,
+                retry_limit: Some(2),
+                observations: [
+                    quota("host/first"),
+                    quota("host/second"),
+                    quota("host/third"),
+                ]
+                .into(),
+                models: [
+                    ("host/first".into(), "codex/one".into()),
+                    ("host/second".into(), "claude/two".into()),
+                ]
+                .into(),
+                ..Default::default()
+            };
+            let mut journal = MemoryJournal::default();
+            let status = advance(&document, &mut owner, &mut journal).unwrap();
+            assert_eq!(status.checkpoint.nodes[0].state, NodeState::Failed);
+            assert_eq!(owner.calls.len(), 3);
+            assert!(owner.calls.iter().all(|(_, route)| route == &alias));
+            assert_ne!(owner.calls[0].0, owner.calls[1].0);
+            assert_ne!(owner.calls[1].0, owner.calls[2].0);
+            assert_eq!(
+                owner.prior_attempts,
+                vec![
+                    vec![],
+                    vec!["codex/one".to_owned()],
+                    vec!["codex/one".to_owned(), "claude/two".to_owned()]
+                ]
+            );
+            let checkpoint = journal.0.unwrap();
+            assert_eq!(checkpoint.nodes[0].previous_attempts.len(), 2);
+            assert_eq!(checkpoint.nodes[0].attempts.len(), 1);
+            assert_eq!(checkpoint.nodes[0].extra["retry"]["retries"], 2);
+            assert_eq!(checkpoint.nodes[0].extra["quota_redraw_spent"], 2);
+            if with_fallback {
+                assert_eq!(
+                    checkpoint.nodes[0].advance_error_code.as_deref(),
+                    Some("fallback_budget_exhausted")
+                );
+            }
         }
-        observation
-    };
-    let mut owner = FakeOwner {
-        quota_redraw: true, retry_limit: Some(2),
-        observations: [quota("host/first"), quota("host/second"), quota("host/third")].into(),
-        models: [("host/first".into(), "codex/one".into()), ("host/second".into(), "claude/two".into())].into(),
-        ..Default::default()
-    };
-    let mut journal = MemoryJournal::default();
-    let status = advance(&document, &mut owner, &mut journal).unwrap();
-    assert_eq!(status.checkpoint.nodes[0].state, NodeState::Failed);
-    assert_eq!(owner.calls.len(), 3);
-    assert!(owner.calls.iter().all(|(_, route)| route == &alias));
-    assert_ne!(owner.calls[0].0, owner.calls[1].0);
-    assert_ne!(owner.calls[1].0, owner.calls[2].0);
-    assert_eq!(owner.prior_attempts, vec![vec![], vec!["codex/one".to_owned()], vec!["codex/one".to_owned(), "claude/two".to_owned()]]);
-    let checkpoint = journal.0.unwrap();
-    assert_eq!(checkpoint.nodes[0].previous_attempts.len(), 2);
-    assert_eq!(checkpoint.nodes[0].attempts.len(), 1);
-    assert_eq!(checkpoint.nodes[0].extra["retry"]["retries"], 2);
-    assert_eq!(checkpoint.nodes[0].extra["quota_redraw_spent"], 2);
-    if with_fallback {
-        assert_eq!(checkpoint.nodes[0].advance_error_code.as_deref(), Some("fallback_budget_exhausted"));
-    }
-    }
     }
 }

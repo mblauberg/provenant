@@ -27,8 +27,20 @@ fn malformed_graph_reports_safe_output_field_and_action() -> Result {
     assert!(!output.status.success());
     let value: Value = serde_json::from_slice(&output.stdout)?;
     assert_eq!(value["error"]["code"], "dispatch_refused", "{value}");
-    assert!(value["error"]["message"].as_str().unwrap().contains("composite.exports[].outputs"), "{value}");
-    assert!(value["error"]["repair"].as_str().unwrap().contains("output"), "{value}");
+    assert!(
+        value["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("composite.exports[].outputs"),
+        "{value}"
+    );
+    assert!(
+        value["error"]["repair"]
+            .as_str()
+            .unwrap()
+            .contains("output"),
+        "{value}"
+    );
     assert!(!String::from_utf8_lossy(&output.stdout).contains("PROMPT_SENTINEL"));
     Ok(())
 }

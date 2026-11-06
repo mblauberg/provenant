@@ -829,7 +829,9 @@ impl TerminalCause {
             Self::ProcessCrash => {
                 "the provider process crashed; inspect local evidence before retrying"
             }
-            Self::TokenBudget => "the host stopped the provider at its token budget; inspect the retained work before retrying",
+            Self::TokenBudget => {
+                "the host stopped the provider at its token budget; inspect the retained work before retrying"
+            }
             Self::SettlementFailure => "lane settlement failed; inspect local recovery evidence",
             Self::ProviderEarlyStop => {
                 "provider stopped early; inspect the result and resume if needed"

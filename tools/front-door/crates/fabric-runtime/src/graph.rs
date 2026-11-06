@@ -1107,9 +1107,10 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     .skip_reason
                     .as_deref()
                     .is_some_and(|reason| reason.starts_with("parent "))
-                    && let Some(state) = node.cancelled_from.take() {
-                        node.state = state;
-                        node.skip_reason = None;
+                    && let Some(state) = node.cancelled_from.take()
+                {
+                    node.state = state;
+                    node.skip_reason = None;
                 }
             }
             asks::refresh_wake(&mut validation);
@@ -2104,7 +2105,8 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                 {
                     attempt_extra.insert("retry_generation".into(), generation.clone());
                 }
-                let predecessor = checkpoint.nodes[node_index].recorded_attempts()
+                let predecessor = checkpoint.nodes[node_index]
+                    .recorded_attempts()
                     .filter(|attempt| attempt.state == AttemptState::Terminal)
                     .filter_map(|attempt| attempt.attempt_ref.as_ref())
                     .next_back();
@@ -2118,7 +2120,9 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     route_index: u16::try_from(route_index)
                         .map_err(|_| GraphError::Invalid(String::from("route count")))?,
                 };
-                let key = checkpoint.nodes[node_index].attempts.last()
+                let key = checkpoint.nodes[node_index]
+                    .attempts
+                    .last()
                     .filter(|attempt| attempt.state != AttemptState::Terminal)
                     .map_or(key, |attempt| attempt.key.clone());
 
@@ -2670,11 +2674,24 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                 for attempt in checkpoint.nodes[node_index]
                     .previous_attempts
                     .iter()
-                    .skip(checkpoint.nodes[node_index].previous_attempts.len().saturating_sub(
-                        checkpoint.nodes[node_index].extra.get("quota_redraw_archived")
-                            .and_then(serde_json::Value::as_u64).unwrap_or(0) as usize
-                    ))
-                    .chain(checkpoint.nodes[node_index].attempts.iter().take(route_index))
+                    .skip(
+                        checkpoint.nodes[node_index]
+                            .previous_attempts
+                            .len()
+                            .saturating_sub(
+                                checkpoint.nodes[node_index]
+                                    .extra
+                                    .get("quota_redraw_archived")
+                                    .and_then(serde_json::Value::as_u64)
+                                    .unwrap_or(0) as usize,
+                            ),
+                    )
+                    .chain(
+                        checkpoint.nodes[node_index]
+                            .attempts
+                            .iter()
+                            .take(route_index),
+                    )
                     .filter(|_| !review_retry)
                 {
                     let resolved = if let Some(reference) = &attempt.attempt_ref {
@@ -2793,7 +2810,11 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                             &mut checkpoint,
                             node_index,
                             &error,
-                            LaunchTiming { clock, admission_seconds, policy },
+                            LaunchTiming {
+                                clock,
+                                admission_seconds,
+                                policy,
+                            },
                             journal,
                         )?;
                         break;
@@ -2887,10 +2908,14 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                 };
                 let quota_redraw = match &observation {
                     AttemptObservation::Terminal {
-                        attempt_ref: Some(reference), outcome: AttemptOutcome::UsageLimited, ..
+                        attempt_ref: Some(reference),
+                        outcome: AttemptOutcome::UsageLimited,
+                        ..
                     } if route.alias.is_some() && route.model.is_none() => {
                         quota_redraw_budget(&checkpoint.nodes[node_index])
-                            && owner.quota_alias_redraw(&key, reference).map_err(GraphError::Run)?
+                            && owner
+                                .quota_alias_redraw(&key, reference)
+                                .map_err(GraphError::Run)?
                     }
                     _ => false,
                 };
@@ -3246,8 +3271,12 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                                         route_index,
                                         outcome,
                                         launched,
-                                        FallbackEvidence { preparation: fallback_evidence, unreadable: evidence_unreadable,
-                                            review_limit_reached, cause: fallback_cause.as_ref() },
+                                        FallbackEvidence {
+                                            preparation: fallback_evidence,
+                                            unreadable: evidence_unreadable,
+                                            review_limit_reached,
+                                            cause: fallback_cause.as_ref(),
+                                        },
                                     ) {
                                         SettlementFallback::Continue => true,
                                         SettlementFallback::Fail { code, message } => {
@@ -3310,30 +3339,70 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     // route, and the retry patch requires the old execution settled.
                     checkpoint.nodes[node_index].state = NodeState::Failed;
                     let retry_policy = checkpoint.nodes[node_index].extra.get("retry").cloned();
-                    let spent = checkpoint.nodes[node_index].extra.get("quota_redraw_spent")
-                        .and_then(serde_json::Value::as_u64).unwrap_or(0)
-                        .saturating_add(checkpoint.nodes[node_index].attempts.iter().filter(|attempt| attempt.launched).count() as u64)
-                        .saturating_add(u64::from(checkpoint.nodes[node_index].attempts.last().is_some_and(|attempt| !attempt.launched)));
-                    let archived = checkpoint.nodes[node_index].extra.get("quota_redraw_archived")
-                        .and_then(serde_json::Value::as_u64).unwrap_or(0)
+                    let spent = checkpoint.nodes[node_index]
+                        .extra
+                        .get("quota_redraw_spent")
+                        .and_then(serde_json::Value::as_u64)
+                        .unwrap_or(0)
+                        .saturating_add(
+                            checkpoint.nodes[node_index]
+                                .attempts
+                                .iter()
+                                .filter(|attempt| attempt.launched)
+                                .count() as u64,
+                        )
+                        .saturating_add(u64::from(
+                            checkpoint.nodes[node_index]
+                                .attempts
+                                .last()
+                                .is_some_and(|attempt| !attempt.launched),
+                        ));
+                    let archived = checkpoint.nodes[node_index]
+                        .extra
+                        .get("quota_redraw_archived")
+                        .and_then(serde_json::Value::as_u64)
+                        .unwrap_or(0)
                         .saturating_add(checkpoint.nodes[node_index].attempts.len() as u64);
                     let library = template::TemplateLibrary::bundled();
                     let resolvers = Default::default();
                     patch::retry_node(
-                        &mut patch::LiveGraph { document, checkpoint: &mut checkpoint },
-                        &node.id, None,
-                        &patch::PatchContext {
-                            library: &library, resolvers: &resolvers, limits,
-                            scan: &patch::scan_for_secrets, journal: None,
+                        &mut patch::LiveGraph {
+                            document,
+                            checkpoint: &mut checkpoint,
                         },
-                    ).map_err(|error| GraphError::Refused(error.to_string()))?;
+                        &node.id,
+                        None,
+                        &patch::PatchContext {
+                            library: &library,
+                            resolvers: &resolvers,
+                            limits,
+                            scan: &patch::scan_for_secrets,
+                            journal: None,
+                        },
+                    )
+                    .map_err(|error| GraphError::Refused(error.to_string()))?;
                     if let Some(policy) = retry_policy {
-                        checkpoint.nodes[node_index].extra.insert("retry".into(), policy);
+                        checkpoint.nodes[node_index]
+                            .extra
+                            .insert("retry".into(), policy);
                     }
-                    checkpoint.nodes[node_index].extra.insert("quota_redraw_spent".into(), spent.into());
-                    checkpoint.nodes[node_index].extra.insert("quota_redraw_archived".into(), archived.into());
+                    checkpoint.nodes[node_index]
+                        .extra
+                        .insert("quota_redraw_spent".into(), spent.into());
+                    checkpoint.nodes[node_index]
+                        .extra
+                        .insert("quota_redraw_archived".into(), archived.into());
                     journal.save(&checkpoint).map_err(GraphError::Journal)?;
-                    return advance_inner(document, owner, journal, limits, budget, false, &[], observed_ci);
+                    return advance_inner(
+                        document,
+                        owner,
+                        journal,
+                        limits,
+                        budget,
+                        false,
+                        &[],
+                        observed_ci,
+                    );
                 }
                 let appended = if settled_result.is_some() || node.plan.is_some() {
                     plans::settle(
