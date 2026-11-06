@@ -1224,6 +1224,39 @@ pub(crate) mod peer_tests {
         let accepted = graph::AttemptSpec { build_heavy: true, ..Default::default() };
         let receipt = run_owner.submit_with_access(input, budget, &cancel, grants, None, Some(accepted))?;
         let target = receipt.targets.first().ok_or("target")?;
+        // The plain lane and graph owner both lower through the same submission
+        // boundary; compare their durable launch fields, excluding identities.
+        let plain_key: graph::AttemptKey = serde_json::from_value(serde_json::json!({
+            "graph_id":"plain-parity", "node_id":"inspect", "route_index":0
+        }))?;
+        let plain_operation = graph_operation("graph-attempt-operation", &plain_key)?;
+        let session = run_owner.session(&cancel)?;
+        let plain_task = provenant_cli::run::Submitted {
+            attempt: graph::AttemptSpec { build_heavy: true, ..Default::default() },
+            require_skill_location: false, settlement_retry_limit: None, context: None,
+            title: Some("inspect".into()),
+            task_id: provenant_cli::run::derived_task(&plain_operation, 0).map_err(|_| "plain task id")?,
+            prompt: "Review the slice".into(), base: None, pinned_base: None, head: None,
+            route: serde_json::from_value(serde_json::json!({"kind":"model", "provider":"fixture", "model":"fixture/model"}))?,
+            fallback: Vec::new(), provider_timeout: factory.context.config.limits.graph_timeout_seconds,
+            delivery_id: None, deliver: None, worktree: None,
+            access: provenant_records::run::LaneAccess { write_roots: vec![write_root.clone()], ..Default::default() },
+        };
+        let (plain_run, _) = run_owner.with_edge(|edge| provenant_cli::run::submit_with_host(
+            &session, edge, provenant_cli::run::Submission { chair: None, operation_id: plain_operation,
+                tasks: vec![plain_task], concurrency: Some(1), knobs: vec!["routing.graph_exclude=[\"codex/gpt-6-luna\"]".into()] },
+            &run_owner.call(&cancel), None))?;
+        let graph_record = session.store.record(target.attempt, &run_owner.call(&cancel))?;
+        let graph_request = session.store.request(graph_record.run_id, &run_owner.call(&cancel))?;
+        let plain_request = session.store.request(plain_run.run_id, &run_owner.call(&cancel))?;
+        let graph_task = &graph_request.tasks[0];
+        let plain_task = &plain_request.tasks[0];
+        assert_eq!(graph_task.cloud, plain_task.cloud);
+        assert_eq!(graph_task.build_heavy, plain_task.build_heavy);
+        assert_eq!(graph_task.account, plain_task.account);
+        assert_eq!(graph_task.route, plain_task.route);
+        assert_eq!(graph_task.access, plain_task.access);
+        assert_eq!(graph_task.prompt_digest, plain_task.prompt_digest);
         let mut graph_owner = BoundGraphOwner {
             factory: &factory,
             integration_base: None,
