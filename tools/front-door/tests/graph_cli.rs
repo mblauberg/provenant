@@ -570,10 +570,19 @@ fn oversized_graph_expansion_is_refused_before_journalling() -> Result {
 fn steer_graph_and_node_refuse_ambiguous_live_attempts_before_reading_stdin() -> Result {
     let rig = GraphProject::new()?;
     let path = rig.document(&json!({"schema_version":1,"graph_id":"steer-ambiguous","nodes":[{"id":"accept","kind":"gate","access":"read_only","condition":{"type":"budget"}}]}))?;
-    let output = rig.command().args(["run", "--file"]).arg(path).arg("--wait=10s").output()?;
+    let output = rig
+        .command()
+        .args(["run", "--file"])
+        .arg(path)
+        .arg("--wait=10s")
+        .output()?;
     assert!(output.status.success(), "{output:?}");
-    let checkpoint_path = graph_records(&rig.state())?.into_iter()
-        .find(|path| path.file_name().is_some_and(|name| name == "graph-steer-ambiguous.json"))
+    let checkpoint_path = graph_records(&rig.state())?
+        .into_iter()
+        .find(|path| {
+            path.file_name()
+                .is_some_and(|name| name == "graph-steer-ambiguous.json")
+        })
         .ok_or("checkpoint")?;
     let mut stored: Value = serde_json::from_slice(&std::fs::read(&checkpoint_path)?)?;
     let attempt = json!({"key":{"graph_id":"steer-ambiguous","node_id":"accept","route_index":0},
@@ -582,16 +591,31 @@ fn steer_graph_and_node_refuse_ambiguous_live_attempts_before_reading_stdin() ->
     stored["checkpoint"]["nodes"][0]["state"] = json!("running");
     let mut other = attempt.clone();
     other["key"]["route_index"] = json!(1);
-    stored["checkpoint"]["nodes"][0]["attempts"] = json!([attempt,other]);
-    let checkpoint: provenant_fabric_runtime::graph::GraphCheckpoint = serde_json::from_value(stored["checkpoint"].clone())?;
-    let execution: provenant_fabric_runtime::graph::GraphExecution = serde_json::from_value(stored["execution"].clone())?;
-    stored["digest"] = json!(provenant_records::CanonicalV1::record_digest("fabric-graph-checkpoint", 2, &(checkpoint,execution))?.to_string());
+    stored["checkpoint"]["nodes"][0]["attempts"] = json!([attempt, other]);
+    let checkpoint: provenant_fabric_runtime::graph::GraphCheckpoint =
+        serde_json::from_value(stored["checkpoint"].clone())?;
+    let execution: provenant_fabric_runtime::graph::GraphExecution =
+        serde_json::from_value(stored["execution"].clone())?;
+    stored["digest"] = json!(
+        provenant_records::CanonicalV1::record_digest(
+            "fabric-graph-checkpoint",
+            2,
+            &(checkpoint, execution)
+        )?
+        .to_string()
+    );
     std::fs::write(&checkpoint_path, serde_json::to_vec(&stored)?)?;
     for target in ["steer-ambiguous", "steer-ambiguous/accept"] {
         let (output, value) = rig.run(&["steer", target, "--text-stdin"])?;
         assert!(!output.status.success(), "{value}");
+        assert_eq!(value["status"], "refused", "{value}");
         assert_eq!(value["error"]["code"], "steer_target_refused", "{value}");
-        assert!(value["error"]["message"].as_str().is_some_and(|message| message.contains("several live attempts")), "{value}");
+        assert!(
+            value["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("several live attempts")),
+            "{value}"
+        );
     }
     Ok(())
 }

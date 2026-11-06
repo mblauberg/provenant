@@ -206,7 +206,6 @@ impl RunConfig {
             |config| config.review_exempt(project),
         )
     }
-
 }
 /// A resolved writer token budget. `tokens` of 0 means no budget.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]

@@ -2297,12 +2297,13 @@ mod tests {
         )?;
         let id = document.graph_id.clone();
         let attempt = json!({"key":{"graph_id":id,"node_id":"task","route_index":0},"launched":true,"route":{"alias":"senior"},"state":"terminal","attempt_ref":"host/attempt","launch_actor":"actor","usage":{"tokens":100,"cost_micro_usd":25,"wall_time_seconds":3,"cache_read_tokens":60,"input_tokens":80,"queue_time_ms":1500,"outcome":"timed_out","tier":"principal","template":"implement.fix"}});
-        let mut checkpoint: provenant_fabric_runtime::graph::GraphCheckpoint = serde_json::from_value(
-            json!({"schema_version":1,"graph_id":id,"plan_digest":"test","nodes":[
-                {"id":"group","worktree":null,"state":"succeeded","attempts":[],"children":["task"],"usage":{"tokens":100}},
-                {"id":"task","worktree":null,"state":"succeeded","attempts":[attempt.clone()],"previous_attempts":[attempt]}
-            ]}),
-        )?;
+        let mut checkpoint: provenant_fabric_runtime::graph::GraphCheckpoint =
+            serde_json::from_value(
+                json!({"schema_version":1,"graph_id":id,"plan_digest":"test","nodes":[
+                    {"id":"group","worktree":null,"state":"succeeded","attempts":[],"children":["task"],"usage":{"tokens":100}},
+                    {"id":"task","worktree":null,"state":"succeeded","attempts":[attempt.clone()],"previous_attempts":[attempt]}
+                ]}),
+            )?;
         checkpoint.nodes[1].previous_attempts.push(serde_json::from_value(json!({
             "key":{"graph_id":id,"node_id":"task","route_index":1},
             "launched":false,"route":{"alias":"senior"},"state":"terminal",
@@ -2325,7 +2326,8 @@ mod tests {
         })?;
         let mut reserved = checkpoint.clone();
         reserved.nodes[1].attempts[0].attempt_ref = None;
-        reserved.nodes[1].attempts[0].state = provenant_fabric_runtime::graph::AttemptState::Starting;
+        reserved.nodes[1].attempts[0].state =
+            provenant_fabric_runtime::graph::AttemptState::Starting;
         reserved.nodes[1].attempts[0].outcome = None;
         reserved.nodes[1].attempts[0].usage = None;
         reserved.nodes[1].previous_attempts.clear();
@@ -2345,8 +2347,12 @@ mod tests {
         assert_eq!(stats["groups"][0]["cache_read_share"], 0.75);
         assert_eq!(stats["groups"][0]["queue_time_ms"], 1500);
         assert_eq!(stats["groups"][0]["outcomes"]["timed_out"], 1);
-        let refused = stats["groups"].as_array().ok_or("stats groups")?.iter()
-            .find(|group| group["name"] == "senior").ok_or("refused attempt group")?;
+        let refused = stats["groups"]
+            .as_array()
+            .ok_or("stats groups")?
+            .iter()
+            .find(|group| group["name"] == "senior")
+            .ok_or("refused attempt group")?;
         assert_eq!(refused["attempts"], 1);
         assert_eq!(refused["outcomes"]["adapter_unavailable"], 1);
 
@@ -2399,8 +2405,12 @@ mod tests {
         )?;
         assert_eq!(retained["groups"][0]["attempts"], 1);
         assert_eq!(retained["groups"][0]["tokens"], 100);
-        let refused = retained["groups"].as_array().ok_or("retained groups")?.iter()
-            .find(|group| group["name"] == "senior").ok_or("retained refusal")?;
+        let refused = retained["groups"]
+            .as_array()
+            .ok_or("retained groups")?
+            .iter()
+            .find(|group| group["name"] == "senior")
+            .ok_or("retained refusal")?;
         assert_eq!(refused["attempts"], 1);
         assert_eq!(refused["outcomes"]["adapter_unavailable"], 1);
 

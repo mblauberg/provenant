@@ -543,9 +543,15 @@ mod tests {
                 "route":{"alias":"senior"},"state":"starting","launched":false,
                 "attempt_ref":null,"outcome":null,"launch_actor":"actor"
             }]}]
-        })).unwrap();
+        }))
+        .unwrap();
         append_changes(&directory, "g", None, &checkpoint, None).unwrap();
-        assert!(read(&directory, "g").unwrap().iter().all(|event| event.attempt.is_none()));
+        assert!(
+            read(&directory, "g")
+                .unwrap()
+                .iter()
+                .all(|event| event.attempt.is_none())
+        );
         let before = checkpoint.clone();
         checkpoint.nodes[0].state = NodeState::Failed;
         let attempt = &mut checkpoint.nodes[0].attempts[0];
@@ -554,8 +560,11 @@ mod tests {
         attempt.settled = 1;
         append_changes(&directory, "g", Some(&before), &checkpoint, None).unwrap();
         append_changes(&directory, "g", Some(&checkpoint), &checkpoint, None).unwrap();
-        let attempts = read(&directory, "g").unwrap().into_iter()
-            .filter_map(|event| event.attempt).collect::<Vec<_>>();
+        let attempts = read(&directory, "g")
+            .unwrap()
+            .into_iter()
+            .filter_map(|event| event.attempt)
+            .collect::<Vec<_>>();
         assert_eq!(attempts.len(), 1);
         assert_eq!(attempts[0].outcome.as_deref(), Some("adapter_unavailable"));
         assert_eq!(attempts[0].tier, "senior");

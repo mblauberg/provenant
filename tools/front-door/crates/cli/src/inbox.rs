@@ -956,19 +956,25 @@ pub fn live_steer_reference<'a>(
     if node.is_some_and(|id| !checkpoint.nodes.iter().any(|node| node.id == id)) {
         return Err("target node was not found");
     }
-    let mut live = checkpoint.nodes.iter()
+    let mut live = checkpoint
+        .nodes
+        .iter()
         .filter(|candidate| node.is_none_or(|id| candidate.id == id))
         .flat_map(|candidate| &candidate.attempts)
         .filter(|attempt| attempt.state != AttemptState::Terminal)
-        .filter(|attempt| selected_reference.is_none_or(|reference| attempt.attempt_ref.as_deref() == Some(reference)));
+        .filter(|attempt| {
+            selected_reference
+                .is_none_or(|reference| attempt.attempt_ref.as_deref() == Some(reference))
+        });
     let first = live.next().ok_or("target has no live attempt")?;
     if live.next().is_some() {
         return Err("target has several live attempts; select graph/node or an attempt ID");
     }
-    first.attempt_ref.as_deref()
+    first
+        .attempt_ref
+        .as_deref()
         .ok_or("live attempt has no resolved attempt ID yet; retry after launch resolves")
 }
-
 
 fn execute(
     command: HumanCommand,
@@ -1322,20 +1328,46 @@ mod tests {
                     "launched":true, "route":{"alias":"senior"}, "state":"running",
                     "attempt_ref":format!("{host}/{attempt}"), "outcome":null, "launch_actor":"fixture"}]}]
         })).unwrap();
-        assert_eq!(live_steer_reference(&checkpoint, None, None).unwrap(), reference);
-        assert_eq!(live_steer_reference(&checkpoint, Some("task"), None).unwrap(), reference);
-        assert!(matches!(live_steer_reference(&checkpoint, Some("missing"), None), Err("target node was not found")));
+        assert_eq!(
+            live_steer_reference(&checkpoint, None, None).unwrap(),
+            reference
+        );
+        assert_eq!(
+            live_steer_reference(&checkpoint, Some("task"), None).unwrap(),
+            reference
+        );
+        assert!(matches!(
+            live_steer_reference(&checkpoint, Some("missing"), None),
+            Err("target node was not found")
+        ));
         let mut second = checkpoint.nodes[0].clone();
         second.id = "other".into();
         checkpoint.nodes.push(second);
         let error = live_steer_reference(&checkpoint, None, None).unwrap_err();
         assert!(error.to_string().contains("several live attempts"));
-        assert_eq!(live_steer_reference(&checkpoint, Some("task"), None).unwrap(), reference);
+        assert_eq!(
+            live_steer_reference(&checkpoint, Some("task"), None).unwrap(),
+            reference
+        );
         checkpoint.nodes[0].attempts[0].attempt_ref = None;
-        assert!(live_steer_reference(&checkpoint, None, None).unwrap_err().contains("several live attempts"));
-        assert!(live_steer_reference(&checkpoint, Some("task"), None).unwrap_err().to_string().contains("no resolved attempt ID"));
+        assert!(
+            live_steer_reference(&checkpoint, None, None)
+                .unwrap_err()
+                .contains("several live attempts")
+        );
+        assert!(
+            live_steer_reference(&checkpoint, Some("task"), None)
+                .unwrap_err()
+                .to_string()
+                .contains("no resolved attempt ID")
+        );
         checkpoint.nodes[0].attempts[0].state = AttemptState::Terminal;
-        assert!(live_steer_reference(&checkpoint, Some("task"), None).unwrap_err().to_string().contains("no live attempt"));
+        assert!(
+            live_steer_reference(&checkpoint, Some("task"), None)
+                .unwrap_err()
+                .to_string()
+                .contains("no live attempt")
+        );
     }
 
     #[test]

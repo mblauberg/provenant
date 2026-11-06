@@ -586,7 +586,9 @@ pub(crate) fn unified_graph_steer(
         )?
         .ok_or(FacadeError::NotFound)?;
         let reference = match provenant_cli::inbox::live_steer_reference(
-            &checkpoint, target.node.as_deref(), target.attempt.as_deref(),
+            &checkpoint,
+            target.node.as_deref(),
+            target.attempt.as_deref(),
         ) {
             Ok(reference) => reference,
             Err(message) => return Ok(Some(SteerResult::Refused(message))),
@@ -627,8 +629,11 @@ pub(crate) fn unified_graph_steer(
     match result {
         Ok(None) => None,
         Ok(Some(SteerResult::Refused(message))) => Some(crate::fail(
-            "steer", provenant_records::Outcome::Refused, "steer_target_refused",
-            message, globals,
+            "steer",
+            provenant_records::Outcome::Refused,
+            "steer_target_refused",
+            message,
+            globals,
         )),
         Ok(Some(SteerResult::Delivered(data))) => Some(crate::emit(
             &provenant_records::CommandResult::new("steer", provenant_records::Outcome::Ok, data),
