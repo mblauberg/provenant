@@ -3065,6 +3065,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                                     outputs.verdict = Some("VERDICT: INCONCLUSIVE".into());
                                 } else if outputs.findings.iter().any(|finding| {
                                     (repair::blocking(finding)
+                                        && finding.disposition.as_deref() != Some("deferred")
                                         && finding
                                             .extra
                                             .get("verification")
@@ -3111,7 +3112,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                                     .cloned()
                                     .collect();
                                 disposition_error(&node.dispositions, &required_findings, &outputs)
-                                    .or_else(|| review_verification_error(node, &required_findings, &outputs))
+                                    .or_else(|| review_verification_error(node, &upstream_findings, &required_findings, &overflow_ids, &outputs))
                                     .or_else(|| {
                                         (!overflow_ids.is_empty() && result.as_ref().is_none_or(|capture| !capture.disposition_proof.matches(&overflow_ids, &proof_dispositions))).then(|| (
                                             "disposition_overflow_incomplete",
