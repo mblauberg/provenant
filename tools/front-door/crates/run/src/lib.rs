@@ -938,6 +938,125 @@ mod diagnostic_projection_tests {
     }
 
     #[test]
+    fn every_inventoried_configurable_refusal_has_a_safe_setting_and_source() {
+        use provenant_records::diagnostic::{
+            LaneLimit, PortSettingSource, PressureLevel, PressureThreshold, ResourceFact,
+            SettingSource,
+        };
+        let configured = SettingSource::Configuration;
+        let mut examples = vec![
+            (
+                ResourceFact::Disk {
+                    free: 1,
+                    floor: 2,
+                    origin: configured,
+                },
+                "host configuration",
+            ),
+            (
+                ResourceFact::ArgvPromptLimit {
+                    limit: 2,
+                    origin: configured,
+                },
+                "host configuration",
+            ),
+            (
+                ResourceFact::WriteGrantLimit {
+                    limit: 2,
+                    origin: configured,
+                },
+                "host configuration",
+            ),
+            (
+                ResourceFact::GrantLimit {
+                    limit: 2,
+                    origin: configured,
+                },
+                "host configuration",
+            ),
+            (
+                ResourceFact::ProfileLimit {
+                    bytes: 3,
+                    limit: 2,
+                    origin: configured,
+                },
+                "host configuration",
+            ),
+            (
+                ResourceFact::DependencyPreparation { configured: true },
+                "sealed profile",
+            ),
+            (
+                ResourceFact::LanePorts {
+                    blocks: 2,
+                    origin: PortSettingSource::Configuration,
+                },
+                "host configuration",
+            ),
+            (
+                ResourceFact::MemoryPressure {
+                    level: PressureLevel::Critical,
+                    threshold: PressureThreshold::Warning,
+                    origin: configured,
+                },
+                "host configuration",
+            ),
+            (
+                ResourceFact::Processes {
+                    used: 3,
+                    limit: 4,
+                    reserved: 1,
+                },
+                "operating system",
+            ),
+        ];
+        for lane_limit in [
+            LaneLimit::HostWriters,
+            LaneLimit::ProjectWriters,
+            LaneLimit::HostTotal,
+            LaneLimit::ProjectTotal,
+        ] {
+            examples.push((
+                ResourceFact::LaneCap {
+                    active: 2,
+                    limit: 2,
+                    lane_limit,
+                    origin: configured,
+                },
+                "host configuration",
+            ));
+        }
+        let inventory = include_str!("../assets/launch-guards.toml")
+            .parse::<toml_edit::DocumentMut>()
+            .unwrap();
+        for row in inventory["guard"]
+            .as_array_of_tables()
+            .unwrap()
+            .iter()
+            .filter(|row| {
+                row.get("boundary").and_then(|v| v.as_str()) == Some("configurable_default")
+            })
+        {
+            let site = row.get("site").and_then(|v| v.as_str()).unwrap();
+            let setting = row.get("setting").and_then(|v| v.as_str()).unwrap();
+            let code = row.get("code").and_then(|v| v.as_str()).unwrap();
+            assert!(
+                examples.iter().any(|(fact, source)| {
+                    let Some(diagnostic) = RefusalKind::HandoffResource(*fact).diagnostic() else {
+                        return false;
+                    };
+                    diagnostic.code == code
+                        && diagnostic.detail.as_deref().is_some_and(|detail| {
+                            detail.contains(setting) && detail.contains(source)
+                        })
+                        && diagnostic.next.is_some()
+                }),
+                "no safe resource projection for {site} ({code}, {setting})"
+            );
+        }
+    }
+
+    #[test]
     fn confinement_resource_diagnostic_keeps_code_and_excludes_source_text() {
         use provenant_confinement::permissions::PermissionError;
         use provenant_records::diagnostic::{DiagnosticFact, ResourceFact, SettingSource};
