@@ -530,9 +530,7 @@ fn default_creation_base(
         context.utility,
         context.home,
         "origin/HEAD",
-        context
-            .utility_budget
-            .with_timeout_cap(std::time::Duration::from_secs(5))?,
+        context.mutation_budget,
         cancel,
     ) {
         Ok(crate::utility::RemoteBase::Found(oid)) => {

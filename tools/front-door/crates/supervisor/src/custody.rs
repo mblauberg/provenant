@@ -1518,24 +1518,37 @@ pub fn lock_writer_exclusion(
         } else {
             remaining.min(Duration::from_secs(5))
         };
-        let observation = directory
-            .lock(
-                OsStr::new("writer-probe.lock"),
-                LockMode::Exclusive,
-                WaitBudget::up_to(
-                    clock.mono_now(),
-                    provenant_core::DurationMicros::from_micros(
-                        u64::try_from(gate_wait.as_micros())
-                            .map_err(|_| CustodyError::InvalidRecord)?,
-                    ),
+        let observation = match directory.lock(
+            OsStr::new("writer-probe.lock"),
+            LockMode::Exclusive,
+            WaitBudget::up_to(
+                clock.mono_now(),
+                provenant_core::DurationMicros::from_micros(
+                    u64::try_from(gate_wait.as_micros())
+                        .map_err(|_| CustodyError::InvalidRecord)?,
                 ),
-                cancel,
-                clock,
-            )
-            .map_err(|error| match error {
-                FsError::Cancelled { .. } => CustodyError::Filesystem(error),
-                other => CustodyError::ObservationGate(other.to_string()),
-            })?;
+            ),
+            cancel,
+            clock,
+        ) {
+            Ok(observation) => observation,
+            Err(FsError::LockTimeout { .. })
+                if !timeout.is_zero() && (Instant::now() >= deadline || gate_wait == remaining) =>
+            {
+                if cancel.is_cancelled() {
+                    return Err(FsError::Cancelled { path }.into());
+                }
+                if Instant::now() >= deadline {
+                    return Err(FsError::LockTimeout { path, timeout }.into());
+                }
+                // The gate budget is rounded down to microseconds. Retry any
+                // fraction left before the caller's deadline rather than
+                // reporting a distinct observation failure for budget expiry.
+                continue;
+            }
+            Err(error @ FsError::Cancelled { .. }) => return Err(error.into()),
+            Err(error) => return Err(CustodyError::ObservationGate(error.to_string())),
+        };
         let attempt = directory.lock(
             OsStr::new("writer.lock"),
             LockMode::Exclusive,

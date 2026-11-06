@@ -660,7 +660,10 @@ fn agy_read_only_linked_worktree_git_directories_are_not_writable()
             {
                 std::fs::write(path, bytes)?
             }
-            SetupStep::WriteExecutable { path, bytes } if path == &root.join("scratch/bin/git") => {
+            SetupStep::WriteExecutable { path, bytes }
+                if path == &root.join("scratch/bin/git")
+                    || path == &root.join("scratch/read-only-git/git") =>
+            {
                 std::fs::write(path, bytes)?;
                 std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
             }

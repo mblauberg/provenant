@@ -1101,3 +1101,60 @@ fn failed_ownership_publication_reports_retained_reservation() -> TestResult {
     assert!(reservation_present(&directory, scope())?);
     Ok(())
 }
+
+#[test]
+fn writer_exclusion_gate_contention_honours_the_caller_deadline() -> TestResult {
+    let root = tempfile::tempdir()?;
+    let directory = Directory::open_anchor(root.path())?;
+    let _observer = directory.try_lock(OsStr::new("writer-probe.lock"), LockMode::Exclusive)?;
+    let clock = provenant_core::TestClock::new(
+        provenant_core::WallTime::from_micros(0)?,
+        provenant_core::MonoTime::from_micros(0),
+    );
+    let timeout = Duration::from_millis(10);
+    let error = lock_writer_exclusion(
+        &directory,
+        WaitBudget::up_to(
+            clock.mono_now(),
+            provenant_core::DurationMicros::from_micros(10_000),
+        ),
+        &CancelToken::new(),
+        &clock,
+    )
+    .expect_err("the observer remains locked through the writer deadline");
+    assert!(
+        matches!(error, CustodyError::Filesystem(FsError::LockTimeout { path, timeout: actual })
+        if path == root.path().join("writer.lock") && actual == timeout)
+    );
+
+    let cancel = CancelToken::new();
+    cancel.cancel();
+    assert!(matches!(
+        lock_writer_exclusion(
+            &directory,
+            WaitBudget::nonblocking(clock.mono_now()),
+            &cancel,
+            &clock,
+        ),
+        Err(CustodyError::Filesystem(FsError::Cancelled { .. }))
+    ));
+    Ok(())
+}
+
+#[test]
+fn writer_exclusion_distinct_gate_failure_remains_unknown() -> TestResult {
+    let root = tempfile::tempdir()?;
+    std::fs::create_dir(root.path().join("writer-probe.lock"))?;
+    let directory = Directory::open_anchor(root.path())?;
+    let clock = SystemClock::new();
+    assert!(matches!(
+        lock_writer_exclusion(
+            &directory,
+            WaitBudget::cli(clock.mono_now(), 1)?,
+            &CancelToken::new(),
+            &clock,
+        ),
+        Err(CustodyError::ObservationGate(_))
+    ));
+    Ok(())
+}

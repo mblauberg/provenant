@@ -160,6 +160,7 @@ fn default_base_fetch_is_outside_registry_lock_and_failed_fetch_ignores_cached_t
         inner: &'a dyn Executor,
         project_state: &'a Directory,
         calls: std::sync::atomic::AtomicUsize,
+        mutation_timeout: std::time::Duration,
     }
     impl Executor for FailedFetch<'_> {
         fn execute(
@@ -176,7 +177,7 @@ fn default_base_fetch_is_outside_registry_lock_and_failed_fetch_ignores_cached_t
                     .try_lock_existing(OsStr::new(REPOSITORY_LOCK), LockMode::Exclusive)
                     .expect("remote discovery must not own the registry lock");
                 drop(guard);
-                assert!(options.timeout <= std::time::Duration::from_secs(5));
+                assert_eq!(options.timeout, self.mutation_timeout);
             }
             if options.argv.iter().any(|word| word == "fetch") {
                 self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -220,10 +221,13 @@ fn default_base_fetch_is_outside_registry_lock_and_failed_fetch_ignores_cached_t
     let local = fixture.head()?;
     let test = TestContext::new(&fixture)?;
     let mut context = test.context();
+    let mutation_timeout = std::time::Duration::from_secs(120);
+    context.mutation_budget = UtilityBudget::bounded(mutation_timeout)?;
     let failed = FailedFetch {
         inner: context.executor,
         project_state: context.project_state,
         calls: Default::default(),
+        mutation_timeout,
     };
     context.executor = &failed;
     let created = create(
