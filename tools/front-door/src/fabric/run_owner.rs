@@ -593,15 +593,21 @@ impl BinaryRunOwner<'_> {
                 .as_ref()
                 .is_none_or(|context| context.graph_id.is_none() || context.node_id.is_none())
         }) {
-            let invalid = || FacadeError::invalid(InvalidInputDetail::Field("graph context".into()));
+            let invalid =
+                || FacadeError::invalid(InvalidInputDetail::Field("graph context".into()));
             let session = match self.read_session(cancel) {
                 Ok(session) => session,
                 Err(FacadeError::NotFound) => return Err(invalid()),
                 Err(error) => return Err(error),
             };
             let call = self.call(cancel);
-            let retained = session.store.operation(&operation_id, &call).map_err(run_error)?;
-            if retained.is_none_or(|operation| matches!(operation.state, provenant_run::OperationState::Prepared)) {
+            let retained = session
+                .store
+                .operation(&operation_id, &call)
+                .map_err(run_error)?;
+            if retained.is_none_or(|operation| {
+                matches!(operation.state, provenant_run::OperationState::Prepared)
+            }) {
                 return Err(invalid());
             }
             // An accepted pre-cutover operation may have no context. The sealed

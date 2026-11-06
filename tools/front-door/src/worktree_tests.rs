@@ -3674,8 +3674,8 @@ pub(crate) fn lane_provider() -> Result {
     options.env = Some(&stripped);
     // Explanation is side-effect free. An actual child request still needs
     // the parent relay identity even if a provider drops its lane variables.
-    let stripped_input = String::from_utf8(input.clone())?
-        .replace("\"explain\":true", "\"explain\":false");
+    let stripped_input =
+        String::from_utf8(input.clone())?.replace("\"explain\":true", "\"explain\":false");
     options.stdin = Some(stripped_input.as_bytes());
     let stripped_output = SystemExecutor::new(1)?.execute(options)?;
     assert_eq!(
@@ -4303,7 +4303,10 @@ impl Executor for FixtureCredential {
 // Confinement startup exercises the shared graph child request without a
 // launch. The host relay tests own admission, depth limits and cancellation.
 fn assert_lane_child_preview(result: &Value) -> Result {
-    assert!(result.get("isError").is_none_or(|value| value == false), "{result}");
+    assert!(
+        result.get("isError").is_none_or(|value| value == false),
+        "{result}"
+    );
     let operation: provenant_fabric_runtime::graph::relay::RelayOp =
         serde_json::from_value(result["structuredContent"].clone())?;
     let provenant_fabric_runtime::graph::relay::RelayOp::Add(request) = operation else {
