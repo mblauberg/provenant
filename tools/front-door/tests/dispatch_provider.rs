@@ -2185,7 +2185,7 @@ fn commit_stale_default_history(rig: &TestRig) -> Result<(String, String)> {
 fn codex_pinned_reader_launches_from_head_and_base() -> Result {
     let mut rig = TestRig::new()?;
     let cleanup = rig.process_cleanup();
-    commit_stale_default_history(&rig)?;
+    let (base, head) = commit_stale_default_history(&rig)?;
     install_codex_fixture(&mut rig)?;
     let prompt_file = rig.root.join("prompt.txt");
     fs::write(&prompt_file, "reply OK")?;
@@ -2198,9 +2198,9 @@ fn codex_pinned_reader_launches_from_head_and_base() -> Result {
         "--mode",
         "read-only",
         "--base",
-        "HEAD~1",
+        &base,
         "--head",
-        "HEAD",
+        &head,
         "--operation-id",
         &format!("{:032x}", 0x3002_u32),
         "--prompt-file",
@@ -2210,10 +2210,10 @@ fn codex_pinned_reader_launches_from_head_and_base() -> Result {
         "--json",
     ])?;
     if !cfg!(target_os = "macos") {
-        // Off macOS the lane is rejected before launch, as the rollout test expects.
+        // Off macOS preparation refuses the unavailable sandbox before launch.
         assert_eq!(
             code(&out),
-            0,
+            1,
             "{}",
             String::from_utf8_lossy(&out.stdout.bytes)
         );
@@ -2314,14 +2314,14 @@ fn codex_read_only_warning_names_the_checkout_the_lane_reads() -> Result {
 
     // A stale caller reading an up-to-date worktree: no staleness warning.
     rig.execute(&git, &["reset", "-q", "--hard", &old], None)?;
-    let warnings = launch(&rig, &fresh, 0x3002_1)?;
+    let warnings = launch(&rig, &fresh, 0x0003_0021)?;
     if cfg!(target_os = "macos") {
         assert!(!warnings.contains("behind"), "{warnings}");
     }
 
     // An up-to-date caller reading a stale worktree: the warning names that worktree.
     rig.execute(&git, &["reset", "-q", "--hard", &new], None)?;
-    let warnings = launch(&rig, &stale, 0x3002_2)?;
+    let warnings = launch(&rig, &stale, 0x0003_0022)?;
     if cfg!(target_os = "macos") {
         assert!(warnings.contains("1 commit behind"), "{warnings}");
         assert!(warnings.contains(&old), "{warnings}");
