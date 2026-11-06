@@ -862,23 +862,42 @@ impl BinaryRunOwner<'_> {
                 }
                 if matches!(part, OutputPart::Result)
                     && provenant_cli::run::cloud_owner::placement(&session.store, &record, &call)
-                        .map_err(|error| FacadeError::invalid(&error))?.is_some()
+                        .map_err(|error| FacadeError::invalid(&error))?
+                        .is_some()
                 {
-                    let job = provenant_cli::run::cloud_owner::load(&session.store, record.attempt_id, &call)
-                        .map_err(|error| FacadeError::invalid(&error))?.ok_or(FacadeError::NotFound)?;
+                    let job = provenant_cli::run::cloud_owner::load(
+                        &session.store,
+                        record.attempt_id,
+                        &call,
+                    )
+                    .map_err(|error| FacadeError::invalid(&error))?
+                    .ok_or(FacadeError::NotFound)?;
                     let view = provenant_cli::run::cloud_owner::view(&job);
                     let bytes = serde_json::to_vec(&view).map_err(|_| FacadeError::StateCorrupt)?;
-                    let start = usize::try_from(offset).map_err(|_| FacadeError::InvalidInput { detail: None })?;
-                    if start > bytes.len() || max_bytes == 0 || max_bytes > provenant_records::run::OUTPUT_LIMIT {
+                    let start = usize::try_from(offset)
+                        .map_err(|_| FacadeError::InvalidInput { detail: None })?;
+                    if start > bytes.len()
+                        || max_bytes == 0
+                        || max_bytes > provenant_records::run::OUTPUT_LIMIT
+                    {
                         return Err(FacadeError::InvalidInput { detail: None });
                     }
                     let end = start.saturating_add(max_bytes as usize).min(bytes.len());
-                    let digest = provenant_core::Digest::from_bytes(*provenant_records::CanonicalV1::file_digest(&bytes).bytes());
+                    let digest = provenant_core::Digest::from_bytes(
+                        *provenant_records::CanonicalV1::file_digest(&bytes).bytes(),
+                    );
                     let mut extra = chunk_fields;
                     extra.insert("length".into(), serde_json::json!(bytes.len()));
                     return Ok(OutputResult::Chunk {
-                        extra, target, part, state: view["state"]["state"].as_str().unwrap_or("unknown").into(),
-                        reason, offset, next_offset: end as u64, eof: end == bytes.len(), digest,
+                        extra,
+                        target,
+                        part,
+                        state: view["state"]["state"].as_str().unwrap_or("unknown").into(),
+                        reason,
+                        offset,
+                        next_offset: end as u64,
+                        eof: end == bytes.len(),
+                        digest,
                         bytes: OutputBytes::from_bytes(bytes[start..end].to_vec()),
                     });
                 }

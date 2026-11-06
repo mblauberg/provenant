@@ -636,7 +636,10 @@ fn lane_run_submission_adds_graph_children_instead_of_attempts() -> Result<(), B
     assert_eq!(timed_out["children"], first["children"]);
     assert!(timed_out.get("observation_error").is_some());
     let mut no_wait = input.clone();
-    no_wait.as_object_mut().ok_or("submission object")?.remove("wait_seconds");
+    no_wait
+        .as_object_mut()
+        .ok_or("submission object")?
+        .remove("wait_seconds");
     let no_wait_input = serde_json::from_value(no_wait)?;
     let no_wait = ToolCall::Submit(no_wait_input)
         .execute(&mut service, &CancelToken::new())?

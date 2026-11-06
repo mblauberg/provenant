@@ -325,7 +325,8 @@ fn append_child_brief(node: &mut Value, brief: &str) {
         }
     }
     if !boundary && node.get("prompt").is_some() {
-        node["prompt"] = format!("{}\n\n{brief}", node["prompt"].as_str().unwrap_or_default()).into();
+        node["prompt"] =
+            format!("{}\n\n{brief}", node["prompt"].as_str().unwrap_or_default()).into();
     }
 }
 

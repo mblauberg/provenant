@@ -1238,8 +1238,7 @@ fn graph_quality_counts_only_executed_repair_rounds_and_leaf_findings() {
 }
 
 #[test]
-fn host_native_attempts_do_not_resume_explicitly()
--> Result<(), Box<dyn std::error::Error>> {
+fn host_native_attempts_do_not_resume_explicitly() -> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
