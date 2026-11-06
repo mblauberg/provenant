@@ -13,7 +13,7 @@ use provenant_fabric_runtime::graph::{
     FileJournal, GraphJournal,
     patch::{LiveGraph, PatchContext, scan_for_secrets},
     relay::{self, RelayOp},
-    template::TemplateLibrary,
+    template::{Layer, TemplateLibrary},
 };
 use serde_json::{Value, json};
 
@@ -77,7 +77,8 @@ pub fn serve(
         .to_owned();
     let value = match op {
         RelayOp::Add(request) => {
-            let library = TemplateLibrary::bundled();
+            let library = template_library(&context.home, &context.cwd)
+                .map_err(|error| refused("invalid_template", error))?;
             let resolvers = Default::default();
             let patch_context = PatchContext {
                 library: &library,
@@ -127,4 +128,133 @@ pub fn from_lane(
         cancel,
         within,
     )
+}
+
+fn template_library(
+    home: &std::path::Path,
+    repository: &std::path::Path,
+) -> Result<TemplateLibrary, String> {
+    let config = std::env::var_os("XDG_CONFIG_HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| home.join(".config"));
+    if !config.is_absolute() {
+        return Err("XDG_CONFIG_HOME must be absolute".into());
+    }
+    layered_templates(
+        &config.join("provenant/templates"),
+        &repository.join(".provenant/templates"),
+    )
+}
+
+fn layered_templates(
+    user: &std::path::Path,
+    repository: &std::path::Path,
+) -> Result<TemplateLibrary, String> {
+    let mut library = TemplateLibrary::bundled();
+    library.load_dir(Layer::User, user)?;
+    library.load_dir(Layer::Repository, repository)?;
+    Ok(library)
+}
+
+/// Yield the parent slot for a child wait, then reclaim it on every return path.
+/// Cleanup uses its own cancellation token so cancelling the wait still clears
+/// the host's retained waiting flag.
+pub fn while_waiting<T>(
+    cancel: &CancelToken,
+    within: std::time::Duration,
+    wait: impl FnOnce() -> Result<T, ServiceError>,
+) -> Result<T, ServiceError> {
+    with_waiting(
+        |waiting| {
+            let cleanup = CancelToken::new();
+            from_lane(
+                &RelayOp::Wait { waiting },
+                if waiting { cancel } else { &cleanup },
+                within,
+            )
+            .map(|_| ())
+        },
+        wait,
+    )
+}
+
+fn with_waiting<T>(
+    mut send: impl FnMut(bool) -> Result<(), ServiceError>,
+    wait: impl FnOnce() -> Result<T, ServiceError>,
+) -> Result<T, ServiceError> {
+    // A failed reply may follow a committed Wait true frame. Always clear it.
+    let result = send(true).and_then(|()| wait());
+    let cleared = send(false);
+    match result {
+        Ok(value) => cleared.map(|()| value),
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(test)]
+mod wait_tests {
+    use super::*;
+
+    #[test]
+    fn returning_from_a_child_wait_clears_waiting_on_success_and_error() {
+        for succeeds in [true, false] {
+            let mut frames = Vec::new();
+            let result = with_waiting(
+                |waiting| {
+                    frames.push(waiting);
+                    Ok(())
+                },
+                || {
+                    if succeeds {
+                        Ok(42)
+                    } else {
+                        Err(refused("cancelled", "child wait cancelled"))
+                    }
+                },
+            );
+            assert_eq!(frames, [true, false]);
+            assert_eq!(result.is_ok(), succeeds);
+            match result {
+                Ok(value) => assert_eq!(value, 42),
+                Err(ServiceError::Cli { code, .. }) => assert_eq!(code, "cancelled"),
+                Err(error) => panic!("unexpected error: {error}"),
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use provenant_fabric_runtime::graph::template::Compiler;
+
+    #[test]
+    fn relay_templates_apply_user_then_repository_layers() {
+        let root = tempfile::tempdir().unwrap();
+        let user = root.path().join("user");
+        let repo = root.path().join("repo");
+        std::fs::create_dir(&user).unwrap();
+        std::fs::create_dir(&repo).unwrap();
+        std::fs::write(
+            user.join("custom.toml"),
+            "brief = 'User brief'\ntier = 'junior'\naccess = 'read_only'\n",
+        )
+        .unwrap();
+        std::fs::write(
+            repo.join("custom.toml"),
+            "brief = 'Repository brief'\ntier = 'senior'\naccess = 'read_only'\n",
+        )
+        .unwrap();
+        let library = layered_templates(&user, &root.path().join("missing")).unwrap();
+        let node = Compiler::new(&library)
+            .compile(&json!({"id":"child", "use":"custom"}))
+            .unwrap();
+        assert_eq!(node.prompt, "User brief");
+        let library = layered_templates(&user, &repo).unwrap();
+        let node = Compiler::new(&library)
+            .compile(&json!({"id":"child", "use":"custom"}))
+            .unwrap();
+        assert_eq!(node.prompt, "Repository brief");
+        assert!(library.resolve("task").is_ok());
+    }
 }

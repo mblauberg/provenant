@@ -840,6 +840,16 @@ fn restore_cancelled_nodes(checkpoint: &mut GraphCheckpoint) -> Result<(), (Stri
                 node.state = state;
                 node.skip_reason = None;
             }
+            Some(state @ (NodeState::Pending | NodeState::Running))
+                if node.state == NodeState::Skipped
+                    && node
+                        .skip_reason
+                        .as_deref()
+                        .is_some_and(|reason| reason.starts_with("parent ")) =>
+            {
+                // A resumed graph must not resurrect a cancelled subtree.
+                node.cancelled_from = Some(state);
+            }
             None => {}
             _ => {
                 return Err((
@@ -993,6 +1003,20 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
             let mut validation = checkpoint.clone();
             restore_cancelled_nodes(&mut validation)
                 .map_err(|(node, invariant)| GraphError::BadCheckpoint { node, invariant })?;
+            // Cancellation retains attempt custody evidence. Validate the
+            // original state without reopening the actual admission fence.
+            for node in &mut validation.nodes {
+                if node
+                    .skip_reason
+                    .as_deref()
+                    .is_some_and(|reason| reason.starts_with("parent "))
+                {
+                    if let Some(state) = node.cancelled_from.take() {
+                        node.state = state;
+                        node.skip_reason = None;
+                    }
+                }
+            }
             validate_checkpoint(document, &validation, &plan, &plan_digest)?;
             checkpoint
         }
@@ -1339,6 +1363,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
         journal.save(&checkpoint).map_err(GraphError::Journal)?;
     }
 
+    let mut stopped_children = std::collections::BTreeSet::new();
     'schedule: loop {
         plans::remaining(&mut checkpoint, &expanded, limits);
         for node in &plan.nodes {
@@ -1410,7 +1435,39 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
             journal.save(&checkpoint).map_err(GraphError::Journal)?;
         }
 
+        relay::settle_subtrees(
+            document,
+            &mut checkpoint,
+            owner,
+            journal,
+            &mut stopped_children,
+        )?;
         for node_index in 0..plan.nodes.len() {
+            if checkpoint.nodes[node_index]
+                .extra
+                .contains_key(relay::SUBTREE_CANCEL)
+            {
+                continue;
+            }
+            // A parent earlier in this wave may just have failed.
+            if checkpoint.nodes.iter().any(|node| {
+                matches!(node.state, NodeState::Failed | NodeState::Skipped)
+                    && node.extra.get("children_cancelled") != Some(&serde_json::Value::Bool(true))
+            }) {
+                relay::settle_subtrees(
+                    document,
+                    &mut checkpoint,
+                    owner,
+                    journal,
+                    &mut stopped_children,
+                )?;
+                if checkpoint.nodes[node_index]
+                    .extra
+                    .contains_key(relay::SUBTREE_CANCEL)
+                {
+                    continue;
+                }
+            }
             if checkpoint.nodes[node_index].state.settled() {
                 if checkpoint.nodes[node_index].state == NodeState::Blocked
                     && dependency_state(&plan.nodes[node_index], &plan, &checkpoint, &positions)
@@ -3101,6 +3158,13 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
             }
         }
 
+        relay::settle_subtrees(
+            document,
+            &mut checkpoint,
+            owner,
+            journal,
+            &mut stopped_children,
+        )?;
         loops::refresh_pause(&mut checkpoint);
         let all_settled = checkpoint.nodes.iter().all(|node| node.state.settled());
         if all_settled
