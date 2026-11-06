@@ -623,8 +623,20 @@ pub(super) fn append(document: &mut GraphDocument, expansion: &Expansion) {
                     node.after_expansion.push(root.node.clone());
                 }
             } else {
-                node.after_expansion
-                    .extend(expansion.nodes.iter().map(|n| n.id.clone()));
+                node.after_expansion.extend(
+                    expansion
+                        .nodes
+                        .iter()
+                        .filter(|n| {
+                            !expansion.nodes.iter().any(|root| {
+                                root.extra.get(super::relay::DETACHED)
+                                    == Some(&serde_json::Value::Bool(true))
+                                    && (n.id == root.id
+                                        || n.id.starts_with(&format!("{}--", root.id)))
+                            })
+                        })
+                        .map(|n| n.id.clone()),
+                );
             }
             if !expansion.continuation {
                 wire_exports(node, &expansion.source, &exported);
@@ -1648,7 +1660,11 @@ pub(super) fn flatten_fragment(
         BTreeSet::new()
     };
     let mut local_nodes = local_nodes;
-    for existing in document.nodes.iter().filter(|node| external.contains(&node.id)) {
+    for existing in document
+        .nodes
+        .iter()
+        .filter(|node| external.contains(&node.id))
+    {
         let name = &existing.id;
         let mut stub: GraphNode = serde_json::from_value(serde_json::json!({
             "id": name, "access": "read_only", "prompt": "placeholder", "route": {"alias": "senior"}

@@ -30,6 +30,7 @@ pub(crate) use preset_graph::run_preset_graph;
 #[cfg(test)]
 #[allow(unused_imports)] // unused where integration tests include this file
 pub(crate) use preset_graph::{PreparedScratch, retry_scratch_poll, scratch_prepare_error_message};
+pub(crate) use settlement::advance_live_graph;
 
 #[cfg(test)]
 include!("fabric/facade_tests.rs");

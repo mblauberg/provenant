@@ -591,7 +591,11 @@ fn supervise(descriptors: &[u64], globals: &provenant_cli::Globals, process: &dy
         clock: process.clock(),
     };
     process.holder(&holder, &mut |holder| {
-        let holder = provenant_cli::run::HostHolder::new(holder);
+        let workers = process.workers();
+        let holder =
+            provenant_cli::run::HostHolder::new(holder).with_graph_wake(move |context, id| {
+                fabric::advance_live_graph(context, id, workers).map_err(|error| error.to_string())
+            });
         let disk = disk_guard::LaneDisk::default();
         let (Ok(mut stdout_filter), Ok(mut stderr_filter)) = (
             provenant_confinement::redact::Redactor::new([]),

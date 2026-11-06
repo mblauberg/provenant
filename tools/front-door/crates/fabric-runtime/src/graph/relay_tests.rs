@@ -297,3 +297,139 @@ fn relay_frames_are_tagged_and_strict() {
         .is_err()
     );
 }
+
+#[test]
+fn detached_children_do_not_gate_their_parents_dependants() {
+    let (document, mut checkpoint) = live(None);
+    let mut library = template::TemplateLibrary::bundled();
+    library
+        .insert_toml(
+            template::Layer::Repository,
+            "branch",
+            "nodes = [{id = 'leaf', use = 'task'}]",
+        )
+        .unwrap();
+    let resolvers = Default::default();
+    let limits = plans::generous();
+    let context = patch::PatchContext {
+        library: &library,
+        resolvers: &resolvers,
+        limits: &limits,
+        scan: &|_| Ok(()),
+    };
+    patch::admit_patch(
+        &mut patch::LiveGraph {
+            document: &document,
+            checkpoint: &mut checkpoint,
+        },
+        Some("a"),
+        &patch::Patch {
+            schema_version: patch::PATCH_SCHEMA_VERSION,
+            nodes: vec![json!({"id":"keep", "use":"branch", "detached":true})],
+            ..Default::default()
+        },
+        &context,
+    )
+    .unwrap();
+    let expanded = plans::expand(
+        &document,
+        &checkpoint.extensions,
+        &checkpoint.expansions,
+        &plans::generous(),
+    )
+    .unwrap();
+    let consumer = expanded.nodes.iter().find(|node| node.id == "b").unwrap();
+    assert!(consumer.after_expansion.is_empty());
+    let cancelled = cancel_subtree(&document, &mut checkpoint, "a--keep").unwrap();
+    assert_eq!(cancelled.skipped, ["a--keep--leaf"]);
+    assert!(cancelled.detached.is_empty());
+}
+
+#[test]
+fn failed_parent_stops_running_children_and_preserves_detached_subtrees() {
+    let (document, mut checkpoint) = live(None);
+    add(&document, &mut checkpoint, "a", &child("stop", "stop")).unwrap();
+    let mut keep = child("keep", "keep");
+    keep.detached = true;
+    add(&document, &mut checkpoint, "a", &keep).unwrap();
+    set_waiting(&mut checkpoint, "a", true);
+    let mut owner = FakeOwner {
+        observations: ["attempt-a", "attempt-stop", "attempt-keep"]
+            .into_iter()
+            .map(|id| AttemptObservation::Pending {
+                attempt_ref: Some(id.into()),
+            })
+            .collect(),
+        ..Default::default()
+    };
+    let launched = advance(&document, &mut owner, &mut MemoryJournal(Some(checkpoint))).unwrap();
+    let mut owner = FakeOwner {
+        observations: [
+            AttemptObservation::Terminal {
+                outcome: AttemptOutcome::OtherFailure,
+                result_warning: None,
+                result_path: None,
+                branch: None,
+                commit: None,
+                launched: true,
+                result: None,
+                attempt_ref: Some("attempt-a".into()),
+            },
+            AttemptObservation::Pending {
+                attempt_ref: Some("attempt-keep".into()),
+            },
+        ]
+        .into(),
+        ..Default::default()
+    };
+    let mut journal = MemoryJournal(Some(launched.checkpoint));
+    let failed = advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(owner.cancellation_stops, 1);
+    assert_eq!(
+        progress(&failed.checkpoint, "a--keep").state,
+        NodeState::Running
+    );
+    owner.cancelled_attempt_settled = true;
+    owner.observations.push_back(AttemptObservation::Pending {
+        attempt_ref: Some("attempt-keep".into()),
+    });
+    let settled = advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(
+        progress(&settled.checkpoint, "a--stop").state,
+        NodeState::Skipped
+    );
+    assert_eq!(
+        progress(&settled.checkpoint, "a--keep").state,
+        NodeState::Running
+    );
+    owner.observations.push_back(AttemptObservation::Pending {
+        attempt_ref: Some("attempt-keep".into()),
+    });
+    let reloaded = advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(
+        progress(&reloaded.checkpoint, "a--stop").state,
+        NodeState::Skipped
+    );
+}
+
+#[test]
+fn unstarted_child_cancellation_survives_checkpoint_reload() {
+    let (document, mut checkpoint) = live(None);
+    add(&document, &mut checkpoint, "a", &child("stop", "stop")).unwrap();
+    let parent = checkpoint
+        .nodes
+        .iter_mut()
+        .find(|node| node.id == "a")
+        .unwrap();
+    parent.state = NodeState::Failed;
+    parent.attempts[0].state = AttemptState::Terminal;
+    parent.attempts[0].outcome = Some(AttemptOutcome::OtherFailure);
+    let mut journal = MemoryJournal(Some(checkpoint));
+    let mut owner = FakeOwner::default();
+    advance(&document, &mut owner, &mut journal).unwrap();
+    let run = advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(
+        progress(&run.checkpoint, "a--stop").state,
+        NodeState::Skipped
+    );
+}

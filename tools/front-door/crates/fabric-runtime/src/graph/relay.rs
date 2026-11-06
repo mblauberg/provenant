@@ -21,6 +21,7 @@ pub const DEFAULT_CHILD_DEPTH: usize = 8;
 pub const DETACHED: &str = "detached";
 /// Progress field set while a parent waits on its children.
 pub const YIELDED_SLOT: &str = "yielded_slot";
+pub(super) const SUBTREE_CANCEL: &str = "subtree_cancel";
 const SEPARATOR: &str = "--";
 const ID_BYTES: usize = 64;
 
@@ -302,7 +303,11 @@ pub fn cancel_subtree(
                 result.skipped.push(progress.id.clone());
                 changed = true;
             }
-            NodeState::Pending | NodeState::Running => result.running.push(progress.id.clone()),
+            NodeState::Pending | NodeState::Running => {
+                progress.extra.insert(SUBTREE_CANCEL.into(), parent.into());
+                progress.extra.remove(YIELDED_SLOT);
+                result.running.push(progress.id.clone());
+            }
             _ => {}
         }
     }
@@ -310,4 +315,85 @@ pub fn cancel_subtree(
         asks::refresh_wake(checkpoint);
     }
     Ok(result)
+}
+
+/// Fence failed parents' children before stopping their attempts. Repeated
+/// advances retry uncertain stops without ever observing/relaunching the child.
+pub(super) fn settle_subtrees<R: AttemptOwner, J: GraphJournal>(
+    document: &GraphDocument,
+    checkpoint: &mut GraphCheckpoint,
+    owner: &mut R,
+    journal: &mut J,
+    stopped: &mut BTreeSet<(String, u16)>,
+) -> Result<(), GraphError<R::Error, J::Error>> {
+    let parents: Vec<String> = checkpoint
+        .nodes
+        .iter()
+        .filter(|node| {
+            matches!(node.state, NodeState::Failed | NodeState::Skipped)
+                && node.extra.get("children_cancelled") != Some(&Value::Bool(true))
+        })
+        .map(|node| node.id.clone())
+        .collect();
+    if !parents.is_empty() {
+        for parent in parents {
+            cancel_subtree(document, checkpoint, &parent).map_err(GraphError::Refused)?;
+            checkpoint
+                .nodes
+                .iter_mut()
+                .find(|node| node.id == parent)
+                .unwrap()
+                .extra
+                .insert("children_cancelled".into(), true.into());
+        }
+        journal.save(checkpoint).map_err(GraphError::Journal)?;
+    }
+    let mut first_error = None;
+    for index in 0..checkpoint.nodes.len() {
+        let node = &checkpoint.nodes[index];
+        let Some(parent) = node
+            .extra
+            .get(SUBTREE_CANCEL)
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+        else {
+            continue;
+        };
+        if node.state.settled() {
+            continue;
+        }
+        let mut settled = true;
+        for attempt in node
+            .attempts
+            .iter()
+            .filter(|attempt| attempt.state != AttemptState::Terminal)
+        {
+            match owner.cancelled_attempt_settled(attempt) {
+                Ok(true) => {}
+                observed => {
+                    settled = false;
+                    if let Err(error) = observed {
+                        first_error.get_or_insert(error);
+                    }
+                    if stopped.insert((attempt.key.node_id.clone(), attempt.key.route_index)) {
+                        if let Err(error) = owner.stop_cancelled_attempt(attempt) {
+                            first_error.get_or_insert(error);
+                        }
+                    }
+                }
+            }
+        }
+        if settled {
+            let node = &mut checkpoint.nodes[index];
+            node.cancelled_from = Some(node.state);
+            node.state = NodeState::Skipped;
+            node.skip_reason = Some(format!("parent {parent} cancelled"));
+            asks::refresh_wake(checkpoint);
+            journal.save(checkpoint).map_err(GraphError::Journal)?;
+        }
+    }
+    match first_error {
+        Some(error) => Err(GraphError::Run(error)),
+        None => Ok(()),
+    }
 }

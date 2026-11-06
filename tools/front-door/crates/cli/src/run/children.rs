@@ -33,6 +33,8 @@ impl provenant_os::capture::FrameDecoder for QuotaFrames {
 }
 
 type Stop = Arc<Mutex<Option<StopReason>>>;
+pub(crate) type GraphWake = dyn Fn(&run::HolderContext, &str) -> Result<(), String> + Send + Sync;
+
 struct Service {
     cancel: CancelToken,
     thread: JoinHandle<Result<(), String>>,
@@ -43,6 +45,7 @@ struct Service {
 /// and observing cancellation while child provider preparation runs.
 pub struct HostHolder<'a> {
     inner: &'a dyn Holder,
+    graph_wake: Option<Arc<GraphWake>>,
     stdout_frames: QuotaFrames,
     stderr_frames: QuotaFrames,
     fabric_relay: Mutex<Option<provenant_fabric_mcp::lane::HostRelay>>,
@@ -53,12 +56,21 @@ impl<'a> HostHolder<'a> {
     pub fn new(inner: &'a dyn Holder) -> Self {
         Self {
             inner,
+            graph_wake: None,
             stdout_frames: QuotaFrames::default(),
             stderr_frames: QuotaFrames::default(),
             fabric_relay: Mutex::new(None),
             service: Mutex::new(None),
             settled: Mutex::new(None),
         }
+    }
+    /// Let the binary wake its graph owner after a durable relay admission.
+    pub fn with_graph_wake(
+        mut self,
+        wake: impl Fn(&run::HolderContext, &str) -> Result<(), String> + Send + Sync + 'static,
+    ) -> Self {
+        self.graph_wake = Some(Arc::new(wake));
+        self
     }
     /// Live stdout lifecycle evidence, bound during admission before spawn.
     pub fn stdout_decoder(&self) -> &dyn provenant_os::capture::FrameDecoder {
@@ -202,7 +214,7 @@ impl Holder for HostHolder<'_> {
             .fabric_relay
             .lock()
             .map_err(|_| custody::CustodyError::InvalidRecord)? = Some(
-            provider::start_fabric_relay(&context)
+            provider::start_fabric_relay(&context, self.graph_wake.clone())
                 .map_err(|error| custody::CustodyError::Io(std::io::Error::other(error)))?,
         );
         let cancel = CancelToken::new();
