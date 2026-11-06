@@ -9831,6 +9831,9 @@ mod loop_tests {
 mod plan_tests {
     include!("plan_tests.rs");
 }
+mod relay_tests {
+    include!("relay_tests.rs");
+}
 mod envelope_tests {
     include!("envelope_tests.rs");
 }

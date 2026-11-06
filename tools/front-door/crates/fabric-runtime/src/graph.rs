@@ -38,6 +38,7 @@ mod observation;
 mod outputs;
 pub mod patch;
 mod plans;
+pub mod relay;
 pub mod template;
 #[cfg(test)]
 mod template_tests;
@@ -1983,6 +1984,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                                 *index != node_index
                                     && node.state == NodeState::Running
                                     && node.ci.is_none()
+                                    && !relay::yields_slot(node)
                                     && plan.nodes[*index].composite.is_none()
                                     && plan.nodes[*index].decide.is_none()
                                     && plan.nodes[*index].land.is_none()
