@@ -155,6 +155,18 @@ pub trait McpFacade: F3Facade {
             data: Value::Null,
         })
     }
+    /// Wait through the lane graph relay so the parent yields its slot.
+    fn wait_for_children(
+        &mut self,
+        _cancel: &CancelToken,
+        _within: std::time::Duration,
+    ) -> Result<Value, ServiceError> {
+        Err(ServiceError::Cli {
+            code: "graph_relay_unavailable".into(),
+            message: "lane graph relay unavailable".into(),
+            data: Value::Null,
+        })
+    }
     fn inbox_owner(
         &mut self,
         input: InboxInput,
@@ -858,6 +870,9 @@ impl ToolCall {
         if service.in_lane
             && let Self::Submit(input) | Self::SubmitWait(input, ..) = &self
         {
+            if let Self::SubmitWait(_, seconds, _) = &self {
+                service.budget(*seconds)?;
+            }
             let operations = lane_children(input)?;
             let mut children = Vec::with_capacity(operations.len());
             for operation in operations {
@@ -867,8 +882,18 @@ impl ToolCall {
                     std::time::Duration::from_secs(crate::MAX_WAIT_SECONDS),
                 )?);
             }
+            let mut value = serde_json::json!({"children": children});
+            if let Self::SubmitWait(_, seconds, _) = &self {
+                match service.facade.wait_for_children(
+                    cancel,
+                    std::time::Duration::from_secs(*seconds),
+                ) {
+                    Ok(states) => value["wait"] = states,
+                    Err(error) => value["observation_error"] = serde_json::json!(error.to_string()),
+                }
+            }
             return service.limit_response(
-                response(self.name(), serde_json::json!({"children": children})),
+                response(self.name(), value),
                 true,
                 false,
             );

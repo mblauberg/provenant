@@ -4135,6 +4135,162 @@ fn cloud_job_survives_reopening_owned_attempt() -> Result<(), Box<dyn std::error
 }
 
 #[test]
+fn graph_cloud_ticks_recover_one_submission_and_settle_remote_evidence()
+-> Result<(), Box<dyn std::error::Error>> {
+    use crate::fabric::graph_cloud;
+    use provenant_fabric_runtime::graph::{AttemptObservation, AttemptOutcome};
+    use provenant_providers::cloud::{
+        CloudProvider, CloudResult, CloudSubmission, RemoteJob, RemoteState,
+    };
+    struct Fake {
+        submissions: usize,
+        observations: usize,
+        recoveries: usize,
+        uncertain_submission: bool,
+        state: u8,
+        passed: bool,
+        cancel_confirmed: bool,
+    }
+    impl CloudProvider for Fake {
+        type Error = ();
+        fn check_environment(&mut self, _: CloudSubmission<'_>) -> Result<(), ()> {
+            Ok(())
+        }
+        fn submit(&mut self, request: CloudSubmission<'_>) -> Result<String, ()> {
+            assert_eq!(request.task, "p");
+            assert_eq!(request.job.commit, "a".repeat(40));
+            self.submissions += 1;
+            if self.uncertain_submission {
+                return Err(());
+            }
+            Ok("graph-remote-id".into())
+        }
+        fn recover(&mut self, job: &RemoteJob) -> Result<Option<String>, ()> {
+            assert_eq!(job.state, RemoteState::Submitting);
+            assert!(job.remote_id.is_empty());
+            assert_eq!(self.submissions, 1);
+            self.recoveries += 1;
+            Ok(Some("graph-remote-id".into()))
+        }
+        fn observe(&mut self, job: &RemoteJob) -> Result<RemoteState, ()> {
+            assert_eq!(job.remote_id, "graph-remote-id");
+            self.observations += 1;
+            Ok(match self.state {
+                0 => RemoteState::Running,
+                1 => RemoteState::Unknown { detail: "temporarily unavailable".into() },
+                _ => RemoteState::Finished {
+                    result: CloudResult {
+                        job_id: job.job_id.clone(),
+                        nonce: job.nonce.clone(),
+                        commit: job.commit.clone(),
+                        exit_status: if self.passed { 0 } else { 1 },
+                        tests_run: vec!["targeted".into()],
+                        tests_failed: if self.passed { vec![] } else { vec!["targeted".into()] },
+                        log_location: "log".into(),
+                        tracked_files_changed: false,
+                        observed_model: Some(job.requested_model.clone()),
+                    },
+                },
+            })
+        }
+        fn cancel(&mut self, job: &RemoteJob) -> Result<bool, ()> {
+            assert_eq!(job.remote_id, "graph-remote-id");
+            Ok(self.cancel_confirmed)
+        }
+    }
+    for (expected_pass, finishes_after_cancel, uncertain_submission) in [
+        (Some(false), false, false), (Some(true), false, false),
+        (None, false, false), (None, true, false), (None, false, true),
+    ] {
+        let temp = tempfile::tempdir()?;
+        let clock = SystemClock::new();
+        let cancel = CancelToken::new();
+        let call = request(&clock, &cancel).map_err(|error| error.message)?;
+        let store = trace_store(&temp, &call)?;
+        let mut input = trace_run(44, AttemptId::from_bytes([1; 16]), clock.wall_now()?)?;
+        input.request.parent_attempt = None;
+        input.request.tasks[0].head = Some("a".repeat(40));
+        input.request.tasks[0].cloud = Some(provenant_records::run::CloudPlacement {
+            target: "target".into(),
+            provider: "fake".into(),
+            environment: "env".into(),
+            repository: "repository".into(),
+            branch: "main".into(),
+            model: "small".into(),
+            effort: None,
+            deadline_seconds: 3600,
+        });
+        store.create(&input, &call)?;
+        let id = input.attempts[0].attempt_id;
+        let reference = format!("host/{id}");
+        let passed = expected_pass.unwrap_or(false);
+        let mut provider = Fake {
+            submissions: 0, observations: 0, recoveries: 0, uncertain_submission,
+            state: 0, passed, cancel_confirmed: uncertain_submission,
+        };
+        let observation = graph_cloud::advance(&mut provider, &store, id, "p", &reference, &call, false);
+        if uncertain_submission {
+            assert!(observation.is_err());
+            let saved = cloud_owner::load(&store, id, &call)?.ok_or("missing submission intent")?;
+            assert_eq!(saved.state, RemoteState::Submitting);
+            drop(store);
+            let store = trace_store(&temp, &call)?;
+            let recovered = graph_cloud::advance(&mut provider, &store, id, "p", &reference, &call, true)?;
+            assert!(matches!(recovered, Some(AttemptObservation::Terminal { outcome: AttemptOutcome::OtherFailure, launched: true, .. })));
+            assert_eq!(provider.submissions, 1);
+            assert_eq!(provider.recoveries, 1);
+            assert_eq!(provider.observations, 1);
+            continue;
+        }
+        let observation = observation?;
+        assert!(matches!(observation, Some(AttemptObservation::Pending { attempt_ref: Some(ref id) }) if id == &reference));
+        assert_eq!(provider.submissions, 1);
+        assert_eq!(provider.observations, 0);
+        drop(store);
+        if expected_pass.is_none() {
+            let store = trace_store(&temp, &call)?;
+            let unconfirmed = graph_cloud::advance(&mut provider, &store, id, "p", &reference, &call, true)?;
+            assert!(matches!(unconfirmed, Some(AttemptObservation::Unknown { .. })));
+            drop(store);
+            provider.cancel_confirmed = !finishes_after_cancel;
+            provider.state = if finishes_after_cancel { 2 } else { 0 };
+            let store = trace_store(&temp, &call)?;
+            let confirmed = graph_cloud::advance(&mut provider, &store, id, "p", &reference, &call, true)?;
+            let Some(AttemptObservation::Terminal { outcome, launched, .. }) = confirmed else {
+                panic!("confirmed cancellation or observed completion must settle the node");
+            };
+            assert_eq!(outcome, if finishes_after_cancel { AttemptOutcome::TaskFailed } else { AttemptOutcome::OtherFailure });
+            assert!(launched);
+            assert!(provider.observations > 0, "unconfirmed cancellation must observe the remote job");
+            assert_eq!(provider.submissions, 1);
+            continue;
+        }
+        // Every tick reopens the store, as a recovered graph owner does.
+        for state in [0, 1, 2, 2] {
+            let store = trace_store(&temp, &call)?;
+            provider.state = state;
+            let observation = graph_cloud::advance(&mut provider, &store, id, "p", &reference, &call, false)?;
+            match state {
+                0 => assert!(matches!(observation, Some(AttemptObservation::Pending { .. }))),
+                1 => assert!(matches!(observation, Some(AttemptObservation::Unknown { .. }))),
+                _ => {
+                    let Some(AttemptObservation::Terminal { attempt_ref, outcome, launched, result, .. }) = observation else {
+                        panic!("finished remote evidence must settle the graph node");
+                    };
+                    assert_eq!(attempt_ref.as_deref(), Some(reference.as_str()));
+                    assert_eq!(outcome, if passed { AttemptOutcome::Succeeded } else { AttemptOutcome::TaskFailed });
+                    assert!(launched);
+                    assert!(result.is_some());
+                }
+            }
+            assert_eq!(provider.submissions, 1);
+        }
+        assert_eq!(provider.observations, 3, "terminal evidence is reused");
+    }
+    Ok(())
+}
+
+#[test]
 fn status_shows_recorded_capability_origins() -> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
     let root = std::fs::canonicalize(temp.path())?;
