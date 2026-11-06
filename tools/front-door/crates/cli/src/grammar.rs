@@ -801,6 +801,9 @@ pub struct Dispatch {
     /// Wait for task or preset graph settlement (seconds, or a duration such as 30m)
     #[arg(long, catalog_duration())]
     pub wait: Option<u64>,
+    /// Let a child outlive its parent and graph cancellation (inside a lane only)
+    #[arg(long)]
+    pub detached: bool,
     /// Admission timeout before launch (seconds, or a duration such as 10m)
     #[arg(long, value_parser = duration_seconds)]
     pub admission_timeout: Option<u64>,

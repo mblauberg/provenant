@@ -304,7 +304,7 @@ fn build_strict() -> Vec<Value> {
             let mut variants = tagged_variants("op", operations);
             if *kind == ToolKind::Run {
                 let graph = tagged_variants("op", json!({
-                    "run":{"document?":{"type":"object"},"brief?":text(MAX_TEXT_BYTES),"use?":text(128),"tier?":text(128),"over?":{"anyOf":[{"type":"array","items":text(1024)},text(128)]},"set?":{"type":"object"},"explain?":{"type":"boolean"},"wait_seconds?":integer(1,crate::MAX_WAIT_SECONDS)},
+                    "run":{"detached?":{"type":"boolean"},"document?":{"type":"object"},"brief?":text(MAX_TEXT_BYTES),"use?":text(128),"tier?":text(128),"over?":{"anyOf":[{"type":"array","items":text(1024)},text(128)]},"set?":{"type":"object"},"explain?":{"type":"boolean"},"wait_seconds?":integer(1,crate::MAX_WAIT_SECONDS)},
                     "status":{"id?":text(200),"stats?":{"type":"boolean"},"by?":choices(&["tier","template"]),"wait_seconds?":integer(1,crate::MAX_WAIT_SECONDS)},
                     "stop":{"id":text(200),"reason?":text_allowing_empty(provenant_fabric_runtime::graph::MAX_CANCEL_REASON_BYTES),"wait_seconds?":integer(1,crate::MAX_WAIT_SECONDS)},
                     "retry":{"id":text(200),"node?":text(200),"brief?":text(MAX_TEXT_BYTES),"extend?":array(text(256),0,64),"wait_seconds?":integer(1,crate::MAX_WAIT_SECONDS)},
