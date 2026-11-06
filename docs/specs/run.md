@@ -817,14 +817,14 @@ existing steer capability matrix. All current lane adapters are
 control receipt, and is not delivered to the lane. `provenant run --explain`
 shows the budget, its source and the providers it is enforced for. Claude
 enforces the budget from live usage. Codex exec emits tool and message item
-events within a turn, but reports usage only at terminal `turn.completed`;
-it cannot be stopped mid-turn by this budget. The version-matched Codex
-[JSONL processor](https://github.com/openai/codex/blob/f2ed5dc90e514b59c2334f3bafb9b0250cc3e038/codex-rs/exec/src/event_processor_with_jsonl_output.rs)
-(`rust-v0.166.0-alpha.1`) stores `ThreadTokenUsageUpdated` internally without
-emitting a JSON frame, and emits usage at `TurnCompleted` before shutdown. This launch path has no further
-turn to stop, so Codex's budget is not enforced. Its completed-turn accounting
-still subtracts cached input per turn. Other providers without live usage are
-also not enforced, and launch warnings or receipt notes report this.
+events within a turn, but its usage arrives at `turn.completed`. The Codex
+decoder (`crates/providers/src/codex.rs#LiveUsage`) counts each completed turn's
+fresh input and output, so a Codex writer that passes the budget between turns
+is stopped and its work committed like a Claude lane's. A single long turn is
+not stopped mid-turn: no capture yet shows whether usage can stop one. Other
+providers without reported usage are not enforced, and launch warnings or
+receipt notes report this. A cherry-pick, revert or rebase in progress is left
+uncommitted like a merge, with a settlement note.
 Time a lane spends queued for
 a build slot stays off the wall deadline, up to `lanes.slot_wait_seconds`
 (default 7200) in total.

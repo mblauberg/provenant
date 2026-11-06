@@ -307,19 +307,21 @@ impl WriterLaunch {
             "budget commit needs private Git state",
         ))?;
         let tip = crate::objects::private_tip(&source, self.branch.as_str())?;
-        // Never stage away conflict stages or finish a merge on the lane's
-        // behalf. The existing stopped-merge import restores this state.
-        match source
-            .refs
-            .read_stable(OsStr::new("MERGE_HEAD"), 1024 * 1024)
-        {
-            Ok(_) => {
-                return Ok(
-                    "budget commit skipped: in-progress merge preserved for stopped-merge handling",
-                );
+        // Never stage away conflict stages or finish a merge, cherry-pick,
+        // revert or rebase on the lane's behalf. A merge is restored by the
+        // existing stopped-merge import; the others stay as the lane left them.
+        for (name, operation) in [
+            ("MERGE_HEAD", "merge"),
+            ("CHERRY_PICK_HEAD", "cherry-pick"),
+            ("REVERT_HEAD", "revert"),
+            ("rebase-merge", "rebase"),
+            ("rebase-apply", "rebase"),
+        ] {
+            match source.refs.metadata_at(OsStr::new(name), false) {
+                Ok(_) => return Ok(in_progress_note(operation)),
+                Err(error) if error.is_not_found() => {}
+                Err(error) => return Err(error.into()),
             }
-            Err(error) if error.is_not_found() => {}
-            Err(error) => return Err(error.into()),
         }
         let objects = crate::objects::prepare_budget_objects(&source.objects, repo)?;
         // Reuse stable, no-follow reading before passing the index path to Git.
@@ -350,9 +352,7 @@ impl WriterLaunch {
             };
             run_git(&["update-ref", "HEAD", &tip.to_string()])?;
             if !run_git(&["ls-files", "--unmerged", "-z"])?.is_empty() {
-                return Ok(
-                    "budget commit skipped: in-progress merge preserved for stopped-merge handling",
-                );
+                return Ok(in_progress_note("merge"));
             }
             if run_git(&["status", "--porcelain", "-z"])?.is_empty() {
                 return Ok("budget stop: worktree already clean");
@@ -379,6 +379,17 @@ impl WriterLaunch {
             crate::objects::set_private_tip(&source, self.branch.as_str(), head)?;
             Ok("work committed on its branch")
         })
+    }
+}
+
+/// The settlement note for a budget stop that left an in-progress operation
+/// uncommitted.
+fn in_progress_note(operation: &str) -> &'static str {
+    match operation {
+        "merge" => "budget commit skipped: in-progress merge preserved for stopped-merge handling",
+        "cherry-pick" => "budget commit skipped: in-progress cherry-pick left uncommitted",
+        "revert" => "budget commit skipped: in-progress revert left uncommitted",
+        _ => "budget commit skipped: in-progress rebase left uncommitted",
     }
 }
 
