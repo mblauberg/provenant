@@ -33,6 +33,7 @@ mod land;
 mod land_tests;
 mod loops;
 mod model;
+pub mod next_attempt;
 mod observation;
 mod outputs;
 mod pattern_plan;
@@ -47,6 +48,7 @@ mod admission_tests;
 use budget::*;
 pub use journal::*;
 pub use model::*;
+pub use next_attempt::*;
 pub use observation::*;
 use outputs::*;
 pub(crate) use validation::*;
@@ -808,185 +810,6 @@ pub fn resume_with_budget<R: AttemptOwner, J: GraphJournal>(
         extensions,
         &mut Default::default(),
     )
-}
-
-/// Whether a failed launch is worth a bounded retry, decided only from the
-/// error's typed kind, never from its prose. Host capacity, store
-/// contention, wait expiry, an unconfirmed launch handoff and filesystem I/O
-/// are transient; access, confinement, invalid input and every untyped error
-/// block the node. The launch itself stays idempotent by attempt key, so a
-/// retry observes an already accepted attempt instead of launching twice.
-fn launch_retry_kind(error: &(dyn Error + 'static)) -> bool {
-    use crate::coordination::facade::FacadeError;
-    use provenant_core::retry::{RetryCause, is_transient};
-    let cause = match error.downcast_ref::<FacadeError>() {
-        Some(FacadeError::Busy | FacadeError::WriterLockBusy | FacadeError::WriterUnknown) => {
-            RetryCause::Contention
-        }
-        Some(FacadeError::Timeout) => RetryCause::Timeout,
-        Some(
-            FacadeError::HomeUnavailable
-            | FacadeError::Io { .. }
-            | FacadeError::DispatchUnobserved { .. }
-            | FacadeError::HostDeliveryStage { .. }
-            | FacadeError::HostDeliveryLimit { .. }
-            | FacadeError::LaunchUnknown { .. },
-        ) => RetryCause::Transport,
-        _ => RetryCause::Permanent,
-    };
-    is_transient(cause)
-}
-
-fn bounded_launch_retry_policy(mut policy: LaunchRetryPolicy) -> LaunchRetryPolicy {
-    policy.limit_source = bounded(&policy.limit_source, 32);
-    policy
-}
-
-fn launch_diagnostic(error: &(dyn Error + 'static)) -> provenant_records::diagnostic::Diagnostic {
-    error
-        .downcast_ref::<crate::coordination::facade::FacadeError>()
-        .map(crate::coordination::facade::FacadeError::diagnostic)
-        .unwrap_or_else(|| provenant_records::diagnostic::Diagnostic::new("launch_failed"))
-}
-
-/// Apply a persisted disposition to a node whose launch errored while its
-/// attempt was still starting: a bounded retry with backoff for a transient
-/// kind, a blocked node with reason and remedy otherwise and after the
-/// admission deadline. Saves the checkpoint either way.
-fn launch_disposition<R: AttemptOwner, J: GraphJournal>(
-    checkpoint: &mut GraphCheckpoint,
-    index: usize,
-    error: &R::Error,
-    clock: Option<provenant_core::WallTime>,
-    admission_seconds: u64,
-    policy: LaunchRetryPolicy,
-    journal: &mut J,
-) -> Result<(), GraphError<R::Error, J::Error>> {
-    apply_launch_disposition(checkpoint, index, error, clock, admission_seconds, policy)
-        .map_err(GraphError::Refused)?;
-    journal.save(checkpoint).map_err(GraphError::Journal)
-}
-
-/// Pure transition: callers persist the resulting checkpoint before reporting it.
-fn apply_launch_disposition(
-    checkpoint: &mut GraphCheckpoint,
-    index: usize,
-    error: &(dyn Error + 'static),
-    clock: Option<provenant_core::WallTime>,
-    admission_seconds: u64,
-    policy: LaunchRetryPolicy,
-) -> Result<(), String> {
-    let retrying = launch_retry_kind(error);
-    if retrying {
-        let Some(now) = clock else {
-            return Err("wall clock unavailable; cannot record a launch retry wake".into());
-        };
-        let retry = checkpoint.nodes[index]
-            .launch_retry
-            .get_or_insert_with(|| LaunchRetry {
-                extra: Default::default(),
-                policy: bounded_launch_retry_policy(policy),
-                failures: 0,
-                deadline: None,
-                wake_at: None,
-                reason: None,
-            });
-        retry.failures = retry.failures.saturating_add(1);
-        let deadline = match retry.deadline {
-            Some(deadline) => deadline,
-            None => {
-                let Some(deadline) = DurationMicros::from_seconds(admission_seconds)
-                    .ok()
-                    .and_then(|duration| now.checked_add(duration).ok())
-                else {
-                    return Err(
-                        "launch retry deadline unavailable; cannot record a retry wake".into(),
-                    );
-                };
-                retry.deadline = Some(deadline);
-                deadline
-            }
-        };
-        let projected = launch_diagnostic(error);
-        retry.reason = Some(bounded(
-            projected.detail.as_deref().unwrap_or(&projected.code),
-            MAX_ADVANCE_ERROR_BYTES,
-        ));
-        if now < deadline && retry.failures <= retry.policy.limit {
-            let delay = provenant_core::retry::Backoff::new(
-                std::time::Duration::from_secs(retry.policy.first_seconds),
-                2,
-                std::time::Duration::from_secs(
-                    retry.policy.max_seconds.max(retry.policy.first_seconds),
-                ),
-            )
-            .delay(u64::from(retry.failures) - 1);
-            retry.wake_at = Some(
-                DurationMicros::from_seconds(delay.as_secs())
-                    .ok()
-                    .and_then(|duration| now.checked_add(duration).ok())
-                    .map_or(deadline, |wake| wake.min(deadline)),
-            );
-            asks::refresh_wake(checkpoint);
-            return Ok(());
-        }
-    }
-    // A permanent refusal, or a retry budget spent: block the node with the
-    // reason and a remedy, and keep the refusal visible in graph status.
-    let graph_id = checkpoint.graph_id.clone();
-    let progress = &mut checkpoint.nodes[index];
-    let id = &progress.id;
-    let code = if retrying {
-        "launch_retry_exhausted"
-    } else {
-        "launch_refused"
-    };
-    progress.advance_error_code = Some(code.into());
-    let projected = launch_diagnostic(error);
-    let detail = projected.detail.as_deref().unwrap_or(&projected.code);
-    let action = projected
-        .next
-        .as_deref()
-        .unwrap_or("inspect the node's inputs and state before retrying");
-    let recovery = if error
-        .downcast_ref::<crate::coordination::facade::FacadeError>()
-        .is_some_and(|e| {
-            matches!(
-                e,
-                crate::coordination::facade::FacadeError::LaunchUnknown { .. }
-            )
-        }) {
-        String::new()
-    } else if graph_id
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
-    {
-        format!(
-            "; after correcting the cause, cancel with `provenant fabric graph cancel {graph_id}` and rerun with a new graph_id (for a preset, use `provenant run --preset <name> --fresh`)"
-        )
-    } else {
-        "; inspect and cancel the graph before rerunning with a new graph_id (for a preset, use `provenant run --preset <name> --fresh`)".into()
-    };
-    progress.advance_error = Some(bounded(
-        &format!(
-            "node {}: the launch failed [{}]: {detail}; {action}{recovery}",
-            provenant_records::diagnostic::safe_text(id),
-            projected.code
-        ),
-        MAX_ADVANCE_ERROR_BYTES,
-    ));
-    progress.state = NodeState::Blocked;
-    // Keep the attempt row even when launch handoff is uncertain. A guardian
-    // may already exist, and cancellation needs its identity and custody.
-    let prior_retry = progress.launch_retry.take();
-    if retrying {
-        progress.last_launch_retry = prior_retry.map(|mut retry| {
-            retry.wake_at = None;
-            retry
-        });
-    }
-    asks::refresh_wake(checkpoint);
-    Ok(())
 }
 
 /// Revert cancellation-only state changes without altering attempt records.
@@ -2017,31 +1840,17 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                 }
             }
             loop {
-                // A persisted launch wait defers this node until its own wake
-                // on every advance, tick or manual, so a failing host that
-                // cannot launch is not hammered with new submissions.
-                let launch_clock = owner.wall_now();
-                if checkpoint.nodes[node_index]
-                    .launch_retry
-                    .as_ref()
-                    .and_then(|retry| retry.wake_at)
-                    .is_some_and(|wake| launch_clock.is_some_and(|now| now < wake))
+                let (route_index, settlement_retries) = match decide_next_attempt(
+                    node,
+                    &checkpoint.nodes[node_index],
+                    limits,
+                    owner,
+                    owner.wall_now(),
+                )
+                .map_err(GraphError::Run)?
                 {
-                    break;
-                }
-                if let Some(retry) = &checkpoint.nodes[node_index].launch_retry
-                    && retry
-                        .deadline
-                        .zip(launch_clock)
-                        .is_some_and(|(end, now)| now >= end)
-                {
-                    let accepted = match checkpoint.nodes[node_index].attempts.last() {
-                        Some(attempt) if attempt.attempt_ref.is_some() => true,
-                        Some(attempt) => owner.launch_accepted(attempt).map_err(GraphError::Run)?,
-                        None => false,
-                    };
-                    if !accepted {
-                        let reason = retry.reason.clone().unwrap_or_default();
+                    NextAttempt::WaitRetryWake => break,
+                    NextAttempt::LaunchRetryExhausted { reason } => {
                         let progress = &mut checkpoint.nodes[node_index];
                         progress.advance_error_code = Some("launch_retry_exhausted".into());
                         progress.advance_error = Some(format!(
@@ -2063,136 +1872,20 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         journal.save(&checkpoint).map_err(GraphError::Journal)?;
                         break;
                     }
-                }
-                let progress = &checkpoint.nodes[node_index];
-                let route_index = match progress.attempts.last() {
-                    None => 0,
-                    Some(last) if last.state != AttemptState::Terminal => {
-                        usize::from(last.key.route_index)
-                    }
-                    Some(last)
-                        if review_substitution(node, last)
-                            && progress
-                                .attempts
-                                .iter()
-                                .filter(|attempt| attempt.review_substitution)
-                                .count()
-                                < limits.review_substitutions =>
-                    {
-                        progress.attempts.len()
-                    }
-                    Some(last) if review_substitution(node, last) => {
-                        // A lowered limit can withdraw a retry that was saved
-                        // but had not yet started when the graph stopped.
-                        checkpoint.nodes[node_index].state = NodeState::Failed;
+                    NextAttempt::Fail { code, message } => {
+                        let progress = &mut checkpoint.nodes[node_index];
+                        progress.state = NodeState::Failed;
+                        progress.advance_error_code = code.map(Into::into);
+                        progress.advance_error = message;
                         journal.save(&checkpoint).map_err(GraphError::Journal)?;
                         break;
                     }
-                    Some(last)
-                        if last.outcome.is_some_and(|outcome| {
-                            fallback_candidate(outcome, node.access, last.launched)
-                        }) =>
-                    {
-                        let Some(outcome) = last.outcome else { break };
-                        let (evidence, unreadable) = match last.attempt_ref.as_deref() {
-                            Some(reference) if !last.launched => {
-                                match owner.preparation_fallback_evidence(&last.key, reference) {
-                                    Ok(evidence) => (evidence, false),
-                                    Err(_) => (None, true),
-                                }
-                            }
-                            _ => (None, false),
-                        };
-                        if !live_fallback_allowed(outcome, last.launched, node.access, evidence) {
-                            let (code, message) =
-                                fallback_denial(last.launched, node.access, unreadable);
-                            let progress = &mut checkpoint.nodes[node_index];
-                            progress.state = NodeState::Failed;
-                            progress.advance_error_code = Some(code.into());
-                            progress.advance_error = Some(message.into());
-                            journal.save(&checkpoint).map_err(GraphError::Journal)?;
-                            break;
-                        }
-                        if review_preparation_substitution(node, last)
-                            && progress
-                                .attempts
-                                .iter()
-                                .filter(|attempt| attempt.review_substitution)
-                                .count()
-                                >= limits.review_substitutions
-                        {
-                            let progress = &mut checkpoint.nodes[node_index];
-                            progress.state = NodeState::Failed;
-                            progress.advance_error_code = Some("review_substitution_limit".into());
-                            progress.advance_error =
-                                Some("review substitution limit reached".into());
-                            journal.save(&checkpoint).map_err(GraphError::Journal)?;
-                            break;
-                        }
-                        progress.attempts.len()
-                    }
-                    Some(_) => break,
+                    NextAttempt::None => break,
+                    NextAttempt::Candidate {
+                        route_index,
+                        settlement_retries,
+                    } => (route_index, settlement_retries),
                 };
-                if route_index > 0
-                    && progress.attempts.last().is_some_and(|attempt| {
-                        attempt.launched && attempt.state == AttemptState::Terminal
-                    })
-                    && node
-                        .routes
-                        .get(route_index - 1)
-                        .and_then(|route| route.account.as_ref())
-                        .is_some_and(|account| {
-                            node.routes
-                                .get(route_index)
-                                .is_some_and(|next| next.account.as_ref() != Some(account))
-                        })
-                {
-                    let progress = &mut checkpoint.nodes[node_index];
-                    progress.state = NodeState::Failed;
-                    progress.advance_error_code = Some("fallback_account_pinned".into());
-                    progress.advance_error =
-                        Some("Route fallback cannot change the pinned account.".into());
-                    journal.save(&checkpoint).map_err(GraphError::Journal)?;
-                    break;
-                }
-                let allowance = progress
-                    .extra
-                    .get("retry")
-                    .and_then(|value| value["retries"].as_u64());
-                // Preparation refusals have not launched a provider and do not
-                // consume the settlement retry allowance.
-                let mut spent = 0u64;
-                for reference in progress
-                    .attempts
-                    .iter()
-                    .filter_map(|attempt| attempt.attempt_ref.as_deref())
-                {
-                    spent = spent.saturating_add(
-                        owner.retry_successors(reference).map_err(GraphError::Run)?,
-                    );
-                }
-                // Each launched attempt that needs another route consumes one
-                // infrastructure retry, in addition to successors within a run.
-                let launched_switches = progress
-                    .attempts
-                    .iter()
-                    .filter(|attempt| attempt.launched && attempt.state == AttemptState::Terminal)
-                    .count() as u64;
-                spent = spent.saturating_add(launched_switches);
-                if route_index > 0
-                    && progress.attempts.last().is_some_and(|attempt| {
-                        attempt.launched && attempt.state == AttemptState::Terminal
-                    })
-                    && allowance.is_some_and(|limit| spent > limit)
-                {
-                    let progress = &mut checkpoint.nodes[node_index];
-                    progress.state = NodeState::Failed;
-                    progress.advance_error_code = Some("fallback_budget_exhausted".into());
-                    progress.advance_error = Some("Route fallback retry budget exhausted.".into());
-                    journal.save(&checkpoint).map_err(GraphError::Journal)?;
-                    break;
-                }
-                let settlement_retries = allowance.map(|limit| limit.saturating_sub(spent) as u8);
                 let route = node
                     .routes
                     .get(route_index)
@@ -3275,76 +2968,22 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                                                 .filter(|attempt| attempt.review_substitution)
                                                 .count()
                                                 >= limits.review_substitutions;
-                                    if !live_fallback_allowed(
+                                    match settlement_fallback_decision(
+                                        node,
+                                        route_index,
                                         outcome,
                                         launched,
-                                        node.access,
                                         fallback_evidence,
-                                    ) || route_index + 1 == node.routes.len()
-                                        || review_limit_reached
-                                    {
-                                        if outcome == AttemptOutcome::UsageLimited {
-                                            progress.advance_error_code =
-                                                Some("usage_limited".into());
-                                            // Name the pool so the user knows which allowance ran out.
-                                            let pool = route
-                                                .alias
-                                                .as_deref()
-                                                .map_or_else(String::new, |alias| {
-                                                    format!(" for pool {alias}")
-                                                });
-                                            progress.advance_error = Some(bounded(
-                                                &format!(
-                                                    "Provider quota or rate limit reached{pool}; wait for the allowance to reset or choose an eligible route."
-                                                ),
-                                                MAX_ADVANCE_ERROR_BYTES,
-                                            ));
+                                        evidence_unreadable,
+                                        review_limit_reached,
+                                    ) {
+                                        SettlementFallback::Continue => true,
+                                        SettlementFallback::Fail { code, message } => {
+                                            progress.advance_error_code = code;
+                                            progress.advance_error = message;
+                                            progress.state = NodeState::Failed;
+                                            false
                                         }
-                                        if route_index + 1 == node.routes.len()
-                                            && launched
-                                            && node.access == AccessMode::ReadOnly
-                                            && (route.account.is_some() || route.model.is_some())
-                                        {
-                                            progress.advance_error_code =
-                                                Some("fallback_route_pinned".into());
-                                            progress.advance_error = Some(
-                                                "The selected route is pinned and has no fallback."
-                                                    .into(),
-                                            );
-                                        }
-                                        if !live_fallback_allowed(
-                                            outcome,
-                                            launched,
-                                            node.access,
-                                            fallback_evidence,
-                                        ) && route_index + 1 < node.routes.len()
-                                        {
-                                            let (code, message) = fallback_denial(
-                                                launched,
-                                                node.access,
-                                                evidence_unreadable,
-                                            );
-                                            progress.advance_error_code = Some(code.into());
-                                            progress.advance_error = Some(message.into());
-                                        }
-                                        if review_limit_reached
-                                            && route_index + 1 < node.routes.len()
-                                            && live_fallback_allowed(
-                                                outcome,
-                                                launched,
-                                                node.access,
-                                                fallback_evidence,
-                                            )
-                                        {
-                                            progress.advance_error_code =
-                                                Some("review_substitution_limit".into());
-                                            progress.advance_error =
-                                                Some("review substitution limit reached".into());
-                                        }
-                                        progress.state = NodeState::Failed;
-                                        false
-                                    } else {
-                                        true
                                     }
                                 }
                                 AttemptOutcome::DeadlineExceeded => {
