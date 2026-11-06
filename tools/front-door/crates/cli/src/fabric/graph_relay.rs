@@ -125,23 +125,45 @@ pub fn serve(
                     &context.config.graph.limits,
                 )
                 .map_err(|error| refused("invalid_graph", error))?;
-                if let (None, Some(branch), Some(source)) = (&parent_path, &document.integration_branch, &checkpoint.bound_integration_base) {
+                if let (None, Some(branch), Some(source)) = (
+                    &parent_path,
+                    &document.integration_branch,
+                    &checkpoint.bound_integration_base,
+                ) {
                     Some((branch.clone(), source.clone()))
                 } else {
-                let path = parent_path.clone().unwrap_or_else(|| context.cwd.to_string_lossy().into_owned());
-                let writer = provenant_run::resolve_writer(
-                    state.as_path(),
-                    &context.cwd,
-                    std::path::Path::new(&path),
-                )
-                .map_err(|error| refused("writer_parent_required", error.to_string()))?;
-                let launch = provenant_run::prepare_writer(&writer, state.as_path(), project)
+                    let path = parent_path
+                        .clone()
+                        .unwrap_or_else(|| context.cwd.to_string_lossy().into_owned());
+                    let writer = provenant_run::resolve_writer(
+                        state.as_path(),
+                        &context.cwd,
+                        std::path::Path::new(&path),
+                    )
                     .map_err(|error| refused("writer_parent_required", error.to_string()))?;
-                let branch = if parent_path.is_none() { document.integration_branch.clone() } else { None }
-                    .unwrap_or_else(|| launch.branch.as_str().trim_start_matches("refs/heads/").to_owned());
-                let source = if parent_path.is_none() { checkpoint.bound_integration_base.clone() } else { None }
+                    let launch = provenant_run::prepare_writer(&writer, state.as_path(), project)
+                        .map_err(|error| {
+                        refused("writer_parent_required", error.to_string())
+                    })?;
+                    let branch = if parent_path.is_none() {
+                        document.integration_branch.clone()
+                    } else {
+                        None
+                    }
+                    .unwrap_or_else(|| {
+                        launch
+                            .branch
+                            .as_str()
+                            .trim_start_matches("refs/heads/")
+                            .to_owned()
+                    });
+                    let source = if parent_path.is_none() {
+                        checkpoint.bound_integration_base.clone()
+                    } else {
+                        None
+                    }
                     .unwrap_or_else(|| launch.source_commit().to_string());
-                Some((branch, source))
+                    Some((branch, source))
                 }
             } else {
                 None
@@ -164,7 +186,8 @@ pub fn serve(
                 return Ok(serde_json::to_value(receipt)?);
             }
             if request.needs_worktree_provisioning()
-                && let Some(path) = receipt.worktree.as_deref() {
+                && let Some(path) = receipt.worktree.as_deref()
+            {
                 let source = relay::child_source(
                     &document,
                     &checkpoint,
@@ -224,7 +247,13 @@ pub fn serve(
                 },
             )
             .map_err(|error| refused(error.code, error.message))?;
-            provision_added_writers(context, &mut journal, &mut checkpoint, &admitted.added, cancel)?;
+            provision_added_writers(
+                context,
+                &mut journal,
+                &mut checkpoint,
+                &admitted.added,
+                cancel,
+            )?;
             json!({"graph_id":graph_id,"revision":admitted.revision,"replayed":admitted.replayed,"added":admitted.added})
         }
         RelayOp::Children => {
@@ -271,34 +300,71 @@ fn provision_added_writers(
     cancel: &CancelToken,
 ) -> Result<(), ServiceError> {
     use provenant_fabric_runtime::graph::{AccessMode, SourceBinding};
-    let writers: Vec<_> = checkpoint.expansions.iter().flat_map(|expansion| &expansion.nodes)
-        .filter(|node| (added.is_empty() || added.contains(&node.id))
-            && node.access == AccessMode::WorktreeWrite
-            && node.extra.get("provision_worktree").and_then(Value::as_bool) == Some(true)
-            && !checkpoint.nodes.iter().any(|progress| (progress.worktree == node.worktree && progress.writer_binding.is_some()) || (progress.id == node.id && !progress.attempts.is_empty())))
-        .cloned().collect();
+    let writers: Vec<_> = checkpoint
+        .expansions
+        .iter()
+        .flat_map(|expansion| &expansion.nodes)
+        .filter(|node| {
+            (added.is_empty() || added.contains(&node.id))
+                && node.access == AccessMode::WorktreeWrite
+                && node
+                    .extra
+                    .get("provision_worktree")
+                    .and_then(Value::as_bool)
+                    == Some(true)
+                && !checkpoint.nodes.iter().any(|progress| {
+                    (progress.worktree == node.worktree && progress.writer_binding.is_some())
+                        || (progress.id == node.id && !progress.attempts.is_empty())
+                })
+        })
+        .cloned()
+        .collect();
     for node in writers {
-        let Some(path) = node.worktree.as_deref() else { continue };
-        let source = if let Some(source) = checkpoint.nodes.iter().find(|progress| progress.id == node.id)
+        let Some(path) = node.worktree.as_deref() else {
+            continue;
+        };
+        let source = if let Some(source) = checkpoint
+            .nodes
+            .iter()
+            .find(|progress| progress.id == node.id)
             .and_then(|progress| progress.extra.get("provisioned_source"))
-            .and_then(Value::as_str) {
+            .and_then(Value::as_str)
+        {
             source.to_owned()
-        } else { match node.source {
-            Some(SourceBinding::Commit { commit }) => commit,
-            // These sources become available only when dependencies settle.
-            Some(_) => continue,
-            None => match checkpoint.bound_integration_base.clone() {
-                Some(source) => source,
-                None => {
-                    let request = provenant_run::resolve_writer(context.roots.state.as_path(), &context.cwd, &context.cwd)
+        } else {
+            match node.source {
+                Some(SourceBinding::Commit { commit }) => commit,
+                // These sources become available only when dependencies settle.
+                Some(_) => continue,
+                None => match checkpoint.bound_integration_base.clone() {
+                    Some(source) => source,
+                    None => {
+                        let request = provenant_run::resolve_writer(
+                            context.roots.state.as_path(),
+                            &context.cwd,
+                            &context.cwd,
+                        )
                         .map_err(|error| refused("writer_source", error.to_string()))?;
-                    provenant_run::prepare_writer(&request, context.roots.state.as_path(), context.identity.project)
-                        .map_err(|error| refused("writer_source", error.to_string()))?.source_commit().to_string()
-                }
+                        provenant_run::prepare_writer(
+                            &request,
+                            context.roots.state.as_path(),
+                            context.identity.project,
+                        )
+                        .map_err(|error| refused("writer_source", error.to_string()))?
+                        .source_commit()
+                        .to_string()
+                    }
+                },
             }
-        }};
-        if let Some(progress) = checkpoint.nodes.iter_mut().find(|progress| progress.id == node.id) {
-            progress.extra.insert("provisioned_source".into(), source.clone().into());
+        };
+        if let Some(progress) = checkpoint
+            .nodes
+            .iter_mut()
+            .find(|progress| progress.id == node.id)
+        {
+            progress
+                .extra
+                .insert("provisioned_source".into(), source.clone().into());
         }
         relay::fence_provisioning(checkpoint, &node.id, path, &source);
     }
@@ -910,8 +976,15 @@ mod provisioning_tests {
         let project = home.join("project");
         std::fs::create_dir_all(&project)?;
         let git = |args: &[&str]| -> Result<String, Box<dyn std::error::Error>> {
-            let output = provenant_os::fixture::git_command().current_dir(&project).args(args).output()?;
-            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+            let output = provenant_os::fixture::git_command()
+                .current_dir(&project)
+                .args(args)
+                .output()?;
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
             Ok(String::from_utf8(output.stdout)?.trim().to_owned())
         };
         git(&["init", "-q"])?;
@@ -938,8 +1011,21 @@ mod provisioning_tests {
             }]}]
         }))?;
         {
-            let mut journal = FileJournal::open(&context.roots.state, context.identity.project, "g-writers", budget, &cancel, &clock)?;
-            journal.bind(GraphExecution { review_base: None, extra: Default::default(), integration_base: Some(source.parse()?), directory: project.clone(), document })?;
+            let mut journal = FileJournal::open(
+                &context.roots.state,
+                context.identity.project,
+                "g-writers",
+                budget,
+                &cancel,
+                &clock,
+            )?;
+            journal.bind(GraphExecution {
+                review_base: None,
+                extra: Default::default(),
+                integration_base: Some(source.parse()?),
+                directory: project.clone(),
+                document,
+            })?;
             journal.save(&checkpoint)?;
         }
         git(&["commit", "--allow-empty", "-qm", "move host head"])?;
@@ -955,7 +1041,15 @@ mod provisioning_tests {
             "id":"edited","use":"implement","brief":"Edit","write_scope":["other"]
         }]}});
         let _ = serve(&context, "caller", edit, budget, &cancel, &clock)?;
-        assert_eq!(git(&["-C", ".worktrees/g-writers-parent--edited", "rev-parse", "HEAD"])?, source);
+        assert_eq!(
+            git(&[
+                "-C",
+                ".worktrees/g-writers-parent--edited",
+                "rev-parse",
+                "HEAD"
+            ])?,
+            source
+        );
         Ok(())
     }
 

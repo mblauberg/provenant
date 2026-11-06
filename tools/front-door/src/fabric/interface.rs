@@ -91,16 +91,21 @@ impl Factory {
         }
         // A retry or continuation repeats the logical launch, rather than the
         // provider attempt. The host scopes this identity to its parent node.
-        let digest = provenant_records::CanonicalV1::record_digest("graph-child-launch", 1, &identity)
-            .map_err(|_| FacadeError::StateCorrupt)?;
+        let digest =
+            provenant_records::CanonicalV1::record_digest("graph-child-launch", 1, &identity)
+                .map_err(|_| FacadeError::StateCorrupt)?;
         let key = format!("child-{}", &provenant_core::hex(digest.as_bytes())[..32]);
-        let has_overrides = ["brief", "use", "tier", "over"].iter().any(|field| {
-            input.get(*field).is_some_and(|value| !value.is_null())
-        }) || input.get("set").is_some_and(|value| {
-            value.as_object().is_none_or(|object| !object.is_empty())
-        });
-        let full_document = raw.filter(|document| document.get("graph_id").is_some() && !has_overrides);
-        let mut inline = raw.and_then(|document| document.get("templates")).cloned()
+        let has_overrides = ["brief", "use", "tier", "over"]
+            .iter()
+            .any(|field| input.get(*field).is_some_and(|value| !value.is_null()))
+            || input
+                .get("set")
+                .is_some_and(|value| value.as_object().is_none_or(|object| !object.is_empty()));
+        let full_document =
+            raw.filter(|document| document.get("graph_id").is_some() && !has_overrides);
+        let mut inline = raw
+            .and_then(|document| document.get("templates"))
+            .cloned()
             .unwrap_or_else(|| json!({}));
         let mut node = if let Some(document) = full_document {
             json!({"access":"read_only", "composite":{"nodes":document["nodes"]}})
@@ -121,11 +126,14 @@ impl Factory {
                     node[field] = value.clone();
                 }
             }
-            let template = library.resolve(node["use"].as_str().unwrap_or("task"))
+            let template = library
+                .resolve(node["use"].as_str().unwrap_or("task"))
                 .map_err(|_| invalid())?;
             let mut parameters = node.get("with").cloned().unwrap_or_else(|| json!({}));
             if let Some(overrides) = input.get("set").filter(|value| !value.is_null()) {
-                parameters.as_object_mut().ok_or_else(invalid)?
+                parameters
+                    .as_object_mut()
+                    .ok_or_else(invalid)?
                     .extend(overrides.as_object().ok_or_else(invalid)?.clone());
             }
             if template.parameters.contains_key("brief")
@@ -146,7 +154,9 @@ impl Factory {
         let mut compiled = provenant_fabric_runtime::graph::template::Compiler {
             library: &library,
             resolvers: &resolvers,
-        }.lower(&node).map_err(|_| invalid())?;
+        }
+        .lower(&node)
+        .map_err(|_| invalid())?;
         if let Some(tier) = input.get("tier").filter(|value| !value.is_null()) {
             let tier = tier.as_str().ok_or_else(invalid)?;
             let route = serde_json::from_value(json!({"alias":tier})).map_err(|_| invalid())?;
@@ -159,15 +169,24 @@ impl Factory {
             && compiled.get("composite").is_none()
             && compiled.get("loop").is_none();
         let write_scope = if writer {
-            serde_json::from_value(compiled.get("write_scope").cloned().unwrap_or_else(|| json!([])))
-                .map_err(|_| invalid())?
+            serde_json::from_value(
+                compiled
+                    .get("write_scope")
+                    .cloned()
+                    .unwrap_or_else(|| json!([])),
+            )
+            .map_err(|_| invalid())?
         } else {
             Vec::new()
         };
         Ok(ChildRequest {
             id: key.clone(),
             template: node["use"].as_str().unwrap_or("task").into(),
-            brief: input.get("brief").and_then(Value::as_str).unwrap_or_default().into(),
+            brief: input
+                .get("brief")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .into(),
             tier: input.get("tier").and_then(Value::as_str).map(str::to_owned),
             timeout_seconds: None,
             writer,
@@ -1128,16 +1147,29 @@ mod tests {
         let input = json!({"op":"run", "use":"implement", "brief":"Fix the parser"});
         let first = factory.child_request(&input)?;
         assert!(first.writer);
-        assert_eq!(first.launch.as_ref().unwrap().node["access"], "worktree_write");
+        assert_eq!(
+            first.launch.as_ref().unwrap().node["access"],
+            "worktree_write"
+        );
         let mut retry = input.clone();
         retry["explain"] = true.into();
         retry["wait_seconds"] = 30.into();
         assert_eq!(factory.child_request(&retry)?, first);
-        assert_ne!(factory.child_request(&json!({"op":"run", "use":"implement", "brief":"Fix another parser"}))?.id, first.id);
+        assert_ne!(
+            factory
+                .child_request(
+                    &json!({"op":"run", "use":"implement", "brief":"Fix another parser"})
+                )?
+                .id,
+            first.id
+        );
         let bound = factory.child_request(&json!({"op":"run", "document":{"use":"implement", "brief":"Bound writer", "worktree":".worktrees/existing"}}))?;
         assert!(bound.writer);
         assert!(!bound.needs_worktree_provisioning());
-        assert_eq!(bound.launch.as_ref().unwrap().node["worktree"], ".worktrees/existing");
+        assert_eq!(
+            bound.launch.as_ref().unwrap().node["worktree"],
+            ".worktrees/existing"
+        );
         Ok(())
     }
 
@@ -1155,7 +1187,9 @@ mod tests {
         let node = &request.launch.as_ref().unwrap().node;
         fn prompts(node: &Value, found: &mut Vec<String>) {
             if let Some(nodes) = node.pointer("/composite/nodes").and_then(Value::as_array) {
-                for child in nodes { prompts(child, found); }
+                for child in nodes {
+                    prompts(child, found);
+                }
             } else if let Some(prompt) = node["prompt"].as_str() {
                 found.push(prompt.into());
                 assert_eq!(node["route"]["alias"], "junior");
@@ -1164,18 +1198,36 @@ mod tests {
         let mut found = Vec::new();
         prompts(node, &mut found);
         assert_eq!(found, ["Inspect code a", "Inspect code b"]);
-        assert!(request.launch.as_ref().unwrap().templates.contains_key("lane-document"));
+        assert!(
+            request
+                .launch
+                .as_ref()
+                .unwrap()
+                .templates
+                .contains_key("lane-document")
+        );
         let request = factory.child_request(&json!({
             "op":"run", "document":{"graph_id":"child-doc", "nodes":[
                 {"id":"inspect", "use":"task", "brief":"Document child"}
             ]}
         }))?;
-        assert_eq!(request.launch.as_ref().unwrap().node["composite"]["nodes"][0]["prompt"], "Document child");
-        let request = factory.child_request(&json!({"op":"run", "use":"implement", "brief":"Fix ${item}", "over":["a","b"]}))?;
+        assert_eq!(
+            request.launch.as_ref().unwrap().node["composite"]["nodes"][0]["prompt"],
+            "Document child"
+        );
+        let request = factory.child_request(
+            &json!({"op":"run", "use":"implement", "brief":"Fix ${item}", "over":["a","b"]}),
+        )?;
         assert!(!request.writer);
-        let children = request.launch.as_ref().unwrap().node["composite"]["nodes"].as_array().unwrap();
+        let children = request.launch.as_ref().unwrap().node["composite"]["nodes"]
+            .as_array()
+            .unwrap();
         assert_eq!(children.len(), 2);
-        assert!(children.iter().all(|node| node["access"] == "worktree_write"));
+        assert!(
+            children
+                .iter()
+                .all(|node| node["access"] == "worktree_write")
+        );
         Ok(())
     }
 
@@ -1183,77 +1235,148 @@ mod tests {
     fn child_launch_crosses_the_lane_transport_and_provisions_writer_fanout() -> Result {
         use provenant_fabric_runtime::graph::{GraphCheckpoint, GraphExecution, relay::RelayOp};
         fn exercise(input: Value, count: usize, disjoint: bool) -> Result {
-        let rig = TestRig::new()?;
-        crate::worktree_tests::git(&rig, &["commit", "--allow-empty", "-m", "source"])?;
-        let source = crate::worktree_tests::git(&rig, &["rev-parse", "HEAD"])?;
-        let branch = crate::worktree_tests::git(&rig, &["symbolic-ref", "--short", "HEAD"])?;
-        let factory = factory(&rig)?;
-        let cancel = CancelToken::new();
-        let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
-        let document: GraphDocument = serde_json::from_value(json!({
-            "schema_version":2, "graph_id":"g-child-e2e", "integration_branch":branch,
-            "nodes":[{"id":"parent", "access":"read_only", "prompt":"Go", "route":{"alias":"senior"}}]
-        }))?;
-        let reference = format!("{}/caller", factory.context.identity.host);
-        let checkpoint: GraphCheckpoint = serde_json::from_value(json!({
-            "schema_version":1, "graph_id":"g-child-e2e", "plan_digest":"fixture", "bound_integration_base":source,
-            "nodes":[{"id":"parent", "state":"running", "attempts":[{
-                "launched":true, "key":{"graph_id":"g-child-e2e", "node_id":"parent", "route_index":0},
-                "route":{"alias":"senior"}, "state":"running", "attempt_ref":reference, "outcome":null, "launch_actor":"fixture"
-            }]}]
-        }))?;
-        {
-            let mut journal = FileJournal::open(&factory.context.roots.state, factory.context.identity.project,
-                &document.graph_id, budget, &cancel, &factory.clock)?;
-            journal.bind(GraphExecution { review_base:None, extra:Default::default(), integration_base:Some(source.parse()?),
-                directory:rig.project.clone(), document:document.clone() })?;
-            journal.save(&checkpoint)?;
-        }
-        crate::worktree_tests::git(&rig, &["commit", "--allow-empty", "-m", "host head moved"])?;
-        let context = Context::open(factory.context.roots.clone(), &rig.home, &rig.project)?;
-        let socket = rig.root.join("child-relay/socket");
-        let _relay = provenant_fabric_mcp::lane::HostRelay::start_with_graph(socket.clone(), Default::default(),
-            |_, _, _| Err(ServiceError::FabricOwnerUnavailable),
-            move |arguments, cancel: &CancelToken, _| {
-                let clock = SystemClock;
-                let budget = WaitBudget::cli(clock.mono_now(), 30).map_err(|_| ServiceError::FabricOwnerUnavailable)?;
-                provenant_cli::fabric::graph_relay::serve(&context, "caller", arguments, budget, cancel, &clock)
-            })?;
-        {
-            let request = factory.child_request(&input)?;
-            let frame = serde_json::to_value(RelayOp::Add(request))?;
-            let receipt = provenant_fabric_mcp::lane::graph(&socket, frame.clone(), &cancel, std::time::Duration::from_secs(30))?;
-            let replay = provenant_fabric_mcp::lane::graph(&socket, frame, &cancel, std::time::Duration::from_secs(30))?;
-            assert_eq!(replay["replayed"], true);
-            assert_eq!(replay["node"], receipt["node"]);
-            let checkpoint = FileJournal::read_checkpoint(&factory.context.roots.state, factory.context.identity.project,
-                &document.graph_id)?.ok_or("missing checkpoint")?;
-            assert_eq!(checkpoint.expansions.len(), 1);
-            let prefix = receipt["node"].as_str().ok_or("missing child")?;
-            let writers: Vec<_> = checkpoint.expansions[0].nodes.iter().filter(|node| node.access == provenant_fabric_runtime::graph::AccessMode::WorktreeWrite
-                && (node.id == prefix || node.id.starts_with(&format!("{prefix}--")))).collect();
-            assert_eq!(writers.len(), count);
-            let mut paths = std::collections::BTreeSet::new();
-            for writer in writers {
-                let path = writer.worktree.as_ref().ok_or("missing writer worktree")?;
-                let unique = paths.insert(path.clone());
-                if disjoint { assert!(unique); }
-                assert_eq!(crate::worktree_tests::git(&rig, &["-C", path, "rev-parse", "HEAD"])?, source);
-                assert_eq!(writer.delivery, Some(provenant_records::run::DeliveryMode::Integrate(branch.clone())));
-                assert_eq!(writer.source, Some(provenant_fabric_runtime::graph::SourceBinding::Commit { commit:source.clone() }));
+            let rig = TestRig::new()?;
+            crate::worktree_tests::git(&rig, &["commit", "--allow-empty", "-m", "source"])?;
+            let source = crate::worktree_tests::git(&rig, &["rev-parse", "HEAD"])?;
+            let branch = crate::worktree_tests::git(&rig, &["symbolic-ref", "--short", "HEAD"])?;
+            let factory = factory(&rig)?;
+            let cancel = CancelToken::new();
+            let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
+            let document: GraphDocument = serde_json::from_value(json!({
+                "schema_version":2, "graph_id":"g-child-e2e", "integration_branch":branch,
+                "nodes":[{"id":"parent", "access":"read_only", "prompt":"Go", "route":{"alias":"senior"}}]
+            }))?;
+            let reference = format!("{}/caller", factory.context.identity.host);
+            let checkpoint: GraphCheckpoint = serde_json::from_value(json!({
+                "schema_version":1, "graph_id":"g-child-e2e", "plan_digest":"fixture", "bound_integration_base":source,
+                "nodes":[{"id":"parent", "state":"running", "attempts":[{
+                    "launched":true, "key":{"graph_id":"g-child-e2e", "node_id":"parent", "route_index":0},
+                    "route":{"alias":"senior"}, "state":"running", "attempt_ref":reference, "outcome":null, "launch_actor":"fixture"
+                }]}]
+            }))?;
+            {
+                let mut journal = FileJournal::open(
+                    &factory.context.roots.state,
+                    factory.context.identity.project,
+                    &document.graph_id,
+                    budget,
+                    &cancel,
+                    &factory.clock,
+                )?;
+                journal.bind(GraphExecution {
+                    review_base: None,
+                    extra: Default::default(),
+                    integration_base: Some(source.parse()?),
+                    directory: rig.project.clone(),
+                    document: document.clone(),
+                })?;
+                journal.save(&checkpoint)?;
             }
-        }
-        Ok(())
+            crate::worktree_tests::git(
+                &rig,
+                &["commit", "--allow-empty", "-m", "host head moved"],
+            )?;
+            let context = Context::open(factory.context.roots.clone(), &rig.home, &rig.project)?;
+            let socket = rig.root.join("child-relay/socket");
+            let _relay = provenant_fabric_mcp::lane::HostRelay::start_with_graph(
+                socket.clone(),
+                Default::default(),
+                |_, _, _| Err(ServiceError::FabricOwnerUnavailable),
+                move |arguments, cancel: &CancelToken, _| {
+                    let clock = SystemClock;
+                    let budget = WaitBudget::cli(clock.mono_now(), 30)
+                        .map_err(|_| ServiceError::FabricOwnerUnavailable)?;
+                    provenant_cli::fabric::graph_relay::serve(
+                        &context, "caller", arguments, budget, cancel, &clock,
+                    )
+                },
+            )?;
+            {
+                let request = factory.child_request(&input)?;
+                let frame = serde_json::to_value(RelayOp::Add(request))?;
+                let receipt = provenant_fabric_mcp::lane::graph(
+                    &socket,
+                    frame.clone(),
+                    &cancel,
+                    std::time::Duration::from_secs(30),
+                )?;
+                let replay = provenant_fabric_mcp::lane::graph(
+                    &socket,
+                    frame,
+                    &cancel,
+                    std::time::Duration::from_secs(30),
+                )?;
+                assert_eq!(replay["replayed"], true);
+                assert_eq!(replay["node"], receipt["node"]);
+                let checkpoint = FileJournal::read_checkpoint(
+                    &factory.context.roots.state,
+                    factory.context.identity.project,
+                    &document.graph_id,
+                )?
+                .ok_or("missing checkpoint")?;
+                assert_eq!(checkpoint.expansions.len(), 1);
+                let prefix = receipt["node"].as_str().ok_or("missing child")?;
+                let writers: Vec<_> = checkpoint.expansions[0]
+                    .nodes
+                    .iter()
+                    .filter(|node| {
+                        node.access == provenant_fabric_runtime::graph::AccessMode::WorktreeWrite
+                            && (node.id == prefix || node.id.starts_with(&format!("{prefix}--")))
+                    })
+                    .collect();
+                assert_eq!(writers.len(), count);
+                let mut paths = std::collections::BTreeSet::new();
+                for writer in writers {
+                    let path = writer.worktree.as_ref().ok_or("missing writer worktree")?;
+                    let unique = paths.insert(path.clone());
+                    if disjoint {
+                        assert!(unique);
+                    }
+                    assert_eq!(
+                        crate::worktree_tests::git(&rig, &["-C", path, "rev-parse", "HEAD"])?,
+                        source
+                    );
+                    assert_eq!(
+                        writer.delivery,
+                        Some(provenant_records::run::DeliveryMode::Integrate(
+                            branch.clone()
+                        ))
+                    );
+                    assert_eq!(
+                        writer.source,
+                        Some(provenant_fabric_runtime::graph::SourceBinding::Commit {
+                            commit: source.clone()
+                        })
+                    );
+                }
+            }
+            Ok(())
         }
         for (input, count, disjoint) in [
-            (json!({"op":"run", "use":"implement", "brief":"Fix the parser"}), 1, false),
-            (json!({"op":"run", "use":"implement", "brief":"Fix ${item}", "over":["one","two"]}), 2, false),
-            (json!({"op":"run", "document":{
+            (
+                json!({"op":"run", "use":"implement", "brief":"Fix the parser"}),
+                1,
+                false,
+            ),
+            (
+                json!({"op":"run", "use":"implement", "brief":"Fix ${item}", "over":["one","two"]}),
+                2,
+                false,
+            ),
+            (
+                json!({"op":"run", "document":{
                 "parameters":{"subject":{"type":"string"}},
                 "nodes":[{"id":"write", "use":"implement", "brief":"Fix ${subject}"}]
-            }, "set":{"subject":"inline"}}), 1, false),
-            (json!({"op":"run", "document":{"use":"implement", "brief":"Fix ${item}", "write_scope":["${item}"]},
-                "over":["three","four"]}), 2, true),
+            }, "set":{"subject":"inline"}}),
+                1,
+                false,
+            ),
+            (
+                json!({"op":"run", "document":{"use":"implement", "brief":"Fix ${item}", "write_scope":["${item}"]},
+                "over":["three","four"]}),
+                2,
+                true,
+            ),
         ] {
             exercise(input, count, disjoint)?;
         }
@@ -1271,7 +1394,10 @@ mod tests {
                 "node":{"read_roots":["${root}"]}
             }}, "use":"escaped"
         }, "set":{"root":rig.home}});
-        assert!(matches!(factory.child_request(&escaping), Err(FacadeError::InvalidInput { .. })));
+        assert!(matches!(
+            factory.child_request(&escaping),
+            Err(FacadeError::InvalidInput { .. })
+        ));
         Ok(())
     }
 

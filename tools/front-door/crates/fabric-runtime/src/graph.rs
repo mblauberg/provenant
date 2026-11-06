@@ -397,7 +397,11 @@ pub trait AttemptOwner {
     }
 
     /// Create a host-managed writer checkout from the checkpointed source.
-    fn provision_writer_worktree(&mut self, _path: &str, _source: &str) -> Result<bool, Self::Error> {
+    fn provision_writer_worktree(
+        &mut self,
+        _path: &str,
+        _source: &str,
+    ) -> Result<bool, Self::Error> {
         Ok(false)
     }
 
@@ -2082,42 +2086,90 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         .worktree
                         .as_deref()
                         .ok_or_else(|| GraphError::Invalid("writer worktree missing".into()))?;
-                    if node.extra.get("provision_worktree").and_then(serde_json::Value::as_bool) == Some(true)
-                        && (relay::pending_provisioning(&checkpoint).iter().any(|(id, _, _)| id == &node.id)
-                            || !checkpoint.nodes.iter().any(|progress| progress.worktree.as_deref() == Some(path) && progress.writer_binding.is_some()))
+                    if node
+                        .extra
+                        .get("provision_worktree")
+                        .and_then(serde_json::Value::as_bool)
+                        == Some(true)
+                        && (relay::pending_provisioning(&checkpoint)
+                            .iter()
+                            .any(|(id, _, _)| id == &node.id)
+                            || !checkpoint.nodes.iter().any(|progress| {
+                                progress.worktree.as_deref() == Some(path)
+                                    && progress.writer_binding.is_some()
+                            }))
                     {
-                        let pending = relay::pending_provisioning(&checkpoint).into_iter().find(|(id, _, _)| id == &node.id);
+                        let pending = relay::pending_provisioning(&checkpoint)
+                            .into_iter()
+                            .find(|(id, _, _)| id == &node.id);
                         let source = if let Some((_, _, source)) = pending {
                             source
                         } else {
-                            let source = if let Some(source) = checkpoint.nodes[node_index].source_commit.clone().or_else(|| checkpoint.nodes[node_index].extra.get("provisioned_source").and_then(serde_json::Value::as_str).map(str::to_owned)) {
+                            let source = if let Some(source) = checkpoint.nodes[node_index]
+                                .source_commit
+                                .clone()
+                                .or_else(|| {
+                                    checkpoint.nodes[node_index]
+                                        .extra
+                                        .get("provisioned_source")
+                                        .and_then(serde_json::Value::as_str)
+                                        .map(str::to_owned)
+                                }) {
                                 Some(source)
-                            } else { match &node.source {
-                                Some(SourceBinding::Commit { commit }) => Some(commit.clone()),
-                                Some(SourceBinding::Node { node: source }) => positions.get(source).and_then(|index| checkpoint.nodes[*index].outputs.as_ref()).and_then(|outputs| outputs.commit.clone()),
-                                Some(SourceBinding::Head { node: writer }) => land::chain_head(&plan, &checkpoint, &positions, &node.id, writer),
-                                Some(SourceBinding::Integration) => owner.integration_head().map_err(GraphError::Run)?,
-                                None => {
-                                    let bound = checkpoint.bound_integration_base.clone();
-                                    match bound {
-                                        Some(source) => Some(source),
-                                        None => owner.bind_writer_worktree(".").map_err(GraphError::Run)?.map(|binding| binding.head),
+                            } else {
+                                match &node.source {
+                                    Some(SourceBinding::Commit { commit }) => Some(commit.clone()),
+                                    Some(SourceBinding::Node { node: source }) => positions
+                                        .get(source)
+                                        .and_then(|index| checkpoint.nodes[*index].outputs.as_ref())
+                                        .and_then(|outputs| outputs.commit.clone()),
+                                    Some(SourceBinding::Head { node: writer }) => land::chain_head(
+                                        &plan,
+                                        &checkpoint,
+                                        &positions,
+                                        &node.id,
+                                        writer,
+                                    ),
+                                    Some(SourceBinding::Integration) => {
+                                        owner.integration_head().map_err(GraphError::Run)?
                                     }
-                                },
-                            }}.ok_or_else(|| GraphError::Invalid("writer provisioning source unavailable".into()))?;
-                            checkpoint.nodes[node_index].extra.insert("provisioned_source".into(), source.clone().into());
+                                    None => {
+                                        let bound = checkpoint.bound_integration_base.clone();
+                                        match bound {
+                                            Some(source) => Some(source),
+                                            None => owner
+                                                .bind_writer_worktree(".")
+                                                .map_err(GraphError::Run)?
+                                                .map(|binding| binding.head),
+                                        }
+                                    }
+                                }
+                            }
+                            .ok_or_else(|| {
+                                GraphError::Invalid("writer provisioning source unavailable".into())
+                            })?;
+                            checkpoint.nodes[node_index]
+                                .extra
+                                .insert("provisioned_source".into(), source.clone().into());
                             if node.source.is_some() {
                                 checkpoint.nodes[node_index].source_commit = Some(source.clone());
                             }
-                            if matches!(node.source, Some(SourceBinding::Integration)) && checkpoint.integration_pin.is_none() {
+                            if matches!(node.source, Some(SourceBinding::Integration))
+                                && checkpoint.integration_pin.is_none()
+                            {
                                 checkpoint.integration_pin = Some(source.clone());
                             }
                             relay::fence_provisioning(&mut checkpoint, &node.id, path, &source);
                             journal.save(&checkpoint).map_err(GraphError::Journal)?;
                             source
                         };
-                        if !owner.provision_writer_worktree(path, &source).map_err(GraphError::Run)? {
-                            return Err(GraphError::Refused("host cannot provision writer worktrees".into()));
+                        if !owner
+                            .provision_writer_worktree(path, &source)
+                            .map_err(GraphError::Run)?
+                        {
+                            return Err(GraphError::Refused(
+                                "host cannot provision writer worktrees".into(),
+                            ));
                         }
                     }
                     let binding = match owner.bind_writer_worktree(path) {
@@ -2150,7 +2202,10 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                                 node.id
                             )));
                         }
-                        if node.source.is_none() && node.continues.is_none() && checkpoint.nodes[node_index].source_commit.is_none() {
+                        if node.source.is_none()
+                            && node.continues.is_none()
+                            && checkpoint.nodes[node_index].source_commit.is_none()
+                        {
                             checkpoint.nodes[node_index].source_commit = Some(binding.head.clone());
                         }
                         checkpoint.nodes[node_index].writer_binding = Some(binding);
