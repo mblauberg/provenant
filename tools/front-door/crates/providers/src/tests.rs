@@ -2745,13 +2745,15 @@ fn claude_requested_permission_modes_are_not_overridden() -> Result<(), Provider
         (Access::WorktreeWrite, "default"),
     ] {
         let plan = fixture_access_plan(access, None, false);
-        let launch = claude::Claude.prepare(fixture_input(
+        let mut input = fixture_input(
             &route,
             &plan,
             &prompt,
             std::path::Path::new("/fixture/repo"),
             Some(&token),
-        ))?;
+        );
+        input.host_var = &|key| (key == "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB").then(|| "1".into());
+        let launch = claude::Claude.prepare(input)?;
         assert!(
             launch
                 .env

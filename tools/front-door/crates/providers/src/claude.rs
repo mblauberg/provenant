@@ -520,8 +520,8 @@ fn refresh_account(
 /// Claude uses the selected config directory. The host reads its login token
 /// and passes it through an inherited pipe, so the keychain stays
 /// unreadable. Both lane types deny keychain services and the security
-/// executable and ask Claude to scrub subprocess credentials. Writers use
-/// private configuration; read-only lanes retain their transcript location.
+/// executable. Writers use private configuration; read-only lanes retain
+/// their transcript location.
 /// Provenant and its hook helpers are added explicitly for lane MCP use.
 fn prepare(
     input: &PrepareInput<'_>,
