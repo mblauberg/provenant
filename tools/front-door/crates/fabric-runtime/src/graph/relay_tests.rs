@@ -961,7 +961,7 @@ fn planner_native_child_runs_before_parent_settles_and_final_fragment_closes_onc
     assert_eq!(progress(&run.checkpoint, "parent").state, NodeState::Running);
     journal.0 = Some(serde_json::from_slice(&serde_json::to_vec(&run.checkpoint).unwrap()).unwrap());
     owner.observations.extend([
-        terminal_from("```fragment\n{\"schema_version\":1,\"nodes\":[{\"id\":\"final\",\"brief\":\"Finish\",\"source\":{\"type\":\"commit\",\"commit\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"acceptance_checks\":[\"Done\"],\"after\":[]}]}\n```", "planner-attempt"),
+        terminal_from("```fragment\n{\"schema_version\":1,\"nodes\":[{\"id\":\"final\",\"use\":\"task\",\"brief\":\"Finish\",\"source\":{\"type\":\"commit\",\"commit\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"acceptance_checks\":[\"Done\"],\"after\":[]}]}\n```", "planner-attempt"),
         terminal_from("Scout done", "scout-attempt"),
         terminal_from("Finished", "final-attempt"),
     ]);
