@@ -2076,16 +2076,27 @@ impl Factory {
         };
         let mut first_error = None;
         for target in targets {
-            if target.host.is_none_or(|host| host == self.context.identity.host) {
+            if target
+                .host
+                .is_none_or(|host| host == self.context.identity.host)
+            {
                 let store = owner.store(cancel)?;
                 let call = owner.call(cancel);
                 let reference = format!("{}/{}", self.context.identity.host, target.attempt);
                 match provenant_cli::fabric::graph_cloud::installed(
-                    &store, target.attempt, "", &reference, &call, &self.cwd,
-                    std::time::Duration::from_micros(budget.remaining(self.clock.mono_now()).as_micros()), true,
+                    &store,
+                    target.attempt,
+                    "",
+                    &reference,
+                    &call,
+                    &self.cwd,
+                    std::time::Duration::from_micros(
+                        budget.remaining(self.clock.mono_now()).as_micros(),
+                    ),
+                    true,
                 ) {
                     Ok(Some(_)) => continue,
-                    Ok(None) => {},
+                    Ok(None) => {}
                     Err(error) => {
                         first_error.get_or_insert_with(|| FacadeError::invalid(&error));
                         continue;

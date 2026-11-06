@@ -924,19 +924,15 @@ impl ToolCall {
             }
             let mut value = serde_json::json!({"children": children});
             if let Self::SubmitWait(_, seconds, _) = &self {
-                match service.facade.wait_for_children(
-                    cancel,
-                    std::time::Duration::from_secs(*seconds),
-                ) {
+                match service
+                    .facade
+                    .wait_for_children(cancel, std::time::Duration::from_secs(*seconds))
+                {
                     Ok(states) => value["wait"] = states,
                     Err(error) => value["observation_error"] = serde_json::json!(error.to_string()),
                 }
             }
-            return service.limit_response(
-                response(self.name(), value),
-                true,
-                false,
-            );
+            return service.limit_response(response(self.name(), value), true, false);
         }
         if service.in_lane
             && service.lane_relay_reads
