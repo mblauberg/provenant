@@ -241,6 +241,7 @@ pub fn worktrees(
             }),
         );
         let info = WorktreeInfo {
+            warnings: Vec::new(),
             path: listed.path,
             branch: listed.branch.map(|branch| branch.as_str().to_owned()),
             head: listed.head,

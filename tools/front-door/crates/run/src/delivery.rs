@@ -2422,7 +2422,6 @@ impl crate::RunStore {
         accept_review: bool,
         call: &crate::Request<'_>,
     ) -> Result<WriterDeliveryReceipt> {
-        use provenant_os::fs::LockMode;
         let record = self.record(id, call)?;
         let review_acceptance = match record.state {
             crate::AttemptState::Terminal {
@@ -2518,16 +2517,18 @@ impl crate::RunStore {
             .take()
             .ok_or_else(|| RunError::unsafe_path(writer.worktree.clone(), PathCheck::Missing))?
             .0;
-        let observation = provenant_supervisor::custody::writer_admission_guard(&state)
-            .map_err(|error| RunError::Io(std::io::Error::other(error.to_string())))?;
-        let _writer = state.lock(
-            OsStr::new("writer.lock"),
-            LockMode::Exclusive,
+        let _writer = provenant_supervisor::custody::lock_writer_exclusion(
+            &state,
             call.lock_budget(),
             call.cancel,
             call.clock,
-        )?;
-        drop(observation);
+        )
+        .map_err(|error| match error {
+            provenant_supervisor::custody::CustodyError::Filesystem(error) => {
+                RunError::Filesystem(error)
+            }
+            other => RunError::Io(std::io::Error::other(other.to_string())),
+        })?;
         let host = host.prepare(&writer, &request)?;
         host.clean(&writer)?;
         if host.head(&writer)? != head {

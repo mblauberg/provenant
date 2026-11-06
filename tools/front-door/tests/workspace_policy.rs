@@ -487,16 +487,16 @@ fn fixture_module_paths(path: &Path, source: &str, fixture: bool) -> Vec<PathBuf
         parent.join(stem)
     };
     let mut paths = Vec::new();
+    let selected = selected_test_scopes(source, false, true);
     for (i, token) in tokens.iter().enumerate() {
         if *token != "mod" || tokens.get(i + 2) != Some(&";") {
             continue;
         }
-        let cfg_test = i >= 7
-            && tokens[..i]
-                .windows(7)
-                .rev()
-                .take(5)
-                .any(|w| w == ["#", "[", "cfg", "(", "test", ")", "]"]);
+        let offset = token.as_ptr() as usize;
+        let cfg_test = selected.iter().any(|scope| {
+            let start = scope.as_ptr() as usize;
+            (start..start + scope.len()).contains(&offset)
+        });
         if fixture || cfg_test {
             let name = tokens[i + 1];
             paths.push(module_dir.join(format!("{name}.rs")));
@@ -556,6 +556,13 @@ fn fixtures_do_not_call_direct_sleep() -> Result<(), Box<dyn Error>> {
             .contains(&PathBuf::from("src/hidden/nested.rs"))
     );
     assert!(fixture_module_paths(Path::new("src/lib.rs"), "mod production;", false).is_empty());
+    let adjacent = fixture_module_paths(
+        Path::new("src/lib.rs"),
+        "#[cfg(test)] mod hidden; pub mod production;",
+        false,
+    );
+    assert!(adjacent.contains(&PathBuf::from("src/hidden.rs")));
+    assert!(!adjacent.contains(&PathBuf::from("src/production.rs")));
     // Follow test-only module declarations transitively.
     let mut test_modules = std::collections::HashSet::new();
     loop {

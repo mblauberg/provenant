@@ -214,19 +214,74 @@ impl crate::LaunchSpec {
 /// `/usr/bin/git` is a shim that finds it through the active developer
 /// directory, which a confined lane cannot consult, so the launcher pins it.
 /// `None` when Git cannot say, in which case Git resolves it as before.
+///
+/// The path is returned canonical: confinement anchors grants at real
+/// directories and refuses a spelling that crosses a symlink (Homebrew's
+/// `/opt/homebrew/opt/git` is one), while the sandbox resolves links before
+/// matching. The wrapper pins this same spelling, so what Git is told to run
+/// is exactly what the profile grants. `None` when the path cannot be
+/// resolved or represented in the profile.
 pub(crate) fn host_exec_path(git: &Path) -> Option<PathBuf> {
+    resolve_exec_path(&probe_exec_path(git)?)
+}
+
+/// Canonical, profile-representable form of a probed exec path.
+pub(crate) fn resolve_exec_path(raw: &Path) -> Option<PathBuf> {
+    let canonical = std::fs::canonicalize(raw).ok()?;
+    provenant_confinement::permissions::profile_path_representable(&canonical).then_some(canonical)
+}
+
+/// The exec path as Git reports it, before any resolution.
+pub(crate) fn probe_exec_path(git: &Path) -> Option<PathBuf> {
+    let executor = provenant_os::exec::SystemExecutor::new(1).ok()?;
+    let cwd = std::env::current_dir().ok()?;
+    let env: Vec<_> = std::env::vars_os().collect();
+    probe_host_exec_path(&executor, git, &cwd, &env)
+}
+
+fn probe_host_exec_path(
+    executor: &dyn provenant_os::exec::Executor,
+    git: &Path,
+    cwd: &Path,
+    env: &[(OsString, OsString)],
+) -> Option<PathBuf> {
+    use provenant_os::exec::{ExecOptions, StreamPolicy, Termination};
     use std::os::unix::ffi::OsStrExt;
-    let output = std::process::Command::new(git)
-        .arg("--exec-path")
-        .env_remove("GIT_EXEC_PATH")
-        .stdin(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .output()
-        .ok()?;
-    let text = output.stdout.strip_suffix(b"\n").unwrap_or(&output.stdout);
+    use std::time::Duration;
+
+    let env: Vec<_> = env
+        .iter()
+        .filter(|(key, _)| key != "GIT_EXEC_PATH")
+        .cloned()
+        .collect();
+    let argv = [git.as_os_str().to_owned(), "--exec-path".into()];
+    let mut options = ExecOptions::new(&argv, cwd, Duration::from_secs(4));
+    options.env = Some(&env);
+    options.stdout = StreamPolicy::Capture { limit: 16 * 1024 };
+    options.stderr = StreamPolicy::Capture { limit: 16 * 1024 };
+    options.stop_on_output_limit = true;
+    options.process_group = true;
+    options.cleanup_process_group = true;
+    let output = executor.execute(options).ok()?;
+    if output.termination != Termination::Exit(0)
+        || output.timed_out
+        || output.cancelled
+        || output.drain_truncated
+        || output.overflow_stopped
+        || output.stdout.truncated
+        || output.stdout.read_failed
+        || output.stderr.truncated
+        || output.stderr.read_failed
+    {
+        return None;
+    }
+    let text = output
+        .stdout
+        .bytes
+        .strip_suffix(b"\n")
+        .unwrap_or(&output.stdout.bytes);
     let path = Path::new(std::ffi::OsStr::from_bytes(text));
-    (output.status.success() && path.is_absolute() && path.is_dir() && !text.contains(&0))
-        .then(|| path.to_owned())
+    (path.is_absolute() && path.is_dir() && !text.contains(&0)).then(|| path.to_owned())
 }
 
 /// Git configuration that answers a GitHub HTTPS credential request from the
@@ -261,15 +316,6 @@ pub(crate) fn git_wrapper(git: &Path, options: &GitWrapper) -> Result<Vec<u8>, P
             bytes.extend_from_slice(bound_exports(bound)?.as_bytes());
         }
     }
-    // Environment configuration keeps the arguments the lane passed untouched.
-    // A host with no `gh` login yields no answer and Git falls through.
-    bytes.extend_from_slice(
-        format!(
-            "GIT_CONFIG_COUNT=1\nGIT_CONFIG_KEY_0=credential.https://github.com.helper\nGIT_CONFIG_VALUE_0={}\nexport GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0\n",
-            shell_quote(TOKEN_HELPER)
-        )
-        .as_bytes(),
-    );
     if let Some(exec_path) = host_exec_path(Path::new(std::ffi::OsStr::from_bytes(git))) {
         let exec_path = exec_path.to_str().ok_or(ProviderError::InvalidPath)?;
         bytes.extend_from_slice(
@@ -295,7 +341,13 @@ pub(crate) fn git_wrapper(git: &Path, options: &GitWrapper) -> Result<Vec<u8>, P
         .map(|value| format!(" -c {value}"))
         .unwrap_or_default();
 
-    bytes.extend_from_slice(format!("{include} \"$@\"\n").as_bytes());
+    // Preserve inherited Git configuration (identity, signing, hooks and
+    // transport policy). Replacing GIT_CONFIG_COUNT would silently discard it.
+    // Only the helper command is an argument; the token is read at run time.
+    let helper = shell_quote(&format!(
+        "credential.https://github.com.helper={TOKEN_HELPER}"
+    ));
+    bytes.extend_from_slice(format!("{include} -c {helper} \"$@\"\n").as_bytes());
     Ok(bytes)
 }
 
@@ -766,6 +818,106 @@ mod tests {
     use super::*;
 
     #[test]
+    fn exec_path_probe_rejects_failed_or_incomplete_captures() {
+        use provenant_os::exec::{
+            CapturedStream, ExecError, ExecOptions, ExecOutcome, Executor, StreamPolicy,
+            Termination,
+        };
+        use std::time::Duration;
+
+        struct Probe(ExecOutcome);
+        impl Executor for Probe {
+            fn execute(&self, options: ExecOptions<'_>) -> Result<ExecOutcome, ExecError> {
+                assert_eq!(
+                    options.argv,
+                    [
+                        OsString::from("/fixture/git"),
+                        OsString::from("--exec-path")
+                    ]
+                );
+                assert_eq!(options.timeout, Duration::from_secs(4));
+                assert!(matches!(
+                    options.stdout,
+                    StreamPolicy::Capture { limit: 16384 }
+                ));
+                assert!(matches!(
+                    options.stderr,
+                    StreamPolicy::Capture { limit: 16384 }
+                ));
+                assert!(options.stop_on_output_limit);
+                assert!(options.process_group && options.cleanup_process_group);
+                assert_eq!(
+                    options.env,
+                    Some(
+                        &[(
+                            OsString::from("DEVELOPER_DIR"),
+                            OsString::from("/fixture/developer")
+                        )][..]
+                    )
+                );
+                Ok(self.0.clone())
+            }
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let good = ExecOutcome {
+            termination: Termination::Exit(0),
+            stdout: CapturedStream {
+                bytes: [directory.path().as_os_str().as_encoded_bytes(), b"\n"].concat(),
+                ..CapturedStream::default()
+            },
+            stderr: CapturedStream::default(),
+            timed_out: false,
+            drain_truncated: false,
+            overflow_stopped: false,
+            cancelled: false,
+            elapsed_micros: 0,
+        };
+        let env = [
+            (
+                OsString::from("GIT_EXEC_PATH"),
+                OsString::from("/fixture/untrusted"),
+            ),
+            (
+                OsString::from("DEVELOPER_DIR"),
+                OsString::from("/fixture/developer"),
+            ),
+        ];
+        let probe = |output| {
+            probe_host_exec_path(
+                &Probe(output),
+                Path::new("/fixture/git"),
+                directory.path(),
+                &env,
+            )
+        };
+        assert_eq!(probe(good.clone()), Some(directory.path().to_owned()));
+        for failure in 0..9 {
+            let mut output = good.clone();
+            match failure {
+                0 => output.termination = Termination::Exit(1),
+                1 => output.timed_out = true,
+                2 => output.cancelled = true,
+                3 => output.drain_truncated = true,
+                4 => output.overflow_stopped = true,
+                5 => output.stdout.truncated = true,
+                6 => output.stdout.read_failed = true,
+                7 => output.stderr.truncated = true,
+                _ => output.stderr.read_failed = true,
+            }
+            assert_eq!(probe(output), None, "capture failure {failure}");
+        }
+        for invalid in [
+            b"relative\n".as_slice(),
+            b"/missing/exec-path\n",
+            b"/tmp\0tail\n",
+        ] {
+            let mut output = good.clone();
+            output.stdout.bytes = invalid.to_vec();
+            assert_eq!(probe(output), None);
+        }
+    }
+
+    #[test]
     fn wrapper_pins_the_hosts_exec_path_and_answers_credentials_from_the_token() {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
@@ -775,8 +927,15 @@ mod tests {
         std::fs::write(&git, format!("#!/bin/sh\necho '{}'\n", core.display())).unwrap();
         std::fs::set_permissions(&git, std::fs::Permissions::from_mode(0o755)).unwrap();
         let text = String::from_utf8(git_wrapper(&git, &GitWrapper::default()).unwrap()).unwrap();
-        assert!(text.contains(&format!("GIT_EXEC_PATH='{}'", core.display())));
-        assert!(text.contains("GIT_CONFIG_KEY_0=credential.https://github.com.helper"));
+        let canonical = std::fs::canonicalize(&core).unwrap();
+        assert!(text.contains(&format!("GIT_EXEC_PATH='{}'", canonical.display())));
+        // A path crossing a symlink (Homebrew's `opt/git`) is pinned resolved.
+        let link = dir.path().join("opt");
+        std::os::unix::fs::symlink(dir.path().join("dev"), &link).unwrap();
+        let linked = link.join("libexec/git-core");
+        assert_eq!(resolve_exec_path(&linked), Some(canonical));
+        assert_eq!(resolve_exec_path(&dir.path().join("absent")), None);
+        assert!(text.contains(" -c 'credential.https://github.com.helper="));
         assert!(!text.contains("secret"));
         let missing = git_wrapper(Path::new("/fixture/git"), &GitWrapper::default()).unwrap();
         assert!(
@@ -784,6 +943,103 @@ mod tests {
                 .unwrap()
                 .contains("GIT_EXEC_PATH")
         );
+    }
+
+    #[test]
+    #[allow(clippy::disallowed_methods)]
+    fn wrapper_preserves_inherited_git_config_and_supplies_github_credentials()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+        use std::process::{Command, Stdio};
+
+        let dir = tempfile::tempdir()?;
+        let wrapper = dir.path().join("git");
+        let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
+        std::fs::write(&wrapper, git_wrapper(&git, &GitWrapper::default())?)?;
+        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700))?;
+        let command = || {
+            let mut command = Command::new(&wrapper);
+            command
+                .current_dir(dir.path())
+                .env_clear()
+                .envs(provenant_os::fixture::fixture_git_settings())
+                .env("PATH", "/usr/bin:/bin");
+            command
+        };
+        for (key, value) in [
+            ("user.name", "Fixture"),
+            ("user.email", "fixture@example.invalid"),
+            ("commit.gpgsign", "false"),
+            ("core.hooksPath", "/dev/null"),
+        ] {
+            let output = command().args(["config", "--get", key]).output()?;
+            assert!(output.status.success(), "inherited setting {key} missing");
+            assert_eq!(output.stdout, format!("{value}\n").as_bytes(), "{key}");
+        }
+        // Synthetic credentials exercise the real helper without network access.
+        // Never include the captured credential response in assertion output.
+        let token = "fixture-token";
+        let fill = |request: &[u8]| -> Result<std::process::Output, Box<dyn std::error::Error>> {
+            let mut child = command()
+                .args(["credential", "fill"])
+                .env("GH_TOKEN", token)
+                .env("GIT_TERMINAL_PROMPT", "0")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()?;
+            child
+                .stdin
+                .take()
+                .ok_or("credential stdin")?
+                .write_all(request)?;
+            Ok(child.wait_with_output()?)
+        };
+        let password = format!("password={token}");
+        let output = fill(b"protocol=https\nhost=github.com\n\n")?;
+        assert!(output.status.success(), "credential helper failed");
+        assert!(
+            output
+                .stdout
+                .split(|byte| *byte == b'\n')
+                .any(|line| line == b"username=x-access-token")
+        );
+        assert!(
+            output
+                .stdout
+                .split(|byte| *byte == b'\n')
+                .any(|line| line == password.as_bytes())
+        );
+        // Userinfo is not the destination host: an unrelated username at
+        // GitHub is safe, while a GitHub-looking username at another host is not.
+        let output = fill(b"url=https://fixture-user@github.com/project/repo.git\n\n")?;
+        assert!(output.status.success(), "GitHub userinfo request failed");
+        assert!(
+            output
+                .stdout
+                .split(|byte| *byte == b'\n')
+                .any(|line| line == password.as_bytes())
+        );
+        for request in [
+            b"url=https://github.com.evil.example/project/repo.git\n\n".as_slice(),
+            b"url=https://notgithub.com/project/repo.git\n\n",
+            b"url=https://example.com/project/repo.git\n\n",
+            b"url=http://github.com/project/repo.git\n\n",
+            b"url=https://github.com@evil.example/project/repo.git\n\n",
+            b"protocol=https\nhost=github.com@evil.example\n\n",
+        ] {
+            let output = fill(request)?;
+            assert!(
+                !output.status.success(),
+                "credential request outside GitHub HTTPS succeeded"
+            );
+            assert!(
+                output.stdout.is_empty(),
+                "unexpected credential response outside GitHub HTTPS"
+            );
+        }
+        Ok(())
     }
 
     #[test]
@@ -1860,8 +2116,9 @@ mod tests {
             assert!(output.status.success());
             String::from_utf8(output.stdout).unwrap()
         };
-        let bound = |args: &str| format!("/private/it's|Lane||{args}\n");
-        let unbound = |args: &str| format!("|||{args}\n");
+        let prefix = format!("-c credential.https://github.com.helper={TOKEN_HELPER}");
+        let bound = |args: &str| format!("/private/it's|Lane||{prefix} {args}\n");
+        let unbound = |args: &str| format!("|||{prefix} {args}\n");
         assert_eq!(run(&worktree, &["status"]), bound("status"));
         assert_eq!(run(&nested, &["status"]), bound("status"));
         for cwd in [&outside, &sibling] {
@@ -1952,13 +2209,26 @@ mod tests {
             .windows(5)
             .position(|bytes| bytes == b"exec ")
             .ok_or("missing exec")?;
-        script.splice(position..position + 5, b"printf '%s' ".iter().copied());
+        script.splice(position..position + 5, b"printf '%s\\000' ".iter().copied());
         let wrapper = dir.path().join("git-wrapper");
         std::fs::write(&wrapper, script)?;
         std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700))?;
-        let output = std::process::Command::new(wrapper).output()?;
+        let output = std::process::Command::new(wrapper)
+            .args(["status", "argument with spaces"])
+            .output()?;
         assert!(output.status.success());
-        assert_eq!(output.stdout, git.as_os_str().as_bytes());
+        let helper = format!("credential.https://github.com.helper={TOKEN_HELPER}");
+        let expected = [
+            git.as_os_str().as_bytes(),
+            b"-c",
+            helper.as_bytes(),
+            b"status",
+            b"argument with spaces",
+        ]
+        .into_iter()
+        .flat_map(|arg| arg.iter().copied().chain(std::iter::once(0)))
+        .collect::<Vec<_>>();
+        assert_eq!(output.stdout, expected);
         Ok(())
     }
 

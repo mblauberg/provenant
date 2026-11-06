@@ -65,6 +65,82 @@ pub fn register_account(
     Ok(())
 }
 
+/// Retain a terminal lane for read-side integration tests without invoking a
+/// provider or depending on an account's host readiness.
+pub fn terminal_lane(
+    rig: &TestRig,
+    operation: &str,
+    context: serde_json::Value,
+) -> Result<provenant_run::AttemptRecord> {
+    use provenant_core::{
+        ActorId, AttemptId, CancelToken, Clock, Digest, OperationId, RootInputs, RunId, TaskId,
+    };
+    use provenant_run::{
+        CanonicalRequest, ExecutionContext, NewAttempt, PreparedRun, Request, RunStore,
+    };
+    let mut inputs = RootInputs::new(rig.home.clone(), rig.project.clone());
+    inputs.state_dir = Some(rig.state.clone());
+    let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+    let project = provenant_config::bind_project(
+        &roots,
+        provenant_config::ProjectLocation::new(rig.project.join(".git"))?,
+    )?
+    .project_id();
+    let clock = provenant_os::clock::SystemClock::new();
+    let cancel = CancelToken::new();
+    let call = Request {
+        clock: &clock,
+        cancel: &cancel,
+    };
+    let digest = provenant_records::CanonicalV1::file_digest(operation.as_bytes());
+    let first: [u8; 16] = digest.bytes()[..16].try_into()?;
+    let second: [u8; 16] = digest.bytes()[16..].try_into()?;
+    let task = TaskId::from_bytes(first);
+    let attempt = AttemptId::from_bytes(second);
+    let prompt = "private fixture prompt";
+    let request: CanonicalRequest = serde_json::from_value(serde_json::json!({
+        "schema_version":1,"tasks":[{
+            "task_id":task,"prompt_digest":provenant_records::CanonicalV1::file_digest(prompt.as_bytes()),
+            "route":{"kind":"model","provider":"codex","model":"codex/gpt-6-luna","effort":null},
+            "fallback":[],"authority_digest":Digest::from_bytes([5;32]),
+            "provider_timeout_seconds":30,"delivery_id":null,"context":context
+        }],"concurrency":1,"parent":null
+    }))?;
+    let store = RunStore::open(
+        &ExecutionContext {
+            state_root: roots.state,
+            project_id: project,
+            actor_id: ActorId::from_bytes([2; 16]),
+            read_prompts: false,
+        },
+        &call,
+    )?;
+    store.create(
+        &PreparedRun {
+            run_id: RunId::from_bytes(first),
+            operation_id: OperationId::parse(operation)?,
+            created_at: clock.wall_now()?,
+            request,
+            attempts: vec![NewAttempt {
+                task_id: task,
+                attempt_id: attempt,
+                prompt: prompt.into(),
+            }],
+        },
+        &call,
+    )?;
+    store.cancel(attempt, "fixture finished", &call)?;
+    let record = store.record(attempt, &call)?;
+    assert!(matches!(
+        record.state,
+        provenant_run::AttemptState::Terminal {
+            outcome: provenant_run::Outcome::Cancelled,
+            ..
+        }
+    ));
+    Ok(record)
+}
+
 pub fn clear_accounts(rig: &TestRig) -> Result {
     let config = rig.state.join("config.toml");
     let mut doc: toml_edit::DocumentMut = fs::read_to_string(&config)?.parse()?;
