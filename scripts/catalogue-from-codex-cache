@@ -1,0 +1,29 @@
+#!/usr/bin/env python3
+"""Print catalogue.toml entries for models in Codex's own model cache.
+
+Reads only model slugs and reasoning levels from the cache file, never the
+auth files beside it. Review the output, then paste new entries into
+tools/front-door/crates/routing/assets/catalogue.toml.
+
+Usage: scripts/catalogue-from-codex-cache [PATH]   (default ~/.codex/models_cache.json)
+"""
+import json
+import os
+import sys
+
+path = sys.argv[1] if len(sys.argv) > 1 else os.path.expanduser("~/.codex/models_cache.json")
+with open(path) as handle:
+    cache = json.load(handle)
+fetched = cache.get("fetched_at", "unknown")
+for model in cache.get("models", []):
+    slug = model.get("slug")
+    if not slug or model.get("visibility") == "hide":
+        continue
+    levels = [r["effort"] for r in model.get("supported_reasoning_levels", []) if "effort" in r]
+    print("[[models]]")
+    print(f'model = "codex/{slug}"')
+    print("efforts = [" + ", ".join(f'"{level}"' for level in levels) + "]")
+    print('family = "openai"')
+    print(f'evidence_ref = "~/.codex/models_cache.json fetched {fetched}"')
+    print("trains_on_prompts = false")
+    print()
