@@ -353,7 +353,8 @@ pub(super) fn validate_decide(
     }
     if decide_session(spec, decision_session)
         .or_else(|| repair_scope_gate(node.extra.get("repair_scope_gate")).then_some(graph_id))
-        .is_none_or(|s| crate::inbox::session_id(s).is_err()) {
+        .is_none_or(|s| crate::inbox::session_id(s).is_err())
+    {
         return Err("decide needs a valid session or graph decision_session");
     }
     Ok(())
@@ -484,7 +485,10 @@ pub(super) fn decide<R: AttemptOwner, J: GraphJournal>(
                 return Ok(());
             }
             let session = decide_session(spec, plan.decision_session.as_deref())
-                .or_else(|| repair_scope_gate(node.extra.get("repair_scope_gate")).then_some(plan.graph_id.as_str()))
+                .or_else(|| {
+                    repair_scope_gate(node.extra.get("repair_scope_gate"))
+                        .then_some(plan.graph_id.as_str())
+                })
                 .ok_or_else(|| GraphError::BadCheckpoint {
                     node: node.id.clone(),
                     invariant: "decision must name an inbox session",
@@ -532,12 +536,19 @@ pub(super) fn decide<R: AttemptOwner, J: GraphJournal>(
                 rejected,
             );
             if repair_scope_gate(node.extra.get("repair_scope_gate"))
-                && let Some(report) = node.depends_on.iter().find_map(|id| checkpoint.nodes.iter()
-                    .find(|progress| &progress.id == id)
-                    .and_then(|progress| progress.outputs.as_ref())
-                    .and_then(|outputs| outputs.result.as_ref())) {
-                    ask.body = bounded(&format!("{}\n\nPrincipal report:\n{}", ask.body, report.excerpt),
-                        provenant_records::inbox::REQUEST_BODY_BYTES);
+                && let Some(report) = node.depends_on.iter().find_map(|id| {
+                    checkpoint
+                        .nodes
+                        .iter()
+                        .find(|progress| &progress.id == id)
+                        .and_then(|progress| progress.outputs.as_ref())
+                        .and_then(|outputs| outputs.result.as_ref())
+                })
+            {
+                ask.body = bounded(
+                    &format!("{}\n\nPrincipal report:\n{}", ask.body, report.excerpt),
+                    provenant_records::inbox::REQUEST_BODY_BYTES,
+                );
             }
             checkpoint.asks.retain(|ask| !mine(ask));
             checkpoint.asks.push(ask);
@@ -920,8 +931,10 @@ pub(super) fn validate(checkpoint: &GraphCheckpoint, plan: &PlannedGraph) -> Res
                 (AskKind::Decide, Some(node)) => {
                     decide_sequence(ask, &node.id).is_some()
                         && node.decide.as_ref().is_some_and(|spec| {
-                            decide_session(spec, plan.decision_session.as_deref())
-                                .or_else(|| repair_scope_gate(node.extra.get("repair_scope_gate")).then_some(plan.graph_id.as_str())) == session
+                            decide_session(spec, plan.decision_session.as_deref()).or_else(|| {
+                                repair_scope_gate(node.extra.get("repair_scope_gate"))
+                                    .then_some(plan.graph_id.as_str())
+                            }) == session
                         })
                 }
                 (AskKind::Pause, None) => plan.decision_session.as_deref() == session,
@@ -963,31 +976,50 @@ pub(super) fn validate_progress(
                 (repair_scope_gate(node.extra.get("repair_scope_gate"))
                     && approved_repair_scope(node, checkpoint)
                     && progress.extra.get("owner_notified") == Some(&serde_json::Value::Bool(true))
-                    && progress.outputs.as_ref().and_then(|outputs| outputs.verdict.as_deref()) == Some("approve")
-                    && latest.is_none()) || latest
-                    .and_then(|ask| ask.answer.as_ref())
-                    .is_some_and(|answer| {
-                        answer.rejected.is_none()
-                            && progress.outputs.as_ref().and_then(|o| o.verdict.as_ref())
-                                == answer.option.as_ref()
-                    })
+                    && progress
+                        .outputs
+                        .as_ref()
+                        .and_then(|outputs| outputs.verdict.as_deref())
+                        == Some("approve")
+                    && latest.is_none())
+                    || latest
+                        .and_then(|ask| ask.answer.as_ref())
+                        .is_some_and(|answer| {
+                            answer.rejected.is_none()
+                                && progress.outputs.as_ref().and_then(|o| o.verdict.as_ref())
+                                    == answer.option.as_ref()
+                        })
             }
             NodeState::Failed => progress.outputs.is_none(),
         };
     if valid { Ok(()) } else { Err(()) }
 }
 
-
 fn repair_scope_gate(value: Option<&serde_json::Value>) -> bool {
     value == Some(&serde_json::Value::Bool(true))
 }
 
 fn approved_repair_scope(node: &PlannedNode, checkpoint: &GraphCheckpoint) -> bool {
-    node.depends_on.iter().find_map(|id| checkpoint.nodes.iter()
-        .find(|progress| &progress.id == id).and_then(|progress| progress.outputs.as_ref()))
+    node.depends_on
+        .iter()
+        .find_map(|id| {
+            checkpoint
+                .nodes
+                .iter()
+                .find(|progress| &progress.id == id)
+                .and_then(|progress| progress.outputs.as_ref())
+        })
         .and_then(|outputs| outputs.extra.get("repair_design"))
-        .is_some_and(|design| design.get("within_scope").and_then(serde_json::Value::as_bool) == Some(true)
-            && design.get("one_way_door").and_then(serde_json::Value::as_bool) == Some(false))
+        .is_some_and(|design| {
+            design
+                .get("within_scope")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true)
+                && design
+                    .get("one_way_door")
+                    .and_then(serde_json::Value::as_bool)
+                    == Some(false)
+        })
 }
 
 /// The host owns notification and the scope barrier. Principal prose and a
@@ -1001,45 +1033,95 @@ fn repair_scope<R: AttemptOwner, J: GraphJournal>(
     owner: &mut R,
     journal: &mut J,
 ) -> Result<bool, GraphError<R::Error, J::Error>> {
-    let design = node.depends_on.iter().find_map(|id| checkpoint.nodes.iter()
-        .find(|progress| &progress.id == id).and_then(|progress| progress.outputs.as_ref()));
+    let design = node.depends_on.iter().find_map(|id| {
+        checkpoint
+            .nodes
+            .iter()
+            .find(|progress| &progress.id == id)
+            .and_then(|progress| progress.outputs.as_ref())
+    });
     let approved_scope = approved_repair_scope(node, checkpoint);
     if checkpoint.nodes[index].extra.get("owner_notified") != Some(&serde_json::Value::Bool(true)) {
-        let report = design.and_then(|outputs| outputs.result.as_ref())
-            .map(|result| result.excerpt.as_str()).unwrap_or("Principal report unavailable");
-        let generation = checkpoint.nodes[index].extra.get("retry_generation")
-            .and_then(serde_json::Value::as_u64).unwrap_or(0);
-        let notice_id = if generation == 0 { format!("{}.owner-notification", node.id) }
-            else { format!("{}.owner-notification.retry-{generation}", node.id) };
-        let mut notice = ask(notice_id, AskKind::Decide,
+        let report = design
+            .and_then(|outputs| outputs.result.as_ref())
+            .map(|result| result.excerpt.as_str())
+            .unwrap_or("Principal report unavailable");
+        let generation = checkpoint.nodes[index]
+            .extra
+            .get("retry_generation")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        let notice_id = if generation == 0 {
+            format!("{}.owner-notification", node.id)
+        } else {
+            format!("{}.owner-notification.retry-{generation}", node.id)
+        };
+        let mut notice = ask(
+            notice_id,
+            AskKind::Decide,
             decide_session(spec, plan.decision_session.as_deref()).unwrap_or(&plan.graph_id),
             "Review repair: principal redesign".into(),
-            bounded(&format!("Graph {}, principal redesign. {}\n\n{}", plan.graph_id,
-                if approved_scope { "Delivery continues within approved scope." } else { "Delivery waits for a scope or one-way-door decision." }, report),
-                provenant_records::inbox::REQUEST_BODY_BYTES));
+            bounded(
+                &format!(
+                    "Graph {}, principal redesign. {}\n\n{}",
+                    plan.graph_id,
+                    if approved_scope {
+                        "Delivery continues within approved scope."
+                    } else {
+                        "Delivery waits for a scope or one-way-door decision."
+                    },
+                    report
+                ),
+                provenant_records::inbox::REQUEST_BODY_BYTES,
+            ),
+        );
         notice.node = Some(node.id.clone());
         identity::<R, J::Error>(checkpoint, owner)?;
         // Save the identity before the external effect; replay uses the same
         // inbox operation if acknowledgement cannot be checkpointed.
         journal.save(checkpoint).map_err(GraphError::Journal)?;
-        let (Some(instance), Some(actor)) = (checkpoint.instance_id.as_deref(), checkpoint.ask_actor.as_deref()) else {
-            return Err(GraphError::BadCheckpoint { node:node.id.clone(), invariant:"owner notification requires saved identity" });
+        let (Some(instance), Some(actor)) = (
+            checkpoint.instance_id.as_deref(),
+            checkpoint.ask_actor.as_deref(),
+        ) else {
+            return Err(GraphError::BadCheckpoint {
+                node: node.id.clone(),
+                invariant: "owner notification requires saved identity",
+            });
         };
-        let notified = owner.notify_owner(AskScope { graph_id: &plan.graph_id,
-            instance_id: instance, actor, ask: &notice })
+        let notified = owner
+            .notify_owner(AskScope {
+                graph_id: &plan.graph_id,
+                instance_id: instance,
+                actor,
+                ask: &notice,
+            })
             .map_err(GraphError::Run)?;
         if !notified {
             return Ok(true);
         }
-        checkpoint.nodes[index].extra.insert("owner_notified".into(), true.into());
+        checkpoint.nodes[index]
+            .extra
+            .insert("owner_notified".into(), true.into());
         journal.save(checkpoint).map_err(GraphError::Journal)?;
     }
     if approved_scope {
         checkpoint.nodes[index].state = NodeState::Succeeded;
-        let answer = AskAnswer { extra: Default::default(), source: AnswerSource::Answered,
-            option: Some("approve".into()), text: None, actor: Some("host:approved-scope".into()),
-            at: owner.wall_now(), rejected: None, rejection_code: None };
-        checkpoint.nodes[index].outputs = Some(decision_outputs(&format!("{}.approved-scope", node.id), "approve", &answer));
+        let answer = AskAnswer {
+            extra: Default::default(),
+            source: AnswerSource::Answered,
+            option: Some("approve".into()),
+            text: None,
+            actor: Some("host:approved-scope".into()),
+            at: owner.wall_now(),
+            rejected: None,
+            rejection_code: None,
+        };
+        checkpoint.nodes[index].outputs = Some(decision_outputs(
+            &format!("{}.approved-scope", node.id),
+            "approve",
+            &answer,
+        ));
         journal.save(checkpoint).map_err(GraphError::Journal)?;
     }
     Ok(approved_scope)

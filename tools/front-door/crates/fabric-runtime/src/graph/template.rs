@@ -900,20 +900,31 @@ impl<'a> Compiler<'a> {
                 children.push(self.lower_in(member, parameters, stack)?);
             }
             let bundled = self.library.layer(name) == Some(Layer::Bundled);
-            if bundled && name == "review-panel" && overrides.get("repair_panel") == Some(&Value::Bool(true)) {
+            if bundled
+                && name == "review-panel"
+                && overrides.get("repair_panel") == Some(&Value::Bool(true))
+            {
                 // Findings are a completed review, not an unavailable reviewer.
                 // The enclosing repair gate adjudicates the panel verdict.
                 fn collect_findings(value: &mut Value) {
                     match value {
                         Value::Object(fields) => {
                             fields.remove("required_verdict");
-                            for child in fields.values_mut() { collect_findings(child); }
+                            for child in fields.values_mut() {
+                                collect_findings(child);
+                            }
                         }
-                        Value::Array(items) => { for child in items { collect_findings(child); } }
+                        Value::Array(items) => {
+                            for child in items {
+                                collect_findings(child);
+                            }
+                        }
                         _ => {}
                     }
                 }
-                for child in &mut children { collect_findings(child); }
+                for child in &mut children {
+                    collect_findings(child);
+                }
             }
 
             if bundled
