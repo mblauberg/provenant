@@ -3256,9 +3256,15 @@ fn own_worktree_pending_reservation_takes_precedence_over_census()
         census_unknown.to_string(),
         worktrees::WorktreeError::UnknownWriter.to_string()
     );
-    let refusal = super::Fail::from(run::RunError::Writer(census_unknown));
+    let error = run::RunError::Writer(census_unknown);
+    let remote = error.diagnostic(provenant_records::diagnostic::Destination::Remote {
+        repository: None,
+        home: None,
+    });
+    assert!(!serde_json::to_string(&remote)?.contains("injected census incomplete"));
+    let refusal = super::Fail::from(error);
     assert!(refusal.message.contains(&path.display().to_string()));
-    assert!(!refusal.message.contains("injected census incomplete"));
+    assert!(refusal.message.contains("injected census incomplete"));
     assert!(
         refusal
             .projection

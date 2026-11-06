@@ -1372,10 +1372,10 @@ pub(crate) fn resolve_dispatch_rejecting(
         rules,
         choice_context,
     );
-    // The unused families have no member to take: none is eligible, or the one
-    // chosen is blocked by persisted account evidence (mismatch or refusal). A
-    // snapshot-exhausted or unavailable one is not: it stays selected rather
-    // than relaxing to a used family, as it did before account evidence.
+    // Relax when the unused families have no eligible member, including fresh
+    // snapshot exhaustion, or the selected account is blocked by persisted
+    // mismatch or refusal evidence. Stale quota and other availability
+    // uncertainty alone do not relax family separation.
     let exhausted = match &selected {
         Err(EdgeError::Routing(error)) => error.code() == "no_eligible_pool_member",
         Ok(route) => {
@@ -5484,40 +5484,43 @@ mod route_tests {
     }
 
     #[test]
-    fn review_substitution_keeps_a_snapshot_exhausted_unused_family() -> Result<(), Box<dyn Error>>
-    {
-        // Snapshot exhaustion is not an account block: an unused family whose
-        // reading is spent stays selected, as it did before account evidence.
-        let fixture = ReviewFixture::new()?;
-        let now = fixture.now;
-        fixture.seed_claude(|record| {
-            let account = record.account.clone();
-            record.snapshot = Some(provenant_quota::QuotaSnapshot {
-                schema_version: 1,
-                account,
-                revision: 0,
-                status: provenant_quota::QuotaStatus::Exhausted,
-                observed_unix_seconds: now,
-                source_ref: "fixture".into(),
-                authority_ref: None,
-                windows: vec![provenant_quota::QuotaWindow {
-                    pool: "seven_day".into(),
-                    window_seconds: Some(604_800),
-                    used_basis_points: 10_000,
-                    resets_unix_seconds: Some(now + 3_600),
-                }],
-                details: None,
-            });
-        })?;
-        let route = fixture.resolve(false)?;
-        assert_eq!(route.adapter, "claude");
-        assert!(matches!(
-            route.readiness,
-            RouteReadiness::Unavailable {
-                reason: provenant_records::RouteExclusionReason::Exhausted,
-                ..
+    fn review_substitution_only_skips_fresh_snapshot_exhaustion() -> Result<(), Box<dyn Error>> {
+        // Fresh exhaustion excludes the unused family, so optional separation
+        // relaxes. Stale exhaustion still ranks it without excluding it.
+        for stale in [false, true] {
+            let fixture = ReviewFixture::new()?;
+            let now = fixture.now;
+            fixture.seed_claude(|record| {
+                let account = record.account.clone();
+                record.snapshot = Some(provenant_quota::QuotaSnapshot {
+                    schema_version: 1,
+                    account,
+                    revision: 0,
+                    status: provenant_quota::QuotaStatus::Exhausted,
+                    observed_unix_seconds: if stale { now - 86_400 } else { now },
+                    source_ref: "fixture".into(),
+                    authority_ref: None,
+                    windows: vec![provenant_quota::QuotaWindow {
+                        pool: "seven_day".into(),
+                        window_seconds: Some(604_800),
+                        used_basis_points: 10_000,
+                        resets_unix_seconds: Some(now + 3_600),
+                    }],
+                    details: None,
+                });
+            })?;
+            let route = fixture.resolve(false)?;
+            assert_eq!(route.adapter, if stale { "claude" } else { "codex" });
+            assert!(matches!(route.readiness, RouteReadiness::Ready { .. }));
+            if stale {
+                assert_eq!(fixture.resolve(true)?.adapter, "claude");
+            } else {
+                assert!(matches!(
+                    fixture.resolve(true),
+                    Err(super::DispatchError::FamilySeparation(..))
+                ));
             }
-        ));
+        }
         Ok(())
     }
 
