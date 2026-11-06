@@ -254,9 +254,9 @@ pub(super) fn apply_attempt_observation(
                 }
                 let marker_warnings = propagation_warnings(&outputs, &marker_inputs);
                 let propagation_error = template::review_behaviour(node).and_then(|_| {
-                    marker_warnings.first().map(|warning| {
-                        ("review_propagation_invalid", warning.clone())
-                    })
+                    marker_warnings
+                        .first()
+                        .map(|warning| ("review_propagation_invalid", warning.clone()))
                 });
                 if !marker_warnings.is_empty() {
                     outputs.warnings.truncate(MAX_WARNINGS.saturating_sub(2));
@@ -336,7 +336,9 @@ pub(super) fn apply_attempt_observation(
                                         mismatch.then(|| ("disposition_overflow_inconsistent", "structured findings disagree with their DISPOSITION lines".to_owned()))
                                     })
                 };
-                let disposition_error = disposition_error.or(propagation_error).or(review_contract_error);
+                let disposition_error = disposition_error
+                    .or(propagation_error)
+                    .or(review_contract_error);
                 if template::review_behaviour(node).is_some() {
                     retain_synthesis_findings(&mut outputs, &upstream_findings);
                     if let Some((code, _)) = &disposition_error {
@@ -346,7 +348,9 @@ pub(super) fn apply_attempt_observation(
                     } else if partial_review {
                         review::mark_partial(&mut outputs);
                         outputs.warnings.truncate(MAX_WARNINGS.saturating_sub(1));
-                        outputs.warnings.push("review_partial: selected review coverage is incomplete".into());
+                        outputs
+                            .warnings
+                            .push("review_partial: selected review coverage is incomplete".into());
                     }
                 }
                 let review_result = node.access == AccessMode::ReadOnly
@@ -359,11 +363,13 @@ pub(super) fn apply_attempt_observation(
                         .iter()
                         .any(|warning| warning.starts_with(FINDINGS_INVALID))
                     && disposition_error.is_none();
-                let outcome = if matches!(outcome, AttemptOutcome::Succeeded | AttemptOutcome::DeclaredStop)
-                    && disposition_error.is_some() {
-                    AttemptOutcome::TaskFailed
-                } else if outcome == AttemptOutcome::DeclaredStop && review_result && !warned
+                let outcome = if matches!(
+                    outcome,
+                    AttemptOutcome::Succeeded | AttemptOutcome::DeclaredStop
+                ) && disposition_error.is_some()
                 {
+                    AttemptOutcome::TaskFailed
+                } else if outcome == AttemptOutcome::DeclaredStop && review_result && !warned {
                     AttemptOutcome::Succeeded
                 } else if warned || outcome == AttemptOutcome::DeclaredStop {
                     AttemptOutcome::OtherFailure
@@ -563,11 +569,7 @@ pub(super) fn fail_with(progress: &mut NodeProgress, code: &str, message: String
 }
 
 pub(super) fn writer_binding_failed(progress: &mut NodeProgress, _id: &str, reason: &str) {
-    fail_with(
-        progress,
-        "writer_binding_unavailable",
-        reason.to_owned(),
-    );
+    fail_with(progress, "writer_binding_unavailable", reason.to_owned());
 }
 
 pub(super) fn retry_exhausted(progress: &mut NodeProgress, reason: &str) {

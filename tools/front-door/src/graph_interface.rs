@@ -190,7 +190,7 @@ pub(crate) fn run(
         let _ = writeln!(std::io::stderr().lock(), "warning: {message}");
         request.brief = None;
         if request.file.is_none() {
-            return invoke("run", Err(message), globals, workers);
+            return invoke("run", Err(cli_input_error(&message)), globals, workers);
         }
     }
     invoke("run", run_input(request), globals, workers)
