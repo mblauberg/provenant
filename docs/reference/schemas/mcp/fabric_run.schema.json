@@ -696,6 +696,20 @@
             "task_id": {
               "type": "string"
             },
+            "terminal_cause": {
+              "enum": [
+                "unsupported_platform",
+                "unknown_pacing_account",
+                "unregistered_account",
+                "delivery_prepare_credential_helper",
+                "spawn_failure",
+                "process_crash",
+                "settlement_failure",
+                "provider_early_stop",
+                "free_pool_quota"
+              ],
+              "type": "string"
+            },
             "title": {
               "type": "string"
             },
@@ -1526,6 +1540,20 @@
                 ]
               },
               "task_id": {
+                "type": "string"
+              },
+              "terminal_cause": {
+                "enum": [
+                  "unsupported_platform",
+                  "unknown_pacing_account",
+                  "unregistered_account",
+                  "delivery_prepare_credential_helper",
+                  "spawn_failure",
+                  "process_crash",
+                  "settlement_failure",
+                  "provider_early_stop",
+                  "free_pool_quota"
+                ],
                 "type": "string"
               },
               "title": {
@@ -2371,6 +2399,20 @@
             "task_id": {
               "type": "string"
             },
+            "terminal_cause": {
+              "enum": [
+                "unsupported_platform",
+                "unknown_pacing_account",
+                "unregistered_account",
+                "delivery_prepare_credential_helper",
+                "spawn_failure",
+                "process_crash",
+                "settlement_failure",
+                "provider_early_stop",
+                "free_pool_quota"
+              ],
+              "type": "string"
+            },
             "title": {
               "type": "string"
             },
@@ -3200,6 +3242,20 @@
               ]
             },
             "task_id": {
+              "type": "string"
+            },
+            "terminal_cause": {
+              "enum": [
+                "unsupported_platform",
+                "unknown_pacing_account",
+                "unregistered_account",
+                "delivery_prepare_credential_helper",
+                "spawn_failure",
+                "process_crash",
+                "settlement_failure",
+                "provider_early_stop",
+                "free_pool_quota"
+              ],
               "type": "string"
             },
             "title": {
