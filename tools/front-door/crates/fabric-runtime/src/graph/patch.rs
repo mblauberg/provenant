@@ -481,6 +481,38 @@ pub fn retry_node(
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| PatchError::invalid(e.to_string()))?,
     );
+    // Already settled consumers retain evidence for the generation they observed.
+    // Their own redo clears these snapshots; pending consumers see the new result.
+    let mut affected = std::collections::BTreeSet::from([id.to_owned()]);
+    loop {
+        let before = affected.len();
+        for node in &expanded.nodes {
+            if node.dependencies().any(|parent| affected.contains(parent)) {
+                affected.insert(node.id.clone());
+            }
+        }
+        if affected.len() == before {
+            break;
+        }
+    }
+    let mut prior = serde_json::to_value(old).map_err(|e| PatchError::invalid(e.to_string()))?;
+    if let Some(fields) = prior.as_object_mut() {
+        fields.remove("settled_dependency_snapshots");
+        fields.remove("previous_attempts");
+    }
+    for consumer in &mut candidate.nodes {
+        if consumer.id != id && affected.contains(&consumer.id) && consumer.state.settled() {
+            let snapshots = consumer
+                .extra
+                .entry("settled_dependency_snapshots".into())
+                .or_insert_with(|| serde_json::json!({}));
+            snapshots
+                .as_object_mut()
+                .ok_or_else(|| PatchError::invalid("invalid dependency snapshots"))?
+                .entry(id.to_owned())
+                .or_insert_with(|| prior.clone());
+        }
+    }
     let mut reset = serde_json::to_value(old).map_err(|e| PatchError::invalid(e.to_string()))?;
     // Keep placement and source bindings; clear all per-execution results and fences.
     let fields = reset.as_object_mut().unwrap();
@@ -938,6 +970,8 @@ pub(super) fn prepare(
         let same_retry = retry == Some(id.as_str()) && {
             let mut comparable = node.clone();
             comparable.prompt = target.prompt.clone();
+            comparable.round = target.round.clone();
+            comparable.after_expansion = target.after_expansion.clone();
             comparable == *target
                 && target.composite.is_none()
                 && target.loop_body.is_none()

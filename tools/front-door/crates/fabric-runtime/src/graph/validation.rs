@@ -1106,6 +1106,40 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
         }
     }
     for (index, (progress, node)) in checkpoint.nodes.iter().zip(&plan.nodes).enumerate() {
+        let mut historical;
+        let checkpoint = if progress.state.settled() {
+            if let Some(snapshots) = progress
+                .extra
+                .get("settled_dependency_snapshots")
+                .and_then(serde_json::Value::as_object)
+            {
+                historical = checkpoint.clone();
+                for (id, snapshot) in snapshots {
+                    let position = *positions.get(id).ok_or_else(|| GraphError::BadCheckpoint {
+                        node: node.id.clone(),
+                        invariant: "dependency snapshot must name a graph node",
+                    })?;
+                    let mut prior: NodeProgress = serde_json::from_value(snapshot.clone())
+                        .map_err(|_| GraphError::BadCheckpoint {
+                            node: node.id.clone(),
+                            invariant: "dependency snapshot must be valid progress",
+                        })?;
+                    if prior.id != *id || !prior.state.settled() {
+                        return Err(GraphError::BadCheckpoint {
+                            node: node.id.clone(),
+                            invariant: "dependency snapshot must retain settled identity",
+                        });
+                    }
+                    prior.round = historical.nodes[position].round.clone();
+                    historical.nodes[position] = prior;
+                }
+                &historical
+            } else {
+                checkpoint
+            }
+        } else {
+            checkpoint
+        };
         let bad = |invariant| GraphError::BadCheckpoint {
             node: node.id.clone(),
             invariant,
@@ -1519,11 +1553,17 @@ fn fallback_settled(
         .outputs
         .as_ref()
         .is_some_and(|outputs| outputs.plan.is_some())
-        && plans::fallback_expansion(&node.id, spec, document, node.require_skill_location)
-            .is_ok_and(|derived| {
-                checkpoint
-                    .expansions
-                    .iter()
-                    .any(|expansion| expansion.source == node.id && *expansion == derived)
-            })
+        && plans::fallback_expansion_for_generation(
+            &node.id,
+            spec,
+            document,
+            node.require_skill_location,
+            progress.extra.get("retry_generation"),
+        )
+        .is_ok_and(|derived| {
+            checkpoint
+                .expansions
+                .iter()
+                .any(|expansion| expansion.source == node.id && *expansion == derived)
+        })
 }

@@ -236,9 +236,19 @@ pub(crate) fn unified_graph_command(
         } else {
             factory(globals, workers)?
         };
-        let Some(target) = factory.graph_target(selector)? else {
+        let Some(mut target) = factory.graph_target(selector)? else {
             return Ok(None);
         };
+        if let GraphCommand::Retry { node: Some(id), .. } = &command {
+            if target
+                .node
+                .as_deref()
+                .is_some_and(|selected| selected != *id)
+            {
+                return Err(FacadeError::invalid("node selector conflicts with --node").into());
+            }
+            target.node = Some((*id).to_owned());
+        }
         let cancel = CancelToken::new();
         let budget = WaitBudget::cli(factory.clock.mono_now(), 55)?;
         let status = || {
@@ -313,6 +323,12 @@ pub(crate) fn unified_graph_command(
                 no_fallback,
                 wait,
             } => {
+                if !extend.is_empty() && (node.is_some() || brief.is_some()) {
+                    return Err(FacadeError::invalid(
+                        "apply --extend separately before redoing a node",
+                    )
+                    .into());
+                }
                 if *legacy_prompt || *no_fallback {
                     return Err(FacadeError::invalid("graph retry accepts --extend, --node and --brief; prompt source and provider continuation options apply only to attempts").into());
                 }
