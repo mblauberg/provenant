@@ -393,7 +393,8 @@ pub(super) fn read_only_plan(
             .ok()
             .and_then(|out| String::from_utf8(out.stdout.bytes).ok())
             .and_then(|text| provenant_core::GitOid::parse(text.trim()).ok());
-            if let Some(head) = head
+            if !isolated
+                && let Some(head) = head
                 && let Some(warning) =
                     read_only_staleness_warning(&executor, &repo, &utility, budget, &cancel, head)
             {
@@ -427,7 +428,7 @@ pub(super) fn read_only_plan(
 /// Compare this checkout with the last fetched origin default ref. This is an
 /// advisory read only: no fetch occurs here, and absent or unusable Git data
 /// must not block a reader from launching.
-pub(super) fn read_only_staleness_warning(
+pub(in crate::run) fn read_only_staleness_warning(
     executor: &dyn provenant_os::exec::Executor,
     repo: &provenant_confinement::ReadOnlyRepo,
     utility: &provenant_confinement::UtilityRuntime,
@@ -438,24 +439,26 @@ pub(super) fn read_only_staleness_warning(
     use provenant_confinement::GitRead;
     use provenant_os::exec::Termination;
 
-    let default = provenant_confinement::run_read_utility(
-        executor,
-        GitRead::ResolveRevision {
-            revision: provenant_confinement::repo::GitRevision::new("refs/remotes/origin/HEAD")
-                .ok()?,
-        },
-        repo,
-        utility,
-        budget,
-        cancel,
-    )
-    .ok()?;
-    if default.termination != Termination::Exit(0) {
-        return None;
-    }
-    let default =
-        provenant_core::GitOid::parse(std::str::from_utf8(&default.stdout.bytes).ok()?.trim())
+    let default = ["refs/remotes/origin/HEAD", "refs/remotes/origin/main"]
+        .into_iter()
+        .find_map(|reference| {
+            let default = provenant_confinement::run_read_utility(
+                executor,
+                GitRead::ResolveRevision {
+                    revision: provenant_confinement::repo::GitRevision::new(reference).ok()?,
+                },
+                repo,
+                utility,
+                budget,
+                cancel,
+            )
             .ok()?;
+            if default.termination != Termination::Exit(0) {
+                return None;
+            }
+            provenant_core::GitOid::parse(std::str::from_utf8(&default.stdout.bytes).ok()?.trim())
+                .ok()
+        })?;
     let behind = provenant_confinement::run_read_utility(
         executor,
         GitRead::AncestorCount {
@@ -478,7 +481,7 @@ pub(super) fn read_only_staleness_warning(
         .ok()?;
     (count > 0).then(|| {
         format!(
-            "checkout is {count} commits behind origin's default branch; read-only lane will read {head}"
+            "checkout is {count} commit{} behind origin's default branch; read-only lane will read {head}", if count == 1 { "" } else { "s" }
         )
     })
 }

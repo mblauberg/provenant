@@ -2,12 +2,13 @@ use super::*;
 
 #[test]
 fn base_requires_a_writer_branch_or_worktree_target() {
-    let refusal = dispatch::base_target_refusal(Some("main"), None, None, None)
+    let refusal = dispatch::base_target_refusal(Some("main"), None, None, None, None)
         .expect("base without target should refuse");
     assert!(refusal.contains("--branch"), "{refusal}");
     assert!(refusal.contains("--worktree"), "{refusal}");
     assert!(
-        dispatch::base_target_refusal(Some("main"), Some("feature/review"), None, None,).is_none()
+        dispatch::base_target_refusal(Some("main"), Some("feature/review"), None, None, None,)
+            .is_none()
     );
     assert!(
         dispatch::base_target_refusal(
@@ -15,10 +16,58 @@ fn base_requires_a_writer_branch_or_worktree_target() {
             None,
             Some(Path::new(".worktrees/review")),
             None,
+            None,
         )
         .is_none()
     );
-    assert!(dispatch::base_target_refusal(None, None, None, None).is_none());
+    assert!(dispatch::base_target_refusal(None, None, None, None, None).is_none());
+}
+
+#[test]
+fn dispatch_accepts_reader_diff_base_only_with_a_head() -> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let root = temp.path();
+    let project = root.join("project");
+    std::fs::create_dir_all(&project)?;
+    let prompt = root.join("prompt");
+    std::fs::write(&prompt, "review")?;
+    with_edge(
+        root,
+        &project,
+        |edge| -> Result<(), Box<dyn std::error::Error>> {
+            for pinned in [false, true] {
+                let mut command = parsed_run(&[
+                    "--model",
+                    "codex/gpt-6-luna",
+                    "--mode",
+                    "read-only",
+                    "--base",
+                    "main",
+                    "--prompt-file",
+                    prompt.to_str().ok_or("prompt")?,
+                ])?;
+                if pinned {
+                    command.head = Some("HEAD".into());
+                }
+                let reply = dispatch::dispatch(command, edge);
+                let message = reply
+                    .result
+                    .error
+                    .map(|error| error.message)
+                    .unwrap_or_default();
+                assert_eq!(
+                    message.contains("--base requires a writer target"),
+                    !pinned,
+                    "{message}"
+                );
+                if !pinned {
+                    assert!(message.contains("diff base"), "{message}");
+                }
+            }
+            Ok(())
+        },
+    )??;
+    Ok(())
 }
 
 fn reexec_test_in_lane(name: &str) -> Result<bool, Box<dyn std::error::Error>> {

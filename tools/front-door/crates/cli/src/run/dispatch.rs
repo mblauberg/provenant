@@ -386,6 +386,7 @@ pub(super) fn dispatch_with_workers(
         command.branch.as_deref(),
         command.access.worktree.as_deref(),
         command.worktree_branch.as_deref(),
+        command.head.as_deref(),
     ) {
         let mut out = reply(
             "dispatch",
@@ -474,9 +475,10 @@ pub(super) fn base_target_refusal(
     branch: Option<&str>,
     worktree: Option<&Path>,
     worktree_branch: Option<&str>,
+    head: Option<&str>,
 ) -> Option<&'static str> {
-    (base.is_some() && branch.is_none() && worktree.is_none() && worktree_branch.is_none())
-        .then_some("--base requires a writer target; use --branch with --host or --worktree")
+    (base.is_some() && branch.is_none() && worktree.is_none() && worktree_branch.is_none() && head.is_none())
+        .then_some("--base requires a writer target; use --branch with --host or --worktree, or use --head to set the reader's commit and --base as its diff base")
 }
 
 /// Project launch policy after constructing the receipt, so no lane facts are lost.
@@ -1888,6 +1890,12 @@ pub(super) fn dispatch_inner(
         })
         .collect();
     brief_warnings.extend(capability_warnings);
+    if command.head.is_none()
+        && matches!(command.access.mode(), Mode::ReadOnly)
+        && let Some(warning) = checkout_staleness_warning(edge.cwd)
+    {
+        brief_warnings.push(warning);
+    }
     if matches!(command.access.mode(), Mode::WorktreeWrite) {
         let budget = config
             .domains
@@ -2066,6 +2074,37 @@ pub(super) fn dispatch_inner(
         data["worktree"] = worktree;
     }
     Ok((data, human, timed_out || cloud_wait_timed_out))
+}
+
+fn checkout_staleness_warning(cwd: &Path) -> Option<String> {
+    use provenant_confinement::{GitRead, UtilityBudget, UtilityRuntime, run_read_utility};
+    let git = provenant_os::git::git_executable()?;
+    let utility = UtilityRuntime::read_only(git).ok()?;
+    let executor = provenant_os::exec::SystemExecutor::new(1).ok()?;
+    let budget = UtilityBudget::bounded(Duration::from_secs(5)).ok()?;
+    let cancel = CancelToken::new();
+    let repo = cwd.ancestors().find_map(|path| {
+        utility
+            .open_read_repo(&executor, path, budget, &cancel)
+            .ok()
+    })?;
+    let output = run_read_utility(
+        &executor,
+        GitRead::RevParseHead,
+        &repo,
+        &utility,
+        budget,
+        &cancel,
+    )
+    .ok()?;
+    let head = std::str::from_utf8(&output.stdout.bytes)
+        .ok()?
+        .trim()
+        .parse()
+        .ok()?;
+    super::provider::confinement::read_only_staleness_warning(
+        &executor, &repo, &utility, budget, &cancel, head,
+    )
 }
 
 /// Carry submit-time warnings as `data["warnings"]`, so JSON consumers see them.

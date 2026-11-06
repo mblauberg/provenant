@@ -3930,7 +3930,7 @@ fn read_only_staleness_uses_only_the_last_fetched_origin_default()
         old.parse()?,
     );
     let warning = warning.ok_or("behind checkout did not warn")?;
-    assert!(warning.contains("1 commits behind"), "{warning}");
+    assert!(warning.contains("1 commit behind"), "{warning}");
     assert!(warning.contains(&old), "{warning}");
 
     assert!(
@@ -3972,6 +3972,24 @@ fn read_only_staleness_uses_only_the_last_fetched_origin_default()
         &repo,
         &env,
         &["symbolic-ref", "--delete", "refs/remotes/origin/HEAD"],
+    )?;
+    assert!(
+        confinement::read_only_staleness_warning(
+            &executor,
+            &read_repo,
+            &utility,
+            budget,
+            &cancel,
+            old.parse()?,
+        )
+        .is_some()
+    );
+    git(
+        &executor,
+        &executable,
+        &repo,
+        &env,
+        &["update-ref", "-d", "refs/remotes/origin/main"],
     )?;
     assert!(
         confinement::read_only_staleness_warning(

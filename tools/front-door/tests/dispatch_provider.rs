@@ -2141,6 +2141,17 @@ fn codex_dispatch_observes_rollout() -> Result {
     {
         let mut rig = TestRig::new()?;
         let cleanup = rig.process_cleanup();
+        let git = provenant_os::git::git_executable().ok_or("git unavailable")?;
+        if index == 0 {
+            for args in [
+                vec!["commit", "--allow-empty", "-qm", "old"],
+                vec!["commit", "--allow-empty", "-qm", "new"],
+                vec!["update-ref", "refs/remotes/origin/main", "HEAD"],
+                vec!["reset", "--hard", "HEAD~1"],
+            ] {
+                assert_eq!(code(&rig.execute(&git, &args, None)?), 0);
+            }
+        }
         // The production read-only profile anchors the host Rust runtime roots.
         for path in [".cargo/bin", ".cargo/registry", ".rustup/toolchains"] {
             fs::create_dir_all(rig.home.join(path))?;
@@ -2180,6 +2191,10 @@ fn codex_dispatch_observes_rollout() -> Result {
             "5",
             "--json",
         ])?;
+        if index == 0 && cfg!(target_os = "macos") {
+            let output = String::from_utf8_lossy(&out.stdout.bytes);
+            assert!(output.contains("1 commit behind"), "{output}");
+        }
         assert_eq!(
             code(&out),
             if index == 0 && !cfg!(target_os = "macos") {
