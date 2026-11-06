@@ -825,6 +825,18 @@ pub fn submit(
         graph_id: graph_id.to_owned(),
         nodes,
     };
+    document.extra.insert(
+        "template_layers".into(),
+        serde_json::json!(library.snapshot_layers()),
+    );
+    document.extra.insert(
+        "template_library".into(),
+        serde_json::json!(library.snapshot()),
+    );
+    document.extra.insert(
+        "template_resolvers".into(),
+        serde_json::json!(context.resolvers),
+    );
     document.schema_version = u64::from(minimum_schema_version(&document));
     document
         .admit(context.limits)
@@ -950,7 +962,20 @@ pub(super) fn prepare(
         let mut node = compiler.compile(raw)?;
         let used = raw.get("use").and_then(Value::as_str);
         let trusted = used.is_some_and(|name| {
-            catalogue.contains_key(name) && !patch.templates.contains_key(name)
+            (catalogue.contains_key(name) || context.library.layer(name).is_some())
+                && !patch.templates.contains_key(name)
+                && ![
+                    "role",
+                    "source",
+                    "capabilities",
+                    "attachments",
+                    "read_roots",
+                    "composite",
+                    "loop",
+                    "plan",
+                ]
+                .iter()
+                .any(|field| raw.get(*field).is_some())
         });
         if let Some(name) = used {
             // Record the effective parameters, defaults included, so a replay

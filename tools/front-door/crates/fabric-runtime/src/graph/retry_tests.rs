@@ -443,7 +443,7 @@ fn planner_container(graph_id: &str) -> GraphDocument {
     serde_json::from_value(json!({
         "schema_version":1,"graph_id":graph_id,"nodes":[{
             "id":"work","kind":"composite","access":"read_only","composite":{
-                "nodes":[{"id":"planner","kind":"plan","access":"read_only","prompt":"Plan work",
+                "nodes":[{"id":"planner","kind":"task","access":"read_only","prompt":"Plan work",
                     "route":{"alias":"senior"},"plan":{"kinds":["task"],"max_nodes":4}}],
                 "exports":[{"node":"planner","outputs":["result"]}]
             }
@@ -569,13 +569,29 @@ fn dynamic_composite_redo_drops_stale_failed_dependencies_and_launches_once() {
     .unwrap();
     assert!(plan.nodes.iter().all(|node| {
         node.id != "work--planner--broken"
-            && node.dependencies().all(|parent| parent != "work--planner--broken")
-            && !node.after_expansion.iter().any(|parent| parent == "work--planner--broken")
-            && !node.composite_members.iter().any(|member| member == "work--planner--broken")
+            && node
+                .dependencies()
+                .all(|parent| parent != "work--planner--broken")
+            && !node
+                .after_expansion
+                .iter()
+                .any(|parent| parent == "work--planner--broken")
+            && !node
+                .composite_members
+                .iter()
+                .any(|member| member == "work--planner--broken")
     }));
     // A settled consumer keeps what it observed until it is redone itself.
     let mut checkpoint = run.checkpoint;
-    retry_id(&document, &mut checkpoint, "sibling", None, &|_| Ok(()), None).unwrap();
+    retry_id(
+        &document,
+        &mut checkpoint,
+        "sibling",
+        None,
+        &|_| Ok(()),
+        None,
+    )
+    .unwrap();
     let mut owner = FakeOwner {
         observations: [done_as("sibling")].into(),
         ..Default::default()
@@ -591,9 +607,13 @@ fn dynamic_composite_redo_drops_stale_failed_dependencies_and_launches_once() {
         serde_json::from_value(serde_json::to_value(&run.checkpoint).unwrap()).unwrap();
     let mut replay = FakeOwner::default();
     assert_eq!(
-        advance(&document, &mut replay, &mut MemoryJournal(Some(reloaded.clone())))
-            .unwrap()
-            .checkpoint,
+        advance(
+            &document,
+            &mut replay,
+            &mut MemoryJournal(Some(reloaded.clone()))
+        )
+        .unwrap()
+        .checkpoint,
         reloaded
     );
     assert!(replay.calls.is_empty());
@@ -915,7 +935,7 @@ fn subtree_stop_fences_live_parent_and_children_across_replay_and_preserves_deta
 fn node_redo_planner_admits_a_new_fragment_without_losing_the_first_expansion() {
     let document: GraphDocument = serde_json::from_value(json!({
         "schema_version":1,"graph_id":"redo-plan","nodes":[{
-            "id":"work","kind":"plan","access":"read_only","prompt":"Plan work",
+            "id":"work","kind":"task","access":"read_only","prompt":"Plan work",
             "route":{"alias":"senior"},"plan":{"kinds":["task"],"max_nodes":4}
         }]
     }))
@@ -1051,7 +1071,7 @@ fn node_redo_can_launch_a_leaf_from_an_inactive_loop_round() {
 fn node_redo_repeated_planner_fallbacks_have_distinct_nodes_and_replay_without_relaunching() {
     let document: GraphDocument = serde_json::from_value(json!({
         "schema_version":1,"graph_id":"redo-fallback","nodes":[{
-            "id":"work","kind":"plan","access":"read_only","prompt":"Plan work",
+            "id":"work","kind":"task","access":"read_only","prompt":"Plan work",
             "route":{"alias":"senior"},"plan":{"kinds":["task"],"max_nodes":4,
                 "fallback":{"nodes":[{"id":"static","access":"read_only","prompt":"Fallback work","route":{"alias":"junior"}}],
                     "exports":[{"node":"static","outputs":["result"]}]}
@@ -1197,7 +1217,11 @@ fn retry_of_explicit_launch_refusal_preserves_pending_siblings_and_rejects_uncer
         &mut checkpoint,
         0,
         &crate::coordination::facade::FacadeError::InvalidInput { detail: None },
-        LaunchTiming { clock: Some(at(0)), admission_seconds: 60, policy: LaunchRetryPolicy::default() },
+        LaunchTiming {
+            clock: Some(at(0)),
+            admission_seconds: 60,
+            policy: LaunchRetryPolicy::default(),
+        },
         &mut MemoryJournal::default(),
     )
     .unwrap();
@@ -1229,7 +1253,11 @@ fn retry_of_explicit_launch_refusal_preserves_pending_siblings_and_rejects_uncer
             &mut candidate,
             0,
             &error,
-            LaunchTiming { clock: Some(at(0)), admission_seconds: 60, policy: LaunchRetryPolicy::default() },
+            LaunchTiming {
+                clock: Some(at(0)),
+                admission_seconds: 60,
+                policy: LaunchRetryPolicy::default(),
+            },
             &mut MemoryJournal::default(),
         )
         .unwrap();
@@ -1252,7 +1280,11 @@ fn retry_of_explicit_launch_refusal_preserves_pending_siblings_and_rejects_uncer
         &mut lookup_failed,
         0,
         &crate::coordination::facade::FacadeError::StateCorrupt,
-        LaunchTiming { clock: Some(at(0)), admission_seconds: 60, policy: LaunchRetryPolicy::default() },
+        LaunchTiming {
+            clock: Some(at(0)),
+            admission_seconds: 60,
+            policy: LaunchRetryPolicy::default(),
+        },
         &mut MemoryJournal::default(),
     )
     .unwrap();
@@ -1272,10 +1304,14 @@ fn retry_of_explicit_launch_refusal_preserves_pending_siblings_and_rejects_uncer
         &crate::coordination::facade::FacadeError::LaunchUnknown {
             operation_id: provenant_core::OperationId::parse("unknown-operation").unwrap(),
         },
-        LaunchTiming { clock: Some(at(0)), admission_seconds: 60, policy: LaunchRetryPolicy {
-            limit: 0,
-            ..Default::default()
-        } },
+        LaunchTiming {
+            clock: Some(at(0)),
+            admission_seconds: 60,
+            policy: LaunchRetryPolicy {
+                limit: 0,
+                ..Default::default()
+            },
+        },
         &mut MemoryJournal::default(),
     )
     .unwrap();

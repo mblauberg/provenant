@@ -235,7 +235,7 @@ pub fn prompt(node: &GraphNode) -> String {
             .and_then(serde_json::Value::as_u64)
             .and_then(|n| usize::try_from(n).ok())
             .unwrap_or(spec.max_nodes);
-        prompt.push_str(&format!("\n\nReturn one final fenced `fragment` JSON block, at most 12288 bytes, holding a patch: {{\"schema_version\":1,\"nodes\":[...],\"templates\":{{...}}}}. Emit 1..{planner_limit} nodes. A node is either `use` of a template with `with` parameters and overrides (`brief`, `tier`, `after`, `inputs`, `over`, `min_ok`, `repeat`), or compiled-node fields with a `kind` of task, plan, composite, loop, gate, decide, synthesise or land; composites, loops and further plan nodes are allowed. `over` copies a node once per named item with `${{item}}`; `repeat = {{\"until\":\"gate\",\"max_rounds\":N}}` loops a composite until its gate passes. Bundled templates: task, plan, explore, research, design, implement, implement.fix, review, review.security, verify, synthesise, repair; `templates` may define more inline. Each agent node requires id, a `brief` (or `goal`), `acceptance_checks` and local `after` or depends_on. `access` defaults to read_only; writers set worktree_write and also require `write_scope` (relative literal files/directories) and the `worktree` key naming an existing registered worktree; read-only agents may omit `write_scope`. The tier defaults to senior. Synthesise nodes require `inputs` selecting dependency outputs, either as `{{\"node\":\"id\",\"outputs\":[\"result\"]}}` or the shorthand `\"id\"` (which selects `result`). Gate nodes use the graph gate condition schema; decide nodes use the graph decide schema. Dependencies and inputs name fragment-local IDs. Keep each namespaced ID (this node's ID + -- + child ID) within 64 bytes."));
+        prompt.push_str(&format!("\n\nReturn one final fenced `fragment` JSON block, at most 12288 bytes, holding a patch: {{\"schema_version\":1,\"nodes\":[...],\"templates\":{{...}}}}. Emit 1..{planner_limit} nodes. A node is either `use` of a template with `with` parameters and overrides (`brief`, `tier`, `after`, `inputs`, `over`, `min_ok`, `repeat`), or compiled-node fields with a `kind` of task, composite, loop, gate, decide, synthesise or land (use `plan` for a planning brief); composites, loops and further plan nodes are allowed. `over` copies a node once per named item with `${{item}}`; `repeat = {{\"until\":\"gate\",\"max_rounds\":N}}` loops a composite until its gate passes. Bundled templates: task, plan, explore, research, design, implement, implement.fix, review, review.security, verify, synthesise, repair; `templates` may define more inline. Each agent node requires id, a `brief` (or `goal`), `acceptance_checks` and local `after` or depends_on. `access` defaults to read_only; writers set worktree_write and also require `write_scope` (relative literal files/directories) and the `worktree` key naming an existing registered worktree; read-only agents may omit `write_scope`. The tier defaults to senior. Synthesise nodes require `inputs` selecting dependency outputs, either as `{{\"node\":\"id\",\"outputs\":[\"result\"]}}` or the shorthand `\"id\"` (which selects `result`). Gate nodes use the graph gate condition schema; decide nodes use the graph decide schema. Dependencies and inputs name fragment-local IDs. Keep each namespaced ID (this node's ID + -- + child ID) within 64 bytes."));
         if !spec.templates.is_empty() {
             prompt.push_str(&format!(
                 " Host templates with their declared authority: {}.",
@@ -249,9 +249,6 @@ pub fn prompt(node: &GraphNode) -> String {
 /// A plan node carries a plan specification and only reads. What its patch
 /// may contain is not restricted here: any agent may emit any template.
 pub(super) fn validate_spec(node: &GraphNode) -> Result<(), &'static str> {
-    if (node.kind == Some(NodeKind::Plan)) != node.plan.is_some() {
-        return Err("plan requires a plan specification with max_nodes");
-    }
     if let Some(spec) = &node.plan {
         if node.access != AccessMode::ReadOnly
             || node.required_verdict.is_some()
@@ -303,15 +300,47 @@ fn block<'a>(
     } else {
         ""
     };
-    let Some((_, rest)) = text.split_once(&marker) else {
+    let mut fence: Option<(u8, usize, bool, usize)> = None;
+    let mut found = None;
+    let mut offset = 0;
+    for line in text.split_inclusive('\n') {
+        let trimmed = line.trim_start_matches(' ');
+        let indent = line.len() - trimmed.len();
+        let delimiter = trimmed.as_bytes().first().copied().unwrap_or_default();
+        let ticks = if matches!(delimiter, b'`' | b'~') {
+            trimmed
+                .bytes()
+                .take_while(|byte| *byte == delimiter)
+                .count()
+        } else {
+            0
+        };
+        if indent <= 3 && ticks >= 3 {
+            let suffix = trimmed[ticks..].trim();
+            match fence {
+                Some((kind, opening, selected, begin))
+                    if delimiter == kind && ticks >= opening && suffix.is_empty() =>
+                {
+                    if selected {
+                        if found.is_some() {
+                            return Err(format!("{tag} block repeated"));
+                        }
+                        found = Some(text[begin..offset].trim_end_matches('\n'));
+                    }
+                    fence = None;
+                }
+                None => fence = Some((delimiter, ticks, suffix == tag, offset + line.len())),
+                _ => {}
+            }
+        }
+        offset += line.len();
+    }
+    if fence.is_some_and(|(_, _, selected, _)| selected) {
+        return Err(format!("{tag} block incomplete"));
+    }
+    let Some(json) = found else {
         return Ok(None);
     };
-    if rest.contains(&marker) {
-        return Err(format!("{tag} block repeated"));
-    }
-    let (json, _) = rest
-        .split_once("\n```")
-        .ok_or_else(|| format!("{tag} block incomplete"))?;
     if json.len() > BLOCK_BYTES {
         return Err(format!("{tag} block exceeds {BLOCK_BYTES} bytes"));
     }
@@ -339,6 +368,13 @@ pub(super) fn handoff(
         ));
     }
     Ok(Some(fenced))
+}
+
+pub(super) fn agent(node: &PlannedNode) -> bool {
+    matches!(
+        node.kind,
+        None | Some(NodeKind::Task | NodeKind::Synthesise)
+    )
 }
 
 pub(super) fn writer(node: &PlannedNode) -> bool {
@@ -901,6 +937,10 @@ fn prepare_nested(
     trusted: bool,
     nested: bool,
 ) -> Result<(), String> {
+    // Composite templates own their children's work bindings and delivery.
+    if trusted && (child.composite.is_some() || child.loop_body.is_some()) {
+        return Ok(());
+    }
     child.require_skill_location |= node.require_skill_location;
     if !trusted {
         // A planner may narrow but never widen the access its own node holds.
@@ -1093,7 +1133,21 @@ fn fragment(
     limits: &crate::config::GraphLimits,
     safe_reason: &mut PlanFailureFact,
 ) -> Result<Expansion, String> {
-    let spec = node.plan.as_ref().ok_or("missing plan configuration")?;
+    let default_spec = PlanSpec {
+        extra: Default::default(),
+        kinds: Vec::new(),
+        max_nodes: limits.nodes,
+        templates: Vec::new(),
+        disjoint_waves: false,
+        wire_exports: false,
+        fallback: None,
+        fallback_depends_on: Vec::new(),
+        fallback_inputs: Vec::new(),
+        fallback_source: None,
+        fallback_read_roots: Vec::new(),
+        fallback_title: None,
+    };
+    let spec = node.plan.as_ref().unwrap_or(&default_spec);
     let patch = super::patch::Patch::from_fragment(json)?;
     let model_limit = spec
         .extra
@@ -1107,7 +1161,42 @@ fn fragment(
             "fragment requires 1..{model_limit} nodes and schema_version 1"
         ));
     }
-    let resolvers: BTreeMap<String, Vec<String>> = spec
+    let snapshots: BTreeMap<String, Template> = source
+        .extra
+        .get("template_library")
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|error| format!("invalid template snapshot: {error}"))?
+        .unwrap_or_default();
+    let layers: BTreeMap<String, super::template::Layer> = source
+        .extra
+        .get("template_layers")
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|error| format!("invalid template layers: {error}"))?
+        .unwrap_or_default();
+    let mut library = bundled_templates().clone();
+    for (name, template) in snapshots {
+        library.insert(
+            layers
+                .get(&name)
+                .copied()
+                .unwrap_or(super::template::Layer::Inline),
+            &name,
+            template,
+        )?;
+    }
+    let mut resolvers: BTreeMap<String, Vec<String>> = source
+        .extra
+        .get("template_resolvers")
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|error| format!("invalid submission resolvers: {error}"))?
+        .unwrap_or_default();
+    let overrides: BTreeMap<String, Vec<String>> = spec
         .extra
         .get("resolvers")
         .cloned()
@@ -1115,8 +1204,9 @@ fn fragment(
         .transpose()
         .map_err(|error| format!("invalid planner resolvers: {error}"))?
         .unwrap_or_default();
+    resolvers.extend(overrides);
     let context = super::patch::PatchContext {
-        library: bundled_templates(),
+        library: &library,
         resolvers: &resolvers,
         scan: &super::patch::scan_for_secrets,
         journal: None,
@@ -1299,7 +1389,28 @@ pub(super) fn flatten_fragment(
     };
     // Composites and loops expand before the patch is checked, so the host
     // limits see every member and round.
-    let local = loops::expand(&local, &[], &generous()).map_err(|error| error.to_string())?;
+    let mut local = loops::expand(&local, &[], &generous()).map_err(|error| error.to_string())?;
+    for child in &mut local.nodes {
+        if child.composite.is_none()
+            && child.loop_body.is_none()
+            && matches!(
+                child.kind,
+                None | Some(NodeKind::Task | NodeKind::Synthesise)
+            )
+            && child.route.is_none()
+            && child.routes.is_none()
+        {
+            child.route = Some(GraphRoute {
+                extra: Default::default(),
+                alias: Some("senior".into()),
+                adapter: None,
+                name: None,
+                model: None,
+                effort: None,
+                account: None,
+            });
+        }
+    }
     validate_schema(&local).map_err(|error| error.to_string())?;
     // The enclosing writer is not part of this isolated fragment. Preserve
     // its binding for the full patch preview, which checks ancestry, delivery
@@ -1355,8 +1466,11 @@ pub(super) fn flatten_fragment(
         }
     }
     if let Some(parent) = parent {
+        let local_ids: BTreeSet<_> = nodes.iter().map(|node| node.id.clone()).collect();
         let id = |name: &str| {
-            if external.contains(name) {
+            if external.contains(name)
+                || (!local_ids.contains(name) && document.nodes.iter().any(|node| node.id == name))
+            {
                 name.to_owned()
             } else {
                 format!("{}--{name}", parent.id)
@@ -1390,8 +1504,41 @@ pub(super) fn flatten_fragment(
             for input in &mut child.inputs {
                 input.node = id(&input.node);
             }
-            if let Some(SourceBinding::Node { node: source }) = &mut child.source {
+            if let Some(
+                SourceBinding::Node { node: source } | SourceBinding::Head { node: source },
+            ) = &mut child.source
+            {
                 *source = id(source);
+            }
+            if let Some(GateCondition::Ci {
+                target: CiTarget::Node { node: target, .. },
+                ..
+            }) = &mut child.condition
+            {
+                *target = id(target);
+            }
+            for writer in child
+                .continues
+                .iter_mut()
+                .chain(child.land.as_mut().map(|spec| &mut spec.node))
+            {
+                *writer = id(writer);
+            }
+            if let Some(plan) = &mut child.plan {
+                for template in &mut plan.templates {
+                    for fields in std::iter::once(&mut template.node).chain(
+                        template
+                            .nodes
+                            .iter_mut()
+                            .filter_map(serde_json::Value::as_object_mut),
+                    ) {
+                        if let Some(writer) = fields.get_mut("continues")
+                            && let Some(name) = writer.as_str()
+                        {
+                            *writer = serde_json::Value::String(id(name));
+                        }
+                    }
+                }
             }
             child.on_fail = child.on_fail.as_deref().map(id);
         }
@@ -1643,11 +1790,12 @@ pub(super) fn settle(
         .find(|n| n.id == node.id)
         .and_then(|n| n.extra.get("retry_generation"))
         .cloned();
-    if checkpoint
-        .expansions
-        .iter()
-        .any(|e| e.source == node.id && e.extra.get("retry_generation") == generation.as_ref())
-    {
+    if checkpoint.expansions.iter().any(|e| {
+        e.source == node.id
+            && (e.patch.is_none()
+                || e.extra.get("final_result") == Some(&serde_json::Value::Bool(true)))
+            && e.extra.get("retry_generation") == generation.as_ref()
+    }) {
         return None;
     }
     if node
@@ -1731,16 +1879,37 @@ pub(super) fn settle(
         .nodes
         .iter()
         .position(|n| n.id == node.id && n.state == NodeState::Succeeded)?;
+    if node.plan.is_none()
+        && !writer(node)
+        && capture.is_none()
+        && checkpoint.nodes[index].expansion_pause.is_some()
+        && checkpoint.nodes[index].fragment.is_none()
+    {
+        return None;
+    }
     // Source and deserialisation errors can contain captured provider output.
     // Retain a closed, safe explanation for status and fallback diagnostics.
     let mut safe_reason = PlanFailureFact::InvalidGraph;
-    let addition = if node.plan.is_some() {
+    let final_patch = capture.map(|capture| {
+        block(capture, "patch")
+            .and_then(|patch| match patch {
+                Some(patch) => Ok(Some(patch)),
+                None => block(capture, "fragment"),
+            })
+            .map(|patch| patch.map(str::to_owned))
+    });
+    let has_patch = final_patch
+        .as_ref()
+        .is_some_and(|result| !matches!(result, Ok(None)));
+    let addition = if node.plan.is_some() || has_patch || checkpoint.nodes[index].fragment.is_some()
+    {
         let json = if let Some(capture) = capture {
-            match block(capture, "fragment") {
-                Ok(Some(json)) => {
-                    checkpoint.nodes[index].fragment = Some(json.to_owned());
-                    Ok(json.to_owned())
-                }
+            let _ = capture;
+            match final_patch.unwrap_or(Ok(None)) {
+                Ok(Some(json)) => super::patch::scan_for_secrets(&json).map(|()| {
+                    checkpoint.nodes[index].fragment = Some(json.clone());
+                    json
+                }),
                 Ok(None) => {
                     safe_reason = PlanFailureFact::MissingBlock;
                     Err("fragment block missing".into())
@@ -1793,6 +1962,9 @@ pub(super) fn settle(
         return None;
     };
     let result = addition.and_then(|mut addition| {
+        addition
+            .extra
+            .insert("final_result".into(), serde_json::Value::Bool(true));
         if let Some(generation) = &generation {
             addition
                 .extra
@@ -1859,7 +2031,29 @@ pub(super) fn settle(
             super::patch::commit(checkpoint, addition, &preview, &plan, limits);
             Some((preview, plan, positions))
         }
-        Err(_reason) => {
+        Err(reason) => {
+            let reason = if super::patch::scan_for_secrets(&reason).is_err() {
+                "patch diagnostic contains a secret; inspect the captured result".to_owned()
+            } else {
+                reason
+                    .chars()
+                    .flat_map(|character| {
+                        if character.is_control() {
+                            character.escape_default().collect::<Vec<_>>()
+                        } else {
+                            vec![character]
+                        }
+                    })
+                    .take(MAX_ADVANCE_ERROR_BYTES)
+                    .collect()
+            };
+            if let Some(outputs) = &mut checkpoint.nodes[index].outputs {
+                let warning = bounded(&format!("patch refused: {reason}"), WARNING_BYTES);
+                if !outputs.warnings.contains(&warning) {
+                    outputs.warnings.truncate(MAX_WARNINGS.saturating_sub(1));
+                    outputs.warnings.push(warning);
+                }
+            }
             if let Some(spec) = node.plan.as_ref().filter(|spec| spec.fallback.is_some()) {
                 let fragment_error = match &checkpoint.nodes[index].expansion_cause {
                     Some(NodeDecisionCause::PlanExpansionPaused {
@@ -1943,7 +2137,7 @@ pub(super) fn settle(
                 }
             }
             let reason = bounded(
-                &format!("node {} expansion paused: {safe_reason}", node.id),
+                &format!("node {} expansion paused: {safe_reason}: {reason}", node.id),
                 MAX_ADVANCE_ERROR_BYTES,
             );
             set_expansion_pause(checkpoint, index, reason, false, None);

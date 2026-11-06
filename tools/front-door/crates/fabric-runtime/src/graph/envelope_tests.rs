@@ -1,6 +1,15 @@
 use super::*;
 use serde_json::json;
 
+/// Measure the actual journal representation after durable text externalisation.
+fn persisted_len(stored: &StoredCheckpoint) -> usize {
+    let temp = tempfile::tempdir().unwrap();
+    let directory = Directory::open_anchor(temp.path()).unwrap();
+    let mut value = serde_json::to_value(stored).unwrap();
+    prompt_store::externalise(&directory, "envelope", &mut value).unwrap();
+    canonical_len(&value)
+}
+
 /// Control characters take six canonical bytes each, the worst case.
 fn worst(max: usize) -> String {
     bounded(&"\u{1}".repeat(max), max)
@@ -17,7 +26,7 @@ fn mixed() -> GraphDocument {
     serde_json::from_value(json!({
         "schema_version":1, "graph_id":"envelope-mixed", "delivery":"pr", "integration_branch":"integration/envelope",
         "decision_session":"chair", "nodes":[
-            {"id":"plan", "kind":"plan", "access":"read_only", "prompt":"Slice the work",
+            {"id":"plan", "kind":"task", "access":"read_only", "prompt":"Slice the work",
              "route":{"alias":"senior"}, "plan":{"kinds":["task"], "max_nodes":4}},
             {"id":"review", "access":"read_only", "prompt":"Review", "routes":routes(3)},
             {"id":"choose", "kind":"decide", "access":"read_only", "depends_on":["review"],
@@ -445,8 +454,19 @@ fn repair_growth_and_risk_metadata_fit_the_checkpoint_bound() {
         ]
     })).unwrap();
     let plan = planned(&document);
-    let positions = plan.nodes.iter().enumerate().map(|(index,node)| (node.id.clone(),index)).collect();
-    assert_eq!(plan.nodes.iter().filter(|node| repair::is_repair_gate(node,&plan,&positions)).count(), 3);
+    let positions = plan
+        .nodes
+        .iter()
+        .enumerate()
+        .map(|(index, node)| (node.id.clone(), index))
+        .collect();
+    assert_eq!(
+        plan.nodes
+            .iter()
+            .filter(|node| repair::is_repair_gate(node, &plan, &positions))
+            .count(),
+        3
+    );
     assert_fits_with_repair_metadata(document.clone(), "terminal", true);
     assert_fits_with_repair_metadata(document, "substantial", false);
 }
@@ -454,10 +474,18 @@ fn repair_growth_and_risk_metadata_fit_the_checkpoint_bound() {
 fn assert_fits_with_repair_metadata(document: GraphDocument, tier: &str, grew: bool) {
     let plan = planned(&document);
     let mut checkpoint = filled_checkpoint(&document, &plan);
-    let positions = plan.nodes.iter().enumerate().map(|(index,node)| (node.id.clone(),index)).collect();
+    let positions = plan
+        .nodes
+        .iter()
+        .enumerate()
+        .map(|(index, node)| (node.id.clone(), index))
+        .collect();
     for (node, planned) in checkpoint.nodes.iter_mut().zip(&plan.nodes) {
         if repair::is_repair_gate(planned, &plan, &positions) {
-            node.extra.insert("repair_growth".into(), json!({"before":"1".repeat(64),"after":"2".repeat(64),"grew":grew}));
+            node.extra.insert(
+                "repair_growth".into(),
+                json!({"before":"1".repeat(64),"after":"2".repeat(64),"grew":grew}),
+            );
         }
         if let Some(outputs) = &mut node.outputs {
             outputs.extra.insert("risk_tier".into(), tier.into());
@@ -483,7 +511,7 @@ fn assert_fits_with_repair_metadata(document: GraphDocument, tier: &str, grew: b
         checkpoint,
         execution,
     };
-    let size = canonical_len(&stored);
+    let size = persisted_len(&stored);
     let bound = envelope::checkpoint_bound(&document, &[], &stored.checkpoint.extensions, &plan);
     assert!(
         size <= bound,
@@ -934,7 +962,7 @@ fn ci_failed_checks_and_findings_fit_the_configured_envelope() {
             };
             let bound =
                 envelope::checkpoint_bound(&document, &[], &stored.checkpoint.extensions, &plan);
-            assert!(canonical_len(&stored) <= bound, "cap={cap} count={count}");
+            assert!(persisted_len(&stored) <= bound, "cap={cap} count={count}");
         }
     }
 }
@@ -984,7 +1012,7 @@ fn disposition_checkpoint_fits_its_reduced_bound() {
         document: document.clone(),
     };
     let size = |checkpoint: &GraphCheckpoint| {
-        canonical_len(&StoredCheckpoint {
+        persisted_len(&StoredCheckpoint {
             extra: Default::default(),
             schema_version: 1,
             digest: "d".repeat(80),
