@@ -212,6 +212,7 @@ fn command_with_executable(
     };
     let settings = json!({"hooks":{
         "SessionStart":[{"hooks":[{"type":"command","command":hook("chair-start")?,"timeout":5}]}],
+        "Stop":[{"hooks":[{"type":"command","command":hook("chair-stop")?,"timeout":5}]}],
         "UserPromptSubmit":[{"hooks":[{"type":"command","command":hook("chair-prompt")?,"timeout":10}]}]
     }});
     let prompt = format!(
@@ -1358,6 +1359,16 @@ mod tests {
                 format!(
                     "{} hook claude chair-start",
                     super::quote(executable.to_str().ok_or("executable")?)
+                )
+            );
+            assert_eq!(
+                settings["hooks"]["Stop"][0]["hooks"][0]["command"].as_str(),
+                Some(
+                    format!(
+                        "{} hook claude chair-stop",
+                        super::quote(executable.to_str().ok_or("executable")?)
+                    )
+                    .as_str()
                 )
             );
             let hook_argv = vec![shell.into(), "-c".into(), hook.into()];

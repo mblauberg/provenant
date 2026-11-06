@@ -3313,6 +3313,81 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 }
 ```
 
+## `provenant native`
+
+| Argument | Contract |
+|---|---|
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
+
+```json
+{
+  "description": "Record metadata for a native sub-agent attempt"
+}
+```
+
+## `provenant native start`
+
+| Argument | Contract |
+|---|---|
+| `--id` | `{"name": "id", "required": true}` |
+| `--session` | `{"name": "session", "required": true}` |
+| `--alias` | `{"name": "alias", "required": true}` |
+| `--model` | `{"name": "model", "required": true}` |
+| `--effort` | `{"name": "effort"}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
+
+```json
+{
+  "description": "Begin tracking a native tool call; do not pass its prompt",
+  "groups": [
+    {
+      "arguments": [
+        "id",
+        "session",
+        "alias",
+        "model",
+        "effort"
+      ],
+      "multiple": true,
+      "name": "Start",
+      "required": false
+    }
+  ]
+}
+```
+
+## `provenant native end`
+
+| Argument | Contract |
+|---|---|
+| `--id` | `{"name": "id", "required": true}` |
+| `--session` | `{"name": "session", "required": true}` |
+| `--agent` | `{"name": "agent"}` |
+| `--settlement` | `{"name": "settlement", "required": true, "values": ["succeeded", "failed", "cancelled"]}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
+
+```json
+{
+  "description": "Settle a tracked call and associate its native agent file ID",
+  "groups": [
+    {
+      "arguments": [
+        "id",
+        "session",
+        "agent",
+        "settlement"
+      ],
+      "multiple": true,
+      "name": "End",
+      "required": false
+    }
+  ]
+}
+```
+
 ## `provenant quota`
 
 | Argument | Contract |
@@ -4983,6 +5058,19 @@ Advisory checks, local input, forge availability and repository settings: [track
 ```json
 {
   "description": "Handle the chair session-start hook"
+}
+```
+
+## `provenant hook claude chair-stop`
+
+| Argument | Contract |
+|---|---|
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
+
+```json
+{
+  "description": "Ingest native usage when the chair turn ends"
 }
 ```
 

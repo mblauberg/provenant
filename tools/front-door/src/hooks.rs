@@ -79,6 +79,10 @@ pub fn run(hook: Hook, globals: &Globals) -> u8 {
             crate::usage::ingest_after_chair_hook(globals);
             status
         }
+        Handler::ChairStop => {
+            crate::usage::ingest_after_chair_hook(globals);
+            0
+        }
         Handler::Guard => guard(globals, deadline, client, hook.spec().registration.event),
         Handler::PreCompact => advisory(Moment::PreCompact, globals, started, client),
         Handler::Compact => advisory(Moment::Compact, globals, started, client),
