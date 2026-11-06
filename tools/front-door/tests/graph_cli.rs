@@ -584,14 +584,21 @@ fn steer_graph_and_node_refuse_ambiguous_live_attempts_before_reading_stdin() ->
                 .is_some_and(|name| name == "graph-steer-ambiguous.json")
         })
         .ok_or("checkpoint")?;
-    use provenant_core::{Clock, RootInputs, StateRoot, WaitBudget, CancelToken};
+    use provenant_core::{CancelToken, Clock, RootInputs, StateRoot, WaitBudget};
     use provenant_fabric_runtime::graph::{FileJournal, GraphJournal, NodeState};
     let mut inputs = RootInputs::new(rig.temp.path().to_path_buf(), rig.root.clone());
     inputs.state_dir = Some(rig.state());
     let state = StateRoot::resolve(&inputs, &provenant_os::fs::SystemPathResolver)?;
-    let project = checkpoint_path.parent().and_then(Path::file_name).and_then(|name| name.to_str()).ok_or("project id")?.parse()?;
-    let execution = FileJournal::execution(&state, project, "steer-ambiguous")?.ok_or("execution")?;
-    let mut checkpoint = FileJournal::read_checkpoint(&state, project, "steer-ambiguous")?.ok_or("checkpoint")?;
+    let project = checkpoint_path
+        .parent()
+        .and_then(Path::file_name)
+        .and_then(|name| name.to_str())
+        .ok_or("project id")?
+        .parse()?;
+    let execution =
+        FileJournal::execution(&state, project, "steer-ambiguous")?.ok_or("execution")?;
+    let mut checkpoint =
+        FileJournal::read_checkpoint(&state, project, "steer-ambiguous")?.ok_or("checkpoint")?;
     let attempt = json!({"key":{"graph_id":"steer-ambiguous","node_id":"accept","route_index":0},
         "launched":false,"route":{"alias":"senior"},"state":"starting","attempt_ref":null,
         "outcome":null,"launch_actor":"fixture"});
@@ -602,7 +609,8 @@ fn steer_graph_and_node_refuse_ambiguous_live_attempts_before_reading_stdin() ->
     let clock = provenant_os::clock::SystemClock::new();
     let cancel = CancelToken::new();
     let budget = WaitBudget::cli(clock.mono_now(), 5)?;
-    let mut journal = FileJournal::open(&state, project, "steer-ambiguous", budget, &cancel, &clock)?;
+    let mut journal =
+        FileJournal::open(&state, project, "steer-ambiguous", budget, &cancel, &clock)?;
     journal.bind(execution)?;
     journal.save(&checkpoint)?;
     drop(journal);
