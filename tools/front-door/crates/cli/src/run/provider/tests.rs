@@ -2099,6 +2099,8 @@ fn writer_plan_stages_scratch_in_private_temporary_directory()
     // same process environment that production preparation reads.
     const CHILD: &str = "PROVENANT_TEST_WRITER_TOKEN_CHILD";
     if std::env::var_os(CHILD).is_none() {
+        // A separate test process isolates the fixture token from parallel tests.
+        #[allow(clippy::disallowed_methods)]
         let status = std::process::Command::new(std::env::current_exe()?)
             .arg("writer_plan_stages_scratch_in_private_temporary_directory")
             .env(CHILD, "1")
@@ -3010,6 +3012,8 @@ printf 'agy 1.0.0\n'
         b"publishing private object fixture\n",
     )?;
     let git_shim = publishing_paths.temporary.join("candidate-0/bin/git");
+    // Exercise the generated shim with the Git credential protocol on stdin.
+    #[allow(clippy::disallowed_methods)]
     let mut credential = std::process::Command::new(&git_shim)
         .args(["credential", "fill"])
         .current_dir(worktree)
