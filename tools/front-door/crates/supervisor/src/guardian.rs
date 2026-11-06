@@ -61,6 +61,26 @@ fn census_walk_due(now: u64, last_walk: Option<u64>) -> bool {
     last_walk.is_none_or(|last| now.saturating_sub(last) >= CENSUS_INTERVAL_MS)
 }
 
+/// Whether this turn walks at all. Every known PID carries a fork and exit
+/// filter, so with healthy watches the tree can only change after an event;
+/// a walk with no event repeats the last one. An idle lane therefore walks
+/// only at the full backstop. A pending event, a newly added watch, failed
+/// watches or a failed reactor keep the former 100 ms rate.
+fn census_turn_due(
+    now: u64,
+    last_walk: Option<u64>,
+    last_full: Option<u64>,
+    reason_to_walk: bool,
+) -> bool {
+    census_walk_due(now, last_walk)
+        && (last_walk.is_none() || reason_to_walk || census_full_due(now, last_full, false))
+}
+
+// Provider CPU only feeds progress evidence published by the one-second
+// checkpoint, and silence is never a stop reason; sampling faster than the
+// checkpoint only repeated `proc_pidinfo`.
+const CPU_SAMPLE_INTERVAL_MS: u64 = 1_000;
+
 fn retry_terminal_with(
     schedule: [u64; 4],
     mut terminal: impl FnMut() -> bool,
@@ -823,6 +843,7 @@ impl Driver<'_> {
         let mut census_reactor_failed = false;
         let mut reactor_warning_recorded = false;
         let mut process_watch_unavailable = false;
+        let mut census_retry = false;
         let mut cleanup_complete;
         let mut drain_deadline = None;
         let mut cleanup_pending = false;
@@ -872,7 +893,8 @@ impl Driver<'_> {
             }
             last_stdout_bytes = stdout_bytes;
             last_stderr_bytes = stderr_bytes;
-            let cpu_sample_due = now.saturating_sub(last_cpu_observation_ms) >= 100;
+            let cpu_sample_due =
+                now.saturating_sub(last_cpu_observation_ms) >= CPU_SAMPLE_INTERVAL_MS;
             let cpu_progress = if cpu_sample_due {
                 last_cpu_observation_ms = now;
                 provider_cpu_micros = self.provider_cpu_micros();
@@ -1143,11 +1165,21 @@ impl Driver<'_> {
             if !disk_paused || exit.is_some() || stop_reason.is_some() {
                 child.resume_builds();
             }
-            // Process events wake the scoped tree and provider-group walk;
-            // a 100 ms timer also samples when no event arrives. A full scan
-            // backs it up every five seconds and is mandatory for cleanup.
-            // Failed events, overflow or a racing walk require a full scan.
-            if census_walk_due(now, last_census_ms) {
+            // Process events wake the scoped tree and provider-group walk, at
+            // most every 100 ms. Without an event nothing watched has forked
+            // or exited, so an idle lane walks only at the five-second full
+            // backstop, which is also mandatory for cleanup. Failed events,
+            // overflow, failed watches or a racing walk require a full scan.
+            if census_turn_due(
+                now,
+                last_census_ms,
+                last_full_census_ms,
+                census_event_pending
+                    || census_event_failed
+                    || census_reactor_failed
+                    || process_watch_unavailable
+                    || census_retry,
+            ) {
                 last_census_ms = Some(now);
                 census_event_pending = false;
                 let event_fallback =
@@ -1191,6 +1223,8 @@ impl Driver<'_> {
                 if census.is_some() && (full_due || fallback) {
                     last_full_census_ms = Some(now);
                 }
+                // A failed census keeps retrying at the walk rate.
+                census_retry = census.is_none();
                 if let Some(census) = census {
                     if full_due || fallback {
                         if !census.is_complete() && !census_warning_active {
@@ -1301,16 +1335,23 @@ impl Driver<'_> {
                 last_observation_ms = Some(now);
             }
             let watches = child.watches();
-            // Pipes and signals wake the reactor. Timer-only work wakes at
-            // its next deadline, including the unchanged 100 ms census.
+            // Pipes, signals and process events wake the reactor. Timer-only
+            // work wakes at its next deadline: the 100 ms cancellation read,
+            // the one-second CPU sample and the five-second full census.
             let wait_now = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
             let wall_ms = wall_started.zip(wall_now()).map_or(0, |(began, current)| {
                 u64::try_from(current.as_micros().saturating_sub(began.as_micros()) / 1000)
                     .unwrap_or(0)
             });
             let mut wait_ms = last_cpu_observation_ms
-                .saturating_add(100)
+                .saturating_add(CPU_SAMPLE_INTERVAL_MS)
                 .saturating_sub(wait_now);
+            if let Some(last) = last_full_census_ms {
+                wait_ms = wait_ms.min(
+                    last.saturating_add(FULL_CENSUS_INTERVAL_MS)
+                        .saturating_sub(wait_now),
+                );
+            }
             if let Some(last) = last_cancel_ms {
                 wait_ms = wait_ms.min(last.saturating_add(100).saturating_sub(wait_now));
             }
@@ -1326,7 +1367,12 @@ impl Driver<'_> {
             if cleanup_pending && let Some(deadline) = drain_deadline {
                 wait_ms = wait_ms.min(deadline.saturating_sub(wait_now));
             }
-            if census_event_pending || census_event_failed {
+            if census_event_pending
+                || census_event_failed
+                || census_reactor_failed
+                || process_watch_unavailable
+                || census_retry
+            {
                 wait_ms = wait_ms.min(
                     last_census_ms
                         .unwrap_or(0)
