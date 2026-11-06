@@ -289,6 +289,38 @@ fn probe_host_exec_path(
 /// written to the launcher or to any argument.
 const TOKEN_HELPER: &str = "!f() { test \"$1\" = get && test -n \"$GH_TOKEN\" && printf 'username=x-access-token\\npassword=%s\\n' \"$GH_TOKEN\"; }; f";
 
+/// Append to the command-scope configuration without discarding caller entries.
+pub(crate) fn install_token_config(
+    env: &mut Vec<(OsString, OsString)>,
+) -> Result<(), ProviderError> {
+    let count = match env.iter().find(|(key, _)| key == "GIT_CONFIG_COUNT") {
+        Some((_, value)) => value
+            .to_str()
+            .and_then(|v| v.parse::<usize>().ok())
+            .ok_or(ProviderError::Malformed)?,
+        None => 0,
+    };
+    let next = count.checked_add(2).ok_or(ProviderError::Malformed)?;
+    env.retain(|(key, _)| key != "GIT_CONFIG_COUNT");
+    env.extend([
+        ("GIT_CONFIG_COUNT".into(), next.to_string().into()),
+        (
+            format!("GIT_CONFIG_KEY_{count}").into(),
+            "credential.helper".into(),
+        ),
+        (format!("GIT_CONFIG_VALUE_{count}").into(), "".into()),
+        (
+            format!("GIT_CONFIG_KEY_{}", count + 1).into(),
+            "credential.https://github.com.helper".into(),
+        ),
+        (
+            format!("GIT_CONFIG_VALUE_{}", count + 1).into(),
+            TOKEN_HELPER.into(),
+        ),
+    ]);
+    Ok(())
+}
+
 pub(crate) fn git_wrapper(git: &Path, options: &GitWrapper) -> Result<Vec<u8>, ProviderError> {
     use std::os::unix::ffi::OsStrExt;
     let git = git.as_os_str().as_bytes();
@@ -326,6 +358,18 @@ pub(crate) fn git_wrapper(git: &Path, options: &GitWrapper) -> Result<Vec<u8>, P
             .as_bytes(),
         );
     }
+    // A cleared environment loses command-scope configuration. Restore the
+    // token helper in that case, ahead of any host helper; without a token,
+    // retain the publishing helper configured by the wrapper.
+    let helper = shell_quote(&format!(
+        "credential.https://github.com.helper={TOKEN_HELPER}"
+    ));
+    bytes.extend_from_slice(
+        format!(
+            "if [ -n \"$GH_TOKEN\" ]; then set -- -c credential.helper= -c {helper} \"$@\"; fi\n"
+        )
+        .as_bytes(),
+    );
     bytes.extend_from_slice(b"exec '");
     for byte in git {
         if *byte == b'\'' {
@@ -341,13 +385,7 @@ pub(crate) fn git_wrapper(git: &Path, options: &GitWrapper) -> Result<Vec<u8>, P
         .map(|value| format!(" -c {value}"))
         .unwrap_or_default();
 
-    // Preserve inherited Git configuration (identity, signing, hooks and
-    // transport policy). Replacing GIT_CONFIG_COUNT would silently discard it.
-    // Only the helper command is an argument; the token is read at run time.
-    let helper = shell_quote(&format!(
-        "credential.https://github.com.helper={TOKEN_HELPER}"
-    ));
-    bytes.extend_from_slice(format!("{include} -c {helper} \"$@\"\n").as_bytes());
+    bytes.extend_from_slice(format!("{include} \"$@\"\n").as_bytes());
     Ok(bytes)
 }
 
@@ -598,7 +636,7 @@ impl LaneRuntime<'_> {
 
     /// `scrubbed_git_config` is for a provider whose shell subprocesses lose
     /// `GIT_CONFIG_GLOBAL`: `scratch/bin/git` then wraps the selected Git and
-    /// sets the variable itself, so Git never opens the unreadable `~/.gitconfig`.
+    /// sets the variable itself, and restores its configured global file.
     pub(crate) fn environment(
         &self,
         scratch: &Path,
@@ -1043,6 +1081,78 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::disallowed_methods)]
+    fn writer_token_precedes_host_helper_for_wrapped_and_absolute_git()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::{
+            io::Write,
+            os::unix::fs::PermissionsExt,
+            process::{Command, Stdio},
+        };
+        let dir = tempfile::tempdir()?;
+        let config = dir.path().join("host-config");
+        let host_helper = dir.path().join("host-helper");
+        std::fs::write(
+            &host_helper,
+            "#!/bin/sh\nprintf 'username=hostuser\\npassword=HOST-CRED\\n'\n",
+        )?;
+        std::fs::set_permissions(&host_helper, std::fs::Permissions::from_mode(0o700))?;
+        std::fs::write(
+            &config,
+            format!("[credential]\n helper = !{}\n", host_helper.display()),
+        )?;
+        let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
+        let wrapper = dir.path().join("git");
+        std::fs::write(&wrapper, git_wrapper(&git, &GitWrapper::default())?)?;
+        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700))?;
+        let mut env = vec![
+            ("GIT_CONFIG_COUNT".into(), "1".into()),
+            ("GIT_CONFIG_KEY_0".into(), "fixture.setting".into()),
+            ("GIT_CONFIG_VALUE_0".into(), "kept".into()),
+        ];
+        install_token_config(&mut env)?;
+        for (executable, with_config, token) in [
+            (&git, false, false),
+            (&git, true, true),
+            (&wrapper, true, true),
+            (&wrapper, false, true),
+        ] {
+            let mut child = Command::new(executable)
+                .args(["credential", "fill"])
+                .env_clear()
+                .envs(env.iter().filter(|_| with_config).cloned())
+                .env("GIT_CONFIG_GLOBAL", &config)
+                .env("GIT_CONFIG_SYSTEM", &config)
+                .env("GH_TOKEN", if token { "fixture-token" } else { "" })
+                .env("PATH", "/usr/bin:/bin")
+                .env("GIT_TERMINAL_PROMPT", "0")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .spawn()?;
+            child
+                .stdin
+                .take()
+                .ok_or("stdin")?
+                .write_all(b"protocol=https\nhost=github.com\n\n")?;
+            let output = child.wait_with_output()?;
+            assert!(output.status.success());
+            assert!(output.stdout.split(|b| *b == b'\n').any(|line| line
+                == if token {
+                    b"username=x-access-token".as_slice()
+                } else {
+                    b"username=hostuser".as_slice()
+                }));
+            assert!(output.stdout.split(|b| *b == b'\n').any(|line| line
+                == if token {
+                    b"password=fixture-token".as_slice()
+                } else {
+                    b"password=HOST-CRED".as_slice()
+                }));
+        }
+        Ok(())
+    }
+
+    #[test]
     fn unencodable_git_path_warns_but_bound_writer_still_refuses() {
         let bin = Path::new("/fixture/scratch:other/bin");
         for scrub in [false, true] {
@@ -1156,6 +1266,13 @@ mod tests {
         init(&repo, false)?;
         init(&scratch.join("git-common"), true)?;
         fs::create_dir_all(scratch.join("git-objects"))?;
+        {
+            use std::io::Write as _;
+            let mut config = fs::OpenOptions::new()
+                .append(true)
+                .open(repo.join(".git/config"))?;
+            writeln!(config, "[fixture]\n poison = host-only")?;
+        }
         let host_head = fs::read(repo.join(".git/HEAD"))?;
         let host_config = fs::read(repo.join(".git/config"))?;
         fs::write(
@@ -1167,7 +1284,7 @@ mod tests {
         fs::write(
             &git,
             format!(
-                "#!/bin/sh\nif [ -z \"$GIT_CONFIG_GLOBAL\" ]; then GIT_CONFIG_GLOBAL={}; export GIT_CONFIG_GLOBAL; fi\nprintf called > {}\nexec {} \"$@\"\n",
+                "#!/bin/sh\nif [ \"$1\" = config ] && [ \"$2\" = --global ] || [ -z \"$GIT_CONFIG_GLOBAL\" ]; then GIT_CONFIG_GLOBAL={}; export GIT_CONFIG_GLOBAL; fi\nprintf called > {}\nexec {} \"$@\"\n",
                 shell_quote(home.join(".gitconfig").to_str().ok_or("global config")?),
                 shell_quote(marker.to_str().ok_or("marker")?),
                 shell_quote(real_git.to_str().ok_or("git")?)
@@ -1212,23 +1329,6 @@ mod tests {
         input.provenant.git = &git;
         input.home = &home;
         let mut spec = registration.adapter.prepare(input)?;
-        let bound = &mut spec.git_wrapper.bound.as_mut().ok_or("bound")?.env;
-        bound.retain(|(key, _)| {
-            ![
-                "GIT_AUTHOR_NAME",
-                "GIT_AUTHOR_EMAIL",
-                "GIT_COMMITTER_NAME",
-                "GIT_COMMITTER_EMAIL",
-            ]
-            .iter()
-            .any(|name| key == name)
-        });
-        bound.extend([
-            ("GIT_AUTHOR_NAME".into(), "Lane Author".into()),
-            ("GIT_AUTHOR_EMAIL".into(), "lane@example.com".into()),
-            ("GIT_COMMITTER_NAME".into(), "Lane Committer".into()),
-            ("GIT_COMMITTER_EMAIL".into(), "lane@example.com".into()),
-        ]);
         spec.configure_publishing(&scratch, &git, &gh, &home, &Default::default())?;
         for step in &spec.setup {
             match step {
@@ -1284,40 +1384,17 @@ mod tests {
         assert!(absolute(&["init", "-q"], &absolute_repo)?.status.success());
         fs::write(nested.join("file"), "absolute Git identity")?;
         assert!(absolute(&["add", "file"], &nested)?.status.success());
-        let host_name = Command::new(&real_git)
-            .args(["config", "--file"])
-            .arg(&identity_config)
-            .args(["--includes", "--get", "user.name"])
-            .output()?;
-        let host_email = Command::new(&real_git)
-            .args(["config", "--file"])
-            .arg(&identity_config)
-            .args(["--includes", "--get", "user.email"])
-            .output()?;
         let host_commit = absolute(&["commit", "-m", "absolute Git"], &nested)?;
+        assert!(
+            host_commit.status.success(),
+            "{}",
+            String::from_utf8_lossy(&host_commit.stderr)
+        );
         let host_commit_identity = absolute(&["log", "-1", "--format=%an <%ae>"], &nested)?;
-        if host_name.status.success() && host_email.status.success() {
-            assert!(
-                host_commit.status.success()
-                    && host_commit_identity.stdout
-                        == [
-                            host_name
-                                .stdout
-                                .strip_suffix(b"\n")
-                                .unwrap_or(&host_name.stdout),
-                            b" <".as_slice(),
-                            host_email
-                                .stdout
-                                .strip_suffix(b"\n")
-                                .unwrap_or(&host_email.stdout),
-                            b">\n".as_slice()
-                        ]
-                        .concat(),
-                "absolute Git did not use the host's configured identity"
-            );
-        } else {
-            assert!(!host_commit.status.success());
-        }
+        assert_eq!(
+            host_commit_identity.stdout,
+            b"Host Name <host@example.com>\n"
+        );
 
         assert!(
             absolute(&["config", "user.name", "Repository Identity"], &nested)?
@@ -1345,10 +1422,6 @@ mod tests {
             b"Repository Identity <repository@example.test>\n"
         );
 
-        fs::write(
-            &identity_config,
-            "[user]\n useConfigOnly = true\n name = Fixture Host\n email = fixture-host@example.test\n",
-        )?;
         let unbound_repo = root.join("unbound-wrapper-repo");
         fs::create_dir(&unbound_repo)?;
         let unbound_path = format!("{}:/usr/bin:/bin", scratch.join("bin").display());
@@ -1369,16 +1442,33 @@ mod tests {
                 .success()
         );
         let unbound_identity = unbound("git log -1 --format='%an <%ae>'")?;
-        assert_eq!(
-            unbound_identity.stdout,
-            b"Fixture Host <fixture-host@example.test>\n"
-        );
+        assert_eq!(unbound_identity.stdout, b"Host Name <host@example.com>\n");
 
-        let empty_identity = root.join("empty-identity.gitconfig");
-        fs::write(&empty_identity, "[user]\n useConfigOnly = true\n")?;
+        // Exercise the config generated by a second launch with no host identity.
+        fs::write(home.join(".gitconfig"), "[fixture]\n empty = true\n")?;
+        let mut empty_input = crate::tests::fixture_input(
+            &route,
+            &plan,
+            &prompt,
+            &repo,
+            (adapter == "claude").then_some(&token),
+        );
+        empty_input.provenant.git = &git;
+        empty_input.home = &home;
+        let empty_spec = registration.adapter.prepare(empty_input)?;
+        let generated = empty_spec
+            .setup
+            .iter()
+            .find_map(|step| match step {
+                SetupStep::WriteFile { path, bytes } if path == &identity_config => Some(bytes),
+                _ => None,
+            })
+            .ok_or("generated empty identity config")?;
+        let saved_config = fs::read(&identity_config)?;
+        fs::write(&identity_config, generated)?;
         let no_identity = root.join("no-identity-repo");
         fs::create_dir(&no_identity)?;
-        let no_identity_env = spec
+        let no_identity_env = empty_spec
             .env
             .iter()
             .filter(|(key, _)| key != "GIT_CONFIG_GLOBAL")
@@ -1389,7 +1479,8 @@ mod tests {
             .current_dir(&no_identity)
             .env_clear()
             .envs(no_identity_env.iter().cloned())
-            .env("GIT_CONFIG_GLOBAL", &empty_identity)
+            .env("GIT_CONFIG_GLOBAL", &identity_config)
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
             .output()?;
         assert!(init.status.success());
         fs::write(no_identity.join("file"), "missing identity")?;
@@ -1398,7 +1489,8 @@ mod tests {
             .current_dir(&no_identity)
             .env_clear()
             .envs(no_identity_env.iter().cloned())
-            .env("GIT_CONFIG_GLOBAL", &empty_identity)
+            .env("GIT_CONFIG_GLOBAL", &identity_config)
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
             .output()?;
         assert!(add.status.success());
         let refused_commit = Command::new(&real_git)
@@ -1406,9 +1498,41 @@ mod tests {
             .current_dir(&no_identity)
             .env_clear()
             .envs(no_identity_env.iter().cloned())
-            .env("GIT_CONFIG_GLOBAL", &empty_identity)
+            .env("GIT_CONFIG_GLOBAL", &identity_config)
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
             .output()?;
         assert!(!refused_commit.status.success());
+        assert!(
+            String::from_utf8_lossy(&refused_commit.stderr).contains("auto-detection is disabled")
+        );
+        fs::write(&identity_config, saved_config)?;
+        for value in ["Ann\rLee", "Ann\n", "Ann\u{000c}Lee"] {
+            assert!(
+                Command::new(&real_git)
+                    .args(["config", "--file"])
+                    .arg(home.join(".gitconfig"))
+                    .args(["user.name", value])
+                    .status()?
+                    .success()
+            );
+            let mut bad_input = crate::tests::fixture_input(
+                &route,
+                &plan,
+                &prompt,
+                &repo,
+                (adapter == "claude").then_some(&token),
+            );
+            bad_input.provenant.git = &git;
+            bad_input.home = &home;
+            assert!(matches!(
+                registration.adapter.prepare(bad_input),
+                Err(ProviderError::InvalidPath)
+            ));
+        }
+        fs::write(
+            home.join(".gitconfig"),
+            "[user]\n name = Host Name\n email = host@example.com\n[url \"https://rewritten.example/\"]\n insteadOf = fixture://\n",
+        )?;
 
         let lane_subdir = repo.join("nested");
         fs::create_dir(&lane_subdir)?;
@@ -1448,7 +1572,7 @@ mod tests {
         );
         assert!(scratch.join("git-objects").read_dir()?.next().is_some());
         let author = run(&["log", "-1", "--format=%an <%ae>"])?;
-        assert_eq!(author.stdout, b"Lane Author <lane@example.com>\n");
+        assert_eq!(author.stdout, b"Host Name <host@example.com>\n");
         let lane_head = run(&["rev-parse", "HEAD"])?.stdout;
         let lane_index = fs::read(scratch.join("git-common/index"))?;
         let fixture = scratch.join("fixture-repo");
@@ -2116,9 +2240,8 @@ mod tests {
             assert!(output.status.success());
             String::from_utf8(output.stdout).unwrap()
         };
-        let prefix = format!("-c credential.https://github.com.helper={TOKEN_HELPER}");
-        let bound = |args: &str| format!("/private/it's|Lane||{prefix} {args}\n");
-        let unbound = |args: &str| format!("|||{prefix} {args}\n");
+        let bound = |args: &str| format!("/private/it's|Lane||{args}\n");
+        let unbound = |args: &str| format!("|||{args}\n");
         assert_eq!(run(&worktree, &["status"]), bound("status"));
         assert_eq!(run(&nested, &["status"]), bound("status"));
         for cwd in [&outside, &sibling] {
@@ -2217,11 +2340,8 @@ mod tests {
             .args(["status", "argument with spaces"])
             .output()?;
         assert!(output.status.success());
-        let helper = format!("credential.https://github.com.helper={TOKEN_HELPER}");
         let expected = [
             git.as_os_str().as_bytes(),
-            b"-c",
-            helper.as_bytes(),
             b"status",
             b"argument with spaces",
         ]

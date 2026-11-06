@@ -585,6 +585,9 @@ pub(crate) fn private_git_objects(
             _ => continue,
         };
         let value = value.to_str().ok_or(ProviderError::InvalidPath)?;
+        if value.chars().any(char::is_control) {
+            return Err(ProviderError::InvalidPath);
+        }
         config_text.push_str(&format!("\t{name} = {}\n", git_config_quote(value)));
     }
     spec.setup.push(SetupStep::WriteFile {
@@ -592,6 +595,7 @@ pub(crate) fn private_git_objects(
         bytes: config_text.into_bytes(),
     });
     spec.env.retain(|(key, _)| key != "GIT_CONFIG_NOSYSTEM");
+    crate::lane::install_token_config(&mut spec.env)?;
     if let Some((_, current)) = spec
         .env
         .iter_mut()
@@ -663,7 +667,9 @@ fn git_config_quote(value: &str) -> String {
             '\n' => quoted.push_str("\\n"),
             '\t' => quoted.push_str("\\t"),
             '\u{0008}' => quoted.push_str("\\b"),
-            control if control.is_control() => {}
+            control if control.is_control() => {
+                unreachable!("control characters are rejected before quoting")
+            }
             character => quoted.push(character),
         }
     }
@@ -1424,20 +1430,10 @@ pub(crate) fn uuid_v4(mut bytes: [u8; 16]) -> String {
 #[cfg(test)]
 mod git_config_quote_tests {
     #[test]
-    #[allow(clippy::disallowed_methods)]
-    fn unsupported_controls_are_stripped_and_git_accepts_value() {
-        let dir = tempfile::tempdir().unwrap();
-        let config = dir.path().join("config");
-        let value = super::git_config_quote("A\rB\u{000c}C\u{0001}D");
-        std::fs::write(&config, format!("[user]\n name = {value}\n")).unwrap();
-        let git = provenant_os::git::git_executable().unwrap();
-        let output = std::process::Command::new(git)
-            .args(["config", "--file"])
-            .arg(config)
-            .args(["--get", "user.name"])
-            .output()
-            .unwrap();
-        assert!(output.status.success());
-        assert_eq!(output.stdout, b"ABCD\n");
+    fn quote_preserves_git_metacharacters() {
+        assert_eq!(
+            super::git_config_quote("Ann \"Lee\""),
+            "\"Ann \\\"Lee\\\"\""
+        );
     }
 }

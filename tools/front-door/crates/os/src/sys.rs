@@ -41,7 +41,7 @@ fn git_identity_scope(git: &Path, cwd: Option<&Path>) -> Vec<(OsString, OsString
             && output.status.success()
             && let Ok(value) = String::from_utf8(output.stdout)
         {
-            let value = value.trim_end_matches('\n');
+            let value = value.strip_suffix('\n').unwrap_or(&value);
             if !value.is_empty() {
                 env.push((author.into(), value.into()));
                 env.push((committer.into(), value.into()));

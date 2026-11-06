@@ -968,6 +968,17 @@ Git run by absolute path inside the checkout bypasses the shim, finds the
 original gitfile and can only read the shared metadata, never write it, so it
 cannot reach other lanes or change the host repository. Outside the checkout
 `git` discovers its repository from the directory as usual.
+Writer launch sets `GIT_CONFIG_GLOBAL` to a private file that includes the host's
+existing global Git configuration and adds the resolved global identity and
+`user.useConfigOnly=true`. System Git configuration remains enabled. Repository
+identity overrides the global identity; absent identity cannot fall back to a
+generated hostname identity. Identity values containing control characters
+refuse launch. The included host files remain readable in the writer sandbox.
+Command-scope Git configuration resets credential helpers and supplies the lane's
+GitHub token helper; the wrapper restores that precedence when a subprocess
+clears the environment but retains `GH_TOKEN`. Other host Git settings remain in
+force. Explicit command-line Git configuration can override these settings.
+
 The small Git wrapper has one source and one installation path for the pinned
 executable and its configuration. It applies the lane binding and the lane's
 commit identity inside the checkout, whether or not a subprocess cleared its
@@ -978,7 +989,7 @@ survive `env -i`-style subprocesses. The restore needs `git` to resolve to the
 wrapper: a subprocess that also drops `PATH` reaches system Git, which finds
 the shared repository through the worktree's `.git` file. That Git can read
 shared metadata, which the sandbox grants read-only, but cannot write it, and
-it loses the publishing credential. Per-adapter tests for every writer adapter
+it loses wrapper-provided publishing configuration when its environment is cleared. Per-adapter tests for every writer adapter
 (Claude, Codex, Cursor, Agy and OpenCode) prove the pinned executable, the
 private refs, index and objects, the identity scrub and publishing credentials
 under a cleared environment that keeps `PATH`. The command adapter does not
