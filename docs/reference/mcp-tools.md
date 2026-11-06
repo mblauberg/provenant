@@ -742,7 +742,8 @@ Source: `tools/front-door/crates/fabric-mcp/tests/fixtures/all-tool-schemas.json
           "by": {
             "enum": [
               "tier",
-              "template"
+              "template",
+              "node"
             ],
             "type": "string"
           },

@@ -1405,7 +1405,8 @@
             "by": {
               "enum": [
                 "tier",
-                "template"
+                "template",
+                "node"
               ],
               "type": "string"
             },
