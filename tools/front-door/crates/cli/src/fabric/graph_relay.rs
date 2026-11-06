@@ -79,13 +79,15 @@ pub fn serve(
         RelayOp::Add(request) => {
             let library = template_library(&context.home, &context.cwd)
                 .map_err(|error| refused("invalid_template", error))?;
-            let resolvers = Default::default();
+            let config = provenant_config::read_with_domains(&context.roots, &crate::domains::SECTIONS)
+                .map_err(|error| refused("invalid_config", error.to_string()))?;
+            let resolvers = launch_resolvers(&config.domains.routing.review, &document)
+                .map_err(|error| refused("invalid_review", error))?;
             let patch_context = PatchContext {
                 journal: None,
                 library: &library,
                 resolvers: &resolvers,
                 scan: &scan_for_secrets,
-                journal: None,
                 limits: &context.config.graph.limits,
             };
             let writer_base = if request.writer {
@@ -161,6 +163,26 @@ pub fn serve(
     };
     journal.save(&checkpoint).map_err(journal_error)?;
     Ok(value)
+}
+
+/// Resolve dynamic panels at the host, using the graph's declared review risk.
+fn launch_resolvers(
+    review: &provenant_routing::ReviewConfig,
+    document: &provenant_fabric_runtime::graph::GraphDocument,
+) -> Result<std::collections::BTreeMap<String, Vec<String>>, String> {
+    let mut request: provenant_routing::ReviewRequest = document.extra.get("review")
+        .cloned().map(serde_json::from_value).transpose()
+        .map_err(|error| format!("invalid graph review request: {error}"))?
+        .unwrap_or_default();
+    if let Some(context) = &document.context {
+        request.risk_tier = request.risk_tier.or_else(|| context.risk_tier.clone());
+        request.kind = request.kind.or_else(|| context.task_kind.clone());
+    }
+    let panel = review.resolve_panel(&request, None, &[], false)?;
+    Ok(std::collections::BTreeMap::from([(
+        "review-panel".into(),
+        panel.slots.into_iter().map(|slot| slot.lens).collect(),
+    )]))
 }
 
 fn provision_child(
@@ -545,5 +567,28 @@ mod provisioning_tests {
             "preserve"
         );
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod panel_tests {
+    use super::*;
+
+    #[test]
+    fn relay_review_resolver_uses_graph_risk_and_tags() {
+        let review = provenant_routing::RoutingConfig::default().review;
+        let mut document: provenant_fabric_runtime::graph::GraphDocument =
+            serde_json::from_value(json!({
+                "schema_version": 1, "graph_id": "panel-risk", "nodes": [],
+                "context": {"risk_tier": "routine"},
+            })).unwrap();
+        let routine = launch_resolvers(&review, &document).unwrap();
+        assert!(routine["review-panel"].iter().any(|lens| lens == "correctness-spec"));
+        assert!(!routine["review-panel"].iter().any(|lens| lens == "tests"));
+        document.context.as_mut().unwrap().risk_tier = Some("crucial".into());
+        document.extra.insert("review".into(), json!({"risk_tags": ["security"]}));
+        let crucial = launch_resolvers(&review, &document).unwrap();
+        assert!(crucial["review-panel"].iter().any(|lens| lens == "tests"));
+        assert!(crucial["review-panel"].iter().any(|lens| lens == "security-privacy"));
     }
 }

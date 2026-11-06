@@ -278,12 +278,6 @@ fn child_patch(
                 message: "writer composite children require explicit per-node work bindings".into(),
             });
         }
-        if !template.parameters.contains_key("brief") && !request.brief.is_empty() {
-            return Err(PatchError {
-                code: "invalid",
-                message: "composite child template must declare a brief parameter".into(),
-            });
-        }
         node.remove("brief");
         node.remove("tier");
         if template.parameters.contains_key("brief") {
@@ -300,6 +294,9 @@ fn child_patch(
                 message,
             })?;
         inherit_child_controls(&mut compiled, request);
+        if !template.parameters.contains_key("brief") && !request.brief.is_empty() {
+            append_child_brief(&mut compiled, &request.brief);
+        }
         // Keep `use` and its effective parameters for admission evidence. The
         // compiled members override the template's default members on admission.
         if let Some(composite) = compiled.get("composite") {
@@ -313,6 +310,23 @@ fn child_patch(
         nodes: vec![Value::Object(node)],
         ..Default::default()
     })
+}
+
+// A composite with no brief parameter still receives the caller's subject.
+// Preserve each template's instructions and append the supplied context.
+fn append_child_brief(node: &mut Value, brief: &str) {
+    let mut boundary = false;
+    for pointer in ["/composite/nodes", "/loop/body"] {
+        if let Some(children) = node.pointer_mut(pointer).and_then(Value::as_array_mut) {
+            boundary = true;
+            for child in children {
+                append_child_brief(child, brief);
+            }
+        }
+    }
+    if !boundary && node.get("prompt").is_some() {
+        node["prompt"] = format!("{}\n\n{brief}", node["prompt"].as_str().unwrap_or_default()).into();
+    }
 }
 
 /// A launch limit applies to the provider processes, including those below
