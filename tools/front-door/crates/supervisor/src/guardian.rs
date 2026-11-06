@@ -298,6 +298,10 @@ pub trait DiskPressure {
 /// except when the attempt directory is provably removed: there is nowhere to
 /// publish the exit or settle, so only the writer reservation remains.
 pub trait Holder {
+    /// Host graph evidence: unknown or live nested work must prevent escapee stops.
+    fn has_live_children(&self, _context: &[u8]) -> Result<bool> {
+        Ok(false)
+    }
     fn admit(&self, context: &[u8], attempt: &Directory) -> Result<()>;
     /// Stop host-side submission services before descendant cleanup begins.
     /// Failure is bookkeeping evidence, never a provider stop reason.
@@ -600,10 +604,9 @@ struct Driver<'a> {
     protected: std::collections::BTreeSet<ProcessIdentity>,
     registry: Option<&'a dyn ChildRegistry>,
     descendant_stop_allowed: bool,
-    /// A stop aimed at one exact sandbox escapee is safe this tick: either the
-    /// nested-child registry was read (owners it lists that cannot be proven
-    /// stay in `protected`), or no registry is wired. Graph children launch
-    /// on the host, outside the provider's descendant tree. Independent of
+    /// A stop aimed at one exact sandbox escapee is safe this tick: the registry
+    /// is absent or readable, and the host reports no live graph children.
+    /// Unproven registered owners stay protected. Independent of
     /// `descendant_stop_allowed`.
     escapee_stop_allowed: bool,
 }

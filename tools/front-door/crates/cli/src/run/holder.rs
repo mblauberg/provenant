@@ -93,7 +93,53 @@ impl Drop for HostHolder<'_> {
         let _ = self.stop();
     }
 }
+/// Read retained graph state after the relay has closed, including children
+/// submitted before provider exit and descendants of composite children.
+fn live_graph_children(
+    state: &provenant_core::StateRoot,
+    project: provenant_core::ProjectId,
+    reference: &str,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    use provenant_fabric_runtime::graph::{FileJournal, NodeState, relay};
+    for id in FileJournal::pending_graph_ids(state, project)? {
+        let checkpoint =
+            FileJournal::read_checkpoint(state, project, &id)?.ok_or("missing graph checkpoint")?;
+        if let Some(parent) = relay::historical_parent_of_attempt(&checkpoint, reference) {
+            let prefix = format!("{parent}--");
+            if checkpoint.nodes.iter().any(|node| {
+                node.id.starts_with(&prefix)
+                    && matches!(node.state, NodeState::Pending | NodeState::Running)
+            }) {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
 impl Holder for HostHolder<'_> {
+    fn has_live_children(&self, raw: &[u8]) -> custody::Result<bool> {
+        let read = || -> Result<bool, Box<dyn std::error::Error>> {
+            let context: run::HolderContext = serde_json::from_slice(raw)?;
+            let Some(launch) = &context.launch else {
+                return Ok(false);
+            };
+            let mut inputs = provenant_core::RootInputs::new(
+                context.roots.home.clone(),
+                context.roots.checkout.clone(),
+            );
+            inputs.state_dir = Some(launch.configuration_root.clone());
+            let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+            let ctx = crate::fabric::Context::open(roots, &context.roots.home, &launch.cwd)?;
+            if ctx.identity.project != context.project_id {
+                return Err("Fabric custody project mismatch".into());
+            }
+            let reference = format!("{}/{}", ctx.identity.host, context.attempt_id);
+            live_graph_children(&ctx.roots.state, context.project_id, &reference)
+        };
+        read().map_err(|error| custody::CustodyError::Io(std::io::Error::other(error.to_string())))
+    }
+
     fn admit(&self, raw: &[u8], attempt: &Directory) -> custody::Result<()> {
         self.inner.admit(raw, attempt)?;
         let (context, store) = run::HolderContext::open(raw)
@@ -168,6 +214,72 @@ mod tests {
     use super::*;
     use provenant_core::{ActorId, Digest, OperationId, ProjectId, RootInputs, RunId, TaskId};
     use provenant_records::CanonicalV1;
+
+    #[test]
+    fn custody_reads_live_graph_children_after_parent_exit()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_fabric_runtime::graph::{
+            FileJournal, GraphCheckpoint, GraphDocument, GraphExecution, GraphJournal,
+        };
+        use serde_json::json;
+        let temp = tempfile::tempdir()?;
+        let clock = SystemClock::new();
+        let (context, _) = child_fixture(temp.path(), &clock)?;
+        let state = &context.state_root;
+        let project = context.project_id;
+        std::fs::create_dir_all(state.as_path())?;
+        assert!(!live_graph_children(state, project, "host/parent-attempt")?);
+        let cancel = CancelToken::new();
+        let budget = provenant_core::WaitBudget::cli(clock.mono_now(), 5)?;
+        let mut journal = FileJournal::open(state, project, "custody", budget, &cancel, &clock)?;
+        let document: GraphDocument = serde_json::from_value(json!({
+            "schema_version":2,"graph_id":"custody","integration_branch":"main",
+            "nodes":[{"id":"parent","access":"read_only","prompt":"Go","route":{"alias":"senior"}}]
+        }))?;
+        journal.bind(GraphExecution {
+            review_base: None,
+            extra: Default::default(),
+            integration_base: None,
+            directory: temp.path().to_path_buf(),
+            document,
+        })?;
+        for status in [
+            "pending",
+            "running",
+            "succeeded",
+            "failed",
+            "blocked",
+            "skipped",
+        ] {
+            let checkpoint: GraphCheckpoint = serde_json::from_value(json!({
+                "schema_version":1,"graph_id":"custody","plan_digest":"fixture",
+                "nodes":[{"id":"parent","state":"succeeded","attempts":[{
+                    "launched":true,"key":{"graph_id":"custody","node_id":"parent","route_index":0},
+                    "route":{"alias":"senior"},"state":"terminal","attempt_ref":"host/parent-attempt",
+                    "outcome":null,"launch_actor":"fixture"
+                }]}, {"id":"parent--child--grandchild","state":status,"attempts":[]},
+                {"id":"parental--other","state":"running","attempts":[]}]
+            }))?;
+            journal.save(&checkpoint)?;
+            assert_eq!(
+                live_graph_children(state, project, "host/parent-attempt")?,
+                matches!(status, "pending" | "running"),
+                "{status}"
+            );
+            assert!(!live_graph_children(state, project, "host/other-attempt")?);
+        }
+        drop(journal);
+        std::fs::write(
+            state
+                .as_path()
+                .join("fabric/graphs")
+                .join(project.to_string())
+                .join("graph-custody.json"),
+            b"broken checkpoint",
+        )?;
+        assert!(live_graph_children(state, project, "host/parent-attempt").is_err());
+        Ok(())
+    }
 
     #[test]
     fn launch_seal_records_root_network_and_legacy_defaults_restrictively()
