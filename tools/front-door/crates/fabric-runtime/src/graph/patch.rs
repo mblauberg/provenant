@@ -603,9 +603,11 @@ fn retry_node_scope(
     // A producer's old descendants cannot share names and dependency edges
     // with a new execution, so their expansions retire in this same candidate.
     let mut retired = BTreeSet::new();
-    for container in expanded.nodes.iter().filter(|node| {
-        reset_ids.contains(&node.id) && redo_topology(node)
-    }) {
+    for container in expanded
+        .nodes
+        .iter()
+        .filter(|node| reset_ids.contains(&node.id) && redo_topology(node))
+    {
         retired.extend(
             super::retire::dynamic_subtree(
                 &mut candidate,
