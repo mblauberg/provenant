@@ -336,6 +336,9 @@ pub(crate) fn unified_graph_command(
     globals: &provenant_cli::Globals,
     workers: &'static dyn WorkerObserver,
 ) -> Option<u8> {
+    if provenant_cli::fabric::in_lane() && matches!(command, GraphCommand::Stop { .. }) {
+        return None;
+    }
     let name = match command {
         GraphCommand::Status { .. } => "status",
         GraphCommand::Stop { .. } => "stop",

@@ -1478,6 +1478,7 @@ pub fn lane_run_request(
                     | "write_scope"
                     | "explain"
                     | "wait_seconds"
+                    | "detached"
                     | "idempotency_key"
                     | "set"
             )
@@ -1522,7 +1523,7 @@ pub fn lane_run_request(
         timeout_seconds: None,
         writer,
         write_scope,
-        detached: false,
+        detached: field("detached").map(|value| value.as_bool().ok_or_else(invalid)).transpose()?.unwrap_or(false),
         idempotency_key,
         reason: Some("run".into()),
     }))

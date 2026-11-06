@@ -1904,12 +1904,24 @@ impl Factory {
             .load(id)
             .map_err(graph_journal_error)?
             .ok_or(FacadeError::NotFound)?;
-        if let GraphInput::Cancel { reason, .. } = input {
+        if let GraphInput::Cancel { reason, .. } = &input {
             // Persist the admission fence before asking the run owner to stop live attempts.
             if !checkpoint.cancelled || reason.is_some() {
-                checkpoint.cancel_reason = reason;
+                checkpoint.cancel_reason = reason.clone();
             }
             checkpoint.cancelled = true;
+            let detached = provenant_fabric_runtime::graph::relay::fence_detached_cancellation(
+                &FileJournal::execution(
+                    &self.context.roots.state,
+                    self.context.identity.project,
+                    id,
+                )
+                .map_err(graph_journal_error)?
+                .ok_or(FacadeError::NotFound)?
+                .document,
+                &mut checkpoint,
+            )
+            .map_err(|_| FacadeError::InvalidInput { detail: None })?;
             provenant_fabric_runtime::graph::mark_cancelled_nodes_without_live_attempts(
                 &mut checkpoint,
             );
@@ -1923,6 +1935,9 @@ impl Factory {
             // One unresolvable target must not strand the others; report the first failure last.
             let mut first_error = None;
             for node in &checkpoint.nodes {
+                if detached.contains(&node.id) {
+                    continue;
+                }
                 for attempt in &node.attempts {
                     if attempt.state == provenant_fabric_runtime::graph::AttemptState::Terminal {
                         continue;
