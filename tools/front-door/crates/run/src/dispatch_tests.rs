@@ -4919,6 +4919,137 @@ fn lane_waits_name_the_class_and_what_each_unstarted_lane_waits_for() -> TestRes
 }
 
 #[test]
+fn waiting_parent_yields_host_and_project_leases_and_both_writers_finish() -> TestResult {
+    child_wait_lease_cycle(false)
+}
+
+#[test]
+fn blocked_parent_reclaim_preserves_work_and_reports_admission_wait() -> TestResult {
+    child_wait_lease_cycle(true)
+}
+
+fn child_wait_lease_cycle(block_reclaim: bool) -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let mut store = RunStore::open(&context(temp.path())?, &call)?;
+    store.set_admission_policy(AdmissionPolicy {
+        startup_spacing_ms: 0,
+        ..AdmissionPolicy::default()
+    });
+    std::fs::write(
+        store.writer_registry.join("config.toml"),
+        "schema_version=1\n[domains.fabric.lanes]\nmax_writer_lanes=1\nmax_project_writer_lanes=1\n",
+    )?;
+    let facts = HostFacts::new(100);
+    let parent = lane(121, true);
+    let child = lane(122, true);
+    let parent_id = starting(&store, &parent, &call)?;
+    let parent_record = store
+        .claim_observed(parent_id, &clock, &call, &facts)?
+        .ok_or("parent claim")?;
+    let parent_dir = store.attempt_dir(parent.run_id, parent_id, false)?;
+    artifacts::seal(&parent_dir, "stdout.log", b"parent work", CAPTURE_LIMIT)?;
+    let child_id = starting(&store, &child, &call)?;
+    assert!(
+        store
+            .claim_observed(child_id, &clock, &call, &facts)?
+            .is_none()
+    );
+    if block_reclaim {
+        // The ledger yield commits before the owning store. Simulate the
+        // latter failing: cleanup must still reclaim despite an active ticket.
+        store.db.execute_batch("CREATE TEMP TRIGGER fail_child_wait BEFORE UPDATE ON admission BEGIN SELECT RAISE(ABORT,'injected store failure'); END;")?;
+        assert!(
+            store
+                .set_child_wait_observed(parent_id, true, &call, &facts)
+                .is_err()
+        );
+        store.db.execute_batch("DROP TRIGGER fail_child_wait;")?;
+    } else {
+        assert!(store.set_child_wait_observed(parent_id, true, &call, &facts)?);
+        assert!(
+            store.lane_waits_with_resources(&[store.record(parent_id, &call)?], &call, &facts)[0]
+                .waiting_for
+                .contains("children")
+        );
+    }
+    let child_record = store
+        .claim_observed(child_id, &clock, &call, &facts)?
+        .ok_or("child claim")?;
+    if block_reclaim {
+        assert!(!store.set_child_wait_observed(parent_id, false, &call, &facts)?);
+        let reopened = RunStore::open(&context(temp.path())?, &call)?;
+        let retained = reopened.record(parent_id, &call)?;
+        assert_eq!(retained.started_at, parent_record.started_at);
+        assert_eq!(retained.generation, parent_record.generation);
+        assert!(matches!(retained.state, AttemptState::Running { .. }));
+        assert!(
+            reopened.lane_waits_with_resources(&[retained], &call, &facts)[0]
+                .waiting_for
+                .contains("admission")
+        );
+        assert_eq!(
+            parent_dir.read_stable("stdout.log".as_ref(), CAPTURE_LIMIT)?,
+            b"parent work"
+        );
+    }
+    let child_dir = store.attempt_dir(child.run_id, child_id, false)?;
+    artifacts::seal(&child_dir, "stdout.log", b"child work", CAPTURE_LIMIT)?;
+    let child_exit = ExitObservation {
+        scope: RunStore::scope(&child_record),
+        ..exit()
+    };
+    seal_exit(&store, &child_exit)?;
+    store.publish_terminal(
+        child_id,
+        child_record.revision,
+        &TerminalPublication {
+            started_at: child_record.started_at,
+            result: "child work",
+            ..super::tests::publication()
+        },
+        &child_exit,
+        &call,
+    )?;
+    assert!(store.set_child_wait_observed(parent_id, false, &call, &facts)?);
+    let resumed = store.record(parent_id, &call)?;
+    assert_eq!(resumed.started_at, parent_record.started_at);
+    assert_eq!(resumed.runtime_deadline, parent_record.runtime_deadline);
+    assert!(
+        store
+            .lane_waits_with_resources(&[resumed], &call, &facts)
+            .is_empty()
+    );
+    let parent_exit = ExitObservation {
+        scope: RunStore::scope(&parent_record),
+        ..exit()
+    };
+    seal_exit(&store, &parent_exit)?;
+    store.publish_terminal(
+        parent_id,
+        store.record(parent_id, &call)?.revision,
+        &TerminalPublication {
+            started_at: parent_record.started_at,
+            result: "parent work",
+            ..super::tests::publication()
+        },
+        &parent_exit,
+        &call,
+    )?;
+    for id in [parent_id, child_id] {
+        assert!(matches!(
+            store.record(id, &call)?.state,
+            AttemptState::Terminal {
+                outcome: Outcome::Succeeded,
+                ..
+            }
+        ));
+    }
+    Ok(())
+}
+
+#[test]
 fn child_stores_share_the_host_ledger_and_recovery_frees_a_lease() -> TestResult {
     let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());

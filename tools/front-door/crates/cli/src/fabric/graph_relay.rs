@@ -158,6 +158,24 @@ pub fn serve(
             return Ok(relay::child_states(&checkpoint, &parent));
         }
         RelayOp::Wait { waiting } => {
+            let call = provenant_run::Request { clock, cancel };
+            let execution = provenant_run::ExecutionContext {
+                state_root: state.clone(),
+                project_id: project,
+                actor_id: context.identity.inbox.actor,
+                read_prompts: false,
+            };
+            let store = provenant_run::RunStore::open(&execution, &call).map_err(journal_error)?;
+            let id = provenant_core::AttemptId::parse(attempt).map_err(journal_error)?;
+            let admitted = store
+                .set_child_wait(id, waiting, &call)
+                .map_err(journal_error)?;
+            // Keep the graph slot yielded until host admission is reclaimed.
+            // Each retry releases the journal lock so children can settle.
+            if !admitted {
+                return Ok(json!({"graph_id": graph_id, "node": parent,
+                    "waiting": true, "reclaiming": true}));
+            }
             relay::set_waiting(&mut checkpoint, &parent, waiting);
             json!({"graph_id": graph_id, "node": parent, "waiting": waiting})
         }
@@ -338,19 +356,27 @@ pub fn while_waiting<T>(
     with_waiting(
         |waiting| {
             let cleanup = CancelToken::new();
-            from_lane(
-                &RelayOp::Wait { waiting },
-                if waiting { cancel } else { &cleanup },
-                if waiting {
-                    within
-                } else {
-                    within.min(std::time::Duration::from_secs(5))
-                },
-            )
-            .map(|_| ())
+            wait_for_admission(|| {
+                from_lane(
+                    &RelayOp::Wait { waiting },
+                    if waiting { cancel } else { &cleanup },
+                    within,
+                )
+            })
         },
         wait,
     )
+}
+
+fn wait_for_admission(
+    mut send: impl FnMut() -> Result<Value, ServiceError>,
+) -> Result<(), ServiceError> {
+    while send()?["reclaiming"] == true {
+        // Each frame releases the graph lock. Retain the completed child-wait
+        // result in with_waiting until the parent has admission again.
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    Ok(())
 }
 
 fn with_waiting<T>(
@@ -369,6 +395,31 @@ fn with_waiting<T>(
 #[cfg(test)]
 mod wait_tests {
     use super::*;
+
+    #[test]
+    fn pending_reclaims_retain_the_completed_child_wait_result() {
+        let mut reclaims = 0;
+        let mut waits = 0;
+        let result = with_waiting(
+            |waiting| {
+                if waiting {
+                    return Ok(());
+                }
+                wait_for_admission(|| {
+                    reclaims += 1;
+                    Ok(json!({"reclaiming": reclaims < 3}))
+                })
+            },
+            || {
+                waits += 1;
+                Ok(json!({"children": [{"node": "parent--child", "result": "saved work"}]}))
+            },
+        )
+        .unwrap();
+        assert_eq!(reclaims, 3);
+        assert_eq!(waits, 1);
+        assert_eq!(result["children"][0]["result"], "saved work");
+    }
 
     #[test]
     fn returning_from_a_child_wait_clears_waiting_on_success_and_error() {
