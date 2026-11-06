@@ -309,6 +309,33 @@ pub fn create(
     create_with_default(context, request, cancel, None)
 }
 
+/// Refuse to create a writer branch over an existing remote-only branch.
+/// Discover the exact remote ref even when the configured fetch refspec omits it.
+pub fn require_no_remote_only_branch(
+    context: &WorktreeContext<'_>,
+    name: &str,
+    cancel: &CancelToken,
+) -> Result<(), WorktreeError> {
+    let branch = GitRefName::branch(name).map_err(|_| WorktreeError::InvalidRequest)?;
+    if read_branch_tips(context, cancel)?.contains_key(&branch) {
+        return Ok(());
+    }
+    match crate::utility::fetch_missing_remote_branch(
+        context.executor,
+        context.repo,
+        context.utility,
+        context.home,
+        &format!("origin/{name}"),
+        context.mutation_budget,
+        cancel,
+    )? {
+        crate::utility::RemoteBase::Found(_) => Err(WorktreeError::RemoteOnlyBranch {
+            branch: name.to_owned(),
+        }),
+        crate::utility::RemoteBase::NotRemote | crate::utility::RemoteBase::Missing => Ok(()),
+    }
+}
+
 fn create_with_default(
     context: &WorktreeContext<'_>,
     request: WorktreeCreate,

@@ -90,6 +90,10 @@ pub enum WorktreeError {
     WriterBusy { holder: Option<AttemptId> },
     #[error("branch name collides with existing ref {existing}")]
     BranchCollision { existing: String },
+    #[error(
+        "branch {branch} exists on origin but not locally; fetch it and create the local branch at origin/{branch} before starting the writer"
+    )]
+    RemoteOnlyBranch { branch: String },
     #[error("branch {branch} at {head} does not contain base {base}; omit --base to reuse it")]
     BranchExistsWithBase {
         branch: String,

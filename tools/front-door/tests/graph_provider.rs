@@ -622,6 +622,82 @@ fn policy_codex_fixture() -> Result<TestRig> {
     Ok(rig)
 }
 
+fn remote_only_writer_cli_refuses_without_leaving_a_lane() -> Result {
+    let rig = policy_codex_fixture()?;
+    let git = provenant_os::git::git_executable().ok_or("git")?;
+    let remote = rig.root.join("remote.git");
+    for args in [
+        vec!["init", "--bare", remote.to_str().ok_or("remote")?],
+        vec!["commit", "--allow-empty", "-qm", "base"],
+        vec!["branch", "remote-only"],
+        vec!["remote", "add", "origin", remote.to_str().ok_or("remote")?],
+        vec!["push", "origin", "remote-only"],
+        vec!["branch", "-D", "remote-only"],
+        vec!["update-ref", "-d", "refs/remotes/origin/remote-only"],
+        vec!["commit", "--allow-empty", "-qm", "different local tip"],
+    ] {
+        let output = rig.execute(&git, &args, None)?;
+        assert_eq!(code(&output), 0, "{args:?}: {output:?}");
+    }
+    let auth = br#"{"tokens":{"account_id":"fixture-one"}}"#;
+    let key = provenant_providers::identity::codex_account(auth).ok_or("account key")?;
+    support::register_account(&rig, "codex", "fixture", &key, &rig.root.join("codex"))
+        .map_err(|e| format!("register account: {e}"))?;
+    for args in [
+        vec![
+            "run",
+            "remote writer",
+            "--mode",
+            "worktree-write",
+            "--branch",
+            "remote-only",
+            "--base",
+            "HEAD",
+            "--wait=30s",
+            "--json",
+        ],
+        vec![
+            "run",
+            "remote writer",
+            "--mode",
+            "worktree-write",
+            "--worktree",
+            "remote-only",
+            "--wait=30s",
+            "--json",
+        ],
+    ] {
+        for _ in 0..2 {
+            let output = rig
+                .command(&args)
+                .map_err(|e| format!("run {args:?}: {e}"))?;
+            let combined = format!(
+                "{} {}",
+                String::from_utf8_lossy(&output.stdout.bytes),
+                String::from_utf8_lossy(&output.stderr.bytes)
+            );
+            assert_ne!(code(&output), 0, "{args:?}: {combined}");
+            assert!(!combined.contains("WRITER_UNKNOWN"), "{combined}");
+            if args.contains(&"--branch") {
+                assert!(
+                    combined.contains("exists on origin but not locally"),
+                    "{combined}"
+                );
+            } else {
+                assert!(
+                    combined.contains("worktree")
+                        && (combined.contains("not found")
+                            || combined.contains("missing")
+                            || combined.contains("does not exist")),
+                    "{combined}"
+                );
+            }
+            assert!(!rig.project.join(".worktrees/remote-only").exists());
+        }
+    }
+    Ok(())
+}
+
 /// Medium: injected lifecycle ticks and real durable attempt settlement; no sleeps.
 fn opencode_usage_limit_settlement_is_bounded() -> Result {
     use provenant_os::capture::{FrameDecoder, FrameEvent};
@@ -3118,6 +3194,10 @@ fn main() -> ExitCode {
     } else {
         type NamedTest = (&'static str, fn() -> Result);
         let tests: &[NamedTest] = &[
+            (
+                "remote_only_writer_cli_refuses_without_leaving_a_lane",
+                remote_only_writer_cli_refuses_without_leaving_a_lane,
+            ),
             #[cfg(target_os = "macos")]
             (
                 "graph_launch_proceeds_when_provider_update_is_busy",

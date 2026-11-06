@@ -590,6 +590,7 @@ fn provision_in_context(
         worktrees::require_clean_worktree(context, &mut tree, cancel)?;
         return Ok(());
     }
+    worktrees::require_no_remote_only_branch(context, branch, cancel)?;
     worktrees::create(
         context,
         WorktreeCreate {
