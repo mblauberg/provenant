@@ -1,5 +1,12 @@
 #[test]
 fn graph_admission_error_has_safe_field_and_action() {
+    let template = ServiceError::Facade(FacadeError::invalid(
+        provenant_fabric_runtime::coordination::facade::InvalidInputDetail::TemplateInvalid,
+    ))
+    .structured_error();
+    assert!(template["detail"].as_str().unwrap().contains("templates"));
+    assert!(template["detail"].as_str().unwrap().contains("validated"));
+    assert!(template["next"].is_string());
     let error = FacadeError::graph_admission(
         provenant_fabric_runtime::graph::AdmissionError::Schema("TOKEN_SENTINEL\u{1b}".into()),
     );
@@ -277,6 +284,45 @@ fn uncertain_mutation_errors_include_operation_id_and_recovery() {
     assert_eq!(detail["code"], "LAUNCH_UNKNOWN");
     assert_eq!(detail["operation_id"], "dispatch-17");
     assert!(detail["message"].is_string() && detail["hint"].is_string());
+    assert!(detail["next"].as_str().unwrap().contains("dispatch-17"));
+    assert!(
+        detail["next"]
+            .as_str()
+            .unwrap()
+            .contains("same operation ID")
+    );
+}
+
+#[test]
+fn writer_and_resource_remedies_match_the_typed_owner() {
+    use provenant_fabric_runtime::coordination::facade::DispatchRefusalFact;
+    use provenant_records::diagnostic::{
+        PressureLevel, PressureThreshold, ResourceFact, SettingSource,
+    };
+    for (fact, condition) in [
+        (DispatchRefusalFact::DirtyWriter, "commit"),
+        (DispatchRefusalFact::CheckedOutWriter, "--worktree"),
+        (
+            DispatchRefusalFact::Resource(ResourceFact::MemoryPressure {
+                level: PressureLevel::Critical,
+                threshold: PressureThreshold::Critical,
+                origin: SettingSource::Configuration,
+            }),
+            "memory",
+        ),
+    ] {
+        let owner = FacadeError::DispatchRefused {
+            fact: Some(fact),
+            disk: None,
+            reason: "TOKEN_SENTINEL".into(),
+        };
+        let projection = owner.diagnostic();
+        let wire = ServiceError::Facade(owner).structured_error();
+        assert_eq!(wire["code"], projection.code);
+        assert_eq!(wire["next"], projection.next.unwrap());
+        assert!(wire["next"].as_str().unwrap().contains(condition));
+        assert!(!wire.to_string().contains("TOKEN_SENTINEL"));
+    }
 }
 
 #[test]
@@ -732,6 +778,19 @@ fn continuation_conflict_includes_current_generation() {
 
 #[test]
 fn projected_mcp_failure_omits_untrusted_sources_and_bounds_safe_detail() {
+    let error = ServiceError::Facade(FacadeError::invalid(
+        provenant_fabric_runtime::coordination::facade::InvalidInputDetail::graph_reason(format!(
+            "PROMPT_SENTINEL\u{1b}{}",
+            "é".repeat(2048)
+        )),
+    ))
+    .structured_error();
+    assert!(!error.to_string().contains("PROMPT_SENTINEL"));
+    assert!(
+        error["detail"].as_str().unwrap().len()
+            <= provenant_records::diagnostic::MAX_DIAGNOSTIC_BYTES
+    );
+    assert!(error["next"].is_string());
     let unsafe_error = ServiceError::Facade(FacadeError::Io {
         delivery_limit: None,
         delivery_stage: None,

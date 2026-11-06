@@ -197,6 +197,7 @@ pub enum DispatchRefusalFact {
 #[serde(tag = "kind", content = "value", rename_all = "snake_case")]
 pub enum InvalidInputDetail {
     GraphReason(String),
+    TemplateInvalid,
     Schema,
     LandingLock,
     UnresolvableBase(String),
@@ -216,16 +217,11 @@ impl InvalidInputDetail {
 
     fn safe_text(&self) -> Option<String> {
         match self {
-            Self::GraphReason(reason) => {
-                if crate::graph::patch::scan_for_secrets(reason).is_err() {
-                    return Some("graph refused: diagnostic contains a secret".into());
-                }
-                let reason: String = reason.chars().take(4096).flat_map(|character| {
-                    if character.is_control() { character.escape_default().collect::<Vec<_>>() }
-                    else { vec![character] }
-                }).collect();
-                Some(format!("graph refused: {reason}"))
-            }
+            // Parser and transport errors may contain input, prompts or source
+            // text. They are not approved facts, even when a secret scanner
+            // does not recognise their contents.
+            Self::GraphReason(_) => Some("graph input could not be processed".into()),
+            Self::TemplateInvalid => Some("invalid input field `templates`: template could not be loaded or validated".into()),
             Self::Schema => Some("graph document schema_version is invalid".into()),
             Self::LandingLock => Some("landing lock required".into()),
             Self::UnresolvableBase(name) => safe_base_ref(name)
@@ -585,6 +581,11 @@ impl FacadeError {
         use provenant_records::diagnostic::Diagnostic;
         let mut projected = Diagnostic::new(self.code());
         match self {
+            Self::InvalidInput { detail: Some(InvalidInputDetail::GraphReason(_)) }
+            | Self::GraphRelayRefused { detail: Some(InvalidInputDetail::GraphReason(_)), .. } => {
+                projected = projected.detail("graph input could not be processed")
+                    .next("inspect the graph definition and template fields");
+            }
             Self::InvalidInput { detail: Some(detail) } | Self::GraphRelayRefused { detail: Some(detail), .. } => {
                 if let Some(detail) = detail.safe_text() {
                     projected = projected.detail(detail);
@@ -850,11 +851,9 @@ mod invalid_detail_wire {
         {
             map.serialize_entry("detail", &text)?;
             let safe_fact = match fact {
-                InvalidInputDetail::GraphReason(_) => InvalidInputDetail::GraphReason(
-                    text.strip_prefix("graph refused: ")
-                        .unwrap_or(&text)
-                        .to_owned(),
-                ),
+                InvalidInputDetail::GraphReason(_) => {
+                    InvalidInputDetail::GraphReason(String::new())
+                }
                 fact => fact.clone(),
             };
             map.serialize_entry("detail_fact", &safe_fact)?;
@@ -1064,6 +1063,7 @@ mod diagnostic_tests {
     fn graph_reason_wire_contains_only_disclosed_text() -> Result<(), Box<dyn std::error::Error>> {
         for reason in [
             "sk-abcdefghijklmnopqrstuvwx".to_owned(),
+            "PROMPT_SENTINEL unclassified source text".to_owned(),
             "line\ncontrol\u{1b}".to_owned(),
             "long".repeat(4096),
         ] {
@@ -1071,10 +1071,12 @@ mod diagnostic_tests {
             let wire = serde_json::to_value(&error)?;
             let text = wire["detail"].as_str().ok_or("detail")?;
             let fact = wire["detail_fact"]["value"].as_str().ok_or("fact")?;
-            assert_eq!(text, format!("graph refused: {fact}"));
+            assert_eq!(text, "graph input could not be processed");
+            assert!(fact.is_empty());
             assert!(!fact.chars().any(char::is_control));
             assert!(fact.chars().count() <= 4096);
             assert!(!serde_json::to_string(&wire)?.contains("sk-abcdefghijklmnopqrstuvwx"));
+            assert!(!serde_json::to_string(&wire)?.contains("PROMPT_SENTINEL"));
         }
         Ok(())
     }

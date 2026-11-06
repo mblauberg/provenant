@@ -45,6 +45,92 @@ fn malformed_graph_reports_safe_output_field_and_action() -> Result {
     Ok(())
 }
 
+#[test]
+fn existing_git_worktree_with_spaces_has_a_followable_branch_remedy() -> Result {
+    let rig = GraphProject::new()?;
+    let checkout = rig.temp.path().join("external writer's checkout");
+    let git = provenant_os::fixture::git_command()
+        .current_dir(&rig.project)
+        .args(["worktree", "add", "-b", "topic/remedy"])
+        .arg(&checkout)
+        .arg("HEAD")
+        .output()?;
+    assert!(git.status.success(), "{git:?}");
+    let (output, refusal) = rig.run(&[
+        "run",
+        "inspect",
+        "--branch",
+        "topic/remedy",
+        "--base",
+        "HEAD",
+        "--write-scope",
+        ".",
+        "--wait=10s",
+    ])?;
+    if refusal.to_string().contains("ProbeFailed") {
+        provenant_test_support::skip_sandbox_dependent_test("native confinement probe failed")?;
+        return Ok(());
+    }
+    assert!(!output.status.success(), "{refusal}");
+    let action = refusal["data"]["local_worktree_remedy"]
+        .as_str()
+        .ok_or_else(|| format!("missing local remedy: {refusal}"))?;
+    let quoted = provenant_records::diagnostic::shell_path(
+        &checkout.canonicalize()?,
+        provenant_records::diagnostic::Destination::Local,
+    )
+    .ok_or("path not shell-safe")?;
+    assert!(action.contains(&format!("--worktree {quoted}")), "{action}");
+    let quoted_argument = action
+        .split_once("--worktree ")
+        .ok_or("missing worktree flag")?
+        .1;
+    let resolved = Command::new("sh")
+        .args([
+            "-c",
+            &format!("set -- {quoted_argument}; printf '%s' \"$1\""),
+        ])
+        .output()?;
+    assert!(resolved.status.success(), "{resolved:?}");
+    let selected = String::from_utf8(resolved.stdout)?;
+    assert_eq!(Path::new(&selected), checkout.canonicalize()?);
+    let graph = refusal["data"]["checkpoint"]["graph_id"]
+        .as_str()
+        .ok_or("missing graph id")?;
+    let (_, status) = rig.run(&["status", graph])?;
+    assert!(
+        status["data"]["rows"]
+            .as_array()
+            .is_some_and(|rows| rows.iter().any(|row| row["next"]
+                .as_str()
+                .is_some_and(|next| next.contains(&format!("--worktree {quoted}"))))),
+        "{status}"
+    );
+    let (_, graph_output) = rig.run(&["output", graph])?;
+    assert!(
+        graph_output["data"]["graph_failures"]
+            .as_array()
+            .is_some_and(|rows| rows.iter().any(|row| row["next"]
+                .as_str()
+                .is_some_and(|next| next.contains(&format!("--worktree {quoted}"))))),
+        "{graph_output}"
+    );
+    let output = rig
+        .command()
+        .args(["run", "inspect", "--worktree"])
+        .arg(&selected)
+        .args(["--write-scope", ".", "--wait=10s"])
+        .output()?;
+    let followed: Value = serde_json::from_slice(&output.stdout)?;
+    assert!(
+        followed["data"]["checkpoint"]["nodes"]
+            .as_array()
+            .is_some_and(|nodes| nodes.iter().any(|node| !node["writer_binding"].is_null())),
+        "{followed}"
+    );
+    Ok(())
+}
+
 fn fixture_cli() -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_provenant"));
     provenant_os::fixture::scrub_git_env(&mut command);
@@ -484,6 +570,17 @@ fn invalid_template_documents_are_refused_by_list_and_show() -> Result {
         let (output, _) = rig.run(&args)?;
         assert!(!output.status.success());
     }
+    let (output, refusal) = rig.run(&["run", "--use", "broken", "inspect"])?;
+    assert!(!output.status.success(), "{refusal}");
+    assert_eq!(refusal["error"]["code"], "invalid_input", "{refusal}");
+    assert!(refusal["error"]["repair"].is_string(), "{refusal}");
+    let detail = refusal["error"]["message"]
+        .as_str()
+        .ok_or("missing template reason")?;
+    assert!(
+        detail.contains("templates") && detail.contains("validated"),
+        "{refusal}"
+    );
     assert!(graph_records(&rig.state())?.is_empty());
     Ok(())
 }

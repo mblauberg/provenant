@@ -710,8 +710,11 @@ pub(crate) fn unified_graph_command(
         let cancel = CancelToken::new();
         let wait_seconds = input["wait_seconds"].as_u64().unwrap_or(55).max(55);
         let budget = WaitBudget::cli(factory.clock.mono_now(), wait_seconds)?;
-        let data = factory.graph_document(input, budget, &cancel)?;
+        let mut data = factory.graph_document(input, budget, &cancel)?;
         let timed_out = data["timed_out"].as_bool().unwrap_or(false);
+        if let Some(rows) = data["rows"].as_array_mut() {
+            localise_worktree_actions(&factory, &target.graph, rows);
+        }
         let rows = data["rows"].as_array().ok_or(FacadeError::StateCorrupt)?;
         let human = render_graph_status(rows);
         Ok(Some((data, human, timed_out)))
@@ -863,6 +866,7 @@ pub(crate) fn append_graph_status(
                         &factory.clock,
                         &CancelToken::new(),
                     )?;
+                    localise_worktree_actions(&factory, &graph, &mut graph_rows);
                     rows.extend(graph_rows);
                 }
                 Ok(None) => {}
@@ -972,6 +976,7 @@ pub(crate) fn unified_graph_output(
                 &factory.clock,
                 &CancelToken::new(),
             )?;
+            localise_worktree_actions(&factory, &target.graph, &mut rows);
             rows.retain(|row| {
                 row["kind"] == "node" && matches!(row["state"].as_str(), Some("failed" | "blocked"))
             });
@@ -1213,6 +1218,52 @@ fn with_graph_failures(
         }
     }
     reply
+}
+
+/// Add a current local checkout observation only to CLI readings. Remote and
+/// MCP callers retain the owner's path-free diagnostic.
+fn localise_worktree_actions(factory: &Factory, graph: &str, rows: &mut [Value]) {
+    if !rows.iter().any(|row| {
+        row["kind"] == "node"
+            && row["state"] == "failed"
+            && row["cause_code"] == "writer_binding_unavailable"
+    }) {
+        return;
+    }
+    let Ok(Some(execution)) = FileJournal::execution(
+        &factory.context.roots.state,
+        factory.context.identity.project,
+        graph,
+    ) else {
+        return;
+    };
+    for row in rows.iter_mut().filter(|row| {
+        row["kind"] == "node"
+            && row["state"] == "failed"
+            && row["cause_code"] == "writer_binding_unavailable"
+    }) {
+        let Some(node) = execution
+            .document
+            .nodes
+            .iter()
+            .find(|node| Some(node.id.as_str()) == row["node_id"].as_str())
+        else {
+            continue;
+        };
+        let Some(attempt) = node
+            .attempt
+            .as_ref()
+            .filter(|attempt| attempt.host.is_none() && attempt.placement.is_none())
+        else {
+            continue;
+        };
+        let Some(branch) = attempt.new_worktree.as_ref().map(|new| new.branch.as_str()) else {
+            continue;
+        };
+        if let Some(action) = crate::graph_interface::local_branch_action(factory, branch) {
+            row["next"] = json!(action);
+        }
+    }
 }
 
 /// Select one output per peer node, with the same terminal preference as

@@ -92,11 +92,11 @@ fn run_envelope(input: &Value) -> Result<Value, FacadeError> {
         input["operation_id"] = operation;
     }
     if let Some(operation) = input.get("operation_id").filter(|value| !value.is_null()) {
-        let id = operation
-            .as_str()
-            .ok_or_else(|| graph_input_reason("invalid operation_id"))?;
+        let id = operation.as_str().ok_or_else(|| {
+            FacadeError::invalid(InvalidInputDetail::Field("operation_id".into()))
+        })?;
         provenant_core::OperationId::parse(id)
-            .map_err(|_| graph_input_reason("invalid operation_id"))?;
+            .map_err(|_| FacadeError::invalid(InvalidInputDetail::Field("operation_id".into())))?;
     }
     Ok(input)
 }
@@ -568,16 +568,16 @@ impl Factory {
         let mut library = TemplateLibrary::bundled();
         library
             .load_dir(Layer::User, &config.join("provenant/templates"))
-            .map_err(graph_input_reason)?;
+            .map_err(|_| FacadeError::invalid(InvalidInputDetail::TemplateInvalid))?;
         library
             .load_dir(Layer::Repository, &self.cwd.join(".provenant/templates"))
-            .map_err(graph_input_reason)?;
+            .map_err(|_| FacadeError::invalid(InvalidInputDetail::TemplateInvalid))?;
         if let Some(inline) = inline.filter(|value| !value.is_null()) {
-            let templates: BTreeMap<String, Template> =
-                serde_json::from_value(inline.clone()).map_err(graph_input_reason)?;
+            let templates: BTreeMap<String, Template> = serde_json::from_value(inline.clone())
+                .map_err(|_| FacadeError::invalid(InvalidInputDetail::TemplateInvalid))?;
             library = library
                 .with(Layer::Inline, &templates)
-                .map_err(graph_input_reason)?;
+                .map_err(|_| FacadeError::invalid(InvalidInputDetail::TemplateInvalid))?;
         }
         Ok(library)
     }

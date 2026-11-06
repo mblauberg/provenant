@@ -1080,6 +1080,9 @@ cause and recovery guidance on its node. A launch refusal retains the owner's
 action, including the operation identity when the handoff is uncertain; it is
 not replaced by a generic retry command. Graph output includes these failed
 node rows as `graph_failures` in JSON and in its human reading.
+For a local writer-binding refusal, the CLI may add a shell-quoted checkout
+action after observing Git's current inventory. That observation is not stored
+in the checkpoint or disclosed to a remote or MCP caller.
 
 Settled nodes record version 2 outputs in the checkpoint, exposed by graph
 status JSON. A result's `digest` is `sha256:` followed by the lowercase
