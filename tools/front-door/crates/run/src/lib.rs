@@ -567,7 +567,8 @@ impl RunError {
                     diagnostic = diagnostic.next(action);
                 }
                 if let WorktreeError::UnknownWriterAt { path }
-                | WorktreeError::CensusUnknown { path, .. } = error
+                | WorktreeError::CensusUnknown { path, .. }
+                | WorktreeError::UnknownOccupancy { path, .. } = error
                 {
                     if let Some(path) = safe_path(path, destination) {
                         diagnostic =
@@ -582,7 +583,8 @@ impl RunError {
                 // Census evidence can name processes and host paths. The local
                 // operator needs it to understand the uncertainty, but it is
                 // not an approved fact for remote peers.
-                if let WorktreeError::CensusUnknown { path, detail } = error
+                if let WorktreeError::CensusUnknown { path, detail }
+                | WorktreeError::UnknownOccupancy { path, detail } = error
                     && matches!(
                         destination,
                         provenant_records::diagnostic::Destination::Local
@@ -905,23 +907,30 @@ mod diagnostic_projection_tests {
     }
 
     #[test]
-    fn unknown_census_diagnostic_names_local_scope_and_evidence() {
-        let error = RunError::Writer(
+    fn unknown_occupancy_diagnostics_name_local_scope_without_leaking_remote_evidence() {
+        for cause in [
             provenant_confinement::worktrees::WorktreeError::CensusUnknown {
                 path: PathBuf::from("/checkout/tree"),
                 detail: "process 123: cwd unreadable at /private/other".into(),
             },
-        );
-        let local = error.diagnostic(Destination::Local);
-        let detail = local.detail.unwrap();
-        assert!(detail.contains("/checkout/tree"));
-        assert!(detail.contains("process 123: cwd unreadable at /private/other"));
-        let remote = error.diagnostic(Destination::Remote {
-            repository: None,
-            home: None,
-        });
-        let rendered = serde_json::to_string(&remote).unwrap();
-        assert!(!rendered.contains("/private/other"));
-        assert!(!rendered.contains("/checkout/tree"));
+            provenant_confinement::worktrees::WorktreeError::UnknownOccupancy {
+                path: PathBuf::from("/checkout/tree"),
+                detail: "process 123: cwd unreadable at /private/other".into(),
+            },
+        ] {
+            let error = RunError::Writer(cause);
+            assert_eq!(ErrorKind::from(&error), ErrorKind::WriterUnknown);
+            let local = error.diagnostic(Destination::Local);
+            let detail = local.detail.unwrap();
+            assert!(detail.contains("/checkout/tree"));
+            assert!(detail.contains("process 123: cwd unreadable at /private/other"));
+            let remote = error.diagnostic(Destination::Remote {
+                repository: None,
+                home: None,
+            });
+            let rendered = serde_json::to_string(&remote).unwrap();
+            assert!(!rendered.contains("/private/other"));
+            assert!(!rendered.contains("/checkout/tree"));
+        }
     }
 }

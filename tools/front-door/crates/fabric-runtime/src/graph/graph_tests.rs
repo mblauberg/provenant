@@ -10476,7 +10476,7 @@ fn launch_retry_kinds_are_decided_from_the_typed_error_only() {
     for permanent in [
         FacadeError::InvalidInput { detail: None },
         FacadeError::ConfinementRefused,
-        FacadeError::WriterBusy,
+        FacadeError::WriterBusy { holder: None },
         FacadeError::DispatchRefused {
             fact: None,
             disk: None,

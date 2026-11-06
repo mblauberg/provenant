@@ -386,7 +386,7 @@ pub(super) fn dispatch_with_workers(
                         .find(|tree| tree.path == path)
                         .ok_or(worktrees::WorktreeError::NotFound)?;
                     if info.dirty != worktrees::WorktreeCondition::Clean
-                        || info.writer != worktrees::WriterState::Free
+                        || !info.occupancy.is_available()
                     {
                         return Err(worktrees::WorktreeError::Dirty(String::new()));
                     }
@@ -397,14 +397,11 @@ pub(super) fn dispatch_with_workers(
                     }) {
                         return Err(worktrees::WorktreeError::UnknownWriter);
                     }
-                    worktrees::remove(
+                    worktrees::remove_created_by_operation(
                         context,
-                        worktrees::WorktreeRemove::Name {
-                            name: branch,
-                            discard: false,
-                            integration: None,
-                            expected_head: Some(info.head),
-                        },
+                        branch,
+                        info.head,
+                        &operation_id,
                         &cancel,
                     )?;
                     Ok(())
@@ -669,6 +666,7 @@ impl WorktreeAdmissionError {
                     | WorktreeError::LockBusy
                     | WorktreeError::UnknownWriter
                     | WorktreeError::UnknownWriterAt { .. }
+                    | WorktreeError::UnknownOccupancy { .. }
             ),
             _ => false,
         }
@@ -686,6 +684,10 @@ mod admission_retry_tests {
             |error| WorktreeAdmissionError::Run(run::RunError::Writer(error)).is_transient();
         assert!(retry(WorktreeError::LockBusy));
         assert!(retry(WorktreeError::UnknownWriter));
+        assert!(retry(WorktreeError::UnknownOccupancy {
+            path: "lane".into(),
+            detail: "registration race".into()
+        }));
         assert!(!retry(WorktreeError::LiveWriter));
         assert!(!retry(WorktreeError::Dirty(String::new())));
     }
@@ -1590,39 +1592,36 @@ pub(super) fn dispatch_inner(
                                 lock_budget,
                                 ..*context
                             };
-                            let info = worktrees::list(context, &cancel)?
+                            let observation = worktrees::list(context, &cancel)?
                                 .into_iter()
                                 .find(|tree| tree.path == writer.worktree)
                                 .ok_or(worktrees::WorktreeError::NotFound)?;
+                            let info = observation;
                             let branch =
                                 info.branch
                                     .ok_or(worktrees::WorktreeError::DetachedWorktree {
                                         head: info.head,
                                     })?;
                             if !replay {
+                                super::worktree::warn_advisory_occupancy(
+                                    &info.path,
+                                    &info.occupancy,
+                                )?;
                                 match worktrees::cache_writer_probe(
                                     context.project_state,
                                     &info.path,
                                 ) {
                                     Ok(_) => {}
-                                    Err(worktrees::WorkerState::Busy) => {
-                                        let tree = provenant_confinement::verify_worktree(
-                                            context.repo,
+                                    Err(worktrees::Occupancy::Held) => {
+                                        let holder = worktrees::writer_holder(
+                                            context.project_state,
                                             &info.path,
-                                        )?;
-                                        let holder = worktrees::load_owner(&tree)?
-                                            .and_then(|owner| owner.attempt_id);
+                                        );
                                         return Err(worktrees::WorktreeError::WriterBusy {
                                             holder,
                                         });
                                     }
-                                    Err(worktrees::WorkerState::Live) => {
-                                        return Err(worktrees::live_refusal(
-                                            context.workers,
-                                            &info.path,
-                                        ));
-                                    }
-                                    Err(_) => return Err(worktrees::WorktreeError::UnknownWriter),
+                                    Err(other) => return Err(worktrees::custody_refusal(other)),
                                 }
                             }
                             Ok(json!({
@@ -2979,9 +2978,16 @@ pub(super) fn launch_on_host_with_wait(
                         && (owner.operation_id.as_ref() == Some(&attempt.operation_id)
                             || owner.attempt_id.is_some() && owner.attempt_id == attempt.retry_of)
                     {
+                        let expected = owner.clone();
                         owner.attempt_id = Some(attempt.attempt_id);
                         owner.operation_id = Some(attempt.operation_id.clone());
-                        worktrees::save_owner(&tree, &owner)?;
+                        worktrees::update_owner_when_unchanged(
+                            context,
+                            &tree,
+                            &expected,
+                            &owner,
+                            call.cancel,
+                        )?;
                     }
                     Ok(())
                 },

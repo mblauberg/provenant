@@ -117,6 +117,20 @@ slow-timeout = { period = "30s", terminate-after = 2 }
 filter = 'test(=run::tests::wait_handles_a_stale_default_cursor)'
 slow-timeout = { period = "60s", terminate-after = 5 }
 
+# Creating 100 real worktrees for the repository-facts counting test is slow
+# on shared hosts; keep the test bounded without terminating it at 30 seconds.
+[[profile.default.overrides]]
+filter = 'test(gc_does_not_inspect_status_of_out_of_scope_worktrees)'
+slow-timeout = { period = "30s", terminate-after = 4 }
+
+[[profile.ci.overrides]]
+filter = 'test(gc_does_not_inspect_status_of_out_of_scope_worktrees)'
+slow-timeout = { period = "30s", terminate-after = 4 }
+
+[[profile.lane.overrides]]
+filter = 'test(gc_does_not_inspect_status_of_out_of_scope_worktrees)'
+slow-timeout = { period = "30s", terminate-after = 4 }
+
 # Runs a whole review several times through real launches.
 [[profile.ci.overrides]]
 filter = 'test(=review_fans_out_and_collects_fake_provider)'

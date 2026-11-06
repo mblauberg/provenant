@@ -1,6 +1,531 @@
 //! Git worktree inventory parsing and Git invocations.
 use super::*;
 
+/// Command-scoped repository observations. A GC preview consumes its inventory
+/// snapshot; mutation paths always perform a fresh read while holding custody.
+pub struct RepoFacts {
+    inventory_limit: usize,
+    scalar_limit: usize,
+    inventories: std::sync::Mutex<BTreeMap<PathBuf, InventorySnapshot>>,
+}
+
+struct InventorySnapshot {
+    device: u64,
+    inode: u64,
+    budget: UtilityBudget,
+    entries: Vec<GitWorktree>,
+}
+
+impl Default for RepoFacts {
+    fn default() -> Self {
+        Self {
+            inventory_limit: provenant_os::exec::DEFAULT_CAPTURE_LIMIT,
+            scalar_limit: provenant_os::git::REPO_FACT_SCALAR_LIMIT,
+            inventories: std::sync::Mutex::new(BTreeMap::new()),
+        }
+    }
+}
+
+impl RepoFacts {
+    /// Override output caps without widening the caller's Git budget.
+    pub fn with_limits(inventory_limit: usize, scalar_limit: usize) -> Result<Self, WorktreeError> {
+        let budget = UtilityBudget::bounded(std::time::Duration::from_secs(1))?;
+        budget.with_stdout_cap(inventory_limit)?;
+        budget.with_stdout_cap(scalar_limit)?;
+        Ok(Self {
+            inventory_limit,
+            scalar_limit,
+            ..Self::default()
+        })
+    }
+
+    /// Resolve a commit ref from fresh Git evidence. Ref values can move even
+    /// within a command, so this read is never served from an earlier epoch.
+    pub fn resolve_commit(
+        &self,
+        context: &WorktreeContext<'_>,
+        name: GitRefName,
+        cancel: &CancelToken,
+    ) -> Result<GitOid, WorktreeError> {
+        validate_binding(context)?;
+        self.resolve_repo_commit(
+            context.repo,
+            context.executor,
+            context.utility,
+            context.utility_budget,
+            name,
+            cancel,
+        )
+    }
+
+    fn resolve_repo_commit(
+        &self,
+        repo: &VerifiedRepo,
+        executor: &dyn Executor,
+        utility: &UtilityRuntime,
+        budget: UtilityBudget,
+        name: GitRefName,
+        cancel: &CancelToken,
+    ) -> Result<GitOid, WorktreeError> {
+        repo.revalidate()?;
+        let budget = budget.with_stdout_cap(self.scalar_limit)?;
+        let outcome = run_utility(
+            executor,
+            GitRead::ResolveRef { name },
+            repo,
+            utility,
+            budget,
+            cancel,
+        )?;
+        if exit_code(&outcome)? != 0 {
+            return Err(WorktreeError::NotFound);
+        }
+        parse_oid(trim_ascii(&outcome.stdout.bytes))
+    }
+
+    /// Resolve a commit through a read-only repository, including native
+    /// alternates, with the same session cap as protected repository reads.
+    pub fn resolve_read_commit(
+        &self,
+        repo: &crate::repo::ReadOnlyRepo,
+        executor: &dyn Executor,
+        utility: &UtilityRuntime,
+        budget: UtilityBudget,
+        name: GitRefName,
+        cancel: &CancelToken,
+    ) -> Result<GitOid, WorktreeError> {
+        let budget = budget.with_stdout_cap(self.scalar_limit)?;
+        let outcome = crate::utility::run_read_utility(
+            executor,
+            GitRead::ResolveRef { name },
+            repo,
+            utility,
+            budget,
+            cancel,
+        )?;
+        if exit_code(&outcome)? != 0 {
+            return Err(WorktreeError::NotFound);
+        }
+        parse_oid(trim_ascii(&outcome.stdout.bytes))
+    }
+
+    /// Resolve a read-only ref without peeling it, preserving Git's distinction
+    /// between an absent ref and a ref to a non-commit object.
+    pub fn resolve_read_ref(
+        &self,
+        repo: &crate::repo::ReadOnlyRepo,
+        executor: &dyn Executor,
+        utility: &UtilityRuntime,
+        budget: UtilityBudget,
+        name: GitRefName,
+        cancel: &CancelToken,
+    ) -> Result<GitOid, WorktreeError> {
+        let budget = budget.with_stdout_cap(self.scalar_limit)?;
+        let outcome = crate::utility::run_read_utility(
+            executor,
+            GitRead::ResolveRefOid { name },
+            repo,
+            utility,
+            budget,
+            cancel,
+        )?;
+        if exit_code(&outcome)? != 0 {
+            return Err(WorktreeError::NotFound);
+        }
+        parse_oid(trim_ascii(&outcome.stdout.bytes))
+    }
+
+    /// Resolve a commit's tree through the read-only facts boundary.
+    pub fn resolve_read_tree(
+        &self,
+        repo: &crate::repo::ReadOnlyRepo,
+        executor: &dyn Executor,
+        utility: &UtilityRuntime,
+        budget: UtilityBudget,
+        commit: GitOid,
+        cancel: &CancelToken,
+    ) -> Result<GitOid, WorktreeError> {
+        let budget = budget.with_stdout_cap(self.scalar_limit)?;
+        let outcome = crate::utility::run_read_utility(
+            executor,
+            GitRead::ResolveCommitTree { oid: commit },
+            repo,
+            utility,
+            budget,
+            cancel,
+        )?;
+        if exit_code(&outcome)? != 0 {
+            return Err(WorktreeError::NotFound);
+        }
+        parse_oid(trim_ascii(&outcome.stdout.bytes))
+    }
+
+    /// Resolve a revision from fresh Git evidence using this session's scalar cap.
+    pub fn resolve_revision(
+        &self,
+        context: &WorktreeContext<'_>,
+        revision: GitRevision,
+        cancel: &CancelToken,
+    ) -> Result<GitOid, WorktreeError> {
+        validate_binding(context)?;
+        context.repo.revalidate()?;
+        let budget = context.utility_budget.with_stdout_cap(self.scalar_limit)?;
+        let outcome = run_utility(
+            context.executor,
+            GitRead::ResolveRevision { revision },
+            context.repo,
+            context.utility,
+            budget,
+            cancel,
+        )?;
+        if exit_code(&outcome)? != 0 {
+            return Err(WorktreeError::NotFound);
+        }
+        parse_oid(trim_ascii(&outcome.stdout.bytes))
+    }
+
+    /// Read the current commit of a verified checkout in this repository.
+    pub(super) fn checkout_head(
+        &self,
+        context: &WorktreeContext<'_>,
+        repo: &VerifiedRepo,
+        cancel: &CancelToken,
+    ) -> Result<GitOid, WorktreeError> {
+        validate_binding(context)?;
+        context.repo.revalidate()?;
+        repo.revalidate()?;
+        if repo.common_git_dir() != context.repo.common_git_dir() {
+            return Err(WorktreeError::IdentityChanged);
+        }
+        let budget = context.utility_budget.with_stdout_cap(self.scalar_limit)?;
+        let outcome = run_utility(
+            context.executor,
+            GitRead::RevParseHead,
+            repo,
+            context.utility,
+            budget,
+            cancel,
+        )?;
+        if exit_code(&outcome)? != 0 {
+            return Err(WorktreeError::NotFound);
+        }
+        parse_oid(trim_ascii(&outcome.stdout.bytes))
+    }
+
+    /// Resolve the full symbolic name of a revision, if Git can identify one.
+    pub fn symbolic_revision(
+        &self,
+        context: &WorktreeContext<'_>,
+        revision: GitRevision,
+        cancel: &CancelToken,
+    ) -> Result<Option<String>, WorktreeError> {
+        validate_binding(context)?;
+        context.repo.revalidate()?;
+        let budget = context.utility_budget.with_stdout_cap(self.scalar_limit)?;
+        let outcome = run_utility(
+            context.executor,
+            GitRead::SymbolicRevision { revision },
+            context.repo,
+            context.utility,
+            budget,
+            cancel,
+        )?;
+        if exit_code(&outcome)? != 0 {
+            return Ok(None);
+        }
+        let name = std::str::from_utf8(trim_ascii(&outcome.stdout.bytes))
+            .map_err(|_| WorktreeError::InvalidOutput)?;
+        Ok(Some(name.to_owned()))
+    }
+
+    /// Resolve the trusted local bare setting with the session's scalar cap.
+    pub fn bare_setting(
+        &self,
+        repo: &VerifiedRepo,
+        executor: &dyn Executor,
+        utility: &UtilityRuntime,
+        budget: UtilityBudget,
+        cancel: &CancelToken,
+    ) -> Result<Option<bool>, WorktreeError> {
+        let scalar = budget.with_stdout_cap(self.scalar_limit)?;
+        let bare = run_utility(
+            executor,
+            GitRead::LocalBareOrigins,
+            repo,
+            utility,
+            scalar,
+            cancel,
+        )?;
+        match exit_code(&bare)? {
+            0 => {
+                let roots = utility.lane_roots(repo);
+                let lane_files = crate::utility::lane_configuration_files(
+                    executor, repo, utility, budget, cancel,
+                )?;
+                if !bare.stdout.bytes.ends_with(&[0]) {
+                    return Err(WorktreeError::InvalidOutput);
+                }
+                let mut fields = bare.stdout.bytes.split(|byte| *byte == 0);
+                let mut selected = None;
+                let mut untrusted_bare = false;
+                while let Some(origin) = fields.next() {
+                    if origin.is_empty() && fields.clone().next().is_none() {
+                        break;
+                    }
+                    let path = origin
+                        .strip_prefix(b"file:")
+                        .ok_or(WorktreeError::InvalidOutput)?;
+                    if path.is_empty() {
+                        return Err(WorktreeError::InvalidOutput);
+                    }
+                    let path = PathBuf::from(OsString::from_vec(path.to_vec()));
+                    let path = if path.is_absolute() {
+                        path
+                    } else {
+                        repo.root_path().join(path)
+                    };
+                    let in_lane = roots.contains(&path);
+                    let path = crate::transport::normalise(&path);
+                    let value = fields.next().ok_or(WorktreeError::InvalidOutput)?;
+                    let value = match value {
+                        b"true" => true,
+                        b"false" => false,
+                        _ => return Err(WorktreeError::InvalidOutput),
+                    };
+                    if !in_lane && !lane_files.contains(&path) {
+                        selected = Some(value);
+                    } else {
+                        untrusted_bare |= value;
+                    }
+                }
+                // If a bare setting appears only through lane-controlled
+                // provenance, the primary worktree cannot be classified
+                // safely: an alias may hide a trusted occurrence of that file.
+                if selected != Some(true) && untrusted_bare {
+                    return Err(WorktreeError::InvalidOutput);
+                }
+                Ok(selected)
+            }
+            1 => Ok(None),
+            _ => Err(WorktreeError::InvalidOutput),
+        }
+    }
+
+    /// Read raw worktree registrations from a read-only checkout. The common
+    /// repository's local bare setting controls Git's primary registration;
+    /// the utility's normal override otherwise changes that fact.
+    pub fn read_only_inventory(
+        &self,
+        repo: &crate::repo::ReadOnlyRepo,
+        executor: &dyn Executor,
+        utility: &UtilityRuntime,
+        budget: UtilityBudget,
+        cancel: &CancelToken,
+    ) -> Result<Vec<u8>, WorktreeError> {
+        let bare = self
+            .bare_setting(&repo.0, executor, utility, budget, cancel)?
+            .unwrap_or(false);
+        let budget = budget.with_stdout_cap(self.inventory_limit)?;
+        let operation = if bare {
+            GitRead::WorktreeListBare
+        } else {
+            GitRead::WorktreeList
+        };
+        let outcome =
+            crate::utility::run_read_utility(executor, operation, repo, utility, budget, cancel)?;
+        if exit_code(&outcome)? != 0 {
+            return Err(WorktreeError::InvalidOutput);
+        }
+        Ok(outcome.stdout.bytes)
+    }
+
+    /// Discover registrations from a working directory, including a bare
+    /// repository or a subdirectory that has not been opened as a checkout.
+    /// The caller supplies its already-sanitised Git environment.
+    pub fn discover_worktree_paths(
+        &self,
+        cwd: &Path,
+        git: &Path,
+        environment: &[(OsString, OsString)],
+        executor: &dyn Executor,
+        timeout: std::time::Duration,
+        cancel: &CancelToken,
+    ) -> Result<Vec<PathBuf>, WorktreeError> {
+        use provenant_os::exec::{ExecOptions, StreamPolicy};
+        let argv = [
+            git.as_os_str().to_owned(),
+            "-c".into(),
+            "core.fsmonitor=false".into(),
+            "worktree".into(),
+            "list".into(),
+            "--porcelain".into(),
+            "-z".into(),
+        ];
+        let mut options = ExecOptions::new(&argv, cwd, timeout);
+        options.env = Some(environment);
+        options.stdin = Some(b"");
+        options.cancel = Some(cancel);
+        options.stdout = StreamPolicy::Capture {
+            limit: self.inventory_limit,
+        };
+        options.stderr = StreamPolicy::Capture { limit: 4096 };
+        options.stop_on_output_limit = true;
+        let output = executor.execute(options).map_err(UtilityError::from)?;
+        if output.stdout.truncated {
+            return Err(UtilityError::Truncated { stream: "stdout" }.into());
+        }
+        if output.cancelled {
+            return Err(UtilityError::Cancelled.into());
+        }
+        if output.timed_out {
+            return Err(UtilityError::TimedOut.into());
+        }
+        if output.drain_truncated || output.stdout.read_failed || output.stdout.sink_failed {
+            return Err(UtilityError::Incomplete.into());
+        }
+        if output.termination != Termination::Exit(0) {
+            return Err(WorktreeError::InvalidOutput);
+        }
+        inventory_paths(&output.stdout.bytes)
+    }
+
+    /// Read registered checkout paths without interpreting Git's quoted text
+    /// format. Bare primary registrations are included, as in Git's inventory.
+    pub fn read_only_worktree_paths(
+        &self,
+        repo: &crate::repo::ReadOnlyRepo,
+        executor: &dyn Executor,
+        utility: &UtilityRuntime,
+        budget: UtilityBudget,
+        cancel: &CancelToken,
+    ) -> Result<Vec<PathBuf>, WorktreeError> {
+        let inventory = self.read_only_inventory(repo, executor, utility, budget, cancel)?;
+        inventory_paths(&inventory)
+    }
+
+    /// Read bounded worktree registrations for writer membership verification.
+    pub fn writer_inventory(
+        &self,
+        repo: &VerifiedRepo,
+        executor: &dyn Executor,
+        utility: &UtilityRuntime,
+        budget: UtilityBudget,
+        cancel: &CancelToken,
+    ) -> Result<Vec<u8>, WorktreeError> {
+        let outcome = run_utility(
+            executor,
+            GitRead::WorktreeList,
+            repo,
+            utility,
+            budget.with_stdout_cap(self.inventory_limit)?,
+            cancel,
+        )?;
+        if exit_code(&outcome)? != 0 {
+            return Err(WorktreeError::InvalidOutput);
+        }
+        Ok(outcome.stdout.bytes)
+    }
+
+    /// Read inventory afresh and invalidate any older advisory snapshot.
+    pub(super) fn read_inventory(
+        &self,
+        context: &WorktreeContext<'_>,
+        cancel: &CancelToken,
+    ) -> Result<Vec<GitWorktree>, WorktreeError> {
+        let _ = self.take_inventory(context);
+        let bytes = self.writer_inventory(
+            context.repo,
+            context.executor,
+            context.utility,
+            context.utility_budget,
+            cancel,
+        )?;
+        parse_worktree_list(&bytes)
+    }
+
+    pub(super) fn capture_inventory(
+        &self,
+        context: &WorktreeContext<'_>,
+        cancel: &CancelToken,
+    ) -> Result<Vec<GitWorktree>, WorktreeError> {
+        let budget = context
+            .utility_budget
+            .with_stdout_cap(self.inventory_limit)?;
+        let entries = self.read_inventory(context, cancel)?;
+        self.remember_inventory(context, &entries, budget);
+        Ok(entries)
+    }
+
+    fn remember_inventory(
+        &self,
+        context: &WorktreeContext<'_>,
+        entries: &[GitWorktree],
+        budget: UtilityBudget,
+    ) {
+        let path = context.repo.common_git_dir();
+        let mut inventories = self
+            .inventories
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        inventories.remove(path);
+        if let Ok(metadata) = std::fs::metadata(path) {
+            inventories.insert(
+                path.to_path_buf(),
+                InventorySnapshot {
+                    device: metadata.dev(),
+                    inode: metadata.ino(),
+                    budget,
+                    entries: entries.to_vec(),
+                },
+            );
+        }
+    }
+
+    /// Reuse an advisory inventory while the repository identity is unchanged.
+    /// Mutation paths invalidate it and perform their own guarded rereads.
+    pub(super) fn cached_inventory(
+        &self,
+        context: &WorktreeContext<'_>,
+    ) -> Option<Vec<GitWorktree>> {
+        let inventories = self
+            .inventories
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let snapshot = inventories.get(context.repo.common_git_dir())?;
+        let metadata = std::fs::metadata(context.repo.common_git_dir()).ok()?;
+        let budget = context
+            .utility_budget
+            .with_stdout_cap(self.inventory_limit)
+            .ok()?;
+        (snapshot.device == metadata.dev()
+            && snapshot.inode == metadata.ino()
+            && snapshot.budget == budget)
+            .then(|| snapshot.entries.clone())
+    }
+
+    /// Discard an advisory inventory before a command-controlled Git mutation.
+    pub fn invalidate_inventory(&self, context: &WorktreeContext<'_>) {
+        let _ = self.take_inventory(context);
+    }
+
+    pub(super) fn take_inventory(&self, context: &WorktreeContext<'_>) -> Option<Vec<GitWorktree>> {
+        let snapshot = self
+            .inventories
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .remove(context.repo.common_git_dir())?;
+        let metadata = std::fs::metadata(context.repo.common_git_dir()).ok()?;
+        let budget = context
+            .utility_budget
+            .with_stdout_cap(self.inventory_limit)
+            .ok()?;
+        (snapshot.device == metadata.dev()
+            && snapshot.inode == metadata.ino()
+            && snapshot.budget == budget)
+            .then_some(snapshot.entries)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct GitWorktree {
     pub(crate) path: PathBuf,
@@ -9,6 +534,33 @@ pub(crate) struct GitWorktree {
     pub(super) locked: bool,
     pub(super) prunable: bool,
     pub(crate) bare: bool,
+}
+
+fn inventory_paths(bytes: &[u8]) -> Result<Vec<PathBuf>, WorktreeError> {
+    if !bytes.ends_with(b"\0\0") {
+        return Err(WorktreeError::InvalidOutput);
+    }
+    let mut paths = Vec::new();
+    let mut at_record_start = true;
+    for field in bytes.split(|byte| *byte == 0) {
+        if field.is_empty() {
+            at_record_start = true;
+        } else if at_record_start {
+            let path = field
+                .strip_prefix(b"worktree ")
+                .filter(|path| path.first() == Some(&b'/'))
+                .ok_or(WorktreeError::InvalidOutput)?;
+            paths.push(PathBuf::from(OsString::from_vec(path.to_vec())));
+            if paths.len() > MAX_WORKTREES {
+                return Err(WorktreeError::InvalidOutput);
+            }
+            at_record_start = false;
+        }
+    }
+    if paths.is_empty() {
+        return Err(WorktreeError::InvalidOutput);
+    }
+    Ok(paths)
 }
 
 pub(crate) fn parse_worktree_list(bytes: &[u8]) -> Result<Vec<GitWorktree>, WorktreeError> {
@@ -170,17 +722,6 @@ pub(super) fn run_git(
     .map_err(WorktreeError::from)
 }
 
-pub(super) fn read_worktrees(
-    context: &WorktreeContext<'_>,
-    cancel: &CancelToken,
-) -> Result<Vec<GitWorktree>, WorktreeError> {
-    let outcome = run_git(context, context.repo, GitRead::WorktreeList, cancel)?;
-    if exit_code(&outcome)? != 0 {
-        return Err(WorktreeError::InvalidOutput);
-    }
-    parse_worktree_list(&outcome.stdout.bytes)
-}
-
 pub(super) fn read_branch_tips(
     context: &WorktreeContext<'_>,
     cancel: &CancelToken,
@@ -190,18 +731,6 @@ pub(super) fn read_branch_tips(
         return Err(WorktreeError::InvalidOutput);
     }
     parse_branch_tips(&outcome.stdout.bytes)
-}
-
-pub(super) fn resolve_ref(
-    context: &WorktreeContext<'_>,
-    name: GitRefName,
-    cancel: &CancelToken,
-) -> Result<GitOid, WorktreeError> {
-    let outcome = run_git(context, context.repo, GitRead::ResolveRef { name }, cancel)?;
-    if exit_code(&outcome)? != 0 {
-        return Err(WorktreeError::NotFound);
-    }
-    parse_oid(trim_ascii(&outcome.stdout.bytes))
 }
 
 pub fn is_ancestor(
@@ -297,4 +826,23 @@ pub(super) fn read_bounded(
                 source,
             },
         })
+}
+
+#[cfg(test)]
+mod path_tests {
+    use super::*;
+    use std::os::unix::ffi::OsStrExt;
+
+    #[test]
+    fn inventory_paths_preserve_unquoted_native_paths_and_bare_records() {
+        let paths =
+            inventory_paths(b"worktree /bare\0bare\0\0worktree /lane \xff\nname\0HEAD 123\0\0")
+                .expect("valid inventory");
+        assert_eq!(paths.len(), 2);
+        assert_eq!(paths[0], PathBuf::from("/bare"));
+        assert_eq!(paths[1].as_os_str().as_bytes(), b"/lane \xff\nname");
+        assert!(inventory_paths(b"worktree /truncated\0").is_err());
+        assert!(inventory_paths(b"worktree relative\0bare\0\0").is_err());
+        assert!(inventory_paths(b"\0\0").is_err());
+    }
 }

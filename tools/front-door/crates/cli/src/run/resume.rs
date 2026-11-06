@@ -455,7 +455,8 @@ pub(super) fn fresh_continuation_worktree(
                 call.cancel,
             )?;
             let tree = provenant_confinement::verify_worktree(context.repo, &info.path)?;
-            let publication = worktrees::save_owner(
+            let publication = worktrees::save_lane_owner_when_free(
+                context,
                 &tree,
                 &WorktreeOwner {
                     attempt_id: Some(input.attempt_id),
@@ -467,16 +468,17 @@ pub(super) fn fresh_continuation_worktree(
                     origin: WorktreeOrigin::Lane,
                     label: None,
                 },
+                info.head,
+                None,
+                false,
+                call.cancel,
             );
             if let Err(error) = publication {
-                if worktrees::remove(
+                if worktrees::remove_created_by_operation(
                     context,
-                    worktrees::WorktreeRemove::Name {
-                        name: format!("lane/resume-{}", input.attempt_id),
-                        discard: false,
-                        integration: None,
-                        expected_head: Some(info.head),
-                    },
+                    format!("lane/resume-{}", input.attempt_id),
+                    info.head,
+                    &input.operation_id,
                     call.cancel,
                 )
                 .is_err()

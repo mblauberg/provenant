@@ -3602,15 +3602,28 @@ fn visit_nodes(
 /// which a graph node may always read. Outside a repository the project is only
 /// its own directory.
 pub(crate) fn project_worktrees(directory: &Path) -> Vec<PathBuf> {
-    crate::handoff::git_text(directory, &["worktree", "list", "--porcelain"])
-        .map(|listing| {
-            listing
-                .lines()
-                .filter_map(|line| line.strip_prefix("worktree "))
-                .map(std::path::PathBuf::from)
-                .collect()
-        })
-        .unwrap_or_else(|_| vec![directory.to_path_buf()])
+    let read = || -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
+        let git = provenant_os::git::git_executable().ok_or("Git executable unavailable")?;
+        let environment: Vec<_> = std::env::vars_os()
+            .filter(|(key, _)| {
+                !key.to_str()
+                    .is_some_and(|key| crate::fabric::GIT_REDIRECTS.contains(&key))
+            })
+            .chain([("GIT_TERMINAL_PROMPT".into(), "0".into())])
+            .collect();
+        let executor = provenant_os::exec::SystemExecutor::new(1)?;
+        Ok(
+            provenant_confinement::worktrees::RepoFacts::default().discover_worktree_paths(
+                directory,
+                &git,
+                &environment,
+                &executor,
+                std::time::Duration::from_secs(60),
+                &provenant_core::CancelToken::new(),
+            )?,
+        )
+    };
+    read().unwrap_or_else(|_| vec![directory.to_path_buf()])
 }
 
 fn discover_read_roots(worktrees: &[PathBuf], allowed: &[String], extra: &[PathBuf]) -> ReadRoots {

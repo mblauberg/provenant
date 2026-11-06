@@ -549,20 +549,13 @@ pub fn prepare_writer(
         .map_err(|error| anchor_filesystem(error, state))?;
     let (directory, binding) =
         worktrees::writer_custody(&project_state, &worktree, &branch, base, || {
-            let outcome = provenant_confinement::run_utility(
-                &executor,
-                provenant_confinement::GitRead::WorktreeList,
+            worktrees::RepoFacts::default().writer_inventory(
                 &repo,
+                &executor,
                 &utility,
                 budget().map_err(|_| worktrees::WorktreeError::InvalidRequest)?,
                 &CancelToken::new(),
-            )?;
-            if outcome.termination != provenant_os::exec::Termination::Exit(0)
-                || outcome.stdout.truncated
-            {
-                return Err(worktrees::WorktreeError::InvalidOutput);
-            }
-            Ok(outcome.stdout.bytes)
+            )
         })
         .map_err(|error| match error {
             worktrees::WorktreeError::NotFound => {

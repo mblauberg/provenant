@@ -68,6 +68,7 @@ pub fn with_context_using_workers<T>(
     let project_state = child(&registry, OsStr::new(&binding.project_id().to_string()))?;
     let lock_budget =
         WaitBudget::cli(clock.mono_now(), 5).map_err(|_| WorktreeError::InvalidRequest)?;
+    let facts = RepoFacts::default();
     action(&WorktreeContext {
         home,
         repo: &repo,
@@ -75,6 +76,7 @@ pub fn with_context_using_workers<T>(
         project_state: &project_state,
         executor: &executor,
         utility: &runtime,
+        facts: &facts,
         workers,
         clock,
         utility_budget: budget,

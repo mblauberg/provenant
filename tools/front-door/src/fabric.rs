@@ -29,6 +29,72 @@ include!("fabric/graph_tests.rs");
 
 use provenant_cli::fabric::Context;
 
+/// Recheck writer custody before adopting an existing peer worktree. Census
+/// observations remain advisory; an actual held lease or retained fence refuses.
+fn peer_adoption_custody(
+    context: &provenant_confinement::worktrees::WorktreeContext<'_>,
+    observation: &provenant_confinement::worktrees::WorktreeInfo,
+    cancel: &CancelToken,
+) -> Result<Option<&'static str>, provenant_confinement::worktrees::WorktreeError> {
+    use provenant_confinement::worktrees::{
+        self, Occupancy, OccupancyUnknownSource, WorktreeError,
+    };
+    let warning = match &observation.occupancy {
+        Occupancy::Held => None,
+        Occupancy::Unknown {
+            scope,
+            evidence,
+            source: OccupancyUnknownSource::Custody,
+        } => {
+            return Err(WorktreeError::UnknownOccupancy {
+                path: scope.clone(),
+                detail: evidence.clone(),
+            });
+        }
+        Occupancy::Unknown { .. } => {
+            Some("process census was incomplete; writer custody was checked")
+        }
+        Occupancy::Observed { .. } => {
+            Some("a process was observed in the worktree; writer custody was checked")
+        }
+        Occupancy::Available => None,
+    };
+    let mut tree = provenant_confinement::verify_worktree(context.repo, &observation.path)
+        .map_err(|error| WorktreeError::UnknownOccupancy {
+            path: observation.path.clone(),
+            detail: format!("worktree registration could not be verified: {error}"),
+        })?;
+    let holder =
+        || worktrees::load_owner(&tree).map(|owner| owner.and_then(|owner| owner.attempt_id));
+    let _writer =
+        worktrees::cache_writer_guard(context.project_state, tree.path()).map_err(|state| {
+            match state {
+                Occupancy::Held => WorktreeError::WriterBusy {
+                    holder: holder().ok().flatten(),
+                },
+                other => worktrees::custody_refusal(other),
+            }
+        })?;
+    worktrees::check_writer_terminal(tree.repo())?;
+    let branch = observation
+        .branch
+        .as_deref()
+        .ok_or(WorktreeError::IdentityChanged)?;
+    let reference = provenant_confinement::repo::GitRefName::new(branch)
+        .map_err(|_| WorktreeError::IdentityChanged)?;
+    let head = tree
+        .repo()
+        .private_dir()
+        .read_stable(std::ffi::OsStr::new("HEAD"), 4096)?;
+    if head != format!("ref: {}\n", reference.as_str()).as_bytes()
+        || context.facts.resolve_commit(context, reference, cancel)? != observation.head
+    {
+        return Err(WorktreeError::IdentityChanged);
+    }
+    worktrees::require_clean_worktree(context, &mut tree, cancel)?;
+    Ok(warning)
+}
+
 /// Repeat a list-then-read tail lookup until two consecutive passes name the
 /// same attempt, and return the earlier pass's record. The later pass listed
 /// after the earlier one read its state, so agreement proves no successor had
@@ -87,14 +153,14 @@ fn graph_writer_initialisation_error(
     use provenant_confinement::worktrees::WorktreeError;
     match error {
         WorktreeError::RegistryLockTimeout | WorktreeError::LockBusy => FacadeError::WriterLockBusy,
-        WorktreeError::UnknownWriter
-        | WorktreeError::UnknownWriterAt { .. }
-        | WorktreeError::CensusUnknown { .. }
-        | WorktreeError::IncompleteCensus { .. } => FacadeError::WriterUnknown,
+        WorktreeError::UnknownWriter => FacadeError::WriterUnknown,
         error => FacadeError::DispatchRefused {
             fact: None,
             disk: None,
-            reason: format!("initialise graph writer at {commit}: {error}"),
+            reason: format!(
+                "initialise graph writer at {commit}: {}",
+                crate::worktrees::local_worktree_message(&error)
+            ),
         },
     }
 }
@@ -1500,32 +1566,69 @@ pub(crate) const GIT_REDIRECTS: &[&str] = &[
     "GIT_CONFIG_COUNT",
     "GIT_TERMINAL_PROMPT",
 ];
-/// Fetch every remote with this host's own Git authority, then require `base`
-/// on a remote-tracking ref, so a peer writer never starts from a commit only
-/// this clone has. Returns the pinned base commit.
-fn fetch_remote_base(
-    project: &Path,
-    base: &str,
-    timeout: std::time::Duration,
-) -> Result<provenant_core::GitOid, FacadeError> {
-    remote_base(project, base, timeout, true)
+/// Project a repository-fact failure once at the peer boundary, preserving
+/// bounded-output, cancellation and timeout distinctions without exposing paths.
+fn repository_fact_error(error: provenant_confinement::worktrees::WorktreeError) -> FacadeError {
+    use provenant_confinement::{utility::UtilityError, worktrees::WorktreeError};
+    match error {
+        WorktreeError::Utility(UtilityError::Truncated { .. }) => FacadeError::io(
+            provenant_fabric_runtime::coordination::facade::REPOSITORY_FACT_LIMIT_OPERATION,
+        ),
+        WorktreeError::Cancelled | WorktreeError::Utility(UtilityError::Cancelled) => {
+            FacadeError::Cancelled
+        }
+        WorktreeError::Utility(UtilityError::TimedOut) => FacadeError::Timeout,
+        _ => FacadeError::BaseUnreachable,
+    }
 }
-/// [`fetch_remote_base`], skipping the fetch when `fetch` is false so a caller
-/// pinning several bases fetches once.
+
+/// Fetch with host Git authority, resolve through the command facts session,
+/// and require the pinned commit on a remote-tracking ref. A caller pinning
+/// several bases may skip later fetches.
 pub(crate) fn remote_base(
-    project: &Path,
+    context: &provenant_confinement::worktrees::WorktreeContext<'_>,
     base: &str,
     timeout: std::time::Duration,
     fetch: bool,
+    cancel: &CancelToken,
 ) -> Result<provenant_core::GitOid, FacadeError> {
+    let project = context.repo.root_path();
+    let revision = provenant_confinement::repo::GitRevision::new(base)
+        .map_err(|_| FacadeError::BaseUnreachable)?;
     use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, Termination};
     let git = provenant_os::git::git_executable().ok_or(FacadeError::OwnerUnavailable)?;
     let environment: Vec<(std::ffi::OsString, std::ffi::OsString)> = std::env::vars_os()
-        .filter(|(key, _)| !key.to_str().is_some_and(|key| GIT_REDIRECTS.contains(&key)))
-        .chain([("GIT_TERMINAL_PROMPT".into(), "0".into())])
+        .filter(|(key, _)| {
+            key != "GIT_NO_REPLACE_OBJECTS"
+                && key != "GIT_GRAFT_FILE"
+                && !key.to_str().is_some_and(|key| GIT_REDIRECTS.contains(&key))
+        })
+        .chain([
+            ("GIT_TERMINAL_PROMPT".into(), "0".into()),
+            ("GIT_NO_REPLACE_OBJECTS".into(), "1".into()),
+            ("GIT_GRAFT_FILE".into(), "/dev/null".into()),
+        ])
         .collect();
     let executor = SystemExecutor::new(1).map_err(|_| FacadeError::io("create Git executor"))?;
+    let clock = SystemClock::new();
+    let started = clock.mono_now().as_micros();
+    let remaining = || {
+        timeout.saturating_sub(std::time::Duration::from_micros(
+            clock.mono_now().as_micros().saturating_sub(started),
+        ))
+    };
     let git_output = |args: &[&str]| -> Result<Vec<u8>, FacadeError> {
+        if cancel.is_cancelled() {
+            return Err(FacadeError::Cancelled);
+        }
+        let remaining = remaining();
+        if remaining.is_zero() {
+            return Err(FacadeError::Timeout);
+        }
+        context
+            .repo
+            .revalidate()
+            .map_err(|_| FacadeError::BaseUnreachable)?;
         let argv: Vec<std::ffi::OsString> = std::iter::once(git.as_os_str().to_owned())
             .chain(
                 [
@@ -1539,39 +1642,99 @@ pub(crate) fn remote_base(
                 .map(std::ffi::OsString::from),
             )
             .collect();
-        let mut options = ExecOptions::new(&argv, project, timeout);
+        let mut options = ExecOptions::new(&argv, project, remaining);
         options.env = Some(&environment);
+        options.cancel = Some(cancel);
         options.stdin = Some(b"");
-        options.stdout = StreamPolicy::Capture { limit: 4096 };
+        options.stdout = StreamPolicy::Capture {
+            limit: provenant_os::exec::DEFAULT_CAPTURE_LIMIT,
+        };
         options.stderr = StreamPolicy::Discard;
+        options.stop_on_output_limit = true;
         let output = executor
             .execute(options)
             .map_err(|_| FacadeError::BaseUnreachable)?;
-        if output.termination != Termination::Exit(0) || output.timed_out {
+        if output.stdout.truncated || output.overflow_stopped {
+            return Err(FacadeError::io(
+                provenant_fabric_runtime::coordination::facade::REPOSITORY_FACT_LIMIT_OPERATION,
+            ));
+        }
+        if cancel.is_cancelled() {
+            return Err(FacadeError::Cancelled);
+        }
+        if output.timed_out {
+            return Err(FacadeError::Timeout);
+        }
+        if output.termination != Termination::Exit(0) {
             return Err(FacadeError::BaseUnreachable);
         }
         Ok(output.stdout.bytes)
     };
     if fetch {
+        context.facts.invalidate_inventory(context);
         git_output(&["fetch", "--all", "--no-tags", "--no-recurse-submodules"])?;
     }
-    let contains = format!("--contains={base}");
+    let remaining = remaining();
+    if remaining.is_zero() {
+        return Err(FacadeError::Timeout);
+    }
+    let fact_context = provenant_confinement::worktrees::WorktreeContext {
+        utility_budget: context
+            .utility_budget
+            .with_timeout_cap(remaining)
+            .map_err(|_| FacadeError::Timeout)?,
+        ..*context
+    };
+    let oid = context
+        .facts
+        .resolve_revision(&fact_context, revision, cancel)
+        .map_err(repository_fact_error)?;
+    let contains = format!("--contains={oid}");
     let refs = git_output(&[
         "for-each-ref",
-        "--count=1",
-        "--format=%(refname)",
+        "--format=%(objectname) %(symref)",
         &contains,
         "refs/remotes",
     ])?;
-    if refs.iter().all(u8::is_ascii_whitespace) {
+    let refs = std::str::from_utf8(&refs).map_err(|_| FacadeError::BaseUnreachable)?;
+    let tips: std::collections::HashSet<_> = refs
+        .lines()
+        .filter_map(|line| {
+            let (tip, symbolic) = line.split_once(' ')?;
+            if symbolic.is_empty() {
+                provenant_core::GitOid::parse(tip).ok()
+            } else {
+                None
+            }
+        })
+        .collect();
+    if tips.is_empty() {
         return Err(FacadeError::BaseUnreachable);
     }
-    let commit = format!("{base}^{{commit}}");
-    let oid = git_output(&["rev-parse", "--verify", "--end-of-options", &commit])?;
-    std::str::from_utf8(&oid)
-        .ok()
-        .and_then(|oid| provenant_core::GitOid::parse(oid.trim()).ok())
-        .ok_or(FacadeError::BaseUnreachable)
+    // A tracking ref can outlive its remote branch. An advertised branch with
+    // the same tip proves it is still remote, regardless of fetch refspecs.
+    let remotes = git_output(&["remote"])?;
+    let remotes = std::str::from_utf8(&remotes).map_err(|_| FacadeError::BaseUnreachable)?;
+    for remote in remotes.lines() {
+        let advertised = match git_output(&["ls-remote", "--heads", "--", remote]) {
+            Ok(advertised) => advertised,
+            Err(FacadeError::BaseUnreachable) => continue,
+            Err(error) => return Err(error),
+        };
+        let advertised =
+            std::str::from_utf8(&advertised).map_err(|_| FacadeError::BaseUnreachable)?;
+        for line in advertised.lines() {
+            let Some((tip, name)) = line.split_once('\t') else {
+                continue;
+            };
+            if name.starts_with("refs/heads/")
+                && provenant_core::GitOid::parse(tip).is_ok_and(|tip| tips.contains(&tip))
+            {
+                return Ok(oid);
+            }
+        }
+    }
+    Err(FacadeError::BaseUnreachable)
 }
 
 struct BinaryRunOwner<'a> {
@@ -1618,6 +1781,12 @@ fn run_error(error: provenant_run::RunError) -> FacadeError {
     // collapsing to a bare "invalid input".
     if let provenant_run::RunError::InvalidBase(base) = &error {
         return FacadeError::invalid(format!("unresolvable base `{base}`"));
+    }
+    if let provenant_run::RunError::Writer(
+        provenant_confinement::worktrees::WorktreeError::WriterBusy { holder },
+    ) = &error
+    {
+        return FacadeError::WriterBusy { holder: *holder };
     }
     fail_error(error.into())
 }
@@ -1737,7 +1906,7 @@ fn facade_error_for_kind(kind: provenant_run::ErrorKind) -> FacadeError {
         | E::LaneCap
         | E::BuildSettings
         | E::GuardianIdentity => FacadeError::ConfinementRefused,
-        E::WriterBusy => FacadeError::WriterBusy,
+        E::WriterBusy => FacadeError::WriterBusy { holder: None },
         E::WriterLockBusy => FacadeError::WriterLockBusy,
         E::WriterUnknown => FacadeError::WriterUnknown,
         E::CredentialRoot => FacadeError::CredentialRoot {
@@ -2384,7 +2553,7 @@ impl BinaryRunOwner<'_> {
         cancel: &CancelToken,
     ) -> Result<provenant_fabric_runtime::runs::PeerWorktree, FacadeError> {
         use provenant_confinement::worktrees::{
-            self, WorktreeCondition, WorktreeCreate, WorktreeError, WriterState,
+            self, WorktreeCondition, WorktreeCreate, WorktreeError,
         };
         let branch = provenant_confinement::repo::GitRefName::branch(&spec.branch)
             .map_err(|_| FacadeError::InvalidInput { detail: None })?;
@@ -2402,44 +2571,68 @@ impl BinaryRunOwner<'_> {
             std::time::Duration::from_micros(micros)
         };
         let project = &self.factory.cwd;
+        let facts = worktrees::RepoFacts::default();
         let base = if replay {
             None
         } else {
-            Some(fetch_remote_base(project, &spec.base, half())?)
+            let resolved = crate::worktrees::with_context(
+                &self.factory.context.roots,
+                &self.factory.home,
+                project,
+                half(),
+                self.factory.workers,
+                |context, cancel| {
+                    let context = &worktrees::WorktreeContext {
+                        facts: &facts,
+                        ..*context
+                    };
+                    Ok(remote_base(context, &spec.base, half(), true, cancel))
+                },
+            )
+            .map_err(|_| FacadeError::io("resolve peer base"))?;
+            Some(resolved?)
         };
-        let info = crate::worktrees::with_context(
+        let (info, warning) = crate::worktrees::with_context(
             &self.factory.context.roots,
             &self.factory.home,
             project,
             half(),
             self.factory.workers,
             |context, cancel| {
+                let context = &worktrees::WorktreeContext {
+                    facts: &facts,
+                    ..*context
+                };
                 let existing = worktrees::list(context, cancel)?
                     .into_iter()
-                    .find(|w| w.branch.as_deref() == Some(branch.as_str()));
+                    .find(|entry| entry.branch.as_deref() == Some(branch.as_str()));
                 let Some(base) = base else {
-                    return existing.ok_or(WorktreeError::NotFound.into());
+                    return existing
+                        .map(|entry| (entry, None))
+                        .ok_or(WorktreeError::NotFound.into());
                 };
                 match existing {
-                    Some(info)
-                        if info.head == base
-                            && info.dirty == WorktreeCondition::Clean
-                            && info.writer != WriterState::Live =>
-                    {
-                        Ok(info)
+                    Some(entry) => {
+                        if entry.head != base || entry.dirty != WorktreeCondition::Clean {
+                            if matches!(&entry.occupancy, worktrees::Occupancy::Held) {
+                                let _ = peer_adoption_custody(context, &entry, cancel)?;
+                            }
+                            return Err(WorktreeError::BranchExistsWithBase {
+                                branch: spec.branch.clone(),
+                                head: entry.head,
+                                base,
+                            }
+                            .into());
+                        }
+                        let warning = peer_adoption_custody(context, &entry, cancel)?;
+                        Ok((entry, warning))
                     }
-                    Some(info) => Err(WorktreeError::BranchExistsWithBase {
-                        branch: spec.branch.clone(),
-                        head: info.head,
-                        base,
-                    }
-                    .into()),
                     None => {
                         let request = WorktreeCreate {
                             branch: spec.branch.clone(),
                             base: Some(base.to_string()),
                         };
-                        Ok(worktrees::create(context, request, cancel)?)
+                        Ok((worktrees::create(context, request, cancel)?, None))
                     }
                 }
             },
@@ -2456,10 +2649,31 @@ impl BinaryRunOwner<'_> {
                 FacadeError::BaseUnreachable
             }
             crate::worktrees::Error::Worktree(WorktreeError::Cancelled) => FacadeError::Cancelled,
+            crate::worktrees::Error::Worktree(WorktreeError::IdentityChanged) => {
+                FacadeError::Conflict
+            }
+            crate::worktrees::Error::Worktree(
+                WorktreeError::GitOperationInProgress
+                | WorktreeError::Dirty(_)
+                | WorktreeError::IgnoredPaths(_),
+            ) => FacadeError::ConfinementRefused,
+            crate::worktrees::Error::Worktree(WorktreeError::WriterBusy { holder }) => {
+                FacadeError::WriterBusy { holder }
+            }
+            crate::worktrees::Error::Worktree(WorktreeError::LockBusy) => {
+                FacadeError::WriterBusy { holder: None }
+            }
+            crate::worktrees::Error::Worktree(
+                WorktreeError::UnknownOccupancy { .. } | WorktreeError::UnknownWriter,
+            ) => FacadeError::WriterUnknown,
             _ => FacadeError::io("create peer worktree"),
         })?;
+        let mut extra = provenant_records::ExtraFields::default();
+        if let Some(warning) = warning {
+            extra.insert("warnings".into(), serde_json::json!([warning]));
+        }
         Ok(provenant_fabric_runtime::runs::PeerWorktree {
-            extra: Default::default(),
+            extra,
             path: info
                 .path
                 .to_str()
@@ -3907,7 +4121,7 @@ fn settle_owned_worktree(
                     // Retained lanes can resume with fresh caches. Restrict this
                     // pass to their owner, including detached remnants, and prove
                     // terminal state again while acquiring writer exclusion.
-                    if lane.writer == worktrees::WriterState::Free {
+                    if lane.occupancy.is_available() {
                         provenant_confinement::cache::gc_worktree_cargo_caches_with_writer_guard(
                             &settled.roots.home,
                             &provenant_confinement::cache::CacheGcPolicy {
@@ -3920,7 +4134,10 @@ fn settle_owned_worktree(
                                 let guard =
                                     worktrees::cache_writer_guard(context.project_state, path)?;
                                 if !terminal(path) || !no_live(path) {
-                                    return Err(worktrees::WorkerState::Unknown);
+                                    return Err(worktrees::Occupancy::custody_unknown(
+                                        path.to_path_buf(),
+                                        "lane settlement could not be verified",
+                                    ));
                                 }
                                 Ok(Some(guard))
                             },

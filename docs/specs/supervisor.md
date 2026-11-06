@@ -15,6 +15,38 @@ relative to `tools/front-door/`.
 
 ## Custody
 
+### Repository facts in GC previews
+
+A GC command shares its worktree inventory between discovery and preview for
+each repository. The snapshot is tied to the common Git directory identity and
+is consumed once. Applied cleanup discards the snapshot and reads Git again
+under the repository lock before authorising mutations. Ref resolution uses
+fresh bounded evidence after fetch. The facts session's inventory and scalar
+caps are configurable and never widen the caller's utility budget. Cached
+inventories are reused only under the same effective utility budget. Session
+handoff uses one facts session for its inventory, upstream commit reads and
+WIP rechecks, refreshing mutable evidence after its own Git writes. Target-side
+handoff recreation reuses an identity-bound advisory inventory between branches;
+guarded reads and attempted mutations invalidate it before authorising writes.
+Peer and handoff base resolution pins through the facts session and then checks
+that exact commit against remote-tracking refs, so a moved ref cannot change the
+commit after the reachability check. A containing tracking tip must also match
+a currently advertised remote branch tip; deleted tracking refs cannot prove
+reachability. Replacement objects and grafts do not alter that ancestry check.
+Fetch, resolution and advertisement share the peer deadline. Pull-request base
+resolution and landing branch and commit tree reads each use a command-scoped facts session
+and read-only verified checkouts, including when Git uses a separate directory
+or native object alternates. Landing inventory reads the common repository's
+trusted local and included bare settings before listing worktrees, so Git's
+primary bare registration is preserved without accepting lane-writable or
+worktree-level configuration overrides. Worktree GC uses the same fact but
+requires an explicit trusted non-bare setting before selecting a primary
+checkout. Batch landing passes its facts session into local follow-up and discards verified
+checkout handles around command-controlled mutations. Landing revalidates those
+handles before reading their common or private Git paths instead of rediscovering
+the paths with separate Git commands. Target-seed builds resolve their pinned
+remote-tracking commit through the same bounded read-only facts boundary.
+
 ### Worktree census sessions
 
 Each command owns a census session. Within an unchanged observation epoch,
@@ -35,6 +67,45 @@ held, and repeat required census checks after output preparation. A native
 process that does not take the advisory writer lock may start after the
 observation; the census is not atomic exclusion and never grants signalling
 authority.
+
+An unowned worktree may be claimed when writer custody is available even if
+the census observes a bystander or cannot complete. Admission warns with the
+observation, and the claim checks the Git registration, HEAD, cleanliness and
+in-progress Git operations under repository and writer custody. A different
+operation cannot replace a nonterminal lane owner, including a reservation that
+has not yet acquired an attempt ID. A replay of that same operation can use
+its reservation despite advisory census evidence, after reacquiring custody.
+Publishing an initial owner also takes repository and writer custody and checks
+the previously observed owner, so a creator cannot overwrite a competing claim.
+Subsequent owner updates compare the complete observed record under both guards.
+These reservations are published before the writer lease, so they do not yet
+prove which attempt holds an acquired lease.
+Failed-creation cleanup rechecks the operation owner under those locks before
+removing the tree. An unreadable owner record is custody uncertainty with the
+worktree scope and read failure, not an unowned checkout. Inventory retains the
+validated owner record or its read error, while the existing worktree-list
+owner labels remain stable. A retained import fence still refuses custody, but
+is reported as scoped custody uncertainty rather than as a live held lease.
+
+A lane owner whose recorded attempt is confirmed terminal may be reassigned
+when the writer lock is free even if the census sees a process in the tree.
+Admission warns about that observation, or the scoped census evidence when
+it is incomplete. A refusal caused by incomplete census also carries that
+scope and evidence. Admission represents a held lease, an advisory process and
+unknown census or custody evidence as distinct occupancy outcomes. Inventory,
+admission, cache retention and cleanup share that occupancy; the established
+`writer` output is a projection of it. Reassignment rechecks the owner and HEAD under repository
+and writer custody, and still refuses dirty trees, Git operations and retained
+writer fences. Peer worktree adoption also rechecks writer custody, branch,
+HEAD and Git-operation state before accepting an existing checkout;
+process-only observations travel as warnings. Local worktree, GC and landing
+refusals include the affected scope and escaped occupancy evidence; remote
+diagnostics retain their existing disclosure boundary.
+
+Session handoff holds writer custody through WIP Git operations. It rechecks
+registration, branch, HEAD, Git operation markers and untracked files before
+writing; a held lease or unresolved custody prevents WIP. Process observations
+and incomplete census evidence are advisory and produce scoped warnings.
 
 ### Closed stop reasons; natural exit wins
 

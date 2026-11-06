@@ -2417,12 +2417,12 @@ fn a_late_host_limit_fails_the_receipt_at_its_stage_and_keeps_the_reason()
             roots: &[std::path::PathBuf],
         ) -> std::collections::BTreeMap<
             std::path::PathBuf,
-            provenant_confinement::worktrees::WorkerState,
+            provenant_confinement::worktrees::Occupancy,
         > {
             roots
                 .iter()
                 .cloned()
-                .map(|root| (root, provenant_confinement::worktrees::WorkerState::Free))
+                .map(|root| (root, provenant_confinement::worktrees::Occupancy::Available))
                 .collect()
         }
     }
@@ -2527,7 +2527,8 @@ fn a_late_host_limit_fails_the_receipt_at_its_stage_and_keeps_the_reason()
     let git = fixture.root.join("late-limit-git");
     let flag = fixture.root.join("late-limit-enabled");
     let payload = fixture.root.join("late-limit-output");
-    std::fs::write(&payload, vec![b'a'; 16 * 1024 + 1])?;
+    let limit = provenant_os::git::REPO_FACT_SCALAR_LIMIT;
+    std::fs::write(&payload, vec![b'a'; limit + 1])?;
     let real_git = provenant_os::git::git_executable().ok_or("git executable")?;
     fixture.executable(
         &git,
@@ -2561,7 +2562,7 @@ fn a_late_host_limit_fails_the_receipt_at_its_stage_and_keeps_the_reason()
         .and_then(serde_json::Value::as_str)
         .ok_or("reason")?;
     assert!(reason.contains("rev-parse"), "{reason}");
-    assert!(reason.contains("16384"), "{reason}");
+    assert!(reason.contains(&limit.to_string()), "{reason}");
     Ok(())
 }
 
@@ -2575,12 +2576,12 @@ fn review_delivery_requires_acceptance_and_exact_head()
             roots: &[std::path::PathBuf],
         ) -> std::collections::BTreeMap<
             std::path::PathBuf,
-            provenant_confinement::worktrees::WorkerState,
+            provenant_confinement::worktrees::Occupancy,
         > {
             roots
                 .iter()
                 .cloned()
-                .map(|root| (root, provenant_confinement::worktrees::WorkerState::Free))
+                .map(|root| (root, provenant_confinement::worktrees::Occupancy::Available))
                 .collect()
         }
     }
@@ -2724,12 +2725,12 @@ fn settled_delivery_refuses_dirty_or_changed_head_and_replays_success()
             roots: &[std::path::PathBuf],
         ) -> std::collections::BTreeMap<
             std::path::PathBuf,
-            provenant_confinement::worktrees::WorkerState,
+            provenant_confinement::worktrees::Occupancy,
         > {
             roots
                 .iter()
                 .cloned()
-                .map(|root| (root, provenant_confinement::worktrees::WorkerState::Free))
+                .map(|root| (root, provenant_confinement::worktrees::Occupancy::Available))
                 .collect()
         }
     }
@@ -4141,12 +4142,12 @@ pub(super) fn registered_landed_writer_fixture(
             roots: &[std::path::PathBuf],
         ) -> std::collections::BTreeMap<
             std::path::PathBuf,
-            provenant_confinement::worktrees::WorkerState,
+            provenant_confinement::worktrees::Occupancy,
         > {
             roots
                 .iter()
                 .cloned()
-                .map(|root| (root, provenant_confinement::worktrees::WorkerState::Free))
+                .map(|root| (root, provenant_confinement::worktrees::Occupancy::Available))
                 .collect()
         }
     }

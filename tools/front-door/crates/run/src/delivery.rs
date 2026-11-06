@@ -1984,13 +1984,10 @@ pub(super) fn stdout_limit(commit_log: bool, args: &[&str]) -> usize {
     } else if args.contains(&"--show-origin") {
         // A configuration listing with origins can exceed an ordinary reply.
         1024 * 1024
-    } else if matches!(
-        git_subcommand(args).as_str(),
-        "worktree list" | "for-each-ref" | "ls-remote"
-    ) {
+    } else if matches!(git_subcommand(args).as_str(), "for-each-ref" | "ls-remote") {
         provenant_os::exec::DEFAULT_CAPTURE_LIMIT
     } else {
-        16 * 1024
+        provenant_os::git::fact_capture_limit(args, 16 * 1024)
     }
 }
 
