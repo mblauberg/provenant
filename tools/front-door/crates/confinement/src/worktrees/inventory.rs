@@ -798,7 +798,11 @@ impl Executor for FactExecutor<'_> {
         {
             let flags = u8::from(outcome.cancelled)
                 | (u8::from(outcome.timed_out) << 1)
-                | (u8::from(outcome.stdout.truncated || outcome.overflow_stopped) << 2)
+                // The executor stops on either stream's capture limit. A
+                // bounded stderr excerpt must not become a stdout fact-limit
+                // error and hide the caller's command failure diagnostic.
+                | (u8::from(outcome.stdout.truncated
+                    || (outcome.overflow_stopped && !outcome.stderr.truncated)) << 2)
                 | (u8::from(
                     outcome.drain_truncated
                         || outcome.stdout.read_failed
@@ -1166,6 +1170,82 @@ mod path_tests {
                     stream: "stdout"
                 }))
             ));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn scoped_fact_execution_preserves_stderr_overflow_failure_without_hiding_stdout_loss()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_os::exec::{CapturedStream, ExecError, ExecOptions};
+        struct StderrOverflow {
+            stdout_truncated: bool,
+        }
+        impl Executor for StderrOverflow {
+            fn execute(&self, options: ExecOptions<'_>) -> Result<ExecOutcome, ExecError> {
+                assert!(options.stop_on_output_limit);
+                Ok(ExecOutcome {
+                    termination: Termination::Signal(9),
+                    stdout: CapturedStream {
+                        bytes: b"partial fact".to_vec(),
+                        truncated: self.stdout_truncated,
+                        ..Default::default()
+                    },
+                    stderr: CapturedStream {
+                        bytes: b"fixture git failure".to_vec(),
+                        truncated: true,
+                        ..Default::default()
+                    },
+                    timed_out: false,
+                    drain_truncated: false,
+                    overflow_stopped: true,
+                    cancelled: false,
+                    elapsed_micros: 0,
+                })
+            }
+        }
+        let facts = RepoFacts::default();
+        let cancel = CancelToken::new();
+        let argv = [
+            OsString::from("git"),
+            OsString::from("rev-parse"),
+            OsString::from("HEAD"),
+        ];
+        for stdout_truncated in [false, true] {
+            let result: Result<(), WorktreeError> =
+                facts.with_executor(&StderrOverflow { stdout_truncated }, &cancel, |executor| {
+                    let output = executor
+                        .execute(ExecOptions::new(
+                            &argv,
+                            Path::new("/"),
+                            std::time::Duration::from_secs(1),
+                        ))
+                        .map_err(UtilityError::from)?;
+                    assert_eq!(output.stderr.bytes, b"fixture git failure");
+                    // Never use partial stdout after the stderr cap stopped the
+                    // process; retain the caller's precise command failure.
+                    match output.termination {
+                        Termination::Signal(signal) => {
+                            Err(UtilityError::Signalled { signal }.into())
+                        }
+                        _ => Err(WorktreeError::InvalidOutput),
+                    }
+                });
+            if stdout_truncated {
+                assert!(matches!(
+                    result,
+                    Err(WorktreeError::Utility(UtilityError::Truncated {
+                        stream: "stdout"
+                    }))
+                ));
+            } else {
+                assert!(matches!(
+                    result,
+                    Err(WorktreeError::Utility(UtilityError::Signalled {
+                        signal: 9
+                    }))
+                ));
+            }
         }
         Ok(())
     }
