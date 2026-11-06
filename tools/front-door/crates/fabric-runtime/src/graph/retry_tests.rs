@@ -1537,7 +1537,7 @@ fn planner_patched_loop_body_redo_recovers_after_checkpoint_crash() {
         "schema_version":1,"graph_id":"redo-dynamic-loop-crash","nodes":[
             {"id":"work","kind":"loop","access":"read_only","loop":{
                 "max_rounds":1,"until":"check","body":[
-                    {"id":"planner","kind":"plan","prompt":"Plan work","access":"read_only","route":{"alias":"senior"},"plan":{"kinds":["task"],"max_nodes":1}},
+                    {"id":"planner","kind":"task","prompt":"Plan work","access":"read_only","route":{"alias":"senior"},"plan":{"kinds":["task"],"max_nodes":1}},
                     {"id":"check","kind":"gate","access":"read_only","depends_on":["planner"],"condition":{"type":"budget"}}
                 ]
             }},
@@ -1581,18 +1581,18 @@ fn planner_patched_loop_body_redo_recovers_after_checkpoint_crash() {
 }
 
 #[test]
-fn public_planner_retry_replaces_dynamic_children_instead_of_relaunching_stale_work() {
+fn public_agent_retry_replaces_dynamic_children_instead_of_relaunching_stale_work() {
     for replacement in ["slice", "replacement"] {
         let document: GraphDocument = serde_json::from_value(json!({
             "schema_version":1,"graph_id":"retry-planner-consumers","nodes":[{
-                "id":"work","kind":"plan","access":"read_only","prompt":"Plan work",
-                "route":{"alias":"senior"},"plan":{"kinds":["task"],"max_nodes":4}
+                "id":"work","kind":"task","access":"read_only","prompt":"Plan work",
+                "route":{"alias":"senior"}
             }]
         }))
         .unwrap();
         let mut owner = FakeOwner {
             observations: [
-                terminal_from(&slice_fragment("slice"), "old-plan"),
+                terminal_from(&slice_fragment("slice").replace("```fragment", "```patch"), "old-plan"),
                 done_as("old-child"),
             ]
             .into(),
@@ -1601,6 +1601,27 @@ fn public_planner_retry_replaces_dynamic_children_instead_of_relaunching_stale_w
         let mut checkpoint = advance(&document, &mut owner, &mut MemoryJournal::default())
             .unwrap()
             .checkpoint;
+        let mut busy = checkpoint.clone();
+        let child = busy.nodes.iter_mut().find(|node| node.id == "work--slice").unwrap();
+        child.state = NodeState::Running;
+        child.attempts[0].state = AttemptState::Running;
+        let before = busy.clone();
+        assert!(patch::retry_node_and_dependants(
+            &mut patch::LiveGraph {
+                document: &document,
+                checkpoint: &mut busy,
+            },
+            "work",
+            None,
+            &patch::PatchContext {
+                library: &template::TemplateLibrary::bundled(),
+                resolvers: &Default::default(),
+                scan: &|_| Ok(()),
+                journal: None,
+                limits: &plans::generous(),
+            },
+        ).is_err());
+        assert_eq!(busy, before, "a live dynamic child must retain its custody");
         patch::retry_node_and_dependants(
             &mut patch::LiveGraph {
                 document: &document,
@@ -1625,7 +1646,7 @@ fn public_planner_retry_replaces_dynamic_children_instead_of_relaunching_stale_w
         );
         let mut owner = FakeOwner {
             observations: [
-                terminal_from(&slice_fragment(replacement), "new-plan"),
+                terminal_from(&slice_fragment(replacement).replace("```fragment", "```patch"), "new-plan"),
                 done_as("new-child"),
             ]
             .into(),
