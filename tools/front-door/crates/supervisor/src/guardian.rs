@@ -644,6 +644,50 @@ fn admission_refusal(error: &CustodyError) -> String {
         _ => "admission refused".into(),
     }
 }
+fn lane_port_allocation(
+    plan: Option<&provenant_os::lane_ports::Plan>,
+) -> std::result::Result<
+    (
+        Option<provenant_os::lane_ports::Lease>,
+        Option<&'static str>,
+    ),
+    String,
+> {
+    let Some(plan) = plan else {
+        return Ok((None, None));
+    };
+    match plan.try_acquire() {
+        Ok(Some(lease)) => Ok((Some(lease), None)),
+        Ok(None) => {
+            let origin = match plan.blocks_origin {
+                Some(provenant_os::lane_ports::BlocksOrigin::CompiledDefault) => "compiled default",
+                Some(provenant_os::lane_ports::BlocksOrigin::HostConfig) => "host configuration",
+                None => "recorded plan",
+            };
+            Err(format!(
+                "no free lane port block; domains.fabric.lanes.lane_port_blocks={} ({origin}); raise or disable this setting",
+                plan.blocks
+            ))
+        }
+        Err(_) => Ok((
+            None,
+            Some(
+                "lane port block unavailable; continuing without allocation (domains.fabric.lanes.lane_port_blocks)",
+            ),
+        )),
+    }
+}
+
+fn without_lane_ports(env: &[(OsString, OsString)]) -> Vec<(OsString, OsString)> {
+    env.iter()
+        .filter(|(name, _)| {
+            name != provenant_os::lane_ports::BASE_ENV
+                && name != provenant_os::lane_ports::COUNT_ENV
+        })
+        .cloned()
+        .collect()
+}
+
 /// `env` with the lane's port block set, replacing any value it carried.
 fn with_lane_ports(
     env: &[(OsString, OsString)],
@@ -705,20 +749,20 @@ impl Driver<'_> {
         }
         // Held until this function returns, which is after the provider and
         // its descendants are settled; the kernel drops it if we die first.
-        let ports = match self.lane_ports.as_ref().map(|plan| plan.try_acquire()) {
-            None => None,
-            Some(Ok(Some(lease))) => Some(lease),
-            Some(Ok(None)) => {
-                return self.never_spawned(
-                    "no free lane port block; raise domains.fabric.lanes.lane_port_blocks",
-                );
-            }
-            Some(Err(_)) => return self.never_spawned("lane port blocks unavailable"),
+        let (ports, port_warning) = match lane_port_allocation(self.lane_ports.as_ref()) {
+            Ok(result) => result,
+            Err(reason) => return self.never_spawned(&reason),
         };
-        let leased_env;
+        if let Some(warning) = port_warning {
+            warn(&mut warnings, &mut omitted_warnings, warning);
+        }
+        let adjusted_env;
         let env = if let Some(lease) = &ports {
-            leased_env = with_lane_ports(env, lease);
-            leased_env.as_slice()
+            adjusted_env = with_lane_ports(env, lease);
+            adjusted_env.as_slice()
+        } else if port_warning.is_some() {
+            adjusted_env = without_lane_ports(env);
+            adjusted_env.as_slice()
         } else {
             env
         };

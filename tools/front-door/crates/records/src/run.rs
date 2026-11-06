@@ -6,9 +6,29 @@ use provenant_core::{
 };
 use serde::{Deserialize, Serialize};
 
+/// Compiled scheduling defaults, also used when configured priority is unavailable.
+pub const DEFAULT_WRITER_PRIORITY: u8 = 10;
+pub const DEFAULT_READER_PRIORITY: u8 = 5;
+pub const DEFAULT_BUILD_HEAVY_PRIORITY: u8 = 15;
+
+pub fn default_lane_priority(writer: bool, build_heavy: bool) -> u8 {
+    if build_heavy {
+        DEFAULT_BUILD_HEAVY_PRIORITY
+    } else if writer {
+        DEFAULT_WRITER_PRIORITY
+    } else {
+        DEFAULT_READER_PRIORITY
+    }
+}
+
 pub const RECORD_LIMIT: u64 = 1024 * 1024;
 /// Encoded write grants an attempt may record, leaving terminal headroom.
 pub const MAX_WRITE_GRANT_BYTES: u64 = 256 * 1024;
+/// Maximum configurable encoded grants; terminal records retain at least the
+/// same amount of headroom for their other fields.
+pub const MAX_WRITE_GRANT_BYTES_CEILING: u64 = 8 * RECORD_LIMIT;
+/// Host-owned terminal decisions can contain the full applied grant ledger.
+pub const TERMINAL_RECORD_LIMIT: u64 = 16 * RECORD_LIMIT;
 pub const RESULT_LIMIT: u64 = 4 * 1024 * 1024;
 pub const CAPTURE_LIMIT: u64 = 64 * 1024 * 1024;
 pub const OUTPUT_LIMIT: u64 = 65536;

@@ -808,14 +808,16 @@ back to a fresh named launch under the existing resume policy.
 
 ## Launch prompts
 
-Launch prompts are bounded to 1 MiB. Argv adapters take up to 64 KiB; a
+Launch prompts are bounded to 1 MiB. Argv adapters take up to the
+`domains.run.argv_prompt_limit_bytes` threshold (64 KiB by default); a
 larger top-level prompt is sealed as `prompt.md` and replaced by a pointer to it, while
 nested argv attempts refuse it because the parent lane can write their
 directory. Prompt digests cover the full text in `prompt.txt`.
 - Why: a spill file a lane can rewrite would change its child's task.
-- Test: `crates/cli/src/run/provider.rs::launch_prompt_spills_only_top_level_argv_and_refuses_conflicting_file`;
-  `::launch_prompt_refuses_symlinked_attempt_ancestors`
-- Owner: `crates/cli/src/run/provider.rs`
+- Test: `tools/front-door/crates/cli/src/run/provider/tests.rs#launch_prompt_spills_only_top_level_argv_and_refuses_conflicting_file`;
+  `tools/front-door/crates/cli/src/run/provider/tests.rs#nested_argv_prompt_respects_configured_byte_limit`;
+  `tools/front-door/crates/cli/src/run/provider/tests.rs#launch_prompt_refuses_symlinked_attempt_ancestors`
+- Owner: `tools/front-door/crates/cli/src/run/provider/observation.rs#launch_prompt`
 
 ## Read-only write exceptions
 

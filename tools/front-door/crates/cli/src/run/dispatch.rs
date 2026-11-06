@@ -2505,6 +2505,9 @@ pub(super) struct PreparedProvider<'a> {
 }
 
 impl run::Providers for PreparedProvider<'_> {
+    fn write_grant_limit(&self) -> run::WriteGrantLimit {
+        self.fallback.write_grant_limit()
+    }
     fn runtime_cap(&self, provider: &str) -> Option<u64> {
         self.fallback.runtime_cap(provider)
     }
@@ -3101,15 +3104,6 @@ pub(super) fn check_launch_policy(started: &[run::Started]) -> Result<(), Fail> 
         .any(|started| !matches!(started, run::Started::Refused { .. }))
     {
         return Ok(());
-    }
-    if let Some(seconds) = started.iter().find_map(|started| match started {
-        run::Started::Refused {
-            kind: run::RefusalKind::SetupLockTimeout { seconds },
-            ..
-        } => Some(*seconds),
-        _ => None,
-    }) {
-        return Err(run::RunError::SetupLockTimeout { seconds }.into());
     }
     if let Some((run, attempt, worktree)) = started.iter().find_map(|started| match started {
         run::Started::Refused {

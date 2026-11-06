@@ -25,8 +25,7 @@ Set these in `[domains.fabric.lanes]` in the host configuration. Omit a key for 
 | `memory_pressure_threshold` | critical | Kernel memory pressure level at which new lanes wait on macOS. warning also defers at critical; never disables the pressure gate. The memory and disk floors still apply. (critical, warning or never). |
 | `max_concurrent_builds` | max(1, min(cores / cargo_build_jobs, GiB of RAM / 6)) | A build throttle, not a hard cap: cargo builds, tests, checks and lints that a lane's cargo shim runs at once across the host and every project that shares the state directory. Lanes are not capped by it; a command that compiles waits for a free slot. Direct ~/.cargo/bin/cargo, rustc and non-cargo builds are not gated. (1 to 64 or -1 for auto). |
 | `build_wait_minutes` | 30 | Minutes a build waits for a build slot or another build's Cargo lock before it gives up with an error. (1 to 1440 or -1 for auto). |
-| `setup_lock_wait_seconds` | 14400 | Seconds a writer waits for its repository's Git setup lock before launch is refused. (1 to 14400 or -1 for auto). |
-| `lane_port_base` | 30000 | First port of the range split into per-writer-lane blocks. Each writer lane holds one block for its lifetime and sees it as PROVENANT_LANE_PORT_BASE and PROVENANT_LANE_PORT_COUNT. (1024 to 65535 or -1 for auto). |
+| `lane_port_base` | 30000 | First port of the range split into per-writer-lane blocks. A writer with an allocated block holds it for its lifetime and sees PROVENANT_LANE_PORT_BASE and PROVENANT_LANE_PORT_COUNT. Unreadable lane-port settings or allocation I/O errors warn and skip allocation. (1024 to 65535 or -1 for auto). |
 | `lane_port_block` | 16 | Ports in each writer lane's block (PROVENANT_LANE_PORT_COUNT). (1 to 1024 or -1 for auto). |
 | `lane_port_blocks` | 64 | Blocks in the range, so the most writer lanes that hold a block at once; the base plus blocks times block size must be at most 65536. 0 turns allocation off. A writer launched while every block is held is not started and reports no free port block. (0 to 1024 or -1 for auto). |
 | `max_writer_lanes` | 40 | Most writer lanes live at once across the host; a writer beyond it queues and is then refused with a reason naming the cap. (1 to 64 or -1 for auto). |
@@ -627,10 +626,16 @@ Set the cap in `[domains.quota]`; set prices per account as shown.
   "host_run_settings": {
     "path": "domains.run",
     "settings": {
+      "argv_prompt_limit_bytes": {
+        "allowed": "1 or more bytes",
+        "default": "65536",
+        "effect": "Maximum prompt bytes passed directly to argv adapters. Larger top-level prompts spill to an attempt-owned file; nested attempts refuse rather than use a parent-writable spill. The overall 1 MiB prompt bound and operating-system argument limits still apply.",
+        "type": "int"
+      },
       "grant_limit": {
         "allowed": "1 or more",
         "default": "128",
-        "effect": "Maximum total plan roots and maximum entries in each provider grant family. Increase for lanes needing more roots.",
+        "effect": "Maximum total plan roots and entries in each provider profile family; authentication and native-control families retain minimum caps of 16 and 64. Increase for lanes needing more roots.",
         "type": "int"
       },
       "profile_limit_bytes": {
@@ -644,6 +649,12 @@ Set the cap in `[domains.quota]`; set prices per account as shown.
         "default": "host writer_writes",
         "effect": "Replace the host writer_writes list for this project; an empty list grants no host-configured writer roots. Origin: host configuration [domains.run.projects.<project ID>].",
         "type": "string_list"
+      },
+      "write_grant_limit_bytes": {
+        "allowed": "1 to 8388608 bytes",
+        "default": "262144",
+        "effect": "Maximum encoded bytes of applied write grants recorded for a lane. Increase when an otherwise valid grant ledger exceeds the default; terminal records retain bounded headroom.",
+        "type": "int"
       }
     }
   },

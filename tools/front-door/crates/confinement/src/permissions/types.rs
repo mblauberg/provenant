@@ -68,6 +68,16 @@ pub enum PermissionError {
         "compiled profile is {bytes} bytes, over the configured {limit}-byte limit; reduce granted roots or raise domains.run.profile_limit_bytes (the OS may impose its own argv limit)"
     )]
     ProfileTooLarge { bytes: usize, limit: usize },
+    #[error(
+        "{family} exceeds its effective limit of {limit}; raise domains.run.grant_limit to allow more"
+    )]
+    GrantLimitExceeded { family: &'static str, limit: usize },
+    #[error("{source} (source: {origin})")]
+    ConfigOrigin {
+        #[source]
+        source: Box<PermissionError>,
+        origin: &'static str,
+    },
     #[error("{family} exceeds its bound of {limit}: {path:?}")]
     BoundExceeded {
         family: &'static str,
@@ -107,6 +117,7 @@ impl PermissionError {
     pub fn boundary_class(&self) -> provenant_records::diagnostic::BoundaryClass {
         use provenant_records::diagnostic::BoundaryClass as B;
         match self {
+            Self::ConfigOrigin { source, .. } => source.boundary_class(),
             Self::CredentialRoot | Self::CredentialRootAt { .. } | Self::CredentialGrant { .. } => {
                 B::Credentials
             }
@@ -164,6 +175,13 @@ mod repository_error_tests {
         use provenant_records::diagnostic::BoundaryClass as B;
         for (error, expected) in [
             (PermissionError::CredentialRoot, B::Credentials),
+            (
+                PermissionError::ConfigOrigin {
+                    source: Box::new(PermissionError::CredentialRoot),
+                    origin: "fixture",
+                },
+                B::Credentials,
+            ),
             (PermissionError::GitWriteAuthorityMissing, B::LaneGit),
             (PermissionError::AnchorMismatch, B::Authority),
             (

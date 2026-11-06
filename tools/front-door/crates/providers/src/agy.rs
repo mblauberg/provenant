@@ -329,11 +329,17 @@ fn prepare(
         return Err(ProviderError::UnsupportedPolicy);
     }
     input.prompt.check_argv()?;
-    let home = &plan
-        .private_state
-        .as_ref()
-        .ok_or(ProviderError::UnsupportedPolicy)?
-        .path;
+    let home = plan.private_state.as_ref().map_or_else(
+        || {
+            use std::io::Write;
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "warning: Agy private state is unavailable; using the attempt scratch directory"
+            );
+            &plan.scratch.path
+        },
+        |state| &state.path,
+    );
     let keychain = match input.account {
         Some(account) => account_keychain(account.directory(), input.home)?,
         None => None,
@@ -368,13 +374,7 @@ fn prepare(
             argv.extend(["--add-dir".into(), user_skills.as_os_str().to_owned()]);
         }
         for grant in &skill_reads {
-            let directory = match grant.scope {
-                provenant_confinement::permissions::PathScope::Exact => {
-                    grant.path.parent().ok_or(ProviderError::InvalidPath)?
-                }
-                provenant_confinement::permissions::PathScope::Subtree => &grant.path,
-            };
-            argv.extend(["--add-dir".into(), directory.as_os_str().to_owned()]);
+            argv.extend(["--add-dir".into(), grant.path.as_os_str().to_owned()]);
         }
         // Headless mode auto-denies reads outside the workspace, which holds
         // only the working directory, so every other read root joins it.
@@ -398,12 +398,8 @@ fn prepare(
     argv.extend(["--print".into(), input.prompt.text().into()]);
 
     let shell = access == Access::WorktreeWrite;
-    let path = if shell {
-        format!("{}:/usr/bin:/bin", input.home.join(".cargo/bin").display())
-    } else {
-        "/usr/bin:/bin".into()
-    };
-    let mut env = base_env(input, &plan.scratch.path, &path);
+    let path = crate::launch::tool_search_path(input.home, shell);
+    let mut env = base_env(input, &plan.scratch.path, path);
     for (key, value) in &mut env {
         if key == "HOME" {
             *value = home.into();

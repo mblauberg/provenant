@@ -1777,22 +1777,6 @@ fn unsafe_store_path_reason_survives_cli_conversion() {
 }
 
 #[test]
-fn setup_lock_timeout_has_its_own_refusal_and_remedy() {
-    let failure = super::Fail::from(provenant_run::RunError::SetupLockTimeout { seconds: 42 });
-    assert_eq!(failure.kind.code(), "SETUP_LOCK_TIMEOUT");
-    assert_eq!(failure.status, Status::Refused);
-    assert!(failure.message.contains("provenant-lane-setup.lock"));
-    assert!(failure.message.contains("42s"));
-    let projection = failure.projection.expect("typed detail");
-    assert!(
-        projection
-            .next
-            .iter()
-            .any(|next| next.contains("setup_lock_wait_seconds"))
-    );
-}
-
-#[test]
 fn host_delivery_limit_keeps_its_text_as_typed_io_detail() {
     for (tool, command, text) in [
         (
@@ -2145,6 +2129,7 @@ fn submit_names_the_fix_for_a_bare_word_model_and_unsupported_effort()
     );
     // An uncatalogued exact model warns and is tried; the provider decides.
     assert!(super::catalogued("codex/gpt-6-lunaa", None).is_ok());
+    assert!(super::catalogued("opencode/opencode/beam-free", None).is_ok());
     let Err(effort) = super::catalogued("claude/claude-sonnet-5-5", Some("low")) else {
         panic!("unsupported effort accepted");
     };

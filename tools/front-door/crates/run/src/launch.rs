@@ -116,15 +116,21 @@ pub struct PreparedLaunch {
 enum WriteGrantError {
     #[error("invalid write grant path")]
     InvalidPath,
-    #[error("write grants exceed 1,024 entries or 256 KiB")]
-    Limit,
+    #[error(
+        "encoded write grants exceed domains.run.write_grant_limit_bytes={limit} (source: {origin})"
+    )]
+    Limit { limit: u64, origin: &'static str },
 }
 
 fn applied_write_grants(
     plan: &PreparedLaunch,
+    limit: WriteGrantLimit,
 ) -> std::result::Result<admission::AppliedWriteGrants, WriteGrantError> {
     let Some(confinement) = &plan.confinement else {
-        return Ok(admission::AppliedWriteGrants::default());
+        return Ok(admission::AppliedWriteGrants {
+            max_bytes: limit.bytes,
+            ..Default::default()
+        });
     };
     let permissions = confinement.plan.permissions();
     let grants = provenant_confinement::write_grants(permissions, &confinement.profile)
@@ -139,8 +145,11 @@ fn applied_write_grants(
             })
         })
         .collect::<std::result::Result<Vec<_>, WriteGrantError>>()?;
-    if !crate::reader::write_grants_fit(&grants) {
-        return Err(WriteGrantError::Limit);
+    if !crate::reader::write_grants_fit(&grants, limit.bytes) {
+        return Err(WriteGrantError::Limit {
+            limit: limit.bytes,
+            origin: limit.origin,
+        });
     }
     let git_grants_digest = match &permissions.mode {
         provenant_confinement::permissions::AccessMode::ReadOnly => None,
@@ -151,6 +160,7 @@ fn applied_write_grants(
     Ok(admission::AppliedWriteGrants {
         grants,
         git_grants_digest,
+        max_bytes: limit.bytes,
     })
 }
 /// Provider-decoded facts from a completed capture.
@@ -367,10 +377,13 @@ impl RunStore {
                     .prepare(task, &prompt, &paths, None)
                     .map_err(|error| error.to_string())
             })
-            .and_then(|plan| {
-                applied_write_grants(&plan)
-                    .map(|_| plan)
-                    .map_err(|error| error.to_string())
+            .and_then(|mut plan| {
+                let limit = providers.write_grant_limit().checked();
+                applied_write_grants(&plan, limit).map_err(|error| error.to_string())?;
+                plan.route
+                    .extra
+                    .insert("write_grant_limit".into(), limit.receipt());
+                Ok(plan)
             })
             .map_err(|message| RunError::Input {
                 kind: ErrorKind::ContinuationUnsupported,
@@ -384,7 +397,43 @@ impl RunStore {
         ready.retained = ready.run == run;
     }
 }
+/// The host-selected cap and its source, carried into each applied receipt.
+#[derive(Clone, Copy, Debug)]
+pub struct WriteGrantLimit {
+    pub bytes: u64,
+    pub origin: &'static str,
+}
+impl Default for WriteGrantLimit {
+    fn default() -> Self {
+        Self {
+            bytes: provenant_records::run::MAX_WRITE_GRANT_BYTES,
+            origin: "compiled default",
+        }
+    }
+}
+impl WriteGrantLimit {
+    fn checked(self) -> Self {
+        if (1..=provenant_records::run::MAX_WRITE_GRANT_BYTES_CEILING).contains(&self.bytes) {
+            self
+        } else {
+            use std::io::Write;
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "warning: invalid domains.run.write_grant_limit_bytes; using compiled default"
+            );
+            Self::default()
+        }
+    }
+    fn receipt(self) -> serde_json::Value {
+        serde_json::json!({"key": "domains.run.write_grant_limit_bytes", "value": self.bytes, "origin": self.origin})
+    }
+}
+
 pub trait Providers {
+    /// Host cap for the encoded applied write-grant ledger.
+    fn write_grant_limit(&self) -> WriteGrantLimit {
+        WriteGrantLimit::default()
+    }
     /// A host cap, in seconds, on the runtime deadline of lanes on `provider`.
     /// The task's own timeout applies when it is shorter or there is no cap.
     fn runtime_cap(&self, _provider: &str) -> Option<u64> {
@@ -405,7 +454,10 @@ pub trait Providers {
     }
     /// Host-selected minimum nice value for this lane.
     fn priority(&self, task: &TaskRequest) -> std::result::Result<u8, String> {
-        Ok(if task.writer.is_some() { 10 } else { 5 })
+        Ok(provenant_records::run::default_lane_priority(
+            task.writer.is_some(),
+            task.build_heavy,
+        ))
     }
     /// Host policy checks before provider preparation. A refusal is task-local;
     /// no provider is prepared and siblings remain eligible to launch.
@@ -456,7 +508,6 @@ enum HandOff {
     Busy,
     /// No guardian was contacted, but custody remains protected.
     Protected(String),
-    SetupLockTimeout(u64),
     RetainedImport {
         run: RunId,
         attempt: AttemptId,
@@ -497,9 +548,6 @@ pub enum RefusalKind {
     InvalidWriteGrantPath,
     WriteGrantsLimit,
     Handoff,
-    SetupLockTimeout {
-        seconds: u64,
-    },
     RetainedImport {
         run: RunId,
         attempt: AttemptId,
@@ -1636,20 +1684,17 @@ impl RunStore {
                 temporary: base.join("tmp"),
                 temporary_alias: crate::short_temporary::ensure(&attempt),
             };
+            let priority = providers.priority(task).unwrap_or_else(|reason| {
+                let fallback = provenant_records::run::default_lane_priority(task.writer.is_some(), task.build_heavy);
+                use std::io::Write;
+                let _ = writeln!(std::io::stderr().lock(),
+                    "warning: lane priority unavailable ({reason}); using compiled domains.fabric.lanes.priority default {fallback}");
+                fallback
+            });
             let prepared = providers
-                .priority(task)
-                .map_err(|reason| {
-                    (
-                        RefusalKind::PriorityUnavailable,
-                        PrepareRefusal::from(reason),
-                    )
-                })
-                .and_then(|priority| {
-                    providers
-                        .check_policy(task)
-                        .map(|()| priority)
-                        .map_err(|reason| (RefusalKind::Policy, PrepareRefusal::from(reason)))
-                })
+                .check_policy(task)
+                .map(|()| priority)
+                .map_err(|reason| (RefusalKind::Policy, PrepareRefusal::from(reason)))
                 .and_then(|priority| {
                     providers
                         .prepare(
@@ -1717,13 +1762,17 @@ impl RunStore {
                 .and_then(|c| c.plan.permissions().read_only.as_ref())
                 .map(|g| g.writable_paths())
                 .unwrap_or_default();
-            let write_grants = applied_write_grants(&plan);
+            let limit = providers.write_grant_limit().checked();
+            plan.route
+                .extra
+                .insert("write_grant_limit".into(), limit.receipt());
+            let write_grants = applied_write_grants(&plan, limit);
             let write_grants = match write_grants {
                 Ok(grants) => grants,
                 Err(error) => {
                     let kind = match error {
                         WriteGrantError::InvalidPath => RefusalKind::InvalidWriteGrantPath,
-                        WriteGrantError::Limit => RefusalKind::WriteGrantsLimit,
+                        WriteGrantError::Limit { .. } => RefusalKind::WriteGrantsLimit,
                     };
                     let reason = error.to_string();
                     match self.withdraw(
@@ -1791,20 +1840,14 @@ impl RunStore {
                     Ok(()) => Started::Launched(id),
                     // Nothing reached a guardian: the attempt ends here.
                     Err(
-                        error @ (HandOff::Local(_)
-                        | HandOff::Busy
-                        | HandOff::SetupLockTimeout(_)
-                        | HandOff::RetainedImport { .. }),
+                        error
+                        @ (HandOff::Local(_) | HandOff::Busy | HandOff::RetainedImport { .. }),
                     ) => {
                         let (reason, kind) = match error {
                             HandOff::Busy => ("worktree is busy".into(), RefusalKind::WorktreeBusy),
                             HandOff::Local(error) => (
                                 format!("launch preparation failed: {error}"),
                                 RefusalKind::Handoff,
-                            ),
-                            HandOff::SetupLockTimeout(seconds) => (
-                                RunError::SetupLockTimeout { seconds }.to_string(),
-                                RefusalKind::SetupLockTimeout { seconds },
                             ),
                             HandOff::RetainedImport {
                                 run,
@@ -1941,12 +1984,55 @@ fn lane_port_plan(
         base: narrow(settings.lane_port_base_value())?,
         size: narrow(settings.lane_port_block_size())?,
         blocks: narrow(blocks)?,
+        blocks_origin: Some(if settings.lane_port_blocks.is_some() {
+            provenant_os::lane_ports::BlocksOrigin::HostConfig
+        } else {
+            provenant_os::lane_ports::BlocksOrigin::CompiledDefault
+        }),
     }))
+}
+
+fn lane_port_plan_or_warn(state: &std::path::Path) -> Option<provenant_os::lane_ports::Plan> {
+    match lane_port_plan(state) {
+        Ok(plan) => plan,
+        Err(error) => {
+            use std::io::Write;
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "warning: lane port settings unavailable ({error}); continuing without a port block (domains.fabric.lanes.lane_port_base, domains.fabric.lanes.lane_port_block, domains.fabric.lanes.lane_port_blocks)"
+            );
+            None
+        }
+    }
 }
 
 #[cfg(test)]
 mod lane_environment_tests {
     use super::*;
+
+    #[test]
+    fn unavailable_lane_port_settings_skip_allocation() -> std::io::Result<()> {
+        let temp = tempfile::tempdir()?;
+        let not_directory = temp.path().join("not-directory");
+        std::fs::write(&not_directory, b"fixture")?;
+        assert!(lane_port_plan_or_warn(&not_directory).is_none());
+        let defaults = lane_port_plan_or_warn(temp.path()).expect("default plan");
+        assert_eq!(
+            defaults.blocks_origin,
+            Some(provenant_os::lane_ports::BlocksOrigin::CompiledDefault)
+        );
+        std::fs::write(
+            temp.path().join("config.toml"),
+            "schema_version=1\n[domains.fabric.lanes]\nlane_port_blocks=2\n",
+        )?;
+        let configured = lane_port_plan_or_warn(temp.path()).expect("configured plan");
+        assert_eq!(configured.blocks, 2);
+        assert_eq!(
+            configured.blocks_origin,
+            Some(provenant_os::lane_ports::BlocksOrigin::HostConfig)
+        );
+        Ok(())
+    }
 
     #[test]
     fn lane_environment_overrides_adapter_values() {

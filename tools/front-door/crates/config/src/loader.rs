@@ -833,12 +833,18 @@ pub(crate) fn read_settings<T: DeserializeOwned + Default>(
     prefix: &str,
     validate: impl Fn(&T) -> Result<(), &'static str>,
 ) -> std::io::Result<T> {
-    read_section(state, prefix, validate, false)
+    read_section(state, prefix, validate, false).map(|(value, _)| value)
 }
 pub(crate) fn read_boundary_settings<T: DeserializeOwned + Default>(
     state: &Path,
     prefix: &str,
 ) -> std::io::Result<T> {
+    read_section(state, prefix, |_| Ok(()), true).map(|(value, _)| value)
+}
+pub(crate) fn read_boundary_settings_with_keys<T: DeserializeOwned + Default>(
+    state: &Path,
+    prefix: &str,
+) -> std::io::Result<(T, BTreeSet<String>)> {
     read_section(state, prefix, |_| Ok(()), true)
 }
 fn read_section<T: DeserializeOwned + Default>(
@@ -846,16 +852,16 @@ fn read_section<T: DeserializeOwned + Default>(
     prefix: &str,
     validate: impl Fn(&T) -> Result<(), &'static str>,
     strict_types: bool,
-) -> std::io::Result<T> {
+) -> std::io::Result<(T, BTreeSet<String>)> {
     let path = state.join("config.toml");
     let directory = match provenant_os::fs::Directory::open_anchor(state) {
         Ok(directory) => directory,
-        Err(error) if error.is_not_found() => return Ok(T::default()),
+        Err(error) if error.is_not_found() => return Ok((T::default(), BTreeSet::new())),
         Err(error) => return Err(std::io::Error::other(error)),
     };
     let reader = match directory.open_read(OsStr::new("config.toml")) {
         Ok(reader) => reader,
-        Err(error) if error.is_not_found() => return Ok(T::default()),
+        Err(error) if error.is_not_found() => return Ok((T::default(), BTreeSet::new())),
         Err(error) => return Err(std::io::Error::other(error)),
     };
     let text = bounded_text(reader, &path).map_err(std::io::Error::other)?;
@@ -903,8 +909,9 @@ fn read_section<T: DeserializeOwned + Default>(
                 .clone()
                 .into_table()
                 .map_err(|_| std::io::Error::other("invalid domain table"))?;
+            let keys = table.iter().map(|(key, _)| key.to_owned()).collect();
             match decode::<T>(table) {
-                Ok(value) => return Ok(value),
+                Ok(value) => return Ok((value, keys)),
                 Err(error) if error.message().starts_with("unknown field ") => {
                     let offset = error.span().map_or(0, |span| span.start);
                     let key = remove_unknown(&mut item, offset)
@@ -932,7 +939,7 @@ fn read_section<T: DeserializeOwned + Default>(
             warn(&path, &finding);
         }
     }
-    Ok(value)
+    Ok((value, BTreeSet::new()))
 }
 
 /// The first ancestor of `prefix` that exists but is not a table, if any.
