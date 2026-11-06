@@ -2953,16 +2953,46 @@ fn prepare_all_adapters_and_pin_launch_controls() -> Result<(), ProviderError> {
             }
             _ => {}
         }
-        // The package is the CLI's own install directory, never a shared
-        // prefix whose var/ would become readable.
+        // Shared install prefixes fall back to the exact executable. Their
+        // `var/` trees stay outside the lane profile.
         let shared = PrepareInput {
             executable: std::path::Path::new("/opt/homebrew/bin/provider"),
             ..fixture_input(&route, &confined, &prompt, repo, token)
         };
-        assert!(matches!(
-            entry.adapter.prepare(shared),
-            Err(ProviderError::InvalidPath)
-        ));
+        let shared_spec = entry.adapter.prepare(shared)?;
+        let shared_var = Path::new("/opt/homebrew/var");
+        assert!(shared_spec.profile.spec.runtime_reads.iter().any(|grant| {
+            grant.path == Path::new("/opt/homebrew/bin/provider")
+                && grant.scope == provenant_confinement::permissions::PathScope::Exact
+        }));
+        assert!(shared_spec.profile.spec.runtime_reads.iter().all(|grant| {
+            !grant.path.starts_with(shared_var)
+                && !shared_var.starts_with(&grant.path)
+                && grant.path != Path::new("/opt/homebrew")
+        }));
+        assert!(
+            shared_spec
+                .profile
+                .spec
+                .tool_exec_roots
+                .iter()
+                .all(|grant| {
+                    !grant.path.starts_with(shared_var)
+                        && !shared_var.starts_with(&grant.path)
+                        && grant.path != Path::new("/opt/homebrew")
+                })
+        );
+        assert!(
+            provenant_confinement::write_grants(confined.permissions(), &shared_spec.profile)
+                .iter()
+                .all(|grant| {
+                    !grant.path.starts_with(shared_var) && !shared_var.starts_with(&grant.path)
+                })
+        );
+        assert!(shared_spec.omitted_discovery.iter().any(|omitted| {
+            omitted.path == Path::new("/opt/homebrew")
+                && omitted.source == crate::OmissionSource::ProviderPackage
+        }));
         let package = std::path::Path::new("/opt/homebrew/Cellar/provider/1.0");
         // Host-detected Homebrew Node toolchain directories (launch::node_tools).
         let homebrew_node = |path: &Path| {
@@ -6672,7 +6702,7 @@ fn resume_argv_carries_the_recorded_session() -> Result<(), ProviderError> {
 #[test]
 fn shared_provider_package_prefix_falls_back_to_exact_executable() -> Result<(), ProviderError> {
     use provenant_confinement::permissions::PathScope;
-    let executable = Path::new("/usr/local/bin/provider");
+    let prefixes = ["/usr/local", "/opt/homebrew"];
     let token = fixture_token();
     let prompt = Prompt::new("fixture".into());
     for adapter in ["claude", "codex", "cursor", "opencode"] {
@@ -6683,66 +6713,72 @@ fn shared_provider_package_prefix_falls_back_to_exact_executable() -> Result<(),
         let plan = fixture_access_plan(Access::ReadOnly, auth, false);
         let mut route = route(adapter, "fixture-model");
         route.account_key = None;
-        let mut input = fixture_input(
-            &route,
-            &plan,
-            &prompt,
-            Path::new("/fixture/repo"),
-            Some(&token),
-        );
-        input.executable = executable;
         let provider = REGISTRY
             .iter()
             .find(|entry| entry.adapter.id() == adapter)
             .unwrap()
             .adapter;
-        let spec = provider.prepare(input)?;
-        assert!(
-            spec.profile
-                .spec
-                .runtime_reads
-                .iter()
-                .any(|grant| grant.path == executable && grant.scope == PathScope::Exact),
-            "{adapter}"
-        );
-        assert!(
-            spec.profile
-                .spec
-                .runtime_reads
-                .iter()
-                .all(|grant| grant.path != Path::new("/usr/local")),
-            "{adapter}"
-        );
-        assert!(
-            spec.profile
-                .spec
-                .tool_exec_roots
-                .iter()
-                .all(|grant| grant.path != Path::new("/usr/local")),
-            "{adapter}"
-        );
-        assert!(
-            provenant_confinement::write_grants(plan.permissions(), &spec.profile)
-                .iter()
-                .all(|grant| !executable.starts_with(&grant.path)),
-            "{adapter}"
-        );
-        assert!(
-            spec.omitted_discovery
-                .iter()
-                .any(|omitted| omitted.path == Path::new("/usr/local")
-                    && omitted.source == crate::OmissionSource::ProviderPackage),
-            "{adapter}"
-        );
-        let receipt = spec.applied_access().receipt(Path::new("/fixture/home"));
-        assert!(
-            receipt["omitted_grants"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|entry| entry["reason"] == "shared_package_prefix"),
-            "{adapter}"
-        );
+        for prefix in prefixes {
+            let executable = Path::new(prefix).join("bin/provider");
+            let shared_var = Path::new(prefix).join("var");
+            let mut input = fixture_input(
+                &route,
+                &plan,
+                &prompt,
+                Path::new("/fixture/repo"),
+                Some(&token),
+            );
+            input.executable = &executable;
+            let spec = provider.prepare(input)?;
+            assert!(
+                spec.profile
+                    .spec
+                    .runtime_reads
+                    .iter()
+                    .any(|grant| grant.path == executable && grant.scope == PathScope::Exact),
+                "{adapter}: {prefix}"
+            );
+            assert!(
+                spec.profile.spec.runtime_reads.iter().all(|grant| {
+                    grant.path != Path::new(prefix)
+                        && !grant.path.starts_with(&shared_var)
+                        && !shared_var.starts_with(&grant.path)
+                }),
+                "{adapter}: {prefix}"
+            );
+            assert!(
+                spec.profile.spec.tool_exec_roots.iter().all(|grant| {
+                    grant.path != Path::new(prefix)
+                        && !grant.path.starts_with(&shared_var)
+                        && !shared_var.starts_with(&grant.path)
+                }),
+                "{adapter}: {prefix}"
+            );
+            assert!(
+                provenant_confinement::write_grants(plan.permissions(), &spec.profile)
+                    .iter()
+                    .all(|grant| {
+                        !grant.path.starts_with(&shared_var) && !shared_var.starts_with(&grant.path)
+                    }),
+                "{adapter}: {prefix}"
+            );
+            assert!(
+                spec.omitted_discovery.iter().any(|omitted| {
+                    omitted.path == Path::new(prefix)
+                        && omitted.source == crate::OmissionSource::ProviderPackage
+                }),
+                "{adapter}: {prefix}"
+            );
+            let receipt = spec.applied_access().receipt(Path::new("/fixture/home"));
+            assert!(
+                receipt["omitted_grants"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|entry| entry["reason"] == "shared_package_prefix"),
+                "{adapter}: {prefix}"
+            );
+        }
     }
     Ok(())
 }
