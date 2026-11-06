@@ -63,7 +63,8 @@ pub use controls::{
 };
 pub use delivery::HostDeliveryContext;
 pub use git_context::{
-    GitContext, continuation_history, ensure_local_branch, resolve_git_base, review_merge_base,
+    GitContext, continuation_history, ensure_local_branch, resolve_git_base,
+    resolve_git_base_with_facts, review_merge_base,
 };
 pub use holder::{HolderContext, HostLaunchContext, RootSeed, RunHolder, SealedTask};
 pub use launch::{
@@ -77,8 +78,8 @@ pub use retention::{
     AttemptLogRemoval, AttemptTmpRemoval, ProviderStateGc, ProviderStateIssue, TOMBSTONE,
 };
 pub use writer::{
-    LaunchConfinement, WriterFence, WriterLaunch, prepare_writer, resolve_reader_source,
-    resolve_writer, resolve_writer_proposal,
+    LaunchConfinement, WriterFence, WriterLaunch, prepare_writer, prepare_writer_with_facts,
+    resolve_reader_source, resolve_writer, resolve_writer_proposal,
 };
 
 pub use db::{ExecutionContext, Request, RunStore};
@@ -321,6 +322,8 @@ impl std::fmt::Display for ArtifactProvenance {
 
 #[derive(Debug, Error)]
 pub enum RunError {
+    #[error("{}", .0.detail.as_deref().unwrap_or("dispatch was refused"))]
+    RecordedRefusal(Box<provenant_records::diagnostic::Diagnostic>),
     #[error("continuation preparation refused: {}", cause.detail())]
     ContinuationRefused {
         cause: provenant_records::run::TerminalCause,
@@ -526,6 +529,9 @@ impl RunError {
         &self,
         destination: provenant_records::diagnostic::Destination<'_>,
     ) -> provenant_records::diagnostic::Diagnostic {
+        if let Self::RecordedRefusal(diagnostic) = self {
+            return diagnostic.as_ref().clone();
+        }
         use provenant_confinement::{permissions::PermissionError, worktrees::WorktreeError};
         use provenant_records::diagnostic::{Diagnostic, DiagnosticFact, safe_path, shell_path};
         let kind = ErrorKind::from(self);
@@ -642,7 +648,9 @@ impl RunError {
                         .detail(format!("detached HEAD at {head}"))
                         .next("create a branch or remove --worktree and pass --mode read-only");
                 }
-                if matches!(error, WorktreeError::Dirty(_)) {
+                // An empty path list means the tree was not found edited, only
+                // refused for another reason, so claim nothing about edits.
+                if matches!(error, WorktreeError::Dirty(paths) if !paths.is_empty()) {
                     diagnostic = diagnostic.detail("the writer worktree has uncommitted edits");
                 }
             }
@@ -904,6 +912,20 @@ mod diagnostic_projection_tests {
                     .contains("TOKEN_SENTINEL")
             );
         }
+    }
+
+    #[test]
+    fn writer_refusal_without_named_edits_does_not_claim_edits() {
+        use provenant_confinement::worktrees::WorktreeError;
+        let error = RunError::Writer(WorktreeError::Dirty(String::new()));
+        let diagnostic = error.diagnostic(Destination::Local);
+        assert!(
+            !diagnostic
+                .detail
+                .as_deref()
+                .unwrap_or_default()
+                .contains("uncommitted")
+        );
     }
 
     #[test]

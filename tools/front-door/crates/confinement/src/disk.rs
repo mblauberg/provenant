@@ -203,18 +203,9 @@ pub fn worktrees(
     custody: (Option<&Directory>, &dyn WorkerObserver),
 ) -> Result<Vec<WorktreeInfo>, WorktreeError> {
     let (registration, workers) = custody;
-    let outcome = run_utility(
-        executor,
-        GitRead::WorktreeList,
-        repo,
-        utility,
-        budget,
-        cancel,
-    )?;
-    if outcome.termination != Termination::Exit(0) {
-        return Err(WorktreeError::InvalidOutput);
-    }
-    let mut listed = parse_worktree_list(&outcome.stdout.bytes)?;
+    let bytes = crate::worktrees::RepoFacts::default()
+        .writer_inventory(repo, executor, utility, budget, cancel)?;
+    let mut listed = parse_worktree_list(&bytes)?;
     // Git lists the main worktree first, also when invoked in a linked worktree.
     let integration = listed
         .iter()
@@ -250,6 +241,7 @@ pub fn worktrees(
             }),
         );
         let info = WorktreeInfo {
+            warnings: Vec::new(),
             path: listed.path,
             branch: listed.branch.map(|branch| branch.as_str().to_owned()),
             head: listed.head,

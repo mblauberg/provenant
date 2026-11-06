@@ -212,8 +212,24 @@ impl RunStore {
                 }
             }
         }
+        // A cancel that lands during preparation must reach this launcher, or
+        // it keeps waiting on locks while holding the writer.
+        let cancel_requested =
+            || directory().map(|attempt| crate::store::cancel_requested(&attempt, scope));
+        if local_or_withdraw!(cancel_requested()) {
+            local_or_withdraw!(Err::<(), _>(local("launch", &CANCELLED_BEFORE_LAUNCH)));
+        }
         if let Some(confinement) = &mut plan.confinement {
-            if let Err(error) = confinement.prepare_git(call.cancel) {
+            let setup_cancel = provenant_core::CancelToken::new();
+            let watch = CancelWatch::start(
+                local_or_withdraw!(directory()),
+                scope,
+                &setup_cancel,
+                call.cancel,
+            );
+            let prepared = confinement.prepare_git(&setup_cancel);
+            drop(watch);
+            if let Err(error) = prepared {
                 lease.withdraw_unlaunched().map_err(|release| {
                     HandOff::Protected(format!("Git setup: {error}; custody withdrawal: {release}"))
                 })?;
@@ -313,6 +329,9 @@ impl RunStore {
             .tokens,
             provider,
         );
+        if local_or_withdraw!(cancel_requested()) {
+            local_or_withdraw!(Err::<(), _>(local("launch", &CANCELLED_BEFORE_LAUNCH)));
+        }
         // Held before launch: an unconfirmed handoff may still have a guardian.
         if let Some((held, custody)) = held {
             self.hold_child(held, custody);
@@ -350,6 +369,56 @@ fn hold_seed_for_fixture() {
         || !directory.join("hold").exists(),
         |released| *released,
     );
+}
+
+/// The marker carried in a refusal when the launcher saw a cancel request.
+pub(super) const CANCELLED_BEFORE_LAUNCH: &str = "cancelled before launch";
+
+/// Forwards a sealed cancel request, or the caller's own cancellation, to the
+/// token that bounds launch preparation, so a lane waiting on a setup lock
+/// stops as soon as `cancel` is called.
+struct CancelWatch {
+    done: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl CancelWatch {
+    fn start(
+        attempt: provenant_os::fs::Directory,
+        scope: Scope,
+        target: &provenant_core::CancelToken,
+        caller: &provenant_core::CancelToken,
+    ) -> Self {
+        use std::sync::atomic::Ordering;
+        let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (stop, target, caller) = (done.clone(), target.clone(), caller.clone());
+        let thread = std::thread::Builder::new()
+            .name("cancel-watch".into())
+            .spawn(move || {
+                while !stop.load(Ordering::Acquire) {
+                    if caller.is_cancelled() || crate::store::cancel_requested(&attempt, scope) {
+                        target.cancel();
+                        return;
+                    }
+                    provenant_core::Pause::wait(
+                        &provenant_core::ThreadPause,
+                        provenant_core::DurationMicros::from_micros(100_000),
+                        &provenant_core::CancelToken::new(),
+                    );
+                }
+            })
+            .ok();
+        Self { done, thread }
+    }
+}
+
+impl Drop for CancelWatch {
+    fn drop(&mut self) {
+        self.done.store(true, std::sync::atomic::Ordering::Release);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
 }
 
 #[cfg(test)]

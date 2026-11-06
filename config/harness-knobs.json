@@ -38,7 +38,7 @@
     "path": "domains.run",
     "settings": {
       "profile_limit_bytes": {"type": "int", "allowed": "1 or more bytes", "default": "524288", "effect": "Maximum rendered macOS sandbox profile size. Increase for lanes with many grants; profiles pass through argv and may still hit OS limits."},
-      "writer_token_budget": {"type": "int", "allowed": "0 or more tokens", "default": "500000", "effect": "Tokens a writer attempt may use, from the fresh usage its provider reports, before it is ended with its work committed and pushed for a continuation. 0 turns the budget off. Cache reads do not count. Enforced for Claude from live usage. Codex exec reports usage only at turn.completed, so its budget is not enforced; other providers without live usage are also not enforced. Launch warnings or receipt notes say so. Current lane adapters cannot receive a live steer: the 90% warning records an unsupported control receipt. After custody is absent the host attempts a bounded commit; an in-progress merge is preserved for stopped-merge handling, and a commit failure is reported without replacing the budget outcome. Time queued for a build slot does not count towards the wall-clock deadline, up to lanes.slot_wait_seconds in total. The source (run, project, host or default) is shown with the budget."},
+      "writer_token_budget": {"type": "int", "allowed": "0 or more tokens", "default": "500000", "effect": "Tokens a writer attempt may use, from the fresh usage its provider reports, before it is ended so a continuation can pick it up. The host then attempts to commit and publish the lane's work; it does not when custody is not absent, when a merge, cherry-pick, revert or rebase is in progress, or when the commit fails, and settlement notes say which. 0 turns the budget off. Cache reads do not count. Enforced for Claude from live usage. The budget does not stop Codex writers: codex exec reports usage only at its final turn.completed frame, with no further turn to stop. Other providers without live usage are also not enforced. Launch warnings or receipt notes say so. Current lane adapters cannot receive a live steer: the 90% warning records an unsupported control receipt. After custody is absent the host attempts a bounded commit; an in-progress merge is preserved for stopped-merge handling, a cherry-pick, revert or rebase in progress is left uncommitted, and a skipped or failed commit is reported without replacing the budget outcome. Time queued for a build slot does not count towards the wall-clock deadline, up to lanes.slot_wait_seconds in total. The source (run, project, host or default) is shown with the budget."},
       "projects.{project}.writer_token_budget": {"type": "int", "allowed": "0 or more tokens", "default": "host writer_token_budget", "effect": "Replace the host writer token budget for this project."},
       "grant_limit": {"type": "int", "allowed": "1 or more", "default": "128", "effect": "Maximum total plan roots and entries in each provider profile family; authentication and native-control families retain minimum caps of 16 and 64. Increase for lanes needing more roots."},
       "write_grant_limit_bytes": {"type": "int", "allowed": "1 to 8388608 bytes", "default": "262144", "effect": "Maximum encoded bytes of applied write grants recorded for a lane. Increase when an otherwise valid grant ledger exceeds the default; terminal records retain bounded headroom."},
@@ -389,6 +389,12 @@
       "reader": "tools/front-door/crates/config/src/history.rs",
       "effect": "Keep the configuration history file under this many bytes; the oldest entries are dropped first.",
       "trade_off": "A larger bound keeps more history but costs more to read on every config edit."
+    },
+    "chair.refusal_notice": {
+      "type": "enum", "values": ["inbox", "off"], "default": "inbox", "status": "wired",
+      "reader": "tools/front-door/src/settlement.rs",
+      "effect": "Send the bound chair a notice when a dispatch is refused before admission.",
+      "trade_off": "Off keeps the inbox quiet; inbox makes refusals visible to the chair."
     },
     "chair.auto_switch": {
       "strict": true,

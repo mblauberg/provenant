@@ -754,8 +754,10 @@ fn worktree_access_readers_leave_existing_writer_lease_untouched()
                     "--prompt-file",
                     prompt.to_str().ok_or("prompt")?,
                 ])?;
-                let reply = dispatch(command, edge);
+                let reply =
+                    super::submit::with_cancelled_provider_launch(|| dispatch(command, edge));
                 assert_eq!(reply.result.status, Status::Ok, "{:?}", reply.result.error);
+                assert_eq!(reply.result.data["lanes"][0]["state"], "cancelled");
                 let id = reply.result.data["run_id"]
                     .as_str()
                     .ok_or("run id")?
@@ -3177,12 +3179,24 @@ fn own_worktree_pending_reservation_takes_precedence_over_census()
         &cancel,
         None,
     );
+    let busy = busy.expect_err("a second writer must not enter a held worktree");
     assert!(matches!(
-        busy,
-        Err(super::OwnWorktreeError::Other(run::RunError::Writer(
-            worktrees::WorktreeError::WriterBusy { holder: Some(holder) }
-        ))) if holder == provenant_core::AttemptId::from_bytes([42; 16])
+        &busy,
+        super::OwnWorktreeError::Other(run::RunError::Writer(
+            worktrees::WorktreeError::WriterBusy { holder: Some(actual) }
+        )) if *actual == holder
     ));
+    let refusal = super::Fail::from(busy);
+    let error = super::command_error(&refusal);
+    assert_eq!(refusal.status, Status::Refused);
+    assert_eq!(error.code, "WRITER_BUSY");
+    assert!(error.message.contains(&holder.to_string()));
+    assert!(
+        error
+            .cause
+            .as_deref()
+            .is_some_and(|detail| detail.contains(&holder.to_string()))
+    );
     drop(held);
 
     // Exercise the actual owned-run admission boundary for an existing,
@@ -3381,6 +3395,11 @@ fn worktree_census_warning_includes_scope_and_evidence() -> Result<(), Box<dyn s
 #[test]
 fn own_worktree_admits_from_inside_target_worktree_with_no_other_live_writer()
 -> Result<(), Box<dyn std::error::Error>> {
+    if reexec_test_in_lane(
+        "run::tests::own_worktree_admits_from_inside_target_worktree_with_no_other_live_writer",
+    )? {
+        return Ok(());
+    }
     use provenant_confinement::worktrees::{
         self, CensusPolicyWorkers, ObservedProcess, Occupancy, WorkerObserver, WorktreeCreate,
     };
@@ -3588,6 +3607,15 @@ fn own_worktree_admits_from_inside_target_worktree_with_no_other_live_writer()
     drop(held);
     let replay_with_bystander = attempt_claim()?;
     assert_eq!(replay_with_bystander.0.path, path);
+    assert!(matches!(
+        replay_with_bystander.0.occupancy,
+        Occupancy::Observed { .. }
+    ));
+    assert!(matches!(
+        replay_with_bystander.0.owner,
+        Ok(Some(worktrees::WorktreeOwner { operation_id: Some(operation), .. }))
+            if operation == claim_operation
+    ));
     let owner_path = git_dir.join("provenant-owner.json");
     let saved_owner = std::fs::read(&owner_path)?;
     std::fs::write(&owner_path, b"invalid owner record")?;
@@ -3628,7 +3656,27 @@ fn own_worktree_admits_from_inside_target_worktree_with_no_other_live_writer()
     )?;
     assert_eq!(replay.0.path, path);
 
-    let attempt = provenant_core::AttemptId::from_bytes([42; 16]);
+    let call = request(&clock, &cancel).map_err(|error| error.message)?;
+    let session = open(&edge_inside, &call).map_err(|error| error.message)?;
+    let prepared = trace_run(40, AttemptId::from_bytes([9; 16]), clock.wall_now()?)?;
+    let attempt = prepared.attempts[0].attempt_id;
+    session.store.create(&prepared, &call)?;
+    let queued = session.store.record(attempt, &call)?;
+    session
+        .store
+        .withdraw(
+            attempt,
+            queued.state,
+            run::Outcome::Cancelled,
+            "fixture cancelled before launch",
+            clock.wall_now()?,
+            &call,
+        )?
+        .ok_or("attempt did not finish")?;
+    assert!(matches!(
+        session.store.record(attempt, &call)?.state,
+        run::AttemptState::Terminal { .. }
+    ));
     worktrees::with_context(&roots, &home, &project, &clock, &cancel, |context| {
         let tree = provenant_confinement::verify_worktree(context.repo, &path)?;
         let mut owner =
@@ -3636,6 +3684,39 @@ fn own_worktree_admits_from_inside_target_worktree_with_no_other_live_writer()
         owner.attempt_id = Some(attempt);
         worktrees::save_owner(&tree, &owner)
     })?;
+    // The finished attempt can leave both its owner row and a reservation
+    // behind. Only a held lease or a retained-import fence excludes the shell;
+    // the stale reservation alone must not turn advisory cwd evidence into a lock.
+    let reservation_path =
+        worktrees::with_context(&roots, &home, &project, &clock, &cancel, |context| {
+            drop(
+                worktrees::cache_writer_guard(context.project_state, &path)
+                    .map_err(|_| worktrees::WorktreeError::UnknownWriter)?,
+            );
+            let slot = context
+                .project_state
+                .open_verified_directory(&worktrees::state_dir_name(&path))?;
+            let scope = provenant_supervisor::custody::Scope {
+                run: provenant_core::RunId::from_bytes([41; 16]),
+                attempt,
+                generation: 1,
+            };
+            let lease = provenant_supervisor::fixture::acquire_writer(
+                slot.try_clone()?,
+                scope,
+                provenant_core::WaitBudget::nonblocking(clock.mono_now()),
+                &cancel,
+                &clock,
+            )
+            .map_err(|_| worktrees::WorktreeError::UnknownWriter)?;
+            let reservation = slot
+                .current_path()?
+                .join(attempt.to_string())
+                .join("reservation.json");
+            drop(lease);
+            Ok(reservation)
+        })?;
+    let stale_reservation = std::fs::read(&reservation_path)?;
     let admitted_after_terminal = super::own_worktree(
         &super::OwnedWorktree {
             branch: branch.into(),
@@ -3646,13 +3727,29 @@ fn own_worktree_admits_from_inside_target_worktree_with_no_other_live_writer()
         &OperationId::parse("after-terminal")?,
         &edge_inside,
         &ordinary,
-        |id| id == attempt,
+        |id| {
+            session
+                .store
+                .record(id, &call)
+                .is_ok_and(|record| matches!(record.state, run::AttemptState::Terminal { .. }))
+        },
         &mut None,
         &clock,
         &cancel,
         None,
     )?;
     assert_eq!(admitted_after_terminal.0.path, path);
+    assert_eq!(std::fs::read(&reservation_path)?, stale_reservation);
+    worktrees::with_context(&roots, &home, &project, &clock, &cancel, |context| {
+        let tree = provenant_confinement::verify_worktree(context.repo, &path)?;
+        let owner = worktrees::load_owner(&tree)?.ok_or(worktrees::WorktreeError::UnknownWriter)?;
+        assert_eq!(
+            owner.operation_id,
+            Some(OperationId::parse("after-terminal").unwrap())
+        );
+        assert_eq!(owner.attempt_id, None);
+        Ok(())
+    })?;
     Ok(())
 }
 
@@ -4277,6 +4374,46 @@ fn trace_store(
         read_prompts: true,
     };
     Ok(run::RunStore::open(&context, call)?)
+}
+
+#[test]
+fn refused_operations_are_rendered_without_an_attempt() -> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let call = run::Request {
+        clock: &clock,
+        cancel: &cancel,
+    };
+    let store = trace_store(&temp, &call)?;
+    let input = trace_run(
+        30,
+        AttemptId::from_bytes([2; 16]),
+        now(&clock).map_err(|e| e.message)?,
+    )?;
+    store.record_refusal(
+        &input,
+        ErrorKind::Unsupported.diagnostic(),
+        Some("writer".into()),
+        &call,
+    )?;
+    let mut data = json!({"lanes": []});
+    let mut human = String::new();
+    assert!(
+        status::append_refused_operations(&store, 20, &mut data, &mut human, &call)
+            .map_err(|e| e.message)?
+    );
+    assert_eq!(
+        data["refused_operations"][0]["operation_id"],
+        input.operation_id.as_str()
+    );
+    assert_eq!(
+        data["refused_operations"][0]["refusal"]["code"],
+        "UNSUPPORTED"
+    );
+    assert!(human.contains(input.operation_id.as_str()));
+    assert!(data["lanes"].as_array().is_some_and(Vec::is_empty));
+    Ok(())
 }
 
 #[test]
@@ -6370,6 +6507,7 @@ fn quota_reason_uses_safe_fact_without_provider_message() {
         project_id: None,
         host: None,
         cancel: None,
+        repo_facts: Default::default(),
     };
     for (message, _expected) in [
         (
@@ -7276,6 +7414,7 @@ fn codex_rollout_error_reaches_the_decoded_reason() {
         project_id: None,
         host: None,
         cancel: None,
+        repo_facts: Default::default(),
     };
     let stream = [
         json!({"type":"thread.started","thread_id":"01234567-89ab-cdef-0123-456789abcdef"}),
@@ -8250,8 +8389,11 @@ fn worktrees_lock_contention_retries_and_admits() -> Result<(), Box<dyn std::err
             // A wait shorter than the contention must not refuse the lane.
             cmd.wait = Some(1);
 
-            let reply = dispatch_with_workers(cmd, edge, &Free);
+            let reply = super::submit::with_cancelled_provider_launch(|| {
+                dispatch_with_workers(cmd, edge, &Free)
+            });
             assert_eq!(reply.result.status, Status::Ok, "{:?}", reply.result.error);
+            assert_eq!(reply.result.data["lanes"][0]["state"], "cancelled");
             holder.join().unwrap();
 
             // Check that admission window exists and wake_at was updated during retry!
@@ -8451,8 +8593,12 @@ fn dispatch_restart_honours_saved_admission_wake_and_deadline()
             };
             let workers = Counting(AtomicUsize::new(0));
             let start = clock.mono_now();
-            let reply = dispatch_with_workers(make("restart-wake")?, edge, &workers);
+            let command = make("restart-wake")?;
+            let reply = super::submit::with_cancelled_provider_launch(|| {
+                dispatch_with_workers(command, edge, &workers)
+            });
             assert_eq!(reply.result.status, Status::Ok, "{:?}", reply.result.error);
+            assert_eq!(reply.result.data["lanes"][0]["state"], "cancelled");
             assert!(
                 clock
                     .mono_now()

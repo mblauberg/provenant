@@ -18,14 +18,14 @@ pub fn fast_forward(
     if path == canonicalize(context.repo.root_path())? {
         return Err(WorktreeError::Primary);
     }
-    let entries = context.facts.read_inventory(context, cancel)?;
+    let entries = context.facts.fresh_inventory(context, cancel)?;
     let entry = entries
         .iter()
         .find(|entry| canonicalize(&entry.path).ok().as_ref() == Some(&path))
         .ok_or(WorktreeError::NotFound)?;
     let branch = entry.branch.as_ref().ok_or(WorktreeError::InvalidRequest)?;
     let locked = lock_worktree_for_mutation(context, entry, cancel)?;
-    let fresh = context.facts.read_inventory(context, cancel)?;
+    let fresh = context.facts.fresh_inventory(context, cancel)?;
     let current = matching_worktree(&fresh, branch, context.repo.root_path())?
         .ok_or(WorktreeError::IdentityChanged)?;
     if canonicalize(&current.path)? != path
@@ -283,6 +283,7 @@ fn list_impl(
             }
         };
         let info = WorktreeInfo {
+            warnings: Vec::new(),
             path,
             branch: branch_text,
             head: entry.head,
@@ -305,12 +306,21 @@ pub fn create(
     request: WorktreeCreate,
     cancel: &CancelToken,
 ) -> Result<WorktreeInfo, WorktreeError> {
+    create_with_default(context, request, cancel, None)
+}
+
+fn create_with_default(
+    context: &WorktreeContext<'_>,
+    request: WorktreeCreate,
+    cancel: &CancelToken,
+    default: Option<(GitOid, Vec<String>)>,
+) -> Result<WorktreeInfo, WorktreeError> {
     validate_binding(context)?;
     let branch = GitRefName::branch(&request.branch).map_err(|_| WorktreeError::InvalidRequest)?;
     let facts = context.facts;
     let _lock = repository_lock(context, LockMode::Exclusive, cancel)?;
     context.repo.revalidate()?;
-    let entries = context.facts.read_inventory(context, cancel)?;
+    let entries = context.facts.fresh_inventory(context, cancel)?;
     let checked_out = entries
         .iter()
         .filter(|entry| !entry.prunable)
@@ -352,6 +362,15 @@ pub fn create(
         }
     }
     let create_branch = existing.is_none();
+    if create_branch && request.base.is_none() && default.is_none() {
+        // Network discovery does not own the repository registry. Re-enter all
+        // inventory, collision and branch checks after it completes, retaining
+        // only the exact commit the remote fetch proved.
+        drop(_lock);
+        let default = default_creation_base(context, facts, cancel)?;
+        return create_with_default(context, request, cancel, Some(default));
+    }
+
     if create_branch {
         let remote = run_git(context, context.repo, GitRead::RemoteBranchTips, cancel)?;
         if exit_code(&remote)? != 0 {
@@ -382,16 +401,7 @@ pub fn create(
     } else if let Some(base) = request.base.as_deref() {
         pin_revision(context, facts, base, cancel)?
     } else {
-        let head = GitRevision::new("HEAD").map_err(|_| WorktreeError::InvalidRequest)?;
-        facts
-            .resolve_revision(context, head, cancel)
-            .map_err(|error| {
-                if matches!(error, WorktreeError::NotFound) {
-                    WorktreeError::InvalidOutput
-                } else {
-                    error
-                }
-            })?
+        default.as_ref().ok_or(WorktreeError::InvalidRequest)?.0
     };
     let worktree_root = match context
         .repo
@@ -473,7 +483,7 @@ pub fn create(
         return Err(WorktreeError::PrimaryMoved);
     }
     context.repo.revalidate()?;
-    let fresh = context.facts.read_inventory(context, cancel)?;
+    let fresh = context.facts.fresh_inventory(context, cancel)?;
     let entry = fresh
         .iter()
         .find(|entry| canonicalize(&entry.path).ok().as_deref() == Some(target.as_path()))
@@ -494,6 +504,11 @@ pub fn create(
         Occupancy::census_unknown(target.clone(), context.workers.incomplete_census_detail())
     });
     Ok(WorktreeInfo {
+        warnings: if create_branch && request.base.is_none() {
+            default.map_or_else(Vec::new, |(_, warnings)| warnings)
+        } else {
+            Vec::new()
+        },
         path: target.clone(),
         branch: Some(branch.as_str().to_owned()),
         head: entry.head,
@@ -502,6 +517,59 @@ pub fn create(
         primary: false,
         occupancy: combine_occupancy(&target, Occupancy::Available, writer),
     })
+}
+
+fn default_creation_base(
+    context: &WorktreeContext<'_>,
+    facts: &RepoFacts,
+    cancel: &CancelToken,
+) -> Result<(GitOid, Vec<String>), WorktreeError> {
+    match crate::utility::fetch_missing_remote_branch(
+        context.executor,
+        context.repo,
+        context.utility,
+        context.home,
+        "origin/HEAD",
+        context.mutation_budget,
+        cancel,
+    ) {
+        Ok(crate::utility::RemoteBase::Found(oid)) => {
+            let revision =
+                GitRevision::new(oid.to_string()).map_err(|_| WorktreeError::InvalidOutput)?;
+            if let Ok(pinned) = facts.resolve_revision(context, revision, cancel) {
+                return Ok((pinned, Vec::new()));
+            }
+        }
+        Err(crate::utility::UtilityError::Cancelled)
+        | Err(crate::utility::UtilityError::Execution(provenant_os::exec::ExecError::Cancelled)) => {
+            return Err(crate::utility::UtilityError::Cancelled.into());
+        }
+        _ => {}
+    }
+    let head = GitRevision::new("HEAD").map_err(|_| WorktreeError::InvalidRequest)?;
+    let oid = facts
+        .resolve_revision(context, head, cancel)
+        .map_err(|error| {
+            if matches!(error, WorktreeError::NotFound) {
+                WorktreeError::InvalidOutput
+            } else {
+                error
+            }
+        })?;
+    let warning = default_base_warning(oid);
+    let _ = write_default_base_warning(&mut std::io::stderr().lock(), oid);
+    Ok((oid, vec![warning]))
+}
+
+fn default_base_warning(oid: GitOid) -> String {
+    format!("could not fetch origin's default branch; using local HEAD {oid}")
+}
+
+pub(super) fn write_default_base_warning(
+    output: &mut impl std::io::Write,
+    oid: GitOid,
+) -> std::io::Result<()> {
+    writeln!(output, "warning: {}", default_base_warning(oid))
 }
 
 /// Undo a `worktree add` that failed or was killed part-way. Only what this
@@ -524,7 +592,7 @@ pub(super) fn roll_back_failed_add(
     let Some((branch, base)) = created_branch else {
         return clean;
     };
-    let Ok(entries) = context.facts.read_inventory(context, cancel) else {
+    let Ok(entries) = context.facts.fresh_inventory(context, cancel) else {
         return false;
     };
     if entries
@@ -604,6 +672,15 @@ pub(super) fn primary_head(
         Err(error) => return Err(error),
     };
     Ok((bytes, commit))
+}
+
+/// Pin an admission base using the command's fact caps and remote provenance.
+pub fn resolve_base(
+    context: &WorktreeContext<'_>,
+    revision: &str,
+    cancel: &CancelToken,
+) -> Result<GitOid, WorktreeError> {
+    pin_revision(context, context.facts, revision, cancel)
 }
 
 pub(super) fn pin_revision(
@@ -846,7 +923,7 @@ pub(super) fn remove_tree_when(
     let mut locked = lock_worktree_for_mutation(context, entry, cancel)?;
     context.repo.revalidate()?;
     tree_unchanged(
-        &context.facts.read_inventory(context, cancel)?,
+        &context.facts.fresh_inventory(context, cancel)?,
         entry,
         expected_head,
     )?;
@@ -879,7 +956,7 @@ pub(super) fn remove_tree_when(
         }
     };
     tree_unchanged(
-        &context.facts.read_inventory(context, cancel)?,
+        &context.facts.fresh_inventory(context, cancel)?,
         entry,
         expected_head,
     )?;
@@ -918,6 +995,7 @@ pub(super) fn remove_tree_when(
     // Keep writer exclusion through cache detachment and verified deletion.
     // Cleanup remains best-effort after Git has removed the worktree.
     let info = WorktreeInfo {
+        warnings: Vec::new(),
         path: canonical,
         branch: entry
             .branch
@@ -1181,7 +1259,7 @@ pub(super) fn settle_branch(
         Disposition::Discard => true,
     };
     context.repo.revalidate()?;
-    let fresh = context.facts.read_inventory(context, cancel)?;
+    let fresh = context.facts.fresh_inventory(context, cancel)?;
     if checked_out_elsewhere(&fresh, branch, None)? {
         retain(outcome, branch, RetainReason::CheckedOut);
         return Ok(());
@@ -1379,7 +1457,7 @@ fn remove_with_owner(
     let mut detached = Vec::new();
     let result = (|| {
         context.repo.revalidate()?;
-        let entries = context.facts.read_inventory(context, cancel)?;
+        let entries = context.facts.fresh_inventory(context, cancel)?;
         let mut outcome = RemoveOutcome::default();
         match request {
             WorktreeRemove::Name {

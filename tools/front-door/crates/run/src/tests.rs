@@ -402,6 +402,241 @@ pub(super) fn input() -> PreparedRun {
         }],
     }
 }
+
+#[test]
+fn refused_operation_is_durable_and_replay_checks_request_identity() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let context = context(temp.path())?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let input = input();
+    let diagnostic = provenant_records::diagnostic::Diagnostic::new("QUEUE_FULL")
+        .category("refused")
+        .detail("admission queue is full");
+    let store = RunStore::open(&context, &call)?;
+    let saved = store.record_refusal(&input, diagnostic.clone(), Some("lane".into()), &call)?;
+    assert_eq!(saved.refused_at, Some(input.created_at));
+    drop(store);
+    let store = RunStore::open(&context, &call)?;
+    let replayed = store
+        .operation(&input.operation_id, &call)?
+        .ok_or("missing refusal")?;
+    assert_eq!(replayed.refusal, Some(diagnostic.clone()));
+    assert_eq!(replayed.worktree.as_deref(), Some("lane"));
+    assert_eq!(store.recent_refusals(10, &call)?, vec![replayed.clone()]);
+    let mut other_context = context.clone();
+    other_context.actor_id = ActorId::from_bytes([9; 16]);
+    let other = RunStore::open(&other_context, &call)?;
+    assert!(other.recent_refusals(10, &call)?.is_empty());
+    assert!(store.recent_refusals(0, &call).is_err());
+    let duplicate = store.record_refusal(
+        &input,
+        provenant_records::diagnostic::Diagnostic::new("OTHER"),
+        Some("other".into()),
+        &call,
+    )?;
+    assert_eq!(
+        duplicate, replayed,
+        "a replay cannot replace the first refusal"
+    );
+    assert!(
+        matches!(store.create(&input, &call), Err(RunError::RecordedRefusal(saved)) if *saved == diagnostic)
+    );
+    let mut changed = input;
+    changed.request.concurrency = 2;
+    assert!(matches!(
+        store.create(&changed, &call),
+        Err(RunError::OperationConflict)
+    ));
+    assert!(matches!(
+        store.record_refusal(&changed, diagnostic, None, &call),
+        Err(RunError::OperationConflict)
+    ));
+    Ok(())
+}
+
+#[test]
+fn refusal_notice_obligation_survives_restart_and_completes_only_for_same_facts() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let context = context(temp.path())?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let mut input = input();
+    input.request.chair = Some(ChairBinding {
+        extra: Default::default(),
+        host: provenant_core::HostId::from_bytes([1; 16]),
+        actor: ActorId::from_bytes([2; 16]),
+        session: None,
+    });
+    let store = RunStore::open(&context, &call)?;
+    let record = store.record_refusal(
+        &input,
+        provenant_records::diagnostic::Diagnostic::new("REFUSED"),
+        None,
+        &call,
+    )?;
+    assert_eq!(
+        store.pending_refusal_notices(10, &call)?,
+        vec![record.clone()]
+    );
+    let mut changed = record.clone();
+    changed.refusal = Some(provenant_records::diagnostic::Diagnostic::new("OTHER"));
+    assert!(matches!(
+        store.complete_refusal_notice(&changed, &call),
+        Err(RunError::Conflict)
+    ));
+    drop(store);
+    let store = RunStore::open(&context, &call)?;
+    assert_eq!(
+        store.pending_refusal_notices(10, &call)?,
+        vec![record.clone()]
+    );
+    store.complete_refusal_notice(&record, &call)?;
+    store.complete_refusal_notice(&record, &call)?;
+    assert!(store.pending_refusal_notices(10, &call)?.is_empty());
+    assert_eq!(
+        store
+            .operation(&input.operation_id, &call)?
+            .ok_or("missing")?
+            .extra["refusal_notice_done"],
+        true
+    );
+    for n in 10_u8..91 {
+        input.operation_id = OperationId::parse(&format!("notice-{n}"))?;
+        input.run_id = RunId::from_bytes([n; 16]);
+        store.record_refusal(
+            &input,
+            provenant_records::diagnostic::Diagnostic::new("REFUSED"),
+            None,
+            &call,
+        )?;
+    }
+    // Stored records are BLOBs: SQLite JSON queries must cast these exact bytes.
+    let storage: String =
+        store
+            .db
+            .query_row("SELECT typeof(record) FROM operations LIMIT 1", [], |row| {
+                row.get(0)
+            })?;
+    assert_eq!(storage, "blob");
+    assert_eq!(store.recent_refusals(100, &call)?.len(), 82);
+    let page = store.pending_refusal_notices_after(80, 0, &call)?;
+    assert_eq!(page.len(), 80);
+    let after = page.last().ok_or("empty page")?.0;
+    let tail = store.pending_refusal_notices_after(80, after, &call)?;
+    assert_eq!(
+        tail.len(),
+        1,
+        "failed notices in the first page cannot hide the tail"
+    );
+    assert_eq!(tail[0].1.operation_id.as_str(), "notice-90");
+    let first = store.pending_refusal_notices(80, &call)?;
+    assert_eq!(first.len(), 80);
+    for pending in &first {
+        store.complete_refusal_notice(pending, &call)?;
+    }
+    assert_eq!(store.pending_refusal_notices(80, &call)?.len(), 1);
+    Ok(())
+}
+#[test]
+fn corrupt_refusal_notices_do_not_hide_valid_notices_after_a_full_page() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let context = context(temp.path())?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context, &call)?;
+    let mut input = input();
+    input.request.chair = Some(ChairBinding {
+        extra: Default::default(),
+        host: provenant_core::HostId::from_bytes([1; 16]),
+        actor: ActorId::from_bytes([2; 16]),
+        session: None,
+    });
+    let mut expected = Vec::new();
+    for n in 0_u8..164 {
+        input.operation_id = OperationId::parse(&format!("corrupt-notice-{n}"))?;
+        input.run_id = RunId::from_bytes([n; 16]);
+        let record = store.record_refusal(
+            &input,
+            provenant_records::diagnostic::Diagnostic::new("REFUSED"),
+            None,
+            &call,
+        )?;
+        if n >= 81 {
+            expected.push(record);
+            continue;
+        }
+        let mut value = serde_json::to_value(&record)?;
+        let mut operation = input.operation_id.to_string();
+        let raw = if n == 0 {
+            b"{malformed JSON".to_vec()
+        } else {
+            match n % 3 {
+                0 => {
+                    value["schema_version"] = serde_json::json!(999);
+                    serde_json::to_vec(&value)?
+                }
+                1 => {
+                    operation = format!("invalid id {n}");
+                    serde_json::to_vec(&value)?
+                }
+                _ => {
+                    value["operation_id"] = serde_json::json!("another-operation");
+                    serde_json::to_vec(&value)?
+                }
+            }
+        };
+        store.db.execute(
+            "UPDATE operations SET operation=?1,record=?2 WHERE operation=?3",
+            rusqlite::params![operation, raw, input.operation_id.as_str()],
+        )?;
+    }
+    let first = store.pending_refusal_notices_after(80, 0, &call)?;
+    assert_eq!(first.len(), 80);
+    assert_eq!(
+        first
+            .iter()
+            .map(|(_, record)| record.clone())
+            .collect::<Vec<_>>(),
+        expected[..80]
+    );
+    let tail = store.pending_refusal_notices_after(80, first[79].0, &call)?;
+    assert_eq!(
+        tail.into_iter()
+            .map(|(_, record)| record)
+            .collect::<Vec<_>>(),
+        expected[80..]
+    );
+    for record in &expected {
+        store.complete_refusal_notice(record, &call)?;
+    }
+    assert!(store.pending_refusal_notices(80, &call)?.is_empty());
+    Ok(())
+}
+
+#[test]
+fn recorded_refusal_freezes_the_notice_setting() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let context = context(temp.path())?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context, &call)?;
+    let mut input = input();
+    input.request.tasks[0]
+        .profile
+        .knobs
+        .insert("chair.refusal_notice".into(), serde_json::json!("off"));
+    let record = store.record_refusal(
+        &input,
+        provenant_records::diagnostic::Diagnostic::new("REFUSED"),
+        None,
+        &call,
+    )?;
+    assert_eq!(record.extra["refusal_notice"], "off");
+    assert_eq!(store.recent_refusals(1, &call)?, vec![record]);
+    Ok(())
+}
+
 pub(super) fn route() -> RouteRecord {
     RouteRecord {
         provider: Some("fixture".into()),

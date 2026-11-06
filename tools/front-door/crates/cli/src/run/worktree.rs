@@ -103,6 +103,7 @@ pub(super) fn write_worktree_census_warning(
 /// Create or claim the owned tree and publish its lane ownership. A new
 /// tree's owner records the commit creation pinned, so nothing is resolved
 /// again after the side effect and a replay finds the same base.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(super) fn own_worktree(
     owned: &OwnedWorktree,
@@ -122,18 +123,56 @@ pub(super) fn own_worktree(
     ),
     OwnWorktreeError,
 > {
+    let facts = provenant_confinement::worktrees::RepoFacts::default();
+    own_worktree_using_facts(
+        owned,
+        requested_base,
+        operation_id,
+        edge,
+        workers,
+        &facts,
+        terminal_attempt,
+        created,
+        clock,
+        cancel,
+        lock_budget,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn own_worktree_using_facts(
+    owned: &OwnedWorktree,
+    requested_base: Option<&str>,
+    operation_id: &OperationId,
+    edge: &Edge<'_>,
+    workers: &dyn provenant_confinement::worktrees::WorkerObserver,
+    facts: &provenant_confinement::worktrees::RepoFacts,
+    terminal_attempt: impl Fn(provenant_core::AttemptId) -> bool,
+    created: &mut Option<(PathBuf, String)>,
+    clock: &SystemClock,
+    cancel: &CancelToken,
+    lock_budget: Option<provenant_core::WaitBudget>,
+) -> Result<
+    (
+        provenant_confinement::worktrees::WorktreeInfo,
+        provenant_core::GitOid,
+    ),
+    OwnWorktreeError,
+> {
     let OwnedWorktree {
         branch,
         host,
         created_at,
     } = owned;
     let mut owner_refused = false;
-    provenant_confinement::worktrees::with_context(
+    provenant_confinement::worktrees::with_context_using_workers_and_facts(
         edge.roots,
         edge.home,
         edge.cwd,
         clock,
         cancel,
+        workers,
+        facts,
         |context| {
             use provenant_confinement::worktrees::{
                 self, Occupancy, WorktreeCreate, WorktreeOrigin, WorktreeOwner,
@@ -144,16 +183,7 @@ pub(super) fn own_worktree(
                 ..*context
             };
             let requested_base_oid = if let Some(base) = requested_base {
-                let git = provenant_os::git::git_executable()
-                    .ok_or(worktrees::WorktreeError::InvalidRequest)?;
-                let resolved = run::resolve_git_base(&git, context.repo.root_path(), base)
-                    .map_err(|_| worktrees::WorktreeError::BaseNotFound {
-                        base: base.to_owned(),
-                    })?;
-                Some(
-                    provenant_core::GitOid::parse(&resolved)
-                        .map_err(|_| worktrees::WorktreeError::InvalidOutput)?,
-                )
+                Some(worktrees::resolve_base(context, base, cancel)?)
             } else {
                 None
             };
@@ -164,7 +194,13 @@ pub(super) fn own_worktree(
                 });
             let (info, pinned) = match existing {
                 Some(observation) => {
-                    let info = observation;
+                    // Selected admission may initialise the short observer gate
+                    // in a legacy custody slot; read-only list never does.
+                    worktrees::prepare_writer_probe(context.project_state, &observation.path)?;
+                    let info = worktrees::list(context, cancel)?
+                        .into_iter()
+                        .find(|info| info.path == observation.path)
+                        .ok_or(worktrees::WorktreeError::NotFound)?;
                     if let Some(base) = requested_base_oid
                         && !worktrees::is_ancestor(context, base, info.head, cancel)?
                     {

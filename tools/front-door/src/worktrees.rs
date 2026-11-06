@@ -149,6 +149,7 @@ enum Data {
     SeedBuilt(String),
     Created(Box<worktrees::WorktreeInfo>),
     Listed(Vec<worktrees::WorktreeInfo>),
+    Diagnosed(worktrees::WorktreeDiagnosis),
     Removed(worktrees::RemoveOutcome),
 }
 
@@ -160,10 +161,11 @@ pub fn run(command: Worktree, globals: &Globals, workers: &dyn WorkerObserver) -
         Worktree::SeedBuild => "worktree seed-build",
         Worktree::Create { .. } => "worktree create",
         Worktree::List => "worktree list",
+        Worktree::Doctor { .. } => "worktree doctor",
         Worktree::SessionList => unreachable!(),
         Worktree::Remove(_) => "worktree remove",
     };
-    let read_only = matches!(command, Worktree::List);
+    let read_only = matches!(command, Worktree::List | Worktree::Doctor { .. });
     match execute(command, globals, workers) {
         Ok(data) => match serde_json::to_value(&data) {
             Ok(value) => emit(
@@ -245,17 +247,14 @@ fn execute(
         return Ok(Data::SeedBuilt(generation));
     }
     let facts = worktrees::RepoFacts::default();
-    with_context(
+    with_context_using_facts(
         roots,
         home,
         project,
         MUTATION_TIMEOUT,
         workers,
+        &facts,
         |context, cancel| {
-            let context = &WorktreeContext {
-                facts: &facts,
-                ..*context
-            };
             Ok(match command {
                 Worktree::SeedBuild => unreachable!(),
                 Worktree::Create { branch, base } => Data::Created(Box::new(worktrees::create(
@@ -264,6 +263,9 @@ fn execute(
                     cancel,
                 )?)),
                 Worktree::List => Data::Listed(worktrees::list(context, cancel)?),
+                Worktree::Doctor { path } => {
+                    Data::Diagnosed(worktrees::doctor(context, &path, cancel)?)
+                }
                 Worktree::SessionList => unreachable!(),
                 Worktree::Remove(mut args) => {
                     let upstream = if args.discard {
@@ -725,9 +727,9 @@ fn gc_project(
         project,
         MUTATION_TIMEOUT,
         workers,
+        facts,
         read_only,
         |context, cancel| {
-            let context = &WorktreeContext { facts, ..*context };
             if gc_primary_checkout(
                 context.repo,
                 context.executor,
@@ -1133,12 +1135,9 @@ fn gc(command: &Gc, globals: &Globals, workers: &dyn WorkerObserver) -> Result<G
             &project.path,
             MUTATION_TIMEOUT,
             workers,
+            &facts,
             command.dry_run,
             |context, cancel| {
-                let context = &WorktreeContext {
-                    facts: &facts,
-                    ..*context
-                };
                 // A failed fetch cannot grant removal authority. Output pruning
                 // still has its independent terminal-state proof.
                 let (upstream, upstream_error) = if command.pressure {
@@ -1393,15 +1392,34 @@ pub(crate) fn with_context<T>(
     workers: &dyn WorkerObserver,
     action: impl FnOnce(&WorktreeContext<'_>, &CancelToken) -> Result<T, Error>,
 ) -> Result<T, Error> {
-    with_context_mode(roots, home, project, mutation, workers, false, action)
+    let facts = worktrees::RepoFacts::default();
+    with_context_using_facts(roots, home, project, mutation, workers, &facts, action)
 }
 
+/// Build successive contexts around the same command-owned facts and caps.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn with_context_using_facts<T>(
+    roots: &provenant_core::Roots,
+    home: &Path,
+    project: &Path,
+    mutation: Duration,
+    workers: &dyn WorkerObserver,
+    facts: &worktrees::RepoFacts,
+    action: impl FnOnce(&WorktreeContext<'_>, &CancelToken) -> Result<T, Error>,
+) -> Result<T, Error> {
+    with_context_mode(
+        roots, home, project, mutation, workers, facts, false, action,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
 fn with_context_mode<T>(
     roots: &provenant_core::Roots,
     home: &Path,
     project: &Path,
     mutation: Duration,
     workers: &dyn WorkerObserver,
+    facts: &worktrees::RepoFacts,
     read_only: bool,
     action: impl FnOnce(&WorktreeContext<'_>, &CancelToken) -> Result<T, Error>,
 ) -> Result<T, Error> {
@@ -1477,7 +1495,6 @@ fn with_context_mode<T>(
     let clock = SystemClock;
     let policy_workers = worktrees::CensusPolicyWorkers::from_roots(workers, roots)?;
     let workers = worktrees::CensusSession::new(&policy_workers, &clock);
-    let facts = worktrees::RepoFacts::default();
     let context = WorktreeContext {
         home,
         repo: &repo,
@@ -1485,7 +1502,7 @@ fn with_context_mode<T>(
         project_state: &project_state,
         executor: &executor,
         utility: &runtime,
-        facts: &facts,
+        facts,
         workers: &workers,
         clock: &clock,
         utility_budget: budget,
@@ -1549,6 +1566,7 @@ mod human_tests {
     #[allow(dead_code)] // The harness=false driver compiles only the helpers.
     fn info(path: &str) -> Result<worktrees::WorktreeInfo, Box<dyn std::error::Error>> {
         Ok(worktrees::WorktreeInfo {
+            warnings: Vec::new(),
             path: PathBuf::from(path),
             branch: Some("refs/heads/master".into()),
             head: GitOid::parse(&"4a".repeat(20))?,
@@ -1794,6 +1812,7 @@ mod gc_preview_tests {
             &base,
             MUTATION_TIMEOUT,
             &worktrees::SystemWorkerObserver,
+            &worktrees::RepoFacts::default(),
             true,
             |_, _| Ok(()),
         );
