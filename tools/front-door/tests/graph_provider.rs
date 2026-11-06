@@ -2380,7 +2380,9 @@ fn run_graph_provider(rig: &TestRig, graph_id: &str, node: Value) -> Result<Valu
         Some("ok" | "waiting") => 0,
         Some("failed" | "refused") => 1,
         Some("cancelled") => 130,
-        other => return Err(format!("unexpected graph response status {other:?}: {response}").into()),
+        other => {
+            return Err(format!("unexpected graph response status {other:?}: {response}").into());
+        }
     };
     assert_eq!(code(&out), expected_exit, "{response}");
     assert!(response["error"].is_null(), "{response}");
