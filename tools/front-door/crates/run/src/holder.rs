@@ -2032,7 +2032,8 @@ mod host_clock_tests {
         .expect("path denial");
         assert!(hint.contains("/fixture/path"));
         assert!(!hint.contains("ghp_abcdefghijklmnopqrstuvwxyz0123456789"));
-        let create = path_denial_hint(b"touch: /fixture/repo/file: Operation not permitted").unwrap();
+        let create =
+            path_denial_hint(b"touch: /fixture/repo/file: Operation not permitted").unwrap();
         assert!(create.contains("denied create"));
         assert!(create.contains("/fixture/repo/file"));
         let read = path_denial_hint(b"cat: /fixture/secret: Permission denied").unwrap();

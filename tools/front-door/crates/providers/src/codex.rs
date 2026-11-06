@@ -87,7 +87,6 @@ fn prepare(
         argv.extend(["--image".into(), image.as_os_str().to_owned()]);
     }
     input.provenant.codex(&mut argv)?;
-    argv.push("-".into());
 
     // Codex runs helpers from its own package (code-mode host, bundled `rg`
     // and `zsh`), and its shell tool runs system programs. System directories
@@ -145,6 +144,26 @@ fn prepare(
     }
     env.push(("CODEX_HOME".into(), codex_home.into()));
     env.push(("SHELL".into(), "/bin/zsh".into()));
+    if access == Access::ReadOnly && plan.network == provenant_records::run::NetworkAccess::Open {
+        // The outer launch is an explicit environment allow-list. Preserve
+        // only those names plus the host gh login in Codex shell tools.
+        let mut names = env
+            .iter()
+            .map(|(name, _)| name.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        names.push("GH_TOKEN".into());
+        argv.extend([
+            "-c".into(),
+            "shell_environment_policy.ignore_default_excludes=true".into(),
+            "-c".into(),
+            format!(
+                "shell_environment_policy.include_only={}",
+                serde_json::to_string(&names).map_err(|_| ProviderError::Malformed)?
+            )
+            .into(),
+        ]);
+    }
+    argv.push("-".into());
     let mut spec = LaunchSpec {
         argv,
         env,

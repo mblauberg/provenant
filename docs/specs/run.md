@@ -837,6 +837,14 @@ refused, and the attempt records every granted path.
   `crates/run/src/dispatch_tests.rs::read_only_exceptions_are_recorded_and_temporary_paths_are_private_per_attempt`
 - Owner: `crates/confinement/src/plan/read_only.rs`
 
+Read-only Codex and Claude lanes with open network access can use the host
+GitHub login. The host asks `gh auth token` outside confinement, including
+keychain-backed logins, and passes the result only in the live child
+environment; no token enters setup files, prompts, receipts or logs.
+Shell here-documents use the attempt scratch directory through `TMPDIR` and
+`TMPPREFIX`. Denial hints retain the path and reported operation without
+claiming which sandbox or filesystem rule caused the refusal.
+
 Read-only runs use their bound repository with its Git metadata read-only.
 Their PATH selects the host-resolved Git executable; the sandbox grants that
 executable and its linked libraries read access and grants only that executable
@@ -1379,3 +1387,12 @@ reassigned worktrees require a new owned checkout for fresh fallback;
   `crates/cli/src/run.rs::tests::displaced_fallback_reports_unavailable_history`;
   `crates/cli/src/lib.rs::lifecycle_flags_parse_and_refuse_ambiguous_authority`.
 - Owner: `crates/run/src/controls.rs`, `crates/run/src/launch.rs`, `crates/cli/src/run.rs`
+
+### Alias quota recovery
+
+Named route pools skip members with known, unreset exhaustion, including stale
+quota observations. When every member is spent, refusal identifies the members
+and their earliest known resets. An exact model request keeps its model.
+A quota refusal before any generated work may retry the same alias;
+the successor attempt retains the spent members in its routing exclusions and
+links to the prior attempt. Generated output prevents this redraw. A writer with a session also needs explicit zero output usage.
