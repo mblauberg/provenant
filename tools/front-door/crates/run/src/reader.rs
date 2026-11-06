@@ -377,18 +377,6 @@ impl RunStore {
         self.held_owner(&run, None)?;
         Ok(run)
     }
-    /// Every attempt this host view handed to a guardian, once each.
-    pub fn held_attempts(&self) -> Vec<AttemptId> {
-        let mut held: Vec<_> = self
-            .launched
-            .borrow()
-            .iter()
-            .map(|held| held.scope.attempt)
-            .collect();
-        held.sort();
-        held.dedup();
-        held
-    }
     /// The lane can rewrite a child's records after the host stamps them, so
     /// the host's view refuses a launched run or attempt naming another owner.
     fn held_owner(&self, run: &RunRecord, attempt: Option<&AttemptRecord>) -> Result<()> {
