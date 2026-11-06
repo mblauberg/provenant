@@ -35,11 +35,21 @@ pub struct SessionDiscovery {
     pub rebound_from: Vec<ChairRebind>,
 }
 
-// Keep only the most recent rebinds when reading.
+// Accept the previous single-hop record and upgrade it on the next save.
 fn rebind_history<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> Result<Vec<ChairRebind>, D::Error> {
-    let mut history = Vec::<ChairRebind>::deserialize(deserializer)?;
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum History {
+        Many(Vec<ChairRebind>),
+        One(ChairRebind),
+    }
+    let mut history = match Option::<History>::deserialize(deserializer)? {
+        Some(History::Many(history)) => history,
+        Some(History::One(previous)) => vec![previous],
+        None => Vec::new(),
+    };
     let excess = history.len().saturating_sub(REBIND_LIMIT);
     history.drain(..excess);
     Ok(history)
