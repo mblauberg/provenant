@@ -674,7 +674,6 @@ fn chair_snapshot_preserves_active_lanes_while_a_writer_is_open() -> Result {
                         effort: None,
                     },
                     account: None,
-                    fallback: vec![],
                     authority_digest: Digest::from_bytes([5; 32]),
                     writer: None,
                     deliver: None,

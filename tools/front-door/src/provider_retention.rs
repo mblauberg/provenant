@@ -209,8 +209,7 @@ pub(crate) fn provider_state_gc_sweeps_host_and_refuses_replaced_roots()
         request: serde_json::from_value(serde_json::json!({
             "schema_version":1, "concurrency":1, "parent":null, "tasks":[{
                 "task_id": task, "prompt_digest": CanonicalV1::file_digest(b""),
-                "route": {"kind":"model","provider":"codex","model":"codex/fixture"}, "fallback":[],
-                "authority_digest": provenant_core::Digest::from_bytes([0;32]),
+                "route": {"kind":"model","provider":"codex","model":"codex/fixture"}, "authority_digest": provenant_core::Digest::from_bytes([0;32]),
                 "provider_timeout_seconds":20, "delivery_id":null }]
         }))?,
     }, &call)?;

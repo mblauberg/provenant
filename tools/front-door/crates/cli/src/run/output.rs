@@ -165,10 +165,7 @@ pub(super) fn receipt_family(model: Option<&str>) -> String {
         .unwrap_or_else(|| "unknown".into())
 }
 
-pub(super) fn receipt_resolution(
-    record: &run::AttemptRecord,
-    fallback: &[run::RouteRecord],
-) -> String {
+pub(super) fn receipt_resolution(record: &run::AttemptRecord) -> String {
     let Some(route) = record.applied_route.as_ref() else {
         return "unknown".into();
     };
@@ -195,25 +192,12 @@ pub(super) fn receipt_resolution(
     if applied == requested {
         return "explicit".into();
     }
-    if record
-        .skipped_routes
-        .iter()
-        .any(|skip| skip.route == requested)
-        && fallback.iter().any(|route| {
-            receipt_model(route.provider.as_deref(), route.model.as_deref()).as_ref()
-                == Some(&applied)
-        })
-    {
-        "fallback".into()
-    } else {
-        "unknown".into()
-    }
+    "unknown".into()
 }
 
 pub(super) fn reviewer_receipt(
     record: &provenant_records::run::AttemptRecord,
     writer: bool,
-    fallback: &[run::RouteRecord],
 ) -> Result<(Value, String), Fail> {
     use provenant_records::run::AttemptState;
     if !matches!(record.state, AttemptState::Terminal { .. }) {
@@ -239,7 +223,7 @@ pub(super) fn reviewer_receipt(
         .filter(|value| !value.is_empty())
         .unwrap_or("unknown");
     let family = receipt_family(qualified_model.as_deref());
-    let resolved_from = receipt_resolution(record, fallback);
+    let resolved_from = receipt_resolution(record);
     let reviewer = run::fact(record.clone())?.reviewer;
     let reviewer_model = record
         .observed_route
@@ -558,7 +542,7 @@ fn output_read_part(
                 .into_iter()
                 .find(|task| task.task_id == record.task_id)
                 .ok_or(run::RunError::NotFound)?;
-            return reviewer_receipt(&record, task.writer.is_some(), &task.fallback);
+            return reviewer_receipt(&record, task.writer.is_some());
         }
         Part::Result => run::ArtifactPart::Result,
         Part::Prompt => run::ArtifactPart::Prompt,

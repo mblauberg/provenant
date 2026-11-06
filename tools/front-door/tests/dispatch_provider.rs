@@ -794,8 +794,7 @@ fn host_native_preparation_uses_the_provider_contract() -> Result {
     }
     let task: provenant_run::TaskRequest = serde_json::from_value(json!({
         "task_id":TaskId::from_bytes([3;16]), "prompt_digest":provenant_records::CanonicalV1::file_digest(b"fixture host-native"),
-        "route":{"kind":"adapter","provider":"host-native","name":"ci-fixer"}, "account":"pro", "fallback":[],
-        "authority_digest":Digest::from_bytes([4;32]), "provider_timeout_seconds":20, "delivery_id":null
+        "route":{"kind":"adapter","provider":"host-native","name":"ci-fixer"}, "account":"pro", "authority_digest":Digest::from_bytes([4;32]), "provider_timeout_seconds":20, "delivery_id":null
     }))?;
     let mut absent = task.clone();
     absent.route = provenant_run::RequestedRoute::Adapter {
@@ -1408,7 +1407,6 @@ fn persisted_attempt_with(
                     effort: None,
                 },
                 account: None,
-                fallback: vec![],
                 authority_digest: Digest::from_bytes([26; 32]),
                 writer: None,
                 provider_timeout_seconds: 60,

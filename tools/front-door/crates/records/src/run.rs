@@ -254,7 +254,6 @@ pub struct TaskRequest {
     /// Optional dispatch override; normal placement comes from routing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub account: Option<String>,
-    pub fallback: Vec<RouteRecord>,
     /// Digest of the verified confinement/authority plan supplied by the edge.
     pub authority_digest: Digest,
     #[serde(default)]
@@ -1329,7 +1328,6 @@ mod tests {
                     effort: None,
                 },
                 account: None,
-                fallback: Vec::new(),
                 authority_digest: Digest::from_bytes([5; 32]),
                 writer: None,
                 deliver: None,
@@ -1344,6 +1342,7 @@ mod tests {
         };
         let mut sealed = serde_json::to_value(&request)?;
         assert!(sealed["tasks"][0].get("title").is_none());
+        assert!(sealed["tasks"][0].get("fallback").is_none());
         let legacy: CanonicalRequest = serde_json::from_value(sealed.clone())?;
         assert_eq!(serde_json::to_value(&legacy)?, sealed);
         assert_eq!(legacy.digest()?, request.digest()?);

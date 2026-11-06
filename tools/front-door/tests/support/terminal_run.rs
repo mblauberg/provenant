@@ -43,7 +43,7 @@ pub fn seed(rig: &TestRig, operation: &str, contexts: &[Value]) -> Result<RunId>
         let task_id = TaskId::from_bytes(provenant_os::fs::entropy_128()?);
         tasks.push(json!({"task_id":task_id,"prompt_digest":CanonicalV1::file_digest(prompt.as_bytes()),
             "context":work,"route":{"kind":"model","provider":"codex","model":"gpt-6-luna","effort":null},
-            "fallback":[],"authority_digest":Digest::from_bytes([5;32]),"provider_timeout_seconds":30,"delivery_id":null}));
+            "authority_digest":Digest::from_bytes([5;32]),"provider_timeout_seconds":30,"delivery_id":null}));
         attempts.push(NewAttempt {
             task_id,
             attempt_id: AttemptId::from_bytes(provenant_os::fs::entropy_128()?),
