@@ -678,6 +678,7 @@ pub fn cutover_writer_reservations(
     cancel: &CancelToken,
     clock: &dyn Clock,
 ) -> Result<()> {
+    let mut storage_error = None;
     for (index, name) in directory.entries()?.enumerate() {
         if index >= 10_000 {
             return Err(CustodyError::InvalidRecord);
@@ -701,14 +702,26 @@ pub fn cutover_writer_reservations(
             )?;
             carry_forward_slot_reservation(&slot)
         };
-        // Do not let one retained or busy slot hide other reservations.
-        // The read-only listing reports the slot that could not be carried.
-        let _ = migrate();
+        // Malformed and busy slots remain visible in the read-only listing.
+        // A failed write must reach the caller, after carrying any other slots.
+        match migrate() {
+            Ok(())
+            | Err(CustodyError::Fenced | CustodyError::Busy)
+            | Err(CustodyError::Filesystem(FsError::LockTimeout { .. })) => {}
+            Err(error) => {
+                if storage_error.is_none() {
+                    storage_error = Some(error);
+                }
+            }
+        }
         if cancel.is_cancelled() {
             return Err(CustodyError::Cancelled);
         }
     }
-    Ok(())
+    match storage_error {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
 }
 
 /// A carried fence remains exclusive until its owner settles and clears it.

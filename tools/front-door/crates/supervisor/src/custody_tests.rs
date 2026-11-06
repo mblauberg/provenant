@@ -261,6 +261,38 @@ fn reconciliation_skips_busy_and_unreadable_slots_without_hiding_other_fences() 
 }
 
 #[test]
+fn cutover_returns_storage_failure_and_still_carries_other_slots() -> TestResult {
+    let root = tempfile::tempdir()?;
+    let registry = Directory::open_anchor(root.path())?;
+    for name in ["blocked", "good"] {
+        std::fs::create_dir(root.path().join(name))?;
+        let slot = Directory::open_anchor(&root.path().join(name))?;
+        publish_reservation(&slot, &legacy_reservation(scope(), &slot.metadata()?))?;
+    }
+    let blocked = Directory::open_anchor(&root.path().join("blocked"))?;
+    let child = create_attempt_evidence(&blocked, scope())?;
+    let child_path = root
+        .path()
+        .join("blocked")
+        .join(scope().attempt.to_string());
+    std::fs::set_permissions(&child_path, std::fs::Permissions::from_mode(0o500))?;
+    let result = cutover_writer_reservations(&registry, &CancelToken::new(), &SystemClock);
+    std::fs::set_permissions(&child_path, std::fs::Permissions::from_mode(0o700))?;
+    assert!(matches!(result, Err(CustodyError::Filesystem(error)) if error.is_permission_denied()));
+    assert!(root.path().join("blocked/reservation.json").exists());
+    assert!(!root.path().join("good/reservation.json").exists());
+    assert!(!child_path.join("reservation.json").exists());
+    let listing = list_writer_reservations(&registry)?;
+    assert_eq!(listing.issues.len(), 1);
+    assert_eq!(listing.reservations.len(), 1);
+    assert_eq!(
+        child.metadata()?.inode,
+        Directory::open_anchor(&child_path)?.metadata()?.inode
+    );
+    Ok(())
+}
+
+#[test]
 fn cutover_preserves_guardian_identity_for_scoped_observation() -> TestResult {
     let root = tempfile::tempdir()?;
     let slot_path = root.path().join("writer");

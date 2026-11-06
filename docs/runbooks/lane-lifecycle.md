@@ -277,7 +277,9 @@ a storage failure retains the source and a later recovery checks the same bytes
 before completing the cutover. `provenant reconcile --id RUN` performs this
 cutover before discovering attempts. Unreadable or conflicting evidence remains
 visible as a reservation issue and continues to fence writers; retain it for host
-investigation. Reading status does not perform the cutover.
+investigation. Reconcile reports cutover storage errors in
+`writer_reservation_errors`, returns nonzero and continues judging independent
+known runs. Reading status does not perform the cutover.
 
 Cancelling a lane that has not launched a provider settles it as cancelled
 with nothing to import, and frees its queue place and its worktree's writer

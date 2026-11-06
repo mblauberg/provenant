@@ -50,6 +50,31 @@ pub(super) fn reconcile_reply(outcome: Result<(Value, String), Fail>, fenced: bo
 
 pub(super) const SCAN: u64 = 320;
 
+fn reservation_root(session: &Session) -> PathBuf {
+    session
+        .context
+        .state_root
+        .as_path()
+        .join("worktrees")
+        .join(session.context.project_id.to_string())
+}
+
+fn prepare_reservations(
+    session: &Session,
+    call: &run::Request<'_>,
+    visited: &mut std::collections::BTreeSet<provenant_core::ProjectId>,
+    issues: &mut Vec<provenant_supervisor::custody::ReservationIssue>,
+) {
+    if visited.insert(session.context.project_id)
+        && let Err(error) = session.store.cutover_writer_reservations(call)
+    {
+        issues.push(provenant_supervisor::custody::ReservationIssue {
+            reservation: reservation_root(session),
+            reason: error.to_string(),
+        });
+    }
+}
+
 pub(super) fn reconcile_inner(
     command: Reconcile,
     edge: &Edge<'_>,
@@ -73,10 +98,13 @@ pub(super) fn reconcile_inner(
             format!("{id} {}\n", reconcile_summary(&state)),
         ));
     }
+    let mut visited = std::collections::BTreeSet::new();
+    let mut cutover_issues = Vec::new();
     let (runs, truncated) = if command.id.is_empty() {
         let session = open(edge, &request(&clock, &cancel)?)?;
         let call = request(&clock, &cancel)?;
-        let initial = session.store.open_runs(SCAN + 1, &call)?;
+        prepare_reservations(&session, &call, &mut visited, &mut cutover_issues);
+        let initial = session.store.open_runs_readonly(SCAN + 1, &call)?;
         let mut finished = Vec::new();
         for run in &initial {
             if cloud_owner::finished_run(&session.store, *run, &call).unwrap_or(false) {
@@ -89,7 +117,7 @@ pub(super) fn reconcile_inner(
         let mut runs = if finished.is_empty() {
             initial
         } else {
-            session.store.open_runs(scan_cap + 1, &call)?
+            session.store.open_runs_readonly(scan_cap + 1, &call)?
         };
         let exhausted = runs.len() as u64 > scan_cap;
         if !finished.is_empty() {
@@ -121,6 +149,12 @@ pub(super) fn reconcile_inner(
     let mut human = String::new();
     for target in runs {
         let (session, selected) = targets::open(edge, &target, true, &request(&clock, &cancel)?)?;
+        prepare_reservations(
+            &session,
+            &request(&clock, &cancel)?,
+            &mut visited,
+            &mut cutover_issues,
+        );
         let run = selected.run.ok_or(run::RunError::NotFound)?;
         let scoped_cwd = targets::cwd(edge, session.context.project_id)?;
         let scoped_edge = Edge {
@@ -257,13 +291,22 @@ pub(super) fn reconcile_inner(
             "more than {SCAN} open runs; name the rest with --id\n"
         ));
     }
-    let reservations = open(edge, &request(&clock, &cancel)?)?
+    let session = open(edge, &request(&clock, &cancel)?)?;
+    let mut reservations = session
         .store
-        .writer_fence_listing()?;
+        .writer_fence_listing()
+        .unwrap_or_else(|error| provenant_supervisor::custody::ReservationListing {
+            reservations: Vec::new(),
+            issues: vec![provenant_supervisor::custody::ReservationIssue {
+                reservation: reservation_root(&session),
+                reason: error.to_string(),
+            }],
+        });
+    reservations.issues.extend(cutover_issues);
     *fenced |= !reservations.issues.is_empty();
     for issue in &reservations.issues {
         human.push_str(&format!(
-            "writer reservation unreadable: {}: {}\n",
+            "writer reservation requires recovery: {}: {}\n",
             issue.reservation.display(),
             issue.reason
         ));
