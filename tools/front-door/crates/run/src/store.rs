@@ -97,6 +97,7 @@ impl RunStore {
         worktree: Option<String>,
         call: &Request<'_>,
     ) -> Result<OperationRecord> {
+        validate_request(input)?;
         if worktree.as_ref().is_some_and(|name| {
             name.is_empty()
                 || name.len() > 1024

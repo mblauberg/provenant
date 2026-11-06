@@ -423,6 +423,16 @@ fn refused_operation_is_durable_and_replay_checks_request_identity() -> TestResu
         .ok_or("missing refusal")?;
     assert_eq!(replayed.refusal, Some(diagnostic.clone()));
     assert_eq!(replayed.worktree.as_deref(), Some("lane"));
+    let duplicate = store.record_refusal(
+        &input,
+        provenant_records::diagnostic::Diagnostic::new("OTHER"),
+        Some("other".into()),
+        &call,
+    )?;
+    assert_eq!(
+        duplicate, replayed,
+        "a replay cannot replace the first refusal"
+    );
     assert!(
         matches!(store.create(&input, &call), Err(RunError::RecordedRefusal(saved)) if saved == diagnostic)
     );
@@ -430,6 +440,10 @@ fn refused_operation_is_durable_and_replay_checks_request_identity() -> TestResu
     changed.request.concurrency = 2;
     assert!(matches!(
         store.create(&changed, &call),
+        Err(RunError::OperationConflict)
+    ));
+    assert!(matches!(
+        store.record_refusal(&changed, diagnostic, None, &call),
         Err(RunError::OperationConflict)
     ));
     Ok(())
