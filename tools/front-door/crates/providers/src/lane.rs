@@ -1112,11 +1112,7 @@ mod tests {
     #[allow(clippy::disallowed_methods)]
     fn writer_token_precedes_host_helper_for_wrapped_and_absolute_git()
     -> Result<(), Box<dyn std::error::Error>> {
-        use std::{
-            io::Write,
-            os::unix::fs::PermissionsExt,
-            process::Stdio,
-        };
+        use std::{io::Write, os::unix::fs::PermissionsExt, process::Stdio};
         let dir = tempfile::tempdir()?;
         let config = dir.path().join("host-config");
         let host_helper = dir.path().join("host-helper");

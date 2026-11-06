@@ -1164,11 +1164,10 @@ impl HostDeliveryContext {
                 self.command_with_input_uncached(cwd, tool, args, stage, input)
                     .map(String::into_bytes)
             })?;
-            return String::from_utf8(bytes)
-                .map_err(|_| RunError::DeliveryFact {
-                    stage,
-                    source: provenant_confinement::worktrees::WorktreeError::InvalidOutput,
-                });
+            return String::from_utf8(bytes).map_err(|_| RunError::DeliveryFact {
+                stage,
+                source: provenant_confinement::worktrees::WorktreeError::InvalidOutput,
+            });
         }
         self.command_with_input_uncached(cwd, tool, args, stage, input)
     }
@@ -1303,13 +1302,9 @@ impl HostDeliveryContext {
                 },
             )
             .map_err(|error: RunError| match error {
-                RunError::Writer(
-                    provenant_confinement::worktrees::WorktreeError::Utility(
-                        provenant_confinement::utility::UtilityError::Truncated {
-                            stream: "stdout",
-                        },
-                    ),
-                ) if tool == "git" && git_subcommand(args) == "worktree list" => {
+                RunError::Writer(provenant_confinement::worktrees::WorktreeError::Utility(
+                    provenant_confinement::utility::UtilityError::Truncated { stream: "stdout" },
+                )) if tool == "git" && git_subcommand(args) == "worktree list" => {
                     RunError::DeliveryLimit {
                         stage,
                         tool: "git",
