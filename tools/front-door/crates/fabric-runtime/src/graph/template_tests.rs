@@ -277,6 +277,7 @@ fn flavours_and_layers_resolve_in_order() {
         .compile(&json!({"id": "sec", "use": "review.security"}))
         .unwrap();
     assert!(node.prompt.contains("security lens"));
+    assert_eq!(node.extra.get("template"), Some(&json!("review.security")));
     assert!(library.resolve("review.missing").is_err());
 
     library

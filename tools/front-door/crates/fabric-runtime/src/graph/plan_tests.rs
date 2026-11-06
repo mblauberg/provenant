@@ -1957,7 +1957,7 @@ fn admit_with(
     let library = TemplateLibrary::bundled();
     let resolvers = std::collections::BTreeMap::from([("areas".to_owned(), vec!["src".to_owned(), "docs".to_owned()])]);
     let limits = plans::generous();
-    let context = PatchContext { library: &library, resolvers: &resolvers, scan, limits: &limits };
+    let context = PatchContext { library: &library, resolvers: &resolvers, scan, journal: None, limits: &limits };
     admit_patch(&mut LiveGraph { document, checkpoint }, parent, &host_patch(patch), &context)
 }
 
@@ -2037,11 +2037,38 @@ fn admit_patch_skips_and_replaces_only_unstarted_nodes() {
 }
 
 #[test]
+fn admit_patch_journals_before_commit_and_tags_its_nodes_with_the_parent() {
+    let (document, mut checkpoint) = running_graph();
+    let library = TemplateLibrary::bundled();
+    let resolvers = std::collections::BTreeMap::new();
+    let limits = plans::generous();
+    let journaled = std::cell::RefCell::new(Vec::new());
+    let sink = |record: &PatchRecord| {
+        journaled.borrow_mut().push((record.revision, record.parent.clone(), record.journaled));
+        Ok(())
+    };
+    let context = PatchContext { library: &library, resolvers: &resolvers, scan: &|_| Ok(()), journal: Some(&sink), limits: &limits };
+    let patch = host_patch(json!({"schema_version":1, "nodes":[{"id":"x", "use":"task", "brief":"Work"}]}));
+    admit_patch(&mut LiveGraph { document: &document, checkpoint: &mut checkpoint }, Some("a"), &patch, &context).unwrap();
+    // The sink saw the record before commit, unmarked, with the parent named.
+    assert_eq!(*journaled.borrow(), [(1, Some("a".to_owned()), false)]);
+    assert!(checkpoint.expansions[0].patch.as_ref().unwrap().journaled);
+    assert_eq!(checkpoint.expansions[0].nodes[0].extra.get("parent_node"), Some(&json!("a")));
+
+    let failing = |_: &PatchRecord| Err("disk full".to_owned());
+    let context = PatchContext { library: &library, resolvers: &resolvers, scan: &|_| Ok(()), journal: Some(&failing), limits: &limits };
+    let patch = host_patch(json!({"schema_version":1, "nodes":[{"id":"y", "use":"task", "brief":"Work"}]}));
+    let error = admit_patch(&mut LiveGraph { document: &document, checkpoint: &mut checkpoint }, None, &patch, &context).unwrap_err();
+    assert_eq!(error.code, "journal");
+    assert_eq!(checkpoint.expansions.len(), 1, "an unjournaled admission commits nothing");
+}
+
+#[test]
 fn submit_compiles_a_patch_into_a_new_graph() {
     let library = TemplateLibrary::bundled();
     let resolvers = Default::default();
     let limits = plans::generous();
-    let context = PatchContext { library: &library, resolvers: &resolvers, scan: &|_| Ok(()), limits: &limits };
+    let context = PatchContext { library: &library, resolvers: &resolvers, scan: &|_| Ok(()), journal: None, limits: &limits };
     let patch = host_patch(json!({"schema_version":1, "templates":{"pair":{"nodes":[
             {"id":"one", "use":"task", "brief":"First"}, {"id":"two", "use":"task", "brief":"Second", "after":["one"]}]}},
         "nodes":[{"id":"map", "use":"explore", "over":["src"]}, {"id":"work", "use":"pair", "after":["map"]}]}));

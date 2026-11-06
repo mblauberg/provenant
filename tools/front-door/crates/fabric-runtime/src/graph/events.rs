@@ -218,41 +218,16 @@ pub(super) fn append_changes(
             &current.expansions,
         )?);
     }
+    // Patches `admit_patch` journaled are already written; the rest are written here.
     let known = previous.map_or(0, |old| old.expansions.len());
     for record in current
         .expansions
         .iter()
         .skip(known)
         .filter_map(|expansion| expansion.patch.as_ref())
+        .filter(|record| !record.journaled)
     {
-        // Free text (the reason, replaced briefs) is kept as digests.
-        let reason = record
-            .reason
-            .as_ref()
-            .map(|reason| digest(reason))
-            .transpose()?;
-        let replaced = record
-            .replaced
-            .iter()
-            .map(|node| digest(&node.id))
-            .collect::<Result<Vec<_>, _>>()?;
-        events.push(event(
-            GraphEventKind::Patch,
-            record.parent.as_deref().unwrap_or("host"),
-            "admitted",
-            &(
-                record.revision,
-                &record.digest,
-                record.key.as_ref().map(digest).transpose()?,
-                reason,
-                record
-                    .skipped
-                    .iter()
-                    .map(digest)
-                    .collect::<Result<Vec<_>, _>>()?,
-                replaced,
-            ),
-        )?);
+        events.push(patch_event(record)?);
     }
     if previous.is_none_or(|old| old.asks != current.asks) && !current.asks.is_empty() {
         events.push(event(GraphEventKind::Wait, id, "ask", &current.asks)?);
@@ -268,6 +243,52 @@ pub(super) fn append_changes(
         )?);
     }
     events.push(event(GraphEventKind::Checkpoint, id, "save", current)?);
+    append(directory, id, events)
+}
+
+/// Journal one admitted patch. Called by `admit_patch` before its commit.
+pub(super) fn append_patch(
+    directory: &Directory,
+    id: &str,
+    record: &super::patch::PatchRecord,
+) -> Result<(), JournalError> {
+    append(directory, id, vec![patch_event(record)?])
+}
+
+/// The journal line for an admitted patch: digests and identifiers only.
+fn patch_event(record: &super::patch::PatchRecord) -> Result<GraphEvent, JournalError> {
+    // Free text (the reason, replaced briefs) is kept as digests.
+    let reason = record
+        .reason
+        .as_ref()
+        .map(|reason| digest(reason))
+        .transpose()?;
+    let replaced = record
+        .replaced
+        .iter()
+        .map(|node| digest(&node.id))
+        .collect::<Result<Vec<_>, _>>()?;
+    event(
+        GraphEventKind::Patch,
+        record.parent.as_deref().unwrap_or("host"),
+        "admitted",
+        &(
+            record.revision,
+            &record.digest,
+            record.key.as_ref().map(digest).transpose()?,
+            reason,
+            record
+                .skipped
+                .iter()
+                .map(digest)
+                .collect::<Result<Vec<_>, _>>()?,
+            replaced,
+        ),
+    )
+}
+
+/// Append committed lines, repairing an unfinished tail first.
+fn append(directory: &Directory, id: &str, events: Vec<GraphEvent>) -> Result<(), JournalError> {
     let torn = match directory.open_read(&name(id)) {
         Ok(mut file) => {
             let len = file.seek(SeekFrom::End(0))?;
@@ -407,6 +428,7 @@ mod tests {
                 reason: Some("secret reason".into()),
                 skipped: Vec::new(),
                 replaced: Vec::new(),
+                journaled: false,
             }),
         });
         append_changes(&directory, "g", Some(&before), &after).unwrap();
@@ -418,5 +440,44 @@ mod tests {
         );
         let text = String::from_utf8(bytes(&directory, "g").unwrap()).unwrap();
         assert!(!text.contains("secret") && !text.contains("planner"));
+    }
+
+    #[test]
+    fn a_journaled_patch_is_written_once_and_not_again_at_save() {
+        let temp = tempfile::tempdir().unwrap();
+        let directory = Directory::open_anchor(temp.path()).unwrap();
+        let record = super::super::patch::PatchRecord {
+            extra: Default::default(),
+            revision: 1,
+            digest: "sha256:abc".into(),
+            key: None,
+            parent: None,
+            reason: None,
+            skipped: Vec::new(),
+            replaced: Vec::new(),
+            journaled: true,
+        };
+        append_patch(&directory, "g", &record).unwrap();
+        let before: GraphCheckpoint = serde_json::from_value(serde_json::json!({
+            "schema_version": 1, "graph_id": "g", "plan_digest": "digest", "nodes": []
+        }))
+        .unwrap();
+        let mut after = before.clone();
+        after.expansions.push(Expansion {
+            review: None,
+            extra: Default::default(),
+            source: "host".into(),
+            continuation: false,
+            nodes: Vec::new(),
+            uses: Vec::new(),
+            patch: Some(record),
+        });
+        append_changes(&directory, "g", Some(&before), &after).unwrap();
+        let patches = read(&directory, "g")
+            .unwrap()
+            .into_iter()
+            .filter(|event| event.kind == GraphEventKind::Patch)
+            .count();
+        assert_eq!(patches, 1);
     }
 }

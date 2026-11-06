@@ -161,6 +161,15 @@ pub struct WorkContext {
     pub shadow_of: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub selection_source: Option<String>,
+    /// Requested capability tier (for example `senior`) of a graph node's attempt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tier: Option<String>,
+    /// Template the attempt's graph node was compiled from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub template: Option<String>,
+    /// Node that admitted the attempt's node through a patch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_node: Option<String>,
 }
 impl WorkContext {
     /// A new request names only the fixed fields; stored records keep unknown ones for forward compatibility.
@@ -181,6 +190,9 @@ impl WorkContext {
             &self.experiment_arm,
             &self.shadow_of,
             &self.selection_source,
+            &self.tier,
+            &self.template,
+            &self.parent_node,
         ]
         .into_iter()
         .flatten()

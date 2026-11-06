@@ -657,6 +657,18 @@ fn node_context(plan: &PlannedGraph, node: &PlannedNode) -> provenant_records::r
             .shadow_of
             .clone()
             .or_else(|| graph.shadow_of.clone()),
+        // The requested tier is set by the launch, from the route it asks for.
+        tier: None,
+        template: node
+            .extra
+            .get(template::TEMPLATE_FIELD)
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned),
+        parent_node: node
+            .extra
+            .get(patch::PARENT_NODE_FIELD)
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned),
         selection_source: context
             .selection_source
             .clone()
@@ -2515,7 +2527,10 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         settlement_retries,
                         prior_attempts: &prior_attempts,
                         family_peers: &family_peers,
-                        context: node_context(&plan, node),
+                        context: provenant_records::run::WorkContext {
+                            tier: route.alias.clone(),
+                            ..node_context(&plan, node)
+                        },
                         read_roots: &node.read_roots,
                         attachments: &node.attachments,
                         capabilities: node.capabilities.as_deref(),

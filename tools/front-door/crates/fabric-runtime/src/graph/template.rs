@@ -16,6 +16,8 @@ pub const MAX_TEMPLATE_DEPTH: usize = 16;
 /// Copies one `over` may produce.
 pub const MAX_OVER_ITEMS: usize = 256;
 const ITEM: &str = "item";
+/// Node field naming the template a leaf was compiled from; carried to attempts.
+pub const TEMPLATE_FIELD: &str = "template";
 
 #[path = "template_composites.rs"]
 mod composites;
@@ -860,6 +862,7 @@ impl<'a> Compiler<'a> {
                 interpolate(&Value::String(tier.clone()), parameters)?,
             );
         }
+        leaf.insert(TEMPLATE_FIELD.into(), Value::String(name.to_owned()));
         leaf.insert(
             "access".into(),
             serde_json::to_value(template.access.unwrap_or(AccessMode::ReadOnly))

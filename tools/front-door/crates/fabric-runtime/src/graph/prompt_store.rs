@@ -51,8 +51,19 @@ fn nodes_mut(value: &mut Value) -> Vec<&mut Value> {
     found
 }
 
-/// Move every non-empty node prompt into the store. Blobs are durable before
-/// the checkpoint that names them is published.
+/// The prompt as it is persisted: the same known credential shapes that capture
+/// redacts. Redaction runs before the digest, so the stored bytes and their
+/// digest agree.
+fn redact(prompt: &str) -> Result<String, JournalError> {
+    let safe = provenant_confinement::redact::known_shapes(prompt.as_bytes()).map_err(|_| {
+        std::io::Error::new(std::io::ErrorKind::InvalidData, "prompt redaction failed")
+    })?;
+    String::from_utf8(safe)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error).into())
+}
+
+/// Move every non-empty node prompt into the store, redacted. Blobs are durable
+/// before the checkpoint that names them is published.
 pub(super) fn externalise(
     directory: &Directory,
     id: &str,
@@ -69,6 +80,7 @@ pub(super) fn externalise(
         if prompt.is_empty() {
             continue;
         }
+        let prompt = redact(prompt)?;
         let digest = hex(prompt.as_bytes());
         let name: OsString = format!("{}{digest}", prefix(id)).into();
         if directory.metadata_at(&name, false).is_err() {
@@ -160,4 +172,38 @@ pub(super) fn collect(directory: &Directory, id: &str) -> Result<bool, JournalEr
         }
     }
     Ok(!names.is_empty())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn stored_prompts_are_redacted_before_their_digest_is_taken() {
+        let temp = tempfile::tempdir().unwrap();
+        let directory = Directory::open_anchor(temp.path()).unwrap();
+        let secret = "AKIAIOSFODNN7EXAMPLE";
+        let mut value = json!({"execution": {"document": {"nodes": [
+            {"id": "a", "prompt": format!("deploy with {secret} now")}
+        ]}}});
+        externalise(&directory, "g", &mut value).unwrap();
+        let digest = value["execution"]["document"]["nodes"][0]["prompt_digest"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let stored = directory
+            .read_stable(&OsString::from(format!("{}{digest}", prefix("g"))), 1 << 20)
+            .unwrap();
+        let stored = String::from_utf8(stored).unwrap();
+        assert!(!stored.contains(secret), "{stored}");
+        assert_eq!(hex(stored.as_bytes()), digest);
+        let persisted = serde_json::to_vec(&value).unwrap();
+        let restored = rehydrate(&directory, "g", &persisted).unwrap();
+        let restored: Value = serde_json::from_slice(&restored).unwrap();
+        assert_eq!(
+            restored["execution"]["document"]["nodes"][0]["prompt"],
+            stored
+        );
+    }
 }
