@@ -2819,6 +2819,14 @@ pub(super) fn prepare_candidates(
         if let Some(warning) = image_input_warning(&route.adapter, &task.access.attachments) {
             let _ = writeln!(std::io::stderr().lock(), "{warning}");
         }
+        if route.eligibility == provenant_records::RouteEligibility::UnverifiedModel {
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "warning: model {}/{} is not in the catalogue; the provider will check it",
+                route.adapter,
+                route.model
+            );
+        }
         for warning in config.domains.routing.pool_effort_warnings(&catalogue) {
             let _ = writeln!(std::io::stderr().lock(), "{warning}");
         }

@@ -715,7 +715,7 @@ fn graph_opencode_observes_v2_wal_session() -> Result {
         ] {
             let (model, provider, session_model) = if expected == "model_unavailable" {
                 (
-                    "opencode/opencode/deepseek-v4.1-flash-free",
+                    "opencode/opencode/uncatalogued-fixture-model",
                     "opencode",
                     "misspelt-free",
                 )
@@ -2537,6 +2537,7 @@ fn agy_individual_quota_cools_model_until_reset() -> Result {
 }
 
 fn run_graph_provider(rig: &TestRig, graph_id: &str, node: Value) -> Result<Value> {
+    let unlisted = node["route"]["model"] == "opencode/opencode/uncatalogued-fixture-model";
     let document = rig.root.join(format!("{graph_id}.json"));
     fs::write(
         &document,
@@ -2549,6 +2550,10 @@ fn run_graph_provider(rig: &TestRig, graph_id: &str, node: Value) -> Result<Valu
         "--wait=5s",
         "--json",
     ])?;
+    if unlisted {
+        let stderr = String::from_utf8_lossy(&out.stderr.bytes);
+        assert!(stderr.contains("not in the catalogue"), "{stderr}");
+    }
     let response: Value = serde_json::from_slice(&out.stdout.bytes)?;
     let expected_exit = match response["status"].as_str() {
         Some("ok" | "waiting") => 0,
