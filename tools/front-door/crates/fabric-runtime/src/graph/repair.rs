@@ -122,6 +122,36 @@ pub(super) fn replan_source<'a>(
     Some((&parent.id, commit))
 }
 
+pub(super) fn repair_commits<'a>(
+    node: &PlannedNode,
+    checkpoint: &'a GraphCheckpoint,
+) -> Option<(&'a str, &'a str)> {
+    let round = node.round.as_ref()?;
+    let fix = checkpoint.nodes.iter().find(|progress| {
+        progress.round.as_ref().is_some_and(|item| {
+            item.loop_id == round.loop_id && item.round == round.round && item.node_id == "fix"
+        })
+    })?;
+    Some((
+        &fix.writer_binding.as_ref()?.head,
+        fix.outputs.as_ref()?.commit.as_deref()?,
+    ))
+}
+
+pub(super) fn is_repair_gate(
+    node: &PlannedNode,
+    plan: &PlannedGraph,
+    positions: &BTreeMap<String, usize>,
+) -> bool {
+    node.round.as_ref().is_some_and(|round| {
+        round.until
+            && matches!(node.condition, Some(GateCondition::Verdict { .. }))
+            && positions
+                .get(&round.loop_id)
+                .is_some_and(|&index| is_repair(&plan.nodes[index]))
+    })
+}
+
 pub(super) fn panel_expansion<'a>(
     checkpoint: &'a GraphCheckpoint,
     parent: &str,
@@ -178,12 +208,7 @@ pub(super) fn growth_in_round(
     let Some(round) = &node.round else {
         return false;
     };
-    if !round.until
-        || !matches!(node.condition, Some(GateCondition::Verdict { .. }))
-        || !positions
-            .get(&round.loop_id)
-            .is_some_and(|&i| is_repair(&plan.nodes[i]))
-    {
+    if !is_repair_gate(node, plan, positions) {
         return false;
     }
     checkpoint.nodes.iter().any(|progress| {

@@ -2006,10 +2006,15 @@ fn delta_review_runs_only_the_lens_that_raised_findings() {
     let finding = repair_finding(false);
     let pass = "```findings\n{\"schema_version\":1,\"findings\":[]}\n```\nVERDICT: PASS";
     let mut owner = reviews(&[&finding, "fixed", pass]);
+    if let AttemptObservation::Terminal { commit, .. } = &mut owner.observations[1] {
+        *commit = Some("a".repeat(40));
+    }
     let mut journal = MemoryJournal::default();
     let run = advance(&document, &mut owner, &mut journal).unwrap();
     assert!(run.checkpoint.successful());
     assert_eq!(owner.calls.len(), 3);
+    assert_eq!(owner.repair_growth_calls, 1);
+    assert_eq!(owner.repair_panel_calls, 0);
     assert!(
         owner
             .calls
@@ -2077,20 +2082,22 @@ fn risk_or_scope_growth_cannot_pass_the_original_panel() {
 
 #[test]
 fn repair_growth_resolves_and_runs_a_fresh_panel() {
-    for (field, reviewer_passes) in [("risk_grew", true), ("scope_grew", true), ("risk_grew", false)] {
+    for (field, reviewer_passes) in [("risk_grew", true), ("scope_grew", true), ("risk_grew", false), ("host_detected", true)] {
         let document = review_repair_document();
         let initial = repair_finding(false);
-        let growth = initial.replace("\"design_defect\":false", &format!("\"design_defect\":false,\"{field}\":true"));
+        let growth = if field == "host_detected" { initial.clone() } else { initial.replace("\"design_defect\":false", &format!("\"design_defect\":false,\"{field}\":true")) };
         let pass = "```findings\n{\"schema_version\":1,\"findings\":[]}\n```\nVERDICT: PASS";
         let fail = "```findings\n{\"schema_version\":1,\"findings\":[]}\n```\nVERDICT: FAIL";
         let mut owner = reviews(&[&initial, "fix", &growth, pass, if reviewer_passes { pass } else { fail }, "principal options"]);
         owner.repair_panel = Some(vec!["correctness".into(), "security".into()]);
+        owner.repair_growth = field == "host_detected";
         if let AttemptObservation::Terminal { commit, .. } = &mut owner.observations[1] {
             *commit = Some("a".repeat(40));
         }
         let mut journal = MemoryJournal::default();
         let run = advance(&document, &mut owner, &mut journal).unwrap();
         assert_eq!(owner.repair_panel_calls, 1);
+        assert_eq!(owner.repair_growth_calls, 1);
         assert_eq!(owner.calls.iter().filter(|call| call.0.node_id.contains("--panel--")).count(), 2, "calls: {:?}; gate: {:?}", owner.calls, run.checkpoint.nodes.iter().find(|node| node.id == "repair--r1--accepted"));
         let gate = run.checkpoint.nodes.iter().find(|node| node.id == "repair--r1--accepted").unwrap();
         assert_eq!(gate.state == NodeState::Succeeded, reviewer_passes);

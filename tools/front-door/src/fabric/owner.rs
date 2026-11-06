@@ -1158,7 +1158,51 @@ pub(crate) fn writer_source_identity_matches(
         })
 }
 
+fn repair_scope_grew(
+    review: &provenant_routing::ReviewConfig,
+    before: &[String],
+    after: &[String],
+) -> bool {
+    let rank = |tier: Option<&str>| match tier {
+        Some("terminal") => 3,
+        Some("crucial") => 2,
+        Some("substantial") => 1,
+        _ => 0,
+    };
+    let old_floor = review.path_floors(before);
+    let new_floor = review.path_floors(after);
+    after.iter().any(|path| !before.contains(path))
+        || rank(new_floor.tier.as_deref()) > rank(old_floor.tier.as_deref())
+}
+
 impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
+    fn detect_repair_growth(&mut self, before: &str, after: &str) -> Result<bool, String> {
+        let before = provenant_core::GitOid::parse(before).map_err(|error| error.to_string())?;
+        let after = provenant_core::GitOid::parse(after).map_err(|error| error.to_string())?;
+        let base = self
+            .integration_base
+            .and_then(|bases| bases.review.or(bases.integration))
+            .ok_or("cannot assess repair growth without a pinned review base")?;
+        let paths = |subject: &provenant_core::GitOid| -> Result<Vec<String>, String> {
+            let range = format!("{base}...{subject}");
+            let names = self.review_git(
+                &self.factory.cwd,
+                &["diff", "--no-renames", "--name-only", "-z", &range, "--"],
+            )?;
+            Ok(names
+                .split('\0')
+                .filter(|name| !name.is_empty())
+                .map(str::to_owned)
+                .collect())
+        };
+        let old = paths(&before)?;
+        let new = paths(&after)?;
+        let routing: provenant_routing::RoutingConfig =
+            provenant_config::read_domain(self.factory.context.roots.state.as_path(), "routing")
+                .map_err(|error| error.to_string())?;
+        Ok(repair_scope_grew(&routing.review, &old, &new))
+    }
+
     fn resolve_repair_panel(
         &mut self,
         document: &provenant_fabric_runtime::graph::GraphDocument,
@@ -2960,6 +3004,24 @@ pub(crate) fn restore_scratch_source(
 
 #[cfg(test)]
 mod journal_error_tests {
+    #[test]
+    fn repair_scope_comparison_detects_new_paths() {
+        let review = provenant_routing::ReviewConfig::default();
+        let original = vec!["src/a.rs".to_owned()];
+        assert!(!super::repair_scope_grew(&review, &original, &original));
+        assert!(super::repair_scope_grew(
+            &review,
+            &original,
+            &["src/a.rs".into(), "src/b.rs".into()]
+        ));
+        assert!(super::repair_scope_grew(
+            &review,
+            &original,
+            &["src/b.rs".into()]
+        ));
+        assert!(!super::repair_scope_grew(&review, &original, &[]));
+    }
+
     #[test]
     fn unreadable_graph_journal_preserves_the_cause() {
         use super::{FacadeError, graph_journal_error};
