@@ -5,6 +5,49 @@ use std::{convert::Infallible, os::unix::fs::PermissionsExt};
 struct Owner;
 
 #[test]
+fn terminal_legacy_checkpoint_is_decoded_or_retired() {
+    let temp = crate::test_support::tempdir().unwrap();
+    std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let base = std::fs::canonicalize(temp.path()).unwrap();
+    let mut inputs = provenant_core::RootInputs::new(base.join("home"), base.join("checkout"));
+    inputs.state_dir = Some(base.clone());
+    let root = StateRoot::resolve(&inputs, &SystemPathResolver).unwrap();
+    let project = ProjectId::from_bytes([1; 16]);
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let budget = WaitBudget::cli(clock.mono_now(), 5).unwrap();
+    drop(FileJournal::open(&root, project, "g-test", budget, &cancel, &clock).unwrap());
+    let path = base
+        .join("fabric/graphs")
+        .join(project.to_string())
+        .join("graph-g-test.json");
+    std::fs::write(
+        &path,
+        include_bytes!("../fixtures/legacy-graph-checkpoint.json"),
+    )
+    .unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    match FileJournal::read_status_checkpoint(&root, project, "g-test") {
+        Ok(Some(checkpoint)) => assert_eq!(checkpoint.nodes[0].state, NodeState::Succeeded),
+        Err(error) if error.is_unreadable() => {
+            assert!(
+                FileJournal::retire_unreadable(
+                    &root,
+                    project,
+                    "g-test",
+                    budget,
+                    &cancel,
+                    &clock,
+                    |_| Ok(())
+                )
+                .unwrap()
+            );
+        }
+        other => panic!("legacy checkpoint was neither decoded nor retired: {other:?}"),
+    }
+}
+
+#[test]
 fn interrupted_marker_and_sentinel_publications_converge() {
     use super::journal::{CRASH_POINT, CrashPoint};
     use std::panic::{AssertUnwindSafe, catch_unwind};

@@ -71,6 +71,11 @@ a real launch on each host. Report terminal checkpoints that cannot be read;
 keep their records for inspection and use the unreadable-record retirement path
 when appropriate.
 
+The staged release checks each host for pending graphs, live lanes and user
+presets before installation. Resolve the reported findings and rerun the upgrade,
+or pass `--yes` to `provenant upgrade` or `install.sh --upgrade` to proceed
+despite them. A failure to inspect the state stops the upgrade.
+
 The core commands are `run`, `status`, `output`, `steer`, `stop`, `retry`,
 `edit`, `templates`, `land`, `quota` and `trace`. Use `run --use task` for a
 bounded assignment or `run --use deliver` for implementation through landing;
