@@ -2711,7 +2711,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     Replay {
                         delivery: land::delivery(node),
                         branch: continued.as_deref(),
-                        fast_forward_only: node.round.is_some(),
+                        fast_forward_only: node.round.is_some() || node.continues.is_some(),
                         stored_ref: stored_ref.as_deref(),
                         launch_actor: &launch_actor,
                     },

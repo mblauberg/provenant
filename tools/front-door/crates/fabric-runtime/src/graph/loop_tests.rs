@@ -2108,3 +2108,126 @@ fn principal_recovery_completes_enclosing_composite_and_delivery_continues() {
         run.checkpoint
     );
 }
+
+#[test]
+fn compiled_repair_design_continuation_keeps_the_original_writer() {
+    let library = template::TemplateLibrary::bundled();
+    let compiler = template::Compiler::new(&library);
+    let assurance = compiler.compile(&serde_json::json!({
+        "id":"assurance","use":"review-repair","after":["initial"],
+        "inputs":[{"node":"initial","outputs":["findings","verdict"]}],
+        "with":{"worktree":"/fixture/writer","write_scope":["src"],"writer":"implement","lenses":["correctness"],"max_repair_cycles":1}
+    })).unwrap();
+    let implement = serde_json::from_value(serde_json::json!({
+        "id":"implement","access":"worktree_write","worktree":"/fixture/writer","write_scope":["src"],"delivery":"pr","prompt":"implement","route":{"alias":"senior"}
+    })).unwrap();
+    let initial = serde_json::from_value(serde_json::json!({
+        "id":"initial","access":"read_only","depends_on":["implement"],"prompt":"review","route":{"alias":"senior"},"require_findings":true
+    })).unwrap();
+    let mut document = review_repair_document();
+    document.nodes = vec![GraphNode::composite(
+        "delivery".into(),
+        vec![],
+        CompositeSpec {
+            nodes: vec![implement, initial, assurance],
+            min_successful: None,
+            reduce_verdict: false,
+            exports: vec![],
+        },
+    )];
+    let finding = repair_finding(true);
+    let fragment = format!(
+        "```fragment\n{}\n```",
+        serde_json::json!({"schema_version":1,"nodes":[{
+            "id":"slice","use":"repair-slice","brief":"Meet principal acceptance evidence within approved scope"
+        }]})
+    );
+    let writer = AttemptObservation::Terminal {
+        attempt_ref: None,
+        outcome: AttemptOutcome::Succeeded,
+        launched: true,
+        result: None,
+        result_warning: None,
+        result_path: None,
+        branch: Some("work/item".into()),
+        commit: Some("1".repeat(40)),
+    };
+    let mut owner = reviews(&[
+        &finding,
+        "root constraint and approved-scope option",
+        &fragment,
+        "fixed",
+    ]);
+    if let Some(AttemptObservation::Terminal { branch, commit, .. }) = owner.observations.back_mut()
+    {
+        *branch = Some("work/item".into());
+        *commit = Some("2".repeat(40));
+    }
+    owner.observations.push_front(writer);
+    let observations = owner.observations.clone();
+    let mut journal = MemoryJournal::default();
+    let run = advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(
+        run.status,
+        GraphStatus::Complete,
+        "{:?}",
+        run.checkpoint.pause_reason
+    );
+    assert!(run.checkpoint.successful());
+    let slice = run
+        .checkpoint
+        .nodes
+        .iter()
+        .find(|node| node.id.ends_with("continue--slice"))
+        .unwrap();
+    assert_eq!(
+        slice.writer_binding.as_ref().unwrap().worktree,
+        "/fixture/writer"
+    );
+    assert_eq!(
+        slice.outputs.as_ref().unwrap().branch.as_deref(),
+        Some("work/item")
+    );
+    assert_eq!(
+        slice.outputs.as_ref().unwrap().commit.as_deref(),
+        Some("2".repeat(40).as_str())
+    );
+    assert!(owner.fast_forward_only.last().copied().unwrap());
+    let expanded = run
+        .checkpoint
+        .expansions
+        .iter()
+        .flat_map(|expansion| &expansion.nodes)
+        .find(|node| node.id.ends_with("continue--slice"))
+        .unwrap();
+    assert_eq!(expanded.continues.as_deref(), Some("delivery--implement"));
+    assert_eq!(
+        advance(&document, &mut FakeOwner::default(), &mut journal)
+            .unwrap()
+            .checkpoint,
+        run.checkpoint
+    );
+    let mut wrong_worktree = document.clone();
+    let assurance = &mut wrong_worktree.nodes[0].composite.as_mut().unwrap().nodes[2];
+    let continuation = &mut assurance.composite.as_mut().unwrap().nodes[2];
+    continuation.plan.as_mut().unwrap().templates[0]
+        .node
+        .insert("worktree".into(), "/fixture/other".into());
+    let mut refused_owner = FakeOwner {
+        actor: "chair".into(),
+        observations,
+        ..Default::default()
+    };
+    let refused = advance(
+        &wrong_worktree,
+        &mut refused_owner,
+        &mut MemoryJournal::default(),
+    )
+    .unwrap();
+    assert_eq!(refused.status, GraphStatus::Paused);
+    assert_eq!(
+        refused.checkpoint.pause_code.as_deref(),
+        Some("invalid_plan_expansion")
+    );
+    assert!(refused.checkpoint.expansions.is_empty());
+}

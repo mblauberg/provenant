@@ -2243,3 +2243,39 @@ fn initial_submission_envelope_counts_prompt_references_not_brief_copies() {
     let (plan, _) = validate_plan_with_limits(&document, &limits).unwrap();
     assert!(graph_envelope_reason(&document, &[], &[], &plan).is_none());
 }
+
+#[test]
+fn continuation_fragment_resolves_the_host_review_panel() {
+    let mut document = planner(8);
+    document.nodes[0].plan.as_mut().unwrap().extra.insert(
+        "resolvers".into(),
+        json!({"review-panel":["correctness","tests"]}),
+    );
+    let output = result(vec![json!({
+        "id":"delta", "use":"review", "over":"@review-panel",
+        "with":{"lens":"${item}"}, "acceptance_checks":["Review the repair delta"]
+    })]);
+    let passed = "```findings\n{\"schema_version\":1,\"findings\":[]}\n```\nVERDICT: PASS";
+    let mut owner = fixture_owner(&[&output, passed, passed, "done"]);
+    let mut journal = MemoryJournal::default();
+    let run = advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(run.status, GraphStatus::Complete);
+    assert!(run.checkpoint.successful());
+    let expanded = &run.checkpoint.expansions[0].nodes;
+    assert!(
+        expanded
+            .iter()
+            .any(|node| node.id.ends_with("delta--correctness"))
+    );
+    assert!(
+        expanded
+            .iter()
+            .any(|node| node.id.ends_with("delta--tests"))
+    );
+    assert_eq!(
+        advance(&document, &mut fixture_owner(&[]), &mut journal)
+            .unwrap()
+            .checkpoint,
+        run.checkpoint
+    );
+}
