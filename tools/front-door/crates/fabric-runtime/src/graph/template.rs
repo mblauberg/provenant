@@ -632,7 +632,10 @@ impl<'a> Compiler<'a> {
                 boundary.insert(key.into(), value);
             }
         }
-        let min_ok = copy.remove("min_ok");
+        let min_ok = copy
+            .remove("min_ok")
+            .map(|value| interpolate(&value, bindings))
+            .transpose()?;
         // A used template that declares `item` receives it unless set.
         if let Some(name) = copy.get("use").and_then(Value::as_str)
             && self
