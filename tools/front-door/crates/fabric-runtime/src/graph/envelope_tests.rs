@@ -426,8 +426,24 @@ fn worst_case_land_checkpoint_fits_its_bound() {
 }
 
 fn assert_fits(document: GraphDocument) {
+    assert_fits_with_repair_metadata(document, "substantial", false);
+}
+
+#[test]
+fn repair_growth_and_risk_metadata_fit_the_checkpoint_bound() {
+    assert_fits_with_repair_metadata(mixed(), "terminal", true);
+    assert_fits_with_repair_metadata(mixed(), "substantial", false);
+}
+
+fn assert_fits_with_repair_metadata(document: GraphDocument, tier: &str, grew: bool) {
     let plan = planned(&document);
-    let checkpoint = filled_checkpoint(&document, &plan);
+    let mut checkpoint = filled_checkpoint(&document, &plan);
+    for node in &mut checkpoint.nodes {
+        node.extra.insert("repair_growth".into(), json!({"before":"1".repeat(64),"after":"2".repeat(64),"grew":grew}));
+        if let Some(outputs) = &mut node.outputs {
+            outputs.extra.insert("risk_tier".into(), tier.into());
+        }
+    }
     let execution = GraphExecution {
         review_base: None,
         extra: Default::default(),

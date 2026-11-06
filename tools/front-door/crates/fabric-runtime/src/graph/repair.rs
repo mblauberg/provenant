@@ -73,6 +73,207 @@ fn design_defect(finding: &Finding) -> bool {
             .is_some_and(|evidence| !evidence.trim().is_empty())
 }
 
+fn grows_review(finding: &Finding) -> bool {
+    ["risk_grew", "scope_grew"]
+        .iter()
+        .any(|field| finding.extra.get(*field) == Some(&serde_json::Value::Bool(true)))
+}
+
+/// Construct the host patch that reviews the repaired commit through a fresh
+/// resolver result. The patch is idempotent per repair round.
+pub(super) fn panel_patch(parent: &str, commit: &str, revision: u64) -> patch::Patch {
+    let panel = serde_json::json!({
+        "id": "panel", "use": "review-panel", "after": [parent],
+        "inputs": [{"node": parent, "outputs": ["findings"]}],
+        "source": {"type": "commit", "commit": commit},
+        "distinct_from": "dependencies", "distinct_strength": "prefer"
+    });
+    patch::Patch {
+        schema_version: patch::PATCH_SCHEMA_VERSION,
+        expected_revision: Some(revision),
+        idempotency_key: Some(format!(
+            "repair-panel:{}",
+            CanonicalV1::file_digest(parent.as_bytes())
+        )),
+        reason: Some("repair expanded risk or scope".into()),
+        nodes: vec![panel],
+        ..Default::default()
+    }
+}
+
+pub(super) fn replan_source<'a>(
+    node: &PlannedNode,
+    checkpoint: &'a GraphCheckpoint,
+) -> Option<(&'a str, &'a str)> {
+    let round = node.round.as_ref()?;
+    let member = |name: &str| {
+        checkpoint.nodes.iter().find(|progress| {
+            progress.round.as_ref().is_some_and(|item| {
+                item.loop_id == round.loop_id && item.round == round.round && item.node_id == name
+            })
+        })
+    };
+    let parent = member("synthesis")
+        .filter(|progress| progress.state == NodeState::Succeeded && progress.outputs.is_some())
+        .or_else(|| member("check").filter(|progress| progress.state == NodeState::Succeeded && progress.outputs.is_some()))?;
+    let commit = member("fix")?.outputs.as_ref()?.commit.as_deref()?;
+    Some((&parent.id, commit))
+}
+
+/// A growth observation is reusable only for the exact commits measured.
+pub(super) fn cached_growth(progress: &NodeProgress, before: &str, after: &str) -> Option<bool> {
+    let cache = progress.extra.get("repair_growth")?;
+    (cache.get("before")?.as_str()? == before && cache.get("after")?.as_str()? == after)
+        .then(|| cache.get("grew").and_then(serde_json::Value::as_bool)).flatten()
+}
+
+pub(super) fn repair_commits<'a>(
+    node: &PlannedNode,
+    checkpoint: &'a GraphCheckpoint,
+) -> Option<(&'a str, &'a str)> {
+    let round = node.round.as_ref()?;
+    let fix = checkpoint.nodes.iter().find(|progress| {
+        progress.round.as_ref().is_some_and(|item| {
+            item.loop_id == round.loop_id && item.round == round.round && item.node_id == "fix"
+        })
+    })?;
+    Some((
+        &fix.writer_binding.as_ref()?.head,
+        fix.outputs.as_ref()?.commit.as_deref()?,
+    ))
+}
+
+pub(super) fn is_repair_gate(
+    node: &PlannedNode,
+    plan: &PlannedGraph,
+    positions: &BTreeMap<String, usize>,
+) -> bool {
+    node.round.as_ref().is_some_and(|round| {
+        round.until
+            && matches!(node.condition, Some(GateCondition::Verdict { .. }))
+            && positions
+                .get(&round.loop_id)
+                .is_some_and(|&index| is_repair(&plan.nodes[index]))
+    })
+}
+
+/// Every active delta lens must report a valid risk assessment before its
+/// verdict can establish that the repair did not expand risk.
+pub(super) fn risk_assessment_missing(
+    node: &PlannedNode,
+    plan: &PlannedGraph,
+    checkpoint: &GraphCheckpoint,
+) -> bool {
+    let Some(round) = &node.round else {
+        return false;
+    };
+    plan.nodes.iter().enumerate().any(|(index, member)| {
+        member
+            .round
+            .as_ref()
+            .is_some_and(|item| item.loop_id == round.loop_id && item.round == round.round)
+            && member.extra.get("repair_risk_assessment") == Some(&serde_json::Value::Bool(true))
+            && checkpoint.nodes[index].state != NodeState::Skipped
+            && checkpoint.nodes[index]
+                .outputs
+                .as_ref()
+                .and_then(|output| output.extra.get("risk_tier"))
+                .is_none()
+    })
+}
+
+pub(super) fn panel_expansion<'a>(
+    checkpoint: &'a GraphCheckpoint,
+    parent: &str,
+) -> Option<&'a Expansion> {
+    checkpoint.expansions.iter().find(|expansion| {
+        expansion.patch.as_ref().is_some_and(|record| {
+            record.parent.as_deref() == Some(parent)
+                && record.reason.as_deref() == Some("repair expanded risk or scope")
+        })
+    })
+}
+
+/// A prior immutable panel can certify only its pinned repaired commit.
+pub(super) fn panel_reviews_commit(expansion: &Expansion, commit: &str) -> bool {
+    let mut leaves = expansion.nodes.iter().filter(|node| node.composite.is_none()).peekable();
+    leaves.peek().is_some() && leaves.all(|node| matches!(&node.source,
+        Some(SourceBinding::Commit { commit: subject }) if subject == commit))
+}
+
+pub(super) fn panel_pending(checkpoint: &GraphCheckpoint, expansion: &Expansion) -> bool {
+    expansion.nodes.iter().any(|member| checkpoint.nodes.iter()
+        .find(|progress| progress.id == member.id).is_some_and(|progress| !progress.state.settled()))
+}
+
+pub(super) fn panel_failure(checkpoint: &GraphCheckpoint, expansion: &Expansion) -> Option<String> {
+    let Some(root) = expansion.nodes.iter().find(|candidate| candidate.composite.is_some()
+        && expansion.nodes.iter().all(|member| member.id == candidate.id
+            || member.id.starts_with(&format!("{}--", candidate.id)))) else {
+        return Some("replanned panel boundary is missing".into());
+    };
+    let Some(progress) = checkpoint.nodes.iter().find(|progress| progress.id == root.id) else {
+        return Some("replanned panel boundary is missing".into());
+    };
+    let Some(outputs) = progress.outputs.as_ref() else {
+        return Some("replanned panel has no complete output".into());
+    };
+    if progress.state != NodeState::Succeeded || outputs.findings_available != Some(true)
+        || outputs.verdict.as_deref() != Some("VERDICT: PASS") || outputs.findings.iter().any(blocking) {
+        return Some("replanned panel did not pass".into());
+    }
+    None
+}
+
+/// A repair cannot be accepted on the old panel after a reviewer reports
+/// expanded risk or scope. Preserve the evidence for the recovery path.
+pub(super) fn growth_in_round(
+    node: &PlannedNode,
+    plan: &PlannedGraph,
+    checkpoint: &GraphCheckpoint,
+    positions: &BTreeMap<String, usize>,
+) -> bool {
+    let Some(round) = &node.round else {
+        return false;
+    };
+    if !is_repair_gate(node, plan, positions) {
+        return false;
+    }
+    let rank = |tier: &str| match tier {
+        "routine" => Some(0),
+        "substantial" => Some(1),
+        "crucial" => Some(2),
+        "terminal" => Some(3),
+        _ => None,
+    };
+    let baseline = node
+        .context
+        .as_ref()
+        .and_then(|context| context.risk_tier.as_deref())
+        .or_else(|| {
+            plan.context
+                .as_ref()
+                .and_then(|context| context.risk_tier.as_deref())
+        })
+        .and_then(rank);
+    checkpoint.nodes.iter().any(|progress| {
+        progress.round.as_ref().is_some_and(|member| {
+            member.loop_id == round.loop_id
+                && member.round == round.round
+                && (matches!(member.node_id.as_str(), "check" | "synthesis")
+                    || member.node_id.starts_with("check--"))
+        }) && progress.outputs.as_ref().is_some_and(|output| {
+            output.findings.iter().any(grows_review)
+                || output
+                    .extra
+                    .get("risk_tier")
+                    .and_then(serde_json::Value::as_str)
+                    .and_then(rank)
+                    .is_some_and(|current| baseline.is_none_or(|baseline| current > baseline))
+        })
+    })
+}
+
 fn same_finding(left: &Finding, right: &Finding) -> bool {
     left.id.rsplit(':').next() == right.id.rsplit(':').next()
         && left.file == right.file
@@ -115,6 +316,9 @@ pub(super) fn escalation(
         let Some(outputs) = &check.outputs else {
             continue;
         };
+        if outputs.findings.iter().any(grows_review) {
+            return Some("repair expanded risk or scope; full panel replan required");
+        }
         let current: Vec<_> = outputs
             .findings
             .iter()
@@ -191,11 +395,7 @@ pub(super) fn inactive_lens(
         return false;
     }
     // Scope or risk expansion requires the whole host-selected panel.
-    if findings.iter().any(|(_, finding)| {
-        ["risk_grew", "scope_grew"]
-            .iter()
-            .any(|field| finding.extra.get(*field) == Some(&serde_json::Value::Bool(true)))
-    }) {
+    if findings.iter().any(|(_, finding)| grows_review(finding)) {
         return false;
     }
     let mut known = false;
@@ -288,4 +488,11 @@ mod tests {
         item.extra.insert("evidence".into(), "".into());
         assert!(!design_defect(&item));
     }
+    #[test]
+    fn replanned_panel_prefers_separation_from_dependencies() {
+        let patch = panel_patch("review", &"a".repeat(40), 2);
+        assert_eq!(patch.nodes[0]["use"], "review-panel");
+        assert_eq!(patch.nodes[0]["distinct_strength"], "prefer");
+    }
+
 }
