@@ -306,6 +306,14 @@ impl provenant_fabric_mcp::tools::McpFacade for BoundFacade<'_> {
         provenant_cli::fabric::graph_relay::from_lane(op, cancel, within)
     }
 
+    fn wait_for_children(
+        &mut self,
+        cancel: &CancelToken,
+        within: std::time::Duration,
+    ) -> Result<serde_json::Value, ServiceError> {
+        provenant_cli::fabric::graph_relay::wait_for_children(cancel, within)
+    }
+
     fn console(
         &mut self,
         input: provenant_fabric_mcp::tools::ConsoleInput,
@@ -2081,6 +2089,22 @@ impl Factory {
                 Err(error) => {
                     // Still ask the known attempt to stop if tail lookup fails.
                     first_error.get_or_insert(error);
+                }
+            }
+            if target.host.is_none_or(|host| host == self.context.identity.host) {
+                let store = owner.store(cancel)?;
+                let call = owner.call(cancel);
+                let reference = format!("{}/{}", self.context.identity.host, target.attempt);
+                match provenant_cli::fabric::graph_cloud::installed(
+                    &store, target.attempt, "", &reference, &call, &self.cwd,
+                    std::time::Duration::from_micros(budget.remaining(self.clock.mono_now()).as_micros()), true,
+                ) {
+                    Ok(Some(_)) => continue,
+                    Ok(None) => {},
+                    Err(error) => {
+                        first_error.get_or_insert_with(|| FacadeError::invalid(&error));
+                        continue;
+                    }
                 }
             }
             let operation_id =
