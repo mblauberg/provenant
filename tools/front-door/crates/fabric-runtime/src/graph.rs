@@ -1714,7 +1714,9 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                 if structural_pause.is_some() || checkpoint.pause_reason.is_some() {
                     continue;
                 }
-                let reason = if matches!(condition, GateCondition::Ci { .. }) {
+                let reason = if repair::growth_in_round(node, &plan, &checkpoint, &positions) {
+                    Some("repair expanded risk or scope; full panel replan required".into())
+                } else if matches!(condition, GateCondition::Ci { .. }) {
                     if observed_ci.contains(&node.id) {
                         continue;
                     }

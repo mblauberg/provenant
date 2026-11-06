@@ -73,6 +73,43 @@ fn design_defect(finding: &Finding) -> bool {
             .is_some_and(|evidence| !evidence.trim().is_empty())
 }
 
+fn grows_review(finding: &Finding) -> bool {
+    ["risk_grew", "scope_grew"]
+        .iter()
+        .any(|field| finding.extra.get(*field) == Some(&serde_json::Value::Bool(true)))
+}
+
+/// A repair cannot be accepted on the old panel after a reviewer reports
+/// expanded risk or scope. Preserve the evidence for the recovery path.
+pub(super) fn growth_in_round(
+    node: &PlannedNode,
+    plan: &PlannedGraph,
+    checkpoint: &GraphCheckpoint,
+    positions: &BTreeMap<String, usize>,
+) -> bool {
+    let Some(round) = &node.round else {
+        return false;
+    };
+    if !round.until
+        || !matches!(node.condition, Some(GateCondition::Verdict { .. }))
+        || !positions
+            .get(&round.loop_id)
+            .is_some_and(|&i| is_repair(&plan.nodes[i]))
+    {
+        return false;
+    }
+    checkpoint.nodes.iter().any(|progress| {
+        progress.round.as_ref().is_some_and(|member| {
+            member.loop_id == round.loop_id
+                && member.round == round.round
+                && matches!(member.node_id.as_str(), "check" | "synthesis")
+        }) && progress
+            .outputs
+            .as_ref()
+            .is_some_and(|output| output.findings.iter().any(grows_review))
+    })
+}
+
 fn same_finding(left: &Finding, right: &Finding) -> bool {
     left.id.rsplit(':').next() == right.id.rsplit(':').next()
         && left.file == right.file
@@ -115,6 +152,9 @@ pub(super) fn escalation(
         let Some(outputs) = &check.outputs else {
             continue;
         };
+        if outputs.findings.iter().any(grows_review) {
+            return Some("repair expanded risk or scope; full panel replan required");
+        }
         let current: Vec<_> = outputs
             .findings
             .iter()
@@ -219,11 +259,7 @@ pub(super) fn inactive_lens(
         return false;
     }
     // Scope or risk expansion requires the whole host-selected panel.
-    if findings.iter().any(|(_, finding)| {
-        ["risk_grew", "scope_grew"]
-            .iter()
-            .any(|field| finding.extra.get(*field) == Some(&serde_json::Value::Bool(true)))
-    }) {
+    if findings.iter().any(|(_, finding)| grows_review(finding)) {
         return false;
     }
     let mut known = false;
