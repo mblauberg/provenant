@@ -169,8 +169,17 @@ impl RunStore {
             return Err(RunError::Validation("worktree identifier"));
         }
         let digest = input.request.digest()?;
+        let mut extra = provenant_records::ExtraFields::default();
+        if let Some(notice) = input
+            .request
+            .tasks
+            .first()
+            .and_then(|task| task.profile.knobs.get("chair.refusal_notice"))
+        {
+            extra.insert("refusal_notice".into(), notice.clone());
+        }
         let operation = OperationRecord {
-            extra: Default::default(),
+            extra,
             schema_version: 1,
             project_id: self.context.project_id,
             actor_id: self.context.actor_id,
@@ -669,11 +678,11 @@ impl RunStore {
                 return Err(RunError::OperationConflict);
             }
             if op.state == OperationState::Refused {
-                return Err(RunError::RecordedRefusal(
+                return Err(RunError::RecordedRefusal(Box::new(
                     op.refusal
                         .clone()
                         .ok_or(RunError::Validation("refusal diagnostic missing"))?,
-                ));
+                )));
             }
             if op.state != OperationState::Prepared {
                 return self.run(op.run_id, call);
@@ -737,10 +746,10 @@ impl RunStore {
                 return Err(RunError::OperationConflict);
             }
             if op.state == OperationState::Refused {
-                return Err(RunError::RecordedRefusal(
+                return Err(RunError::RecordedRefusal(Box::new(
                     op.refusal
                         .ok_or(RunError::Validation("refusal diagnostic missing"))?,
-                ));
+                )));
             }
             if op.state != OperationState::Prepared {
                 return self.run(op.run_id, call);
@@ -752,7 +761,7 @@ impl RunStore {
                 let prior: OperationRecord = decode(&prior)?;
                 if prior.request_digest != digest { return Err(RunError::OperationConflict); }
                 if prior.state == OperationState::Refused {
-                    return Err(RunError::RecordedRefusal(prior.refusal.ok_or(RunError::Validation("refusal diagnostic missing"))?));
+                    return Err(RunError::RecordedRefusal(Box::new(prior.refusal.ok_or(RunError::Validation("refusal diagnostic missing"))?)));
                 }
                 if prior.run_id != input.run_id { return Err(RunError::Conflict); }
                 return Ok(());
@@ -1654,7 +1663,13 @@ impl RunStore {
             // Refuse while another holder owns the writer lock.
             let _lock = match &slot {
                 Some(slot) if !held => {
-                    Some(slot.try_lock(OsStr::new("writer.lock"), LockMode::Exclusive)?)
+                    let observation = provenant_supervisor::custody::writer_admission_guard(slot)
+                        .map_err(|error| {
+                        RunError::Io(std::io::Error::other(error.to_string()))
+                    })?;
+                    let writer = slot.try_lock(OsStr::new("writer.lock"), LockMode::Exclusive)?;
+                    drop(observation);
+                    Some(writer)
                 }
                 _ => None,
             };

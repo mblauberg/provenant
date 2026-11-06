@@ -323,7 +323,7 @@ impl std::fmt::Display for ArtifactProvenance {
 #[derive(Debug, Error)]
 pub enum RunError {
     #[error("{}", .0.detail.as_deref().unwrap_or("dispatch was refused"))]
-    RecordedRefusal(provenant_records::diagnostic::Diagnostic),
+    RecordedRefusal(Box<provenant_records::diagnostic::Diagnostic>),
     #[error("continuation preparation refused: {}", cause.detail())]
     ContinuationRefused {
         cause: provenant_records::run::TerminalCause,
@@ -530,7 +530,7 @@ impl RunError {
         destination: provenant_records::diagnostic::Destination<'_>,
     ) -> provenant_records::diagnostic::Diagnostic {
         if let Self::RecordedRefusal(diagnostic) = self {
-            return diagnostic.clone();
+            return diagnostic.as_ref().clone();
         }
         use provenant_confinement::{permissions::PermissionError, worktrees::WorktreeError};
         use provenant_records::diagnostic::{Diagnostic, DiagnosticFact, safe_path, shell_path};

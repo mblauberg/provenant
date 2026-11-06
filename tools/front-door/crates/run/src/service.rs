@@ -1,6 +1,6 @@
 //! One typed execution API for command and MCP edges.
 use crate::*;
-use provenant_core::{AttemptId, OperationId, RunId};
+use provenant_core::{AttemptId, CancelToken, OperationId, RunId};
 use provenant_records::CanonicalV1;
 use std::path::Path;
 
@@ -95,12 +95,12 @@ impl<'a> Service<'a> {
             if operation.request_digest != preflight_digest(&input, cwd)? {
                 return Err(RunError::OperationConflict);
             }
-            return Err(RunError::RecordedRefusal(
+            return Err(RunError::RecordedRefusal(Box::new(
                 operation
                     .refusal
                     .clone()
                     .ok_or(RunError::Validation("refusal diagnostic missing"))?,
-            ));
+            )));
         }
         let previous = match &operation {
             Some(operation) if operation.state == OperationState::Refused => None,
@@ -250,7 +250,14 @@ impl<'a> Service<'a> {
                     })?;
                     let git =
                         provenant_os::git::git_executable().ok_or(RunError::GitUnavailable)?;
-                    let resolved = resolve_git_base(&git, git_cwd, sha).map_err(|_| {
+                    let resolved = resolve_git_base_with_facts(
+                        &git,
+                        git_cwd,
+                        sha,
+                        self.store.repo_facts(),
+                        &CancelToken::new(),
+                    )
+                    .map_err(|_| {
                         input_error(
                             ErrorKind::Invalid,
                             format!("invalid Git {label}: expected a resolvable commit SHA"),
@@ -286,7 +293,13 @@ impl<'a> Service<'a> {
                     .map(|base| {
                         let git =
                             provenant_os::git::git_executable().ok_or(RunError::GitUnavailable)?;
-                        resolve_git_base(&git, git_cwd, base)
+                        resolve_git_base_with_facts(
+                            &git,
+                            git_cwd,
+                            base,
+                            self.store.repo_facts(),
+                            &CancelToken::new(),
+                        )
                     })
                     .transpose()?
             };
@@ -411,11 +424,11 @@ impl<'a> Service<'a> {
             if saved.state != OperationState::Refused {
                 return Err(RunError::OperationConflict);
             }
-            return Err(RunError::RecordedRefusal(
+            return Err(RunError::RecordedRefusal(Box::new(
                 saved
                     .refusal
                     .ok_or(RunError::Validation("refusal diagnostic missing"))?,
-            ));
+            )));
         }
         let record = self.store.create(&prepared, call)?;
         if !contribution_branches.is_empty() {
@@ -463,7 +476,7 @@ impl<'a> Service<'a> {
             actor_id: self.store.context.actor_id,
             operation_id: input.operation_id.clone(),
             kind: OperationKind::Dispatch,
-            request_digest: preflight_digest(&input, cwd)?,
+            request_digest: preflight_digest(input, cwd)?,
             run_id: fresh(RunId::from_bytes)?,
             state: OperationState::Refused,
             blocked_reason: None,
@@ -480,9 +493,9 @@ impl<'a> Service<'a> {
         if saved.state != OperationState::Refused {
             return Err(RunError::OperationConflict);
         }
-        Err(RunError::RecordedRefusal(saved.refusal.ok_or(
+        Err(RunError::RecordedRefusal(Box::new(saved.refusal.ok_or(
             RunError::Validation("refusal diagnostic missing"),
-        )?))
+        )?)))
     }
     /// Canonical model IDs carry the provider prefix in every stored request.
     pub fn route(route: RequestedRoute) -> Result<RequestedRoute> {

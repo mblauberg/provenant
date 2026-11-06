@@ -11,7 +11,84 @@ pub struct RepoFacts {
     inventories: std::sync::Arc<std::sync::Mutex<BTreeMap<PathBuf, InventorySnapshot>>>,
 }
 
+#[derive(PartialEq, Eq)]
+struct RegistrationStamp {
+    name: OsString,
+    device: u64,
+    inode: u64,
+    modified_seconds: i64,
+    modified_nanoseconds: i64,
+}
+
+// Git may add, remove or lock a registration outside this command. Such a
+// change starts a new inventory epoch without spending a Git subprocess on
+// every admission that shares the unchanged registrations.
+fn registration_stamps(common: &Path) -> Option<Vec<RegistrationStamp>> {
+    fn stamp(common: &Path, path: &Path, stamps: &mut Vec<RegistrationStamp>) -> Option<()> {
+        let metadata = match std::fs::symlink_metadata(path) {
+            Ok(metadata) if !metadata.file_type().is_symlink() => Some(metadata),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            _ => return None,
+        };
+        stamps.push(RegistrationStamp {
+            name: path.strip_prefix(common).ok()?.as_os_str().to_owned(),
+            device: metadata.as_ref().map_or(0, |meta| meta.dev()),
+            inode: metadata.as_ref().map_or(0, |meta| meta.ino()),
+            modified_seconds: metadata.as_ref().map_or(0, |meta| meta.mtime()),
+            modified_nanoseconds: metadata.as_ref().map_or(0, |meta| meta.mtime_nsec()),
+        });
+        Some(())
+    }
+    fn head(common: &Path, admin: &Path, stamps: &mut Vec<RegistrationStamp>) -> Option<()> {
+        use std::io::Read;
+        let path = admin.join("HEAD");
+        stamp(common, &path, stamps)?;
+        let mut bytes = Vec::new();
+        std::fs::File::open(path)
+            .ok()?
+            .take(1025)
+            .read_to_end(&mut bytes)
+            .ok()?;
+        if bytes.len() > 1024 {
+            return None;
+        }
+        if let Some(reference) = trim_ascii(&bytes).strip_prefix(b"ref: ") {
+            let reference = GitRefName::new(std::str::from_utf8(reference).ok()?).ok()?;
+            stamp(common, &common.join(reference.as_str()), stamps)?;
+        }
+        Some(())
+    }
+    let mut stamps = Vec::new();
+    head(common, common, &mut stamps)?;
+    stamp(common, &common.join("packed-refs"), &mut stamps)?;
+    let entries = match std::fs::read_dir(common.join("worktrees")) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Some(stamps),
+        Err(_) => return None,
+    };
+    for (count, entry) in entries.enumerate() {
+        let entry = entry.ok()?;
+        if count >= MAX_WORKTREES {
+            return None;
+        }
+        let metadata = std::fs::symlink_metadata(entry.path()).ok()?;
+        if !metadata.is_dir() {
+            return None;
+        }
+        stamp(common, &entry.path(), &mut stamps)?;
+        head(common, &entry.path(), &mut stamps)?;
+        // A registration's lock and pruning markers affect admission even
+        // when its branch and commit have not moved.
+        for name in ["locked", "prunable", "gitdir", "commondir"] {
+            stamp(common, &entry.path().join(name), &mut stamps)?;
+        }
+    }
+    stamps.sort_by(|left, right| left.name.cmp(&right.name));
+    Some(stamps)
+}
+
 struct RawInventorySnapshot {
+    registrations: Option<Vec<RegistrationStamp>>,
     device: u64,
     inode: u64,
     budget: UtilityBudget,
@@ -488,6 +565,7 @@ impl RepoFacts {
         let budget = budget.with_stdout_cap(self.inventory_limit)?;
         let path = repo.common_git_dir();
         let metadata = std::fs::metadata(path).map_err(|_| WorktreeError::IdentityChanged)?;
+        let registrations = registration_stamps(path);
         let mut snapshots = self
             .raw_inventories
             .lock()
@@ -496,6 +574,8 @@ impl RepoFacts {
             && snapshot.device == metadata.dev()
             && snapshot.inode == metadata.ino()
             && snapshot.budget == budget
+            && registrations.is_some()
+            && snapshot.registrations == registrations
         {
             return Ok(snapshot.bytes.clone());
         }
@@ -513,6 +593,7 @@ impl RepoFacts {
         snapshots.insert(
             path.to_owned(),
             RawInventorySnapshot {
+                registrations,
                 device: metadata.dev(),
                 inode: metadata.ino(),
                 budget,

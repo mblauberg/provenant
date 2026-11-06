@@ -77,7 +77,7 @@ fn post_verified_refusal(
     Ok(())
 }
 
-/// Retry a bounded page of this actor's durable refusal-notice obligations.
+/// Page through this actor's durable refusal-notice obligations.
 /// A crash after inbox insertion is safe: its message ID is deterministic.
 pub(crate) fn reconcile_refusal_notices(
     edge: &provenant_cli::run::Edge<'_>,
@@ -99,21 +99,24 @@ pub(crate) fn reconcile_refusal_notices(
         read_prompts: false,
     };
     let store = provenant_run::RunStore::open(&execution, &call)?;
-    for _ in 0..4 {
-        let records = store.pending_refusal_notices(80, &call)?;
-        if records.is_empty() {
-            return Ok(false);
-        }
-        drain_refusal_page(records, |record| {
+    let mut after = 0;
+    let mut pending = false;
+    loop {
+        let records = store.pending_refusal_notices_after(80, after, &call)?;
+        let Some((last, _)) = records.last() else {
+            return Ok(pending);
+        };
+        after = *last;
+        pending |= drain_refusal_page(records, |(_, record)| {
             post_verified_refusal(&record, &context, &store, edge.roots, &call)
-        })?;
+        })
+        .is_err();
     }
-    Ok(!store.pending_refusal_notices(1, &call)?.is_empty())
 }
 
 // One unverifiable binding or failed inbox write must not prevent independent
-// notices in the same page from being attempted. Keep the first failure visible
-// so the caller knows recovery is incomplete and can retry the pending rows.
+// notices in the same page from being attempted. Return the first failure as
+// advisory evidence while the caller continues paging through later rows.
 fn drain_refusal_page<T>(
     records: impl IntoIterator<Item = T>,
     mut post: impl FnMut(T) -> Result<(), Error>,

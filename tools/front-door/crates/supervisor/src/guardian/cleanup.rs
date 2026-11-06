@@ -674,10 +674,12 @@ pub(super) fn try_writer_lease(
     directory: &Directory,
     expected: provenant_os::fs::Metadata,
 ) -> Result<provenant_os::fs::LockGuard> {
+    let observation = crate::custody::writer_admission_guard(directory)?;
     let lease = directory.try_lock(
         OsStr::new("writer.lock"),
         provenant_os::fs::LockMode::Exclusive,
     )?;
+    drop(observation);
     let actual = lease.metadata()?;
     if !expected.same_identity(&actual) {
         return Err(CustodyError::InvalidRecord);

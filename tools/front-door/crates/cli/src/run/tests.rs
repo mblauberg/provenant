@@ -112,6 +112,55 @@ fn allow_any_free_disk(edge: &Edge<'_>) -> std::io::Result<()> {
     )
 }
 
+/// Supply synthetic, fresh account evidence for tests whose subject is admission.
+fn ready_codex_fixture(edge: &Edge<'_>) -> Result<(), Box<dyn std::error::Error>> {
+    use std::os::unix::fs::PermissionsExt;
+    let account_dir = edge.home.join(".codex");
+    std::fs::create_dir_all(&account_dir)?;
+    std::fs::set_permissions(&account_dir, std::fs::Permissions::from_mode(0o700))?;
+    let auth = br#"{"tokens":{"account_id":"admission-fixture"}}"#;
+    std::fs::write(account_dir.join("auth.json"), auth)?;
+    std::fs::set_permissions(
+        account_dir.join("auth.json"),
+        std::fs::Permissions::from_mode(0o600),
+    )?;
+    let key = provenant_providers::identity::codex_account(auth).ok_or("fixture account")?;
+    let config = edge.roots.state.as_path().join("config.toml");
+    let mut text = std::fs::read_to_string(&config).unwrap_or_else(|_| "schema_version=1\n".into());
+    text.push_str(&format!("\n[domains.accounts.entries.admission_fixture]\nadapter='codex'\nlabel='default'\nkey='{key}'\ndirectory='{}'\n", account_dir.display()));
+    std::fs::write(config, text)?;
+    let now = SystemClock::new().unix_seconds();
+    let ready = provenant_quota::ReadinessFile {
+        schema_version: 1,
+        login: None,
+        records: vec![provenant_quota::RouteReadiness {
+            schema_version: 1,
+            scope: provenant_quota::ReadinessScope {
+                host: provenant_quota::LOCAL_HOST.into(),
+                adapter: "codex".into(),
+                account_key: key.clone(),
+                route: provenant_quota::ACCOUNT_ROUTE.into(),
+            },
+            state: provenant_quota::ReadinessState::Ready,
+            reason: None,
+            observed_unix_seconds: now,
+            expires_unix_seconds: now + 300,
+            reset_unix_seconds: None,
+            evidence_ref: Some("admission-fixture".into()),
+        }],
+    };
+    let readiness = edge.roots.state.as_path().join("readiness");
+    let directory = readiness.join(key);
+    std::fs::create_dir_all(&directory)?;
+    for path in [&readiness, &directory] {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
+    }
+    let path = directory.join("codex.json");
+    std::fs::write(&path, serde_json::to_vec(&ready)?)?;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    Ok(())
+}
+
 /// Runs `check` with the edge that `run` would see from `cwd`.
 fn with_edge<T>(
     root: &Path,
@@ -691,6 +740,7 @@ fn worktree_access_readers_leave_existing_writer_lease_untouched()
                 provenant_config::ProjectLocation::new(fixture.project.join(".git"))?,
             )?;
             provenant_config::bind_host(edge.roots)?;
+            ready_codex_fixture(edge)?;
             let clock = SystemClock::new();
             let cancel = CancelToken::new();
             let call = request(&clock, &cancel).map_err(|fail| fail.message)?;
@@ -8306,6 +8356,7 @@ fn worktrees_lock_contention_retries_and_admits() -> Result<(), Box<dyn std::err
             provenant_config::bind_host(edge.roots)?;
             allow_any_free_disk(edge)?;
 
+            ready_codex_fixture(edge)?;
             let clock = SystemClock::new();
             let cancel = CancelToken::new();
             let call = request(&clock, &cancel).map_err(|fail| fail.message)?;
@@ -8556,6 +8607,7 @@ fn dispatch_restart_honours_saved_admission_wake_and_deadline()
             crate::fabric::private_dir(edge.roots.state.as_path(), edge.roots.state.as_path())?;
             provenant_config::bind_host(edge.roots)?;
             allow_any_free_disk(edge)?;
+            ready_codex_fixture(edge)?;
             let clock = SystemClock::new();
             let cancel = CancelToken::new();
             let call = request(&clock, &cancel).map_err(|fail| fail.message)?;

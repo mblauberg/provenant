@@ -2518,6 +2518,8 @@ impl crate::RunStore {
             .take()
             .ok_or_else(|| RunError::unsafe_path(writer.worktree.clone(), PathCheck::Missing))?
             .0;
+        let observation = provenant_supervisor::custody::writer_admission_guard(&state)
+            .map_err(|error| RunError::Io(std::io::Error::other(error.to_string())))?;
         let _writer = state.lock(
             OsStr::new("writer.lock"),
             LockMode::Exclusive,
@@ -2525,6 +2527,7 @@ impl crate::RunStore {
             call.cancel,
             call.clock,
         )?;
+        drop(observation);
         let host = host.prepare(&writer, &request)?;
         host.clean(&writer)?;
         if host.head(&writer)? != head {

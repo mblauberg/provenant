@@ -936,6 +936,11 @@ impl RunStore {
                 } else {
                     None
                 };
+                let observation = slot
+                    .as_ref()
+                    .map(provenant_supervisor::custody::writer_admission_guard)
+                    .transpose()
+                    .map_err(|error| RunError::Io(std::io::Error::other(error.to_string())))?;
                 let _writer = match slot.as_ref().map(|slot| {
                     slot.try_lock(
                         std::ffi::OsStr::new("writer.lock"),
@@ -947,6 +952,7 @@ impl RunStore {
                     Some(Err(error)) => return Err(error.into()),
                     None => None,
                 };
+                drop(observation);
                 let cancel = CancelToken::new();
                 let host = match completion {
                     Completion::Live {
@@ -3183,7 +3189,11 @@ mod writer_recovery_tests {
             "reason: {reason_text}"
         );
         if let BudgetStopCase::InProgress(operation) = case {
-            let operation = if operation == "rebase-apply" { "rebase" } else { operation };
+            let operation = if operation == "rebase-apply" {
+                "rebase"
+            } else {
+                operation
+            };
             assert!(
                 reason_text.contains(&format!(
                     "budget commit skipped: in-progress {operation} left uncommitted"

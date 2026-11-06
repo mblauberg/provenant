@@ -558,14 +558,26 @@ fn command_write_is_refused_before_preparing_a_worktree() -> TestResult {
         name: "fmt-check".into(),
     };
     input.tasks[0].worktree = Some(temp.path().join("not-a-worktree"));
-    assert!(matches!(
-        Service::new(&store).dispatch(input, temp.path(), &call),
-        Err(RunError::Input {
-            kind: ErrorKind::Unsupported,
-            ..
-        })
-    ));
-    assert!(store.operation(&operation, &call)?.is_none());
+    let error = Service::new(&store)
+        .dispatch(input, temp.path(), &call)
+        .unwrap_err();
+    assert_eq!(ErrorKind::from(&error), ErrorKind::Unsupported);
+    assert!(
+        matches!(&error, RunError::RecordedRefusal(diagnostic) if diagnostic.code == ErrorKind::Unsupported.code())
+    );
+    let saved = store
+        .operation(&operation, &call)?
+        .ok_or("refusal receipt missing")?;
+    assert_eq!(saved.state, OperationState::Refused);
+    assert_eq!(
+        saved
+            .refusal
+            .as_ref()
+            .map(|diagnostic| diagnostic.code.as_str()),
+        Some(ErrorKind::Unsupported.code())
+    );
+    assert!(!store.has_runs(&call)?);
+    assert!(!temp.path().join("not-a-worktree").exists());
     Ok(())
 }
 

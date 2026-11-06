@@ -194,7 +194,13 @@ pub(super) fn own_worktree_using_facts(
                 });
             let (info, pinned) = match existing {
                 Some(observation) => {
-                    let info = observation;
+                    // Selected admission may initialise the short observer gate
+                    // in a legacy custody slot; read-only list never does.
+                    worktrees::prepare_writer_probe(context.project_state, &observation.path)?;
+                    let info = worktrees::list(context, cancel)?
+                        .into_iter()
+                        .find(|info| info.path == observation.path)
+                        .ok_or(worktrees::WorktreeError::NotFound)?;
                     if let Some(base) = requested_base_oid
                         && !worktrees::is_ancestor(context, base, info.head, cancel)?
                     {

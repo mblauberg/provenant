@@ -208,6 +208,7 @@ fn reply_waited(command: &str, outcome: Result<(Value, String, bool), Fail>) -> 
     } else if expired {
         out.result.status = Status::Timeout;
     }
+    dispatch::apply_launch_policy(&mut out);
     out
 }
 fn reply(command: &str, outcome: Result<(Value, String), Fail>) -> Reply {

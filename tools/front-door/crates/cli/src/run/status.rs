@@ -208,7 +208,7 @@ pub fn status(command: crate::Status, _json_output: bool, edge: &Edge<'_>) -> Re
                 && command.cursor.is_none()
                 && append_refused_operations(
                     &session.store,
-                    command.limit.min(100).max(1),
+                    command.limit.clamp(1, 100),
                     &mut data,
                     &mut human,
                     &call,
@@ -787,6 +787,7 @@ pub(super) fn report(
             }
         }
     }
+    data["started"] = json!(started);
     data["run_id"] = json!(record.run_id);
     data["operation_id"] = json!(record.operation_id);
     let unknown = launch_unknown(started);
