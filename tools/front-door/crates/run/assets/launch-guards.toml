@@ -207,7 +207,7 @@ reason = "The selected source and continuation head must match the pinned commit
 [[guard]]
 site = "run/src/launch/hand_off.rs#RunStore::hand_off"
 boundary = "authority"
-reason = "A handoff must use the selected worktree and held custody binding; fenced, unknown or invalid custody cannot be granted to another attempt."
+reason = "A handoff must use the selected worktree and held custody binding; fenced, unknown, invalid or unconfirmed custody cannot be granted to another attempt."
 
 [[guard]]
 site = "supervisor/src/custody.rs#PublicationReservation::prepare"

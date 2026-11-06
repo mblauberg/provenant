@@ -61,7 +61,8 @@ fn custody_local(phase: &str, error: &custody::CustodyError) -> HandOff {
     match error {
         custody::CustodyError::Fenced
         | custody::CustodyError::UnknownIdentity
-        | custody::CustodyError::InvalidRecord => HandOff::Boundary {
+        | custody::CustodyError::InvalidRecord
+        | custody::CustodyError::HandoffUnknown => HandOff::Boundary {
             message,
             class: provenant_records::diagnostic::BoundaryClass::Authority,
             cause: None,
@@ -549,6 +550,7 @@ mod tests {
             custody::CustodyError::Fenced,
             custody::CustodyError::UnknownIdentity,
             custody::CustodyError::InvalidRecord,
+            custody::CustodyError::HandoffUnknown,
         ] {
             assert!(matches!(
                 custody_local("publication reservation", &error),
