@@ -104,15 +104,6 @@ fn linked_fixture() -> Result<LinkedFixture, Box<dyn std::error::Error>> {
     })
 }
 
-/// A writer launch measures the real volume against `gc.free_floor`, so a test
-/// about something else must not depend on how full the host's disk is.
-fn allow_any_free_disk(edge: &Edge<'_>) -> std::io::Result<()> {
-    std::fs::write(
-        edge.roots.state.as_path().join("config.toml"),
-        "schema_version = 1\n[gc]\nfree_floor = '1B'\n",
-    )
-}
-
 /// Runs `check` with the edge that `run` would see from `cwd`.
 fn with_edge<T>(
     root: &Path,

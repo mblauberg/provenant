@@ -751,8 +751,6 @@ fn every_tool_rejects_unknown_fields_in_closed_input_objects() {
     // These nested shared records tolerate future fields on peer ingress, so
     // their strict MCP boundary must be exercised below the top-level input.
     for path in [
-        "fabric_run/tasks/0/route",
-        "fabric_run/tasks/0/deliver",
         "fabric_mail/artifacts/0/path",
         "fabric_lease/scope",
         "fabric_inbox/request/work/repository/relative_to_root",

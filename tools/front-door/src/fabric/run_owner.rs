@@ -1,69 +1,5 @@
 use super::*;
 
-pub(crate) fn peer_adoption_custody(
-    context: &provenant_confinement::worktrees::WorktreeContext<'_>,
-    observation: &provenant_confinement::worktrees::WorktreeInfo,
-    cancel: &CancelToken,
-) -> Result<Option<&'static str>, provenant_confinement::worktrees::WorktreeError> {
-    use provenant_confinement::worktrees::{
-        self, Occupancy, OccupancyUnknownSource, WorktreeError,
-    };
-    let warning = match &observation.occupancy {
-        Occupancy::Held => None,
-        Occupancy::Unknown {
-            scope,
-            evidence,
-            source: OccupancyUnknownSource::Custody,
-        } => {
-            return Err(WorktreeError::UnknownOccupancy {
-                path: scope.clone(),
-                detail: evidence.clone(),
-            });
-        }
-        Occupancy::Unknown { .. } => {
-            Some("process census was incomplete; writer custody was checked")
-        }
-        Occupancy::Observed { .. } => {
-            Some("a process was observed in the worktree; writer custody was checked")
-        }
-        Occupancy::Available => None,
-    };
-    let mut tree = provenant_confinement::verify_worktree(context.repo, &observation.path)
-        .map_err(|error| WorktreeError::UnknownOccupancy {
-            path: observation.path.clone(),
-            detail: format!("worktree registration could not be verified: {error}"),
-        })?;
-    let holder =
-        || worktrees::load_owner(&tree).map(|owner| owner.and_then(|owner| owner.attempt_id));
-    let _writer =
-        worktrees::cache_writer_guard(context.project_state, tree.path()).map_err(|state| {
-            match state {
-                Occupancy::Held => WorktreeError::WriterBusy {
-                    holder: holder().ok().flatten(),
-                },
-                other => worktrees::custody_refusal(other),
-            }
-        })?;
-    worktrees::check_writer_terminal(tree.repo())?;
-    let branch = observation
-        .branch
-        .as_deref()
-        .ok_or(WorktreeError::IdentityChanged)?;
-    let reference = provenant_confinement::repo::GitRefName::new(branch)
-        .map_err(|_| WorktreeError::IdentityChanged)?;
-    let head = tree
-        .repo()
-        .private_dir()
-        .read_stable(std::ffi::OsStr::new("HEAD"), 4096)?;
-    if head != format!("ref: {}\n", reference.as_str()).as_bytes()
-        || context.facts.resolve_commit(context, reference, cancel)? != observation.head
-    {
-        return Err(WorktreeError::IdentityChanged);
-    }
-    worktrees::require_clean_worktree(context, &mut tree, cancel)?;
-    Ok(warning)
-}
-
 struct SubmissionPolicy {
     access: provenant_records::run::LaneAccess,
     settlement_retry_limit: Option<u8>,
@@ -598,12 +534,12 @@ impl BinaryRunOwner<'_> {
 impl BinaryRunOwner<'_> {
     pub(crate) fn capabilities(&self) -> RunCapabilities {
         RunCapabilities {
-            submit: true,
+            submit: false,
             list: true,
             status: true,
             wait: true,
             cancel: true,
-            resume: provenant_cli::run::Registry::default().continues_sessions(),
+            resume: false,
             output: true,
             events: true,
         }
@@ -633,7 +569,7 @@ impl BinaryRunOwner<'_> {
     fn launch_graph_attempt(
         &mut self,
         input: SubmitInput,
-        budget: WaitBudget,
+        _budget: WaitBudget,
         cancel: &CancelToken,
         policy: SubmissionPolicy,
     ) -> Result<SubmissionReceipt, FacadeError> {
@@ -1169,71 +1105,7 @@ impl BinaryRunOwner<'_> {
                     attempt: service.status(target.attempt, &call).map_err(run_error)?,
                 })
             }
-            RunInput::Resume {
-                ref target,
-                ref operation_id,
-                ref prompt,
-                expected_generation,
-                no_fallback,
-                ..
-            } => {
-                if self.factory.context.in_lane {
-                    if target
-                        .host
-                        .is_some_and(|host| host != self.factory.context.identity.host)
-                    {
-                        return Err(FacadeError::LaneCoordinationRefused);
-                    }
-                    return Err(FacadeError::ContinuationUnsupported);
-                }
-                if let Some(answer) = self.remote(
-                    target,
-                    PeerAction::Run {
-                        extra: Default::default(),
-                        input: input.clone(),
-                    },
-                    budget,
-                    cancel,
-                )? {
-                    return match answer {
-                        PeerResult::Run { data: value, .. }
-                            if matches!(&*value, RunResult::Resume { attempt, .. }
-                                if attempt.operation_id == *operation_id) =>
-                        {
-                            Ok(*value)
-                        }
-                        _ => Err(FacadeError::StateCorrupt),
-                    };
-                }
-                if !self.capabilities().resume {
-                    return Err(FacadeError::ContinuationUnsupported);
-                }
-                self.require_graph_control(target, cancel)?;
-                let session = self.session(cancel)?;
-                let call = self.call(cancel);
-                let (run, started) = self.with_edge(|edge| {
-                    provenant_cli::run::continue_attempt_mode(
-                        &session,
-                        edge,
-                        target.attempt,
-                        operation_id.clone(),
-                        prompt.clone(),
-                        expected_generation,
-                        &call,
-                        !no_fallback,
-                    )
-                })?;
-                let receipt =
-                    self.receipt(&session, operation_id.clone(), &run, &started, &call)?;
-                let attempt = receipt.targets.first().ok_or(FacadeError::StateCorrupt)?;
-                Ok(RunResult::Resume {
-                    extra: Default::default(),
-                    attempt: session
-                        .service()
-                        .status(attempt.attempt, &call)
-                        .map_err(run_error)?,
-                })
-            }
+            RunInput::Resume { .. } => Err(FacadeError::invalid(InvalidInputDetail::Field("retry requires a graph target".into()))),
             RunInput::List { after, limit, .. } => {
                 if !(1..=100).contains(&limit) {
                     return Err(FacadeError::InvalidInput { detail: None });
