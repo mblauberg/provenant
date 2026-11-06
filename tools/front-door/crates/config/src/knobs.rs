@@ -14,8 +14,14 @@ const REGISTRY: &str = include_str!("../../../../../config/harness-knobs.json");
 pub(crate) struct Registry {
     pub(crate) knobs: BTreeMap<String, Spec>,
     documented_fields: Vec<String>,
+    provider_updates: ProviderUpdates,
     pub(crate) presets: BTreeMap<String, Preset>,
 }
+#[derive(Deserialize)]
+struct ProviderUpdates {
+    provider_ids: Vec<String>,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum Kind {
@@ -440,7 +446,8 @@ mod ceiling_tests {
 }
 
 /// Whether a field belongs to the compact agent-facing configuration surface.
-/// Full schema validation always includes advanced fields.
+/// Provider placeholders cover the registry's documented adapters; internal
+/// adapters remain available through the full schema and validation.
 pub fn documented_field(path: &str) -> bool {
     registry().is_ok_and(|registry| {
         registry.documented_fields.iter().any(|field| {
@@ -449,9 +456,17 @@ pub fn documented_field(path: &str) -> bool {
             loop {
                 match (expected.next(), actual.next()) {
                     (None, None) => return true,
+                    (Some("{provider}"), Some(value))
+                        if registry
+                            .provider_updates
+                            .provider_ids
+                            .iter()
+                            .any(|provider| provider == value) => {}
                     (Some(pattern), Some(value))
                         if pattern == value
-                            || (pattern.starts_with('{') && pattern.ends_with('}')) => {}
+                            || (pattern != "{provider}"
+                                && pattern.starts_with('{')
+                                && pattern.ends_with('}')) => {}
                     _ => return false,
                 }
             }
