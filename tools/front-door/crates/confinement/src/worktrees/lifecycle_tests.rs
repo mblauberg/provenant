@@ -32,6 +32,119 @@ use std::fs;
 
 use std::os::unix::fs::PermissionsExt;
 
+#[test]
+fn create_defaults_to_fetched_remote_head_and_preserves_existing_and_explicit_bases()
+-> Result<(), Box<dyn Error>> {
+    let source = Fixture::new()?;
+    source.run(&["branch", "-M", "trunk"])?;
+    let mut fixture = Fixture::new()?;
+    let clone = fixture._temp.path().join("clone-default");
+    fixture.run(&[
+        "clone",
+        source.root.to_str().ok_or("source path")?,
+        clone.to_str().ok_or("clone path")?,
+    ])?;
+    fixture.root = clone;
+    fixture.repo = fixture.runtime.open_repo(
+        &fixture.executor,
+        &fixture.root,
+        fixture.budget()?,
+        &cancel(),
+    )?;
+    let old = fixture.head()?;
+    fixture.run(&["branch", "existing"])?;
+    source.run(&["commit", "--allow-empty", "-m", "new remote tip"])?;
+    let latest = source.head()?;
+    let test = TestContext::new(&fixture)?;
+    let context = test.context();
+    let new = create(
+        &context,
+        WorktreeCreate {
+            branch: "new-default".into(),
+            base: None,
+        },
+        &cancel(),
+    )?;
+    assert_eq!(new.head, latest);
+    let existing = create(
+        &context,
+        WorktreeCreate {
+            branch: "existing".into(),
+            base: None,
+        },
+        &cancel(),
+    )?;
+    assert_eq!(existing.head, old);
+    let explicit = create(
+        &context,
+        WorktreeCreate {
+            branch: "explicit".into(),
+            base: Some("HEAD".into()),
+        },
+        &cancel(),
+    )?;
+    assert_eq!(explicit.head, old);
+    Ok(())
+}
+
+#[test]
+fn create_defaults_to_local_head_when_remote_unavailable_or_head_missing()
+-> Result<(), Box<dyn Error>> {
+    let source = Fixture::new()?;
+    let mut fixture = Fixture::new()?;
+    fixture.run(&[
+        "remote",
+        "add",
+        "origin",
+        source.root.to_str().ok_or("source path")?,
+    ])?;
+    source.run(&["symbolic-ref", "HEAD", "refs/heads/missing"])?;
+    fixture.repo = fixture.runtime.open_repo(
+        &fixture.executor,
+        &fixture.root,
+        fixture.budget()?,
+        &cancel(),
+    )?;
+    let test = TestContext::new(&fixture)?;
+    let context = test.context();
+    let head = fixture.head()?;
+    let missing = create(
+        &context,
+        WorktreeCreate {
+            branch: "missing-default".into(),
+            base: None,
+        },
+        &cancel(),
+    )?;
+    assert_eq!(missing.head, head);
+    let mut offline_fixture = Fixture::new()?;
+    offline_fixture.run(&["remote", "add", "origin", "/nonexistent/provenant-2998"])?;
+    offline_fixture.repo = offline_fixture.runtime.open_repo(
+        &offline_fixture.executor,
+        &offline_fixture.root,
+        offline_fixture.budget()?,
+        &cancel(),
+    )?;
+    let offline_head = offline_fixture.head()?;
+    let test = TestContext::new(&offline_fixture)?;
+    let context = test.context();
+    let offline = create(
+        &context,
+        WorktreeCreate {
+            branch: "offline-default".into(),
+            base: None,
+        },
+        &cancel(),
+    )?;
+    assert_eq!(offline.head, offline_head);
+    let mut warning = Vec::new();
+    lifecycle::write_default_base_warning(&mut warning, head)?;
+    let warning = String::from_utf8(warning)?;
+    assert!(warning.contains("local HEAD"));
+    assert!(warning.contains(&head.to_string()));
+    Ok(())
+}
+
 pub(super) struct FreeWorkers;
 
 #[test]

@@ -79,6 +79,12 @@ lease, including while a writer holds it. The checkout and its Git metadata
 remain read-only even when the project configures ordinary read-only write
 exceptions. Explicit write roots must not overlap the checkout.
 
+When a writer launch creates a new branch without `--base`, it fetches the
+default branch advertised by `origin` and starts from that commit. If the
+remote cannot be fetched or has no default branch, it uses local `HEAD` and
+warns with the commit ID. An explicit base and an existing branch keep their
+usual behaviour. `provenant worktree create` uses the same default.
+
 Read-only lanes can run offline Cargo tests, including doc-tests, using their
 private `CARGO_TARGET_DIR` under lane scratch; they may execute files they
 write to scratch but nowhere else. When a Swift toolchain is selected, the `swift` shim sends
