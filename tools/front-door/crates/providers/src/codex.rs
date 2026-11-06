@@ -14,7 +14,7 @@ pub struct Codex;
 pub const REGISTRATION: crate::Registration = crate::Registration {
     adapter: &Codex,
     quota_source: Some(&Codex),
-    stdout_decoder: None,
+    stdout_decoder: Some(&LiveUsage),
     stderr_decoder: None,
     display_name: "Codex",
     quota: provenant_quota::QuotaPolicy {
@@ -28,6 +28,39 @@ pub const REGISTRATION: crate::Registration = crate::Registration {
 };
 
 crate::adapter!(Codex, "codex", prepare);
+
+/// Live token usage for a token budget. `codex exec --json` reports each
+/// turn's usage in its `turn.completed` event; `input_tokens` already holds
+/// the cached reads and writes, so a turn's total is input plus output. Every
+/// turn is a distinct call, so each gets its own key and they add.
+pub struct LiveUsage;
+static TURNS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+impl provenant_os::capture::FrameDecoder for LiveUsage {
+    fn decode(
+        &self,
+        frame: &[u8],
+    ) -> Result<provenant_os::capture::FrameEvent, provenant_os::capture::DecodeFailure> {
+        use provenant_os::capture::FrameEvent;
+        Ok(live_usage(frame).map_or(FrameEvent::Progress, |tokens| FrameEvent::Usage {
+            key: TURNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            tokens,
+        }))
+    }
+    fn reports_usage(&self) -> bool {
+        true
+    }
+}
+/// The token total of a `turn.completed` frame, or `None` for any other frame
+/// or one that does not parse. A bad frame never ends an attempt.
+fn live_usage(frame: &[u8]) -> Option<u64> {
+    if !frame.windows(14).any(|window| window == b"turn.completed") {
+        return None;
+    }
+    match serde_json::from_slice::<Event>(frame).ok()? {
+        Event::Completed { usage } => Some(usage.input_tokens.saturating_add(usage.output_tokens)),
+        _ => None,
+    }
+}
 /// The exec JSON stream carries no answering-model position.
 const MODEL_ON_WIRE: bool = false;
 
@@ -280,4 +313,32 @@ fn decode(bytes: &[u8]) -> Result<Vec<E>, ProviderError> {
         }
         _ => vec![],
     })
+}
+
+#[cfg(test)]
+mod live_usage_tests {
+    use super::*;
+    use provenant_os::capture::{FrameDecoder, FrameEvent};
+
+    #[test]
+    fn a_completed_turn_reports_its_input_including_cached_and_its_output() {
+        let turn = br#"{"type":"turn.completed","usage":{"input_tokens":1000,"cached_input_tokens":800,"output_tokens":50}}"#;
+        let FrameEvent::Usage { tokens, key } = LiveUsage.decode(turn).unwrap() else {
+            panic!("a completed turn reports usage");
+        };
+        assert_eq!(tokens, 1050);
+        // Each turn is its own call, so two identical turns both count.
+        let FrameEvent::Usage { key: next, .. } = LiveUsage.decode(turn).unwrap() else {
+            panic!("a completed turn reports usage");
+        };
+        assert_ne!(key, next);
+        for other in [
+            &br#"{"type":"turn.started"}"#[..],
+            br#"{"type":"item.completed","item":{"type":"agent_message","text":"turn.completed"}}"#,
+            b"turn.completed but not json",
+        ] {
+            assert_eq!(LiveUsage.decode(other).unwrap(), FrameEvent::Progress);
+        }
+        assert!(LiveUsage.reports_usage());
+    }
 }
