@@ -2203,7 +2203,7 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 | `--base` | `{"description": "Git base for a new writer branch", "name": "base"}` |
 | `--write-scope` | `{"description": "Paths the writer may change, relative to its worktree; repeatable", "name": "write_scope", "repeatable": true}` |
 | `--over` | `{"description": "Copy the node over named items, or a resolver such as @review-panel", "name": "over", "repeatable": true}` |
-| `--set` | `{"description": "Bind a template parameter (NAME=TOML_VALUE); repeatable", "name": "set", "repeatable": true}` |
+| `--set` | `{"description": "Bind a template parameter or attempt.FIELD (NAME=TOML_VALUE); repeatable", "name": "set", "repeatable": true}` |
 | `--file` | `{"description": "Read a graph document (JSON or TOML), or a plain text brief", "name": "file"}` |
 | `--detached` | `{"defaults": ["false"], "description": "Let this child outlive parent and graph cancellation (inside a lane only)", "name": "detached", "values": ["true", "false"]}` |
 | `--explain` | `{"defaults": ["false"], "description": "Explain the compiled graph without starting work", "name": "explain", "values": ["true", "false"]}` |
