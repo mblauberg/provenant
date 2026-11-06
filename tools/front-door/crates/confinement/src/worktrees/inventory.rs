@@ -433,21 +433,14 @@ impl RepoFacts {
         cancel: &CancelToken,
     ) -> Result<Vec<GitWorktree>, WorktreeError> {
         let _ = self.take_inventory(context);
-        let budget = context
-            .utility_budget
-            .with_stdout_cap(self.inventory_limit)?;
-        let outcome = run_utility(
-            context.executor,
-            GitRead::WorktreeList,
+        let bytes = self.writer_inventory(
             context.repo,
+            context.executor,
             context.utility,
-            budget,
+            context.utility_budget,
             cancel,
         )?;
-        if exit_code(&outcome)? != 0 {
-            return Err(WorktreeError::InvalidOutput);
-        }
-        parse_worktree_list(&outcome.stdout.bytes)
+        parse_worktree_list(&bytes)
     }
 
     pub(super) fn capture_inventory(
