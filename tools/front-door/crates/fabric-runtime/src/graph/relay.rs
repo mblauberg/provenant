@@ -122,6 +122,119 @@ pub fn child_worktree(graph_id: &str, node: &str) -> String {
     format!(".worktrees/{graph_id}-{node}")
 }
 
+/// The node that owns `attempt` in any state, including a settled parent or a
+/// superseded attempt. Only receipt replay may act as such a node.
+pub fn historical_parent_of_attempt<'a>(
+    checkpoint: &'a GraphCheckpoint,
+    attempt: &str,
+) -> Option<&'a str> {
+    checkpoint
+        .nodes
+        .iter()
+        .find(|node| {
+            node.attempts
+                .iter()
+                .any(|row| row.attempt_ref.as_deref() == Some(attempt))
+        })
+        .map(|node| node.id.as_str())
+}
+
+/// The earlier receipt for this request's idempotency key, if any. It compares
+/// the submitted request before consulting mutable templates or moving host
+/// bindings, and does not require the parent to be running, so a receipt lost
+/// in flight can be replayed after the parent settles.
+pub fn replay_child(
+    document: &GraphDocument,
+    checkpoint: &GraphCheckpoint,
+    parent: &str,
+    request: &ChildRequest,
+) -> Result<Option<ChildReceipt>, PatchError> {
+    let invalid = |message: String| PatchError {
+        code: "invalid",
+        message,
+    };
+    let graph_id = document.graph_id.clone();
+    let node = format!("{parent}{SEPARATOR}{}", request.id);
+    let worktree = request.writer.then(|| child_worktree(&graph_id, &node));
+    let digest = CanonicalV1::record_digest("fabric-relay-child", 1, request)
+        .map_err(|error| invalid(error.to_string()))?
+        .to_string();
+    let Some(record) = checkpoint
+        .expansions
+        .iter()
+        .filter_map(|expansion| expansion.patch.as_ref())
+        .find(|record| record.key.as_deref() == Some(&request.idempotency_key))
+    else {
+        return Ok(None);
+    };
+    if record.parent.as_deref() != Some(parent)
+        || record.extra.get(REQUEST_DIGEST).and_then(Value::as_str) != Some(digest.as_str())
+    {
+        return Err(PatchError {
+            code: "idempotency_conflict",
+            message: "child idempotency key was used for a different request or parent".into(),
+        });
+    }
+    Ok(Some(ChildReceipt {
+        graph_id,
+        parent: parent.into(),
+        node,
+        revision: record.revision,
+        replayed: true,
+        worktree,
+        detached: request.detached,
+    }))
+}
+
+const PENDING_PROVISIONING: &str = "pending_writer_provisioning";
+
+/// Fence a writer child's worktree creation in the checkpoint. The caller saves
+/// the checkpoint before any Git effect, so a crash leaves the intent durable.
+pub fn fence_provisioning(checkpoint: &mut GraphCheckpoint, node: &str, path: &str, source: &str) {
+    let entry = checkpoint
+        .extra
+        .entry(PENDING_PROVISIONING.into())
+        .or_insert_with(|| Value::Object(Map::new()));
+    if let Some(map) = entry.as_object_mut() {
+        map.insert(
+            node.into(),
+            serde_json::json!({"path": path, "source": source}),
+        );
+    }
+}
+
+/// Provisioning fenced but not yet confirmed: `(node, path, source)`.
+pub fn pending_provisioning(checkpoint: &GraphCheckpoint) -> Vec<(String, String, String)> {
+    checkpoint
+        .extra
+        .get(PENDING_PROVISIONING)
+        .and_then(Value::as_object)
+        .into_iter()
+        .flatten()
+        .filter_map(|(node, value)| {
+            Some((
+                node.clone(),
+                value.get("path")?.as_str()?.to_owned(),
+                value.get("source")?.as_str()?.to_owned(),
+            ))
+        })
+        .collect()
+}
+
+/// Clear the fence once the worktree exists.
+pub fn clear_provisioning(checkpoint: &mut GraphCheckpoint, node: &str) {
+    if let Some(map) = checkpoint
+        .extra
+        .get_mut(PENDING_PROVISIONING)
+        .and_then(Value::as_object_mut)
+    {
+        map.remove(node);
+        if map.is_empty() {
+            checkpoint.extra.remove(PENDING_PROVISIONING);
+        }
+    }
+}
+
 /// Admit one child of `parent` through the patch path.
 pub fn admit_child(
     graph: &mut LiveGraph<'_>,
@@ -158,37 +271,13 @@ pub fn admit_child_bound(
     }
     let graph_id = graph.document.graph_id.clone();
     let node = format!("{parent}{SEPARATOR}{}", request.id);
+    if let Some(receipt) = replay_child(graph.document, graph.checkpoint, parent, request)? {
+        return Ok(receipt);
+    }
     let worktree = request.writer.then(|| child_worktree(&graph_id, &node));
     let digest = CanonicalV1::record_digest("fabric-relay-child", 1, request)
         .map_err(|error| invalid(error.to_string()))?
         .to_string();
-    // Compare the submitted request, before consulting mutable templates or
-    // moving host bindings. Receipt replay must survive either changing.
-    if let Some(expansion) = graph.checkpoint.expansions.iter().find(|expansion| {
-        expansion
-            .patch
-            .as_ref()
-            .is_some_and(|record| record.key.as_deref() == Some(&request.idempotency_key))
-    }) {
-        let record = expansion.patch.as_ref().unwrap();
-        if record.parent.as_deref() != Some(parent)
-            || record.extra.get(REQUEST_DIGEST).and_then(Value::as_str) != Some(digest.as_str())
-        {
-            return Err(PatchError {
-                code: "idempotency_conflict",
-                message: "child idempotency key was used for a different request or parent".into(),
-            });
-        }
-        return Ok(ChildReceipt {
-            graph_id,
-            parent: parent.into(),
-            node,
-            revision: record.revision,
-            replayed: true,
-            worktree,
-            detached: request.detached,
-        });
-    }
     let mut patch = child_patch(request, worktree.as_deref(), context)?;
     if let Some((branch, commit)) = writer_base {
         let node = patch.nodes[0].as_object_mut().unwrap();
