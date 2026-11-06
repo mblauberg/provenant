@@ -472,6 +472,19 @@ fn retry_node_scope(
         (node.composite.is_some() || node.loop_body.is_some())
             && (node.id == id || !id.starts_with(&format!("{}--", node.id)))
     };
+    // Ordinary agents can produce final patches too. Their prior topology is
+    // redone with the producer, while live-spawn-only children keep their own
+    // execution. Enclosing joins are only recomputed when one member is redone.
+    let redo_topology = |node: &GraphNode| {
+        redo_container(node)
+            || dependants
+                && (node.id == id || !id.starts_with(&format!("{}--", node.id)))
+                && (node.plan.is_some()
+                    || graph.checkpoint.expansions.iter().any(|expansion| {
+                        expansion.source == node.id
+                            && expansion.extra.get("final_result") == Some(&Value::Bool(true))
+                    }))
+    };
     let prefix = format!("{id}--");
     let mut reset_ids = BTreeSet::from([id.to_owned()]);
     if container {
@@ -489,7 +502,7 @@ fn retry_node_scope(
             let prefixes: Vec<_> = expanded
                 .nodes
                 .iter()
-                .filter(|node| reset_ids.contains(&node.id) && redo_container(node))
+                .filter(|node| reset_ids.contains(&node.id) && redo_topology(node))
                 .map(|node| format!("{}--", node.id))
                 .collect();
             for node in &expanded.nodes {
@@ -591,7 +604,7 @@ fn retry_node_scope(
     // with a new execution, so their expansions retire in this same candidate.
     let mut retired = BTreeSet::new();
     for container in expanded.nodes.iter().filter(|node| {
-        reset_ids.contains(&node.id) && (redo_container(node) || dependants && node.plan.is_some())
+        reset_ids.contains(&node.id) && redo_topology(node)
     }) {
         retired.extend(
             super::retire::dynamic_subtree(
