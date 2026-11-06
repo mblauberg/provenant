@@ -182,7 +182,8 @@
           "launch_actor": "",
           "settled": 1
         }
-      ]
+      ],
+      "children_cancelled": true
     },
     {
       "title": "plan--nested",
@@ -223,7 +224,8 @@
           "launch_actor": "",
           "settled": 2
         }
-      ]
+      ],
+      "children_cancelled": true
     },
     {
       "title": "plan--nested--inner",
@@ -264,7 +266,8 @@
           "launch_actor": "",
           "settled": 3
         }
-      ]
+      ],
+      "children_cancelled": true
     },
     {
       "title": "after",
@@ -305,7 +308,8 @@
           "launch_actor": "",
           "settled": 4
         }
-      ]
+      ],
+      "children_cancelled": true
     }
   ]
 }

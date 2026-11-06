@@ -313,10 +313,15 @@ fn every_bundled_template_is_listed_shown_and_explained() -> Result {
         }
         node["with"] = parameters;
         let mut nodes = Vec::new();
-        if name == "synthesise" {
-            nodes.push(json!({"id":"source", "use":"task"}));
+        if name == "synthesise" || template["review"] == "synthesis" {
+            let source = if template["review"] == "synthesis" { "review" } else { "task" };
+            nodes.push(json!({"id":"source", "use":source}));
             node["after"] = json!(["source"]);
-            node["inputs"] = json!([{"node":"source", "outputs":["result"]}]);
+            node["inputs"] = if template["review"] == "synthesis" {
+                json!([{"node":"source", "outputs":["result", "findings"]}])
+            } else {
+                json!([{"node":"source", "outputs":["result"]}])
+            };
         }
         nodes.push(node);
         let path =
@@ -386,7 +391,7 @@ fn review_shape_selects_the_expected_template_nodes() -> Result {
         let result: Value = serde_json::from_slice(&output.stdout)?;
         assert!(output.status.success(), "{risk}: {result}");
         let mut found = Vec::new();
-        ids(&result["data"]["document"], &mut found);
+        ids(&result["data"]["document"]["nodes"], &mut found);
         for stage in ["frame", "verify", "synthesis"] {
             assert_eq!(
                 found.iter().any(|id| id == stage),
