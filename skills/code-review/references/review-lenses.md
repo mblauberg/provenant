@@ -4,8 +4,8 @@ Use only the lenses relevant to the change. Follow evidence, not a fixed
 checklist quota.
 
 Each lens has a prompt file in [`lenses/`](lenses/) that points back to the
-sections below. Fabric presets (`review`, `big-batch`) load those files,
-so this document and the presets share one definition of each lens.
+sections below. Template composites (`review`, `batch`) load those files,
+so this document and the templates share one definition of each lens.
 
 ## Dependency cone
 

@@ -56,13 +56,16 @@ provenant upgrade
 provenant upgrade --from-source /absolute/path/to/provenant --hosts all
 ```
 
-Drain writer lanes on each host before upgrading: let running providers exit
-and settle before installing the release, then launch new writers afterwards.
-The host does not force-cancel running lanes or retain a legacy object verifier.
-An older interrupted settlement can resume through `provenant reconcile --id RUN`
-when its private object directory remains. A missing private source is refused
-with instructions to recover commits on the host and start a fresh run. See
-[lane Git and import](../specs/run.md#lane-git-and-import).
+Before upgrading, finish or stop pending graphs and let active writers settle
+on every host. Install on all hosts before launching new work. Preserve and
+report unreadable records; never drop them. Check `provenant status`, collect
+`provenant output TARGET` and inspect `provenant output TARGET --trace` before
+using `retry` for unfinished work.
+
+The core commands are `run`, `status`, `output`, `steer`, `stop`, `retry`,
+`edit`, `templates`, `land`, `quota` and `trace`. Use `run --use task` for a
+bounded assignment or `run --use deliver` for implementation through landing;
+see [templates](presets.md). `provenant help --all` lists advanced commands.
 
 Upgrade requires a receipt. It downloads one release tag for this host and all
 registered Fabric peers, or builds the selected source checkout on every host.
