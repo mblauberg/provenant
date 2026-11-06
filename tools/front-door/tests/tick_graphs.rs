@@ -365,17 +365,25 @@ fn tick_refuses_new_graph_attempts_while_unrelated_legacy_work_is_pending() -> R
             .iter()
             .all(|attempt| attempt.attempt_ref.is_none())
     );
-    if rig.state.join("run.sqlite3").exists() {
-        let db = graph::cutover::read_connection(&rig.state.join("run.sqlite3"))?;
+    // 94dca6101 retains pre-admission refusals without admitting a run or attempt.
+    let db = graph::cutover::read_connection(&rig.state.join("run.sqlite3"))?;
+    let mut operations = db.prepare("SELECT record FROM operations")?;
+    let records = operations
+        .query_map([], |row| row.get::<_, Vec<u8>>(0))?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    assert_eq!(records.len(), 1);
+    let refusal: provenant_run::OperationRecord = serde_json::from_slice(&records[0])?;
+    assert_eq!(refusal.state, provenant_run::OperationState::Refused);
+    assert_eq!(
+        refusal.refusal.as_ref().ok_or("refusal diagnostic")?.code,
+        "UPGRADE_DRAIN_REQUIRED"
+    );
+    for table in ["runs", "attempts"] {
         assert_eq!(
-            db.query_row("SELECT COUNT(*) FROM operations", [], |row| row
+            db.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| row
                 .get::<_, i64>(0))?,
-            0
-        );
-        assert_eq!(
-            db.query_row("SELECT COUNT(*) FROM attempts", [], |row| row
-                .get::<_, i64>(0))?,
-            0
+            0,
+            "refusal must not admit {table}"
         );
     }
     assert!(!rig.state.join("runs").exists());

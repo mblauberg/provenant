@@ -14,6 +14,12 @@ fn graph_input_reason(reason: impl std::fmt::Display) -> FacadeError {
 fn relay_error(error: ServiceError) -> FacadeError {
     match error {
         ServiceError::Facade(error) => error,
+        ServiceError::Cli { code, .. } if code == "UPGRADE_DRAIN_REQUIRED" => {
+            FacadeError::GraphRelayRefused {
+                refusal_code: code,
+                detail: Some(InvalidInputDetail::UpgradeDrainRequired),
+            }
+        }
         error => FacadeError::GraphRelayRefused {
             refusal_code: error.code().to_owned(),
             detail: Some(InvalidInputDetail::graph_reason(error)),
@@ -1620,6 +1626,44 @@ mod tests {
             assert_eq!(mcp["code"], code);
             assert!(!mcp["message"].as_str().unwrap_or_default().contains(detail));
         }
+        Ok(())
+    }
+
+    #[test]
+    fn relay_upgrade_refusal_retains_safe_drain_guidance() -> Result<()> {
+        let error = super::relay_error(ServiceError::Cli {
+            code: "UPGRADE_DRAIN_REQUIRED".into(),
+            message: "PROMPT_SENTINEL private source text".into(),
+            data: json!({"private": "PROMPT_SENTINEL"}),
+        });
+        let wire = serde_json::to_value(&error)?;
+        assert!(!serde_json::to_string(&wire)?.contains("PROMPT_SENTINEL"));
+        let restored: FacadeError = serde_json::from_value(wire)?;
+        assert_eq!(restored, error);
+        let diagnostic = restored.diagnostic();
+        assert_eq!(diagnostic.code, "UPGRADE_DRAIN_REQUIRED");
+        assert_eq!(
+            diagnostic.detail.as_deref(),
+            Some(
+                "Finish or cancel old pending graphs and drain live lanes with the previous release before admitting new work."
+            )
+        );
+        assert!(
+            diagnostic
+                .next
+                .as_deref()
+                .ok_or("drain repair")?
+                .contains("--yes cannot bypass")
+        );
+        let mcp = ServiceError::Facade(restored).structured_error();
+        assert_eq!(mcp["code"], "UPGRADE_DRAIN_REQUIRED");
+        assert!(
+            mcp["message"]
+                .as_str()
+                .ok_or("drain message")?
+                .contains("previous release")
+        );
+        assert!(!serde_json::to_string(&mcp)?.contains("PROMPT_SENTINEL"));
         Ok(())
     }
 

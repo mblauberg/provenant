@@ -1145,7 +1145,14 @@ fn invalid_choices_effort_and_old_policy_flags_are_usage_errors() -> Result {
         vec!["route", "resolve", "missing-route"],
         vec!["route", "resolve", "utility", "--route", "utility"],
         vec!["route", "resolve", "utility", "--model", "codex/a"],
-        vec!["route", "resolve", "--model", "codex/a", "--effort", "high"],
+        vec![
+            "route",
+            "resolve",
+            "--model",
+            "codex/gpt-6-luna",
+            "--effort",
+            "max",
+        ],
         vec!["route", "resolve", "--model", "codex/a#high"],
         vec!["route", "list", "--adapter", "invented"],
         vec!["route", "resolve", "--pool", "principal"],
@@ -1162,6 +1169,16 @@ fn invalid_choices_effort_and_old_policy_flags_are_usage_errors() -> Result {
     ] {
         call(&rig, &args, 2)?;
     }
+    // dfa3451da permits valid efforts on exact models outside the catalogue.
+    let unlisted = call(
+        &rig,
+        &["route", "resolve", "--model", "codex/a", "--effort", "high"],
+        0,
+    )?;
+    assert_eq!(unlisted["data"]["eligibility"], "unverified_model");
+    assert_eq!(unlisted["data"]["model"], "a");
+    assert_eq!(unlisted["data"]["effort"], "high");
+    assert!(unlisted["data"]["supported_efforts"].is_null());
     assert!(!rig.state.exists());
     Ok(())
 }
