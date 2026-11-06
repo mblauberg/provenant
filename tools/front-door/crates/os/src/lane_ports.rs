@@ -32,6 +32,16 @@ pub struct Plan {
     pub base: u32,
     pub size: u32,
     pub blocks: u32,
+    /// Where the effective block count was selected; absent in older plans.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocks_origin: Option<BlocksOrigin>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BlocksOrigin {
+    CompiledDefault,
+    HostConfig,
 }
 
 /// One held block. Dropping it, or the process exiting, releases it.
@@ -165,7 +175,18 @@ mod tests {
             base: 30000,
             size: 16,
             blocks,
+            blocks_origin: None,
         }
+    }
+
+    #[test]
+    fn old_port_plans_without_origin_remain_readable()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let plan: Plan = serde_json::from_str(
+            r#"{"state":"/fixture/state","base":30000,"size":16,"blocks":1}"#,
+        )?;
+        assert_eq!(plan.blocks_origin, None);
+        Ok(())
     }
 
     #[test]

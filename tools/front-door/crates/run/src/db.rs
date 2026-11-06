@@ -280,7 +280,11 @@ impl RunStore {
             } else {
                 Vec::new()
             };
-            store.write(request, |tx| {
+            // Rebuilding the attempts table requires foreign keys off on this
+            // private connection. Check them inside the transaction before
+            // commit, then restore enforcement even if migration fails.
+            store.db.execute_batch("PRAGMA foreign_keys=OFF;")?;
+            let migration = store.write(request, |tx| {
                 let current = version(tx)?;
                 let start = usize::try_from(current).map_err(|_| RunError::Version(current))?;
                 provenant_sqlite::migrate(
@@ -311,8 +315,18 @@ impl RunStore {
                         Ok(())
                     },
                 )?;
+                let violations: i64 =
+                    tx.query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |row| {
+                        row.get(0)
+                    })?;
+                if violations != 0 {
+                    return Err(RunError::Validation("migration foreign key integrity"));
+                }
                 Ok(())
-            })?;
+            });
+            let restore = store.db.execute_batch("PRAGMA foreign_keys=ON;");
+            migration?;
+            restore?;
         }
         Ok(store)
     }
@@ -429,7 +443,7 @@ pub(crate) fn open_database(
 /// Ordered run-store migrations. A step's index is the version it upgrades from,
 /// so the current version follows from this list and a new step cannot be missed
 /// when an existing store opens.
-const SCHEMA_STEPS: [&str; 8] = [
+const SCHEMA_STEPS: [&str; 9] = [
     include_str!("schema.sql"),
     include_str!("schema_v2.sql"),
     include_str!("schema_v3.sql"),
@@ -438,6 +452,7 @@ const SCHEMA_STEPS: [&str; 8] = [
     include_str!("schema_v6.sql"),
     include_str!("schema_v7.sql"),
     include_str!("schema_v8.sql"),
+    include_str!("schema_v9.sql"),
 ];
 const SCHEMA_VERSION: i64 = SCHEMA_STEPS.len() as i64;
 
@@ -466,11 +481,17 @@ pub(crate) fn companions(directory: &Directory, base: &str) -> Result<()> {
     })
 }
 pub(crate) fn bytes<T: serde::Serialize>(record: &T) -> Result<Vec<u8>> {
+    bytes_with_limit(record, RECORD_LIMIT)
+}
+
+pub(crate) fn attempt_bytes(record: &AttemptRecord) -> Result<Vec<u8>> {
+    bytes_with_limit(record, TERMINAL_RECORD_LIMIT)
+}
+
+fn bytes_with_limit<T: serde::Serialize>(record: &T, limit: u64) -> Result<Vec<u8>> {
     let bytes = provenant_records::CanonicalV1::bytes(record)?;
-    if bytes.as_bytes().len() as u64 > RECORD_LIMIT {
-        return Err(RunError::TooLarge {
-            limit: RECORD_LIMIT,
-        });
+    if bytes.as_bytes().len() as u64 > limit {
+        return Err(RunError::TooLarge { limit });
     }
     Ok(bytes.as_bytes().to_vec())
 }
@@ -495,7 +516,14 @@ pub(crate) fn decode_unversioned<T: serde::de::DeserializeOwned>(bytes: &[u8]) -
 }
 
 pub(crate) fn decode_attempt(bytes: &[u8]) -> Result<AttemptRecord> {
-    let record: AttemptRecord = decode_unversioned(bytes)?;
+    let record: AttemptRecord = provenant_records::decode(
+        bytes,
+        provenant_records::Limits {
+            max_bytes: TERMINAL_RECORD_LIMIT,
+            max_members: 1_000_000,
+            ..Default::default()
+        },
+    )?;
     if !matches!(record.schema_version, 1 | 2) {
         return Err(RunError::Version(record.schema_version as i64));
     }

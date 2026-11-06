@@ -1,5 +1,5 @@
 use crate::launch::{
-    Access, PrepareInput, Session, SetupStep, Stdin, base_env, exact, package_root, subtree,
+    Access, PrepareInput, Session, SetupStep, Stdin, base_env, exact, package_grant, subtree,
 };
 use crate::{LaunchSpec, ProviderError, ProviderEvent as E, StreamState, stream::wire};
 use provenant_confinement::CodexPolicy;
@@ -93,17 +93,18 @@ fn prepare(
     // and `zsh`), and its shell tool runs system programs. System directories
     // are readable through the runtime baseline; exec roots add exec, not
     // reads. No shared install prefix: its var/ stays unreadable.
-    let package = package_root(input.executable)?;
+    let mut package_omissions = Vec::new();
+    let package = package_grant(input.executable, &mut package_omissions);
     let tool_exec_roots = vec![
         subtree("/bin"),
         subtree("/usr/bin"),
         subtree("/usr/libexec"),
-        subtree(package),
+        package.clone(),
     ];
-    let mut runtime_reads = vec![subtree(package)];
+    let mut runtime_reads = vec![package.clone()];
     let tool_writes = Vec::new();
     let staged_skills = input.stage_user_skills();
-    let omitted_discovery = Vec::new();
+    let omitted_discovery = package_omissions;
     let mut setup = vec![SetupStep::Symlink {
         link: codex_home.join("auth.json"),
         target: credential.clone(),
@@ -116,8 +117,8 @@ fn prepare(
             target: skills.clone(),
         });
     }
-    let path = format!("{}:/usr/bin:/bin", input.home.join(".cargo/bin").display());
-    let mut env = base_env(input, &plan.scratch.path, &path);
+    let path = crate::launch::tool_search_path(input.home, true);
+    let mut env = base_env(input, &plan.scratch.path, path);
     input
         .provenant
         .environment(&plan.scratch.path, &mut env, &mut setup, false)?;

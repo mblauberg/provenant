@@ -4789,7 +4789,5 @@ which may be reworded.
 | `BUILD_SETTINGS` | The host lane build settings are invalid. |
 | `GUARDIAN_IDENTITY` | The guardian process identity could not be observed. |
 | `HOST_CLOCK` | Startup spacing cannot be judged: the monotonic clock or boot identity is unreadable. |
-| `WRITER_REF_LOCKED` | A writer Git ref lock already exists. |
-| `SETUP_LOCK_TIMEOUT` | The writer Git setup lock wait expired. |
 | `WRITER_IMPORT_RETAINED` | A predecessor writer import remains unresolved. |
 | `OBJECT_IMPORT_LIMIT` | A lane's Git object import exceeded its limits. |

@@ -46,8 +46,6 @@ pub enum RoutingError {
         effort: String,
         support: String,
     },
-    #[error("{model} is not an admitted OpenCode route; choose one of: {admitted}")]
-    UnlistedOpenCodeModel { model: String, admitted: String },
     #[error("unknown exclusion `{selector}`: {detail}")]
     UnknownExclusion { selector: String, detail: String },
     #[error("invalid catalogue")]
@@ -72,7 +70,6 @@ impl RoutingError {
             Self::ConfidentialModel => "confidential_model",
             Self::NoEligiblePoolMember { .. } => "no_eligible_pool_member",
             Self::UnsupportedEffort { .. } => "unsupported_effort",
-            Self::UnlistedOpenCodeModel { .. } => "unlisted_opencode_model",
             Self::UnknownExclusion { .. } => "unknown_exclusion",
             Self::Catalogue => "catalogue",
             Self::Availability => "availability",

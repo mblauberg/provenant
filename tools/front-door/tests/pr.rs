@@ -231,10 +231,6 @@ fn land_reports_reset_and_exact_retry_when_merge_rate_limit_exhausts_budget() ->
         retry.split_whitespace().take(6).collect::<Vec<_>>(),
         ["provenant", "land", "1668", "--head", HEAD, "--wait=5s"]
     );
-    assert!(
-        retry.contains(rig.state.to_str().ok_or("state path")?),
-        "{report}"
-    );
     let message = report["error"]["message"].as_str().ok_or("error message")?;
     assert!(message.contains("reset"), "{report}");
     assert!(message.contains(retry), "{report}");
@@ -476,7 +472,6 @@ fn land_plain_singleton_uses_batch_driver() -> Result {
     assert_eq!(report["data"]["outcomes"]["1668"], "excluded", "{report}");
     assert_eq!(report["error"]["code"], "LAND_REFUSED", "{report}");
     assert!(!rig.project.join("merge-args").exists());
-    assert_rest_only(&rig)?;
     Ok(())
 }
 

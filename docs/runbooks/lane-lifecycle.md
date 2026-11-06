@@ -148,6 +148,11 @@ change this bound; the lock continues to serialise setup for the repository.
 While a writer waits, `status` names `provenant-lane-setup.lock` as
 the waiting reason. If the launcher exits, its wait indication clears.
 
+Overlapping origin refresh requests share one fetch. The repository setup lock
+serialises only upstream configuration writes; origin refresh,
+repository verification, branch creation and provider launch run outside it.
+The lock is released before provider launch and custody confirmation.
+
 Choose `--deliver none`, `push`, `integrate:integration` or `pr`. Push and PR
 use origin and the lane branch. Integration targets must already exist;
 `integrate:origin/integration` selects a remote branch. Local targets must be

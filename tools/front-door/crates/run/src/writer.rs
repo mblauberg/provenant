@@ -33,121 +33,8 @@ pub(crate) enum WriterCustodyError {
     },
 }
 
-pub(crate) const SETUP_WAIT_LOCK: &str = "setup-wait.lock";
 /// Held while the writer's Cargo cache is seeded, so observers can name the phase.
 pub(crate) const SEED_WAIT_LOCK: &str = "seed-wait.lock";
-
-// Serialise queue changes separately from the long-lived setup lock. Each
-// ticket is itself locked, so a killed waiter can be discarded by its peers.
-fn queued_setup_lock(
-    common: &Directory,
-    wait_seconds: u64,
-    cancel: &CancelToken,
-    clock: &dyn provenant_core::Clock,
-    limit: Option<provenant_core::WaitBudget>,
-) -> Result<provenant_os::fs::LockGuard> {
-    use provenant_core::{DurationMicros, Pause, ThreadPause, WaitBudget};
-    use provenant_os::fs::LockMode;
-
-    let now = clock.mono_now();
-    let configured =
-        WaitBudget::cli(now, wait_seconds).map_err(error("set writer setup lock budget", None))?;
-    let budget = WaitBudget::up_to(
-        now,
-        limit.map_or(configured.remaining(now), |limit| {
-            limit.remaining(now).min(configured.remaining(now))
-        }),
-    );
-    let timeout = || RunError::SetupLockTimeout {
-        seconds: wait_seconds,
-    };
-    let map_lock = |failure| match failure {
-        FsError::LockTimeout { .. } => timeout(),
-        failure => failure.into(),
-    };
-    let queue_name = OsStr::new("provenant-lane-setup-queue");
-    match common.mkdir(queue_name, 0o700) {
-        Ok(()) => {}
-        Err(failure) if failure.is_exists() => {}
-        Err(failure) => return Err(failure.into()),
-    }
-    let queue = common.open_directory(queue_name)?;
-    let manager = OsStr::new("queue.lock");
-    let guard = queue
-        .lock(manager, LockMode::Exclusive, budget, cancel, clock)
-        .map_err(map_lock)?;
-    // Lock files are stable inodes. Disposable markers name a sequence and a
-    // reusable slot; the queue mutex protects marker creation and removal.
-    let scan = |own_slot: Option<u64>| -> Result<Vec<(u64, u64)>> {
-        let mut active = Vec::new();
-        for item in queue.entries()? {
-            let item = item?;
-            let Some((sequence, slot)) = item
-                .to_str()
-                .and_then(|name| name.strip_prefix("ticket-"))
-                .and_then(|name| name.split_once('-'))
-                .and_then(|(a, b)| Some((a.parse::<u64>().ok()?, b.parse::<u64>().ok()?)))
-            else {
-                continue;
-            };
-            if Some(slot) == own_slot {
-                active.push((sequence, slot));
-                continue;
-            }
-            let slot_name = format!("slot-{slot}.lock");
-            match queue.try_lock_existing(OsStr::new(&slot_name), LockMode::Exclusive) {
-                Ok(_stale) => queue.unlink(&item)?,
-                Err(FsError::LockTimeout { .. }) => active.push((sequence, slot)),
-                Err(failure) => return Err(failure.into()),
-            }
-        }
-        Ok(active)
-    };
-    let active = scan(None)?;
-    let sequence = active
-        .iter()
-        .map(|(sequence, _)| *sequence)
-        .max()
-        .unwrap_or(0)
-        .checked_add(1)
-        .ok_or(RunError::Validation("setup queue exhausted"))?;
-    let slot = (0..)
-        .find(|slot| !active.iter().any(|(_, used)| used == slot))
-        .ok_or(RunError::Validation("setup queue exhausted"))?;
-    let slot_name = format!("slot-{slot}.lock");
-    let held = queue.try_lock(OsStr::new(&slot_name), LockMode::Exclusive)?;
-    let ticket = format!("ticket-{sequence}-{slot}");
-    let ticket_name = OsStr::new(&ticket);
-    queue.create_new(ticket_name)?;
-    drop(guard);
-    loop {
-        let guard = queue
-            .lock(manager, LockMode::Exclusive, budget, cancel, clock)
-            .map_err(map_lock)?;
-        if budget.remaining(clock.mono_now()).as_micros() == 0 {
-            queue.unlink(ticket_name)?;
-            return Err(timeout());
-        }
-        let first = scan(Some(slot))?
-            .iter()
-            .all(|(other, _)| *other >= sequence);
-        if first {
-            match common
-                .try_lock_existing(OsStr::new("provenant-lane-setup.lock"), LockMode::Exclusive)
-            {
-                Ok(setup) => {
-                    queue.unlink(ticket_name)?;
-                    drop(held);
-                    return Ok(setup);
-                }
-                Err(FsError::LockTimeout { .. }) => {}
-                Err(failure) => return Err(failure.into()),
-            }
-        }
-        drop(guard);
-        ThreadPause.wait(DurationMicros::from_micros(20_000), cancel);
-    }
-}
 
 #[cfg(test)]
 thread_local! {
@@ -594,17 +481,72 @@ pub struct LaunchConfinement {
     /// Host state root containing target seed generations.
     pub state_root: PathBuf,
 }
+struct ResolvedLaunchLimits {
+    limits: ProfileLimits,
+    grant_origin: &'static str,
+    profile_origin: &'static str,
+}
+
+impl ResolvedLaunchLimits {
+    fn annotate(
+        &self,
+        error: provenant_confinement::permissions::PermissionError,
+    ) -> provenant_confinement::permissions::PermissionError {
+        use provenant_confinement::permissions::PermissionError;
+        let origin = match &error {
+            PermissionError::GrantLimitExceeded { .. } => self.grant_origin,
+            PermissionError::ProfileTooLarge { .. } => self.profile_origin,
+            _ => return error,
+        };
+        PermissionError::ConfigOrigin {
+            source: Box::new(error),
+            origin,
+        }
+    }
+}
+
+fn launch_resource_limits(state: &Path) -> ResolvedLaunchLimits {
+    match provenant_confinement::run_config::RunConfig::read_with_keys(state) {
+        Ok((config, keys)) => {
+            let origin = |key: &str| {
+                if keys.contains(key) {
+                    "host configuration"
+                } else {
+                    "compiled default"
+                }
+            };
+            ResolvedLaunchLimits {
+                limits: ProfileLimits {
+                    grant_limit: config.grant_limit,
+                    profile_limit_bytes: config.profile_limit_bytes,
+                },
+                grant_origin: origin("grant_limit"),
+                profile_origin: origin("profile_limit_bytes"),
+            }
+        }
+        Err(error) => {
+            let defaults = ProfileLimits::default();
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "warning: launch resource limits unavailable ({error}); using compiled defaults domains.run.grant_limit={} and domains.run.profile_limit_bytes={}",
+                defaults.grant_limit,
+                defaults.profile_limit_bytes
+            );
+            ResolvedLaunchLimits {
+                limits: defaults,
+                grant_origin: "compiled default",
+                profile_origin: "compiled default",
+            }
+        }
+    }
+}
+
 impl LaunchConfinement {
     /// Prepare Git while custody is held, then replace every handle that was
     /// bound to the common config before Git changed it.
-    pub(crate) fn prepare_git(
-        &mut self,
-        attempt: &Directory,
-        cancel: &CancelToken,
-        setup_budget: Option<provenant_core::WaitBudget>,
-    ) -> Result<Option<provenant_os::fs::LockGuard>> {
+    pub(crate) fn prepare_git(&mut self, cancel: &CancelToken) -> Result<()> {
         let Some(writer) = self.writer.as_mut() else {
-            return Ok(None);
+            return Ok(());
         };
         writer
             .worktree
@@ -616,18 +558,15 @@ impl LaunchConfinement {
                 ))
             })?;
         let AccessMode::WorktreeWrite(authority) = &self.plan.permissions().mode else {
-            return Ok(None);
+            return Ok(());
         };
         prepare_writer_git(
             writer,
             &self.state_root,
             &self.home,
             Some(authority),
-            Some(attempt),
             cancel,
-            setup_budget,
         )
-        .map(Some)
     }
     /// Prepare the private Cargo caches while writer custody is held.
     pub(crate) fn seed_cargo(&self, environment: &[(OsString, OsString)], attempt_dir: &Directory) {
@@ -718,12 +657,7 @@ impl LaunchConfinement {
     ) -> Result<Vec<OsString>> {
         let executor =
             SystemExecutor::new(1).map_err(error("initialise writer system executor", None))?;
-        let config = provenant_confinement::run_config::RunConfig::read(&self.state_root)
-            .map_err(error("read launch resource limits", None))?;
-        let limits = ProfileLimits {
-            grant_limit: config.grant_limit,
-            profile_limit_bytes: config.profile_limit_bytes,
-        };
+        let limits = launch_resource_limits(&self.state_root);
         let backend = system_backend_with_limits(
             &BackendContext {
                 executor: &executor,
@@ -731,7 +665,7 @@ impl LaunchConfinement {
                 #[cfg(target_os = "macos")]
                 env: &[],
             },
-            limits,
+            limits.limits,
         )
         .map_err(RunError::Confinement)?;
         let writer = self.writer.as_ref().map(|w| (&w.worktree, &w.branch));
@@ -755,7 +689,7 @@ impl LaunchConfinement {
         };
         self.plan
             .compile(backend.as_ref(), &self.profile, &anchors)
-            .map_err(RunError::Confinement)?
+            .map_err(|error| RunError::Confinement(limits.annotate(error)))?
             .command(argv, attempt)
             .map_err(RunError::Confinement)
     }
@@ -766,10 +700,8 @@ fn prepare_writer_git(
     state: &Path,
     home: &Path,
     authority: Option<&provenant_confinement::permissions::WorktreeWriteAuthority>,
-    attempt: Option<&Directory>,
     cancel: &CancelToken,
-    limit: Option<provenant_core::WaitBudget>,
-) -> Result<provenant_os::fs::LockGuard> {
+) -> Result<()> {
     use provenant_core::{Clock, WaitBudget};
     use provenant_os::{clock::SystemClock, fs::LockMode};
     let utility = runtime(state)?;
@@ -778,54 +710,6 @@ fn prepare_writer_git(
     let common_identity = writer.worktree.repo().common_identity();
     let executor =
         SystemExecutor::new(1).map_err(error("initialise writer system executor", None))?;
-    // Independent worktrees share config. Keep both writes and all subsequent
-    // verification under one project-wide lock; a later launch repairs either
-    // key if a process stopped between the two writes.
-    let clock = SystemClock::new();
-    let wait_seconds = provenant_config::LaneBuildSettings::read(state)
-        .map_err(error("read Git setup lock settings", None))?
-        .setup_lock_wait_seconds();
-    let setup_dir = writer.worktree.repo().common_dir();
-    let setup_name = OsStr::new("provenant-lane-setup.lock");
-    match setup_dir.create_new(setup_name) {
-        Ok(file) => {
-            file.sync()?;
-            setup_dir.sync()?;
-        }
-        Err(failure) if failure.is_exists() => {}
-        Err(failure) => {
-            return Err(anchored_error(
-                failure,
-                writer.worktree.repo().common_git_dir(),
-            ));
-        }
-    }
-    // The marker is a lock, not a persistent assertion: if the launcher dies,
-    // observers immediately stop reporting a wait even if the file remains.
-    let waiting = attempt.and_then(|directory| {
-        directory
-            .lock(
-                OsStr::new(SETUP_WAIT_LOCK),
-                LockMode::Exclusive,
-                WaitBudget::up_to(
-                    clock.mono_now(),
-                    provenant_core::DurationMicros::from_micros(1_000_000),
-                ),
-                cancel,
-                &clock,
-            )
-            .ok()
-    });
-    let config_lock =
-        queued_setup_lock(setup_dir, wait_seconds, cancel, &clock, limit).map_err(|error| {
-            match error {
-                RunError::SetupLockTimeout { .. } if limit.is_some() => {
-                    RunError::LaneSetupLockTimeout
-                }
-                other => other,
-            }
-        })?;
-    drop(waiting);
     let old_repo = writer.worktree.repo();
     let project = old_repo
         .common_git_dir()
@@ -850,23 +734,6 @@ fn prepare_writer_git(
     }
     writer.worktree = refreshed;
     verify_writer_git_paths(writer.worktree.repo().common_git_dir(), &writer.branch)?;
-    let tracking_lock = writer.worktree.repo().common_git_dir().join(format!(
-        "refs/remotes/origin/{}.lock",
-        writer
-            .branch
-            .as_str()
-            .strip_prefix("refs/heads/")
-            .ok_or(RunError::Validation("writer branch is not a local branch"))?
-    ));
-    match std::fs::symlink_metadata(&tracking_lock) {
-        Ok(_) => return Err(RunError::WriterRefLocked(tracking_lock)),
-        Err(failure) if failure.kind() == std::io::ErrorKind::NotFound => {}
-        Err(failure) => {
-            return Err(error("verify tracking ref lock", Some(&tracking_lock))(
-                failure,
-            ));
-        }
-    }
     if let Some(authority) = authority {
         prepare_writer_directories(&writer.worktree, &writer.branch, authority, home)
             .map_err(RunError::Confinement)?;
@@ -881,6 +748,7 @@ fn prepare_writer_git(
             worktree: path.clone(),
         },
         repo.private_git_dir(),
+        cancel,
     )?;
     repo.revalidate()
         .map_err(error("verify writer repository after fetch", Some(&path)))?;
@@ -892,7 +760,7 @@ fn prepare_writer_git(
     );
     // Packed refs need not have a loose-ref parent. Walk from the held common
     // directory without following links and create missing components while
-    // the setup lock is held.
+    // each branch is protected by its own Git ref lock.
     let mut directory = repo.common_dir().try_clone()?;
     for component in ref_path
         .parent()
@@ -920,13 +788,13 @@ fn prepare_writer_git(
         .ok_or(RunError::Validation("writer ref has no name"))?;
     let mut lock_name = name.to_os_string();
     lock_name.push(".lock");
-    let mut lock = directory.create_new(&lock_name).map_err(|failure| {
-        if failure.is_exists() {
-            RunError::WriterRefLocked(parent.join(&lock_name))
-        } else {
-            failure.into()
-        }
-    })?;
+    // A fetch or another Git user may own the ref lock. The branch already
+    // exists (possibly packed); a collision does not require rewriting it.
+    let mut lock = match directory.create_new(&lock_name) {
+        Ok(lock) => Some(lock),
+        Err(failure) if failure.is_exists() => None,
+        Err(failure) => return Err(failure.into()),
+    };
     let result = (|| -> Result<()> {
         let resolved = provenant_confinement::run_utility(
             &executor,
@@ -948,14 +816,19 @@ fn prepare_writer_git(
         {
             return Err(RunError::Validation("writer branch changed before launch"));
         }
-        writeln!(lock, "{}", writer.base).map_err(error("write writer ref lock", Some(&parent)))?;
-        lock.sync()?;
-        directory.publish_git_ref_lock(name, &lock)?;
-        directory.sync()?;
+        if let Some(lock) = lock.as_mut() {
+            writeln!(lock, "{}", writer.base)
+                .map_err(error("write writer ref lock", Some(&parent)))?;
+            lock.sync()?;
+            directory.publish_git_ref_lock(name, lock)?;
+            directory.sync()?;
+        }
         Ok(())
     })();
-    if result.is_err() {
-        let _ = directory.discard_git_ref_lock(name, &lock);
+    if result.is_err()
+        && let Some(lock) = lock.as_ref()
+    {
+        let _ = directory.discard_git_ref_lock(name, lock);
     }
     result?;
     for merge in [false, true] {
@@ -972,6 +845,18 @@ fn prepare_writer_git(
                 "writer identity changed before launch",
             ));
         }
+        // Only Git's common-config writes need repository-wide exclusion.
+        // Reopen and verify before waiting; sibling upstream keys do not
+        // invalidate this worktree's configuration binding.
+        let clock = SystemClock::new();
+        let config_lock = worktree.repo().common_dir().lock(
+            OsStr::new("provenant-lane-setup.lock"),
+            LockMode::Exclusive,
+            WaitBudget::cli(clock.mono_now(), 60)
+                .map_err(error("set writer config lock budget", None))?,
+            cancel,
+            &clock,
+        )?;
         provenant_confinement::utility::set_lane_upstream_key(
             &executor,
             worktree.repo(),
@@ -982,6 +867,7 @@ fn prepare_writer_git(
             cancel,
         )
         .map_err(error("set writer upstream", Some(&path)))?;
+        drop(config_lock);
     }
     let repo = utility
         .open_repo(&executor, &project, budget()?, cancel)
@@ -1006,7 +892,7 @@ fn prepare_writer_git(
         return Err(RunError::Validation("writer branch changed before launch"));
     }
     writer.worktree = refreshed;
-    Ok(config_lock)
+    Ok(())
 }
 
 // These exact paths are writable by the lane. Check them before host Git can
@@ -1256,148 +1142,10 @@ fn record_cargo_setup_file(
 #[cfg(test)]
 mod cargo_setup_tests {
     use super::*;
-    use provenant_os::fs::LockMode;
 
+    // Medium: eight real linked worktrees prepare Git concurrently.
     #[test]
-    #[allow(clippy::disallowed_methods)] // Exercise real concurrent waiters.
-    fn setup_lock_serves_ten_slow_waiters_in_order()
-    -> std::result::Result<(), Box<dyn std::error::Error>> {
-        let temp = tempfile::tempdir()?;
-        let common = Directory::open_anchor(temp.path())?;
-        let initial =
-            common.try_lock(OsStr::new("provenant-lane-setup.lock"), LockMode::Exclusive)?;
-        let (send, receive) = std::sync::mpsc::channel();
-        let mut threads = Vec::new();
-        for index in 0..10 {
-            let path = temp.path().to_owned();
-            let send = send.clone();
-            threads.push(std::thread::spawn(move || {
-                let common = Directory::open_anchor(&path).unwrap();
-                let _lock = queued_setup_lock(
-                    &common,
-                    30,
-                    &CancelToken::new(),
-                    &provenant_os::clock::SystemClock::new(),
-                    None,
-                )
-                .unwrap();
-                send.send(index).unwrap();
-                let start = std::time::Instant::now();
-                provenant_test_support::wait_for(
-                    "slow holder",
-                    Duration::from_secs(5),
-                    || start.elapsed(),
-                    |elapsed| *elapsed >= Duration::from_millis(125),
-                )
-                .unwrap();
-            }));
-            provenant_test_support::wait_for(
-                "waiter to queue",
-                Duration::from_secs(5),
-                || {
-                    std::fs::read_dir(temp.path().join("provenant-lane-setup-queue"))
-                        .map(|entries| {
-                            entries
-                                .filter_map(std::result::Result::ok)
-                                .filter(|entry| {
-                                    entry.file_name().to_string_lossy().starts_with("ticket-")
-                                })
-                                .count()
-                        })
-                        .unwrap_or(0)
-                },
-                |count| *count == index + 1,
-            )?;
-        }
-        let released = std::time::Instant::now();
-        drop(initial);
-        let order: Vec<_> = (0..10)
-            .map(|_| receive.recv_timeout(Duration::from_secs(30)).unwrap())
-            .collect();
-        // One second is a scaled old bound: the last waiter remains queued
-        // beyond it rather than losing its place or being rejected.
-        assert!(released.elapsed() >= Duration::from_secs(1));
-        for thread in threads {
-            thread.join().unwrap();
-        }
-        assert_eq!(order, (0..10).collect::<Vec<_>>());
-        Ok(())
-    }
-
-    #[test]
-    #[allow(clippy::disallowed_methods)] // Exercise a real process and wall-clock deadline.
-    fn setup_lock_recovers_after_holder_dies() -> std::result::Result<(), Box<dyn std::error::Error>>
-    {
-        const CHILD_DIR: &str = "PROVENANT_TEST_SETUP_LOCK_CHILD_DIR";
-        let name = OsStr::new("provenant-lane-setup.lock");
-        if let Some(path) = std::env::var_os(CHILD_DIR) {
-            let directory = Directory::open_anchor(Path::new(&path))?;
-            let _held = directory.try_lock(name, LockMode::Exclusive)?;
-            std::fs::write(Path::new(&path).join("ready"), b"ready")?;
-            loop {
-                std::thread::park();
-            }
-        }
-        let temp = tempfile::tempdir()?;
-        let mut child = std::process::Command::new(std::env::current_exe()?)
-            .arg("--exact")
-            .arg("writer::cargo_setup_tests::setup_lock_recovers_after_holder_dies")
-            .env(CHILD_DIR, temp.path())
-            .spawn()?;
-        let ready = provenant_test_support::wait_for(
-            "holder to acquire setup lock",
-            Duration::from_secs(10),
-            || (temp.path().join("ready").exists(), child.try_wait()),
-            |(ready, exited)| *ready || !matches!(exited, Ok(None)),
-        );
-        if !matches!(ready, Ok((true, Ok(None)))) {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err("holder did not acquire the setup lock".into());
-        }
-        let directory = Directory::open_anchor(temp.path())?;
-        let held = directory.try_lock_existing(name, LockMode::Exclusive);
-        let path = temp.path().to_owned();
-        let waiter = std::thread::spawn(move || {
-            let directory = Directory::open_anchor(&path).map_err(|error| error.to_string())?;
-            queued_setup_lock(
-                &directory,
-                30,
-                &CancelToken::new(),
-                &provenant_os::clock::SystemClock::new(),
-                None,
-            )
-            .map(drop)
-            .map_err(|error| error.to_string())
-        });
-        let queued = provenant_test_support::wait_for(
-            "waiter to queue",
-            Duration::from_secs(5),
-            || {
-                (
-                    std::fs::read_dir(temp.path().join("provenant-lane-setup-queue"))
-                        .map(|entries| {
-                            entries.filter_map(std::result::Result::ok).any(|entry| {
-                                entry.file_name().to_string_lossy().starts_with("ticket-")
-                            })
-                        })
-                        .unwrap_or(false),
-                    waiter.is_finished(),
-                )
-            },
-            |(queued, finished)| *queued || *finished,
-        )
-        .is_ok_and(|(queued, _)| queued);
-        child.kill()?;
-        child.wait()?;
-        assert!(queued, "waiter did not enter the queue");
-        assert!(matches!(held, Err(FsError::LockTimeout { .. })));
-        waiter.join().map_err(|_| "waiter panicked")??;
-        Ok(())
-    }
-
-    #[test]
-    fn packed_writer_ref_and_upstream_are_prepared_with_fresh_handles()
+    fn eight_concurrent_writers_prepare_packed_refs_and_both_upstream_keys()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
         let root = std::fs::canonicalize(temp.path())?;
@@ -1551,151 +1299,81 @@ mod cargo_setup_tests {
             custody: None,
             review_exempt: Default::default(),
         };
+        let mut siblings = Vec::new();
+        for index in 2..8 {
+            let branch = format!("chore/writer-{index}");
+            let lane = root.join(format!("lane-{index}"));
+            run(&[
+                "worktree",
+                "add",
+                "-qb",
+                &branch,
+                lane.to_str().ok_or("lane path")?,
+            ])?;
+            siblings.push(WriterLaunch {
+                worktree: provenant_confinement::verify_worktree(&repo, &lane)?,
+                branch: GitRefName::branch(&branch)?,
+                base: source_oid,
+                custody: None,
+                review_exempt: Default::default(),
+            });
+        }
+        // Eight real worktrees share .git/config. Start their preparations
+        // together and require every launch to finish with both upstream keys.
+        let start = std::sync::Barrier::new(8);
         std::thread::scope(|scope| {
-            let first = scope.spawn(|| {
-                prepare_writer_git(
-                    &mut writer,
-                    &state,
-                    &root,
-                    None,
-                    None,
-                    &CancelToken::new(),
-                    None,
-                )
-                .map(drop)
-                .map_err(|e| e.to_string())
-            });
-            let second = scope.spawn(|| {
-                prepare_writer_git(
-                    &mut second,
-                    &state,
-                    &root,
-                    None,
-                    None,
-                    &CancelToken::new(),
-                    None,
-                )
-                .map(drop)
-                .map_err(|e| e.to_string())
-            });
-            first
-                .join()
-                .map_err(|_| "first preparation panicked".to_owned())??;
-            second
-                .join()
-                .map_err(|_| "second preparation panicked".to_owned())??;
+            let handles: Vec<_> = std::iter::once(&mut writer)
+                .chain(std::iter::once(&mut second))
+                .chain(siblings.iter_mut())
+                .map(|writer| {
+                    scope.spawn(|| {
+                        start.wait();
+                        prepare_writer_git(writer, &state, &root, None, &CancelToken::new())
+                            .map_err(|error| error.to_string())
+                    })
+                })
+                .collect();
+            for handle in handles {
+                handle
+                    .join()
+                    .map_err(|_| "writer preparation panicked".to_owned())??;
+            }
             Ok::<(), String>(())
         })?;
-        // Hold a real seed in its clone callback while another writer runs
-        // Git setup. The handoff helper releases the actual repository lock.
-        let cache = root.join("held-seed-cache");
-        std::fs::create_dir(&cache)?;
-        std::thread::scope(
-            |scope| -> std::result::Result<(), Box<dyn std::error::Error>> {
-                let held = prepare_writer_git(
-                    &mut writer,
-                    &state,
-                    &root,
-                    None,
-                    None,
-                    &CancelToken::new(),
-                    None,
-                )?;
-                let (entered_tx, entered_rx) = std::sync::mpsc::channel();
-                let (release_tx, release_rx) = std::sync::mpsc::channel();
-                let root_ref = &root;
-                let cache_ref = &cache;
-                let seed = scope.spawn(move || {
-                    let mut lock = Some(held);
-                    crate::launch::hand_off::seed_without_setup_lock(&mut lock, || {
-                        crate::cargo_seed::seed_with(root_ref, cache_ref, |_, _| {
-                            entered_tx.send(()).unwrap();
-                            provenant_test_support::wait_for(
-                                "release seed",
-                                Duration::from_secs(30),
-                                || release_rx.try_recv().is_ok(),
-                                |ready| *ready,
-                            )
-                            .unwrap();
-                            Ok(())
-                        });
-                    });
-                });
-                provenant_test_support::wait_for(
-                    "seed entered",
-                    Duration::from_secs(30),
-                    || entered_rx.try_recv().is_ok(),
-                    |ready| *ready,
-                )?;
-                let result = prepare_writer_git(
-                    &mut second,
-                    &state,
-                    &root,
-                    None,
-                    None,
-                    &CancelToken::new(),
-                    None,
-                );
-                release_tx.send(())?;
-                result.map(drop)?;
-                seed.join().map_err(|_| "seed panicked")?;
-                Ok(())
-            },
-        )?;
-        // A busy repository lock honours the configured bound and identifies
-        // the setting that controls it, without changing the lock's inode.
-        std::fs::write(
-            state.join("config.toml"),
-            "schema_version = 1\n[domains.fabric.lanes]\nsetup_lock_wait_seconds = 1\n",
-        )?;
-        let common = provenant_os::fs::Directory::open_anchor(&git_dir)?;
-        let held = common.try_lock_existing(
+        for writer in std::iter::once(&writer)
+            .chain(std::iter::once(&second))
+            .chain(&siblings)
+        {
+            let branch = writer
+                .branch
+                .as_str()
+                .strip_prefix("refs/heads/")
+                .ok_or("branch")?;
+            assert_eq!(
+                run(&[
+                    "config",
+                    "--local",
+                    "--get",
+                    &format!("branch.{branch}.remote")
+                ])?,
+                "origin"
+            );
+            assert_eq!(
+                run(&[
+                    "config",
+                    "--local",
+                    "--get",
+                    &format!("branch.{branch}.merge")
+                ])?,
+                writer.branch.as_str()
+            );
+        }
+        // Preparation returns no lock for provider launch or custody to retain.
+        let common = Directory::open_anchor(&git_dir)?;
+        drop(common.try_lock_existing(
             OsStr::new("provenant-lane-setup.lock"),
             provenant_os::fs::LockMode::Exclusive,
-        )?;
-        let attempt_path = root.join("attempt");
-        std::fs::create_dir(&attempt_path)?;
-        let attempt = Directory::open_anchor(&attempt_path)?;
-        let refused = std::thread::scope(|scope| {
-            let launch = scope.spawn(|| {
-                prepare_writer_git(
-                    &mut writer,
-                    &state,
-                    &root,
-                    None,
-                    Some(&attempt),
-                    &CancelToken::new(),
-                    None,
-                )
-            });
-            loop {
-                if matches!(
-                    attempt.try_lock_existing(OsStr::new(SETUP_WAIT_LOCK), LockMode::Exclusive),
-                    Err(FsError::LockTimeout { .. })
-                ) {
-                    break;
-                }
-                assert!(!launch.is_finished(), "launcher must publish its lock wait");
-                std::thread::yield_now();
-            }
-            match launch.join().expect("launcher panicked") {
-                Err(error) => error,
-                Ok(_) => panic!("held Git setup lock must block preparation"),
-            }
-        });
-        assert!(
-            attempt
-                .try_lock_existing(OsStr::new(SETUP_WAIT_LOCK), LockMode::Exclusive)
-                .is_ok()
-        );
-        assert!(matches!(refused, RunError::SetupLockTimeout { seconds: 1 }));
-        assert!(
-            refused
-                .to_string()
-                .contains("domains.fabric.lanes.setup_lock_wait_seconds")
-        );
-        drop(held);
-        std::fs::remove_file(state.join("config.toml"))?;
+        )?);
         let repo = utility.open_repo(&executor, &project, budget()?, &cancel)?;
         provenant_confinement::verify_worktree(&repo, &lane)?
             .repo()
@@ -1743,34 +1421,18 @@ mod cargo_setup_tests {
         let reflog = git_dir.join("logs/refs/remotes/origin/chore/x");
         std::fs::create_dir_all(reflog.parent().ok_or("reflog parent")?)?;
         std::os::unix::fs::symlink(&target, &reflog)?;
-        let failure = prepare_writer_git(
-            &mut writer,
-            &state,
-            &root,
-            None,
-            None,
-            &CancelToken::new(),
-            None,
-        )
-        .err()
-        .ok_or("symlinked tracking reflog must refuse")?;
+        let failure = prepare_writer_git(&mut writer, &state, &root, None, &CancelToken::new())
+            .err()
+            .ok_or("symlinked tracking reflog must refuse")?;
         assert!(failure.to_string().contains(&reflog.display().to_string()));
         assert_eq!(std::fs::read(&target)?, b"untouched");
         std::fs::remove_file(&reflog)?;
         let parent = reflog.parent().ok_or("reflog parent")?;
         std::fs::remove_dir(parent)?;
         std::os::unix::fs::symlink(&root, parent)?;
-        let failure = prepare_writer_git(
-            &mut writer,
-            &state,
-            &root,
-            None,
-            None,
-            &CancelToken::new(),
-            None,
-        )
-        .err()
-        .ok_or("symlinked tracking reflog parent must refuse")?;
+        let failure = prepare_writer_git(&mut writer, &state, &root, None, &CancelToken::new())
+            .err()
+            .ok_or("symlinked tracking reflog parent must refuse")?;
         assert!(failure.to_string().contains(&parent.display().to_string()));
         assert_eq!(std::fs::read(&target)?, b"untouched");
         std::fs::remove_file(parent)?;
@@ -1778,39 +1440,13 @@ mod cargo_setup_tests {
         let tracking_lock = git_dir.join("refs/remotes/origin/chore/x.lock");
         std::fs::create_dir_all(tracking_lock.parent().ok_or("tracking lock parent")?)?;
         std::fs::write(&tracking_lock, b"held")?;
-        let failure = prepare_writer_git(
-            &mut writer,
-            &state,
-            &root,
-            None,
-            None,
-            &CancelToken::new(),
-            None,
-        )
-        .err()
-        .ok_or("stale tracking lock must refuse")?;
-        assert!(
-            matches!(&failure, RunError::WriterRefLocked(path) if *path == tracking_lock),
-            "{failure:?}"
-        );
-        assert_eq!(failure.code(), "WRITER_REF_LOCKED");
+        prepare_writer_git(&mut writer, &state, &root, None, &CancelToken::new())?;
         assert_eq!(std::fs::read(&tracking_lock)?, b"held");
         std::fs::remove_file(&tracking_lock)?;
         run(&["remote", "remove", "origin"])?;
         let stale = git_dir.join("refs/heads/chore/x.lock");
         std::fs::write(&stale, b"held")?;
-        let failure = prepare_writer_git(
-            &mut writer,
-            &state,
-            &root,
-            None,
-            None,
-            &CancelToken::new(),
-            None,
-        )
-        .err()
-        .ok_or("stale lock must refuse")?;
-        assert_eq!(failure.code(), "WRITER_REF_LOCKED", "{failure}");
+        prepare_writer_git(&mut writer, &state, &root, None, &CancelToken::new())?;
         assert_eq!(std::fs::read(&stale)?, b"held");
         Ok(())
     }
@@ -2766,6 +2402,74 @@ mod custody_admission_tests {
             &Directory::open_anchor(&path)?,
             scope
         )?);
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod launch_resource_limit_tests {
+    use super::*;
+
+    #[test]
+    fn unavailable_resource_settings_use_compiled_limits() -> std::io::Result<()> {
+        let state = tempfile::tempdir()?;
+        std::fs::write(
+            state.path().join("config.toml"),
+            "schema_version=1\n[domains.run]\ngrant_limit=0\n",
+        )?;
+        let limits = launch_resource_limits(state.path());
+        let defaults = ProfileLimits::default();
+        assert_eq!(limits.limits.grant_limit, defaults.grant_limit);
+        assert_eq!(limits.grant_origin, "compiled default");
+        assert_eq!(
+            limits.limits.profile_limit_bytes,
+            defaults.profile_limit_bytes
+        );
+        assert_eq!(limits.profile_origin, "compiled default");
+        let default_error = limits.annotate(
+            provenant_confinement::permissions::PermissionError::GrantLimitExceeded {
+                family: "fixture",
+                limit: 1,
+            },
+        );
+        assert!(
+            default_error
+                .to_string()
+                .contains("source: compiled default")
+        );
+        std::fs::write(
+            state.path().join("config.toml"),
+            "schema_version=1\n[domains.run]\ngrant_limit=128\n",
+        )?;
+        let explicit_default = launch_resource_limits(state.path());
+        assert_eq!(explicit_default.grant_origin, "host configuration");
+        assert_eq!(explicit_default.profile_origin, "compiled default");
+        std::fs::write(
+            state.path().join("config.toml"),
+            "schema_version=1\n[domains.run]\ngrant_limit=256\nprofile_limit_bytes=1048576\n",
+        )?;
+        let configured = launch_resource_limits(state.path());
+        assert_eq!(configured.limits.grant_limit, 256);
+        assert_eq!(configured.grant_origin, "host configuration");
+        assert_eq!(configured.limits.profile_limit_bytes, 1048576);
+        assert_eq!(configured.profile_origin, "host configuration");
+        let configured_error = configured.annotate(
+            provenant_confinement::permissions::PermissionError::ProfileTooLarge {
+                bytes: 2,
+                limit: 1,
+            },
+        );
+        assert!(
+            configured_error
+                .to_string()
+                .contains("source: host configuration")
+        );
+        let unrelated = configured
+            .annotate(provenant_confinement::permissions::PermissionError::ProtectedOverlap);
+        assert!(matches!(
+            unrelated,
+            provenant_confinement::permissions::PermissionError::ProtectedOverlap
+        ));
         Ok(())
     }
 }
