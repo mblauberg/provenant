@@ -342,6 +342,10 @@ pub enum FacadeError {
     HostDeliveryLimit {
         fact: provenant_records::diagnostic::DeliveryLimit,
     },
+    #[error("no configured peer has this host label")]
+    UnknownHost,
+    #[error("peer placement requires a read-only attempt without a local worktree")]
+    WorktreeNotApplicable,
     #[error("local worktree does not exist; create it with `provenant worktree create`")]
     WorktreeMissing,
     #[error(
@@ -648,6 +652,8 @@ impl FacadeError {
 
     pub const fn code(&self) -> &'static str {
         match self {
+            Self::UnknownHost => "UNKNOWN_HOST",
+            Self::WorktreeNotApplicable => "WORKTREE_NOT_APPLICABLE",
             Self::OwnerUnavailable => "owner_unavailable",
             Self::InvalidInput { .. } => "invalid_input",
             Self::NotFound => "not_found",

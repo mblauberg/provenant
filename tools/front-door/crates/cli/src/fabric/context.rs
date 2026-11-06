@@ -468,10 +468,24 @@ impl Context {
             })?;
         let project = ProjectLocator::new(&self.identity, &self.home)
             .map_err(|_| PeerFailure::from(FacadeError::ConfinementRefused { resource: None }))?;
+        // Graph operation replay is scoped to the actor that first launched
+        // the attempt, even when another agent later resumes its graph.
+        // Keep that namespace under the authenticated sending host rather
+        // than adopting a caller-supplied actor ID on the receiving host.
+        let agent = if let PeerAction::Submit { extra, .. } = &action {
+            match extra.get("graph_launch_actor") {
+                Some(value) => {
+                    let actor = value.as_str().and_then(|value| value.parse::<provenant_core::ActorId>().ok())
+                        .ok_or_else(|| PeerFailure::from(FacadeError::InvalidInput { detail: None }))?;
+                    format!("graph-{actor}")
+                }
+                None => self.identity.inbox.agent.clone(),
+            }
+        } else { self.identity.inbox.agent.clone() };
         let request = PeerRequest::new(
             host,
             self.identity.host,
-            self.identity.inbox.agent.clone(),
+            agent,
             project,
             action,
         );
@@ -512,7 +526,7 @@ impl Context {
             let probe = PeerRequest::new(
                 host,
                 self.identity.host,
-                self.identity.inbox.agent.clone(),
+                request.agent.clone(),
                 request.project.clone(),
                 PeerAction::Health {
                     extra: Default::default(),
@@ -710,6 +724,8 @@ pub fn facade_outcome(error: &FacadeError) -> (Outcome, provenant_run::ErrorKind
             (Outcome::Refused, ErrorKind::PeerVersion)
         }
         FacadeError::InvalidInput { .. } => (Outcome::Invalid, ErrorKind::Invalid),
+        FacadeError::UnknownHost => (Outcome::Invalid, ErrorKind::UnknownHost),
+        FacadeError::WorktreeNotApplicable => (Outcome::Invalid, ErrorKind::WorktreeNotApplicable),
         FacadeError::NotFound => (Outcome::Invalid, ErrorKind::NotFound),
         FacadeError::Conflict | FacadeError::GenerationConflict { .. } => {
             (Outcome::Refused, ErrorKind::Conflict)

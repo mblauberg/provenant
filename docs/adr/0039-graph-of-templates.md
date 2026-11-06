@@ -120,11 +120,17 @@ tier and template without counting composite descendants twice.
 `run`, `status`, `output`, `steer`, `stop`, `retry`, `edit`, `templates`, `land`,
 `quota`. Everything else sits behind `--all`. `output --trace` shows the timeline;
 `edit` applies a patch. `status` has one row schema for graph, node and attempt.
-`run [BRIEF] [--use T] [--tier] [--over] [--set] [--file] [--explain] [--wait]` starts
+`run [BRIEF] [--use T] [--tier T | --model ADAPTER/MODEL] [--effort LEVEL]
+[--account NAME] [--host NAME] [--over] [--set] [--file] [--explain] [--wait]` starts
 work, and inside a lane adds a child. `retry` resumes, continues or redoes a target,
 optionally with a new brief or a raised budget. `status --stats --by tier|template`
 reports efficiency. MCP calls the same service with the same JSON and takes
 documents, not file paths.
+
+`--operation-id ID` is available in `help --all` for replay. Attempt controls use
+`--set attempt.host='"workshop"'`, `--set attempt.build_heavy=true`,
+`--set attempt.confidential=true` and `--set attempt.provider_timeout=300`.
+`--host` overrides the attempt host setting. Delivery uses `--use deliver`.
 
 Deleted: `dispatch`, `review`, `lanes`, `resume`, `cancel`, `preset`, `fabric graph`,
 `fabric_graph`, `PRESET_INCOMPATIBLE`, the policy successors and tail chase (#2869),

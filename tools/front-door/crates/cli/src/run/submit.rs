@@ -722,6 +722,7 @@ fn submit_with_launcher(
                 .settlement_retry_limit
                 .map(|limit| limit.min(provenant_routing::MAX_SETTLEMENT_RETRIES));
             let attempt = task.attempt;
+            if attempt.confidential { task_profile.extra.insert("confidential".into(), serde_json::json!(true)); }
             if attempt.new_worktree.is_some()
                 || !attempt.capabilities.is_empty()
                 || !attempt.write_roots.is_empty()
@@ -746,7 +747,7 @@ fn submit_with_launcher(
                 source_head: task.source_head,
                 route: task.route,
                 account: attempt.account,
-                timeout_seconds: task.provider_timeout,
+                timeout_seconds: attempt.provider_timeout.unwrap_or(task.provider_timeout),
                 delivery_id: task.delivery_id,
                 deliver: task.deliver,
                 worktree: task.worktree,

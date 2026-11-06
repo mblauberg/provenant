@@ -987,7 +987,7 @@ fn route_request(task: &run::TaskRequest) -> Result<provenant_routing::RouteRequ
         choice,
         effort,
         fallback: Fallback::None,
-        confidential: false,
+        confidential: task.profile.extra.get("confidential").and_then(serde_json::Value::as_bool).unwrap_or(false),
     })
 }
 

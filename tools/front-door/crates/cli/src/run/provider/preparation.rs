@@ -1095,7 +1095,9 @@ pub(super) fn prepare_candidates(
         Some(prior) => continuation_request(prior)?,
         None => route_request(task)?,
     };
-    request.intent = route_request(task)?.intent;
+    let task_request = route_request(task)?;
+    request.intent = task_request.intent;
+    request.confidential = task_request.confidential;
     let catalogue = provenant_routing::Catalogue::bundled().map_err(|e| e.to_string())?;
     let mut eligible = provenant_routing::probe_adapters(
         &request,

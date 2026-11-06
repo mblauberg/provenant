@@ -2189,6 +2189,11 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 
 | Argument | Contract |
 |---|---|
+| `--host` | `{"description": "Place attempts on this peer name or host ID", "name": "host"}` |
+| `--model` | `{"conflicts": ["tier"], "description": "Use this exact adapter/model instead of a route tier", "name": "model"}` |
+| `--effort` | `{"description": "Override model reasoning effort", "name": "effort"}` |
+| `--account` | `{"description": "Account label for routing and quota accounting", "name": "account"}` |
+| `--operation-id` | `{"description": "Stable operation identity for replay", "name": "operation_id"}` |
 | `brief` | `{"description": "Brief for the selected template", "name": "brief", "positional": true}` |
 | `--use` | `{"description": "Select a layered template [default: task]", "name": "template"}` |
 | `--tier` | `{"description": "Override the template's route tier", "name": "tier"}` |
@@ -2218,6 +2223,11 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
   "groups": [
     {
       "arguments": [
+        "host",
+        "model",
+        "effort",
+        "account",
+        "operation_id",
         "brief",
         "template",
         "tier",
