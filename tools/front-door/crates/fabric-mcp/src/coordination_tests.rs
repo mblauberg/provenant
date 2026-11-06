@@ -314,10 +314,10 @@ fn graph_documents_reach_the_shared_owner_unchanged() -> Result<(), Box<dyn Erro
     assert_eq!(call(&mut service, "fabric_run", status.clone())?, status);
     let child_request = json!({"op":"run","brief":"inspect parser","use":"explore","tier":"junior","wait_seconds":1});
     let child = call(&mut service, "fabric_run", child_request)?;
-    assert_eq!(child["op"], "add");
-    assert_eq!(child["use"], "explore");
-    assert_eq!(child["brief"], "inspect parser");
-    assert_eq!(child["tier"], "junior");
+    assert_eq!(child["receipt"]["op"], "add");
+    assert_eq!(child["receipt"]["use"], "explore");
+    assert_eq!(child["receipt"]["brief"], "inspect parser");
+    assert_eq!(child["receipt"]["tier"], "junior");
     service = service.with_lane_restrictions(false);
     for request in [
         json!({"op":"run","document":{"id":"graph","nodes":[{"id":"inspect","use":"task","brief":"inspect parser"}],"templates":{"local":{"brief":"local"}}}}),
