@@ -340,9 +340,8 @@ fn schema_tools_report_errors_in_text_in_both_protocol_eras() {
         }
         for (index, (id, name, arguments, code, detail)) in [
             ("identity", "fabric_context", json!({"op":"inspect"}), "not_found", "not_found"),
-            ("submit", "fabric_run", json!({"op":"submit","operation_id":"unknown-launch-17", "tasks":[{"prompt":"work", "route":{"kind":"named","name":"utility"}, "timeout_seconds":1}]}), "LAUNCH_UNKNOWN", "unknown-launch-17"),
             ("bad-identity", "fabric_context", json!({"op":"inspect","extra":true}), "invalid_input", "arguments.<unknown>"),
-            ("bad-submit", "fabric_run", json!({"op":"submit","operation_id":"invalid", "tasks":[]}), "invalid_input", "arguments.tasks"),
+            ("bad-submit", "fabric_run", json!({"op":"submit","operation_id":"invalid", "tasks":[]}), "invalid_input", "arguments.op"),
         ].into_iter().enumerate() {
             let mut request = tool_call(id, name, arguments);
             if modern {
@@ -365,27 +364,6 @@ fn schema_tools_report_errors_in_text_in_both_protocol_eras() {
         }
         assert!(matches!(server.finish(), Ok(())));
     }
-}
-
-#[test]
-fn generated_submit_id_survives_facade_error() {
-    let gate = Arc::new(Gate::default());
-    gate.release();
-    gate.state.lock().unwrap().submit_error = Some(FacadeError::NotFound);
-    let server = Server::start(FakeFactory::new(gate), false);
-    server.send(&initialize());
-    server.send(&notification("notifications/initialized", json!({})));
-    server.send(&tool_call("submit", "fabric_run", json!({"op":"submit", "tasks":[{"prompt":"work", "route":{"kind":"named","name":"utility"}, "timeout_seconds":1}]})));
-    let frames = server.wait_for_frames(2, TEST_WAIT).unwrap();
-    let result = &frames[1]["result"];
-    assert_eq!(result["isError"], true);
-    assert!(
-        result["structuredContent"]["operation_id"]
-            .as_str()
-            .unwrap()
-            .starts_with("mcp-")
-    );
-    assert!(matches!(server.finish(), Ok(())));
 }
 
 #[test]

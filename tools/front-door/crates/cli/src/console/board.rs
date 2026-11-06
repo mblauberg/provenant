@@ -201,7 +201,6 @@ pub(super) fn read(
                 attempt,
                 &waits,
                 roots.state.as_path(),
-                &Default::default(),
                 clock.wall_now().ok(),
                 false,
             );

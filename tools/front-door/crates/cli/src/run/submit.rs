@@ -20,34 +20,6 @@ pub fn with_deferred_provider_launch<T>(action: impl FnOnce() -> T) -> T {
 }
 
 /// Strict manifest: `{schema_version:1,tasks:[...]}`.
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct Manifest {
-    pub(super) schema_version: u64,
-    pub(super) tasks: Vec<ManifestTask>,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct ManifestTask {
-    pub(super) context: Option<provenant_records::run::WorkContext>,
-    #[serde(default)]
-    pub(super) build_heavy: bool,
-    #[serde(default)]
-    pub(super) require_skill_location: bool,
-    pub(super) title: Option<String>,
-    pub(super) base: Option<String>,
-    pub(super) task_id: Option<TaskId>,
-    pub(super) prompt: Option<String>,
-    pub(super) prompt_file: Option<PathBuf>,
-    pub(super) route: run::RequestedRoute,
-    pub(super) delivery_id: Option<DeliveryId>,
-    pub(super) deliver: Option<run::WriterDeliveryRequest>,
-    pub(super) account: Option<String>,
-    /// Per-task network; overrides `--network` for this task.
-    pub(super) network: Option<Switch>,
-}
-
 pub(super) fn read_bounded(path: &Path) -> Result<String, Fail> {
     let invalid = |error: &dyn std::fmt::Display| {
         input_failure(

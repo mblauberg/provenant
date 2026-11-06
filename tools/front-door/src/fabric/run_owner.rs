@@ -67,7 +67,6 @@ pub(crate) fn peer_adoption_custody(
 struct SubmissionPolicy {
     access: provenant_records::run::LaneAccess,
     settlement_retry_limit: Option<u8>,
-    apply_project_defaults: bool,
     attempt: Option<provenant_fabric_runtime::graph::AttemptSpec>,
 }
 
@@ -351,6 +350,20 @@ impl BinaryRunOwner<'_> {
             .with_host(ctx.identity.host);
         Ok(provenant_cli::run::Session { store, context })
     }
+    fn read_session(&self, cancel: &CancelToken) -> Result<provenant_cli::run::Session, FacadeError> {
+        let ctx = &self.factory.context;
+        let context = provenant_run::ExecutionContext {
+            state_root: ctx.roots.state.clone(), project_id: ctx.identity.project,
+            actor_id: self.actor.unwrap_or(ctx.identity.inbox.actor), read_prompts: true,
+        };
+        let store = provenant_run::RunStore::open_read_only(&context, &self.call(cancel))
+            .map_err(run_error)?.ok_or(FacadeError::NotFound)?.with_host(ctx.identity.host);
+        Ok(provenant_cli::run::Session { store, context })
+    }
+    fn require_graph_control(&self, target: &AttemptTarget, cancel: &CancelToken) -> Result<(), FacadeError> {
+        let record = self.read_session(cancel)?.service().status_for_wait(target.attempt, &self.call(cancel)).map_err(run_error)?;
+        require_graph_context(record.context.as_ref())
+    }
     pub(crate) fn store(
         &self,
         cancel: &CancelToken,
@@ -474,7 +487,7 @@ impl BinaryRunOwner<'_> {
                 _ => Err(FacadeError::StateCorrupt),
             };
         }
-        provenant_run::Service::new(&self.store(cancel)?)
+        provenant_run::Service::new(&self.read_session(cancel)?.store)
             .status(
                 target.attempt,
                 &provenant_run::Request {
@@ -496,7 +509,7 @@ impl BinaryRunOwner<'_> {
         {
             return Err(FacadeError::InvalidInput { detail: None });
         }
-        let session = self.session(cancel)?;
+        let session = self.read_session(cancel)?;
         let call = self.call(cancel);
         targets
             .iter()
@@ -520,7 +533,7 @@ impl BinaryRunOwner<'_> {
         if !(1..=100).contains(&limit) {
             return Err(FacadeError::InvalidInput { detail: None });
         }
-        let store = self.store(cancel)?;
+        let store = self.read_session(cancel)?.store;
         let page = provenant_run::Service::new(&store)
             .lanes_for_wait(
                 &provenant_run::LaneQuery {
@@ -544,7 +557,7 @@ impl BinaryRunOwner<'_> {
         cancel: &CancelToken,
     ) -> Result<Vec<provenant_records::run::LaneWait>, FacadeError> {
         let lanes = self.snapshots_local(targets, cancel)?;
-        let store = self.store(cancel)?;
+        let store = self.read_session(cancel)?.store;
         Ok(store.lane_waits(&lanes, &self.call(cancel)))
     }
     pub(crate) fn peer(
@@ -580,27 +593,6 @@ impl BinaryRunOwner<'_> {
             events: true,
         }
     }
-    /// Submissions take the CLI's scan, record and launch path. Fabric never
-    /// creates queued rows itself or reconstructs a provider invocation.
-    pub(crate) fn submit(
-        &mut self,
-        input: SubmitInput,
-        budget: WaitBudget,
-        cancel: &CancelToken,
-    ) -> Result<SubmissionReceipt, FacadeError> {
-        self.submit_inner(
-            input,
-            budget,
-            cancel,
-            SubmissionPolicy {
-                access: Default::default(),
-                settlement_retry_limit: None,
-                apply_project_defaults: true,
-                attempt: None,
-            },
-        )
-        .map_err(|error| scope_io(error, "submit"))
-    }
     /// Graph nodes use the same validated, sealed access grants as CLI lanes.
     pub(crate) fn submit_with_access(
         &mut self,
@@ -611,20 +603,19 @@ impl BinaryRunOwner<'_> {
         settlement_retry_limit: Option<u8>,
         attempt: Option<provenant_fabric_runtime::graph::AttemptSpec>,
     ) -> Result<SubmissionReceipt, FacadeError> {
-        self.submit_inner(
+        self.launch_graph_attempt(
             input,
             budget,
             cancel,
             SubmissionPolicy {
                 access,
                 settlement_retry_limit,
-                apply_project_defaults: false,
                 attempt,
             },
         )
         .map_err(|error| scope_io(error, "submit"))
     }
-    fn submit_inner(
+    fn launch_graph_attempt(
         &mut self,
         input: SubmitInput,
         budget: WaitBudget,
@@ -635,7 +626,6 @@ impl BinaryRunOwner<'_> {
         let SubmissionPolicy {
             access,
             settlement_retry_limit,
-            apply_project_defaults,
             attempt,
         } = policy;
         let SubmitInput::Submit {
@@ -646,88 +636,15 @@ impl BinaryRunOwner<'_> {
             host,
             ..
         } = input;
-        // Explicit placement forwards the whole batch; the peer confines it.
-        if let Some(host) = host.filter(|h| *h != self.factory.context.identity.host) {
-            if !access.is_default() {
-                return Err(FacadeError::ConfinementRefused { resource: None });
-            }
-            if !self.allow_remote {
-                return Err(FacadeError::ConfinementRefused { resource: None });
-            }
-            // MCP forwards read-only work only; a peer writer comes from `dispatch`.
-            if tasks
-                .iter()
-                .any(|t| t.access != provenant_fabric_runtime::graph::AccessMode::ReadOnly)
-            {
-                return Err(FacadeError::OwnerUnavailable);
-            }
-            let input = SubmitInput::Submit {
-                extra: Default::default(),
-                operation_id: operation_id.clone(),
-                tasks,
-                concurrency,
-                knobs,
-                host: None,
-            };
-            return match self.peer(
-                host,
-                PeerAction::Submit {
-                    extra: Default::default(),
-                    input,
-                },
-                budget,
-                cancel,
-            )? {
-                PeerResult::Submitted { data: receipt, .. }
-                    if receipt.operation_id == operation_id
-                        && receipt.worktree.is_none()
-                        && !receipt.targets.is_empty()
-                        && receipt.targets.iter().all(|t| t.host == Some(host)) =>
-                {
-                    Ok(receipt)
-                }
-                _ => Err(FacadeError::StateCorrupt),
-            };
+        if tasks.iter().any(|task| task.context.as_ref().is_none_or(|context|
+            context.graph_id.is_none() || context.node_id.is_none())) {
+            return Err(FacadeError::invalid(InvalidInputDetail::Field("graph context".into())));
         }
-        // Peer ingress creates a writer's worktree in this host's clone; a
-        // caller never names a path here, and a batch creates at most one.
-        let ingress = !self.allow_remote;
-        let mut tasks = tasks;
-        let mut created = None;
-        for task in &mut tasks {
-            let Some(spec) = task.new_worktree.take() else {
-                if ingress && task.worktree.is_some() {
-                    return Err(FacadeError::InvalidInput { detail: None });
-                }
-                continue;
-            };
-            if !ingress
-                || created.is_some()
-                || task.worktree.is_some()
-                || task.access != provenant_fabric_runtime::graph::AccessMode::WorktreeWrite
-            {
-                return Err(FacadeError::InvalidInput { detail: None });
-            }
-            let worktree = self.peer_worktree(&operation_id, spec, budget, cancel)?;
-            task.worktree = Some(worktree.path.clone());
-            created = Some(worktree);
+        // Graph worktree and placement are resolved before the sealed attempt reaches this owner.
+        if host.is_some_and(|host| host != self.factory.context.identity.host)
+            || tasks.iter().any(|task| task.new_worktree.is_some()) {
+            return Err(FacadeError::invalid(InvalidInputDetail::Field("attempt placement".into())));
         }
-        let defaults = if apply_project_defaults {
-            let config = provenant_config::read_with_domains(
-                &self.factory.context.roots,
-                &provenant_cli::domains::SECTIONS,
-            )
-            .map_err(|_| FacadeError::InvalidInput { detail: None })?;
-            config
-                .domains
-                .lanes
-                .projects
-                .get(&self.factory.context.identity.project.to_string())
-                .map(|settings| settings.capabilities.clone())
-                .unwrap_or_default()
-        } else {
-            Vec::new()
-        };
         let mut submitted = Vec::new();
         for (index, task) in tasks.into_iter().enumerate() {
             worktree_access(
@@ -736,24 +653,6 @@ impl BinaryRunOwner<'_> {
                 task.worktree.as_deref().map(Path::new),
             )
             .map_err(fail_error)?;
-            let mut task_access = access.clone();
-            if apply_project_defaults {
-                let capabilities = task.capabilities.as_deref().unwrap_or_else(|| {
-                    if task.access == provenant_fabric_runtime::graph::AccessMode::WorktreeWrite {
-                        defaults.as_slice()
-                    } else {
-                        &[]
-                    }
-                });
-                for capability in capabilities {
-                    if capability == "postgres" {
-                        task_access.database_ipc = true;
-                        task_access.extra.insert("capability_sources".into(), serde_json::json!([{"name":"postgres", "source": if task.capabilities.is_some() { task.capability_sources.get("postgres").map(String::as_str).filter(|source| matches!(*source, "flag" | "project default" | "task")).unwrap_or("task") } else { "project default" }}]));
-                    } else {
-                        provenant_cli::run::warn_ignored_capability("project ", capability);
-                    }
-                }
-            }
             submitted.push(Submitted {
                 attempt: attempt.clone().unwrap_or_else(|| {
                     provenant_fabric_runtime::graph::AttemptSpec {
@@ -777,7 +676,7 @@ impl BinaryRunOwner<'_> {
                 delivery_id: task.delivery_id,
                 deliver: task.deliver,
                 worktree: task.worktree.map(PathBuf::from),
-                access: task_access,
+                access: access.clone(),
             });
         }
         let session = self.session(cancel)?;
@@ -797,150 +696,7 @@ impl BinaryRunOwner<'_> {
                 self.factory.host_launch.as_ref(),
             )
         })?;
-        let mut receipt = self.receipt(&session, operation_id, &run, &started, &call)?;
-        receipt.worktree = created;
-        Ok(receipt)
-    }
-    /// The writer worktree a peer request names. A first request fetches every
-    /// remote, requires the base on a remote-tracking ref and creates the
-    /// branch at it. A retry adopts the branch's worktree while it is still
-    /// clean at that base; a replayed operation finds the one it created.
-    fn peer_worktree(
-        &self,
-        operation_id: &provenant_core::OperationId,
-        spec: NewWorktree,
-        budget: WaitBudget,
-        cancel: &CancelToken,
-    ) -> Result<provenant_fabric_runtime::runs::PeerWorktree, FacadeError> {
-        use provenant_confinement::worktrees::{
-            self, WorktreeCondition, WorktreeCreate, WorktreeError,
-        };
-        let branch = provenant_confinement::repo::GitRefName::branch(&spec.branch)
-            .map_err(|_| FacadeError::InvalidInput { detail: None })?;
-        provenant_confinement::repo::GitRevision::new(&spec.base)
-            .map_err(|_| FacadeError::InvalidInput { detail: None })?;
-        let replay = self
-            .store(cancel)?
-            .operation(operation_id, &self.call(cancel))
-            .map_err(run_error)?
-            .is_some();
-        // Fetch and create each take at most half of what remains, so the
-        // submission keeps a reserve; a retry adopts a create that ran late.
-        let half = || {
-            let micros = budget.remaining(self.factory.clock.mono_now()).as_micros() / 2;
-            std::time::Duration::from_micros(micros)
-        };
-        let project = &self.factory.cwd;
-        let facts = worktrees::RepoFacts::default();
-        let base = if replay {
-            None
-        } else {
-            let resolved = crate::worktrees::with_context(
-                &self.factory.context.roots,
-                &self.factory.home,
-                project,
-                half(),
-                self.factory.workers,
-                |context, cancel| {
-                    let context = &worktrees::WorktreeContext {
-                        facts: &facts,
-                        ..*context
-                    };
-                    Ok(remote_base(context, &spec.base, half(), true, cancel))
-                },
-            )
-            .map_err(|_| FacadeError::io("resolve peer base"))?;
-            Some(resolved?)
-        };
-        let (info, warning) = crate::worktrees::with_context(
-            &self.factory.context.roots,
-            &self.factory.home,
-            project,
-            half(),
-            self.factory.workers,
-            |context, cancel| {
-                let context = &worktrees::WorktreeContext {
-                    facts: &facts,
-                    ..*context
-                };
-                let existing = worktrees::list(context, cancel)?
-                    .into_iter()
-                    .find(|entry| entry.branch.as_deref() == Some(branch.as_str()));
-                let Some(base) = base else {
-                    return existing
-                        .map(|entry| (entry, None))
-                        .ok_or(WorktreeError::NotFound.into());
-                };
-                match existing {
-                    Some(entry) => {
-                        if entry.head != base || entry.dirty != WorktreeCondition::Clean {
-                            if matches!(&entry.occupancy, worktrees::Occupancy::Held) {
-                                let _ = peer_adoption_custody(context, &entry, cancel)?;
-                            }
-                            return Err(WorktreeError::BranchExistsWithBase {
-                                branch: spec.branch.clone(),
-                                head: entry.head,
-                                base,
-                            }
-                            .into());
-                        }
-                        let warning = peer_adoption_custody(context, &entry, cancel)?;
-                        Ok((entry, warning))
-                    }
-                    None => {
-                        let request = WorktreeCreate {
-                            branch: spec.branch.clone(),
-                            base: Some(base.to_string()),
-                        };
-                        Ok((worktrees::create(context, request, cancel)?, None))
-                    }
-                }
-            },
-        )
-        .map_err(|error| match error {
-            // The branch name is valid, so either refusal means it already exists.
-            crate::worktrees::Error::Worktree(
-                WorktreeError::InvalidRequest | WorktreeError::BranchExistsWithBase { .. },
-            ) if !replay => FacadeError::BranchExists,
-            crate::worktrees::Error::Worktree(WorktreeError::NotFound) if replay => {
-                FacadeError::WorktreeMissing
-            }
-            crate::worktrees::Error::Worktree(WorktreeError::NotFound) => {
-                FacadeError::BaseUnreachable
-            }
-            crate::worktrees::Error::Worktree(WorktreeError::Cancelled) => FacadeError::Cancelled,
-            crate::worktrees::Error::Worktree(WorktreeError::IdentityChanged) => {
-                FacadeError::Conflict
-            }
-            crate::worktrees::Error::Worktree(
-                WorktreeError::GitOperationInProgress
-                | WorktreeError::Dirty(_)
-                | WorktreeError::IgnoredPaths(_),
-            ) => FacadeError::ConfinementRefused { resource: None },
-            crate::worktrees::Error::Worktree(WorktreeError::WriterBusy { holder }) => {
-                FacadeError::WriterBusy { holder }
-            }
-            crate::worktrees::Error::Worktree(WorktreeError::LockBusy) => {
-                FacadeError::WriterBusy { holder: None }
-            }
-            crate::worktrees::Error::Worktree(
-                WorktreeError::UnknownOccupancy { .. } | WorktreeError::UnknownWriter,
-            ) => FacadeError::WriterUnknown,
-            _ => FacadeError::io("create peer worktree"),
-        })?;
-        let mut extra = provenant_records::ExtraFields::default();
-        if let Some(warning) = warning {
-            extra.insert("warnings".into(), serde_json::json!([warning]));
-        }
-        Ok(provenant_fabric_runtime::runs::PeerWorktree {
-            extra,
-            path: info
-                .path
-                .to_str()
-                .ok_or(FacadeError::io("create peer worktree"))?
-                .to_owned(),
-            branch: spec.branch,
-        })
+        self.receipt(&session, operation_id, &run, &started, &call)
     }
     pub(crate) fn output(
         &mut self,
@@ -965,18 +721,16 @@ impl BinaryRunOwner<'_> {
                 _ => Err(FacadeError::StateCorrupt),
             };
         }
-        let session = self.session(cancel)?;
+        let session = self.read_session(cancel)?;
         let call = self.call(cancel);
         let record = session
             .service()
             .status(target.attempt, &call)
             .map_err(run_error)?;
-        let successors = Default::default();
         let mut row = provenant_cli::run::project_lane(
             &record,
             &[],
             session.context.state_root.as_path(),
-            &successors,
             self.factory.clock.wall_now().ok(),
             false,
         );
@@ -1227,7 +981,7 @@ impl BinaryRunOwner<'_> {
                 let local_session = if local_indices.is_empty() {
                     None
                 } else {
-                    Some(self.session(cancel)?)
+                    Some(self.read_session(cancel)?)
                 };
                 let local_call = self.call(cancel);
                 let mut last_attempts = None;
@@ -1370,6 +1124,7 @@ impl BinaryRunOwner<'_> {
                         _ => Err(FacadeError::StateCorrupt),
                     };
                 }
+                self.require_graph_control(target, cancel)?;
                 let store = self.store(cancel)?;
                 let call = self.call(cancel);
                 let reason = format!("cancelled by Fabric operation {operation_id}");
@@ -1430,6 +1185,7 @@ impl BinaryRunOwner<'_> {
                 if !self.capabilities().resume {
                     return Err(FacadeError::ContinuationUnsupported);
                 }
+                self.require_graph_control(target, cancel)?;
                 let session = self.session(cancel)?;
                 let call = self.call(cancel);
                 let (run, started) = self.with_edge(|edge| {
@@ -1467,7 +1223,7 @@ impl BinaryRunOwner<'_> {
                 {
                     return Err(FacadeError::OwnerUnavailable);
                 }
-                let store = self.store(cancel)?;
+                let store = self.read_session(cancel)?.store;
                 let call = self.call(cancel);
                 let after_sequence = after
                     .as_ref()
@@ -1523,7 +1279,7 @@ impl BinaryRunOwner<'_> {
         if !(1..=64).contains(&limit) {
             return Err(FacadeError::InvalidInput { detail: None });
         }
-        let store = self.store(cancel)?;
+        let store = self.read_session(cancel)?.store;
         let call = provenant_run::Request {
             clock: &self.factory.clock,
             cancel,
@@ -1551,5 +1307,28 @@ impl BinaryRunOwner<'_> {
             cursor,
             truncated,
         })
+    }
+}
+
+fn require_graph_context(context: Option<&provenant_records::run::WorkContext>) -> Result<(), FacadeError> {
+    if context.is_some_and(|context| context.graph_id.is_some() && context.node_id.is_some()) {
+        Ok(())
+    } else {
+        Err(FacadeError::invalid(InvalidInputDetail::Field("retained non-graph lanes are read-only".into())))
+    }
+}
+
+#[cfg(test)]
+mod graph_control_tests {
+    use super::*;
+    #[test]
+    fn retained_attempts_require_graph_context_before_controls() {
+        assert!(require_graph_context(None).is_err());
+        let mut context = provenant_records::run::WorkContext::default();
+        assert!(require_graph_context(Some(&context)).is_err());
+        context.graph_id = Some("graph".into());
+        assert!(require_graph_context(Some(&context)).is_err());
+        context.node_id = Some("task".into());
+        assert!(require_graph_context(Some(&context)).is_ok());
     }
 }

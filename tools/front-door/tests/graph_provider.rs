@@ -1,4 +1,4 @@
-//! Real dispatch composition with isolated, synthetic provider processes.
+//! Graph provider composition with isolated, synthetic provider processes.
 #![allow(clippy::disallowed_methods)]
 mod support;
 use serde_json::{Value, json};
@@ -626,7 +626,7 @@ fn opencode_usage_limit_settlement_is_bounded() -> Result {
 }
 
 /// Read provider session facts from its committed WAL through a graph node.
-fn opencode_dispatch_observes_v2_wal_session() -> Result {
+fn graph_opencode_observes_v2_wal_session() -> Result {
     if !graph_fixture_available()? {
         return Ok(());
     }
@@ -1068,27 +1068,6 @@ fn claude_dispatch(host_native: bool, pool: bool) -> Result {
         assert_eq!(
             lane["applied_route"]["source"],
             "domains.fabric.host_native.ci-fixer"
-        );
-        let resume_prompt = rig.root.join("resume-prompt.md");
-        fs::write(&resume_prompt, "continue")?;
-        let resumed = rig.command(&[
-            "resume",
-            lane["attempt_id"].as_str().ok_or("attempt")?,
-            "--prompt-file",
-            resume_prompt.to_str().ok_or("resume prompt")?,
-            "--no-fallback",
-            "--json",
-        ])?;
-        assert_eq!(
-            code(&resumed),
-            1,
-            "{}",
-            String::from_utf8_lossy(&resumed.stdout.bytes)
-        );
-        let refusal: Value = serde_json::from_slice(&resumed.stdout.bytes)?;
-        assert_eq!(
-            refusal["error"]["code"], "CONTINUATION_UNSUPPORTED",
-            "{refusal}"
         );
     }
     assert!(account.join("refreshed").exists());
@@ -1755,53 +1734,6 @@ fn persisted_attempt_with(
     Ok((rig, terminal))
 }
 
-fn cancel_wait_settles_stalled_import_with_durable_exit() -> Result {
-    let (rig, running) = persisted_attempt_with(
-        "codex",
-        "codex/gpt-6.1-sol",
-        ("work", "fixture"),
-        b"",
-        b"",
-        0,
-        PersistedAttemptOptions {
-            writer: true,
-            nonterminal: true,
-            stalled_import: true,
-            ..Default::default()
-        },
-    )
-    .map_err(|error| format!("stalled import fixture: {error}"))?;
-    let _cleanup = rig.process_cleanup();
-    let output = rig.command(&[
-        "stop",
-        &running.attempt_id.to_string(),
-        "--wait",
-        "10s",
-        "--json",
-    ])?;
-    let value: Value = serde_json::from_slice(&output.stdout.bytes)?;
-    assert_eq!(code(&output), 0, "{value}");
-    assert_eq!(value["data"]["condition_met"], true, "{value}");
-    let lanes = rig.command(&["status", &running.attempt_id.to_string(), "--all", "--json"])?;
-    let lanes: Value = serde_json::from_slice(&lanes.stdout.bytes)?;
-    let lane = &lanes["data"]["rows"][0];
-    assert_eq!(lane["state"], "cancelled", "{lanes}");
-    assert_eq!(lane["cause"], "cancelled", "{lanes}");
-    assert_eq!(lane["exit_code"], 0, "{lanes}");
-    let database = rusqlite::Connection::open(rig.state.join("run.sqlite3"))?;
-    let retained: Vec<u8> = database.query_row(
-        "SELECT record FROM attempts WHERE id=?1",
-        [running.attempt_id.to_string()],
-        |row| row.get(0),
-    )?;
-    let retained: provenant_run::AttemptRecord = serde_json::from_slice(&retained)?;
-    assert_eq!(
-        retained.terminal_evidence,
-        Some(provenant_run::TerminalEvidence::ImportCancellation)
-    );
-    Ok(())
-}
-
 fn receipt_output_resolves_run_task_and_attempt() -> Result {
     let (rig, terminal) = persisted_attempt(
         "codex",
@@ -2430,83 +2362,6 @@ fn agy_individual_quota_cools_model_until_reset() -> Result {
     Ok(())
 }
 
-fn fixture_owner_repro(ready_path: &std::path::Path) -> Result {
-    let mut rig = TestRig::new()?;
-    let data = rig.home.join(".local/share/opencode");
-    fs::create_dir_all(&data)?;
-    let db = rusqlite::Connection::open(data.join("opencode.db"))?;
-    db.execute_batch(
-        r#"PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0;
-        CREATE TABLE session_message (session_id TEXT, type TEXT, data TEXT);
-        INSERT INTO session_message VALUES ('ses_x', 'assistant',
-        '{"model":{"providerID":"opencode-go","id":"glm-5.3-flash"},"finish":"stop"}');"#,
-    )?;
-    let bin = rig.root.join("provider/bin");
-    fs::create_dir_all(&bin)?;
-    rig.copy_executable(&std::env::current_exe()?, &bin.join("opencode"))?;
-    rig.env.retain(|(key, _)| key != "PATH");
-    rig.env.push((
-        "PATH".into(),
-        format!("{}:/usr/bin:/bin", bin.display()).into(),
-    ));
-    let prompt = rig.root.join("prompt.md");
-    fs::write(&prompt, "fixture owner lifetime probe")?;
-    let output = rig.command(&[
-        "dispatch",
-        "--model",
-        "opencode/opencode-go/glm-5.3-flash",
-        "--operation-id",
-        "fixture-owner-lifetime",
-        "--prompt-file",
-        prompt.to_str().ok_or("prompt path")?,
-        "--wait",
-        "1s",
-        "--json",
-    ])?;
-    // The provider is still running when the one-second wait ends (exit 124).
-    assert!(matches!(code(&output), 0 | 124), "{output:?}");
-    let identity = provenant_test_support::wait_for(
-        &format!(
-            "guardian identity; dispatch output: {}",
-            String::from_utf8_lossy(&output.stdout.bytes)
-        ),
-        std::time::Duration::from_secs(10),
-        || find_guardian_identity(&rig.state),
-        |result| !matches!(result, Ok(None)),
-    )??
-    .ok_or("guardian identity missing")?;
-    fs::write(
-        ready_path,
-        serde_json::to_vec(&json!({"root": rig.root, "guardian": identity}))?,
-    )?;
-    // Keep the owner alive until the parent kills it to test guardian cleanup.
-    #[allow(clippy::disallowed_methods)] // Bound fixture lifetime if cleanup fails.
-    std::thread::park_timeout(std::time::Duration::from_secs(120));
-    Ok(())
-}
-
-fn find_guardian_identity(root: &std::path::Path) -> Result<Option<Value>> {
-    for entry in fs::read_dir(root)? {
-        let path = entry?.path();
-        if path.is_dir() {
-            if let Some(identity) = find_guardian_identity(&path)? {
-                return Ok(Some(identity));
-            }
-        } else if path
-            .file_name()
-            .is_some_and(|name| name == "reservation.json")
-        {
-            let value: Value = serde_json::from_slice(&fs::read(path)?)?;
-            if let Some(identity) = value.get("guardian") {
-                return Ok(Some(identity.clone()));
-            }
-        }
-    }
-    Ok(None)
-}
-
-/// Launch one synthetic provider through the current graph interface, then read
-/// its settled attempt from the shared host store for provider-contract checks.
 fn run_graph_provider(rig: &TestRig, graph_id: &str, node: Value) -> Result<Value> {
     let document = rig.root.join(format!("{graph_id}.json"));
     fs::write(
@@ -2520,8 +2375,11 @@ fn run_graph_provider(rig: &TestRig, graph_id: &str, node: Value) -> Result<Valu
         "--wait=5s",
         "--json",
     ])?;
-    assert_eq!(code(&out), 0, "{out:?}");
     let response: Value = serde_json::from_slice(&out.stdout.bytes)?;
+    let outcome: provenant_records::Outcome = serde_json::from_value(response["status"].clone())?;
+    assert_eq!(code(&out), i32::from(provenant_cli::exit_status(&outcome)), "{response}");
+    assert!(response["error"].is_null(), "{response}");
+    assert!(response["data"]["checkpoint"].is_object(), "{response}");
     let reference = response["data"]["checkpoint"]["nodes"][0]["attempts"][0]["attempt_ref"]
         .as_str()
         .ok_or_else(|| format!("attempt reference missing: {response}"))?;
@@ -2549,7 +2407,6 @@ fn run_graph_provider(rig: &TestRig, graph_id: &str, node: Value) -> Result<Valu
         &record,
         &[],
         rig.state.as_path(),
-        &Default::default(),
         None,
         false,
     ))?)
@@ -2831,157 +2688,6 @@ fn graph_node_reads_full_upstream_result_from_its_inputs_directory() -> Result {
     Ok(())
 }
 
-fn owned_dispatch_refuses_adopted_owner_and_cleans_refused_creation() -> Result {
-    let rig = TestRig::new()?;
-    let git = provenant_os::git::git_executable().ok_or("git")?;
-    for args in [
-        vec!["commit", "--allow-empty", "-qm", "base"],
-        vec!["branch", "-M", "main"],
-    ] {
-        assert_eq!(code(&rig.execute(&git, &args, None)?), 0);
-    }
-    let branch = "fixture/adopted";
-    assert_eq!(
-        code(&rig.command(&["worktree", "create", branch, "--base", "main", "--json",])?),
-        0
-    );
-    let tree = rig.project.join(".worktrees/fixture-adopted");
-    let admin = rig.execute(
-        &git,
-        &[
-            "-C",
-            tree.to_str().ok_or("tree")?,
-            "rev-parse",
-            "--absolute-git-dir",
-        ],
-        None,
-    )?;
-    assert_eq!(code(&admin), 0);
-    let owner_path =
-        PathBuf::from(String::from_utf8(admin.stdout.bytes)?.trim()).join("provenant-owner.json");
-    let base_head = rig.execute(&git, &["rev-parse", "HEAD"], None)?;
-    assert_eq!(code(&base_head), 0);
-    let mut owner = json!({
-        "attempt_id": null,
-        "operation_id": null,
-        "branch": branch,
-        "base": String::from_utf8(base_head.stdout.bytes)?.trim(),
-        "host": provenant_core::HostId::from_bytes([1; 16]),
-        "created_at": provenant_core::WallTime::from_micros(1)?,
-        "origin": "adopted",
-        "label": "human-session"
-    });
-    // Exercise the retained host writer-admission service directly. The
-    // binary no longer exposes the former dispatch command, but this service
-    // still owns refusing foreign worktree owners and cleaning failed setup.
-    #[derive(clap::Parser)]
-    struct WriterAdmissionFixture {
-        #[command(flatten)]
-        request: provenant_cli::Dispatch,
-    }
-    let mut inputs = provenant_core::RootInputs::new(rig.home.clone(), rig.project.clone());
-    inputs.state_dir = Some(rig.state.clone());
-    let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
-    let edge = provenant_cli::run::Edge {
-        roots: &roots,
-        home: &rig.home,
-        assets: &rig.project,
-        cwd: &rig.project,
-    };
-    let admit = |args: &[&str]| -> Result<Value> {
-        use clap::Parser;
-        let parsed = WriterAdmissionFixture::try_parse_from(args)?;
-        Ok(serde_json::to_value(
-            provenant_cli::run::run(parsed.request, &edge).result,
-        )?)
-    };
-    let base = owner["base"].clone();
-    let prompt = rig.root.join("owned-prompt.md");
-    fs::write(&prompt, "Do not change files.")?;
-    for same_operation in [false, true] {
-        owner["operation_id"] = if same_operation {
-            json!("adopted-refused")
-        } else {
-            Value::Null
-        };
-        fs::write(&owner_path, serde_json::to_vec(&owner)?)?;
-        let before = fs::read(&owner_path)?;
-        let result = admit(&[
-            "writer-admission-fixture",
-            "--operation-id",
-            "adopted-refused",
-            "--model",
-            "codex/gpt-6-luna",
-            "--mode",
-            "worktree-write",
-            "--worktree-branch",
-            branch,
-            "--base",
-            "main",
-            "--prompt-file",
-            prompt.to_str().ok_or("prompt")?,
-        ])?;
-        assert_ne!(result["status"], "ok", "{result}");
-        assert!(
-            result["error"]["message"]
-                .as_str()
-                .unwrap_or_default()
-                .contains("adopted or foreign owner"),
-            "{result}"
-        );
-        assert_eq!(fs::read(&owner_path)?, before);
-        assert_eq!(owner["base"], base);
-        assert_eq!(owner["label"], "human-session");
-    }
-    // A new checkout made before prompt loading fails must be removed.
-    let missing = rig.root.join("missing-prompt.md");
-    let result = admit(&[
-        "writer-admission-fixture",
-        "--operation-id",
-        "creation-refused",
-        "--model",
-        "codex/gpt-6-luna",
-        "--mode",
-        "worktree-write",
-        "--worktree-branch",
-        "fixture/refused",
-        "--base",
-        "main",
-        "--prompt-file",
-        missing.to_str().ok_or("missing")?,
-    ])?;
-    assert_ne!(result["status"], "ok", "{result}");
-    let refused_tree = rig.project.join(".worktrees/fixture-refused");
-    if refused_tree.exists() {
-        // A native census that cannot prove the tree free must retain its
-        // durable lane owner for GC rather than force removal.
-        assert!(
-            result["error"]["message"]
-                .as_str()
-                .unwrap_or_default()
-                .contains("new managed worktree retained for gc"),
-            "{result}"
-        );
-        let admin = rig.execute(
-            &git,
-            &[
-                "-C",
-                refused_tree.to_str().ok_or("tree")?,
-                "rev-parse",
-                "--absolute-git-dir",
-            ],
-            None,
-        )?;
-        let owner: Value = serde_json::from_slice(&fs::read(
-            PathBuf::from(String::from_utf8(admin.stdout.bytes)?.trim())
-                .join("provenant-owner.json"),
-        )?)?;
-        assert_eq!(owner["origin"], "lane");
-        assert_eq!(owner["operation_id"], "creation-refused");
-    }
-    Ok(())
-}
-
 fn graph_settlement_records_a_failed_advance_for_status() -> Result {
     if !graph_fixture_available()? {
         return Ok(());
@@ -3050,7 +2756,7 @@ fn graph_settlement_records_a_failed_advance_for_status() -> Result {
 }
 
 #[cfg(target_os = "macos")]
-fn dispatch_proceeds_when_provider_update_is_busy() -> Result {
+fn graph_launch_proceeds_when_provider_update_is_busy() -> Result {
     let mut rig = TestRig::new()?;
     let _cleanup = rig.process_cleanup();
     let bin = rig.root.join("provider/bin");
@@ -3092,16 +2798,37 @@ fn dispatch_proceeds_when_provider_update_is_busy() -> Result {
     Ok(())
 }
 
-fn main() -> ExitCode {
-    if let Some(path) = std::env::var_os("PROVENANT_FIXTURE_OWNER_REPRO") {
-        return match fixture_owner_repro(std::path::Path::new(&path)) {
-            Ok(()) => ExitCode::SUCCESS,
-            Err(error) => {
-                let _ = writeln!(io::stderr(), "fixture owner repro: {error}");
-                ExitCode::FAILURE
-            }
-        };
+fn graph_codex_rollout_binds_observed_route_and_missing_rollout_is_explicit() -> Result {
+    if !graph_fixture_available()? { return Ok(()); }
+    let rig = policy_codex_fixture()?;
+    let cleanup = rig.process_cleanup();
+    for (id, brief, has_rollout) in [
+        ("rollout-present", "reply OK", true),
+        ("rollout-missing", "fixture missing rollout", false),
+    ] {
+        let lane = run_graph_provider(&rig, id, json!({
+            "id":"provider", "prompt":brief, "access":"read_only",
+            "route":{"adapter":"codex","model":"gpt-6-luna","effort":"low"}
+        }))?;
+        assert_eq!(lane["state"], "succeeded", "{lane}");
+        if has_rollout {
+            assert_eq!(lane["observed_route"]["model"], "codex/gpt-6-luna", "{lane}");
+            assert_eq!(lane["transcript"]["session"], "01234567-89ab-cdef-0123-456789abcdef");
+        } else {
+            assert!(lane["observed_route"].is_null(), "{lane}");
+            assert!(!lane["transcript"].is_null(), "{lane}");
+        }
     }
+    cleanup.disarm();
+    Ok(())
+}
+
+fn graph_host_native_launch_uses_the_provider_contract() -> Result {
+    if !graph_fixture_available()? { return Ok(()); }
+    claude_dispatch(true, false)
+}
+
+fn main() -> ExitCode {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
     #[cfg(target_os = "macos")]
     if std::env::args_os().next().is_some_and(|arg| {
@@ -3127,23 +2854,23 @@ fn main() -> ExitCode {
             &args,
             &[
                 #[cfg(target_os = "macos")]
-                "dispatch_proceeds_when_provider_update_is_busy",
+                "graph_launch_proceeds_when_provider_update_is_busy",
                 "graph_settlement_records_a_failed_advance_for_status",
                 "graph_node_reads_full_upstream_result_from_its_inputs_directory",
                 "opencode_stderr_live_quota",
                 "opencode_usage_limit_stops_hanging_provider",
-                "owned_dispatch_refuses_adopted_owner_and_cleans_refused_creation",
                 "pool_receipt_excludes_prompt_and_credential_from_artifacts",
                 "printed_credentials_leave_no_plaintext_in_run_files",
-                "cancel_wait_settles_stalled_import_with_durable_exit",
                 "receipt_output_reports_unknown_route_for_settled_lost_attempt",
                 "output_names_the_attempt_it_reads_and_writes_or_locates_parts",
                 "receipt_output_resolves_run_task_and_attempt",
                 "receipt_output_classifies_writers_and_refuses_ambiguous_or_running_attempts",
                 "opencode_usage_limit_settlement_is_bounded",
                 "host_native_preparation_uses_the_provider_contract",
+                "graph_host_native_launch_uses_the_provider_contract",
+                "graph_codex_rollout_binds_observed_route_and_missing_rollout_is_explicit",
                 "graph_read_only_alias_retries_another_member_after_empty_launch_quota",
-                "opencode_dispatch_observes_v2_wal_session",
+                "graph_opencode_observes_v2_wal_session",
                 "opencode_free_pool_cools_second_model",
                 "opencode_free_reset_cools_pool_until_reset_and_restores",
                 "agy_individual_quota_cools_model_until_reset",
@@ -3154,16 +2881,14 @@ fn main() -> ExitCode {
             |name| {
                 let result = match name {
                     #[cfg(target_os = "macos")]
-                    "dispatch_proceeds_when_provider_update_is_busy" => dispatch_proceeds_when_provider_update_is_busy(),
+                    "graph_launch_proceeds_when_provider_update_is_busy" => graph_launch_proceeds_when_provider_update_is_busy(),
                     "graph_settlement_records_a_failed_advance_for_status" => graph_settlement_records_a_failed_advance_for_status(),
                     "graph_node_reads_full_upstream_result_from_its_inputs_directory" => graph_node_reads_full_upstream_result_from_its_inputs_directory(),
                     "opencode_stderr_live_quota" => opencode_stderr_live_quota(),
                     "opencode_usage_limit_stops_hanging_provider" => opencode_usage_limit_stops_hanging_provider(),
-                    "owned_dispatch_refuses_adopted_owner_and_cleans_refused_creation" => owned_dispatch_refuses_adopted_owner_and_cleans_refused_creation(),
                     "pool_receipt_excludes_prompt_and_credential_from_artifacts" => pool_receipt_excludes_prompt_and_credential_from_artifacts(),
                     "printed_credentials_leave_no_plaintext_in_run_files" => printed_credentials_leave_no_plaintext_in_run_files(),
 
-                    "cancel_wait_settles_stalled_import_with_durable_exit" => cancel_wait_settles_stalled_import_with_durable_exit(),
                     "receipt_output_reports_unknown_route_for_settled_lost_attempt" => {
                         receipt_output_reports_unknown_route_for_settled_lost_attempt()
                     }
@@ -3181,12 +2906,14 @@ fn main() -> ExitCode {
                         opencode_usage_limit_settlement_is_bounded()
                     }
 
+                    "graph_host_native_launch_uses_the_provider_contract" => graph_host_native_launch_uses_the_provider_contract(),
+                    "graph_codex_rollout_binds_observed_route_and_missing_rollout_is_explicit" => graph_codex_rollout_binds_observed_route_and_missing_rollout_is_explicit(),
                     "host_native_preparation_uses_the_provider_contract" => {
                         host_native_preparation_uses_the_provider_contract()
                     }
 
                     "graph_read_only_alias_retries_another_member_after_empty_launch_quota" => graph_read_only_alias_retries_another_member_after_empty_launch_quota(),
-                    "opencode_dispatch_observes_v2_wal_session" => opencode_dispatch_observes_v2_wal_session(),
+                    "graph_opencode_observes_v2_wal_session" => graph_opencode_observes_v2_wal_session(),
                     "opencode_free_pool_cools_second_model" => {
                         opencode_free_pool_cools_second_model()
                     }

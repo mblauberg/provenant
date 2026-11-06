@@ -375,8 +375,8 @@ pub fn peer(
                     }
                 })
             }
-            PeerAction::Submit { input, .. } => {
-                peer_result(owner.submit(input.clone(), budget, &cancel), |data| {
+            PeerAction::Submit { .. } => {
+                peer_result(Err::<provenant_fabric_runtime::runs::SubmissionReceipt, _>(FacadeError::invalid(InvalidInputDetail::Field("submit".into()))), |data| {
                     PeerResult::Submitted {
                         data,
                         extra: Default::default(),

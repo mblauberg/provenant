@@ -1,7 +1,7 @@
 //! CLI-owned grammar with mounted owner subtrees.
 use crate::metadata::CatalogueArg;
 use clap::{Args, Parser, Subcommand, ValueEnum, builder::TypedValueParser};
-use provenant_core::{DeliveryId, GitOid, OperationId, RunId, TaskId};
+use provenant_core::{GitOid, OperationId, RunId, TaskId};
 pub use provenant_records::Harness;
 use std::{ffi::OsString, path::PathBuf, str::FromStr};
 
@@ -413,20 +413,6 @@ mod viewer_tests {
     use super::*;
 
     #[test]
-    fn dispatch_accepts_skill_location_requirement() {
-        #[derive(clap::Parser)]
-        struct Fixture {
-            #[command(flatten)]
-            dispatch: Dispatch,
-        }
-        let dispatch =
-            Fixture::try_parse_from(["fixture", "--require-skill-location", "--prompt-stdin"])
-                .unwrap()
-                .dispatch;
-        assert!(dispatch.require_skill_location);
-    }
-
-    #[test]
     fn viewer_revision_flags_reject_zero() {
         for args in [
             vec![
@@ -651,28 +637,30 @@ impl Access {
     }
 }
 #[derive(Debug, Args)]
-#[group(id = "dispatch_input", required = true, multiple = false)]
-pub struct DispatchInput {
-    /// Read the prompt from this file
-    #[arg(long)]
-    pub prompt_file: Option<PathBuf>,
-    /// Read the prompt from standard input
-    #[arg(long)]
-    pub prompt_stdin: bool,
-    /// Dispatch the tasks in this manifest file
-    #[arg(long)]
-    pub manifest: Option<PathBuf>,
-}
-#[derive(Debug, Args)]
 pub struct GraphRunArgs {
     /// Brief for the selected template
     pub brief: Option<String>,
     /// Select a layered template [default: task]
     #[arg(long = "use")]
     pub template: Option<String>,
-    /// Override the template's route tier
-    #[arg(long)]
+    /// Override the template's named route tier
+    #[arg(long, visible_alias = "route")]
     pub tier: Option<String>,
+    /// Access for a plain task; writer targets imply worktree-write
+    #[arg(long, value_parser = ["read-only", "worktree-write"])]
+    pub mode: Option<String>,
+    /// Existing writer worktree
+    #[arg(long, conflicts_with = "branch")]
+    pub worktree: Option<PathBuf>,
+    /// Create an owned writer worktree on this branch
+    #[arg(long, requires = "base")]
+    pub branch: Option<String>,
+    /// Git base for a new writer branch
+    #[arg(long, requires = "branch")]
+    pub base: Option<String>,
+    /// Paths the writer may change, relative to its worktree; repeatable
+    #[arg(long = "write-scope")]
+    pub write_scope: Vec<String>,
     /// Copy the node over named items, or a resolver such as @review-panel
     #[arg(long, value_delimiter = ',')]
     pub over: Vec<String>,
@@ -690,121 +678,6 @@ pub struct GraphRunArgs {
     pub wait: Option<u64>,
 }
 
-#[derive(Debug, Args)]
-#[command(group(clap::ArgGroup::new("writer_target").args(["worktree", "branch", "worktree_branch"])))]
-pub struct Dispatch {
-    /// Placement: local or named cloud target in cloud:NAME form.
-    #[arg(long, conflicts_with = "preset")]
-    pub placement: Option<String>,
-    /// Override the cloud provider.
-    #[arg(long)]
-    pub cloud_provider: Option<String>,
-    /// Override the provider environment ID.
-    #[arg(long)]
-    pub cloud_environment: Option<String>,
-    /// Override the requested cloud model.
-    #[arg(long)]
-    pub cloud_model: Option<String>,
-    /// Override the requested cloud effort.
-    #[arg(long)]
-    pub cloud_effort: Option<String>,
-    /// Override the cloud repository source.
-    #[arg(long)]
-    pub cloud_repository: Option<String>,
-    /// Override the repository branch made available to the cloud job.
-    #[arg(long)]
-    pub cloud_branch: Option<String>,
-    /// Override the cloud job deadline in seconds.
-    #[arg(long)]
-    pub cloud_deadline: Option<u64>,
-    /// Expand and run a named pipeline preset
-    #[arg(long, visible_alias = "use", catalog_requires = "prompt_file")]
-    pub preset: Option<String>,
-    /// Override a preset value (PATH=TOML_VALUE); quote TOML strings; repeatable
-    #[arg(long = "set", catalog_requires = "preset")]
-    pub preset_set: Vec<String>,
-    /// Read preset parameters from a TOML table file; --set overrides it
-    #[arg(long = "params-file", catalog_requires = "preset")]
-    pub preset_params_file: Option<PathBuf>,
-    /// Planner front-end: auto, on or off; the default is [domains.fabric.plan] mode
-    #[arg(long = "plan", catalog_requires = "preset", value_parser = ["auto", "on", "off"])]
-    pub preset_plan: Option<String>,
-    /// Give this preset run a new graph identity, for example to rerun after a cancel
-    #[arg(long, catalog_requires = "preset")]
-    pub fresh: bool,
-    /// Explain roles, limits and the expanded graph without running it
-    #[arg(long)]
-    pub explain: bool,
-    /// Risk tier supplied to preset selection and model-choice preferences
-    #[arg(long)]
-    pub risk_tier: Option<String>,
-    /// Task kind supplied to preset selection and model-choice preferences
-    #[arg(long)]
-    pub task_kind: Option<String>,
-    /// Changed or declared path supplied to automatic preset selection (repeatable)
-    #[arg(long = "path")]
-    pub selection_paths: Vec<String>,
-    /// Require the selected adapter to provide a skill location
-    #[arg(long)]
-    pub require_skill_location: bool,
-    /// Use the build-heavy scheduling priority
-    #[arg(long)]
-    pub build_heavy: bool,
-    #[command(flatten)]
-    pub input: DispatchInput,
-    /// Caller-chosen ID that makes retries idempotent
-    #[arg(long, default_value = "", value_parser = operation_id, hide = true, hide_default_value = true)]
-    pub operation_id: OperationId,
-    /// Short human title for this task
-    #[arg(long, conflicts_with = "manifest")]
-    pub title: Option<String>,
-    /// Fabric task this lane serves
-    #[arg(long)]
-    pub task_id: Option<TaskId>,
-    /// Delivery this lane belongs to
-    #[arg(long)]
-    pub delivery_id: Option<DeliveryId>,
-    /// Host delivery: none, push, integrate:<branch> (local), or pr (origin)
-    #[arg(long)]
-    pub deliver: Option<provenant_records::run::DeliveryMode>,
-    #[command(flatten)]
-    pub route: RouteRequest,
-    /// Pin a registered account (key or label) instead of resolving one
-    #[arg(long)]
-    pub account: Option<String>,
-    #[command(flatten)]
-    pub access: Access,
-    /// Provider timeout in seconds
-    #[arg(long, default_value = "3600", default_value_if("mode", "worktree-write", "10800"), catalog_u64_range = 1..=provenant_core::MAX_LANE_RUNTIME_SECONDS)]
-    pub provider_timeout: u64,
-    /// Manifest lanes or preset graph attempts to run at once (1 to 16)
-    #[arg(long, catalog_u64_range = 1..=16)]
-    pub concurrency: Option<u64>,
-    /// Override an effective harness knob for this dispatch (NAME=VALUE).
-    #[arg(long = "knob")]
-    pub knobs: Vec<String>,
-    /// Configured peer (label or host ID) to run the dispatch on
-    #[arg(long)]
-    pub host: Option<String>,
-    /// New writer branch; run creates an owned worktree locally or on --host
-    #[arg(long, catalog_requires_all = ["host", "base"])]
-    pub branch: Option<String>,
-    /// Create or reuse a clean local writer worktree owned by this lane
-    #[arg(long, conflicts_with_all = ["worktree", "branch", "host", "manifest"])]
-    pub worktree_branch: Option<String>,
-    /// Chair-verified full commit SHA to review (must exist on the executing host)
-    #[arg(long)]
-    pub head: Option<String>,
-    /// Git base for attempt history and a new writer branch
-    #[arg(long)]
-    pub base: Option<String>,
-    /// Wait for task or preset graph settlement (seconds, or a duration such as 30m)
-    #[arg(long, catalog_duration())]
-    pub wait: Option<u64>,
-    /// Admission timeout before launch (seconds, or a duration such as 10m)
-    #[arg(long, value_parser = duration_seconds)]
-    pub admission_timeout: Option<u64>,
-}
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Target {
     /// Deferred selection when at least one ID is a unique hexadecimal prefix.
