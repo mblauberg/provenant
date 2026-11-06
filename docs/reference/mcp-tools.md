@@ -1029,8 +1029,17 @@ Source: `tools/front-door/crates/fabric-mcp/tests/fixtures/all-tool-schemas.json
             "maxLength": 200,
             "type": "string"
           },
+          "node": {
+            "maxLength": 200,
+            "type": "string"
+          },
           "op": {
             "const": "retry"
+          },
+          "wait_seconds": {
+            "maximum": 55,
+            "minimum": 1,
+            "type": "integer"
           }
         },
         "required": [
@@ -1111,6 +1120,11 @@ Source: `tools/front-door/crates/fabric-mcp/tests/fixtures/all-tool-schemas.json
           },
           "stats": {
             "type": "boolean"
+          },
+          "wait_seconds": {
+            "maximum": 55,
+            "minimum": 1,
+            "type": "integer"
           }
         },
         "required": [
@@ -1131,6 +1145,11 @@ Source: `tools/front-door/crates/fabric-mcp/tests/fixtures/all-tool-schemas.json
           "reason": {
             "maxLength": 256,
             "type": "string"
+          },
+          "wait_seconds": {
+            "maximum": 55,
+            "minimum": 1,
+            "type": "integer"
           }
         },
         "required": [

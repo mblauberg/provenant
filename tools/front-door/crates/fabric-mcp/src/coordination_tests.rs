@@ -434,7 +434,7 @@ fn graph_documents_reach_the_shared_owner_unchanged() -> Result<(), Box<dyn Erro
             .structured_content,
         json!({"op":"output","id":"g-test","trace":true})
     );
-    let status = json!({"op":"status","id":"g-test"});
+    let status = json!({"op":"status","id":"g-test","wait_seconds":1});
     assert_eq!(call(&mut service, "fabric_run", status.clone())?, status);
     let child_request = json!({"op":"run","brief":"inspect parser","use":"explore","tier":"junior","wait_seconds":1});
     assert_eq!(
@@ -445,6 +445,8 @@ fn graph_documents_reach_the_shared_owner_unchanged() -> Result<(), Box<dyn Erro
     for request in [
         json!({"op":"run","document":{"id":"graph","nodes":[{"id":"inspect","use":"task","brief":"inspect parser"}],"templates":{"local":{"brief":"local"}}}}),
         json!({"op":"edit","id":"graph","patch":{"expected_revision":1,"idempotency_key":"edit-1","nodes":[{"id":"next","use":"local"}]}}),
+        json!({"op":"stop","id":"graph","reason":"maintenance","wait_seconds":1}),
+        json!({"op":"retry","id":"graph","node":"task","brief":"repeat","extend":["attempts=2"],"wait_seconds":1}),
     ] {
         assert_eq!(call(&mut service, "fabric_run", request.clone())?, request);
     }
