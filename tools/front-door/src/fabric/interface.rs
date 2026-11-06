@@ -190,6 +190,13 @@ impl Factory {
         cancel: &CancelToken,
     ) -> Result<Value, FacadeError> {
         let operation = required(&input, "op")?;
+        if let Some(wait) = input.get("wait_seconds") {
+            let seconds = wait
+                .as_u64()
+                .ok_or_else(|| FacadeError::invalid("wait_seconds must be an integer"))?;
+            WaitBudget::cli(self.clock.mono_now(), seconds)
+                .map_err(|error| FacadeError::invalid(error.to_string()))?;
+        }
         if self.context.inspection_only
             && (matches!(operation, "edit" | "stop" | "retry")
                 || operation == "run" && input["explain"] != true)
@@ -423,7 +430,12 @@ impl Factory {
             Some(&scratch),
         )?;
         let run = self.wait_document(run, input, budget, cancel)?;
-        encode(run)
+        let timed_out = input.get("wait_seconds").and_then(Value::as_u64).is_some()
+            && run.status == GraphStatus::Pending
+            && !cancel.is_cancelled();
+        let mut result = encode(run)?;
+        result["timed_out"] = json!(timed_out);
+        Ok(result)
     }
 
     fn edit_document(
@@ -510,6 +522,20 @@ impl Factory {
             }
             target.node = Some(node.into());
         }
+        let extend: Vec<String> = input
+            .get("extend")
+            .cloned()
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(|error| FacadeError::invalid(error.to_string()))?
+            .unwrap_or_default();
+        if !extend.is_empty()
+            && (target.node.is_some() || input.get("brief").is_some_and(|value| !value.is_null()))
+        {
+            return Err(FacadeError::invalid(
+                "apply extend separately before redoing a node",
+            ));
+        }
         let id = target.graph.clone();
         if let Some(node) = target.node.as_deref() {
             let mut journal = FileJournal::open(
@@ -554,13 +580,6 @@ impl Factory {
         } else if input.get("brief").is_some_and(|value| !value.is_null()) {
             return Err(FacadeError::invalid("brief requires a node target"));
         }
-        let extend = input
-            .get("extend")
-            .cloned()
-            .map(serde_json::from_value)
-            .transpose()
-            .map_err(|error| FacadeError::invalid(error.to_string()))?
-            .unwrap_or_default();
         let run = self.graph(
             GraphInput::Resume {
                 extra: Default::default(),
@@ -1094,6 +1113,30 @@ mod tests {
         assert_eq!(stats["groups"][0]["tokens"], 100);
         assert_eq!(stats["groups"][0]["cost_micro_usd"], 25);
         assert_eq!(stats["groups"][0]["wall_time_seconds"], 3);
+        let before = FileJournal::read_status_checkpoint(
+            &factory.context.roots.state,
+            factory.context.identity.project,
+            &id,
+        )?;
+        for extend in [json!(true), json!(["budget.tokens=1000"])] {
+            assert!(
+                factory
+                    .graph_document(
+                        json!({"op":"retry","id":format!("{id}/task"),"extend":extend}),
+                        budget,
+                        &cancel
+                    )
+                    .is_err()
+            );
+            assert_eq!(
+                FileJournal::read_status_checkpoint(
+                    &factory.context.roots.state,
+                    factory.context.identity.project,
+                    &id
+                )?,
+                before
+            );
+        }
         Ok(())
     }
 }
