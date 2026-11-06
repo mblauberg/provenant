@@ -187,7 +187,7 @@ fn bind_launch_controls(input: &Value, node: &mut Value, cwd: &Path) -> Result<(
     let base = input.get("base").filter(|value| !value.is_null());
     let worktree = input.get("worktree").filter(|value| !value.is_null());
     let access = input.get("access").filter(|value| !value.is_null());
-    if branch.is_some() != base.is_some() || branch.is_some() && worktree.is_some() {
+    if base.is_some() && branch.is_none() || branch.is_some() && worktree.is_some() {
         return Err(invalid("branch"));
     }
     if let Some(access) = access {
@@ -208,10 +208,13 @@ fn bind_launch_controls(input: &Value, node: &mut Value, cwd: &Path) -> Result<(
             .filter(|value| !value.is_empty())
             .ok_or_else(|| invalid("branch"))?;
         provenant_confinement::repo::GitRefName::branch(branch).map_err(|_| invalid("branch"))?;
-        let base = base
-            .and_then(Value::as_str)
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| invalid("base"))?;
+        let base = match base {
+            Some(base) => base
+                .as_str()
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| invalid("base"))?,
+            None => "refs/remotes/origin/HEAD",
+        };
         provenant_confinement::repo::GitRevision::new(base).map_err(|_| invalid("base"))?;
         node["worktree"] = json!(format!(".worktrees/{}", branch.replace('/', "-")));
         if node.get("attempt").is_none() {
@@ -221,6 +224,9 @@ fn bind_launch_controls(input: &Value, node: &mut Value, cwd: &Path) -> Result<(
             return Err(invalid("attempt"));
         }
         node["attempt"]["new_worktree"] = json!({"branch":branch,"base":base});
+        if input.get("base").is_none_or(Value::is_null) {
+            node["attempt"]["new_worktree"]["default_base"] = json!(true);
+        }
     } else if let Some(worktree) = worktree {
         let path = Path::new(
             worktree
@@ -458,7 +464,7 @@ impl Factory {
             resolvers: &resolvers,
         }
         .lower(&node)
-        .map_err(|_| invalid())?;
+        .map_err(graph_input_reason)?;
         if let Some(tier) = input.get("tier").filter(|value| !value.is_null()) {
             let tier = tier.as_str().ok_or_else(invalid)?;
             let route = serde_json::from_value(json!({"alias":tier})).map_err(|_| invalid())?;
@@ -1645,6 +1651,42 @@ mod tests {
             mcp_project: None,
             workers: &Workers,
         })
+    }
+
+    #[test]
+    fn child_unknown_parameter_keeps_the_compiler_refusal() -> Result {
+        let rig = TestRig::new()?;
+        let factory = factory(&rig)?;
+        let error = factory
+            .child_request(&json!({
+                "op":"run", "brief":"Inspect", "set":{"bogus":true}
+            }))
+            .expect_err("task has no bogus parameter");
+        let diagnostic = error.diagnostic();
+        let detail = diagnostic
+            .detail
+            .as_deref()
+            .ok_or("missing compiler detail")?;
+        assert!(detail.contains("task"), "{detail}");
+        assert!(detail.contains("bogus"), "{detail}");
+        assert!(detail.contains("parameter"), "{detail}");
+        let restored: FacadeError = serde_json::from_value(serde_json::to_value(&error)?)?;
+        assert_eq!(restored.diagnostic(), diagnostic);
+        Ok(())
+    }
+
+    #[test]
+    fn branch_without_base_uses_the_remote_default_branch() -> Result {
+        let mut node = json!({"use":"task"});
+        bind_launch_controls(&json!({"branch":"topic"}), &mut node, Path::new("/repo"))?;
+        assert_eq!(
+            node["attempt"]["new_worktree"]["base"],
+            "refs/remotes/origin/HEAD"
+        );
+        assert!(
+            bind_launch_controls(&json!({"base":"HEAD"}), &mut node, Path::new("/repo")).is_err()
+        );
+        Ok(())
     }
 
     #[test]

@@ -183,6 +183,12 @@ pub fn main() -> std::process::ExitCode {
                 Err(error) => exit("land race", Err(error)),
             }
         }
+        Some("--admission-only") => {
+            let args = args.into_iter().skip(1);
+            ExitCode::from(provenant_cli::run::with_deferred_provider_launch(|| {
+                crate::dispatch(provenant_cli::parse(args), &Fixture)
+            }))
+        }
         Some("--state-dir" | "internal") => {
             let code = crate::dispatch(provenant_cli::parse(args), &Fixture);
             // A fixture-only observation after the real command has rendered.
@@ -223,6 +229,7 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
     provenant_supervisor::fixture::run_libtest(
         args,
         &[
+            "graph_stop_cancels_live_delivery_fetch_and_seed_preparation",
             "gc_fetches_default_and_removes_only_clean_merged_worktrees",
             "gc_output_requires_terminal_lanes_and_respects_keep_recent_dirty_and_links",
             "gc_disk_alert_is_once_per_dip_and_manual_preview_does_not_latch",
@@ -299,6 +306,7 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
                 "pr_contribution_land_warns_when_binding_fails" => crate::pr_land_tests::pr_contribution_land_warns_when_binding_fails(),
                 "pr_contribution_unbound_project" => crate::pr_land_tests::pr_contribution_unbound_project(),
                 "pr_contribution_roundtrip" => crate::pr_land_tests::pr_contribution_roundtrip(),
+                "graph_stop_cancels_live_delivery_fetch_and_seed_preparation" => graph_stop_cancels_live_delivery_fetch_and_seed_preparation(),
                 "gc_fetches_default_and_removes_only_clean_merged_worktrees" => gc_fetches_default_and_removes_only_clean_merged_worktrees(),
                 "gc_output_requires_terminal_lanes_and_respects_keep_recent_dirty_and_links" => gc_output_requires_terminal_lanes_and_respects_keep_recent_dirty_and_links(),
                 "gc_disk_alert_is_once_per_dip_and_manual_preview_does_not_latch" => gc_disk_alert_is_once_per_dip_and_manual_preview_does_not_latch(),
@@ -2410,6 +2418,18 @@ fn create_list_and_remove_a_managed_worktree() -> Result {
                 && tree["owner"] == "unowned")
     );
     assert!(trees.iter().any(|tree| tree["owner"] == "primary"));
+    let diagnosis = ok(
+        &rig,
+        &["worktree", "doctor", ".worktrees/feature-topic", "--json"],
+    )?;
+    assert_eq!(diagnosis["command"], "worktree doctor");
+    assert_eq!(diagnosis["data"]["state"], "clean");
+    assert_eq!(diagnosis["data"]["path"], created["data"]["path"]);
+    assert!(
+        diagnosis["data"]["repair"]
+            .as_str()
+            .is_some_and(|repair| { repair.starts_with("provenant worktree doctor ") })
+    );
     let cache = prepare_lane_cache(
         &rig,
         &rig.project.join(".worktrees/feature-topic"),
@@ -3287,6 +3307,7 @@ fn lane_prepare_with(cases: &[(&str, bool, bool, u8)], probe: Probe) -> Result {
             project_id: Some(context.project_id),
             host: None,
             cancel: None,
+            repo_facts: Default::default(),
         };
         let clock = provenant_os::clock::SystemClock::new();
         let cancel = provenant_core::CancelToken::new();
@@ -4036,6 +4057,9 @@ if (process.argv[2] === 'child') {
                     "unlink \"$lane_root/.fixture-git-probe\""
                 ),
             ),
+            // This is a native confined-shell probe of the lane's PATH Git
+            // wrapper. fixture::run_git deliberately bypasses that wrapper and
+            // cannot establish this boundary behaviour.
             (
                 "git commit",
                 concat!(
@@ -5053,4 +5077,170 @@ mod predicate_tests {
         assert!(!super::native_shell_probe_case("codex", true, false));
         assert!(!super::native_shell_probe_case("codex", true, true));
     }
+}
+
+// Port the former dispatch preparation cancellation regression through the
+// graph front door. Entering seeding a second time proves the first launcher
+// released the same worktree's custody before stop returned.
+fn graph_stop_cancels_live_delivery_fetch_and_seed_preparation() -> Result {
+    use std::os::unix::fs::PermissionsExt;
+    if !writer_backend_available()? {
+        return Ok(());
+    }
+    for phase in ["delivery", "seed"] {
+        let mut rig = repository()?;
+        let _cleanup = rig.process_cleanup();
+        let gate = rig.root.join("preparation-gate");
+        fs::create_dir(&gate)?;
+        fs::write(gate.join("hold"), b"hold")?;
+        let git_exe = provenant_os::git::git_executable().ok_or("git")?;
+        let remote = rig.root.join("remote.git");
+        git(&rig, &["init", "--bare", remote.to_str().ok_or("remote")?])?;
+        git(
+            &rig,
+            &["remote", "add", "origin", remote.to_str().ok_or("remote")?],
+        )?;
+        git(&rig, &["push", "origin", "HEAD:refs/heads/main"])?;
+        ok(
+            &rig,
+            &[
+                "worktree",
+                "create",
+                "preparation",
+                "--base",
+                "HEAD",
+                "--json",
+            ],
+        )?;
+        let worktree = rig.project.join(".worktrees/preparation");
+        let bin = rig.root.join("provider-bin");
+        fs::create_dir(&bin)?;
+        let codex = bin.join("codex");
+        fs::write(
+            &codex,
+            "#!/bin/sh\ncase \"$1\" in --version) printf 'codex-cli 1.0.0\\n';; login) printf 'Logged in using ChatGPT\\n';; *) printf '{\"type\":\"thread.started\",\"thread_id\":\"fixture-preparation\"}\\n';; esac\n",
+        )?;
+        fs::set_permissions(&codex, fs::Permissions::from_mode(0o700))?;
+        let gh = bin.join("gh");
+        fs::write(
+            &gh,
+            "#!/bin/sh\ncase \"$*\" in *token*) printf 'fixture-token\\n';; *) printf 'gh version 2.0.0\\n';; esac\n",
+        )?;
+        fs::set_permissions(&gh, fs::Permissions::from_mode(0o700))?;
+        rig.env.retain(|(key, _)| key != "PATH");
+        rig.env.push((
+            "PATH".into(),
+            format!("{}:/usr/bin:/bin", bin.display()).into(),
+        ));
+        let account = rig.root.join("codex");
+        fs::write(
+            account.join("auth.json"),
+            br#"{"tokens":{"account_id":"fixture-preparation"}}"#,
+        )?;
+        support::register_account(
+            &rig,
+            "codex",
+            "preparation",
+            "fixture-preparation",
+            &account,
+        )?;
+        if phase == "delivery" {
+            let wrapper = bin.join("git");
+            fs::write(
+                &wrapper,
+                format!(
+                    "#!/bin/sh\ncase \" $* \" in *' fetch '*) if [ -f '{}/hold' ]; then : > '{}/entered'; exec /bin/sleep 30; fi;; esac\nexec '{}' \"$@\"\n",
+                    gate.display(),
+                    gate.display(),
+                    git_exe.display()
+                ),
+            )?;
+            fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o700))?;
+            rig.env.retain(|(key, _)| key != "PROVENANT_GIT");
+            rig.env
+                .push(("PROVENANT_GIT".into(), wrapper.into_os_string()));
+        } else {
+            rig.env.push((
+                "PROVENANT_FIXTURE_HOLD_SEED".into(),
+                gate.clone().into_os_string(),
+            ));
+        }
+        let submit = |rig: &TestRig, id: &str, delivery: &str| -> Result<Value> {
+            let file = rig.root.join(format!("{id}.json"));
+            fs::write(
+                &file,
+                serde_json::to_vec(&serde_json::json!({
+                    "graph_id":id, "nodes":[{"id":"writer", "use":"task", "brief":"reply OK",
+                        "access":"worktree_write", "worktree":worktree, "delivery":delivery,
+                        "route":{"adapter":"codex", "model":"codex/gpt-6-luna", "account":"preparation"}}]
+                }))?,
+            )?;
+            let output = command(
+                rig,
+                &[
+                    "run",
+                    "--file",
+                    file.to_str().ok_or("graph file")?,
+                    "--wait=1s",
+                    "--json",
+                ],
+            )?;
+            assert!(matches!(code(&output), 0 | 124), "{phase}: {output:?}");
+            json(&output)
+        };
+        let first = submit(
+            &rig,
+            "preparation-first",
+            if phase == "delivery" { "push" } else { "none" },
+        )?;
+        provenant_test_support::wait_for(
+            "graph preparation entered",
+            Duration::from_secs(20),
+            || gate.join("entered").exists(),
+            |ready| *ready,
+        )?;
+        assert!(
+            first["data"]["checkpoint"]["nodes"][0]["attempts"][0]["attempt_ref"].is_string(),
+            "{phase}: {first}"
+        );
+        let before = std::time::Instant::now();
+        let stopped = ok(&rig, &["stop", "preparation-first", "--wait=3s", "--json"])?;
+        assert!(
+            before.elapsed() < Duration::from_secs(4),
+            "{phase}: {stopped}"
+        );
+        assert_eq!(
+            stopped["data"]["rows"][0]["state"], "cancelled",
+            "{phase}: {stopped}"
+        );
+        fs::remove_file(gate.join("hold"))?;
+        fs::remove_file(gate.join("entered"))?;
+        let next_gate = rig.root.join("next-seed-gate");
+        fs::create_dir(&next_gate)?;
+        fs::write(next_gate.join("hold"), b"hold")?;
+        rig.env
+            .retain(|(key, _)| key != "PROVENANT_FIXTURE_HOLD_SEED");
+        rig.env.push((
+            "PROVENANT_FIXTURE_HOLD_SEED".into(),
+            next_gate.clone().into_os_string(),
+        ));
+        let next = submit(&rig, "preparation-next", "none")?;
+        provenant_test_support::wait_for(
+            "next graph acquired the writer and entered seeding",
+            Duration::from_secs(20),
+            || next_gate.join("entered").exists(),
+            |ready| *ready,
+        )?;
+        assert!(
+            next["data"]["checkpoint"]["nodes"][0]["attempts"][0]["attempt_ref"].is_string(),
+            "{phase}: {next}"
+        );
+        let stopped = ok(&rig, &["stop", "preparation-next", "--wait=3s", "--json"])?;
+        assert_eq!(
+            stopped["data"]["rows"][0]["state"], "cancelled",
+            "{phase}: {stopped}"
+        );
+        fs::remove_file(next_gate.join("hold"))?;
+    }
+    Ok(())
 }

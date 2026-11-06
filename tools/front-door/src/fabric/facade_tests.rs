@@ -1050,6 +1050,7 @@ pub(crate) mod peer_tests {
             },
             termination: Some(provenant_os::exec::Termination::Exit(0)),
             never_spawned: false,
+            launch_refusal: None,
             stop_reason: None,
             delivered_signals: vec![],
             reaped: vec![],
@@ -1317,6 +1318,74 @@ pub(crate) mod peer_tests {
     }
 
     #[test]
+    fn accepted_attempt_observes_stable_host_after_alias_is_renamed()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_fabric_runtime::graph::{self, AttemptOwner};
+        let rig = crate::worktree_tests::repository()?;
+        let roots = crate::roots::child(&rig.home, &rig.project, rig.state.clone())?;
+        let context = Context::open(roots.clone(), &rig.home, &rig.project)?;
+        let host = context.identity.host;
+        let config = |alias: &str| format!(
+            "schema_version=1\n[gc]\nfree_floor='1B'\n[domains.fabric.peers.{alias}]\nhost='{host}'\ndestination='fixture'\n"
+        );
+        std::fs::write(rig.state.join("config.toml"), config("old_alias"))?;
+        let factory = Factory {
+            context: Context::open(roots.clone(), &rig.home, &rig.project)?,
+            project_attribution: false, clock: SystemClock, backoff: ThreadPause,
+            executor: SystemExecutor::new(1)?, home: rig.home.clone(), cwd: rig.project.clone(),
+            assets: rig.project.clone(), host_launch: None, mcp_project: None, workers: &FreeWorkers,
+        };
+        assert_eq!(factory.context.peer_host("old_alias"), Some(host));
+        let cancel = CancelToken::new();
+        let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
+        let mut owner = BoundGraphOwner { launch_warnings: Vec::new(), repo_facts: Default::default(), factory: &factory,
+            integration_base: None, integration_branch: None, network: None,
+            capability_overrides: Default::default(), exclude: Vec::new(), budget,
+            cancel: &cancel, prices: None, tick: false };
+        let actor = owner.actor();
+        let head = crate::worktree_tests::git(&rig, &["rev-parse", "HEAD"])?;
+        let key: graph::AttemptKey = serde_json::from_value(serde_json::json!({
+            "graph_id":"renamed-alias", "node_id":"inspect", "route_index":0
+        }))?;
+        let spec = graph::AttemptSpec { host: Some("old_alias".into()), ..Default::default() };
+        let route = serde_json::from_value(serde_json::json!({"adapter":"fixture","model":"fixture/model"}))?;
+        let node = || graph::NodeInput {
+            attachments: &[], capabilities: None, capability_sources: None, attempt: Some(&spec),
+            require_skill_location: false, settlement_retries: None, prior_attempts: &[], family_peers: &[],
+            context: graph_test_context(&key), read_roots: &[], distinct_from_attempts: &[], require_distinct: false,
+            source_commit: Some(&head), review_base: None, title: "inspect", prompt: "Inspect",
+            required_verdict: None, deadline_seconds: None, inputs_dir: None,
+        };
+        let first = provenant_cli::run::with_deferred_provider_launch(|| owner.observe_or_start(
+            &key, node(), &route, graph::AccessMode::ReadOnly, None,
+            graph::Replay { delivery: None, branch: None, fast_forward_only: false,
+                stored_ref: None, launch_actor: &actor }))?;
+        let reference = match first {
+            graph::AttemptObservation::Pending { attempt_ref }
+            | graph::AttemptObservation::Unknown { attempt_ref }
+            | graph::AttemptObservation::Terminal { attempt_ref, .. } => attempt_ref.ok_or("missing reference")?,
+        };
+        std::fs::write(rig.state.join("config.toml"), config("new_alias"))?;
+        let renamed = factory.for_graph_directory(&rig.project)?;
+        assert_eq!(renamed.context.peer_host("old_alias"), None);
+        assert_eq!(renamed.context.peer_host("new_alias"), Some(host));
+        let mut owner = BoundGraphOwner { factory: &renamed, ..owner };
+        let replayed = owner.observe_or_start(&key, node(), &route, graph::AccessMode::ReadOnly, None,
+            graph::Replay { delivery: None, branch: None, fast_forward_only: false,
+                stored_ref: Some(&reference), launch_actor: &actor })?;
+        let replayed = match replayed {
+            graph::AttemptObservation::Pending { attempt_ref }
+            | graph::AttemptObservation::Unknown { attempt_ref }
+            | graph::AttemptObservation::Terminal { attempt_ref, .. } => attempt_ref,
+        };
+        assert_eq!(replayed.as_deref(), Some(reference.as_str()));
+        assert!(matches!(owner.observe_or_start(&key, node(), &route, graph::AccessMode::ReadOnly, None,
+            graph::Replay { delivery: None, branch: None, fast_forward_only: false,
+                stored_ref: None, launch_actor: &actor }), Err(FacadeError::UnknownHost)));
+        Ok(())
+    }
+
+    #[test]
     fn graph_cloud_owner_submits_once_and_replays_remote_completion()
     -> Result<(), Box<dyn std::error::Error>> {
         use provenant_fabric_runtime::graph::{self, AttemptOwner};
@@ -1366,7 +1435,7 @@ esac
         };
         let cancel = CancelToken::new();
         let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
-        let mut graph_owner = BoundGraphOwner { factory: &factory, integration_base: None,
+        let mut graph_owner = BoundGraphOwner { launch_warnings: Vec::new(), repo_facts: Default::default(), factory: &factory, integration_base: None,
             integration_branch: None, network: None, capability_overrides: Default::default(),
             exclude: Vec::new(), budget, cancel: &cancel, prices: None, tick: false };
         let actor = graph_owner.actor();
@@ -1452,7 +1521,7 @@ esac
         };
         let cancel = CancelToken::new();
         let budget = WaitBudget::cli(factory.clock.mono_now(), 10)?;
-        let mut owner = BoundGraphOwner {
+        let mut owner = BoundGraphOwner { launch_warnings: Vec::new(), repo_facts: Default::default(),
             factory: &factory, integration_base: None, integration_branch: None,
             network: None, capability_overrides: Default::default(), exclude: Vec::new(),
             budget, cancel: &cancel, prices: None, tick: false,
@@ -1579,7 +1648,7 @@ esac
         };
         let cancel = CancelToken::new();
         let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
-        let mut graph_owner = BoundGraphOwner { factory: &factory, integration_base: None,
+        let mut graph_owner = BoundGraphOwner { launch_warnings: Vec::new(), repo_facts: Default::default(), factory: &factory, integration_base: None,
             integration_branch: None, network: None, capability_overrides: Default::default(), exclude: Vec::new(), budget, cancel: &cancel,
             prices: None, tick: false };
         let actor = graph_owner.actor();
@@ -1640,7 +1709,7 @@ esac
         };
         let cancel = CancelToken::new();
         let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
-        let mut owner = BoundGraphOwner { factory: &factory, integration_base: None,
+        let mut owner = BoundGraphOwner { launch_warnings: Vec::new(), repo_facts: Default::default(), factory: &factory, integration_base: None,
             integration_branch: None, network: None, capability_overrides: Default::default(),
             exclude: Vec::new(), budget, cancel: &cancel, prices: None, tick: false };
         let actor = owner.actor();
@@ -1706,7 +1775,7 @@ esac
         };
         let cancel = CancelToken::new();
         let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
-        let mut owner = BoundGraphOwner { factory: &factory, integration_base: None,
+        let mut owner = BoundGraphOwner { launch_warnings: Vec::new(), repo_facts: Default::default(), factory: &factory, integration_base: None,
             capability_overrides: (Vec::new(), Vec::new()),
             integration_branch: None, network: None, exclude: Vec::new(), budget, cancel: &cancel, prices: None, tick: false };
         let pinned = owner.resolve_review_base("review-pin", Some(rig.project.to_str().ok_or("project")?))?.ok_or("base")?;
@@ -1733,7 +1802,7 @@ esac
         let replayed = match reattached { graph::AttemptObservation::Pending { attempt_ref } | graph::AttemptObservation::Unknown { attempt_ref } | graph::AttemptObservation::Terminal { attempt_ref, .. } => attempt_ref.ok_or("replay reference")? };
         assert_eq!(replayed, reference);
         let other_factory = factory.for_graph_directory(&other)?;
-        let mut replay_owner = BoundGraphOwner { factory: &other_factory, integration_base: None,
+        let mut replay_owner = BoundGraphOwner { launch_warnings: Vec::new(), repo_facts: Default::default(), factory: &other_factory, integration_base: None,
             capability_overrides: (Vec::new(), Vec::new()),
             integration_branch: None, network: None, exclude: Vec::new(), budget, cancel: &cancel, prices: None, tick: false };
         replay_owner.observe_or_start(&key, node(), &route, graph::AccessMode::ReadOnly, Some(rig.project.to_str().ok_or("source path")?),
@@ -1780,7 +1849,7 @@ esac
         };
         let cancel = CancelToken::new();
         let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
-        let mut owner = BoundGraphOwner { factory: &factory, integration_base: None,
+        let mut owner = BoundGraphOwner { launch_warnings: Vec::new(), repo_facts: Default::default(), factory: &factory, integration_base: None,
             capability_overrides: (Vec::new(), Vec::new()),
             integration_branch: None, network: None, exclude: Vec::new(), budget, cancel: &cancel,
             prices: None, tick: false };
@@ -1813,7 +1882,7 @@ esac
         };
         let cancel = CancelToken::new();
         let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
-        let mut owner = BoundGraphOwner { factory: &factory,
+        let mut owner = BoundGraphOwner { launch_warnings: Vec::new(), repo_facts: Default::default(), factory: &factory,
             capability_overrides: (Vec::new(), Vec::new()),
             integration_base: Some(BoundGraphBases { integration: Some(base.parse()?), review: None }),
             integration_branch: Some("batch".into()), network: None, exclude: Vec::new(),
@@ -1901,7 +1970,7 @@ esac
         let execution_store = rig.state.join("run.sqlite3");
         assert!(!execution_store.exists());
         assert!(matches!(
-            run_owner.submit_with_access(input, budget, &cancel, grants.clone(), None, Some(accepted)),
+            run_owner.submit_with_access(input, budget, &cancel, grants.clone(), None, Some(accepted), &provenant_confinement::worktrees::RepoFacts::default()),
             Err(FacadeError::InvalidInput { .. })
         ));
         assert!(!execution_store.exists());
@@ -1961,7 +2030,7 @@ esac
         assert_eq!(graph_task.route, plain_task.route);
         assert_eq!(graph_task.access, plain_task.access);
         assert_eq!(graph_task.prompt_digest, plain_task.prompt_digest);
-        let mut graph_owner = BoundGraphOwner {
+        let mut graph_owner = BoundGraphOwner { launch_warnings: Vec::new(), repo_facts: Default::default(),
             factory: &factory,
             integration_base: None,
             integration_branch: None,
@@ -2683,7 +2752,7 @@ esac
                 &Default::default(),
                 &Default::default(),
             )?;
-            let mut owner = BoundGraphOwner {
+            let mut owner = BoundGraphOwner { launch_warnings: Vec::new(), repo_facts: Default::default(),
                 factory: &factory,
                 integration_base: None,
                 integration_branch: None,
@@ -2794,7 +2863,7 @@ esac
             &Default::default(),
             &Default::default(),
         )?;
-        let mut owner = BoundGraphOwner {
+        let mut owner = BoundGraphOwner { launch_warnings: Vec::new(), repo_facts: Default::default(),
             factory: &factory,
             integration_base: None,
             integration_branch: None,
@@ -2995,7 +3064,7 @@ esac
             &Default::default(),
             &Default::default(),
         )?;
-        let mut owner = BoundGraphOwner {
+        let mut owner = BoundGraphOwner { launch_warnings: Vec::new(), repo_facts: Default::default(),
             factory: &factory,
             integration_base: None,
             integration_branch: None,
@@ -3117,7 +3186,7 @@ esac
             &document.graph_id, budget, &cancel, &factory.clock).map_err(|error| format!("open journal: {error}"))?;
         journal.bind(graph::GraphExecution { review_base: None, extra: Default::default(),
             integration_base: None, directory: fixture.rig.project.clone(), document: document.clone() })?;
-        let mut owner = BoundGraphOwner { factory: &factory, integration_base: None, integration_branch: None,
+        let mut owner = BoundGraphOwner { launch_warnings: Vec::new(), repo_facts: Default::default(), factory: &factory, integration_base: None, integration_branch: None,
             network: None, capability_overrides: Default::default(), exclude: Vec::new(), budget, cancel: &cancel, prices: None, tick: false };
         let catalogue = Catalogue::bundled()?;
         let models = ["codex/gpt-6-luna", "claude/claude-haiku-5-5", "agy/gemini-3.8-flash", "opencode/opencode-go/glm-5.3-flash"];
@@ -3238,7 +3307,7 @@ esac
         };
         let cancel = CancelToken::new();
         let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
-        let mut bound = BoundGraphOwner {
+        let mut bound = BoundGraphOwner { launch_warnings: Vec::new(), repo_facts: Default::default(),
             factory: &factory,
             integration_base: None,
             integration_branch: None,
@@ -3820,7 +3889,7 @@ esac
             "graph_id":"pinned-base", "node_id":"later-lens", "route_index":0
         }))?;
         let route = serde_json::from_value(serde_json::json!({"adapter":"fixture", "model":"fixture/model"}))?;
-        let mut bound = BoundGraphOwner {
+        let mut bound = BoundGraphOwner { launch_warnings: Vec::new(), repo_facts: Default::default(),
             factory: &factory, integration_base: None, integration_branch: None,
             network: None, capability_overrides: Default::default(), exclude: Vec::new(), budget, cancel: &cancel, prices: None, tick: false,
         };
@@ -4902,7 +4971,7 @@ esac
         )?;
 
         // Now advance with BoundGraphOwner.
-        let mut owner = BoundGraphOwner {
+        let mut owner = BoundGraphOwner { launch_warnings: Vec::new(), repo_facts: Default::default(),
             factory: &factory,
             integration_base: Some(BoundGraphBases { integration: Some(node_source), review: None }),
             integration_branch: None,

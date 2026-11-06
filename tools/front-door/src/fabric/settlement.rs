@@ -215,6 +215,8 @@ fn advance_attempt_graph(
         workers,
     };
     let mut owner = BoundGraphOwner {
+        launch_warnings: Vec::new(),
+        repo_facts: Default::default(),
         factory: &factory,
         integration_base: Some(BoundGraphBases {
             integration: execution.integration_base,
@@ -327,16 +329,18 @@ pub(crate) fn settle_owned_worktree(
             return Ok(());
         }
     }
+    let facts = store.repo_facts();
     // Refresh before taking the collection lock and before the prune budget starts.
     // Explicit worktrees have no owner record, so use their verified HEAD.
     let mut tracking_ref_warning = None;
     let mut lane_owned = false;
-    let _ = crate::worktrees::with_context(
+    let _ = crate::worktrees::with_context_using_facts(
         roots,
         &settled.roots.home,
         &writer.project,
         std::time::Duration::from_secs(15),
         workers,
+        facts,
         |context, _| {
             use std::io::Read;
             let tree = provenant_confinement::verify_worktree(context.repo, &writer.worktree)
@@ -421,12 +425,13 @@ pub(crate) fn settle_owned_worktree(
             .get(&settled.project_id.to_string())
             .cloned()
             .unwrap_or_default();
-        Ok(crate::worktrees::with_context(
+        Ok(crate::worktrees::with_context_using_facts(
             roots,
             &settled.roots.home,
             &writer.project,
             std::time::Duration::from_secs(120),
             workers,
+            facts,
             |context, cancel| {
                 let tree = provenant_confinement::verify_worktree(context.repo, &writer.worktree)
                     .map_err(worktrees::WorktreeError::from)?;
@@ -535,12 +540,7 @@ pub(crate) fn settle_owned_worktree(
                         }
                     });
                 let upstream = upstream.as_deref().unwrap_or(&owner.base);
-                let git = provenant_os::git::git_executable()
-                    .ok_or(worktrees::WorktreeError::InvalidRequest)?;
-                let pinned = provenant_run::resolve_git_base(&git, &writer.project, upstream)
-                    .ok()
-                    .and_then(|value| value.parse().ok())
-                    .ok_or(worktrees::WorktreeError::InvalidRequest)?;
+                let pinned = worktrees::resolve_base(context, upstream, cancel)?;
                 let Some(head) = record.head.or_else(|| {
                     (record.provider_launched == Some(false))
                         .then(|| owner.base.parse().ok())

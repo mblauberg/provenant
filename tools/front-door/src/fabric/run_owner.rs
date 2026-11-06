@@ -1,7 +1,8 @@
 use super::*;
 use provenant_fabric_runtime::runs::SubmissionReceipt;
 
-struct SubmissionPolicy {
+struct SubmissionPolicy<'a> {
+    facts: &'a provenant_confinement::worktrees::RepoFacts,
     access: provenant_records::run::LaneAccess,
     settlement_retry_limit: Option<u8>,
     attempt: Option<provenant_fabric_runtime::graph::AttemptSpec>,
@@ -202,13 +203,7 @@ pub(crate) fn dispatch_refused(fail: provenant_cli::run::Fail) -> FacadeError {
         return fail_error(fail);
     }
     match fail.detail.map(|detail| *detail) {
-        Some(
-            detail @ FacadeError::DispatchRefused {
-                fact: None,
-                disk: Some(_),
-                ..
-            },
-        ) => detail,
+        Some(detail @ FacadeError::DispatchRefused { .. }) => detail,
         _ => FacadeError::DispatchRefused {
             fact: None,
             disk: None,
@@ -264,6 +259,119 @@ pub(crate) fn facade_error_for_kind(kind: provenant_run::ErrorKind) -> FacadeErr
         _ => FacadeError::io("run operation"),
     }
 }
+fn terminal_cause(
+    lane: &provenant_run::AttemptRecord,
+) -> Option<provenant_records::run::TerminalCause> {
+    match &lane.state {
+        provenant_records::run::AttemptState::Terminal { extra, .. } => extra
+            .get("terminal_cause")
+            .and_then(|value| serde_json::from_value(value.clone()).ok()),
+        _ => None,
+    }
+}
+/// Only positive sealed evidence of a pre-launch refusal can reject a replay.
+pub(crate) fn durable_launch_refusal(
+    lanes: &[provenant_run::AttemptRecord],
+) -> Option<provenant_core::AttemptId> {
+    use provenant_records::run::{AttemptState, SettlementReason, TerminalCause};
+    (!lanes.is_empty()
+        && lanes.iter().all(|lane| {
+            lane.provider_launched == Some(false)
+                && lane.settlement_reason == Some(SettlementReason::PreLaunchRefusal)
+                && matches!(lane.state, AttemptState::Terminal { .. })
+                && (terminal_cause(lane).is_some_and(|cause| {
+                    matches!(
+                        cause,
+                        TerminalCause::DiskFloor
+                            | TerminalCause::DiskObservationUnavailable
+                            | TerminalCause::RetainedWriterImport
+                    )
+                }) || lane.skipped_routes.iter().any(|route| {
+                    route.cause == Some(provenant_records::RouteExclusionReason::PacingReserve)
+                }))
+        }))
+    .then(|| lanes[0].attempt_id)
+}
+
+/// Whether a launch batch is refused, judged identically on first call and
+/// replay. Preparation failures are accepted terminal attempts: graph routing
+/// observes their typed outcome and may advance to a fallback route. Only
+/// retained custody, or sealed pre-launch evidence whose typed cause names the
+/// refusal, refuses. Reasons carry typed text, never a refusal's source text.
+pub(crate) fn launch_refusal(
+    started: &[provenant_run::Started],
+    lanes: &[provenant_run::AttemptRecord],
+) -> Option<FacadeError> {
+    let blocked = started
+        .iter()
+        .filter_map(|item| match item {
+            provenant_run::Started::Blocked { attempt, .. } => Some(*attempt),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if !blocked.is_empty()
+        && started.iter().all(|item| {
+            matches!(
+                item,
+                provenant_run::Started::Blocked { .. } | provenant_run::Started::Refused { .. }
+            )
+        })
+    {
+        return Some(FacadeError::DispatchRefused {
+            fact: None,
+            disk: None,
+            reason: blocked
+                .iter()
+                .map(|attempt| format!("{attempt}: launch blocked by retained custody"))
+                .collect::<Vec<_>>()
+                .join("; "),
+        });
+    }
+    let sealed: Vec<provenant_run::AttemptRecord> = if started.is_empty() {
+        lanes.to_vec()
+    } else if started.iter().all(|item| {
+        matches!(
+            item,
+            provenant_run::Started::Refused {
+                kind: provenant_run::RefusalKind::Policy
+                    | provenant_run::RefusalKind::PacingReserve
+                    | provenant_run::RefusalKind::RetainedImport { .. },
+                ..
+            }
+        )
+    }) {
+        lanes
+            .iter()
+            .filter(|lane| {
+                started.iter().any(|item| {
+                    matches!(item, provenant_run::Started::Refused { attempt, .. } if *attempt == lane.attempt_id)
+                })
+            })
+            .cloned()
+            .collect()
+    } else {
+        Vec::new()
+    };
+    durable_launch_refusal(&sealed)?;
+    Some(FacadeError::DispatchRefused {
+        fact: None,
+        disk: None,
+        reason: sealed
+            .iter()
+            .map(|lane| {
+                format!(
+                    "{}: {}",
+                    lane.attempt_id,
+                    terminal_cause(lane)
+                        .map(|cause| cause.detail())
+                        .unwrap_or("pacing reserve refused")
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("; "),
+    })
+}
+
 impl BinaryRunOwner<'_> {
     pub(crate) fn call<'a>(&'a self, cancel: &'a CancelToken) -> provenant_run::Request<'a> {
         provenant_run::Request {
@@ -287,6 +395,24 @@ impl BinaryRunOwner<'_> {
             .with_host(ctx.identity.host);
         Ok(provenant_cli::run::Session { store, context })
     }
+    pub(crate) fn session_with_facts(
+        &self,
+        cancel: &CancelToken,
+        facts: &provenant_confinement::worktrees::RepoFacts,
+    ) -> Result<provenant_cli::run::Session, FacadeError> {
+        let mut session = self.session(cancel)?;
+        session.store = session.store.with_repo_facts(facts);
+        Ok(session)
+    }
+
+    pub(crate) fn store_with_facts(
+        &self,
+        cancel: &CancelToken,
+        facts: &provenant_confinement::worktrees::RepoFacts,
+    ) -> Result<provenant_run::RunStore, FacadeError> {
+        Ok(self.session_with_facts(cancel, facts)?.store)
+    }
+
     fn read_session(
         &self,
         cancel: &CancelToken,
@@ -351,31 +477,56 @@ impl BinaryRunOwner<'_> {
         {
             return Err(FacadeError::LaunchUnknown { operation_id });
         }
-        let page = session
-            .service()
-            .lanes(
-                &provenant_run::LaneQuery {
-                    targets: vec![provenant_run::LaneTarget {
-                        run: run.run_id,
-                        task: None,
-                        attempt: None,
-                    }],
-                    all: true,
-                    limit: 100,
-                    after: 0,
-                    newest_first: false,
-                    owner: None,
-                    unseen_after: None,
-                },
-                call,
-            )
-            .map_err(run_error)?;
+        let mut lanes = Vec::new();
+        let mut after = 0;
+        loop {
+            let page = session
+                .service()
+                .lanes(
+                    &provenant_run::LaneQuery {
+                        targets: vec![provenant_run::LaneTarget {
+                            run: run.run_id,
+                            task: None,
+                            attempt: None,
+                        }],
+                        all: true,
+                        limit: 100,
+                        after,
+                        newest_first: false,
+                        owner: None,
+                        unseen_after: None,
+                    },
+                    call,
+                )
+                .map_err(run_error)?;
+            lanes.extend(page.lanes);
+            match page.next {
+                Some(next) => after = next,
+                None => break,
+            }
+        }
+        if let Some(refusal) = launch_refusal(started, &lanes) {
+            return Err(refusal);
+        }
+        if started.is_empty()
+            && session
+                .store
+                .operation(&operation_id, call)
+                .map_err(run_error)?
+                .is_some_and(|operation| operation.state == provenant_run::OperationState::Blocked)
+        {
+            return Err(FacadeError::DispatchRefused {
+                fact: None,
+                disk: None,
+                reason: "dispatch remains blocked by retained custody; reconcile before retrying"
+                    .into(),
+            });
+        }
         Ok(SubmissionReceipt {
             extra: Default::default(),
             worktree: None,
             operation_id,
-            targets: page
-                .lanes
+            targets: lanes
                 .iter()
                 .map(|lane| AttemptTarget {
                     extra: Default::default(),
@@ -546,6 +697,7 @@ impl BinaryRunOwner<'_> {
         }
     }
     /// Graph nodes use the same validated, sealed access grants as CLI lanes.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn submit_with_access(
         &mut self,
         input: SubmitInput,
@@ -554,12 +706,14 @@ impl BinaryRunOwner<'_> {
         access: provenant_records::run::LaneAccess,
         settlement_retry_limit: Option<u8>,
         attempt: Option<provenant_fabric_runtime::graph::AttemptSpec>,
+        facts: &provenant_confinement::worktrees::RepoFacts,
     ) -> Result<SubmissionReceipt, FacadeError> {
         self.launch_graph_attempt(
             input,
             budget,
             cancel,
             SubmissionPolicy {
+                facts,
                 access,
                 settlement_retry_limit,
                 attempt,
@@ -692,10 +846,11 @@ impl BinaryRunOwner<'_> {
         input: SubmitInput,
         budget: WaitBudget,
         cancel: &CancelToken,
-        policy: SubmissionPolicy,
+        policy: SubmissionPolicy<'_>,
     ) -> Result<SubmissionReceipt, FacadeError> {
         use provenant_cli::run::{Submission, Submitted, derived_task, worktree_access};
         let SubmissionPolicy {
+            facts,
             access,
             settlement_retry_limit,
             attempt,
@@ -840,9 +995,9 @@ impl BinaryRunOwner<'_> {
                 access: access.clone(),
             });
         }
-        let session = self.session(cancel)?;
+        let session = self.session_with_facts(cancel, facts)?;
         let call = self.call(cancel);
-        let (run, started) = self.with_edge(|edge| {
+        let submission = self.with_edge(|edge| {
             provenant_cli::run::submit_with_host(
                 &session,
                 edge,
@@ -856,7 +1011,23 @@ impl BinaryRunOwner<'_> {
                 &call,
                 self.factory.host_launch.as_ref(),
             )
-        })?;
+        });
+        if submission.is_err()
+            && crate::settlement::post_operation_refusal(
+                &operation_id,
+                &self.factory.context,
+                &session.store,
+                &call,
+            )
+            .is_err()
+        {
+            use std::io::Write;
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "refusal notice could not be delivered; inspect the chair binding and notice configuration, then run `provenant reconcile`"
+            );
+        }
+        let (run, started) = submission?;
         self.receipt(&session, operation_id, &run, &started, &call)
     }
     pub(crate) fn output(
@@ -1487,6 +1658,36 @@ fn require_graph_context(
 )]
 mod graph_control_tests {
     use super::*;
+    #[test]
+    fn blocked_launches_refuse_without_echoing_untrusted_text() {
+        let attempt = provenant_core::AttemptId::from_bytes([7; 16]);
+        let blocked = provenant_run::Started::Blocked {
+            attempt,
+            error: "untrusted preparation text".into(),
+        };
+        let Some(FacadeError::DispatchRefused { reason, .. }) = launch_refusal(&[blocked], &[])
+        else {
+            panic!("retained custody must refuse the launch");
+        };
+        assert!(reason.contains(&attempt.to_string()));
+        assert!(reason.contains("retained custody"));
+        assert!(!reason.contains("untrusted preparation text"));
+        assert!(launch_refusal(&[], &[]).is_none());
+        assert!(
+            launch_refusal(
+                &[
+                    provenant_run::Started::Launched(attempt),
+                    provenant_run::Started::Blocked {
+                        attempt,
+                        error: "blocked".into()
+                    },
+                ],
+                &[]
+            )
+            .is_none()
+        );
+    }
+
     #[test]
     fn retained_attempts_require_graph_context_before_controls() {
         assert!(require_graph_context(None).is_err());

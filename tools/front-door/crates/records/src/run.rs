@@ -688,6 +688,8 @@ pub enum OperationState {
     Prepared,
     Accepted,
     Terminal,
+    /// Dispatch was refused before a run was admitted.
+    Refused,
     LaunchUnknown,
     /// Launch preparation failed and custody could not be released.
     Blocked,
@@ -713,6 +715,17 @@ pub struct OperationRecord {
     pub state: OperationState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blocked_reason: Option<String>,
+    /// Safe diagnostic retained for a pre-admission refusal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refusal: Option<crate::diagnostic::Diagnostic>,
+    /// Worktree identifier, not an absolute host path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refused_at: Option<WallTime>,
+    /// Chair bound at submission, retained for refusal notice recovery.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refusal_chair: Option<ChairBinding>,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1047,12 +1060,38 @@ impl SkippedRoute {
         );
     }
 
+    /// Preserve an individual candidate's safe guard facts across fallback.
+    pub fn set_guard_facts(
+        &mut self,
+        boundary: Option<crate::diagnostic::BoundaryClass>,
+        resource: Option<crate::diagnostic::ResourceFact>,
+    ) -> Result<(), serde_json::Error> {
+        if let Some(boundary) = boundary {
+            self.extra
+                .insert("guard_boundary".into(), serde_json::to_value(boundary)?);
+        }
+        if let Some(resource) = resource {
+            self.extra
+                .insert("guard_resource".into(), serde_json::to_value(resource)?);
+        }
+        Ok(())
+    }
+
     /// Project typed facts only; `detail` may contain provider or OS text.
     pub fn diagnostic(&self) -> crate::diagnostic::Diagnostic {
-        self.cause
+        let diagnostic = self
+            .cause
             .as_ref()
             .map(|cause| cause.diagnostic("REFUSED"))
-            .unwrap_or_else(|| self.kind.diagnostic())
+            .unwrap_or_else(|| self.kind.diagnostic());
+        match self.extra.get("guard_resource").and_then(|value| {
+            serde_json::from_value::<crate::diagnostic::ResourceFact>(value.clone()).ok()
+        }) {
+            Some(fact) => fact
+                .project(diagnostic)
+                .fact(crate::diagnostic::DiagnosticFact::Resource(fact)),
+            None => diagnostic,
+        }
     }
 }
 

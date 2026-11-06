@@ -56,7 +56,10 @@ fn provider_preparation_fallback_preserves_authority_and_identity_failures() {
         ProviderError::IsolatedKeychainUnavailable("fixture".into()),
         ProviderError::ProbeDirectory("fixture".into()),
         ProviderError::CredentialReadFailed("fixture".into()),
-        ProviderError::PromptTooLarge,
+        ProviderError::PromptTooLarge {
+            limit: 1,
+            origin: provenant_records::diagnostic::SettingSource::ShippedDefault,
+        },
         ProviderError::Overflow,
         ProviderError::Malformed,
     ] {
@@ -930,7 +933,7 @@ fn prompt_paths(attempt: &Path) -> Result<run::LaunchPaths, Box<dyn std::error::
 }
 
 #[test]
-fn launch_prompt_preserves_small_text_and_refuses_more_than_one_mib()
+fn launch_prompt_preserves_admitted_text_when_host_additions_exceed_one_mib()
 -> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
     let attempt = canonical(temp.path())?;
@@ -938,20 +941,36 @@ fn launch_prompt_preserves_small_text_and_refuses_more_than_one_mib()
     for entry in REGISTRY {
         let adapter = entry.adapter.id();
         for text in ["small prompt".to_owned(), "a".repeat(65_536)] {
-            let prompt = launch_prompt(&text, &paths, &attempt, adapter, 65_536, "test")?;
+            let prompt = launch_prompt(
+                &text,
+                &paths,
+                &attempt,
+                adapter,
+                65_536,
+                provenant_records::diagnostic::SettingSource::Configuration,
+            )?;
             assert_eq!(prompt.text(), text);
             assert!(prompt.file().is_none());
         }
         let text = format!("Durable output instructions\n\n{}", "a".repeat(1024 * 1024));
-        let error = launch_prompt(&text, &paths, &attempt, adapter, 65_536, "test")
-            .err()
-            .ok_or("oversized launch accepted")?;
-        assert!(
-            matches!(error, LaunchPromptError::TooLarge),
-            "{adapter}: {error}"
-        );
+        let prompt = launch_prompt(
+            &text,
+            &paths,
+            &attempt,
+            adapter,
+            65_536,
+            provenant_records::diagnostic::SettingSource::Configuration,
+        )?;
+        if AdapterSpec::get(adapter).is_some_and(|spec| spec.argv_prompt) {
+            assert_eq!(
+                std::fs::read_to_string(prompt.file().ok_or("expected spill file")?)?,
+                text
+            );
+        } else {
+            assert_eq!(prompt.text(), text);
+            assert!(prompt.file().is_none());
+        }
     }
-    assert!(!attempt.join("prompt.md").exists());
     Ok(())
 }
 
@@ -966,7 +985,14 @@ fn launch_prompt_keeps_oversized_stdin_prompts_in_memory() -> Result<(), Box<dyn
         paths.lane_depth = depth;
         for adapter in ["claude", "codex", "opencode"] {
             for text in [&text, &"a".repeat(1024 * 1024)] {
-                let prompt = launch_prompt(text, &paths, &attempt, adapter, 65_536, "test")?;
+                let prompt = launch_prompt(
+                    text,
+                    &paths,
+                    &attempt,
+                    adapter,
+                    65_536,
+                    provenant_records::diagnostic::SettingSource::Configuration,
+                )?;
                 assert_eq!(prompt.text(), text);
                 assert!(prompt.file().is_none());
             }
@@ -986,9 +1012,16 @@ fn launch_prompt_spills_only_top_level_argv_and_refuses_conflicting_file()
         let mut paths = prompt_paths(&attempt)?;
         let text = format!("Durable output instructions\n\n{}", "é".repeat(75_000));
         paths.lane_depth = 2;
-        let error = launch_prompt(&text, &paths, &attempt, adapter, 65_536, "test")
-            .err()
-            .ok_or("nested argv spill accepted")?;
+        let error = launch_prompt(
+            &text,
+            &paths,
+            &attempt,
+            adapter,
+            65_536,
+            provenant_records::diagnostic::SettingSource::Configuration,
+        )
+        .err()
+        .ok_or("nested argv spill accepted")?;
         assert!(
             matches!(error, LaunchPromptError::NestedArgvTooLarge { .. }),
             "{error}"
@@ -997,7 +1030,14 @@ fn launch_prompt_spills_only_top_level_argv_and_refuses_conflicting_file()
 
         paths.lane_depth = 1;
         for _ in 0..2 {
-            let prompt = launch_prompt(&text, &paths, &attempt, adapter, 65_536, "test")?;
+            let prompt = launch_prompt(
+                &text,
+                &paths,
+                &attempt,
+                adapter,
+                65_536,
+                provenant_records::diagnostic::SettingSource::Configuration,
+            )?;
             assert_eq!(prompt.file(), Some(attempt.join("prompt.md").as_path()));
             assert!(prompt.text().len() < 1024);
             assert_eq!(std::fs::read_to_string(attempt.join("prompt.md"))?, text);
@@ -1010,7 +1050,17 @@ fn launch_prompt_spills_only_top_level_argv_and_refuses_conflicting_file()
             );
         }
         std::fs::write(attempt.join("prompt.md"), "conflicting prompt")?;
-        assert!(launch_prompt(&text, &paths, &attempt, adapter, 65_536, "test").is_err());
+        assert!(
+            launch_prompt(
+                &text,
+                &paths,
+                &attempt,
+                adapter,
+                65_536,
+                provenant_records::diagnostic::SettingSource::Configuration
+            )
+            .is_err()
+        );
         assert_eq!(
             std::fs::read_to_string(attempt.join("prompt.md"))?,
             "conflicting prompt"
@@ -1027,10 +1077,24 @@ fn nested_argv_prompt_respects_configured_byte_limit() -> Result<(), Box<dyn std
     paths.lane_depth = 2;
     let text = "a".repeat(65_537);
     assert!(matches!(
-        launch_prompt(&text, &paths, &attempt, "cursor", 65_536, "test"),
+        launch_prompt(
+            &text,
+            &paths,
+            &attempt,
+            "cursor",
+            65_536,
+            provenant_records::diagnostic::SettingSource::Configuration
+        ),
         Err(LaunchPromptError::NestedArgvTooLarge { limit: 65_536, .. })
     ));
-    let prompt = launch_prompt(&text, &paths, &attempt, "cursor", 131_072, "test")?;
+    let prompt = launch_prompt(
+        &text,
+        &paths,
+        &attempt,
+        "cursor",
+        131_072,
+        provenant_records::diagnostic::SettingSource::Configuration,
+    )?;
     assert_eq!(prompt.text(), text);
     assert!(prompt.file().is_none());
     Ok(())
@@ -1050,7 +1114,7 @@ fn launch_prompt_refuses_symlinked_attempt_ancestors() -> Result<(), Box<dyn std
             &state,
             "cursor",
             65_536,
-            "test"
+            provenant_records::diagnostic::SettingSource::Configuration
         )
         .is_err()
     );
@@ -1715,6 +1779,7 @@ fn registry_provider_resolves_prepares_and_reports_quota(
         project_id: Some(binding.project_id()),
         host: None,
         cancel: Some(&cancel),
+        repo_facts: Default::default(),
     };
     let prepared = super::preparation::prepare_candidates(
         &registry,
@@ -1910,6 +1975,7 @@ fn opencode_stale_auth_prepares_with_an_unverified_warning()
         project_id: Some(binding.project_id()),
         host: None,
         cancel: Some(&cancel),
+        repo_facts: Default::default(),
     };
     let prepared = prepare_with(
         &registry,
@@ -1958,6 +2024,23 @@ fn writer_plan_stages_scratch_in_private_temporary_directory()
         os::unix::fs::{DirBuilderExt, PermissionsExt},
         time::Duration,
     };
+
+    // Isolate the host token from other parallel tests while exercising the
+    // same process environment that production preparation reads.
+    const CHILD: &str = "PROVENANT_TEST_WRITER_TOKEN_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        // A separate test process isolates the fixture token from parallel tests.
+        #[allow(clippy::disallowed_methods)]
+        let status = std::process::Command::new(std::env::current_exe()?)
+            .arg("writer_plan_stages_scratch_in_private_temporary_directory")
+            .env(CHILD, "1")
+            .env("GH_TOKEN", "fixture-host-token")
+            .env_remove("GIT_CONFIG_GLOBAL")
+            .env_remove("XDG_CONFIG_HOME")
+            .status()?;
+        assert!(status.success());
+        return Ok(());
+    }
 
     let temp = tempfile::tempdir()?;
     let base = temp.path().canonicalize()?;
@@ -2086,6 +2169,7 @@ fn writer_plan_stages_scratch_in_private_temporary_directory()
         project_id: Some(binding.project_id()),
         host: None,
         cancel: Some(&cancel),
+        repo_facts: Default::default(),
     };
     // A recorded sign-out followed by a healthy account-scoped status probe
     // must permit preparation without waiting for the quota backoff.
@@ -2290,6 +2374,7 @@ printf 'agy 1.0.0\n'
             let linked_cwd = project.join(".worktrees/writer");
             let selected_registry = Registry {
                 cwd: Some(if linked { &linked_cwd } else { &project }),
+                repo_facts: registry.repo_facts.clone(),
                 ..registry
             };
             let prepared = prepare_with(
@@ -2726,13 +2811,21 @@ printf 'agy 1.0.0\n'
     // generated shim, with a fake gh so no GitHub access is needed.
     std::fs::create_dir_all(home.join(".config/gh"))?;
     let gh = assets.join("gh");
-    std::fs::write(&gh, b"#!/bin/sh\nprintf 'forwarded\\n'\n")?;
+    std::fs::write(&gh, b"#!/bin/sh\nif [ \"$1\" = auth ] && [ \"$2\" = token ]; then exit 1; fi\nprintf 'forwarded\\n'\n")?;
     std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o700))?;
     let policy_dir = state
         .join("projects")
         .join(binding.project_id().to_string());
     std::fs::create_dir_all(&policy_dir)?;
     std::fs::write(policy_dir.join("github.json"), r#"{"deny_labels":["ci"]}"#)?;
+    // Both a linked global file and an XDG config beneath a linked directory
+    // must survive preparation and the launcher's canonical anchor checks.
+    let dotfiles = base.join("dotfiles");
+    std::fs::create_dir_all(dotfiles.join("xdg/git"))?;
+    std::fs::write(dotfiles.join("global"), "[fixture]\n global = true\n")?;
+    std::fs::write(dotfiles.join("xdg/git/config"), "[fixture]\n xdg = true\n")?;
+    std::os::unix::fs::symlink(dotfiles.join("global"), home.join(".gitconfig"))?;
+    std::os::unix::fs::symlink(dotfiles.join("xdg/git"), home.join(".config/git"))?;
     let publishing_paths = run::LaunchPaths {
         attempt_id: paths.attempt_id,
         operation_id: paths.operation_id.clone(),
@@ -2772,6 +2865,33 @@ printf 'agy 1.0.0\n'
         },
         None,
     )?;
+    assert!(
+        publishing
+            .environment
+            .iter()
+            .any(|(key, value)| key == "GH_TOKEN" && value == "fixture-host-token")
+    );
+    assert!(!launch.environment.iter().any(|(key, _)| key == "GH_TOKEN"));
+    let profile = &publishing
+        .confinement
+        .as_ref()
+        .ok_or("confinement")?
+        .profile;
+    let config = std::fs::read_to_string(publishing_paths.temporary.join("candidate-0/gitconfig"))?;
+    for target in [dotfiles.join("global"), dotfiles.join("xdg/git/config")] {
+        let target = target.canonicalize()?;
+        assert!(config.contains(target.to_str().ok_or("config path")?));
+        assert!(
+            profile
+                .spec
+                .runtime_reads
+                .iter()
+                .any(|grant| grant.path == target)
+        );
+        provenant_confinement::permissions::AnchoredDirectory::open_canonical(
+            target.parent().ok_or("config parent")?,
+        )?;
+    }
     let worktree = &publishing_task
         .writer
         .as_ref()
@@ -2815,6 +2935,36 @@ printf 'agy 1.0.0\n'
         b"publishing private object fixture\n",
     )?;
     let git_shim = publishing_paths.temporary.join("candidate-0/bin/git");
+    // Exercise the generated shim with the Git credential protocol on stdin.
+    #[allow(clippy::disallowed_methods)]
+    let mut credential = std::process::Command::new(&git_shim)
+        .args(["credential", "fill"])
+        .current_dir(worktree)
+        .env_clear()
+        .envs(
+            publishing
+                .environment
+                .iter()
+                .map(|(key, value)| (key, value)),
+        )
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()?;
+    use std::io::Write as _;
+    credential
+        .stdin
+        .take()
+        .ok_or("credential stdin")?
+        .write_all(b"protocol=https\nhost=github.com\n\n")?;
+    let credential = credential.wait_with_output()?;
+    assert!(credential.status.success());
+    assert!(
+        credential
+            .stdout
+            .windows(b"password=fixture-host-token".len())
+            .any(|window| window == b"password=fixture-host-token")
+    );
     let env = [
         ("HOME".into(), git_home.as_os_str().to_owned()),
         ("PATH".into(), "/usr/bin:/bin".into()),
@@ -3437,6 +3587,7 @@ fn writer_continuation_dirty_brief(committed: bool) -> Result<(), Box<dyn std::e
         project_id: Some(binding.project_id()),
         cancel: Some(&cancel),
         host: None,
+        repo_facts: Default::default(),
     };
 
     let reason = prepare_with(
@@ -3522,6 +3673,119 @@ fn writer_continuation_dirty_brief(committed: bool) -> Result<(), Box<dyn std::e
 }
 
 #[test]
+fn read_only_checkout_warning_measures_the_selected_checkout_against_origin_default()
+-> Result<(), Box<dyn std::error::Error>> {
+    use provenant_os::exec::{ExecOptions, Executor, SystemExecutor, Termination};
+
+    fn git(
+        executor: &SystemExecutor,
+        executable: &Path,
+        repo: &Path,
+        env: &[(std::ffi::OsString, std::ffi::OsString)],
+        args: &[&str],
+    ) -> Result<String, Box<dyn std::error::Error>> {
+        let argv: Vec<_> = std::iter::once(executable.as_os_str().to_owned())
+            .chain(args.iter().map(std::ffi::OsString::from))
+            .collect();
+        let mut options = ExecOptions::new(&argv, repo, std::time::Duration::from_secs(10));
+        options.env = Some(env);
+        let output = executor.execute(options)?;
+        if output.termination != Termination::Exit(0) {
+            return Err(format!(
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&output.stderr.bytes)
+            )
+            .into());
+        }
+        Ok(String::from_utf8(output.stdout.bytes)?.trim().to_owned())
+    }
+
+    // The remote's HEAD names master. origin/main is a different line, two
+    // commits past the shared root, so a wrong default would change the count.
+    let temp = tempfile::tempdir()?;
+    let root = temp.path();
+    let state = root.join("state");
+    std::fs::create_dir_all(&state)?;
+    let executable = provenant_os::git::git_executable().ok_or("git unavailable")?;
+    let executor = SystemExecutor::new(1)?;
+    let env: Vec<_> = std::env::vars_os()
+        .filter(|(key, _)| !key.to_string_lossy().starts_with("GIT_"))
+        .chain(provenant_os::fixture::fixture_git_settings())
+        .collect();
+    let run = |repo: &Path, args: &[&str]| git(&executor, &executable, repo, &env, args);
+
+    run(root, &["init", "-q", "--bare", "remote.git"])?;
+    run(
+        &root.join("remote.git"),
+        &["symbolic-ref", "HEAD", "refs/heads/master"],
+    )?;
+    let seed = root.join("seed");
+    std::fs::create_dir_all(&seed)?;
+    run(&seed, &["init", "-q", "-b", "master"])?;
+    for args in [
+        ["config", "user.name", "Test"],
+        ["config", "user.email", "test@example.invalid"],
+    ] {
+        run(&seed, &args)?;
+    }
+    let commit =
+        |repo: &Path, text: &str, message: &str| -> Result<String, Box<dyn std::error::Error>> {
+            std::fs::write(repo.join("file"), text)?;
+            run(repo, &["add", "file"])?;
+            run(repo, &["commit", "-q", "-m", message])?;
+            run(repo, &["rev-parse", "HEAD"])
+        };
+    let stale = commit(&seed, "one\n", "one")?;
+    run(&seed, &["checkout", "-q", "-b", "main"])?;
+    commit(&seed, "side one\n", "side one")?;
+    commit(&seed, "side two\n", "side two")?;
+    run(&seed, &["checkout", "-q", "master"])?;
+    let default = commit(&seed, "two\n", "two")?;
+    run(&seed, &["push", "-q", "../remote.git", "master", "main"])?;
+
+    run(root, &["clone", "-q", "remote.git", "checkout"])?;
+    let checkout = root.join("checkout");
+    run(&checkout, &["config", "user.name", "Test"])?;
+    run(&checkout, &["config", "user.email", "test@example.invalid"])?;
+    assert_eq!(run(&checkout, &["rev-parse", "HEAD"])?, default);
+
+    // Behind the remote default: the warning names the count, the checkout and the commit read.
+    run(&checkout, &["reset", "-q", "--hard", &stale])?;
+    let warning = confinement::read_only_checkout_warning(&state, &checkout)
+        .ok_or("behind checkout did not warn")?;
+    assert!(warning.contains("1 commit behind"), "{warning}");
+    assert!(warning.contains(&stale), "{warning}");
+    assert!(
+        warning.contains(&checkout.display().to_string()),
+        "{warning}"
+    );
+
+    // Level with, or ahead of, the default: no warning.
+    run(&checkout, &["reset", "-q", "--hard", &default])?;
+    assert!(confinement::read_only_checkout_warning(&state, &checkout).is_none());
+    run(&checkout, &["commit", "-q", "--allow-empty", "-m", "three"])?;
+    assert!(confinement::read_only_checkout_warning(&state, &checkout).is_none());
+
+    // Without origin/HEAD, the remote's advertised default is used, not origin/main.
+    run(&checkout, &["reset", "-q", "--hard", &stale])?;
+    run(
+        &checkout,
+        &["symbolic-ref", "--delete", "refs/remotes/origin/HEAD"],
+    )?;
+    let warning = confinement::read_only_checkout_warning(&state, &checkout)
+        .ok_or("advertised default did not warn")?;
+    assert!(warning.contains("1 commit behind"), "{warning}");
+
+    // An unreachable remote is advisory: the launch continues without a warning.
+    run(
+        &checkout,
+        &["remote", "set-url", "origin", "../missing.git"],
+    )?;
+    assert!(confinement::read_only_checkout_warning(&state, &checkout).is_none());
+    Ok(())
+}
+
+#[test]
 fn read_only_plan_runs_host_git_with_a_private_home_outside_the_child_store()
 -> Result<(), Box<dyn std::error::Error>> {
     use provenant_confinement::permissions::{NetworkAccess, PlanPermissions};
@@ -3551,6 +3815,7 @@ fn read_only_plan_runs_host_git_with_a_private_home_outside_the_child_store()
     let child_store = host_root.join("children/parent-attempt");
     let planted = child_store.join("tmp/git-home");
     std::fs::create_dir_all(&planted)?;
+    std::fs::set_permissions(&host_root, std::fs::Permissions::from_mode(0o700))?;
     std::fs::set_permissions(&planted, std::fs::Permissions::from_mode(0o777))?;
     let repo = base.join("repo");
     std::fs::create_dir_all(&repo)?;
@@ -3615,7 +3880,11 @@ fn read_only_plan_runs_host_git_with_a_private_home_outside_the_child_store()
         false,
         false,
     );
-    assert!(result.is_err());
+    assert!(
+        matches!(result, Err(ReadOnlyPlanError::MissingBinding)),
+        "{:?}",
+        result.as_ref().err()
+    );
 
     let seen = std::fs::read_to_string(&record)?;
     assert!(!seen.is_empty(), "host git never ran");
@@ -3736,7 +4005,7 @@ fn user_sessions_and_pruned_codex_state_remain_resumable() -> Result<(), Box<dyn
             "prompt": {"path": {"encoding": "utf8", "path": "prompt.txt"}, "digest": FileDigest::from_bytes([0; 32]), "bytes": 0, "complete": true, "redacted": false}
         }))?;
         let state = Path::new("/fixture/missing-state");
-        let result = continuation_for(&prior, &route, "fixture", state, state);
+        let result = continuation_for(&prior, &route, "fixture", state, state, state);
         if adapter == "codex" {
             assert!(result.is_err(), "Codex still requires its retained state");
             let session = "01234567-89ab-cdef-0123-456789abcdef";
@@ -3845,6 +4114,7 @@ fn user_sessions_and_pruned_codex_state_remain_resumable() -> Result<(), Box<dyn
                 &prior,
                 &route,
                 "fixture",
+                context.state_root.as_path(),
                 context.state_root.as_path(),
                 &copied,
             )?;
@@ -3976,10 +4246,83 @@ fn user_sessions_and_pruned_codex_state_remain_resumable() -> Result<(), Box<dyn
                     .status(),
                 provenant_providers::OutcomeStatus::Success
             );
+            // A nested execution has its own run files, but only the host
+            // config controls copy/search budgets. A child cannot override it.
+            let host = context.state_root.as_path();
+            let nested = host.join("children/fixture-parent");
+            std::fs::create_dir_all(&nested)?;
+            std::fs::rename(host.join("runs"), nested.join("runs"))?;
+            std::fs::write(
+                host.join("config.toml"),
+                "schema_version=1\n[domains.run]\ncontinuation_copy_entries=1\n",
+            )?;
+            std::fs::write(
+                nested.join("config.toml"),
+                "schema_version=1\n[domains.run]\ncontinuation_copy_entries=100000\n",
+            )?;
+            let nested_copy = base.join("nested-copy");
+            let error = continuation_for(&prior, &route, "fixture", &nested, host, &nested_copy)
+                .unwrap_err();
+            assert!(matches!(
+                error.resource_fact(),
+                Some(
+                    provenant_records::diagnostic::ResourceFact::ContinuationCopy {
+                        limit: 1,
+                        origin: provenant_records::diagnostic::SettingSource::Configuration,
+                        setting: provenant_records::diagnostic::ContinuationCopyLimit::Entries,
+                        ..
+                    }
+                )
+            ));
+            let error = continuation_available(&prior, &nested, host).unwrap_err();
+            assert!(error.to_string().contains("continuation_copy_entries is 1"));
+            let fail =
+                crate::run::resume::no_fallback_refusal(&error.to_string(), error.resource_fact());
+            assert_eq!(fail.status, provenant_records::Outcome::Refused);
+            let projected = crate::run::command_error(&fail);
+            assert_eq!(
+                projected.code,
+                crate::run::ErrorKind::ContinuationUnsupported.code()
+            );
+            assert!(
+                projected
+                    .cause
+                    .as_deref()
+                    .unwrap()
+                    .contains("continuation_copy_entries is 1")
+            );
+            assert!(
+                projected
+                    .cause
+                    .as_deref()
+                    .unwrap()
+                    .contains("host configuration")
+            );
+            assert!(
+                projected
+                    .repair
+                    .as_deref()
+                    .unwrap()
+                    .contains("continuation_copy_entries")
+            );
+            std::fs::write(
+                host.join("config.toml"),
+                "schema_version=1\n[domains.run]\ncontinuation_copy_entries=100000\n",
+            )?;
+            std::fs::write(
+                nested.join("config.toml"),
+                "schema_version=1\n[domains.run]\ncontinuation_copy_entries=1\n",
+            )?;
+            continuation_available(&prior, &nested, host)?;
+            continuation_for(&prior, &route, "fixture", &nested, host, &nested_copy)?;
+            assert_eq!(
+                std::fs::read_to_string(nested_copy.join(&rollout))?,
+                transcript
+            );
         } else {
             assert_eq!(result?.session(), "fixture-session");
             prior.session = None;
-            assert!(continuation_for(&prior, &route, "fixture", state, state).is_err());
+            assert!(continuation_for(&prior, &route, "fixture", state, state, state).is_err());
         }
     }
     Ok(())
@@ -4240,9 +4583,12 @@ fn retained_state_copy_refuses_state_past_its_byte_budget() -> Result<(), Box<dy
         bytes: LIMIT,
         ..RETAINED_STATE
     };
-    let refusal = Err(format!(
-        "retained provider state exceeds its {LIMIT} byte copy budget"
-    ));
+    let assert_byte_refusal = |result: Result<(), String>| {
+        let error = result.expect_err("copy byte ceiling must refuse");
+        assert!(error.contains("domains.run.continuation_copy_limit_bytes"));
+        assert!(error.contains(&LIMIT.to_string()));
+        assert!(error.contains("shipped default"));
+    };
     let temp = tempfile::tempdir()?;
     let base = std::fs::canonicalize(temp.path())?;
     // A sparse file costs the lane no blocks but claims far past the budget.
@@ -4250,7 +4596,7 @@ fn retained_state_copy_refuses_state_past_its_byte_budget() -> Result<(), Box<dy
     std::fs::create_dir(&sparse)?;
     std::fs::File::create(sparse.join("rollout.jsonl"))?.set_len(64 * LIMIT)?;
     let copied = base.join("sparse-copy");
-    assert_eq!(copy_state_within(&sparse, &copied, limits, false), refusal);
+    assert_byte_refusal(copy_state_within(&sparse, &copied, limits, false));
     assert!(
         !copied.join("rollout.jsonl").exists(),
         "the partial copy is removed"
@@ -4261,10 +4607,12 @@ fn retained_state_copy_refuses_state_past_its_byte_budget() -> Result<(), Box<dy
     let half = vec![b'x'; usize::try_from(LIMIT / 2 + 1)?];
     std::fs::write(split.join("history.jsonl"), &half)?;
     std::fs::write(split.join("sessions/rollout.jsonl"), &half)?;
-    assert_eq!(
-        copy_state_within(&split, &base.join("split-copy"), limits, false),
-        refusal
-    );
+    assert_byte_refusal(copy_state_within(
+        &split,
+        &base.join("split-copy"),
+        limits,
+        false,
+    ));
     // State of exactly the budget still copies whole.
     let exact = base.join("exact");
     std::fs::create_dir(&exact)?;
@@ -4301,20 +4649,16 @@ fn retained_state_copy_refuses_trees_past_its_entry_and_depth_budget()
 
     let deep = base.join("deep");
     std::fs::create_dir_all(deep.join("a/b/c"))?;
-    assert_eq!(
-        copy_state_within(&deep, &base.join("deep-copy"), limits, false),
-        Err("retained provider state nests deeper than 2 directories".into())
-    );
+    let error = copy_state_within(&deep, &base.join("deep-copy"), limits, false).unwrap_err();
+    assert!(error.contains("domains.run.continuation_copy_depth is 2"));
 
     let wide = base.join("wide");
     std::fs::create_dir(&wide)?;
     for name in ["1", "2", "3", "4", "5"] {
         std::fs::write(wide.join(name), "lane")?;
     }
-    assert_eq!(
-        copy_state_within(&wide, &base.join("wide-copy"), limits, false),
-        Err("retained provider state exceeds 4 entries".into())
-    );
+    let error = copy_state_within(&wide, &base.join("wide-copy"), limits, false).unwrap_err();
+    assert!(error.contains("domains.run.continuation_copy_entries is 4"));
     Ok(())
 }
 
@@ -4337,12 +4681,9 @@ fn retained_state_copy_leaves_nothing_when_refused() -> Result<(), Box<dyn std::
     let state = base.join("provider-state");
     let copied = state.join("candidate-0");
     std::fs::create_dir_all(&copied)?;
-    assert_eq!(
-        copy_state_within(&source, &copied, limits, false),
-        Err(format!(
-            "retained provider state exceeds its {LIMIT} byte copy budget"
-        ))
-    );
+    let error = copy_state_within(&source, &copied, limits, false).unwrap_err();
+    assert!(error.contains("domains.run.continuation_copy_limit_bytes"));
+    assert!(error.contains(&LIMIT.to_string()));
     let names = |path: &Path| -> std::io::Result<Vec<_>> {
         std::fs::read_dir(path)?
             .map(|entry| entry.map(|entry| entry.file_name()))
@@ -4375,7 +4716,7 @@ fn session_search_reports_its_spent_entry_budget() -> Result<(), Box<dyn std::er
     // An unfinished search is not a missing session.
     assert_eq!(
         find_session_state_within(&state, "fixture-session", limits),
-        Err(SearchExhausted)
+        Err(SearchExhausted::Entries)
     );
     std::fs::remove_file(state.join("candidate-0/sessions/3"))?;
     assert_eq!(
@@ -5075,22 +5416,14 @@ fn graph_read_only_snapshot_survives_moving_and_replaced_checkout()
     let executor = provenant_os::exec::SystemExecutor::new(1)?;
     let git = init_fixture_repository(&executor, &project, &git_home)?;
     std::fs::write(project.join("subject"), "verified checkout")?;
-    for args in [
-        vec!["add", "subject"],
-        vec![
-            "-c",
-            "user.name=Fixture",
-            "-c",
-            "user.email=fixture@example.invalid",
-            "commit",
-            "-qm",
-            "subject",
-        ],
-    ] {
+    for args in [vec!["add", "subject"], vec!["commit", "-qm", "subject"]] {
         let argv: Vec<std::ffi::OsString> = std::iter::once(git.clone().into_os_string())
             .chain(args.into_iter().map(Into::into))
             .collect();
-        let result = executor.execute(ExecOptions::new(&argv, &project, Duration::from_secs(5)))?;
+        let env = provenant_os::fixture::git_env();
+        let mut options = ExecOptions::new(&argv, &project, Duration::from_secs(5));
+        options.env = Some(&env);
+        let result = executor.execute(options)?;
         assert_eq!(result.termination, Termination::Exit(0));
     }
     let head = run::resolve_git_base(&git, &project, "HEAD")?;
@@ -5147,6 +5480,7 @@ fn graph_read_only_snapshot_survives_moving_and_replaced_checkout()
         project_id: Some(binding.project_id()),
         host: None,
         cancel: Some(&cancel),
+        repo_facts: Default::default(),
     };
     let mut task = super::super::tests::trace_run(
         50,
@@ -5218,6 +5552,7 @@ fn graph_read_only_snapshot_survives_moving_and_replaced_checkout()
     assert!(
         source_cwd(&registry, &missing_identity)
             .unwrap_err()
+            .to_string()
             .contains("identity changed")
     );
     let mut replaced = task.clone();
@@ -5230,6 +5565,7 @@ fn graph_read_only_snapshot_survives_moving_and_replaced_checkout()
     assert!(
         source_cwd(&registry, &replaced)
             .unwrap_err()
+            .to_string()
             .contains("identity changed")
     );
     let mut protected = task.clone();
@@ -5237,13 +5573,14 @@ fn graph_read_only_snapshot_survives_moving_and_replaced_checkout()
     assert!(
         source_cwd(&registry, &protected)
             .unwrap_err()
+            .to_string()
             .contains("not an allowed read root")
     );
     let foreign = base.join("foreign");
     std::fs::create_dir(&foreign)?;
     init_fixture_repository(&executor, &foreign, &git_home)?;
     protected.access.source_root = Some(foreign.clone());
-    let error = source_cwd(&registry, &protected).unwrap_err();
+    let error = source_cwd(&registry, &protected).unwrap_err().to_string();
     assert!(error.contains("no longer registered"));
     assert!(!error.contains(&foreign.to_string_lossy().into_owned()));
     let launch = prepare_command(
@@ -5316,10 +5653,6 @@ fn graph_read_only_snapshot_survives_moving_and_replaced_checkout()
         let args: Vec<std::ffi::OsString> = [
             thread_git.as_os_str(),
             "-c".as_ref(),
-            "user.name=Fixture".as_ref(),
-            "-c".as_ref(),
-            "user.email=fixture@example.invalid".as_ref(),
-            "-c".as_ref(),
             "core.hooksPath=/dev/null".as_ref(),
             "commit".as_ref(),
             "--allow-empty".as_ref(),
@@ -5329,12 +5662,13 @@ fn graph_read_only_snapshot_survives_moving_and_replaced_checkout()
         .into_iter()
         .map(ToOwned::to_owned)
         .collect();
-        let env = vec![
+        let mut env = vec![
             ("HOME".into(), thread_home.into_os_string()),
             ("PATH".into(), "/usr/bin:/bin".into()),
             ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
             ("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()),
         ];
+        env.extend(provenant_os::fixture::fixture_git_settings());
         let mut options = ExecOptions::new(&args, &live_source, Duration::from_secs(5));
         options.env = Some(&env);
         let result = provenant_os::exec::SystemExecutor::new(1)
@@ -5377,10 +5711,6 @@ fn graph_read_only_snapshot_survives_moving_and_replaced_checkout()
     );
     let moved_args: Vec<std::ffi::OsString> = [
         git.as_os_str(),
-        "-c".as_ref(),
-        "user.name=Fixture".as_ref(),
-        "-c".as_ref(),
-        "user.email=fixture@example.invalid".as_ref(),
         "commit".as_ref(),
         "--allow-empty".as_ref(),
         "-qm".as_ref(),
@@ -5389,11 +5719,10 @@ fn graph_read_only_snapshot_survives_moving_and_replaced_checkout()
     .into_iter()
     .map(ToOwned::to_owned)
     .collect();
-    let moved = executor.execute(ExecOptions::new(
-        &moved_args,
-        &source,
-        Duration::from_secs(5),
-    ))?;
+    let env = provenant_os::fixture::git_env();
+    let mut options = ExecOptions::new(&moved_args, &source, Duration::from_secs(5));
+    options.env = Some(&env);
+    let moved = executor.execute(options)?;
     assert_eq!(moved.termination, Termination::Exit(0));
     let historical = prepare_command(
         &registry,
@@ -5462,6 +5791,7 @@ fn graph_read_only_snapshot_survives_moving_and_replaced_checkout()
     assert!(
         source_cwd(&registry, &task)
             .unwrap_err()
+            .to_string()
             .contains("identity changed")
     );
     Ok(())
@@ -5501,13 +5831,19 @@ fn write_grant_limit_reports_configured_value_and_origin() -> Result<(), Box<dyn
     };
     let default = registry.write_grant_limit();
     assert_eq!(default.bytes, provenant_records::run::MAX_WRITE_GRANT_BYTES);
-    assert_eq!(default.origin, "compiled default");
+    assert_eq!(
+        default.origin,
+        provenant_records::diagnostic::SettingSource::ShippedDefault
+    );
     std::fs::write(
         state.join("config.toml"),
         "schema_version=1\n[domains.run]\nwrite_grant_limit_bytes=1048576\n",
     )?;
     let configured = registry.write_grant_limit();
     assert_eq!(configured.bytes, 1048576);
-    assert_eq!(configured.origin, "host configuration");
+    assert_eq!(
+        configured.origin,
+        provenant_records::diagnostic::SettingSource::Configuration
+    );
     Ok(())
 }

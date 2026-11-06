@@ -690,6 +690,17 @@ fn coordination_store_errors_include_safe_context() {
 }
 
 #[test]
+fn coordination_envelope_uses_owner_projection() {
+    let error = CoordinationError::Store(provenant_fabric_store::Error::Invalid("through"));
+    let projection = error.diagnostic();
+    let wire = ServiceError::Coordination(error).structured_error();
+    assert_eq!(wire["code"], projection.code);
+    assert_eq!(wire["detail"], projection.detail.unwrap());
+    assert_eq!(wire["next"], projection.next.unwrap());
+    assert_eq!(wire["field"], "through");
+}
+
+#[test]
 fn continuation_conflict_includes_current_generation() {
     let error = ServiceError::Facade(FacadeError::GenerationConflict {
         current_generation: 1,

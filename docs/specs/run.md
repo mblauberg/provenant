@@ -609,6 +609,12 @@ after the original recovery process exits. Predecessors without an import marker
 keep their existing admission semantics. Reservation release retires the marker's
 active fence; its evidence may remain beside the retired reservation.
 
+After the custody cutover, recovery carries a retained slot-root reservation
+to the attempt it names under the writer lock. The attempt record is durable
+before the slot record is removed, and a carried reservation excludes successor
+writers until it is settled. A conflicting or unreadable record stays fenced;
+unreadable evidence appears in reconciliation. Unknown fields are preserved.
+
 If launch preparation fails after acquiring custody, it withdraws the
 unlaunched reservation before reporting a local refusal. A failed withdrawal
 keeps the reservation and durably blocks the operation with the preparation
@@ -814,15 +820,17 @@ existing steer capability matrix. All current lane adapters are
 `continuation_only` or `unsupported`: the warning records an unsupported
 control receipt, and is not delivered to the lane. `provenant run --explain`
 shows the budget, its source and the providers it is enforced for. Claude
-enforces the budget from live usage. Codex exec emits tool and message item
-events within a turn, but reports usage only at terminal `turn.completed`;
-it cannot be stopped mid-turn by this budget. The version-matched Codex
+enforces the budget from live usage. The budget does not stop Codex writers.
+Codex exec runs one turn per launch and reports usage only at its final
+`turn.completed` frame; there is no further turn to stop. The version-matched Codex
 [JSONL processor](https://github.com/openai/codex/blob/f2ed5dc90e514b59c2334f3bafb9b0250cc3e038/codex-rs/exec/src/event_processor_with_jsonl_output.rs)
 (`rust-v0.166.0-alpha.1`) stores `ThreadTokenUsageUpdated` internally without
-emitting a JSON frame, and emits usage at `TurnCompleted` before shutdown. This launch path has no further
-turn to stop, so Codex's budget is not enforced. Its completed-turn accounting
-still subtracts cached input per turn. Other providers without live usage are
-also not enforced, and launch warnings or receipt notes report this.
+emitting a JSON frame, and emits usage at `TurnCompleted` before shutdown.
+Completed-turn accounting still subtracts cached input, but usage may be
+thread-cumulative across `exec resume`; it is not a between-turn stop signal.
+Other providers without live usage are also not enforced, and launch warnings
+or receipt notes report this. A cherry-pick, revert or rebase in progress is
+left uncommitted like a merge, with a settlement note.
 Time a lane spends queued for
 a build slot stays off the wall deadline, up to `lanes.slot_wait_seconds`
 (default 7200) in total.
@@ -964,6 +972,17 @@ Git run by absolute path inside the checkout bypasses the shim, finds the
 original gitfile and can only read the shared metadata, never write it, so it
 cannot reach other lanes or change the host repository. Outside the checkout
 `git` discovers its repository from the directory as usual.
+Writer launch sets `GIT_CONFIG_GLOBAL` to a private file that includes the host's
+existing global Git configuration and adds the resolved global identity and
+`user.useConfigOnly=true`. System Git configuration remains enabled. Repository
+identity overrides the global identity; absent identity cannot fall back to a
+generated hostname identity. Identity values containing control characters
+refuse launch. The included host files remain readable in the writer sandbox.
+Command-scope Git configuration resets credential helpers and supplies the lane's
+GitHub token helper; the wrapper restores that precedence when a subprocess
+clears the environment but retains `GH_TOKEN`. Other host Git settings remain in
+force. Explicit command-line Git configuration can override these settings.
+
 The small Git wrapper has one source and one installation path for the pinned
 executable and its configuration. It applies the lane binding and the lane's
 commit identity inside the checkout, whether or not a subprocess cleared its
@@ -974,7 +993,7 @@ survive `env -i`-style subprocesses. The restore needs `git` to resolve to the
 wrapper: a subprocess that also drops `PATH` reaches system Git, which finds
 the shared repository through the worktree's `.git` file. That Git can read
 shared metadata, which the sandbox grants read-only, but cannot write it, and
-it loses the publishing credential. Per-adapter tests for every writer adapter
+it loses wrapper-provided publishing configuration when its environment is cleared. Per-adapter tests for every writer adapter
 (Claude, Codex, Cursor, Agy and OpenCode) prove the pinned executable, the
 private refs, index and objects, the identity scrub and publishing credentials
 under a cleared environment that keeps `PATH`. The command adapter does not

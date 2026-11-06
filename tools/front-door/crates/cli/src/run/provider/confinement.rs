@@ -183,12 +183,11 @@ pub(super) fn confinement_request(
     host_writes: &provenant_confinement::run_config::RunConfig,
     adapter: &str,
     publishing: bool,
-) -> Result<PlanRequest, String> {
+) -> Result<PlanRequest, provenant_confinement::permissions::PermissionError> {
     let mode = match writer {
         Some(writer) => {
             let mut authority =
-                WorktreeWriteAuthority::for_worktree(&writer.worktree, &writer.branch, roots.home)
-                    .map_err(|error| error.to_string())?;
+                WorktreeWriteAuthority::for_worktree(&writer.worktree, &writer.branch, roots.home)?;
             authority.set_publishing(publishing);
             AccessMode::WorktreeWrite(Box::new(authority))
         }
@@ -265,53 +264,99 @@ pub(super) fn source_identity(path: &Path) -> Result<run::SourceIdentity, String
 
 /// Reopen the graph-bound checkout at launch, refusing a moved or replaced
 /// worktree rather than falling back to the daemon's checkout.
+#[derive(Debug, thiserror::Error)]
+pub(super) enum SourceCwdError {
+    #[error("{0}")]
+    Authority(String),
+    #[error("{0}")]
+    Operational(String),
+}
+impl SourceCwdError {
+    pub(super) fn boundary_class(&self) -> provenant_records::diagnostic::BoundaryClass {
+        match self {
+            Self::Authority(_) => provenant_records::diagnostic::BoundaryClass::Authority,
+            Self::Operational(_) => provenant_records::diagnostic::BoundaryClass::None,
+        }
+    }
+}
+
 pub(super) fn source_cwd(
     registry: &Registry<'_>,
     task: &run::TaskRequest,
-) -> Result<PathBuf, String> {
-    let cwd = registry.cwd.ok_or("working directory is unavailable")?;
+) -> Result<PathBuf, SourceCwdError> {
+    let cwd = registry
+        .cwd
+        .ok_or_else(|| SourceCwdError::Operational("working directory is unavailable".into()))?;
     let Some(source) = &task.access.source_root else {
         if task.access.source_identity.is_some() || task.access.source_live {
-            return Err("graph source identity has no checkout".into());
+            return Err(SourceCwdError::Authority(
+                "graph source identity has no checkout".into(),
+            ));
         }
-        return canonical(cwd);
+        return canonical(cwd).map_err(SourceCwdError::Operational);
     };
     if task.writer.is_some() || (!task.access.source_live && task.head.is_none()) {
-        return Err("read-only source needs a pinned head and no writer".into());
+        return Err(SourceCwdError::Authority(
+            "read-only source needs a pinned head and no writer".into(),
+        ));
     }
-    let state = registry.state_root.ok_or("state root is unavailable")?;
+    let state = registry
+        .state_root
+        .ok_or_else(|| SourceCwdError::Operational("state root is unavailable".into()))?;
     if !run::access_root_allowed(source, state, true)
         || provenant_confinement::refuses_lane_root(source, true, registry.home)
     {
-        return Err("graph source checkout is not an allowed read root".into());
+        return Err(SourceCwdError::Authority(
+            "graph source checkout is not an allowed read root".into(),
+        ));
     }
-    let verified = run::resolve_reader_source(state, cwd, source)
-        .map_err(|_| "graph source checkout is no longer registered with the project")?;
+    let verified = run::resolve_reader_source(state, cwd, source).map_err(|_| {
+        SourceCwdError::Authority(
+            "graph source checkout is no longer registered with the project".into(),
+        )
+    })?;
     if verified != *source {
-        return Err("graph source checkout changed location".into());
+        return Err(SourceCwdError::Authority(
+            "graph source checkout changed location".into(),
+        ));
     }
-    let identity = source_identity(&verified)?;
+    let identity = source_identity(&verified).map_err(SourceCwdError::Authority)?;
     if task.access.source_identity.as_ref() != Some(&identity) {
-        return Err("graph source checkout identity changed".into());
+        return Err(SourceCwdError::Authority(
+            "graph source checkout identity changed".into(),
+        ));
     }
     Ok(verified)
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(super) enum SourceHeadError {
+    #[error("graph source head missing")]
+    Missing,
+    #[error("invalid graph source head")]
+    Invalid,
+    #[error("graph source checkout moved from pinned head {0}")]
+    Moved(provenant_core::GitOid),
+}
+
+pub(super) fn source_head(
+    task: &run::TaskRequest,
+) -> Result<provenant_core::GitOid, SourceHeadError> {
+    task.head
+        .as_deref()
+        .ok_or(SourceHeadError::Missing)?
+        .parse()
+        .map_err(|_| SourceHeadError::Invalid)
 }
 
 pub(super) fn require_source_head(
     task: &run::TaskRequest,
     observed: Option<provenant_core::GitOid>,
-) -> Result<(), String> {
+) -> Result<(), SourceHeadError> {
     if task.access.source_root.is_some() && !task.access.source_live {
-        let expected = task
-            .head
-            .as_deref()
-            .ok_or("graph source head missing")?
-            .parse::<provenant_core::GitOid>()
-            .map_err(|_| "invalid graph source head")?;
+        let expected = source_head(task)?;
         if observed != Some(expected) {
-            return Err(format!(
-                "graph source checkout moved from pinned head {expected}"
-            ));
+            return Err(SourceHeadError::Moved(expected));
         }
     }
     Ok(())
@@ -326,6 +371,71 @@ pub(super) type PreparedReadPlan = (
     Option<PathBuf>,
 );
 
+#[derive(Debug, thiserror::Error)]
+pub(super) enum ReadOnlyPlanError {
+    #[error(transparent)]
+    Run(#[from] run::RunError),
+    #[error(transparent)]
+    Plan(#[from] provenant_confinement::PlanError),
+    #[error("repository does not match dispatch project binding")]
+    BindingMismatch,
+    #[error("dispatch project binding missing")]
+    MissingBinding,
+    #[error("pinned source requires a Git repository")]
+    PinnedSourceRequiresGit,
+    #[error("{0}")]
+    Other(String),
+}
+
+impl From<String> for ReadOnlyPlanError {
+    fn from(value: String) -> Self {
+        Self::Other(value)
+    }
+}
+impl From<&str> for ReadOnlyPlanError {
+    fn from(value: &str) -> Self {
+        Self::Other(value.into())
+    }
+}
+impl ReadOnlyPlanError {
+    pub(super) fn boundary_class(&self) -> provenant_records::diagnostic::BoundaryClass {
+        use provenant_records::diagnostic::BoundaryClass;
+        match self {
+            Self::Run(error) => error.boundary_class(),
+            Self::Plan(error) => error.boundary_class(),
+            Self::BindingMismatch | Self::MissingBinding | Self::PinnedSourceRequiresGit => {
+                BoundaryClass::Authority
+            }
+            Self::Other(_) => BoundaryClass::None,
+        }
+    }
+}
+
+#[test]
+fn read_only_plan_preserves_typed_authority_failures() {
+    use provenant_records::diagnostic::BoundaryClass;
+    assert_eq!(
+        ReadOnlyPlanError::BindingMismatch.boundary_class(),
+        BoundaryClass::Authority
+    );
+    assert_eq!(
+        ReadOnlyPlanError::MissingBinding.boundary_class(),
+        BoundaryClass::Authority
+    );
+    assert_eq!(
+        ReadOnlyPlanError::PinnedSourceRequiresGit.boundary_class(),
+        BoundaryClass::Authority
+    );
+    assert_eq!(
+        ReadOnlyPlanError::Other("unavailable".into()).boundary_class(),
+        BoundaryClass::None
+    );
+    assert_eq!(
+        ReadOnlyPlanError::Run(run::RunError::WriterHeadNotLaneBranch).boundary_class(),
+        BoundaryClass::LaneGit
+    );
+}
+
 pub(super) fn read_only_plan(
     roots: &provenant_core::Roots,
     project: ProjectId,
@@ -334,7 +444,7 @@ pub(super) fn read_only_plan(
     request: PlanRequest,
     isolated: bool,
     live: bool,
-) -> Result<PreparedReadPlan, String> {
+) -> Result<PreparedReadPlan, ReadOnlyPlanError> {
     use provenant_confinement::{GitRead, UtilityBudget, UtilityRuntime, run_read_utility};
     use provenant_os::exec::SystemExecutor;
 
@@ -362,7 +472,7 @@ pub(super) fn read_only_plan(
                 break;
             }
             Err(error) if error.is_not_found() => {}
-            Err(error) => return Err(error.to_string()),
+            Err(error) => return Err(error.to_string().into()),
         }
     }
     let location = provenant_config::ProjectLocation::new(
@@ -373,9 +483,9 @@ pub(super) fn read_only_plan(
     .map_err(|error| error.to_string())?;
     let binding = provenant_config::lookup_project(roots, &location)
         .map_err(|error| error.to_string())?
-        .ok_or("dispatch project binding missing")?;
+        .ok_or(ReadOnlyPlanError::MissingBinding)?;
     if binding.project_id() != project {
-        return Err("repository does not match dispatch project binding".into());
+        return Err(ReadOnlyPlanError::BindingMismatch);
     }
     match repository {
         Some(repo) => {
@@ -407,14 +517,109 @@ pub(super) fn read_only_plan(
                     Some(repo.private_git_dir().to_owned()),
                 )
             })
-            .map_err(|error| error.to_string())
+            .map_err(ReadOnlyPlanError::from)
         }
         // Non-Git workspaces have no Git metadata or repository exceptions.
-        None if isolated => Err("pinned source requires a Git repository".into()),
+        None if isolated => Err(ReadOnlyPlanError::PinnedSourceRequiresGit),
         None => ConfinedPlan::new(request)
             .map(|plan| (plan, None, None, None))
-            .map_err(|error| error.to_string()),
+            .map_err(ReadOnlyPlanError::from),
     }
+}
+
+/// Advisory freshness of the checkout a read-only lane reads, for the launch
+/// warnings. The lane reads `source`: the `--worktree` checkout, or the caller's
+/// checkout when none is named. Absent or unusable Git data yields no warning.
+pub(in crate::run) fn read_only_checkout_warning(state: &Path, source: &Path) -> Option<String> {
+    use provenant_confinement::{GitRead, UtilityBudget, UtilityRuntime, run_read_utility};
+    use provenant_os::exec::SystemExecutor;
+
+    let git = provenant_os::git::git_executable()?;
+    let utility_home = host_git_home(state).ok()?;
+    let utility = UtilityRuntime::new(&git, utility_home.path()).ok()?;
+    let executor = SystemExecutor::new(1).ok()?;
+    let budget = UtilityBudget::bounded(std::time::Duration::from_secs(5)).ok()?;
+    let cancel = provenant_core::CancelToken::new();
+    let ancestor = source.ancestors().find(|path| path.join(".git").exists())?;
+    let repo = utility
+        .open_read_repo(&executor, ancestor, budget, &cancel)
+        .ok()?;
+    let head = run_read_utility(
+        &executor,
+        GitRead::RevParseHead,
+        &repo,
+        &utility,
+        budget,
+        &cancel,
+    )
+    .ok()
+    .and_then(|out| String::from_utf8(out.stdout.bytes).ok())
+    .and_then(|text| provenant_core::GitOid::parse(text.trim()).ok())?;
+    let count = commits_behind_default(&executor, &repo, &utility, budget, &cancel, head)?;
+    Some(format!(
+        "{} is {count} commit{} behind origin's default branch; read-only lane will read {head}",
+        source.display(),
+        if count == 1 { "" } else { "s" }
+    ))
+}
+
+/// Compare `head` with the remote's default branch as last fetched. This never
+/// fetches. The remote is asked only when no `origin/HEAD` is recorded, and only
+/// within the utility budget.
+fn commits_behind_default(
+    executor: &dyn provenant_os::exec::Executor,
+    repo: &provenant_confinement::ReadOnlyRepo,
+    utility: &provenant_confinement::UtilityRuntime,
+    budget: provenant_confinement::UtilityBudget,
+    cancel: &provenant_core::CancelToken,
+    head: provenant_core::GitOid,
+) -> Option<u64> {
+    use provenant_confinement::{GitRead, run_read_utility, utility::advertised_default_branch};
+    use provenant_os::exec::Termination;
+
+    let resolve = |reference: &str| {
+        let out = run_read_utility(
+            executor,
+            GitRead::ResolveRevision {
+                revision: provenant_confinement::repo::GitRevision::new(reference).ok()?,
+            },
+            repo,
+            utility,
+            budget,
+            cancel,
+        )
+        .ok()?;
+        if out.termination != Termination::Exit(0) {
+            return None;
+        }
+        provenant_core::GitOid::parse(std::str::from_utf8(&out.stdout.bytes).ok()?.trim()).ok()
+    };
+    let default = resolve("refs/remotes/origin/HEAD").or_else(|| {
+        let branch =
+            advertised_default_branch(executor, repo, utility, "origin", budget, cancel).ok()??;
+        resolve(&format!("refs/remotes/origin/{}", branch.short_name()))
+    })?;
+    let behind = run_read_utility(
+        executor,
+        GitRead::AncestorCount {
+            base: head,
+            head: default,
+        },
+        repo,
+        utility,
+        budget,
+        cancel,
+    )
+    .ok()?;
+    if behind.termination != Termination::Exit(0) {
+        return None;
+    }
+    std::str::from_utf8(&behind.stdout.bytes)
+        .ok()?
+        .trim()
+        .parse::<u64>()
+        .ok()
+        .filter(|count| *count > 0)
 }
 
 /// Publishing hands the lane the GitHub credential, so it needs the explicit

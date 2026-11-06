@@ -624,7 +624,8 @@ tools/front-door/crates/run/src/launch.rs release.home-path 32dfa2b7dac4116f
 tools/front-door/crates/run/src/launch.rs release.home-path 9011d081761b5af1
 tools/front-door/crates/run/src/launch.rs release.home-path eff16c4e6584baca
 tools/front-door/crates/run/src/policy.rs release.openai-key 1140d4286a3b19e4
-tools/front-door/crates/run/src/service_tests.rs release.openai-key 61c0762099a810c9
+tools/front-door/crates/run/src/service_tests.rs release.openai-key 5b4d355cef302866
+tools/front-door/crates/run/src/service_tests.rs release.openai-key fbc4951617cca063
 tools/front-door/crates/run/src/tests.rs release.github-token cc021845ebe6984f
 tools/front-door/crates/run/src/tests.rs release.github-token e041c192f54daf62
 tools/front-door/crates/run/src/tests.rs release.openai-key 94e2598028fd38a9

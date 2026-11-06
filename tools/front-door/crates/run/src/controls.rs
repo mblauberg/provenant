@@ -547,6 +547,11 @@ mod reboot_tests {
             None,
             &call,
         )?;
+        let attempt = store.attempt_dir(run.run_id, id, false)?;
+        let launcher = attempt.try_lock(
+            std::ffi::OsStr::new("launcher.lock"),
+            provenant_os::fs::LockMode::Exclusive,
+        )?;
         let spawned = std::cell::Cell::new(0);
         let spawn = |_: &[std::ffi::OsString], _: &std::path::Path| {
             spawned.set(spawned.get() + 1);
@@ -557,7 +562,6 @@ mod reboot_tests {
             0,
             "an uncancelled start waits"
         );
-        let attempt = store.attempt_dir(run.run_id, id, false)?;
         let scope = RunStore::scope(&store.record(id, &call)?);
         let request = serde_json::to_vec(&serde_json::json!({"scope": scope}))?;
         crate::artifacts::seal(&attempt, "cancel.json", &request, RECORD_LIMIT)?;
@@ -567,6 +571,7 @@ mod reboot_tests {
             "a cancelled start is reaped"
         );
         assert_eq!(spawned.get(), 1);
+        drop(launcher);
         store.reconcile_with_observer(
             run.run_id,
             &crate::dispatch_tests::Fake::default(),
@@ -580,6 +585,238 @@ mod reboot_tests {
                 ..
             }
         ));
+        Ok(())
+    }
+
+    fn starting_store() -> std::result::Result<
+        (
+            tempfile::TempDir,
+            RunStore,
+            provenant_core::RunId,
+            AttemptId,
+        ),
+        Box<dyn std::error::Error>,
+    > {
+        let temp = tempfile::tempdir()?;
+        let clock = crate::tests::clock();
+        let cancel = provenant_core::CancelToken::new();
+        let call = crate::tests::call(&clock, &cancel);
+        let context = crate::tests::context(temp.path())?;
+        let store = RunStore::open(&context, &call)?;
+        let run = crate::tests::input();
+        store.create(&run, &call)?;
+        let id = run.attempts[0].attempt_id;
+        store.mark_starting(
+            &store.record(id, &call)?,
+            &crate::tests::route(),
+            &[],
+            &Default::default(),
+            None,
+            &call,
+        )?;
+        Ok((temp, store, run.run_id, id))
+    }
+
+    #[test]
+    fn cancelling_an_attempt_that_never_launched_settles_it_before_returning()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let (_temp, store, _run, id) = starting_store()?;
+        let clock = crate::tests::clock();
+        let cancel = provenant_core::CancelToken::new();
+        let call = crate::tests::call(&clock, &cancel);
+        assert_eq!(store.cancel(id, "stop", &call)?, CancelReceipt::Cancelled);
+        assert!(matches!(
+            store.record(id, &call)?.state,
+            AttemptState::Terminal {
+                outcome: Outcome::Cancelled,
+                ..
+            }
+        ));
+        assert_eq!(
+            store.cancel(id, "stop", &call)?,
+            CancelReceipt::AlreadyTerminal
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_starting_attempt_whose_launcher_died_is_reaped_and_settles()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let (_temp, store, run, id) = starting_store()?;
+        let clock = crate::tests::clock();
+        let cancel = provenant_core::CancelToken::new();
+        let call = crate::tests::call(&clock, &cancel);
+        let attempt = store.attempt_dir(run, id, false)?;
+        let spawn = |_: &[std::ffi::OsString], _: &std::path::Path| Ok(());
+        // A live launcher holds the attempt's writer lock.
+        let launcher = attempt.lock(
+            std::ffi::OsStr::new("writer.lock"),
+            provenant_os::fs::LockMode::Exclusive,
+            call.lock_budget(),
+            &cancel,
+            &clock,
+        )?;
+        assert_eq!(store.reap_with(&call, spawn)?, 0, "a live launcher waits");
+        drop(launcher);
+        assert_eq!(
+            store.reap_with(&call, spawn)?,
+            1,
+            "a dead launcher is reaped"
+        );
+        store.reconcile_with_observer(
+            run,
+            &crate::dispatch_tests::Fake::default(),
+            &call,
+            &SystemProcessObserver,
+        )?;
+        assert!(matches!(
+            store.record(id, &call)?.state,
+            AttemptState::Terminal { .. }
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn reaping_settles_a_launcher_lost_before_any_writer_lock_exists()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let (_temp, store, run, id) = starting_store()?;
+        let clock = crate::tests::clock();
+        let cancel = provenant_core::CancelToken::new();
+        let call = crate::tests::call(&clock, &cancel);
+        let attempt = store.attempt_dir(run, id, false)?;
+        assert!(
+            matches!(attempt.metadata_at(std::ffi::OsStr::new("writer.lock"), false),
+            Err(error) if error.is_not_found())
+        );
+        let launcher = attempt.try_lock(
+            std::ffi::OsStr::new("launcher.lock"),
+            provenant_os::fs::LockMode::Exclusive,
+        )?;
+        assert_eq!(store.reap_with(&call, |_, _| Ok(()))?, 0);
+        drop(launcher);
+        assert_eq!(store.reap_with(&call, |_, _| Ok(()))?, 1);
+        store.reconcile_with_observer(
+            run,
+            &crate::dispatch_tests::Fake::default(),
+            &call,
+            &SystemProcessObserver,
+        )?;
+        assert!(matches!(
+            store.record(id, &call)?.state,
+            AttemptState::Terminal {
+                outcome: Outcome::Rejected,
+                ..
+            }
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn reaping_settles_an_old_start_with_no_launcher_or_writer_lock()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let (_temp, store, run, id) = starting_store()?;
+        let clock = crate::tests::clock();
+        let cancel = provenant_core::CancelToken::new();
+        let call = crate::tests::call(&clock, &cancel);
+        let attempt = store.attempt_dir(run, id, false)?;
+        for name in ["launcher.lock", "writer.lock"] {
+            assert!(
+                matches!(attempt.metadata_at(std::ffi::OsStr::new(name), false),
+                Err(error) if error.is_not_found())
+            );
+        }
+        assert_eq!(store.reap_with(&call, |_, _| Ok(()))?, 1);
+        store.reconcile_with_observer(
+            run,
+            &crate::dispatch_tests::Fake::default(),
+            &call,
+            &SystemProcessObserver,
+        )?;
+        assert!(matches!(
+            store.record(id, &call)?.state,
+            AttemptState::Terminal {
+                outcome: Outcome::Rejected,
+                ..
+            }
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn a_handed_off_launcher_is_not_reaped_as_an_unlaunched_attempt()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let (_temp, store, run, id) = starting_store()?;
+        let clock = crate::tests::clock();
+        let cancel = provenant_core::CancelToken::new();
+        let call = crate::tests::call(&clock, &cancel);
+        let attempt = store.attempt_dir(run, id, false)?;
+        // The launcher no longer holds writer.lock after handing custody to
+        // the guardian. Its durable launch evidence rules out prelaunch death.
+        drop(attempt.try_lock(
+            std::ffi::OsStr::new("writer.lock"),
+            provenant_os::fs::LockMode::Exclusive,
+        )?);
+        crate::artifacts::seal(&attempt, "launch.json", b"{}", RECORD_LIMIT)?;
+        assert!(!store.launcher_gone(&store.record(id, &call)?, &attempt, true, &call));
+        assert_eq!(
+            store.reap_with(&call, |_, _| panic!(
+                "handed-off launcher must not be reaped"
+            ))?,
+            0
+        );
+        assert!(matches!(
+            store.record(id, &call)?.state,
+            AttemptState::Starting { .. }
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn launcher_death_is_proved_in_its_worktree_fence()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let (_temp, store, run, id) = starting_store()?;
+        let clock = crate::tests::clock();
+        let cancel = provenant_core::CancelToken::new();
+        let call = crate::tests::call(&clock, &cancel);
+        let record = store.record(id, &call)?;
+        let attempt = store.attempt_dir(run, id, false)?;
+        let slot = store
+            .writer_registry
+            .join("worktrees")
+            .join(record.project_id.to_string())
+            .join("lane");
+        std::fs::create_dir_all(&slot)?;
+        let held = provenant_supervisor::fixture::acquire_writer(
+            provenant_os::fs::Directory::open_anchor(&slot)?,
+            RunStore::scope(&record),
+            call.lock_budget(),
+            &cancel,
+            &clock,
+        )?;
+        assert_eq!(store.writer_fences()?.len(), 1);
+        // The attempt itself has no lock; only its fenced slot can prove life.
+        assert!(!store.launcher_gone(&record, &attempt, true, &call));
+        assert_eq!(
+            store.reap_with(&call, |_, _| panic!("live fence holder must not be reaped"))?,
+            0
+        );
+        drop(held);
+        assert!(store.launcher_gone(&record, &attempt, false, &call));
+        assert_eq!(store.reap_with(&call, |_, _| Ok(()))?, 1);
+        store.reconcile_with_observer(
+            run,
+            &crate::dispatch_tests::Fake::default(),
+            &call,
+            &SystemProcessObserver,
+        )?;
+        assert!(matches!(
+            store.record(id, &call)?.state,
+            AttemptState::Terminal {
+                outcome: Outcome::Rejected,
+                ..
+            }
+        ));
+        assert!(store.writer_fences()?.is_empty());
         Ok(())
     }
 
@@ -901,7 +1138,7 @@ mod lineage_tests {
                 assert_eq!(std::fs::read(&snapshot)?, legacy);
                 assert!(matches!(
                     store.check_writer_lineage(&record, &launch.worktree, &call),
-                    Err(RunError::Validation(
+                    Err(RunError::WriterLineage(
                         "continuation worktree belongs to another lane"
                     ))
                 ));
@@ -960,7 +1197,7 @@ mod lineage_tests {
             )?;
             assert!(matches!(
                 store.check_continuation_writer(next.attempt_id, &call),
-                Err(RunError::Validation(
+                Err(RunError::WriterLineage(
                     "continuation worktree belongs to another lane"
                 ))
             ));
@@ -1109,7 +1346,7 @@ mod lineage_tests {
         )?;
         assert!(matches!(
             store.check_continuation_writer(prior, &call),
-            Err(RunError::Validation(
+            Err(RunError::WriterLineage(
                 "continuation worktree has no lane owner"
             ))
         ));
@@ -1122,7 +1359,7 @@ mod lineage_tests {
         )?;
         assert!(matches!(
             store.check_continuation_writer(prior, &call),
-            Err(RunError::Validation(
+            Err(RunError::WriterLineage(
                 "continuation worktree has no lane owner"
             ))
         ));
@@ -1193,7 +1430,7 @@ mod lineage_tests {
             let queued = store.record(first.attempt_id, &call).unwrap();
             assert!(matches!(
                 store.check_writer_lineage(&queued, &tree, &call),
-                Err(RunError::Validation(
+                Err(RunError::WriterLineage(
                     "continuation worktree belongs to another lane"
                 ))
             ));
@@ -1208,13 +1445,13 @@ mod lineage_tests {
         };
         assert!(matches!(
             store.resume(&next, &call),
-            Err(RunError::Validation(
+            Err(RunError::WriterLineage(
                 "continuation worktree belongs to another lane"
             ))
         ));
         assert!(matches!(
             store.resume_fresh(&next, "fixture", &call),
-            Err(RunError::Validation(
+            Err(RunError::WriterLineage(
                 "continuation worktree belongs to another lane"
             ))
         ));
@@ -1606,6 +1843,8 @@ impl RunStore {
                 },
                 None => attempt.try_clone()?,
             };
+            let observation = custody::writer_admission_guard(&custody)
+                .map_err(|error| RunError::Io(std::io::Error::other(error.to_string())))?;
             let _lease = match custody.try_lock(
                 std::ffi::OsStr::new("writer.lock"),
                 provenant_os::fs::LockMode::Exclusive,
@@ -1614,6 +1853,7 @@ impl RunStore {
                 Err(provenant_os::fs::FsError::LockTimeout { .. }) => return Ok(None),
                 Err(error) => return Err(error.into()),
             };
+            drop(observation);
             let stale = match custody::reservation_present(&custody, Self::scope(record)) {
                 Ok(false) => false,
                 Ok(true) => {
@@ -1786,6 +2026,11 @@ impl RunStore {
                 _ => {}
             }
             let dir = self.attempt_dir(record.run_id, id, false)?;
+            let unlaunched = matches!(record.state, AttemptState::Starting { .. })
+                && matches!(
+                    custody::reattach(dir.try_clone()?, Self::scope(&record)),
+                    Err(CustodyError::Filesystem(ref error)) if error.is_not_found()
+                );
             let stopped = match custody::reattach(dir.try_clone()?, Self::scope(&record)) {
                 Ok(handle) => custody::stop(&handle, StopReason::ExplicitCancellation),
                 Err(CustodyError::Filesystem(error)) if error.is_not_found() => {
@@ -1798,6 +2043,13 @@ impl RunStore {
                 }
                 Err(error) => Err(error),
             };
+            if unlaunched && stopped.is_ok() {
+                // No guardian exists to act on the request. Settle it here so
+                // the queue place and the writer are free before we return.
+                if self.settle_cancelled_unlaunched(id, call)? {
+                    return Ok(CancelReceipt::Cancelled);
+                }
+            }
             return Ok(match stopped {
                 Ok(StopReceipt::Requested) => CancelReceipt::Requested,
                 Ok(StopReceipt::AlreadyRequested) => CancelReceipt::AlreadyRequested,
@@ -1806,6 +2058,43 @@ impl RunStore {
                 },
             });
         }
+    }
+    /// Settle a cancelled attempt whose provider never launched. A launcher
+    /// that is still alive watches for the request and unwinds its own
+    /// preparation, so retry briefly before leaving the request standing.
+    fn settle_cancelled_unlaunched(&self, id: AttemptId, call: &Request<'_>) -> Result<bool> {
+        const ATTEMPTS: u32 = 40;
+        for attempt in 0..ATTEMPTS {
+            let record = self.record(id, call)?;
+            if matches!(record.state, AttemptState::Terminal { .. }) {
+                return Ok(true);
+            }
+            if !matches!(record.state, AttemptState::Starting { .. }) {
+                return Ok(false);
+            }
+            // `settle_unlaunched` waits on a held lock; a live launcher is
+            // asked to unwind instead, so cancel stays prompt.
+            let dir = self.attempt_dir(record.run_id, id, false)?;
+            if self.launcher_gone(&record, &dir, true, call)
+                && matches!(
+                    self.settle_unlaunched(id, &record, call)?,
+                    Reconciled::Withdrawn | Reconciled::Finished
+                )
+            {
+                return Ok(true);
+            }
+            if attempt + 1 < ATTEMPTS {
+                provenant_core::Pause::wait(
+                    &provenant_core::ThreadPause,
+                    provenant_core::DurationMicros::from_micros(100_000),
+                    call.cancel,
+                );
+            }
+        }
+        Ok(matches!(
+            self.record(id, call)?.state,
+            AttemptState::Terminal { .. }
+        ))
     }
 
     /// Accept a continuation run. Each terminal attempt can be continued
@@ -1860,7 +2149,12 @@ impl RunStore {
         )
     }
     fn fresh_writer_branch(&self, input: &Resume, writer: &WriterRequest) -> Result<String> {
-        let launch = crate::prepare_writer(writer, &self.writer_registry, self.context.project_id)?;
+        let launch = crate::prepare_writer_with_facts(
+            writer,
+            &self.writer_registry,
+            self.context.project_id,
+            &self.repo_facts,
+        )?;
         let owner = provenant_confinement::worktrees::load_owner(&launch.worktree)?.ok_or(
             RunError::Validation("fresh fallback needs an owned worktree"),
         )?;
@@ -1891,7 +2185,12 @@ impl RunStore {
         let Some(writer) = &task.writer else {
             return Ok(None);
         };
-        let launch = crate::prepare_writer(writer, &self.writer_registry, prior.project_id)?;
+        let launch = crate::prepare_writer_with_facts(
+            writer,
+            &self.writer_registry,
+            prior.project_id,
+            &self.repo_facts,
+        )?;
         self.check_writer_lineage(&prior, &launch.worktree, call)
     }
     pub(crate) fn check_writer_lineage(
@@ -1911,15 +2210,17 @@ impl RunStore {
         let mut initial_owner = None;
         loop {
             if !seen.insert(current.attempt_id) || seen.len() > 128 {
-                return Err(RunError::Validation("continuation parent chain"));
+                return Err(RunError::WriterLineage("continuation parent chain"));
             }
             if lane.is_some_and(|owner| {
                 owner.attempt_id == Some(current.attempt_id)
                     || owner.operation_id.as_ref() == Some(&current.operation_id)
             }) {
-                let owner_id = lane
-                    .and_then(|owner| owner.attempt_id)
-                    .ok_or(RunError::Validation("continuation owner attempt missing"))?;
+                let owner_id =
+                    lane.and_then(|owner| owner.attempt_id)
+                        .ok_or(RunError::WriterLineage(
+                            "continuation owner attempt missing",
+                        ))?;
                 if owner_id != record.attempt_id && !self.writer_owner_terminal(owner_id, call)? {
                     return Err(RunError::Nonterminal);
                 }
@@ -1937,9 +2238,11 @@ impl RunStore {
                         .as_ref()
                         .is_some_and(|saved| Some(saved) == lane)
                 {
-                    let owner_id = lane
-                        .and_then(|owner| owner.attempt_id)
-                        .ok_or(RunError::Validation("continuation owner attempt missing"))?;
+                    let owner_id =
+                        lane.and_then(|owner| owner.attempt_id)
+                            .ok_or(RunError::WriterLineage(
+                                "continuation owner attempt missing",
+                            ))?;
                     if !self.writer_owner_terminal(owner_id, call)? {
                         return Err(RunError::Nonterminal);
                     }
@@ -1960,12 +2263,12 @@ impl RunStore {
             return Ok(owner);
         }
         if lane.is_some() {
-            return Err(RunError::Validation(
+            return Err(RunError::WriterLineage(
                 "continuation worktree belongs to another lane",
             ));
         }
         if was_owned {
-            return Err(RunError::Validation(
+            return Err(RunError::WriterLineage(
                 "continuation worktree has no lane owner",
             ));
         }
@@ -2175,6 +2478,9 @@ impl RunStore {
     /// this project. Nonterminal work takes priority over temporary cleanup.
     pub fn open_runs(&self, limit: u64, call: &Request<'_>) -> Result<Vec<RunId>> {
         call.check()?;
+        // Listing below reports unreadable evidence without hiding known runs.
+        let _ = self.cutover_writer_reservations(call);
+        call.check()?;
         let limit = crate::db::sql_int(limit)?;
         let ids: Vec<String> = {
             let mut query = self.db.prepare(
@@ -2232,12 +2538,75 @@ impl RunStore {
         Ok(runs)
     }
 
-    /// Queue recovery for each run of this project that holds a running
-    /// attempt, a starting attempt with a cancel request, or a rejected
-    /// writer with deferred cleanup, so a lane whose
-    /// guardian died is settled by the next read instead of waiting for a
-    /// `reconcile`. Queuing already leaves a live holder alone and takes no
-    /// writer lock. Best effort: a run that cannot be queued is skipped.
+    /// A `starting` attempt with no launch evidence whose launcher no longer
+    /// holds custody. A live launcher holds its liveness lock before Starting,
+    /// then holds writer custody until launch. Any doubt answers false;
+    /// settlement re-proves custody before withdrawing.
+    fn launcher_gone(
+        &self,
+        record: &AttemptRecord,
+        dir: &provenant_os::fs::Directory,
+        missing_lock_is_gone: bool,
+        call: &Request<'_>,
+    ) -> bool {
+        // New launchers hold this from before Starting until handoff returns.
+        // A missing file also covers attempts abandoned by older launchers.
+        match dir.try_lock_existing(
+            std::ffi::OsStr::new("launcher.lock"),
+            provenant_os::fs::LockMode::Exclusive,
+        ) {
+            Ok(_guard) => {}
+            Err(error) if error.is_not_found() => {}
+            Err(_) => return false,
+        }
+        let scope = Self::scope(record);
+        let launched = |name: &str| {
+            !matches!(
+                dir.metadata_at(std::ffi::OsStr::new(name), false),
+                Err(ref error) if error.is_not_found()
+            )
+        };
+        if launched("launch.json") || launched("process-exit.json") {
+            return false;
+        }
+        match self.writer_fences() {
+            Ok(fences) => {
+                if let Some(fence) = fences.into_iter().find(|fence| fence.scope == scope) {
+                    let Some(held) = fence.custody_directory() else {
+                        return false;
+                    };
+                    let Ok(anchor) = provenant_os::fs::Directory::open_anchor(held) else {
+                        return false;
+                    };
+                    return custody::acquire_recovery(
+                        anchor,
+                        scope,
+                        provenant_core::WaitBudget::nonblocking(call.clock.mono_now()),
+                        call.cancel,
+                        call.clock,
+                    )
+                    .is_ok();
+                }
+            }
+            Err(_) => return false,
+        }
+        let Ok(_observation) = custody::writer_admission_guard(dir) else {
+            return false;
+        };
+        match dir.try_lock_existing(
+            std::ffi::OsStr::new("writer.lock"),
+            provenant_os::fs::LockMode::Exclusive,
+        ) {
+            Ok(_) => true,
+            // No lock file yet: the launcher may not have reached custody.
+            // A caller about to take the lock itself may proceed; the lock
+            // then keeps a late launcher out.
+            Err(error) => missing_lock_is_gone && error.is_not_found(),
+        }
+    }
+    /// Queue recovery for running attempts, cancelled or abandoned starts,
+    /// and rejected writers with deferred cleanup. Recovery rechecks custody;
+    /// queuing is best effort and leaves live holders alone.
     pub fn reap(&self, call: &Request<'_>) -> Result<usize> {
         self.reap_with(call, provenant_os::exec::spawn_detached)
     }
@@ -2283,8 +2652,11 @@ impl RunStore {
                     AttemptState::Running { .. } => true,
                     AttemptState::Starting { .. } => self
                         .attempt_dir(run, attempt.attempt_id, false)
-                        .and_then(|dir| read_sealed(&dir, "cancel.json", RECORD_LIMIT))
-                        .is_ok_and(|found| found.is_some()),
+                        .is_ok_and(|dir| {
+                            read_sealed(&dir, "cancel.json", RECORD_LIMIT)
+                                .is_ok_and(|found| found.is_some())
+                                || self.launcher_gone(&attempt, &dir, true, call)
+                        }),
                     AttemptState::Terminal {
                         outcome: Outcome::Rejected,
                         ..
@@ -2334,6 +2706,10 @@ impl RunStore {
         call: &Request<'_>,
         observer: &dyn ProcessObserver,
     ) -> Result<Vec<(AttemptId, Reconciled)>> {
+        call.check()?;
+        // The listing path retains its per-run error reporting if cutover fails.
+        let _ = self.cutover_writer_reservations(call);
+        call.check()?;
         let mut ids: Vec<String> = {
             let mut query = self
                 .db
@@ -2511,11 +2887,7 @@ impl RunStore {
     ) -> Result<Reconciled> {
         let scope = Self::scope(record);
         let dir = || self.attempt_dir(record.run_id, id, false);
-        let cancelled = read_sealed(&dir()?, "cancel.json", RECORD_LIMIT)?
-            .and_then(|raw| serde_json::from_slice::<serde_json::Value>(&raw).ok())
-            .is_some_and(|request| {
-                request.get("scope") == serde_json::to_value(scope).ok().as_ref()
-            });
+        let cancelled = crate::store::cancel_requested(&dir()?, scope);
         if !matches!(record.state, AttemptState::Starting { .. }) {
             return Ok(Reconciled::uncertain(UncertainReason::NoLaunchSummary));
         }
@@ -2809,10 +3181,13 @@ impl RunStore {
             }
             // A read-only guardian reserves the attempt itself. Hold
             // its exclusion lock and refuse any retained reservation.
+            let observation = custody::writer_admission_guard(&attempt)
+                .map_err(|error| RunError::Io(std::io::Error::other(error.to_string())))?;
             let _lease = attempt.try_lock(
                 std::ffi::OsStr::new("writer.lock"),
                 provenant_os::fs::LockMode::Exclusive,
             )?;
+            drop(observation);
             match custody::reservation_present(&attempt, scope) {
                 Ok(true) => return Err(RunError::AttemptReservationRetained),
                 Ok(false) => {}
@@ -3216,6 +3591,63 @@ mod tests {
         })?;
         assert_eq!(queued[0], (run.attempts[0].attempt_id, Reconciled::Queued));
         assert!(matches!(&queued[1], (id, Reconciled::Uncertain { .. }) if *id == orphan));
+        Ok(())
+    }
+
+    #[test]
+    fn reconcile_carries_slot_root_fence_before_discovering_its_attempt()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let clock = crate::tests::clock();
+        let cancel = provenant_core::CancelToken::new();
+        let call = crate::tests::call(&clock, &cancel);
+        let context = crate::tests::context(temp.path())?;
+        let store = RunStore::open(&context, &call)?;
+        let run = crate::tests::input();
+        store.create(&run, &call)?;
+        let orphan = AttemptId::from_bytes([7; 16]);
+        let slot = context
+            .state_root
+            .as_path()
+            .join("worktrees")
+            .join(context.project_id.to_string())
+            .join("orphan");
+        std::fs::create_dir_all(&slot)?;
+        let directory = provenant_os::fs::Directory::open_anchor(&slot)?;
+        drop(custody::acquire_reader(
+            directory.try_clone()?,
+            Scope {
+                run: run.run_id,
+                attempt: orphan,
+                generation: 1,
+            },
+            call.lock_budget(),
+            &cancel,
+            &clock,
+        )?);
+        let child = slot.join(orphan.to_string()).join("reservation.json");
+        let mut legacy: serde_json::Value = serde_json::from_slice(&std::fs::read(&child)?)?;
+        let metadata = directory.metadata()?;
+        legacy["reservation_device"] = metadata.device.into();
+        legacy["reservation_inode"] = metadata.inode.into();
+        std::fs::write(slot.join("reservation.json"), serde_json::to_vec(&legacy)?)?;
+        std::fs::remove_file(&child)?;
+        store.attempt_dir(run.run_id, orphan, true)?;
+        assert!(store.writer_fence_listing()?.reservations.is_empty());
+        let found = store.reconcile_with_observer(
+            run.run_id,
+            &crate::dispatch_tests::Fake::default(),
+            &call,
+            &SystemProcessObserver,
+        )?;
+        assert!(
+            found
+                .iter()
+                .any(|(id, state)| *id == orphan && matches!(state, Reconciled::Uncertain { .. }))
+        );
+        assert!(!slot.join("reservation.json").exists());
+        assert!(child.exists());
+        assert_eq!(store.writer_fences()?[0].scope.attempt, orphan);
         Ok(())
     }
 

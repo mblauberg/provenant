@@ -80,8 +80,12 @@ pub fn lane(command: crate::Lane, edge: &Edge<'_>) -> Reply {
                     format!("{id} already delivered; owned worktree pruned\n"),
                 ));
             }
-            let launch =
-                run::prepare_writer(writer, edge.roots.state.as_path(), record.project_id)?;
+            let launch = run::prepare_writer_with_facts(
+                writer,
+                edge.roots.state.as_path(),
+                record.project_id,
+                session.store.repo_facts(),
+            )?;
             let branch = launch.branch.as_str().trim_start_matches("refs/heads/");
             let destination = match deliver {
                 Some(mode) => override_destination(mode, branch, task.deliver.as_ref())?,
@@ -245,6 +249,7 @@ fn retry_attempt_mode(
         .ok()
         .and_then(|owner| owner.as_ref())
         .map(|owner| owner.base.clone());
+    let mut unavailable_resource = None;
     let unavailable = redo.then(|| "node retry requested".to_owned()).or_else(|| {
         ownership.err().map(|error| error.to_string()).or_else(|| {
             Registry::default()
@@ -252,17 +257,21 @@ fn retry_attempt_mode(
                 .err()
                 .map(|fail| fail.message)
                 .or_else(|| {
-                    provider::continuation_available(&record, session.context.state_root.as_path())
-                        .err()
+                    provider::continuation_available(
+                        &record,
+                        session.context.state_root.as_path(),
+                        edge.roots.state.as_path(),
+                    )
+                    .err()
+                    .map(|error| {
+                        unavailable_resource = error.resource_fact();
+                        error.to_string()
+                    })
                 })
         })
     });
     if !fallback && let Some(reason) = &unavailable {
-        return Err(Fail::new(
-            Status::Refused,
-            ErrorKind::ContinuationUnsupported,
-            format!("continuation unavailable; fresh fallback disabled by --no-fallback: {reason}"),
-        ));
+        return Err(no_fallback_refusal(reason, unavailable_resource));
     }
     if let Some(reason) = &unavailable
         && !redo
@@ -340,6 +349,7 @@ fn retry_attempt_mode(
                 project_id: Some(session.context.project_id),
                 host: None,
                 cancel: Some(call.cancel),
+                repo_facts: session.store.repo_facts().clone(),
             };
             session
                 .store
@@ -367,12 +377,13 @@ fn retry_attempt_mode(
     {
         // A refused continuation has not launched. Roll back only the new,
         // clean owned checkout, using the same ownership and custody fences.
-        provenant_confinement::worktrees::with_context(
+        provenant_confinement::worktrees::with_context_using_facts(
             edge.roots,
             edge.home,
             &writer.project,
             call.clock,
             call.cancel,
+            session.store.repo_facts(),
             |context| {
                 use provenant_confinement::worktrees::{self, WorktreeGcPolicy};
                 worktrees::prune_owned(
@@ -467,26 +478,31 @@ pub(super) fn fresh_continuation_worktree(
         .writer
         .ok_or(run::RunError::Validation("fresh writer missing"))?;
     let base = prior.head.map(|head| head.to_string()).or(task.base);
-    let base = match base {
-        Some(base) => base,
-        None => {
-            let git = provenant_os::git::git_executable()
-                .ok_or(run::RunError::Validation("Git unavailable"))?;
-            run::resolve_git_base(&git, &writer.project, "HEAD")?
-        }
-    };
     let host = provenant_config::bind_host(edge.roots)
         .map_err(|error| Fail::new(Status::Error, ErrorKind::Config, error.to_string()))?;
     let mut retained = None;
-    let info = provenant_confinement::worktrees::with_context(
+    let info = provenant_confinement::worktrees::with_context_using_facts(
         edge.roots,
         edge.home,
         &writer.project,
         call.clock,
         call.cancel,
+        session.store.repo_facts(),
         |context| {
             use provenant_confinement::worktrees::{
                 self, WorktreeCreate, WorktreeOrigin, WorktreeOwner,
+            };
+            let base = match &base {
+                Some(base) => base.clone(),
+                None => context
+                    .facts
+                    .resolve_revision(
+                        context,
+                        provenant_confinement::repo::GitRevision::new("HEAD")
+                            .map_err(|_| worktrees::WorktreeError::InvalidRequest)?,
+                        call.cancel,
+                    )?
+                    .to_string(),
             };
             let branch = format!("lane/resume-{}", input.attempt_id);
             let info = worktrees::create(
@@ -669,6 +685,30 @@ pub(super) fn resume_inner(
     });
     data["fallback_reason"] = json!(continuation);
     Ok((data, human, timed_out))
+}
+
+/// Keep the configured continuation budget visible through the command edge.
+/// Operational source text remains outside the safe diagnostic projection.
+pub(super) fn no_fallback_refusal(
+    reason: &str,
+    resource: Option<provenant_records::diagnostic::ResourceFact>,
+) -> Fail {
+    let mut fail = Fail::new(
+        Status::Refused,
+        ErrorKind::ContinuationUnsupported,
+        format!("continuation unavailable; fresh fallback disabled by --no-fallback: {reason}"),
+    );
+    if let Some(fact) = resource {
+        fail.projection = Some(Box::new(
+            fact.project(provenant_records::diagnostic::Diagnostic::new(
+                fail.kind.code(),
+            ))
+            .fact(provenant_records::diagnostic::DiagnosticFact::Resource(
+                fact,
+            )),
+        ));
+    }
+    fail
 }
 
 #[cfg(test)]

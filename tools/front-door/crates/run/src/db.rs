@@ -52,6 +52,7 @@ pub struct RunStore {
     pub(crate) root: Directory,
     pub(crate) context: ExecutionContext,
     pub(crate) writer_registry: std::path::PathBuf,
+    pub(crate) repo_facts: provenant_confinement::worktrees::RepoFacts,
     pub(crate) policy: crate::admission::AdmissionPolicy,
     /// This host's ID, stamped on new attempts when the edge supplies it.
     pub(crate) host: Option<provenant_core::HostId>,
@@ -64,6 +65,16 @@ impl RunStore {
         self.host = Some(host);
         self
     }
+    /// Share the command's facts with admission, provider preparation and recovery.
+    pub fn with_repo_facts(mut self, facts: &provenant_confinement::worktrees::RepoFacts) -> Self {
+        self.repo_facts = facts.clone();
+        self
+    }
+
+    pub fn repo_facts(&self) -> &provenant_confinement::worktrees::RepoFacts {
+        &self.repo_facts
+    }
+
     /// The trusted host config root owns worktree registrations and the host
     /// admission ledger even when this store contains nested runs. Supplied by
     /// the host composition edge.
@@ -143,6 +154,7 @@ impl RunStore {
             root,
             context: context.clone(),
             writer_registry: context.state_root.as_path().to_owned(),
+            repo_facts: Default::default(),
             policy: Default::default(),
             host: None,
             _owner: PhantomData,
@@ -159,6 +171,7 @@ impl RunStore {
             root,
             context: context.clone(),
             writer_registry: context.state_root.as_path().to_owned(),
+            repo_facts: Default::default(),
             policy: Default::default(),
             host: None,
             _owner: PhantomData,

@@ -271,7 +271,9 @@ pub(crate) const GIT_REDIRECTS: &[&str] = &[
     "GIT_TERMINAL_PROMPT",
 ];
 /// Project bounded repository facts without exposing worktree paths.
-fn repository_fact_error(error: provenant_confinement::worktrees::WorktreeError) -> FacadeError {
+pub(crate) fn repository_fact_error(
+    error: provenant_confinement::worktrees::WorktreeError,
+) -> FacadeError {
     use provenant_confinement::{utility::UtilityError, worktrees::WorktreeError};
     match error {
         WorktreeError::Utility(UtilityError::Truncated { .. }) => FacadeError::io(

@@ -94,27 +94,10 @@ mod tests {
             output.stdout
         };
         git(&["init", "-q"]);
-        git(&[
-            "-c",
-            "user.name=Test",
-            "-c",
-            "user.email=test@example.invalid",
-            "commit",
-            "--allow-empty",
-            "-qm",
-            "base",
-        ]);
+        git(&["commit", "--allow-empty", "-qm", "base"]);
         std::fs::write(temp.path().join("tracked"), "before\n").unwrap();
         git(&["add", "tracked"]);
-        git(&[
-            "-c",
-            "user.name=Test",
-            "-c",
-            "user.email=test@example.invalid",
-            "commit",
-            "-qm",
-            "tracked",
-        ]);
+        git(&["commit", "-qm", "tracked"]);
         std::fs::write(temp.path().join("tracked"), "after\n").unwrap();
         std::fs::write(temp.path().join(RESULT_FILE), format!(r#"{{"job_id":"job","nonce":"nonce","commit":"{}","exit_status":0,"tests_run":["test"],"tests_failed":[],"log_location":"log","tracked_files_changed":false,"observed_model":null}}"#, "a".repeat(40))).unwrap();
         git(&["add", "-N", RESULT_FILE]);

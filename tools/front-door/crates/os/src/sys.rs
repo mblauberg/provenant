@@ -12,20 +12,36 @@ use thiserror::Error;
 /// Read the host's effective Git identity before preparing a lane.
 #[allow(clippy::disallowed_methods)]
 pub fn git_identity(git: &Path, cwd: &Path) -> Vec<(OsString, OsString)> {
+    git_identity_scope(git, Some(cwd))
+}
+
+/// Read the host's global Git identity, independently of a repository's
+/// local config. Lane Git keeps this at global scope so that a repository's
+/// own `user.name` and `user.email` continue to override it.
+pub fn git_global_identity(git: &Path) -> Vec<(OsString, OsString)> {
+    git_identity_scope(git, None)
+}
+
+#[allow(clippy::disallowed_methods)]
+fn git_identity_scope(git: &Path, cwd: Option<&Path>) -> Vec<(OsString, OsString)> {
     let mut env = Vec::new();
     for (config, author, committer) in [
         ("user.name", "GIT_AUTHOR_NAME", "GIT_COMMITTER_NAME"),
         ("user.email", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_EMAIL"),
     ] {
-        let output = std::process::Command::new(git)
-            .current_dir(cwd)
-            .args(["config", "--get", config])
-            .output();
+        let mut command = std::process::Command::new(git);
+        command.arg("config");
+        if let Some(cwd) = cwd {
+            command.current_dir(cwd);
+        } else {
+            command.arg("--global");
+        }
+        let output = command.args(["--get", config]).output();
         if let Ok(output) = output
             && output.status.success()
             && let Ok(value) = String::from_utf8(output.stdout)
         {
-            let value = value.trim_end_matches('\n');
+            let value = value.strip_suffix('\n').unwrap_or(&value);
             if !value.is_empty() {
                 env.push((author.into(), value.into()));
                 env.push((committer.into(), value.into()));
@@ -211,6 +227,41 @@ mod tests {
             account(Account::Named(OsStr::new("provenant_missing_user_zz"))).unwrap(),
             None
         );
+    }
+
+    #[test]
+    fn global_git_identity_ignores_repository_local_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("global.gitconfig");
+        let git = dir.path().join("git");
+        std::fs::write(
+            &config,
+            "[user]\n name = Fixture Host\n email = fixture-host@example.test\n",
+        )
+        .unwrap();
+        std::fs::write(
+            &git,
+            format!(
+                "#!/bin/sh\nGIT_CONFIG_GLOBAL='{}'\nexport GIT_CONFIG_GLOBAL\nexec /usr/bin/git \"$@\"\n",
+                config.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&git, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let identity = git_global_identity(&git);
+        for (key, value) in [
+            ("GIT_AUTHOR_NAME", "Fixture Host"),
+            ("GIT_COMMITTER_NAME", "Fixture Host"),
+            ("GIT_AUTHOR_EMAIL", "fixture-host@example.test"),
+            ("GIT_COMMITTER_EMAIL", "fixture-host@example.test"),
+        ] {
+            assert!(
+                identity
+                    .iter()
+                    .any(|(name, actual)| name == key && actual == value)
+            );
+        }
     }
 }
 

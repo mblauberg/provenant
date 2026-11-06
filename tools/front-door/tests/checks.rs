@@ -379,8 +379,6 @@ fn release_flags_personal_email_in_commit_author_and_committer() -> Result {
         &rig,
         &[
             "-c",
-            "user.name=Fixture",
-            "-c",
             "user.email=person@gmail.com",
             "commit",
             "-q",

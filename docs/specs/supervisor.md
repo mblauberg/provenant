@@ -15,8 +15,11 @@ relative to `tools/front-door/`.
 
 ## Custody
 
-### Repository facts in GC previews
+### Command-scoped repository facts
 
+Each command owns one repository facts session, passed into successive
+worktree contexts, admission and writer preparation. The session owns inventory
+and scalar output caps; callers do not interpret their own fact-limit cases.
 A GC command shares its worktree inventory between discovery and preview for
 each repository. The snapshot is tied to the common Git directory identity and
 is consumed once. Applied cleanup discards the snapshot and reads Git again
@@ -86,6 +89,20 @@ worktree scope and read failure, not an unowned checkout. Inventory retains the
 validated owner record or its read error, while the existing worktree-list
 owner labels remain stable. A retained import fence still refuses custody, but
 is reported as scoped custody uncertainty rather than as a live held lease.
+
+Read-only inventory and doctor take the existing short `writer-probe.lock`
+gate before probing writer exclusion. Writer acquisition takes that gate before
+trying `writer.lock`, so an observer cannot cause a spurious `WriterBusy`.
+A budgeted acquisition holds the gate only for each nonblocking writer-lock
+attempt, then releases it before waiting to retry. A recovery or delivery waiting
+for a live writer therefore cannot hide that writer from list or doctor. Each
+retry repeats verified-inode checks and preserves cancellation and its deadline.
+The gate wait has its own five-second bound and reports observation uncertainty,
+never writer contention, if it cannot complete. Registry mutation initialises
+the gate; a read-only report does not create missing state. Legacy slots without
+a gate remain scoped uncertainty until the next registry mutation initialises
+it. The writer flock remains authoritative; stale reservation records do not
+make an unlocked worktree occupied.
 
 A lane owner whose recorded attempt is confirmed terminal may be reassigned
 when the writer lock is free even if the census sees a process in the tree.

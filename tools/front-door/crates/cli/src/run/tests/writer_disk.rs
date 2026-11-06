@@ -1,6 +1,111 @@
 use super::*;
 
 #[test]
+fn disk_policy_refusal_uses_resource_projection() {
+    use provenant_records::diagnostic::{ResourceFact, SettingSource};
+    let refusal = crate::run::disk_policy_refusal(crate::run::DiskCheck::Low {
+        path: "/tmp/example".into(),
+        available: 1,
+        floor: 2,
+        reclaimed: 0,
+        origin: SettingSource::Configuration,
+    });
+    let fact = refusal.resource.expect("disk fact");
+    let kind = run::RefusalKind::PolicyResource(fact);
+    let failure = check_launch_policy(&[run::Started::Refused {
+        attempt: AttemptId::from_bytes([1; 16]),
+        kind,
+        reason: "local path and other source text".into(),
+    }])
+    .expect_err("disk floor must refuse");
+    assert_eq!(failure.kind, ErrorKind::Refused);
+    let diagnostic = failure.projection.expect("resource projection");
+    assert_eq!(diagnostic.code, "REFUSED");
+    assert!(
+        diagnostic
+            .detail
+            .as_deref()
+            .unwrap()
+            .contains("gc.free_floor")
+    );
+    assert!(
+        diagnostic
+            .detail
+            .as_deref()
+            .unwrap()
+            .contains("host configuration")
+    );
+    assert!(diagnostic.next.is_some());
+    assert!(!diagnostic.detail.as_deref().unwrap().contains("local path"));
+    assert!(
+        check_launch_policy(&[
+            run::Started::Refused {
+                attempt: AttemptId::from_bytes([2; 16]),
+                kind: run::RefusalKind::PolicyResource(ResourceFact::Disk {
+                    free: 1,
+                    floor: 2,
+                    origin: SettingSource::Configuration,
+                }),
+                reason: "low disk".into(),
+            },
+            run::Started::Launched(AttemptId::from_bytes([3; 16])),
+        ])
+        .is_ok()
+    );
+}
+
+#[test]
+fn all_refused_render_keeps_the_full_typed_receipt() -> Result<(), Box<dyn std::error::Error>> {
+    let run = provenant_core::RunId::from_bytes([3; 16]);
+    let first = AttemptId::from_bytes([1; 16]);
+    let second = AttemptId::from_bytes([2; 16]);
+    let started = [
+        run::Started::Refused {
+            attempt: first,
+            kind: run::RefusalKind::Policy,
+            reason: "disk refused".into(),
+        },
+        run::Started::Refused {
+            attempt: second,
+            kind: run::RefusalKind::Preparation,
+            reason: "preparation refused".into(),
+        },
+    ];
+    let data = json!({"run_id":run, "operation_id":"fixture", "started":started, "lanes":[
+        {"attempt_id":first,"state":"rejected"},
+        {"attempt_id":second,"state":"rejected"}
+    ]});
+    let mut rendered = reply("run", Ok((data.clone(), String::new())));
+    apply_launch_policy(&mut rendered);
+    assert_eq!(rendered.result.status, Status::Refused);
+    assert!(rendered.result.error.is_some());
+    assert_eq!(rendered.result.data, data);
+    assert_eq!(
+        rendered.result.data["started"][0]["Refused"]["attempt"],
+        first.to_string()
+    );
+    assert_eq!(
+        rendered.result.data["started"][1]["Refused"]["kind"],
+        "Preparation"
+    );
+    for state in ["starting", "running", "succeeded"] {
+        let mixed = json!({"run_id":run, "started":[
+            run::Started::Refused { attempt:first, kind:run::RefusalKind::Policy, reason:"disk refused".into() },
+            run::Started::Launched(second)
+        ], "lanes":[
+            {"attempt_id":first,"state":"rejected"},
+            {"attempt_id":second,"state":state}
+        ]});
+        let mut rendered = reply("run", Ok((mixed.clone(), String::new())));
+        apply_launch_policy(&mut rendered);
+        assert_eq!(rendered.result.status, Status::Ok);
+        assert!(rendered.result.error.is_none());
+        assert_eq!(rendered.result.data["started"], mixed["started"]);
+    }
+    Ok(())
+}
+
+#[test]
 fn retained_import_refusal_names_worktree_attempt_and_recovery() {
     let run_id = provenant_core::RunId::from_bytes([3; 16]);
     let attempt = AttemptId::from_bytes([4; 16]);
@@ -51,17 +156,18 @@ fn policy_refusal_preserves_uncertain_sibling_handoff() -> Result<(), String> {
         .ok_or("policy refusal was ignored")?;
     assert_eq!(error.status, Status::Refused);
     assert_eq!(error.kind, ErrorKind::Refused);
-    // Unavailable routes still return their normal per-attempt receipts.
+    // All refusal kinds fail when no sibling can progress.
     for kind in [
         run::RefusalKind::PriorityUnavailable,
         run::RefusalKind::Preparation,
     ] {
-        check_launch_policy(&[run::Started::Refused {
+        let error = check_launch_policy(&[run::Started::Refused {
             attempt: AttemptId::from_bytes([3; 16]),
             kind,
             reason: "codex/model: UnknownAvailability".into(),
         }])
-        .map_err(|error| error.message)?;
+        .expect_err("all-refused batch must fail");
+        assert_eq!(error.status, Status::Refused);
     }
     // The typed cause promotes pacing without interpreting candidate prose.
     let pacing = || run::Started::Refused {
@@ -296,13 +402,15 @@ fn writer_disk_policy_refusal_keeps_disk_facts_and_safe_recovery() -> Result<(),
     )
     .err()
     .ok_or("writer accepted insufficient disk")?;
-    let refusal = writer_disk_policy_refusal(check);
+    let refusal = disk_policy_refusal(check);
     assert_eq!(refusal.terminal_cause, Some(TerminalCause::DiskFloor));
     assert_eq!(
-        refusal.terminal_note.as_deref(),
-        Some(
-            "99 bytes available; gc.free_floor is 100 bytes (source: host configuration); bounded GC reported 0 bytes reclaimed"
-        )
+        refusal.resource,
+        Some(provenant_records::diagnostic::ResourceFact::Disk {
+            free: 99,
+            floor: 100,
+            origin: provenant_records::diagnostic::SettingSource::Configuration,
+        })
     );
     assert!(
         TerminalCause::DiskFloor
@@ -310,8 +418,7 @@ fn writer_disk_policy_refusal_keeps_disk_facts_and_safe_recovery() -> Result<(),
             .contains("provenant gc --apply")
     );
     assert!(!TerminalCause::DiskFloor.detail().contains("access grants"));
-    let unobserved =
-        writer_disk_policy_refusal(DiskCheck::Unobserved("HOST_ERROR_SENTINEL".into()));
+    let unobserved = disk_policy_refusal(DiskCheck::Unobserved("HOST_ERROR_SENTINEL".into()));
     assert_eq!(
         unobserved.terminal_cause,
         Some(TerminalCause::DiskObservationUnavailable)
@@ -328,4 +435,38 @@ fn writer_disk_policy_refusal_keeps_disk_facts_and_safe_recovery() -> Result<(),
             .contains("restore the host disk observation")
     );
     Ok(())
+}
+
+#[test]
+fn preparation_and_handoff_resources_reach_launch_policy_projection() {
+    use provenant_records::diagnostic::{
+        PressureLevel, PressureThreshold, ResourceFact, SettingSource,
+    };
+    for kind in [
+        run::RefusalKind::PreparationResource(ResourceFact::DependencyPreparation {
+            configured: true,
+        }),
+        run::RefusalKind::HandoffResource(ResourceFact::MemoryPressure {
+            level: PressureLevel::Critical,
+            threshold: PressureThreshold::Warning,
+            origin: SettingSource::Configuration,
+        }),
+    ] {
+        let expected = kind.diagnostic().unwrap();
+        let failure = check_launch_policy(&[run::Started::Refused {
+            attempt: AttemptId::from_bytes([1; 16]),
+            kind,
+            reason: "UNSAFE_SOURCE_SENTINEL".into(),
+        }])
+        .unwrap_err();
+        let diagnostic = failure.projection.expect("typed launch refusal projection");
+        assert_eq!(diagnostic.code, "REFUSED");
+        assert_eq!(diagnostic.detail, expected.detail);
+        assert_eq!(diagnostic.next, expected.next);
+        assert!(
+            !serde_json::to_string(&diagnostic)
+                .unwrap()
+                .contains("UNSAFE_SOURCE_SENTINEL")
+        );
+    }
 }

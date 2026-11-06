@@ -487,7 +487,15 @@ pub fn peer(
                         // the authenticated graph launch envelope above.
                         context.graph_template_launch = true;
                     }
-                    owner.submit_with_access(input, budget, &cancel, access, retry, Some(attempt))
+                    owner.submit_with_access(
+                        input,
+                        budget,
+                        &cancel,
+                        access,
+                        retry,
+                        Some(attempt),
+                        &provenant_confinement::worktrees::RepoFacts::default(),
+                    )
                 })(),
                 |data| PeerResult::Submitted {
                     data,

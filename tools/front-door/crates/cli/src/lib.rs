@@ -1793,6 +1793,16 @@ mod tests {
         ]); // timebomb: allow tests the equal-window boundary
         invalid(&["telemetry", "stats", "--since", "2026-10-24T00:00:00"]); // timebomb: allow offset requirement
     }
+
+    #[test]
+    fn worktree_doctor_requires_and_preserves_a_path() {
+        invalid(&["worktree", "doctor"]);
+        let invocation = valid(&["worktree", "doctor", "../lane with spaces", "--json"]);
+        let Command::Worktree(Worktree::Doctor { path }) = invocation.command else {
+            panic!("worktree doctor");
+        };
+        assert_eq!(path, std::path::PathBuf::from("../lane with spaces"));
+    }
     #[test]
     fn collection_caps_are_not_per_occurrence_caps() {
         for (prefix, flag, max) in [

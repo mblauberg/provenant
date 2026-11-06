@@ -8,14 +8,14 @@ thread_local! {
 /// Keep a test submission queued after admission, before provider preparation.
 #[cfg(any(test, feature = "fixture"))]
 pub fn with_deferred_provider_launch<T>(action: impl FnOnce() -> T) -> T {
-    struct Reset;
+    struct Reset(bool);
     impl Drop for Reset {
         fn drop(&mut self) {
-            TEST_DEFER_PROVIDER_LAUNCH.with(|flag| flag.set(false));
+            TEST_DEFER_PROVIDER_LAUNCH.with(|flag| flag.set(self.0));
         }
     }
-    TEST_DEFER_PROVIDER_LAUNCH.with(|flag| flag.set(true));
-    let _reset = Reset;
+    let previous = TEST_DEFER_PROVIDER_LAUNCH.with(|flag| flag.replace(true));
+    let _reset = Reset(previous);
     action()
 }
 
@@ -779,12 +779,13 @@ fn submit_with_launcher(
         let pending = session.store.pending_attempts(record.run_id, call)?;
         for task in &canonical.tasks {
             if let Some(writer) = &task.writer {
-                provenant_confinement::worktrees::with_context(
+                provenant_confinement::worktrees::with_context_using_facts(
                     edge.roots,
                     edge.home,
                     &writer.project,
                     call.clock,
                     call.cancel,
+                    session.store.repo_facts(),
                     |context| {
                         use provenant_confinement::worktrees;
                         let tree =

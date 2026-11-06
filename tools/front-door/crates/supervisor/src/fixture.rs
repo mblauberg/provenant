@@ -1225,3 +1225,9 @@ pub fn bind_writer_attempt(
     .require_durable()?;
     Ok(lease)
 }
+
+/// Run once after a contended writer attempt releases the short observer gate.
+/// This fixture seam synchronises observation tests without scheduler sleeps.
+pub fn on_writer_lock_wait(hook: impl FnOnce() + 'static) {
+    crate::custody::WRITER_LOCK_WAIT_HOOK.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+}

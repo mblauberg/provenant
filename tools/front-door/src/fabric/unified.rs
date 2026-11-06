@@ -103,6 +103,8 @@ impl Factory {
             }
         }
         let mut graph_owner = BoundGraphOwner {
+            launch_warnings: Vec::new(),
+            repo_facts: Default::default(),
             factory: self,
             integration_base: None,
             integration_branch: None,

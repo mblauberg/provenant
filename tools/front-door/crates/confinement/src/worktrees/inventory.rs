@@ -3,10 +3,97 @@ use super::*;
 
 /// Command-scoped repository observations. A GC preview consumes its inventory
 /// snapshot; mutation paths always perform a fresh read while holding custody.
+#[derive(Clone)]
 pub struct RepoFacts {
     inventory_limit: usize,
     scalar_limit: usize,
-    inventories: std::sync::Mutex<BTreeMap<PathBuf, InventorySnapshot>>,
+    raw_inventories: std::sync::Arc<std::sync::Mutex<BTreeMap<PathBuf, RawInventorySnapshot>>>,
+    inventories: std::sync::Arc<std::sync::Mutex<BTreeMap<PathBuf, InventorySnapshot>>>,
+    worktree_listings: std::sync::Arc<std::sync::Mutex<BTreeMap<PathBuf, Vec<u8>>>>,
+}
+
+#[derive(PartialEq, Eq)]
+struct RegistrationStamp {
+    name: OsString,
+    device: u64,
+    inode: u64,
+    modified_seconds: i64,
+    modified_nanoseconds: i64,
+}
+
+// Git may add, remove or lock a registration outside this command. Such a
+// change starts a new inventory epoch without spending a Git subprocess on
+// every admission that shares the unchanged registrations.
+fn registration_stamps(common: &Path) -> Option<Vec<RegistrationStamp>> {
+    fn stamp(common: &Path, path: &Path, stamps: &mut Vec<RegistrationStamp>) -> Option<()> {
+        let metadata = match std::fs::symlink_metadata(path) {
+            Ok(metadata) if !metadata.file_type().is_symlink() => Some(metadata),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            _ => return None,
+        };
+        stamps.push(RegistrationStamp {
+            name: path.strip_prefix(common).ok()?.as_os_str().to_owned(),
+            device: metadata.as_ref().map_or(0, |meta| meta.dev()),
+            inode: metadata.as_ref().map_or(0, |meta| meta.ino()),
+            modified_seconds: metadata.as_ref().map_or(0, |meta| meta.mtime()),
+            modified_nanoseconds: metadata.as_ref().map_or(0, |meta| meta.mtime_nsec()),
+        });
+        Some(())
+    }
+    fn head(common: &Path, admin: &Path, stamps: &mut Vec<RegistrationStamp>) -> Option<()> {
+        use std::io::Read;
+        let path = admin.join("HEAD");
+        stamp(common, &path, stamps)?;
+        let mut bytes = Vec::new();
+        std::fs::File::open(path)
+            .ok()?
+            .take(1025)
+            .read_to_end(&mut bytes)
+            .ok()?;
+        if bytes.len() > 1024 {
+            return None;
+        }
+        if let Some(reference) = trim_ascii(&bytes).strip_prefix(b"ref: ") {
+            let reference = GitRefName::new(std::str::from_utf8(reference).ok()?).ok()?;
+            stamp(common, &common.join(reference.as_str()), stamps)?;
+        }
+        Some(())
+    }
+    let mut stamps = Vec::new();
+    head(common, common, &mut stamps)?;
+    stamp(common, &common.join("packed-refs"), &mut stamps)?;
+    let entries = match std::fs::read_dir(common.join("worktrees")) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Some(stamps),
+        Err(_) => return None,
+    };
+    for (count, entry) in entries.enumerate() {
+        let entry = entry.ok()?;
+        if count >= MAX_WORKTREES {
+            return None;
+        }
+        let metadata = std::fs::symlink_metadata(entry.path()).ok()?;
+        if !metadata.is_dir() {
+            return None;
+        }
+        stamp(common, &entry.path(), &mut stamps)?;
+        head(common, &entry.path(), &mut stamps)?;
+        // A registration's lock and pruning markers affect admission even
+        // when its branch and commit have not moved.
+        for name in ["locked", "prunable", "gitdir", "commondir"] {
+            stamp(common, &entry.path().join(name), &mut stamps)?;
+        }
+    }
+    stamps.sort_by(|left, right| left.name.cmp(&right.name));
+    Some(stamps)
+}
+
+struct RawInventorySnapshot {
+    registrations: Option<Vec<RegistrationStamp>>,
+    device: u64,
+    inode: u64,
+    budget: UtilityBudget,
+    bytes: Vec<u8>,
 }
 
 struct InventorySnapshot {
@@ -21,12 +108,52 @@ impl Default for RepoFacts {
         Self {
             inventory_limit: provenant_os::exec::DEFAULT_CAPTURE_LIMIT,
             scalar_limit: provenant_os::git::REPO_FACT_SCALAR_LIMIT,
-            inventories: std::sync::Mutex::new(BTreeMap::new()),
+            raw_inventories: Default::default(),
+            inventories: std::sync::Arc::new(std::sync::Mutex::new(BTreeMap::new())),
+            worktree_listings: Default::default(),
         }
     }
 }
 
 impl RepoFacts {
+    /// Effective stdout cap for repository worktree inventory facts.
+    pub fn inventory_limit(&self) -> usize {
+        self.inventory_limit
+    }
+
+    /// Run a read-only Git resolver through this session's fact caps. Retain
+    /// incomplete fact evidence even if the resolver maps its subprocess error.
+    pub fn with_executor<T, E: From<WorktreeError>>(
+        &self,
+        executor: &dyn Executor,
+        cancel: &CancelToken,
+        action: impl FnOnce(&dyn Executor) -> Result<T, E>,
+    ) -> Result<T, E> {
+        let scoped = FactExecutor {
+            executor,
+            facts: self,
+            cancel,
+            failures: std::sync::atomic::AtomicU8::new(0),
+        };
+        let result = action(&scoped);
+        let flags = scoped.failures.load(std::sync::atomic::Ordering::Relaxed);
+        let error = if cancel.is_cancelled() || flags & 1 != 0 {
+            Some(UtilityError::Cancelled)
+        } else if flags & 2 != 0 {
+            Some(UtilityError::TimedOut)
+        } else if flags & 4 != 0 {
+            Some(UtilityError::Truncated { stream: "stdout" })
+        } else if flags & 8 != 0 {
+            Some(UtilityError::Incomplete)
+        } else {
+            None
+        };
+        match error {
+            Some(error) => Err(E::from(WorktreeError::from(error))),
+            None => result,
+        }
+    }
+
     /// Override output caps without widening the caller's Git budget.
     pub fn with_limits(inventory_limit: usize, scalar_limit: usize) -> Result<Self, WorktreeError> {
         let budget = UtilityBudget::bounded(std::time::Duration::from_secs(1))?;
@@ -37,6 +164,27 @@ impl RepoFacts {
             scalar_limit,
             ..Self::default()
         })
+    }
+
+    /// Reuse a successful worktree listing for the lifetime of this command's
+    /// repository facts session. Callers that mutate registrations must use
+    /// their guarded fresh-inventory path instead.
+    pub fn cached_worktree_listing<E>(
+        &self,
+        cwd: &Path,
+        read: impl FnOnce() -> Result<Vec<u8>, E>,
+    ) -> Result<Vec<u8>, E> {
+        let key = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
+        let mut listings = self
+            .worktree_listings
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        if let Some(listing) = listings.get(&key) {
+            return Ok(listing.clone());
+        }
+        let listing = read()?;
+        listings.insert(key, listing.clone());
+        Ok(listing)
     }
 
     /// Resolve a commit ref from fresh Git evidence. Ref values can move even
@@ -58,7 +206,8 @@ impl RepoFacts {
         )
     }
 
-    fn resolve_repo_commit(
+    /// Resolve a commit in a verified repository with this session's scalar cap.
+    pub fn resolve_repo_commit(
         &self,
         repo: &VerifiedRepo,
         executor: &dyn Executor,
@@ -67,16 +216,47 @@ impl RepoFacts {
         name: GitRefName,
         cancel: &CancelToken,
     ) -> Result<GitOid, WorktreeError> {
-        repo.revalidate()?;
-        let budget = budget.with_stdout_cap(self.scalar_limit)?;
-        let outcome = run_utility(
-            executor,
-            GitRead::ResolveRef { name },
+        self.resolve_repo_fact(
             repo,
+            executor,
             utility,
             budget,
+            GitRead::ResolveRef { name },
             cancel,
-        )?;
+        )
+    }
+
+    /// Read the current checkout commit with this session's scalar cap.
+    pub fn repo_head(
+        &self,
+        repo: &VerifiedRepo,
+        executor: &dyn Executor,
+        utility: &UtilityRuntime,
+        budget: UtilityBudget,
+        cancel: &CancelToken,
+    ) -> Result<GitOid, WorktreeError> {
+        self.resolve_repo_fact(
+            repo,
+            executor,
+            utility,
+            budget,
+            GitRead::RevParseHead,
+            cancel,
+        )
+    }
+
+    fn resolve_repo_fact(
+        &self,
+        repo: &VerifiedRepo,
+        executor: &dyn Executor,
+        utility: &UtilityRuntime,
+        budget: UtilityBudget,
+        operation: GitRead,
+        cancel: &CancelToken,
+    ) -> Result<GitOid, WorktreeError> {
+        repo.revalidate()?;
+        let budget = budget.with_stdout_cap(self.scalar_limit)?;
+        let outcome = run_utility(executor, operation, repo, utility, budget, cancel)?;
         if exit_code(&outcome)? != 0 {
             return Err(WorktreeError::NotFound);
         }
@@ -197,19 +377,13 @@ impl RepoFacts {
         if repo.common_git_dir() != context.repo.common_git_dir() {
             return Err(WorktreeError::IdentityChanged);
         }
-        let budget = context.utility_budget.with_stdout_cap(self.scalar_limit)?;
-        let outcome = run_utility(
-            context.executor,
-            GitRead::RevParseHead,
+        self.repo_head(
             repo,
+            context.executor,
             context.utility,
-            budget,
+            context.utility_budget,
             cancel,
-        )?;
-        if exit_code(&outcome)? != 0 {
-            return Err(WorktreeError::NotFound);
-        }
-        parse_oid(trim_ascii(&outcome.stdout.bytes))
+        )
     }
 
     /// Resolve the full symbolic name of a revision, if Git can identify one.
@@ -412,6 +586,27 @@ impl RepoFacts {
         budget: UtilityBudget,
         cancel: &CancelToken,
     ) -> Result<Vec<u8>, WorktreeError> {
+        repo.revalidate()?;
+        if cancel.is_cancelled() {
+            return Err(UtilityError::Cancelled.into());
+        }
+        let budget = budget.with_stdout_cap(self.inventory_limit)?;
+        let path = repo.common_git_dir();
+        let metadata = std::fs::metadata(path).map_err(|_| WorktreeError::IdentityChanged)?;
+        let registrations = registration_stamps(path);
+        let mut snapshots = self
+            .raw_inventories
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        if let Some(snapshot) = snapshots.get(path)
+            && snapshot.device == metadata.dev()
+            && snapshot.inode == metadata.ino()
+            && snapshot.budget == budget
+            && registrations.is_some()
+            && snapshot.registrations == registrations
+        {
+            return Ok(snapshot.bytes.clone());
+        }
         let outcome = run_utility(
             executor,
             GitRead::WorktreeList,
@@ -423,16 +618,41 @@ impl RepoFacts {
         if exit_code(&outcome)? != 0 {
             return Err(WorktreeError::InvalidOutput);
         }
+        snapshots.insert(
+            path.to_owned(),
+            RawInventorySnapshot {
+                registrations,
+                device: metadata.dev(),
+                inode: metadata.ino(),
+                budget,
+                bytes: outcome.stdout.bytes.clone(),
+            },
+        );
         Ok(outcome.stdout.bytes)
     }
 
-    /// Read inventory afresh and invalidate any older advisory snapshot.
+    /// Refresh inventory for mutation checks, discarding the command snapshot.
+    pub(super) fn fresh_inventory(
+        &self,
+        context: &WorktreeContext<'_>,
+        cancel: &CancelToken,
+    ) -> Result<Vec<GitWorktree>, WorktreeError> {
+        self.invalidate_inventory(context);
+        let result = self.read_inventory(context, cancel);
+        self.invalidate_inventory(context);
+        result
+    }
+
+    /// Read this command's inventory and invalidate an older parsed advisory snapshot.
     pub(super) fn read_inventory(
         &self,
         context: &WorktreeContext<'_>,
         cancel: &CancelToken,
     ) -> Result<Vec<GitWorktree>, WorktreeError> {
-        let _ = self.take_inventory(context);
+        self.inventories
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .remove(context.repo.common_git_dir());
         let bytes = self.writer_inventory(
             context.repo,
             context.executor,
@@ -509,6 +729,10 @@ impl RepoFacts {
     }
 
     pub(super) fn take_inventory(&self, context: &WorktreeContext<'_>) -> Option<Vec<GitWorktree>> {
+        self.raw_inventories
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .remove(context.repo.common_git_dir());
         let snapshot = self
             .inventories
             .lock()
@@ -523,6 +747,66 @@ impl RepoFacts {
             && snapshot.inode == metadata.ino()
             && snapshot.budget == budget)
             .then_some(snapshot.entries)
+    }
+}
+
+/// Adapter for read-only resolvers whose repository layouts cannot grant
+/// protected worktree mutation authority (for example native alternates).
+struct FactExecutor<'a> {
+    executor: &'a dyn Executor,
+    facts: &'a RepoFacts,
+    cancel: &'a CancelToken,
+    failures: std::sync::atomic::AtomicU8,
+}
+
+impl Executor for FactExecutor<'_> {
+    fn execute(
+        &self,
+        mut options: provenant_os::exec::ExecOptions<'_>,
+    ) -> Result<ExecOutcome, provenant_os::exec::ExecError> {
+        use provenant_os::exec::StreamPolicy;
+        use std::sync::atomic::Ordering;
+        if self.cancel.is_cancelled() {
+            self.failures.fetch_or(1, Ordering::Relaxed);
+            return Err(provenant_os::exec::ExecError::Cancelled);
+        }
+        let args: Vec<_> = options
+            .argv
+            .iter()
+            .skip(1)
+            .map(|arg| arg.to_str().unwrap_or(""))
+            .collect();
+        let fact_limit = provenant_os::git::fact_capture_limit(&args, 0);
+        if fact_limit != 0 {
+            let limit = if fact_limit == provenant_os::git::REPO_FACT_SCALAR_LIMIT {
+                self.facts.scalar_limit
+            } else {
+                self.facts.inventory_limit
+            };
+            if let StreamPolicy::Capture { limit: existing } = &mut options.stdout {
+                *existing = (*existing).min(limit);
+            }
+            options.stop_on_output_limit = true;
+        }
+        let result = self.executor.execute(options);
+        if self.cancel.is_cancelled() {
+            self.failures.fetch_or(1, Ordering::Relaxed);
+            return Err(provenant_os::exec::ExecError::Cancelled);
+        }
+        if fact_limit != 0
+            && let Ok(outcome) = &result
+        {
+            let flags = u8::from(outcome.cancelled)
+                | (u8::from(outcome.timed_out) << 1)
+                | (u8::from(outcome.stdout.truncated || outcome.overflow_stopped) << 2)
+                | (u8::from(
+                    outcome.drain_truncated
+                        || outcome.stdout.read_failed
+                        || outcome.stdout.sink_failed,
+                ) << 3);
+            self.failures.fetch_or(flags, Ordering::Relaxed);
+        }
+        result
     }
 }
 
@@ -832,6 +1116,59 @@ pub(super) fn read_bounded(
 mod path_tests {
     use super::*;
     use std::os::unix::ffi::OsStrExt;
+
+    #[test]
+    fn scoped_fact_execution_preserves_tighter_caps_and_reports_squashed_truncation()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_os::exec::{ExecError, ExecOptions, StreamPolicy};
+        struct Truncated {
+            expected: usize,
+        }
+        impl Executor for Truncated {
+            fn execute(&self, options: ExecOptions<'_>) -> Result<ExecOutcome, ExecError> {
+                assert!(
+                    matches!(options.stdout, StreamPolicy::Capture { limit } if limit == self.expected)
+                );
+                Ok(ExecOutcome {
+                    termination: Termination::Exit(0),
+                    stdout: provenant_os::exec::CapturedStream {
+                        truncated: true,
+                        ..Default::default()
+                    },
+                    stderr: Default::default(),
+                    timed_out: false,
+                    drain_truncated: false,
+                    overflow_stopped: true,
+                    cancelled: false,
+                    elapsed_micros: 0,
+                })
+            }
+        }
+        let facts = RepoFacts::with_limits(4, 8)?;
+        let cancellation = CancelToken::new();
+        for (words, caller_cap, expected) in [
+            (vec!["git", "rev-parse", "HEAD"], 40, 8),
+            (vec!["git", "rev-parse", "HEAD"], 2, 2),
+            (vec!["git", "worktree", "list"], 40, 4),
+        ] {
+            let argv: Vec<OsString> = words.into_iter().map(OsString::from).collect();
+            let result: Result<(), WorktreeError> =
+                facts.with_executor(&Truncated { expected }, &cancellation, |executor| {
+                    let mut options =
+                        ExecOptions::new(&argv, Path::new("/"), std::time::Duration::from_secs(1));
+                    options.stdout = StreamPolicy::Capture { limit: caller_cap };
+                    let _ = executor.execute(options);
+                    Ok(()) // Resolver's own error mapping cannot discard fact evidence.
+                });
+            assert!(matches!(
+                result,
+                Err(WorktreeError::Utility(UtilityError::Truncated {
+                    stream: "stdout"
+                }))
+            ));
+        }
+        Ok(())
+    }
 
     #[test]
     fn inventory_paths_preserve_unquoted_native_paths_and_bare_records() {

@@ -168,6 +168,7 @@ pub(super) fn cancel_inner(mut command: Cancel, edge: &Edge<'_>) -> Reply {
                     project_id: Some(session.context.project_id),
                     host: None,
                     cancel: Some(&cancel),
+                    repo_facts: session.store.repo_facts().clone(),
                 };
                 let recovered = request(&clock, &cancel).and_then(|call| {
                     Ok(session

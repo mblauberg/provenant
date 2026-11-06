@@ -187,6 +187,7 @@ pub(super) fn reconcile_inner(
             project_id: Some(session.context.project_id),
             host: None,
             cancel: Some(&cancel),
+            repo_facts: session.store.repo_facts().clone(),
         };
         // Each step gets a fresh budget; recovery waits on custody locks.
         let mut found = match request(&clock, &cancel)
@@ -213,7 +214,9 @@ pub(super) fn reconcile_inner(
                     .filter(|s| matches!(s, run::Started::Launched(_)))
                     .count(),
                 launch_unknown(started),
-                None,
+                check_launch_policy(started)
+                    .err()
+                    .map(|failure| failure.message),
             ),
             Err(fail) => (0, Vec::new(), Some(fail.message.clone())),
         };
@@ -242,6 +245,7 @@ pub(super) fn reconcile_inner(
             "launched": launched,
             "launch_unknown": unknown,
             "launch_error": launch_error,
+            "started": started.as_ref().ok(),
             "cloud_jobs": cloud_jobs,
         }));
     }

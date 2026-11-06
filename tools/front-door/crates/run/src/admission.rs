@@ -488,6 +488,9 @@ impl RunStore {
         let pressure_threshold = provenant_config::LaneBuildSettings::read(&self.writer_registry)
             .map(|settings| settings.memory_pressure_threshold())
             .unwrap_or_default();
+        // One observational view shares a host census across its rows. Actual
+        // admission keeps taking fresh resource samples at its own boundary.
+        let process_budget = std::cell::OnceCell::new();
         let mut stalled_cache = std::collections::HashMap::new();
         let slot_queue = self.slot_queue(lanes, call);
         lanes
@@ -529,14 +532,14 @@ impl RunStore {
                         })?
                 } else if matches!(lane.state, AttemptState::Queued { .. }) {
                     self.recovery_process_wait(lane.run_id, call)
-                        .unwrap_or_else(|| match resources.process_budget() {
+                        .unwrap_or_else(|| match process_budget.get_or_init(|| resources.process_budget()) {
                             Ok(budget) if !budget.has_room() => format!(
                                 "host capacity: user process count {} of {}",
                                 budget.used, budget.limit
                             ),
                             Err(error) => format!(
                                 "launch: not yet handed to a guardian; process budget probe failed, not holding the lane: {}",
-                                probe_error(&error)
+                                probe_error(error)
                             ),
                             _ => "launch: not yet handed to a guardian".to_owned(),
                         })
@@ -595,7 +598,7 @@ impl RunStore {
                                 format!("host capacity: memory pressure {pressure:?}")
                             }
                             pressure => {
-                                let budget = resources.process_budget();
+                                let budget = process_budget.get_or_init(|| resources.process_budget());
                                 let pressure_error = pressure.as_ref().err();
                                 let budget_error = budget.as_ref().err();
                                 let full = budget.as_ref().ok().filter(|budget| !budget.has_room());
@@ -1649,6 +1652,109 @@ mod process_wait_tests {
             None,
             call,
         )?)
+    }
+
+    #[test]
+    fn lane_wait_view_samples_process_budget_once_and_refreshes_the_next_view()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        use std::cell::Cell;
+        struct Counting {
+            budget: Cell<Budget>,
+            calls: Cell<usize>,
+        }
+        impl Resources for Counting {
+            fn observe_process(
+                &self,
+                pid: i64,
+            ) -> provenant_supervisor::census::ProcessObservation {
+                crate::tests::HostFacts::new(100).observe_process(pid)
+            }
+
+            fn memory(&self) -> std::io::Result<MemorySample> {
+                Ok(MemorySample {
+                    available_bytes: 100,
+                    total_bytes: 100,
+                })
+            }
+            fn disk(&self, _: &Directory) -> std::io::Result<u64> {
+                Ok(u64::MAX)
+            }
+            fn process_budget(&self) -> std::io::Result<resources::ProcessBudget> {
+                self.calls.set(self.calls.get() + 1);
+                Probes {
+                    pressure: None,
+                    budget: self.budget.get(),
+                }
+                .process_budget()
+            }
+        }
+        let temp = tempfile::tempdir()?;
+        let clock = crate::tests::clock();
+        let cancel = CancelToken::new();
+        let call = crate::tests::call(&clock, &cancel);
+        let store = RunStore::open(&crate::tests::context(temp.path())?, &call)?;
+        let mut lanes = Vec::new();
+        for n in 1..=4u8 {
+            let mut run = crate::tests::input();
+            run.run_id = provenant_core::RunId::from_bytes([n; 16]);
+            run.operation_id = provenant_core::OperationId::parse(&format!("view-census-{n}"))?;
+            run.attempts[0].attempt_id = provenant_core::AttemptId::from_bytes([n; 16]);
+            store.create(&run, &call)?;
+            let queued = store.record(run.attempts[0].attempt_id, &call)?;
+            lanes.push(if n % 2 == 0 {
+                store.mark_starting(
+                    &queued,
+                    &crate::tests::route(),
+                    &[],
+                    &Default::default(),
+                    None,
+                    &call,
+                )?
+            } else {
+                queued
+            });
+        }
+        let resources = Counting {
+            budget: Cell::new(Budget::Unlimited),
+            calls: Cell::new(0),
+        };
+        for (view, budget) in [
+            Budget::Full {
+                used: 950,
+                limit: 1000,
+            },
+            Budget::Failed("unavailable"),
+            Budget::Unlimited,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            resources.budget.set(budget);
+            let waits = store.lane_waits_with_resources(&lanes, &call, &resources);
+            assert_eq!(waits.len(), 4);
+            assert_eq!(
+                resources.calls.get(),
+                view + 1,
+                "every view samples once, including failed censuses"
+            );
+            for (lane, wait) in lanes.iter().zip(waits) {
+                assert_eq!(wait.attempt_id, lane.attempt_id);
+                let queued = matches!(lane.state, AttemptState::Queued { .. });
+                let expected = match (budget, queued) {
+                    (Budget::Full { .. }, _) => "host capacity: user process count 950 of 1000",
+                    (Budget::Failed(_), true) => {
+                        "launch: not yet handed to a guardian; process budget probe failed, not holding the lane: unavailable"
+                    }
+                    (Budget::Failed(_), false) => {
+                        "host capacity: process budget probe failed, not holding the lane: unavailable"
+                    }
+                    (Budget::Unlimited, true) => "launch: not yet handed to a guardian",
+                    (Budget::Unlimited, false) => "launch preparation: preparing the lane",
+                };
+                assert_eq!(wait.waiting_for, expected);
+            }
+        }
+        Ok(())
     }
 
     #[test]

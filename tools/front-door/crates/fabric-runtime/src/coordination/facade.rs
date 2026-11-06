@@ -191,7 +191,8 @@ pub enum DispatchRefusalFact {
 }
 
 /// Facts the input owner has explicitly approved for disclosure.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
 pub enum InvalidInputDetail {
     GraphReason(String),
     Schema,
@@ -255,24 +256,14 @@ pub enum FacadeError {
     /// has one. Absent on the wire when empty, so older readers still decode it.
     #[error("invalid input{}", invalid_detail(.detail))]
     InvalidInput {
-        #[serde(
-            default,
-            skip_serializing_if = "Option::is_none",
-            serialize_with = "serialise_invalid_detail",
-            deserialize_with = "deserialise_invalid_detail"
-        )]
+        #[serde(flatten, with = "invalid_detail_wire")]
         detail: Option<InvalidInputDetail>,
     },
     /// A graph relay refusal retains its named cause across CLI and MCP.
     #[error("graph relay refused: {refusal_code}")]
     GraphRelayRefused {
         refusal_code: String,
-        #[serde(
-            default,
-            skip_serializing_if = "Option::is_none",
-            serialize_with = "serialise_invalid_detail",
-            deserialize_with = "deserialise_invalid_detail"
-        )]
+        #[serde(flatten, with = "invalid_detail_wire")]
         detail: Option<InvalidInputDetail>,
     },
     #[error("record not found")]
@@ -465,11 +456,14 @@ fn serialise_grant_access<S: serde::Serializer>(
     })
 }
 
+const DISPATCH_REFUSED_WIRE_REASON: &str =
+    "dispatch was refused; inspect the request and access policy";
+
 fn serialise_dispatch_reason<S: serde::Serializer>(
     _: &str,
     serializer: S,
 ) -> Result<S::Ok, S::Error> {
-    serializer.serialize_str("dispatch was refused; inspect the request and access policy")
+    serializer.serialize_str(DISPATCH_REFUSED_WIRE_REASON)
 }
 
 fn serialise_unobserved_reason<S: serde::Serializer>(
@@ -629,6 +623,14 @@ impl FacadeError {
             Self::DispatchRefused { disk: Some(disk), .. } => {
                 projected = projected.detail(format!("insufficient disk space on the limiting volume: {} bytes available, floor {} bytes; gc.free_floor from {}; bounded GC reported {} bytes reclaimed", disk.available, disk.floor, disk.origin.description(), disk.reclaimed))
                     .next(format!("run `provenant gc --free-floor {}B` before dispatching a writer", disk.floor));
+            }
+            // `reason` can carry a preparation refusal's source text, which the
+            // lane layer deliberately withholds. Project the same fixed text the
+            // wire carries; the attempt's typed cause is on its lane receipt.
+            Self::DispatchRefused { .. } => {
+                projected = projected
+                    .detail(DISPATCH_REFUSED_WIRE_REASON)
+                    .next("inspect the lane receipt for the typed refusal cause");
             }
             Self::HostDeliveryLimit { fact } | Self::Io { delivery_limit: Some(fact), .. } => projected = projected.detail(fact.detail()).next("inspect host delivery before retrying"),
             Self::HostDeliveryStage { stage } | Self::Io { delivery_stage: Some(stage), .. } => projected = projected.detail(format!("host writer delivery failed at {stage:?}")).next("inspect host delivery before retrying"),
@@ -828,61 +830,44 @@ pub(super) fn safe_input_field(field: &str) -> Option<&str> {
     None
 }
 
-fn serialise_invalid_detail<S: serde::Serializer>(
-    detail: &Option<InvalidInputDetail>,
-    serializer: S,
-) -> Result<S::Ok, S::Error> {
-    detail
-        .as_ref()
-        .and_then(InvalidInputDetail::safe_text)
-        .serialize(serializer)
-}
+// Keep the human-readable wire field while carrying the independently typed
+// fact used for disclosure decisions. Peer-supplied prose is never a fact.
+mod invalid_detail_wire {
+    use super::InvalidInputDetail;
+    use serde::{Deserialize, Deserializer, Serializer, ser::SerializeMap};
 
-fn deserialise_invalid_detail<'de, D: serde::Deserializer<'de>>(
-    deserializer: D,
-) -> Result<Option<InvalidInputDetail>, D::Error> {
-    let detail = Option::<String>::deserialize(deserializer)?;
-    Ok(detail.and_then(|detail| match detail.as_str() {
-        "graph document schema_version is invalid" => Some(InvalidInputDetail::Schema),
-        "landing lock required" => Some(InvalidInputDetail::LandingLock),
-        _ if detail.starts_with("graph refused: ") => Some(InvalidInputDetail::GraphReason(
-            detail.trim_start_matches("graph refused: ").to_owned(),
-        )),
-        "input file is unreadable or is not a regular file" => {
-            Some(InvalidInputDetail::InputUnreadable)
-        }
-        "input exceeds the 1 MiB limit" => Some(InvalidInputDetail::InputTooLarge),
-        "input is not UTF-8" => Some(InvalidInputDetail::InputInvalidUtf8),
-        _ if Some(detail.as_str())
-            == InvalidInputDetail::GraphDocumentTooLarge
-                .safe_text()
-                .as_deref() =>
+    pub fn serialize<S: Serializer>(
+        detail: &Option<InvalidInputDetail>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        let mut map = serializer.serialize_map(None)?;
+        if let Some(fact) = detail
+            && let Some(text) = fact.safe_text()
         {
-            Some(InvalidInputDetail::GraphDocumentTooLarge)
+            map.serialize_entry("detail", &text)?;
+            let safe_fact = match fact {
+                InvalidInputDetail::GraphReason(_) => InvalidInputDetail::GraphReason(
+                    text.strip_prefix("graph refused: ")
+                        .unwrap_or(&text)
+                        .to_owned(),
+                ),
+                fact => fact.clone(),
+            };
+            map.serialize_entry("detail_fact", &safe_fact)?;
         }
-        _ if detail.starts_with("unresolvable base `") => detail
-            .strip_prefix("unresolvable base `")
-            .and_then(|name| name.strip_suffix('`'))
-            .and_then(safe_base_ref)
-            .map(|name| InvalidInputDetail::UnresolvableBase(name.to_owned())),
-        _ => detail
-            .strip_prefix("invalid input field `")
-            .and_then(|rest| {
-                let (field, reason) = rest.split_once('`')?;
-                let field = safe_input_field(field)?.to_owned();
-                match reason {
-                    "" => Some(InvalidInputDetail::Field(field)),
-                    ": task title must be 1 to 256 bytes and contain no control characters" => {
-                        Some(InvalidInputDetail::FieldTitle(field))
-                    }
-                    _ => reason
-                        .strip_prefix(": exceeds ")
-                        .and_then(|value| value.strip_suffix(" bytes"))
-                        .and_then(|value| value.parse::<usize>().ok())
-                        .map(|limit| InvalidInputDetail::FieldTooLarge { field, limit }),
-                }
-            }),
-    }))
+        map.end()
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<InvalidInputDetail>, D::Error> {
+        #[derive(Deserialize)]
+        struct Fields {
+            detail_fact: Option<InvalidInputDetail>,
+        }
+        let fields = Fields::deserialize(deserializer)?;
+        Ok(fields.detail_fact.filter(|fact| fact.safe_text().is_some()))
+    }
 }
 
 impl FacadeError {
@@ -1070,6 +1055,25 @@ impl From<&provenant_fabric_store::Error> for FacadeError {
 #[cfg(test)]
 mod diagnostic_tests {
     use super::FacadeError;
+
+    #[test]
+    fn graph_reason_wire_contains_only_disclosed_text() -> Result<(), Box<dyn std::error::Error>> {
+        for reason in [
+            "sk-abcdefghijklmnopqrstuvwx".to_owned(),
+            "line\ncontrol\u{1b}".to_owned(),
+            "long".repeat(4096),
+        ] {
+            let error = FacadeError::invalid(super::InvalidInputDetail::graph_reason(&reason));
+            let wire = serde_json::to_value(&error)?;
+            let text = wire["detail"].as_str().ok_or("detail")?;
+            let fact = wire["detail_fact"]["value"].as_str().ok_or("fact")?;
+            assert_eq!(text, format!("graph refused: {fact}"));
+            assert!(!fact.chars().any(char::is_control));
+            assert!(fact.chars().count() <= 4096);
+            assert!(!serde_json::to_string(&wire)?.contains("sk-abcdefghijklmnopqrstuvwx"));
+        }
+        Ok(())
+    }
 
     #[test]
     fn an_unresolvable_base_is_named_but_unsafe_text_is_not() {
@@ -1313,6 +1317,21 @@ mod diagnostic_tests {
     }
 
     #[test]
+    fn dispatch_refusal_projection_withholds_source_text() {
+        let error = FacadeError::DispatchRefused {
+            fact: None,
+            disk: None,
+            reason: "attempt-7: HOST_DISK_ERROR_SENTINEL /private/host\u{1b}".into(),
+        };
+        let projected = error.diagnostic();
+        let text = serde_json::to_string(&projected).unwrap();
+        assert!(!text.contains("HOST_DISK_ERROR_SENTINEL"), "{text}");
+        assert!(!text.contains("/private/host"), "{text}");
+        assert_eq!(projected.code, "dispatch_refused");
+        assert!(projected.detail.is_some());
+    }
+
+    #[test]
     fn detached_writer_refusal_keeps_its_typed_cause_across_transport() {
         let error = FacadeError::DispatchRefused {
             reason: "writer needs a branch".into(),
@@ -1407,6 +1426,7 @@ mod diagnostic_tests {
         );
         let wire = serde_json::to_value(&detailed).unwrap();
         assert_eq!(wire["detail"], "graph document schema_version is invalid");
+        assert_eq!(wire["detail_fact"]["kind"], "schema");
         assert!(!wire.to_string().contains("31m"));
         let oversized = FacadeError::invalid(super::InvalidInputDetail::GraphDocumentTooLarge);
         let received: FacadeError =
@@ -1424,6 +1444,12 @@ mod diagnostic_tests {
                 .contains("TOKEN_SENTINEL")
         );
         assert!(!untrusted.to_string().contains("TOKEN_SENTINEL"));
+        let forged: FacadeError = serde_json::from_value(serde_json::json!({
+            "code": "invalid_input", "detail": "safe-looking text",
+            "detail_fact": {"kind": "field", "value": "TOKEN_SENTINEL"}
+        }))
+        .unwrap();
+        assert_eq!(forged.diagnostic().detail.as_deref(), Some("invalid input"));
         for input in [
             format!("schema version TOKEN_SENTINEL\u{1b}{}", "é".repeat(2048)),
             "invalid input field `scope.paths` TOKEN_SENTINEL".to_owned(),

@@ -1330,39 +1330,12 @@ impl ServiceError {
             );
             return value;
         }
-        if let Self::Facade(error) = self {
-            let projection = error.diagnostic();
-            let mut value = serde_json::to_value(&projection)
-                .unwrap_or_else(|_| serde_json::json!({"code": error.code()}));
-            value["message"] = Value::String(
-                projection
-                    .detail
-                    .clone()
-                    .unwrap_or_else(|| projection.code.clone()),
-            );
-            value["hint"] = Value::String(
-                projection
-                    .next
-                    .clone()
-                    .unwrap_or_else(|| "Inspect the current state before retrying.".into()),
-            );
-            match error {
-                FacadeError::LaunchUnknown { operation_id } => {
-                    value["operation_id"] = serde_json::json!(operation_id)
-                }
-                FacadeError::GenerationConflict { current_generation } => {
-                    value["current_generation"] = serde_json::json!(current_generation)
-                }
-                FacadeError::Busy => value["retryable"] = Value::Bool(true),
-                FacadeError::Io { operation, .. } if operation == "access Fabric store" => {
-                    value["operation"] = Value::String(operation.clone());
-                }
-                _ => {}
-            }
-            return value;
-        }
-        if let Self::Coordination(error) = self {
-            let projection = error.diagnostic();
+        let projection = match self {
+            Self::Facade(error) => Some(error.diagnostic()),
+            Self::Coordination(error) => Some(error.diagnostic()),
+            _ => None,
+        };
+        if let Some(projection) = projection {
             let mut value = serde_json::to_value(&projection)
                 .unwrap_or_else(|_| serde_json::json!({"code": self.code()}));
             value["message"] = Value::String(
@@ -1377,22 +1350,32 @@ impl ServiceError {
                     .clone()
                     .unwrap_or_else(|| "Inspect the current state before retrying.".into()),
             );
-            match error {
-                CoordinationError::Store(provenant_fabric_runtime::StoreError::Invalid(field)) => {
+            // These are envelope fields, not independent diagnostic decisions.
+            match self {
+                Self::Facade(FacadeError::LaunchUnknown { operation_id })
+                | Self::Coordination(CoordinationError::Peer(
+                    provenant_fabric_runtime::hosts::PeerError::Unknown { operation_id },
+                )) => value["operation_id"] = serde_json::json!(operation_id),
+                Self::Facade(FacadeError::GenerationConflict { current_generation }) => {
+                    value["current_generation"] = serde_json::json!(current_generation);
+                }
+                Self::Coordination(CoordinationError::Store(
+                    provenant_fabric_runtime::StoreError::Invalid(field),
+                )) => {
                     value["field"] =
-                        serde_json::json!(provenant_records::diagnostic::safe_text(field));
+                        serde_json::json!(provenant_records::diagnostic::safe_text(field))
                 }
-                CoordinationError::Input(error) => {
+                Self::Coordination(CoordinationError::Input(error)) => {
                     value["path"] = serde_json::json!(error.safe_path());
-                }
-                CoordinationError::Peer(provenant_fabric_runtime::hosts::PeerError::Unknown {
-                    operation_id,
-                }) => {
-                    value["operation_id"] = serde_json::json!(operation_id);
                 }
                 _ => {}
             }
-            if let FacadeError::Io { operation, .. } = FacadeError::from(error)
+            let facade = match self {
+                Self::Facade(error) => Some(error.clone()),
+                Self::Coordination(error) => Some(FacadeError::from(error)),
+                _ => None,
+            };
+            if let Some(FacadeError::Io { operation, .. }) = facade
                 && operation == "access Fabric store"
             {
                 value["operation"] = Value::String(operation);

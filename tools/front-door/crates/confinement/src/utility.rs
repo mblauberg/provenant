@@ -291,6 +291,12 @@ pub enum GitRead {
         base: GitOid,
         head: GitOid,
     },
+    /// Count commits reachable from `head` but not `base` without emitting the
+    /// commit list. Used for bounded, advisory checkout freshness warnings.
+    AncestorCount {
+        base: GitOid,
+        head: GitOid,
+    },
     TreeEntries {
         oid: GitOid,
         prefix: RepoPath,
@@ -1010,6 +1016,33 @@ pub(crate) fn advertised_remote_head(
     ])
 }
 
+/// The branch the remote advertises as its HEAD, using host transport
+/// credentials and the same bounded budget. `None` when the remote is absent,
+/// unreachable, or does not name exactly one branch.
+pub fn advertised_default_branch(
+    executor: &dyn Executor,
+    repo: &ReadOnlyRepo,
+    runtime: &UtilityRuntime,
+    remote: &str,
+    budget: UtilityBudget,
+    cancel: &CancelToken,
+) -> Result<Option<crate::repo::GitRefName>, UtilityError> {
+    let outcome = advertised_remote_head(executor, repo, runtime, remote, budget, cancel)?;
+    if outcome.termination != Termination::Exit(0) {
+        return Ok(None);
+    }
+    let text = std::str::from_utf8(&outcome.stdout.bytes)
+        .map_err(|_| UtilityError::InvalidOperationValue)?;
+    let mut targets = text.lines().filter_map(|line| {
+        line.strip_prefix("ref: refs/heads/")?
+            .strip_suffix("\tHEAD")
+    });
+    let (Some(branch), None) = (targets.next(), targets.next()) else {
+        return Ok(None);
+    };
+    Ok(crate::repo::GitRefName::branch(branch).ok())
+}
+
 /// Query one pushed branch, avoiding an unbounded remote ref listing.
 pub(crate) fn advertised_remote_branch(
     executor: &dyn Executor,
@@ -1412,6 +1445,12 @@ fn git_args(
         ],
         GitRead::AncestorRange { base, head } => vec![
             "rev-list".into(),
+            format!("{base}..{head}").into(),
+            "--".into(),
+        ],
+        GitRead::AncestorCount { base, head } => vec![
+            "rev-list".into(),
+            "--count".into(),
             format!("{base}..{head}").into(),
             "--".into(),
         ],

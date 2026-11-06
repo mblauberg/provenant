@@ -6,8 +6,11 @@ use serde::Serialize;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ProviderError {
-    #[error("argv prompt exceeds its configured byte limit")]
-    PromptTooLarge,
+    #[error("argv prompt exceeds domains.run.argv_prompt_limit_bytes ({limit} bytes; source: {})", .origin.description())]
+    PromptTooLarge {
+        limit: usize,
+        origin: provenant_records::diagnostic::SettingSource,
+    },
     #[error("provider protocol is malformed")]
     Malformed,
     #[error("provider protocol is malformed: {0}")]
@@ -48,6 +51,67 @@ pub enum ProviderError {
     CredentialReadFailed(String),
 }
 
+impl ProviderError {
+    pub fn resource_fact(&self) -> Option<provenant_records::diagnostic::ResourceFact> {
+        match self {
+            Self::PromptTooLarge { limit, origin } => Some(
+                provenant_records::diagnostic::ResourceFact::ArgvPromptLimit {
+                    limit: u64::try_from(*limit).ok()?,
+                    origin: *origin,
+                },
+            ),
+            _ => None,
+        }
+    }
+    /// Classify only failures whose typed cause establishes a hard boundary.
+    pub fn boundary_class(&self) -> provenant_records::diagnostic::BoundaryClass {
+        use provenant_records::diagnostic::BoundaryClass as B;
+        match self {
+            Self::IdentityMismatch
+            | Self::UnknownIdentity
+            | Self::InvalidPath
+            | Self::UnsupportedPolicy => B::Authority,
+            Self::IsolatedKeychainUnavailable(_) | Self::CredentialReadFailed(_) => B::Credentials,
+            Self::PromptTooLarge { .. }
+            | Self::Malformed
+            | Self::MalformedResult(_)
+            | Self::Overflow
+            | Self::ProbeDirectory(_)
+            | Self::LoginRequired
+            | Self::CredentialUnavailable
+            | Self::CredentialNotFound
+            | Self::CredentialExpired => B::None,
+        }
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn provider_failure_boundary_depends_on_typed_cause() {
+    use provenant_records::diagnostic::BoundaryClass as B;
+    assert_eq!(
+        ProviderError::IdentityMismatch.boundary_class(),
+        B::Authority
+    );
+    assert_eq!(
+        ProviderError::UnsupportedPolicy.boundary_class(),
+        B::Authority
+    );
+    assert_eq!(
+        ProviderError::CredentialReadFailed("sentinel".into()).boundary_class(),
+        B::Credentials
+    );
+    assert_eq!(ProviderError::LoginRequired.boundary_class(), B::None);
+    assert_eq!(
+        ProviderError::PromptTooLarge {
+            limit: 1,
+            origin: provenant_records::diagnostic::SettingSource::ShippedDefault
+        }
+        .boundary_class(),
+        B::None
+    );
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct AvailabilityRecord {
     pub schema_version: u64,
@@ -68,6 +132,7 @@ pub struct Prompt {
     text: String,
     file: Option<std::path::PathBuf>,
     argv_limit: usize,
+    argv_origin: provenant_records::diagnostic::SettingSource,
 }
 impl Prompt {
     pub fn new(text: String) -> Self {
@@ -75,6 +140,7 @@ impl Prompt {
             text,
             file: None,
             argv_limit: provenant_confinement::run_config::DEFAULT_ARGV_PROMPT_LIMIT_BYTES,
+            argv_origin: provenant_records::diagnostic::SettingSource::ShippedDefault,
         }
     }
     pub fn from_file(path: std::path::PathBuf) -> Self {
@@ -85,11 +151,17 @@ impl Prompt {
             ),
             file: Some(path),
             argv_limit: provenant_confinement::run_config::DEFAULT_ARGV_PROMPT_LIMIT_BYTES,
+            argv_origin: provenant_records::diagnostic::SettingSource::ShippedDefault,
         }
     }
     /// Override the compiled argv prompt threshold for this launch.
-    pub fn with_argv_limit(mut self, limit: usize) -> Self {
+    pub fn with_argv_limit(
+        mut self,
+        limit: usize,
+        origin: provenant_records::diagnostic::SettingSource,
+    ) -> Self {
         self.argv_limit = limit;
+        self.argv_origin = origin;
         self
     }
     pub fn file(&self) -> Option<&std::path::Path> {
@@ -100,7 +172,10 @@ impl Prompt {
     }
     pub fn check_argv(&self) -> Result<(), ProviderError> {
         if self.text.len() > self.argv_limit {
-            Err(ProviderError::PromptTooLarge)
+            Err(ProviderError::PromptTooLarge {
+                limit: self.argv_limit,
+                origin: self.argv_origin,
+            })
         } else {
             Ok(())
         }

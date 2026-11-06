@@ -1896,6 +1896,32 @@ fn integration_refuses_default_fallbacks_remote_head_and_primary_branch()
 }
 
 #[test]
+fn integration_rechecks_primary_checkout_after_preparation()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let mut fixture = PrepareFixture::new()?;
+    fixture.git(&["branch", "integration"])?;
+    fixture.request =
+        HostDeliveryContext::destination(DeliveryMode::Integrate("integration".into()), "lane")?
+            .ok_or("destination")?;
+
+    // Preparation caches the initial primary checkout listing in these facts.
+    let facts = provenant_confinement::worktrees::RepoFacts::default();
+    let host = HostDeliveryContext::new(fixture.environment.clone())
+        .with_repo_facts(&facts)
+        .prepare(&fixture.writer, &fixture.request)?;
+
+    fixture.commit(&fixture.writer.worktree, "provider output")?;
+    fixture.git(&["checkout", "integration"])?;
+
+    let head = host.head(&fixture.writer)?;
+    assert!(matches!(
+        host.integrate(&fixture.writer, &fixture.request, head),
+        Err(RunError::Delivery(WriterDeliveryStage::Integrate))
+    ));
+    Ok(())
+}
+
+#[test]
 fn integration_refuses_the_default_branch_of_a_non_origin_remote()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
     let mut fixture = PrepareFixture::new()?;
@@ -2721,8 +2747,8 @@ fn a_late_host_limit_fails_the_receipt_at_its_stage_and_keeps_the_reason()
         .get("reason")
         .and_then(serde_json::Value::as_str)
         .ok_or("reason")?;
-    assert!(reason.contains("rev-parse"), "{reason}");
-    assert!(reason.contains(&limit.to_string()), "{reason}");
+    let expected = provenant_confinement::utility::UtilityError::Truncated { stream: "stdout" };
+    assert!(reason.contains(&expected.to_string()), "{reason}");
     Ok(())
 }
 
@@ -3226,6 +3252,7 @@ impl PrepareFixture {
             branch: provenant_confinement::repo::GitRefName::new("refs/heads/lane")?,
             base,
             custody: None,
+            facts: Default::default(),
             review_exempt: Default::default(),
         };
         let scope = provenant_supervisor::custody::Scope {
@@ -3873,14 +3900,87 @@ fn worktree_listing_over_the_capture_default_is_refused_at_every_stage()
                 stage,
             )
             .expect_err("an oversized listing must be refused");
+        let RunError::DeliveryLimit {
+            stage: actual_stage,
+            tool,
+            command,
+            limit: actual_limit,
+        } = &error
+        else {
+            panic!("unexpected error: {error:?}");
+        };
+        assert_eq!(*actual_stage, stage);
+        assert_eq!(*tool, "git");
+        assert_eq!(command, "worktree list");
+        assert_eq!(*actual_limit, limit);
+        let projection = error.diagnostic(provenant_records::diagnostic::Destination::Local);
+        assert_eq!(projection.code, "IO");
         assert!(
-            matches!(error, RunError::DeliveryLimit { .. }),
-            "{stage:?}: {error:?}"
+            projection
+                .detail
+                .as_deref()
+                .unwrap()
+                .contains("worktree list")
         );
-        let message = error.to_string();
-        assert!(message.contains("worktree list"), "{message}");
-        assert!(message.contains(&limit.to_string()), "{message}");
+        assert!(
+            projection
+                .detail
+                .as_deref()
+                .unwrap()
+                .contains(&limit.to_string())
+        );
+        assert!(matches!(
+            projection.fact,
+            Some(provenant_records::diagnostic::DiagnosticFact::DeliveryLimit(_))
+        ));
     }
+    Ok(())
+}
+
+#[test]
+fn delivery_preflights_reuse_the_command_worktree_listing_with_many_worktrees()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let mut fixture = PrepareFixture::new()?;
+    let admin = fixture.writer.project.join(".git/worktrees");
+    let head = std::fs::read(admin.join("lane/HEAD"))?;
+    for index in 0..100 {
+        let path = fixture.root.join(format!("preflight-tree-{index}"));
+        let entry = admin.join(format!("preflight-{index}"));
+        std::fs::create_dir(&entry)?;
+        std::fs::write(entry.join("HEAD"), &head)?;
+        std::fs::write(entry.join("commondir"), b"../..\n")?;
+        std::fs::write(
+            entry.join("gitdir"),
+            format!("{}\n", path.join(".git").display()),
+        )?;
+    }
+
+    let git = provenant_os::git::git_executable().ok_or("git executable")?;
+    let wrapper = fixture.root.join("counting-git");
+    let count = fixture.root.join("worktree-list-count");
+    fixture.executable(
+        &wrapper,
+        &format!(
+            "#!/bin/sh\ncase \" $* \" in *\" worktree list --porcelain \"*) printf x >> '{}';; esac\nexec '{}' \"$@\"\n",
+            count.display(),
+            git.display()
+        ),
+    )?;
+    fixture
+        .environment
+        .push(("PROVENANT_GIT".into(), wrapper.into_os_string()));
+    let facts = provenant_confinement::worktrees::RepoFacts::default();
+    let host = HostDeliveryContext::new(fixture.environment.clone()).with_repo_facts(&facts);
+
+    // The CLI's owned-worktree and task preflights share these command facts.
+    host.check_delivery_branch_with_facts(&fixture.writer.project, "unprotected")?;
+    host.check_delivery_branch_with_facts(&fixture.writer.project, "unprotected")?;
+
+    assert_eq!(
+        std::fs::read(&count)?.len(),
+        1,
+        "worktree list should run once"
+    );
     Ok(())
 }
 
@@ -3949,43 +4049,28 @@ fn host_forge_output_over_its_bound_names_gh_not_git()
 }
 
 #[test]
-fn worktree_listing_keeps_the_raised_limit_and_others_keep_theirs() {
-    let listing = stdout_limit(false, &["worktree", "list", "--porcelain"]);
-    assert!(listing >= provenant_os::exec::DEFAULT_CAPTURE_LIMIT);
-    for (forge, args) in [
-        (false, &["for-each-ref", "--format=%(refname)"][..]),
-        (
-            false,
-            &[
-                "--git-dir",
-                "repo.git",
-                "--work-tree",
-                "tree",
-                "for-each-ref",
-            ],
-        ),
-        (
-            false,
-            &[
-                "-c",
-                "remote.origin.uploadpack=git-upload-pack",
-                "ls-remote",
-                "origin",
-            ],
-        ),
-        (
-            false,
-            &["--git-dir=repo.git", "worktree", "list", "--porcelain"],
-        ),
-        (false, &["remote"]),
-        (true, &["log"]),
+fn non_fact_host_commands_keep_their_limits() {
+    let listing = provenant_os::exec::DEFAULT_CAPTURE_LIMIT;
+    for args in [
+        &["for-each-ref", "--format=%(refname)"][..],
+        &[
+            "--git-dir",
+            "repo.git",
+            "--work-tree",
+            "tree",
+            "for-each-ref",
+        ],
+        &[
+            "-c",
+            "remote.origin.uploadpack=git-upload-pack",
+            "ls-remote",
+            "origin",
+        ],
     ] {
-        let limit = stdout_limit(forge, args);
-        assert!(
-            limit > 0 && limit <= listing,
-            "{args:?}: {limit} > {listing}"
-        );
+        assert_eq!(stdout_limit(false, args), listing, "{args:?}");
     }
+    assert_eq!(stdout_limit(false, &["remote"]), 16 * 1024);
+    assert_eq!(stdout_limit(true, &["log"]), 56_000);
 }
 
 #[test]
@@ -4957,6 +5042,31 @@ fn host_push_delivery_refuses_a_non_fast_forward_and_leaves_the_branch()
 }
 
 #[test]
+fn delivery_retry_reconciles_remote_before_push()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let mut fixture = PrepareFixture::new()?;
+    fixture.commit(&fixture.writer.worktree, "Lane work")?;
+    let git = provenant_os::git::git_executable().ok_or("git")?;
+    let wrapper = fixture.root.join("git-wrapper");
+    let marker = fixture.root.join("refuse-push");
+    fixture.executable(&wrapper, &format!(
+        "#!/bin/sh\nfor arg in \"$@\"; do if [ \"$arg\" = push ] && [ -f '{}' ]; then exit 42; fi; done\nexec '{}' \"$@\"\n",
+        marker.display(), git.display()
+    ))?;
+    fixture
+        .environment
+        .push(("PROVENANT_GIT".into(), wrapper.into_os_string()));
+    let host = fixture.prepare()?;
+    let head = host.head(&fixture.writer)?;
+    host.push(&fixture.writer, &fixture.request, head, "fixture")?;
+    std::fs::write(marker, "")?;
+    // A second push is deliberately made to fail; reconciliation must reuse
+    // the already-published head and still complete verification.
+    host.push(&fixture.writer, &fixture.request, head, "fixture")?;
+    Ok(())
+}
+
+#[test]
 fn existing_pr_delivery_only_creates_after_positive_absence()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
     let mut fixture = PrepareFixture::new()?;
@@ -5249,5 +5359,164 @@ fn budget_commit_uses_bounded_git_without_running_hooks()
         String::from_utf8_lossy(&output.stderr)
     );
     assert_eq!(output.stdout, b"saved\n");
+    Ok(())
+}
+
+#[test]
+fn writer_preparation_preserves_command_repository_fact_caps()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    use provenant_confinement::{
+        utility::UtilityError,
+        worktrees::{RepoFacts, WorktreeError},
+    };
+    let fixture = PrepareFixture::new()?;
+    let execution = registered_landed_writer_fixture(&fixture)?;
+    let (clock, cancel) = (tests::clock(), CancelToken::new());
+    let call = tests::call(&clock, &cancel);
+    for (inventory, scalar) in [
+        (provenant_os::exec::DEFAULT_CAPTURE_LIMIT, 1),
+        (1, provenant_os::git::REPO_FACT_SCALAR_LIMIT),
+    ] {
+        let command_facts = RepoFacts::with_limits(inventory, scalar)?;
+        let store = RunStore::open(&execution, &call)?.with_repo_facts(&command_facts);
+        let result = crate::prepare_writer_with_facts(
+            &fixture.writer,
+            &store.writer_registry,
+            execution.project_id,
+            store.repo_facts(),
+        );
+        assert!(matches!(
+            result,
+            Err(RunError::Writer(WorktreeError::Utility(
+                UtilityError::Truncated { stream: "stdout" }
+            )))
+        ));
+    }
+    // The fixture remains admissible; a cap failure never leaves writer custody.
+    crate::prepare_writer(
+        &fixture.writer,
+        execution.state_root.as_path(),
+        execution.project_id,
+    )?;
+    Ok(())
+}
+
+#[test]
+fn host_delivery_repository_facts_use_command_caps()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    use provenant_confinement::{
+        utility::UtilityError,
+        worktrees::{RepoFacts, WorktreeError},
+    };
+    let fixture = PrepareFixture::new()?;
+    let host = fixture.prepare()?;
+    let inventory = RepoFacts::with_limits(1, provenant_os::git::REPO_FACT_SCALAR_LIMIT)?;
+    let scalar = RepoFacts::with_limits(provenant_os::exec::DEFAULT_CAPTURE_LIMIT, 1)?;
+    let truncated = |error: RunError| {
+        matches!(
+            error,
+            RunError::DeliveryFact {
+                source: WorktreeError::Utility(UtilityError::Truncated { stream: "stdout" }),
+                ..
+            }
+        )
+    };
+    let listing_error = host
+        .clone()
+        .with_repo_facts(&inventory)
+        .command(
+            &fixture.writer.worktree,
+            "git",
+            &["worktree", "list", "--porcelain"],
+            WriterDeliveryStage::Integrate,
+        )
+        .unwrap_err();
+    assert!(matches!(
+        listing_error,
+        RunError::DeliveryLimit {
+            stage: WriterDeliveryStage::Integrate,
+            tool: "git",
+            command,
+            limit: 1,
+        } if command == "worktree list"
+    ));
+    for args in [
+        &["rev-parse", "--absolute-git-dir"][..],
+        &["rev-parse", "--verify", "HEAD"],
+        &["rev-parse", "--verify", "HEAD~0"],
+    ] {
+        assert!(truncated(
+            host.clone()
+                .with_repo_facts(&scalar)
+                .command(
+                    &fixture.writer.worktree,
+                    "git",
+                    args,
+                    WriterDeliveryStage::Head
+                )
+                .unwrap_err()
+        ));
+    }
+    assert!(truncated(
+        HostDeliveryContext::new(fixture.environment.clone())
+            .with_repo_facts(&scalar)
+            .prepare(&fixture.writer, &fixture.request)
+            .unwrap_err()
+    ));
+    for error in [
+        HostDeliveryContext::new(fixture.environment.clone())
+            .with_repo_facts(&inventory)
+            .prepare(&fixture.writer, &fixture.request)
+            .unwrap_err(),
+        HostDeliveryContext::new(fixture.environment.clone())
+            .with_repo_facts(&inventory)
+            .check_delivery_branch_with_facts(&fixture.writer.project, "unprotected")
+            .unwrap_err(),
+    ] {
+        assert!(matches!(
+            error,
+            RunError::DeliveryLimit {
+                tool: "git",
+                command,
+                limit: 1,
+                ..
+            } if command == "worktree list"
+        ));
+    }
+    let head = host.head(&fixture.writer)?;
+    let error = host
+        .clone()
+        .with_repo_facts(&inventory)
+        .integrate(&fixture.writer, &fixture.request, head)
+        .unwrap_err();
+    assert!(
+        matches!(
+            &error,
+            RunError::DeliveryLimit {
+                stage: WriterDeliveryStage::Integrate,
+                tool: "git",
+                command,
+                limit: 1,
+            } if command == "worktree list"
+        ),
+        "{error:?}"
+    );
+    assert!(matches!(
+        HostDeliveryContext::new(fixture.environment.clone())
+            .with_repo_facts(&inventory)
+            .deliver_graph_pr(&fixture.writer.project, "unprotected", head, "body")
+            .unwrap_err(),
+        RunError::DeliveryLimit {
+            tool: "git",
+            command,
+            limit: 1,
+            ..
+        } if command == "worktree list"
+    ));
+    assert!(truncated(
+        host.with_repo_facts(&scalar)
+            .head(&fixture.writer)
+            .unwrap_err()
+    ));
     Ok(())
 }

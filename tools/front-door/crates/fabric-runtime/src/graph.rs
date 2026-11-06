@@ -398,6 +398,20 @@ pub trait AttemptOwner {
         Ok(None)
     }
 
+    /// Submit-time warnings retained in graph status for every transport.
+    fn take_launch_warnings(&mut self) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// Resolve an omitted creation base using the host's default-branch policy.
+    fn resolve_creation_base(
+        &mut self,
+        reference: &str,
+        _default_base: bool,
+    ) -> Result<Option<String>, Self::Error> {
+        self.resolve_review_base(reference, None)
+    }
+
     /// Create or recover a graph-owned writer after its base is checkpointed.
     fn provision_writer_worktree(
         &mut self,
@@ -850,6 +864,57 @@ pub fn resume_with_budget<R: AttemptOwner, J: GraphJournal>(
         extensions,
         &mut Default::default(),
     )
+}
+
+/// Apply an accepted, nonterminal attempt observation without I/O.
+fn apply_pending_observation(
+    attempt: &mut GraphAttempt,
+    state: &mut NodeState,
+    reference: Option<String>,
+) {
+    attempt.state = AttemptState::Running;
+    attempt.attempt_ref = reference;
+    *state = NodeState::Running;
+}
+
+/// Apply an unresolved attempt observation without authorising a new route.
+fn apply_unknown_observation(
+    attempt: &mut GraphAttempt,
+    state: &mut NodeState,
+    reference: Option<String>,
+) {
+    attempt.state = AttemptState::Unresolved;
+    attempt.attempt_ref = reference;
+    *state = NodeState::Running;
+}
+
+/// Apply a settled gate using already-observed inputs, before checkpoint save.
+fn apply_gate_result(
+    progress: &mut NodeProgress,
+    reason: Option<String>,
+    on_fail: Option<String>,
+    is_ci: bool,
+) {
+    let passed = reason.is_none();
+    progress.state = if passed {
+        NodeState::Succeeded
+    } else {
+        NodeState::Failed
+    };
+    progress.gate = Some(GateResult {
+        extra: Default::default(),
+        passed,
+        reason: reason.map(|reason| bounded(&reason, OUTPUT_FIELD_BYTES)),
+        on_fail,
+    });
+    progress.outputs = Some(if is_ci {
+        ci::outputs(passed, progress.ci.as_ref())
+    } else {
+        gate_outputs(passed)
+    });
+    if let Some(ci) = progress.ci.as_mut() {
+        ci.wake_at = None;
+    }
 }
 
 /// Revert cancellation-only state changes without altering attempt records.
@@ -1969,27 +2034,12 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                 } else {
                     gate_failure(condition, node, &checkpoint, &positions, &effective_budget)
                 };
-                let progress = &mut checkpoint.nodes[node_index];
-                progress.state = if reason.is_none() {
-                    NodeState::Succeeded
-                } else {
-                    NodeState::Failed
-                };
-                progress.gate = Some(GateResult {
-                    extra: Default::default(),
-                    passed: reason.is_none(),
-                    reason: reason.map(|reason| bounded(&reason, OUTPUT_FIELD_BYTES)),
-                    on_fail: node.on_fail.clone(),
-                });
-                let passed = progress.state == NodeState::Succeeded;
-                progress.outputs = Some(if matches!(condition, GateCondition::Ci { .. }) {
-                    ci::outputs(passed, progress.ci.as_ref())
-                } else {
-                    gate_outputs(passed)
-                });
-                if let Some(ci) = progress.ci.as_mut() {
-                    ci.wake_at = None;
-                }
+                apply_gate_result(
+                    &mut checkpoint.nodes[node_index],
+                    reason,
+                    node.on_fail.clone(),
+                    matches!(condition, GateCondition::Ci { .. }),
+                );
                 asks::refresh_wake(&mut checkpoint);
                 journal.save(&checkpoint).map_err(GraphError::Journal)?;
                 continue;
@@ -2239,7 +2289,13 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                             Some(base) => base.to_owned(),
                             None => {
                                 let base = owner
-                                    .resolve_review_base(&spec.base, None)
+                                    .resolve_creation_base(
+                                        &spec.base,
+                                        spec.extra
+                                            .get("default_base")
+                                            .and_then(serde_json::Value::as_bool)
+                                            .unwrap_or(false),
+                                    )
                                     .map_err(GraphError::Run)?
                                     .filter(|base| base.parse::<provenant_core::GitOid>().is_ok())
                                     .ok_or_else(|| {
@@ -2946,6 +3002,12 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     }
                     Err(error) => return Err(GraphError::Run(error)),
                 };
+                let warnings = owner.take_launch_warnings();
+                if !warnings.is_empty() {
+                    checkpoint.nodes[node_index]
+                        .extra
+                        .insert("warnings".into(), serde_json::json!(warnings));
+                }
                 let applied_route = match &observation {
                     AttemptObservation::Pending { attempt_ref }
                     | AttemptObservation::Unknown { attempt_ref }
@@ -3174,15 +3236,11 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     retry_was_pending = progress.launch_retry.take().is_some();
                     match observation {
                         AttemptObservation::Pending { attempt_ref } => {
-                            attempt.state = AttemptState::Running;
-                            attempt.attempt_ref = attempt_ref;
-                            progress.state = NodeState::Running;
+                            apply_pending_observation(attempt, &mut progress.state, attempt_ref);
                             false
                         }
                         AttemptObservation::Unknown { attempt_ref } => {
-                            attempt.state = AttemptState::Unresolved;
-                            attempt.attempt_ref = attempt_ref;
-                            progress.state = NodeState::Running;
+                            apply_unknown_observation(attempt, &mut progress.state, attempt_ref);
                             false
                         }
                         AttemptObservation::Terminal {

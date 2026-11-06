@@ -1261,16 +1261,9 @@ mod tests {
     }
 
     fn commit(transport: &GitTransport<'_>, repo: &Path, args: &[&str]) -> GitOid {
-        let mut argv = vec![
-            "-c",
-            "user.name=Fabric Test",
-            "-c",
-            "user.email=fabric@example.test",
-            "commit",
-            "-q",
-        ];
+        let mut argv = vec!["commit", "-q"];
         argv.extend_from_slice(args);
-        git(transport, repo, &argv);
+        provenant_os::fixture::run_git(repo, &argv).unwrap();
         transport.head(repo, &CancelToken::new()).unwrap()
     }
 
@@ -1410,22 +1403,16 @@ mod tests {
         let receiver = fixture.receiver(&sender, base);
         let base_tree = git(&transport, &sender, &["rev-parse", "HEAD^{tree}"]);
         let child = |tree: &str, message: &str| {
-            git(
-                &transport,
-                &sender,
-                &[
-                    "-c",
-                    "user.name=Fabric Test",
-                    "-c",
-                    "user.email=fabric@example.test",
-                    "commit-tree",
-                    tree,
-                    "-p",
-                    &base.to_string(),
-                    "-m",
-                    message,
-                ],
+            String::from_utf8(
+                provenant_os::fixture::run_git(
+                    &sender,
+                    &["commit-tree", tree, "-p", &base.to_string(), "-m", message],
+                )
+                .unwrap(),
             )
+            .unwrap()
+            .trim()
+            .to_owned()
         };
 
         // Malformed: a commit whose author line has no valid date.

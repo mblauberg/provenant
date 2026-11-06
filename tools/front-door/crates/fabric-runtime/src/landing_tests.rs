@@ -133,37 +133,16 @@ fn repositories() -> Repositories {
     add_remote.push(origin.as_os_str().to_owned());
     run_git(&seed_transport, &writer, &add_remote);
 
-    let identity = [
-        "-c",
-        "user.name=Fabric landing test",
-        "-c",
-        "user.email=fabric-landing@example.test",
-        "commit",
-        "--allow-empty",
-        "-m",
-        "base",
-    ];
-    git(&seed_transport, &writer, &identity);
+    let identity = ["commit", "--allow-empty", "-m", "base"];
+    provenant_os::fixture::run_git(&writer, &identity).unwrap();
     let base = seed_transport.head(&writer, &CancelToken::new()).unwrap();
     git(
         &seed_transport,
         &writer,
         &["push", "origin", "refs/heads/main"],
     );
-    git(
-        &seed_transport,
-        &writer,
-        &[
-            "-c",
-            "user.name=Fabric landing test",
-            "-c",
-            "user.email=fabric-landing@example.test",
-            "commit",
-            "--allow-empty",
-            "-m",
-            "candidate",
-        ],
-    );
+    provenant_os::fixture::run_git(&writer, &["commit", "--allow-empty", "-m", "candidate"])
+        .unwrap();
     let candidate = seed_transport.head(&writer, &CancelToken::new()).unwrap();
 
     let store = Store::open(&fixture.root, &fixture.request()).unwrap();

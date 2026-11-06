@@ -15,7 +15,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 mod command;
-mod confinement;
+pub(super) mod confinement;
 mod continuation;
 mod fixtures;
 mod gh_auth;

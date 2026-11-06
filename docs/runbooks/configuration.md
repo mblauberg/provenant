@@ -64,6 +64,14 @@ overrides win over configuration. Each sealed task and attempt records the
 profile name, effective knob values and exact dispatch overrides, and
 continuations keep that stamp.
 
+`chair.refusal_notice` accepts `inbox` (the default) or `off`. For a recorded
+pre-admission refusal with a bound chair, the graph submission posts a
+path-free notice to that chair's inbox. Retrying the same operation reuses the
+message identity. If posting fails or the dispatcher stops before sending,
+restore inbox access and run `provenant reconcile` from the submitting session.
+Reconcile retries all pending notices, continuing past an individual failure,
+and reports when any notice still needs recovery.
+
 ## Graph launch retries
 
 `lanes.launch_retry_limit` sets the number of retries after a transient launch
@@ -154,6 +162,14 @@ provider grant family, and the rendered macOS sandbox profile respectively.
 Raise either positive integer when a lane needs more capacity. The profile
 travels in an argument, so the operating system can still impose its own
 transport limit. These settings do not bypass path, credential, or Git checks.
+
+Continuation refusals caused by large retained state name the limiting
+`[domains.run]` setting, its value and its source. Increase
+`continuation_copy_limit_bytes`, `continuation_copy_entries` or
+`continuation_copy_depth` when the retained session needs more capacity, then
+retry the continuation. The byte copy budget also respects available disk
+space. These settings preserve credential, state-root, filesystem, hard-link
+and worktree-overlap guards.
 
 `confinement.census_exclude_ancestors` controls whether run admission excludes the
 invoking process's ancestor chain (such as the invoking shell) from live-writer detection.

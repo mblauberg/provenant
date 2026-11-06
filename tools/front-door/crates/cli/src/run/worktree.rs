@@ -22,3 +22,16 @@ pub fn worktree_access(
         Some(_) => Ok(()),
     }
 }
+
+#[cfg(test)]
+mod access_tests {
+    use super::*;
+    #[test]
+    fn worktree_access_preserves_writer_and_implicit_reader_rules() {
+        let path = Path::new("/checkout");
+        assert!(worktree_access(true, false, Some(path)).is_ok());
+        assert!(worktree_access(true, false, None).is_err());
+        assert!(worktree_access(false, false, Some(path)).is_err());
+        assert!(worktree_access(false, true, Some(path)).is_ok());
+    }
+}

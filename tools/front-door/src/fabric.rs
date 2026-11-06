@@ -132,6 +132,27 @@ pub(crate) struct Factory {
     pub(crate) workers: &'static dyn WorkerObserver,
 }
 impl Factory {
+    /// Resolve against the selected checkout with this command's caps. The
+    /// read-only resolver preserves separate Git directories, bare-linked
+    /// checkouts and native alternates without granting mutation authority.
+    fn resolve_base(
+        &self,
+        directory: &Path,
+        reference: &str,
+        facts: &provenant_confinement::worktrees::RepoFacts,
+        cancel: &CancelToken,
+    ) -> Result<provenant_core::GitOid, FacadeError> {
+        let git = provenant_os::git::git_executable()
+            .ok_or(FacadeError::InvalidInput { detail: None })?;
+        provenant_run::resolve_git_base_with_facts(&git, directory, reference, facts, cancel)
+            .map_err(|error| match error {
+                provenant_run::RunError::Writer(error) => landing::repository_fact_error(error),
+                error => run_error(error),
+            })?
+            .parse()
+            .map_err(|_| FacadeError::StateCorrupt)
+    }
+
     /// Reopen a retained graph directory without borrowing the caller's checkout.
     pub(crate) fn for_graph_directory(&self, directory: &Path) -> Result<Self, FacadeError> {
         let context = Context::open(self.context.roots.clone(), &self.home, directory)
@@ -1179,6 +1200,8 @@ pub(crate) fn tick_graphs(
                     workers,
                 };
                 let mut owner = BoundGraphOwner {
+                    launch_warnings: Vec::new(),
+                    repo_facts: Default::default(),
                     factory: &factory,
                     integration_base: Some(BoundGraphBases {
                         integration: execution.integration_base,
@@ -1422,6 +1445,7 @@ impl Factory {
         cancel: &CancelToken,
         prepared_scratch: Option<&Path>,
     ) -> Result<provenant_fabric_runtime::graph::GraphRun, FacadeError> {
+        let facts = provenant_confinement::worktrees::RepoFacts::default();
         use provenant_fabric_runtime::coordination::input::ValidateInput;
         use provenant_fabric_runtime::graph::{FileJournal, GraphJournal};
         let input = match input {
@@ -1544,10 +1568,11 @@ impl Factory {
                             Path::new(path),
                         )
                         .map_err(run_error)?;
-                        let writer = provenant_run::prepare_writer(
+                        let writer = provenant_run::prepare_writer_with_facts(
                             &writer,
                             self.context.roots.state.as_path(),
                             self.context.identity.project,
+                            &facts,
                         )
                         .map_err(run_error)?;
                         provenant_run::HostDeliveryContext::check_delivery_branch(
@@ -1571,10 +1596,11 @@ impl Factory {
                             Path::new(path),
                         )
                         .map_err(run_error)?;
-                        let writer = provenant_run::prepare_writer(
+                        let writer = provenant_run::prepare_writer_with_facts(
                             &writer,
                             self.context.roots.state.as_path(),
                             self.context.identity.project,
+                            &facts,
                         )
                         .map_err(run_error)?;
                         if writer.branch.as_str().trim_start_matches("refs/heads/") == target {
@@ -1783,12 +1809,7 @@ impl Factory {
                     )
                     .map_err(run_error)?;
                 }
-                Some(
-                    provenant_run::resolve_git_base(&git, &self.cwd, &reference)
-                        .map_err(run_error)?
-                        .parse()
-                        .map_err(|_| FacadeError::StateCorrupt)?,
-                )
+                Some(self.resolve_base(&self.cwd, &reference, &facts, cancel)?)
             } else {
                 None
             };
@@ -1801,23 +1822,7 @@ impl Factory {
                 .as_deref()
                 .filter(|base| !base.is_empty())
             {
-                let git = provenant_os::git::git_executable()
-                    .ok_or(FacadeError::InvalidInput { detail: None })?;
-                Some(
-                    provenant_run::resolve_git_base(&git, &self.cwd, reference)
-                        .map_err(|error| match error {
-                            provenant_run::RunError::InvalidBase(_) => {
-                                FacadeError::DispatchRefused {
-                                    fact: None,
-                                    disk: None,
-                                    reason: error.to_string(),
-                                }
-                            }
-                            error => run_error(error),
-                        })?
-                        .parse()
-                        .map_err(|_| FacadeError::StateCorrupt)?,
-                )
+                Some(self.resolve_base(&self.cwd, reference, &facts, cancel)?)
             } else {
                 None
             };
@@ -1845,6 +1850,8 @@ impl Factory {
                 None
             };
             let mut owner = BoundGraphOwner {
+                launch_warnings: Vec::new(),
+                repo_facts: facts.clone(),
                 factory: rebound.as_ref().unwrap_or(self),
                 integration_base: Some(BoundGraphBases {
                     integration: integration_base,
@@ -1969,6 +1976,8 @@ impl Factory {
                 }
             }
             let mut graph_owner = BoundGraphOwner {
+                launch_warnings: Vec::new(),
+                repo_facts: facts.clone(),
                 factory: self,
                 integration_base: None,
                 integration_branch: None,

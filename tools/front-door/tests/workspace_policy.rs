@@ -357,7 +357,7 @@ fn selected_test_scopes(source: &str, test_file: bool, fixtures: bool) -> Vec<&s
     let offset = |token: &str| token.as_ptr() as usize - source.as_ptr() as usize;
     let mut scopes = vec![source; usize::from(test_file)];
     for index in 0..tokens.len() {
-        if test_file || !tokens[index..].starts_with(&["#", "[", "cfg", "("]) {
+        if test_file || !tokens[index..].starts_with(&["#", "["]) {
             continue;
         }
         let Some(end) = tokens[index..]
@@ -369,12 +369,14 @@ fn selected_test_scopes(source: &str, test_file: bool, fixtures: bool) -> Vec<&s
         };
         let attribute = &tokens[index..=end];
         let attribute_text = &source[offset(attribute[0])..=offset(attribute[attribute.len() - 1])];
-        let test_only = attribute == ["#", "[", "cfg", "(", "test", ")", "]"]
+        let test_only = attribute == ["#", "[", "test", "]"]
+            || attribute == ["#", "[", "cfg", "(", "test", ")", "]"]
             || (fixtures
                 && attribute.starts_with(&["#", "[", "cfg", "(", "all", "("])
                 && attribute.contains(&"test")
                 && !attribute.contains(&"not"))
             || (fixtures
+                && attribute.starts_with(&["#", "[", "cfg", "("])
                 && attribute_text.contains("\"fixture\"")
                 && attribute.contains(&"feature")
                 && !attribute.contains(&"not")
@@ -496,16 +498,16 @@ fn fixture_module_paths(path: &Path, source: &str, fixture: bool) -> Vec<PathBuf
         parent.join(stem)
     };
     let mut paths = Vec::new();
+    let selected = selected_test_scopes(source, false, true);
     for (i, token) in tokens.iter().enumerate() {
         if *token != "mod" || tokens.get(i + 2) != Some(&";") {
             continue;
         }
-        let cfg_test = i >= 7
-            && tokens[..i]
-                .windows(7)
-                .rev()
-                .take(5)
-                .any(|w| w == ["#", "[", "cfg", "(", "test", ")", "]"]);
+        let offset = token.as_ptr() as usize;
+        let cfg_test = selected.iter().any(|scope| {
+            let start = scope.as_ptr() as usize;
+            (start..start + scope.len()).contains(&offset)
+        });
         if fixture || cfg_test {
             let name = tokens[i + 1];
             paths.push(module_dir.join(format!("{name}.rs")));
@@ -565,6 +567,13 @@ fn fixtures_do_not_call_direct_sleep() -> Result<(), Box<dyn Error>> {
             .contains(&PathBuf::from("src/hidden/nested.rs"))
     );
     assert!(fixture_module_paths(Path::new("src/lib.rs"), "mod production;", false).is_empty());
+    let adjacent = fixture_module_paths(
+        Path::new("src/lib.rs"),
+        "#[cfg(test)] mod hidden; pub mod production;",
+        false,
+    );
+    assert!(adjacent.contains(&PathBuf::from("src/hidden.rs")));
+    assert!(!adjacent.contains(&PathBuf::from("src/production.rs")));
     // Follow test-only module declarations transitively.
     let mut test_modules = std::collections::HashSet::new();
     loop {
@@ -1235,11 +1244,15 @@ fn adapter_policy_excludes_complete_test_const_arrays() {
 
 #[test]
 fn adapter_policy_excludes_fixture_items_but_scans_production_neighbours() {
-    let source = "#[cfg(feature = \"fixture\")] fn fixture() -> Result<(), Error> { adapter == \"codex\"; }\nfn production() { adapter == \"claude\"; }";
-    let scopes = selected_test_scopes(source, false, true);
-    assert_eq!(scopes.len(), 1);
-    assert!(scopes[0].contains("codex"));
-    assert!(!scopes[0].contains("claude"));
+    for attribute in ["#[cfg(feature = \"fixture\")]", "#[test]"] {
+        let source = format!(
+            "{attribute} fn fixture() -> Result<(), Error> {{ adapter == \"codex\"; }}\nfn production() {{ adapter == \"claude\"; }}"
+        );
+        let scopes = selected_test_scopes(&source, false, true);
+        assert_eq!(scopes.len(), 1);
+        assert!(scopes[0].contains("codex"));
+        assert!(!scopes[0].contains("claude"));
+    }
 }
 
 fn adapter_identity_comparison() -> Result<regex::Regex, regex::Error> {

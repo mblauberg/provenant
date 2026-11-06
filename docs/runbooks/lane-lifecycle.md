@@ -83,6 +83,12 @@ lease, including while a writer holds it. The checkout and its Git metadata
 remain read-only even when the project configures ordinary read-only write
 exceptions. Explicit write roots must not overlap the checkout.
 
+When a writer launch creates a new branch without `--base`, it fetches the
+default branch advertised by `origin` and starts from that commit. If the
+remote cannot be fetched or has no default branch, it uses local `HEAD` and
+warns with the commit ID. An explicit base and an existing branch keep their
+usual behaviour. `provenant worktree create` uses the same default.
+
 Read-only lanes can run offline Cargo tests, including doc-tests, using their
 private `CARGO_TARGET_DIR` under lane scratch; they may execute files they
 write to scratch but nowhere else. When a Swift toolchain is selected, the `swift` shim sends
@@ -109,28 +115,38 @@ checkout; for an absolute path or a path below `.worktrees/`, use
 `--branch BRANCH` to create it. Git's worktree inventory establishes membership,
 so native linked checkouts and checkouts recreated at a previously used path
 need no registration or adoption. Another project's checkout is refused.
-A held writer lock reports busy; lifecycle removal and admission refuse an observed
-live process and name its pid, command and working directory when available.
+A held writer lock reports busy and admission names the holder when its attempt
+can be identified. Lifecycle removal refuses an observed live process; admission
+treats census observations as advisory when claiming an unowned checkout,
+replaying its operation or replacing a confirmed terminal lane owner.
 
 Live-writer detection at run admission excludes the invoking process and, by default,
 its verified ancestor chain (such as the invoking shell). A run launched from inside
-the target worktree is admitted when no other writer or foreign process is active in
-the tree. When a genuine live writer or foreign process is observed, admission is refused
-with an error naming the observed process (PID, command and working directory), rather
-than blaming a previous attempt. Hosts can tighten this policy by setting
+the target worktree is admitted when writer custody is free and the Git boundary
+is safe. Bystander observations warn with the observed process (PID, command
+and working directory) when available. Hosts can tighten the census policy by setting
 `confinement.census_exclude_ancestors = false` in `[knobs]` in host configuration
-(default `true`); when disabled, any ancestor shell whose working directory is inside
-the worktree is treated as a live writer and refused.
+(default `true`); when disabled, ancestor shells inside the worktree contribute
+to census observations too.
 
 A new writer may reuse a registered worktree from a terminal lane when the tree is clean and
-writer custody is free. Dirty trees, held locks and observed live writers still refuse. When
+writer custody is free. Dirty trees, held locks and retained import fences still refuse. When
 `--base` is supplied for a branch that already exists, Provenant accepts the branch only when
 it already contains that base (reusing its existing worktree or creating one); otherwise the refusal
 names the branch head and the base, and says to omit `--base` to reuse it.
 If a linked checkout has no Provenant lane-owner record, the worktree list
 shows that fact separately from its observed writer state. It may have been
 created outside Provenant. Inspect custody and use `--worktree <path>` to select
-the checkout explicitly; an unknown writer remains unknown until checked.
+the checkout explicitly; unknown custody remains refused until checked.
+
+Use `provenant worktree doctor PATH` after a worktree refusal. It reports the
+checkout's state, the reason and one suggested command for dirty, stale
+registration, live writer, unregistered and detached checkouts. Replace `BRANCH`
+or `PATH` placeholders before running a suggestion. Unknown occupancy includes
+its scope, evidence and source; inspect those before retrying. Doctor only
+observes the checkout: it does not run its suggestion, acquire writer custody
+for a lane or clear retained fences. Admission still rechecks custody and the
+Git boundary after a clean diagnosis.
 
 A refusal that says repository authority could not be revalidated includes the
 underlying repository error and its reason. Inspect that reason and the
@@ -151,6 +167,17 @@ use origin and the lane branch. Integration targets must already exist;
 `integrate:origin/integration` selects a remote branch. Local targets must be
 checked out nowhere, including the delivering lane's own worktree. Integration
 conflicts leave checkouts and destination refs intact. Inspect the failure and resolve it through the owning lane.
+
+Writer Git inherits host global and system Git configuration. Launch places the
+resolved global name and email in a private global config, with
+`user.useConfigOnly=true`; repository identity still takes precedence. A missing
+identity makes Git refuse a commit instead of generating a hostname identity,
+and identity values containing control characters refuse launch. The host global
+config files included by the lane are readable inside the writer sandbox. The
+lane's GitHub token helper resets earlier credential helpers for Git processes
+that retain the lane environment; the wrapper also restores this precedence when
+`GH_TOKEN` survives an otherwise cleared environment. Explicit Git command-line
+configuration can override it.
 
 Publishing from a writer lane is opt-in and off by default: enabling it gives the
 lane your GitHub credential, so a malicious lane can extract the token and act
@@ -230,6 +257,21 @@ Finish or stop pending graphs and drain writers on every host before
 [upgrading](install.md#bootstrap-and-upgrade). Install on all hosts before new
 launches. Preserve unreadable records and report them.
 
+A retained slot-root reservation is carried to its named attempt during locked
+recovery. Unreadable or conflicting evidence continues to fence writers; retain
+it for host investigation.
+
+Cancelling a lane that has not launched a provider settles it as cancelled
+with nothing to import, and frees its queue place and its worktree's writer
+before `stop` returns, so a new `provenant run` there succeeds straight away.
+A launcher still preparing the writer (for example waiting on
+`provenant-lane-setup.lock`) sees the request within a fraction of a second,
+stops waiting and never advances towards launch. If it has not let go within
+about four seconds, `stop` reports the request as pending and the launcher
+settles the attempt as it unwinds. A launcher that dies before the provider
+launches leaves an attempt that status observations settle by
+themselves once its writer lock is free; it no longer shows as `starting`.
+
 `provenant reconcile --id RUN` queues settlement in the background and returns
 without waiting for Git import. The supervisor resumes its durable phase after
 a crash, with at most three attempts that reach import and backoff between
@@ -292,6 +334,14 @@ provenant status --wait=1h --follow --target graph:GRAPH_ID --target pr:2721 --j
 is repeatable; explicit prefixes disambiguate lanes, graphs and PR numbers.
 `land:N` observes PR N only: it grants no merge authority. Use `land N --wait`
 when a merge is authorised.
+
+For a stored refused operation, use `provenant status operation:OPERATION_ID`
+to inspect its diagnostic. `provenant status operation:OPERATION_ID --wait`
+returns immediately with exit 1. Use `--target operation:OPERATION_ID` to
+include it in a mixed wait; a completed wait that observes a refusal exits 1.
+Unsupported adapter capabilities and secret input refused by the run service
+have such a record, including nested requests whose canonical child identity can
+be constructed. Other pre-admission refusals may not yet have one.
 
 The default `--until any` returns on the first observed semantic transition,
 or immediately for a terminal target.

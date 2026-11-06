@@ -989,6 +989,24 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
         Command::Status(cmd) if cmd.stats => {
             graph_interface::stats("status", cmd.id, cmd.by, globals, process.workers())
         }
+        Command::Status(cmd)
+            if cmd.wait.is_some()
+                && cmd.target.is_empty()
+                && cmd
+                    .id
+                    .as_deref()
+                    .is_some_and(|id| id.starts_with("operation:")) =>
+        {
+            run_edge(&inv.leaf, globals, |edge| {
+                let mut reply = provenant_cli::run::status(cmd, globals.json, edge);
+                if reply.result.error.is_none() {
+                    reply.result.status = provenant_records::Outcome::Failed;
+                    reply.result.data["condition_met"] = serde_json::json!(true);
+                    reply.result.data["timed_out"] = serde_json::json!(false);
+                }
+                reply
+            })
+        }
         Command::Status(cmd) if cmd.wait.is_some() => status_wait::run(cmd, globals),
         Command::Status(cmd) => {
             if let Some(id) = &cmd.id
@@ -1104,7 +1122,37 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
             reply
         }),
         Command::Reconcile(cmd) => run_edge(&inv.leaf, globals, |edge| {
-            provenant_cli::run::reconcile(cmd, edge)
+            let all = cmd.id.is_empty() && cmd.abandon.is_none();
+            let mut reply = provenant_cli::run::reconcile(cmd, edge);
+            if all {
+                let issue = match settlement::reconcile_refusal_notices(edge) {
+                    Ok(false) => None,
+                    Ok(true) => {
+                        reply.human.push_str("some refusal notices could not be delivered; inspect their chair bindings and inbox access\n");
+                        reply.result.data["refusal_notice_recovery_pending"] =
+                            serde_json::json!(true);
+                        None
+                    }
+                    Err(_) => Some(
+                        "refusal notice recovery failed; restore inbox access and rerun `provenant reconcile`",
+                    ),
+                };
+                if let Some(message) = issue {
+                    reply.human.push_str(&format!("{message}\n"));
+                    reply.result.data["refusal_notice_recovery_pending"] = serde_json::json!(true);
+                    if reply.result.error.is_none() {
+                        reply.result.status = provenant_records::Outcome::Failed;
+                        reply.result.error = Some(provenant_records::CommandError {
+                            code: "RECONCILE_INCOMPLETE".into(),
+                            message: message.into(),
+                            cause: None,
+                            repair: Some("rerun `provenant reconcile`".into()),
+                            diagnostic: None,
+                        });
+                    }
+                }
+            }
+            reply
         }),
         Command::Telemetry(provenant_cli::Telemetry::Stats(cmd)) => {
             if stats_dispatch(&cmd) == StatsDispatch::Usage {

@@ -593,6 +593,7 @@ pub(super) fn launch_on_host_with_wait(
         // continue to use their sealed host executable authority.
         host: inherited_host.then_some(&host),
         cancel: Some(call.cancel),
+        repo_facts: session.store.repo_facts().clone(),
     };
     let providers = PreparedProvider {
         fallback: &registry,

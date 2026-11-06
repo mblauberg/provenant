@@ -201,6 +201,8 @@ pub struct WriterLaunch {
     pub branch: GitRefName,
     pub(crate) base: GitOid,
     pub(crate) custody: Option<(Directory, WriterBinding)>,
+    /// Repository observations and caps shared by this writer operation.
+    pub(crate) facts: worktrees::RepoFacts,
     /// Paths the project lets this writer change without review, read from the
     /// host config when the launch was prepared.
     pub(crate) review_exempt: provenant_confinement::review_exempt::ReviewExempt,
@@ -307,19 +309,21 @@ impl WriterLaunch {
             "budget commit needs private Git state",
         ))?;
         let tip = crate::objects::private_tip(&source, self.branch.as_str())?;
-        // Never stage away conflict stages or finish a merge on the lane's
-        // behalf. The existing stopped-merge import restores this state.
-        match source
-            .refs
-            .read_stable(OsStr::new("MERGE_HEAD"), 1024 * 1024)
-        {
-            Ok(_) => {
-                return Ok(
-                    "budget commit skipped: in-progress merge preserved for stopped-merge handling",
-                );
+        // Never stage away conflict stages or finish a merge, cherry-pick,
+        // revert or rebase on the lane's behalf. A merge is restored by the
+        // existing stopped-merge import; the others stay as the lane left them.
+        for (name, operation) in [
+            ("MERGE_HEAD", "merge"),
+            ("CHERRY_PICK_HEAD", "cherry-pick"),
+            ("REVERT_HEAD", "revert"),
+            ("rebase-merge", "rebase"),
+            ("rebase-apply", "rebase"),
+        ] {
+            match source.refs.metadata_at(OsStr::new(name), false) {
+                Ok(_) => return Ok(in_progress_note(operation)),
+                Err(error) if error.is_not_found() => {}
+                Err(error) => return Err(error.into()),
             }
-            Err(error) if error.is_not_found() => {}
-            Err(error) => return Err(error.into()),
         }
         let objects = crate::objects::prepare_budget_objects(&source.objects, repo)?;
         // Reuse stable, no-follow reading before passing the index path to Git.
@@ -350,9 +354,7 @@ impl WriterLaunch {
             };
             run_git(&["update-ref", "HEAD", &tip.to_string()])?;
             if !run_git(&["ls-files", "--unmerged", "-z"])?.is_empty() {
-                return Ok(
-                    "budget commit skipped: in-progress merge preserved for stopped-merge handling",
-                );
+                return Ok(in_progress_note("merge"));
             }
             if run_git(&["status", "--porcelain", "-z"])?.is_empty() {
                 return Ok("budget stop: worktree already clean");
@@ -379,6 +381,17 @@ impl WriterLaunch {
             crate::objects::set_private_tip(&source, self.branch.as_str(), head)?;
             Ok("work committed on its branch")
         })
+    }
+}
+
+/// The settlement note for a budget stop that left an in-progress operation
+/// uncommitted.
+fn in_progress_note(operation: &str) -> &'static str {
+    match operation {
+        "merge" => "budget commit skipped: in-progress merge preserved for stopped-merge handling",
+        "cherry-pick" => "budget commit skipped: in-progress cherry-pick left uncommitted",
+        "revert" => "budget commit skipped: in-progress revert left uncommitted",
+        _ => "budget commit skipped: in-progress rebase left uncommitted",
     }
 }
 
@@ -483,6 +496,17 @@ pub fn prepare_writer(
     state: &Path,
     project: ProjectId,
 ) -> Result<WriterLaunch> {
+    let facts = worktrees::RepoFacts::default();
+    prepare_writer_with_facts(request, state, project, &facts)
+}
+
+/// Prepare a writer using the command's repository observations and caps.
+pub fn prepare_writer_with_facts(
+    request: &WriterRequest,
+    state: &Path,
+    project: ProjectId,
+    facts: &worktrees::RepoFacts,
+) -> Result<WriterLaunch> {
     let utility = runtime(state)?;
     let executor =
         SystemExecutor::new(1).map_err(error("initialise writer system executor", None))?;
@@ -492,26 +516,14 @@ pub fn prepare_writer(
     let worktree = provenant_confinement::verify_worktree(&repo, &request.worktree)
         .map_err(worktrees::WorktreeError::from)?;
     let branch = writer_branch(&worktree)?;
-    let base = provenant_confinement::run_utility(
-        &executor,
-        provenant_confinement::GitRead::ResolveRefOid {
-            name: branch.clone(),
-        },
+    let base = facts.resolve_repo_commit(
         worktree.repo(),
+        &executor,
         &utility,
         budget()?,
+        branch.clone(),
         &CancelToken::new(),
-    )
-    .map_err(error("resolve writer branch", Some(&request.worktree)))?;
-    if base.termination != provenant_os::exec::Termination::Exit(0) || base.stdout.truncated {
-        return Err(RunError::Validation("writer branch cannot be resolved"));
-    }
-    let base = GitOid::parse(
-        std::str::from_utf8(&base.stdout.bytes)
-            .map_err(error("decode writer base", Some(&request.worktree)))?
-            .trim(),
-    )
-    .map_err(error("parse writer base", Some(&request.worktree)))?;
+    )?;
     let state_dir = Directory::open_anchor(state)?;
     let projects = crate::artifacts::subdir(&state_dir, OsStr::new("worktrees"), true)
         .map_err(|error| anchor_filesystem(error, state))?;
@@ -519,7 +531,7 @@ pub fn prepare_writer(
         .map_err(|error| anchor_filesystem(error, state))?;
     let (directory, binding) =
         worktrees::writer_custody(&project_state, &worktree, &branch, base, || {
-            worktrees::RepoFacts::default().writer_inventory(
+            facts.writer_inventory(
                 &repo,
                 &executor,
                 &utility,
@@ -538,6 +550,7 @@ pub fn prepare_writer(
         branch,
         base,
         custody: Some((directory, binding)),
+        facts: facts.clone(),
         review_exempt: provenant_confinement::run_config::RunConfig::review_exempt_at(
             state,
             &project.to_string(),
@@ -559,8 +572,8 @@ pub struct LaunchConfinement {
 }
 struct ResolvedLaunchLimits {
     limits: ProfileLimits,
-    grant_origin: &'static str,
-    profile_origin: &'static str,
+    grant_origin: provenant_records::diagnostic::SettingSource,
+    profile_origin: provenant_records::diagnostic::SettingSource,
 }
 
 impl ResolvedLaunchLimits {
@@ -586,9 +599,9 @@ fn launch_resource_limits(state: &Path) -> ResolvedLaunchLimits {
         Ok((config, keys)) => {
             let origin = |key: &str| {
                 if keys.contains(key) {
-                    "host configuration"
+                    provenant_records::diagnostic::SettingSource::Configuration
                 } else {
-                    "compiled default"
+                    provenant_records::diagnostic::SettingSource::ShippedDefault
                 }
             };
             ResolvedLaunchLimits {
@@ -610,8 +623,8 @@ fn launch_resource_limits(state: &Path) -> ResolvedLaunchLimits {
             );
             ResolvedLaunchLimits {
                 limits: defaults,
-                grant_origin: "compiled default",
-                profile_origin: "compiled default",
+                grant_origin: provenant_records::diagnostic::SettingSource::ShippedDefault,
+                profile_origin: provenant_records::diagnostic::SettingSource::ShippedDefault,
             }
         }
     }
@@ -645,13 +658,22 @@ impl LaunchConfinement {
         )
     }
     /// Prepare the private Cargo caches while writer custody is held.
-    pub(crate) fn seed_cargo(&self, environment: &[(OsString, OsString)], attempt_dir: &Directory) {
+    pub(crate) fn seed_cargo(
+        &self,
+        environment: &[(OsString, OsString)],
+        attempt_dir: &Directory,
+        cancel: &CancelToken,
+    ) {
+        if cancel.is_cancelled() {
+            return;
+        }
         let writer = self.writer.as_ref().map(|w| (&w.worktree, &w.branch));
         let outcome = match &self.plan.permissions().mode {
             AccessMode::WorktreeWrite(authority) => crate::cargo_seed::seed_registry(
                 self.cargo_registry_seed,
                 &self.home,
                 &authority.cargo_cache().path,
+                cancel,
             ),
             AccessMode::ReadOnly => crate::cargo_seed::Outcome::skipped("read_only_lane"),
         };
@@ -663,11 +685,15 @@ impl LaunchConfinement {
                 "warning: could not record Cargo setup: {error}"
             );
         }
+        if cancel.is_cancelled() {
+            return;
+        }
         let git_outcome = match &self.plan.permissions().mode {
             AccessMode::WorktreeWrite(authority) => crate::cargo_seed::seed_git(
                 self.cargo_registry_seed,
                 &self.home,
                 &authority.cargo_cache().path,
+                cancel,
             ),
             AccessMode::ReadOnly => crate::cargo_seed::Outcome::skipped("read_only_lane"),
         };
@@ -679,6 +705,9 @@ impl LaunchConfinement {
                 std::io::stderr().lock(),
                 "warning: could not record Cargo Git setup: {error}"
             );
+        }
+        if cancel.is_cancelled() {
+            return;
         }
         let target_outcome = match (&self.plan.permissions().mode, writer) {
             (AccessMode::WorktreeWrite(authority), Some((worktree, _)))
@@ -711,6 +740,7 @@ impl LaunchConfinement {
                     worktree.path(),
                     &self.home,
                     environment,
+                    cancel,
                 )
             }
             _ => crate::cargo_seed::Outcome::skipped("read_only_lane"),
@@ -825,6 +855,7 @@ fn prepare_writer_git(
         },
         repo.private_git_dir(),
         cancel,
+        &writer.facts,
     )?;
     repo.revalidate()
         .map_err(error("verify writer repository after fetch", Some(&path)))?;
@@ -872,24 +903,15 @@ fn prepare_writer_git(
         Err(failure) => return Err(failure.into()),
     };
     let result = (|| -> Result<()> {
-        let resolved = provenant_confinement::run_utility(
-            &executor,
-            provenant_confinement::GitRead::ResolveRef {
-                name: writer.branch.clone(),
-            },
+        let resolved = writer.facts.resolve_repo_commit(
             repo,
+            &executor,
             &utility,
             budget()?,
+            writer.branch.clone(),
             cancel,
-        )
-        .map_err(error("resolve writer branch under lock", Some(&parent)))?;
-        if resolved.termination != provenant_os::exec::Termination::Exit(0)
-            || resolved.stdout.truncated
-            || std::str::from_utf8(&resolved.stdout.bytes)
-                .ok()
-                .map(str::trim)
-                != Some(writer.base.to_string().as_str())
-        {
+        )?;
+        if resolved != writer.base {
             return Err(RunError::Validation("writer branch changed before launch"));
         }
         if let Some(lock) = lock.as_mut() {
@@ -1288,6 +1310,7 @@ mod cargo_setup_tests {
             branch: GitRefName::new(reference)?,
             base: GitOid::parse(&expected)?,
             custody: None,
+            facts: Default::default(),
             review_exempt: Default::default(),
         };
         // Use a real unrelated root, so both named commits exist.
@@ -1373,6 +1396,7 @@ mod cargo_setup_tests {
             branch: GitRefName::new("refs/heads/chore/second")?,
             base: GitOid::parse(&expected)?,
             custody: None,
+            facts: Default::default(),
             review_exempt: Default::default(),
         };
         let mut siblings = Vec::new();
@@ -1391,6 +1415,7 @@ mod cargo_setup_tests {
                 branch: GitRefName::branch(&branch)?,
                 base: source_oid,
                 custody: None,
+                facts: Default::default(),
                 review_exempt: Default::default(),
             });
         }
@@ -1922,7 +1947,12 @@ impl crate::RunStore {
         record: &crate::AttemptRecord,
         writer: &WriterRequest,
     ) -> Result<Directory> {
-        match prepare_writer(writer, &self.writer_registry, record.project_id) {
+        match prepare_writer_with_facts(
+            writer,
+            &self.writer_registry,
+            record.project_id,
+            &self.repo_facts,
+        ) {
             Ok(mut launch) => Ok(launch
                 .custody
                 .take()
@@ -1945,6 +1975,24 @@ impl crate::RunStore {
     }
     pub fn writer_fences(&self) -> Result<Vec<WriterFence>> {
         Ok(self.writer_fence_listing()?.reservations)
+    }
+    /// Perform the one-way custody cutover before a recovery scan.
+    pub(crate) fn cutover_writer_reservations(&self, call: &crate::Request<'_>) -> Result<()> {
+        let path = self
+            .writer_registry
+            .join("worktrees")
+            .join(self.context.project_id.to_string());
+        let directory = match Directory::open_anchor(&path) {
+            Ok(directory) => directory,
+            Err(error) if error.is_not_found() => return Ok(()),
+            Err(error) => return Err(error.into()),
+        };
+        provenant_supervisor::custody::cutover_writer_reservations(
+            &directory,
+            call.cancel,
+            call.clock,
+        )
+        .map_err(error("cut over writer reservations", Some(&path)))
     }
     pub fn writer_fence_listing(
         &self,
@@ -2203,31 +2251,12 @@ impl WriterLaunch {
         let executor =
             SystemExecutor::new(1).map_err(error("initialise writer system executor", None))?;
         let cancel = import_cancel;
-        let oid = |repo: &provenant_confinement::repo::VerifiedRepo, operation| -> Result<GitOid> {
-            let output = provenant_confinement::run_utility(
-                &executor,
-                operation,
-                repo,
-                &utility,
-                budget()?,
-                &cancel,
-            )
-            .map_err(error("resolve writer comparison", Some(repo.root_path())))?;
-            if output.termination != provenant_os::exec::Termination::Exit(0)
-                || output.stdout.truncated
-            {
-                return Err(RunError::Validation("writer comparison cannot be resolved"));
-            }
-            GitOid::parse(
-                std::str::from_utf8(&output.stdout.bytes)
-                    .map_err(error("decode writer comparison", Some(repo.root_path())))?
-                    .trim(),
-            )
-            .map_err(error("parse writer comparison", Some(repo.root_path())))
-        };
-        let tip = oid(
+        let tip = self.facts.repo_head(
             self.worktree.repo(),
-            provenant_confinement::GitRead::RevParseHead,
+            &executor,
+            &utility,
+            budget()?,
+            &cancel,
         )?;
         if tip != verified_tip
             && !crate::objects::is_ancestor(
@@ -2252,11 +2281,13 @@ impl WriterLaunch {
             })?,
             crate::RECORD_LIMIT,
         )?;
-        if oid(
+        if self.facts.resolve_repo_commit(
             self.worktree.repo(),
-            provenant_confinement::GitRead::ResolveRef {
-                name: self.branch.clone(),
-            },
+            &executor,
+            &utility,
+            budget()?,
+            self.branch.clone(),
+            &cancel,
         )? != tip
         {
             return Err(RunError::WriterHeadNotLaneBranch);
@@ -2514,12 +2545,18 @@ mod launch_resource_limit_tests {
         let limits = launch_resource_limits(state.path());
         let defaults = ProfileLimits::default();
         assert_eq!(limits.limits.grant_limit, defaults.grant_limit);
-        assert_eq!(limits.grant_origin, "compiled default");
+        assert_eq!(
+            limits.grant_origin,
+            provenant_records::diagnostic::SettingSource::ShippedDefault
+        );
         assert_eq!(
             limits.limits.profile_limit_bytes,
             defaults.profile_limit_bytes
         );
-        assert_eq!(limits.profile_origin, "compiled default");
+        assert_eq!(
+            limits.profile_origin,
+            provenant_records::diagnostic::SettingSource::ShippedDefault
+        );
         let default_error = limits.annotate(
             provenant_confinement::permissions::PermissionError::GrantLimitExceeded {
                 family: "fixture",
@@ -2536,17 +2573,29 @@ mod launch_resource_limit_tests {
             "schema_version=1\n[domains.run]\ngrant_limit=128\n",
         )?;
         let explicit_default = launch_resource_limits(state.path());
-        assert_eq!(explicit_default.grant_origin, "host configuration");
-        assert_eq!(explicit_default.profile_origin, "compiled default");
+        assert_eq!(
+            explicit_default.grant_origin,
+            provenant_records::diagnostic::SettingSource::Configuration
+        );
+        assert_eq!(
+            explicit_default.profile_origin,
+            provenant_records::diagnostic::SettingSource::ShippedDefault
+        );
         std::fs::write(
             state.path().join("config.toml"),
             "schema_version=1\n[domains.run]\ngrant_limit=256\nprofile_limit_bytes=1048576\n",
         )?;
         let configured = launch_resource_limits(state.path());
         assert_eq!(configured.limits.grant_limit, 256);
-        assert_eq!(configured.grant_origin, "host configuration");
+        assert_eq!(
+            configured.grant_origin,
+            provenant_records::diagnostic::SettingSource::Configuration
+        );
         assert_eq!(configured.limits.profile_limit_bytes, 1048576);
-        assert_eq!(configured.profile_origin, "host configuration");
+        assert_eq!(
+            configured.profile_origin,
+            provenant_records::diagnostic::SettingSource::Configuration
+        );
         let configured_error = configured.annotate(
             provenant_confinement::permissions::PermissionError::ProfileTooLarge {
                 bytes: 2,

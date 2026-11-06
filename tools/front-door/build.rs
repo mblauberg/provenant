@@ -1002,10 +1002,6 @@ mod tests {
             &repository,
             &[
                 "-c",
-                "user.name=Fixture",
-                "-c",
-                "user.email=fixture@example.com",
-                "-c",
                 "commit.gpgsign=false",
                 "commit",
                 "--quiet",

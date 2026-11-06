@@ -22,6 +22,19 @@ pub(crate) struct TerminalEffects {
     pub effects: Vec<(SettlementEffect, EffectDisposition)>,
 }
 
+/// Whether an explicit stop was requested for exactly this attempt scope.
+/// Unreadable evidence counts as no request.
+pub(crate) fn cancel_requested(
+    attempt: &provenant_os::fs::Directory,
+    scope: provenant_supervisor::custody::Scope,
+) -> bool {
+    read_sealed(attempt, "cancel.json", RECORD_LIMIT)
+        .ok()
+        .flatten()
+        .and_then(|raw| serde_json::from_slice::<serde_json::Value>(&raw).ok())
+        .is_some_and(|request| request.get("scope") == serde_json::to_value(scope).ok().as_ref())
+}
+
 pub(crate) fn import_cancelled(
     attempt: &provenant_os::fs::Directory,
     scope: provenant_supervisor::custody::Scope,
@@ -88,6 +101,146 @@ pub(crate) struct Withdrawal<'a> {
 }
 
 impl RunStore {
+    /// Mark a frozen refusal's notice complete after its idempotent inbox write.
+    pub fn complete_refusal_notice(
+        &self,
+        expected: &OperationRecord,
+        call: &Request<'_>,
+    ) -> Result<()> {
+        self.write(call, |tx| {
+            let raw: Vec<u8> = tx
+                .query_row(
+                    "SELECT record FROM operations WHERE project=?1 AND actor=?2 AND operation=?3",
+                    params![
+                        self.context.project_id.to_string(),
+                        self.context.actor_id.to_string(),
+                        expected.operation_id.as_str()
+                    ],
+                    |row| row.get(0),
+                )
+                .optional()?
+                .ok_or(RunError::NotFound)?;
+            let mut current: OperationRecord = decode(&raw)?;
+            if current.project_id != self.context.project_id
+                || current.actor_id != self.context.actor_id
+                || current.operation_id != expected.operation_id
+                || current.run_id != expected.run_id
+                || current.kind != expected.kind
+                || current.state != OperationState::Refused
+                || current.request_digest != expected.request_digest
+                || current.refusal != expected.refusal
+                || current.refusal_chair != expected.refusal_chair
+                || current.refused_at != expected.refused_at
+                || current.extra.get("refusal_notice") != expected.extra.get("refusal_notice")
+            {
+                return Err(RunError::Conflict);
+            }
+            current
+                .extra
+                .insert("refusal_notice_done".into(), serde_json::json!(true));
+            tx.execute(
+                "UPDATE operations SET record=?1 WHERE project=?2 AND actor=?3 AND operation=?4",
+                params![
+                    bytes(&current)?,
+                    self.context.project_id.to_string(),
+                    self.context.actor_id.to_string(),
+                    expected.operation_id.as_str()
+                ],
+            )?;
+            Ok(())
+        })
+    }
+    /// Persist a refusal against the same request digest used for admission.
+    /// A competing or replayed operation cannot replace its first outcome.
+    pub fn record_refusal(
+        &self,
+        input: &PreparedRun,
+        diagnostic: provenant_records::diagnostic::Diagnostic,
+        worktree: Option<String>,
+        call: &Request<'_>,
+    ) -> Result<OperationRecord> {
+        validate_request(input)?;
+        if worktree.as_ref().is_some_and(|name| {
+            name.is_empty()
+                || name.len() > 1024
+                || name.contains('/')
+                || name.chars().any(char::is_control)
+        }) {
+            return Err(RunError::Validation("worktree identifier"));
+        }
+        let digest = input.request.digest()?;
+        let mut extra = provenant_records::ExtraFields::default();
+        if let Some(notice) = input
+            .request
+            .tasks
+            .first()
+            .and_then(|task| task.profile.knobs.get("chair.refusal_notice"))
+        {
+            extra.insert("refusal_notice".into(), notice.clone());
+        }
+        let operation = OperationRecord {
+            extra,
+            schema_version: 1,
+            project_id: self.context.project_id,
+            actor_id: self.context.actor_id,
+            operation_id: input.operation_id.clone(),
+            kind: if input.request.parent.is_some() {
+                OperationKind::Resume
+            } else {
+                OperationKind::Dispatch
+            },
+            request_digest: digest,
+            run_id: input.run_id,
+            state: OperationState::Refused,
+            blocked_reason: None,
+            refusal: Some(diagnostic),
+            worktree,
+            refused_at: Some(input.created_at),
+            refusal_chair: input.request.chair.clone(),
+        };
+        self.insert_refusal(operation, call)
+    }
+
+    /// Commit a preflight refusal whose request has not reached canonical admission.
+    pub(crate) fn insert_refusal(
+        &self,
+        operation: OperationRecord,
+        call: &Request<'_>,
+    ) -> Result<OperationRecord> {
+        let digest = operation.request_digest;
+        self.write(call, |tx| {
+            let prior: Option<Vec<u8>> = tx
+                .query_row(
+                    "SELECT record FROM operations WHERE project=?1 AND actor=?2 AND operation=?3",
+                    params![
+                        self.context.project_id.to_string(),
+                        self.context.actor_id.to_string(),
+                        operation.operation_id.as_str()
+                    ],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if let Some(prior) = prior {
+                let prior: OperationRecord = decode(&prior)?;
+                if prior.request_digest != digest {
+                    return Err(RunError::OperationConflict);
+                }
+                return Ok(prior);
+            }
+            tx.execute(
+                "INSERT INTO operations VALUES (?1,?2,?3,?4,?5,?6)",
+                params![
+                    self.context.project_id.to_string(),
+                    self.context.actor_id.to_string(),
+                    operation.operation_id.as_str(),
+                    digest.to_string(),
+                    operation.run_id.to_string(),
+                    bytes(&operation)?
+                ],
+            )?;
+            Ok(operation.clone())
+        })
+    }
     /// A sealed decision is not a certificate that an unfinished import can
     /// relinquish its reservation or private object inputs: the import must
     /// finish first, unless it was refused for good. The terminal receipts are
@@ -517,15 +670,19 @@ impl RunStore {
         })
     }
     fn create_exact(&self, input: &PreparedRun, call: &Request<'_>) -> Result<RunRecord> {
-        // Configuration and volume probes happen before the store transaction.
-        let disk_floor_bytes = provenant_config::GcSettings::read(&self.writer_registry)?
-            .free_floor_bytes(&self.writer_registry)?;
         let digest = input.request.digest()?;
         let context = &self.context;
         let existing = self.operation(&input.operation_id, call)?;
         if let Some(op) = &existing {
             if op.request_digest != digest {
                 return Err(RunError::OperationConflict);
+            }
+            if op.state == OperationState::Refused {
+                return Err(RunError::RecordedRefusal(Box::new(
+                    op.refusal
+                        .clone()
+                        .ok_or(RunError::Validation("refusal diagnostic missing"))?,
+                )));
             }
             if op.state != OperationState::Prepared {
                 return self.run(op.run_id, call);
@@ -534,6 +691,10 @@ impl RunStore {
                 return Err(RunError::Conflict);
             }
         }
+        // Configuration and volume probes happen before the store transaction,
+        // but a stored refusal replays without depending on current host state.
+        let disk_floor_bytes = provenant_config::GcSettings::read(&self.writer_registry)?
+            .free_floor_bytes(&self.writer_registry)?;
         let run = RunRecord {
             extra: Default::default(),
             schema_version: 1,
@@ -567,6 +728,10 @@ impl RunStore {
             run_id: input.run_id,
             state: OperationState::Prepared,
             blocked_reason: None,
+            refusal: None,
+            worktree: None,
+            refused_at: None,
+            refusal_chair: None,
         };
         let dir = self.run_dir(input.run_id, true)?;
         let _writer = dir.lock(
@@ -580,6 +745,12 @@ impl RunStore {
             if op.request_digest != digest {
                 return Err(RunError::OperationConflict);
             }
+            if op.state == OperationState::Refused {
+                return Err(RunError::RecordedRefusal(Box::new(
+                    op.refusal
+                        .ok_or(RunError::Validation("refusal diagnostic missing"))?,
+                )));
+            }
             if op.state != OperationState::Prepared {
                 return self.run(op.run_id, call);
             }
@@ -589,6 +760,9 @@ impl RunStore {
             if let Some(prior) = prior {
                 let prior: OperationRecord = decode(&prior)?;
                 if prior.request_digest != digest { return Err(RunError::OperationConflict); }
+                if prior.state == OperationState::Refused {
+                    return Err(RunError::RecordedRefusal(Box::new(prior.refusal.ok_or(RunError::Validation("refusal diagnostic missing"))?)));
+                }
                 if prior.run_id != input.run_id { return Err(RunError::Conflict); }
                 return Ok(());
             }
@@ -1489,7 +1663,13 @@ impl RunStore {
             // Refuse while another holder owns the writer lock.
             let _lock = match &slot {
                 Some(slot) if !held => {
-                    Some(slot.try_lock(OsStr::new("writer.lock"), LockMode::Exclusive)?)
+                    let observation = provenant_supervisor::custody::writer_admission_guard(slot)
+                        .map_err(|error| {
+                        RunError::Io(std::io::Error::other(error.to_string()))
+                    })?;
+                    let writer = slot.try_lock(OsStr::new("writer.lock"), LockMode::Exclusive)?;
+                    drop(observation);
+                    Some(writer)
                 }
                 _ => None,
             };

@@ -419,6 +419,15 @@ fn prepared_writer_git_environment_is_private_for_every_adapter() -> Result<(), 
                 }
             }
             if access == Access::WorktreeWrite {
+                assert!(spec.env.iter().any(|(key, value)| {
+                    key == "GIT_CONFIG_GLOBAL" && value == "/fixture/scratch/gitconfig"
+                }));
+                assert!(spec.setup.iter().any(|step| matches!(
+                    step,
+                    SetupStep::WriteFile { path, bytes }
+                        if path == Path::new("/fixture/scratch/gitconfig")
+                            && bytes.starts_with(b"[user]\n\tuseConfigOnly = true\n")
+                )));
                 let path = &spec.env.iter().find(|(key, _)| key == "PATH").unwrap().1;
                 assert_eq!(
                     std::env::split_paths(path).next().unwrap(),
@@ -734,6 +743,7 @@ fn prepared_private_git_supports_commits_fetch_merge_and_push()
                 .current_dir(&linked)
                 .env_clear()
                 .envs(spec.env.iter().cloned())
+                .envs(provenant_os::fixture::fixture_git_settings())
                 .args(args)
                 .output()
                 .unwrap();
@@ -788,10 +798,6 @@ fn prepared_private_git_supports_commits_fetch_merge_and_push()
             std::fs::write(linked.join("lane-blob"), "private committed blob")?;
             lane_git(&["add".as_ref(), "lane-blob".as_ref()]);
             lane_git(&[
-                "-c".as_ref(),
-                "user.name=Fixture".as_ref(),
-                "-c".as_ref(),
-                "user.email=fixture@example.test".as_ref(),
                 "commit".as_ref(),
                 "-qm".as_ref(),
                 "private lane commit".as_ref(),
@@ -837,10 +843,6 @@ fn prepared_private_git_supports_commits_fetch_merge_and_push()
                 "{id} fetched head",
             );
             lane_git(&[
-                "-c".as_ref(),
-                "user.name=Fixture".as_ref(),
-                "-c".as_ref(),
-                "user.email=fixture@example.test".as_ref(),
                 "merge".as_ref(),
                 "--quiet".as_ref(),
                 "--no-ff".as_ref(),
@@ -1958,14 +1960,30 @@ fn argv_prompt_limit_counts_utf8_bytes() {
     assert!(Prompt::new("a".repeat(65_536)).check_argv().is_ok());
     assert!(
         Prompt::new("a".repeat(65_537))
-            .with_argv_limit(131_072)
+            .with_argv_limit(
+                131_072,
+                provenant_records::diagnostic::SettingSource::Configuration
+            )
             .check_argv()
             .is_ok()
     );
     assert!(matches!(
         Prompt::new("é".repeat(32_769)).check_argv(),
-        Err(ProviderError::PromptTooLarge)
+        Err(ProviderError::PromptTooLarge { .. })
     ));
+    let error = Prompt::new("abcd".into())
+        .with_argv_limit(
+            3,
+            provenant_records::diagnostic::SettingSource::Configuration,
+        )
+        .check_argv()
+        .expect_err("configured limit must be enforced");
+    assert!(
+        error
+            .to_string()
+            .contains("domains.run.argv_prompt_limit_bytes")
+    );
+    assert!(error.to_string().contains("host configuration"));
 }
 
 pub(super) fn read_only_plan(
@@ -2955,7 +2973,14 @@ fn prepare_all_adapters_and_pin_launch_controls() -> Result<(), ProviderError> {
                     .collect();
                 assert_eq!(
                     roots,
-                    ["/bin", "/usr/bin", "/usr/libexec", "/fixture/scratch/bin"].map(Path::new)
+                    [
+                        "/bin",
+                        "/usr/bin",
+                        "/usr/libexec",
+                        "/fixture/scratch/bin",
+                        "/fixture/scratch/read-only-git"
+                    ]
+                    .map(Path::new)
                 );
                 assert!(spec.setup.iter().any(|step| matches!(
                     step, crate::launch::SetupStep::WriteExecutable { path, bytes }
@@ -3158,7 +3183,7 @@ fn cursor_launches_fresh_and_resume_with_edits_only_for_writers() -> Result<(), 
             Path::new("/fixture/repo"),
             None
         )),
-        Err(ProviderError::PromptTooLarge)
+        Err(ProviderError::PromptTooLarge { .. })
     ));
     Ok(())
 }
@@ -3251,10 +3276,7 @@ fn agy_writers_exec_what_codex_writers_exec() -> Result<(), ProviderError> {
                 .iter()
                 .any(|(key, value)| key == "SHELL" && value == "/bin/zsh")
         );
-        assert_eq!(
-            spec.profile.spec.process_executables.len(),
-            if access == Access::ReadOnly { 3 } else { 4 }
-        );
+        assert_eq!(spec.profile.spec.process_executables.len(), 4);
         let exec = &spec.profile.spec.tool_exec_roots;
         if access == Access::ReadOnly {
             assert_eq!(
@@ -3262,7 +3284,8 @@ fn agy_writers_exec_what_codex_writers_exec() -> Result<(), ProviderError> {
                 &vec![
                     crate::launch::subtree("/bin"),
                     crate::launch::subtree("/usr/bin"),
-                    crate::launch::subtree("/usr/libexec")
+                    crate::launch::subtree("/usr/libexec"),
+                    crate::launch::subtree("/fixture/scratch/read-only-git")
                 ]
             );
             assert!(spec.profile.spec.tool_writes.is_empty());
@@ -3396,9 +3419,7 @@ fn cursor_reads_and_execs_only_its_resolved_version_payload() -> Result<(), Prov
         input.executable = &launcher;
         let spec = cursor::Cursor.prepare(input)?.profile.spec;
         let mut executables = vec![crate::launch::exact(&launcher)];
-        if access == Access::WorktreeWrite {
-            executables.push(crate::launch::exact("/bin/sh"));
-        }
+        executables.push(crate::launch::exact("/bin/sh"));
         executables.push(crate::launch::exact("/fixture/git/bin/git"));
         assert_eq!(spec.process_executables, executables);
         assert!(
@@ -3411,10 +3432,11 @@ fn cursor_reads_and_execs_only_its_resolved_version_payload() -> Result<(), Prov
                 .map(crate::launch::subtree)
                 .into_iter()
                 .chain([crate::launch::subtree(payload)])
-                .chain(
-                    (access == Access::WorktreeWrite)
-                        .then(|| crate::launch::subtree("/fixture/scratch/bin"))
-                )
+                .chain([crate::launch::subtree(if access == Access::WorktreeWrite {
+                    "/fixture/scratch/bin"
+                } else {
+                    "/fixture/scratch/read-only-git"
+                })])
                 .collect::<Vec<_>>()
         );
     }
@@ -3570,6 +3592,8 @@ fn opencode_writer_gets_the_rust_toolchain_in_its_lane_cache()
                     .join("cache/opencode/bin/rg")
             ),
             crate::launch::exact("/usr/bin/grep"),
+            // The read-only Git launcher the lane puts first on PATH.
+            crate::launch::subtree(plan.permissions().scratch.path.join("read-only-git")),
         ]
     );
     assert!(spec.env.iter().all(|(name, _)| name != "CARGO_HOME"));
@@ -6347,14 +6371,19 @@ fn claude_writer_shell_has_private_config_and_rust_tools() -> Result<(), Provide
             "CARGO_BUILD_BUILD_DIR",
             "/fixture/home/Library/Caches/provenant-lane-cargo/fixture/target",
         ),
-        ("GIT_CONFIG_GLOBAL", "/dev/null"),
-        ("GIT_CONFIG_NOSYSTEM", "1"),
+        ("GIT_CONFIG_GLOBAL", "/fixture/scratch/gitconfig"),
     ] {
         assert!(
             launch.env.iter().any(|(k, v)| k == key && v == value),
             "{key}"
         );
     }
+    assert!(
+        launch
+            .env
+            .iter()
+            .all(|(key, _)| key != "GIT_CONFIG_NOSYSTEM")
+    );
     for path in [
         "/fixture/home/.cargo/bin",
         "/fixture/home/.rustup/toolchains",
@@ -6569,14 +6598,35 @@ fn shell_lanes_exec_the_command_line_tools_python() {
 }
 
 #[test]
-fn writer_git_core_helpers_are_readable_and_executable_only_for_writers()
--> Result<(), Box<dyn std::error::Error>> {
+fn lane_git_exec_path_grants_follow_the_reported_symlink() -> Result<(), Box<dyn std::error::Error>>
+{
+    use std::os::unix::fs::PermissionsExt;
     let temp = tempfile::tempdir()?;
-    // The host resolves Homebrew's bin/git symlink into its versioned keg.
+    // The host resolves Homebrew's opt/git path into its versioned keg.
     let keg = temp.path().join("Cellar/git/1.0");
-    let git = keg.join("bin/git");
-    let core = keg.join("libexec/git-core");
+    let developer = keg.join("Contents/Developer");
+    let git = temp.path().join("opt/git/bin/git");
+    let linked_core = temp
+        .path()
+        .join("opt/git/Contents/Developer/usr/libexec/git-core");
+    let core = developer.join("usr/libexec/git-core");
+    let developer_git = developer.join("usr/bin/git");
     std::fs::create_dir_all(&core)?;
+    std::fs::create_dir_all(developer_git.parent().unwrap())?;
+    std::fs::write(&developer_git, "#!/bin/sh\nexit 0\n")?;
+    std::fs::set_permissions(&developer_git, std::fs::Permissions::from_mode(0o700))?;
+    let homebrew_link = temp.path().join("opt/git");
+    std::fs::create_dir_all(homebrew_link.parent().unwrap())?;
+    std::os::unix::fs::symlink(&keg, &homebrew_link)?;
+    let host_git = keg.join("bin/git");
+    std::fs::create_dir_all(host_git.parent().unwrap())?;
+    std::fs::write(
+        &host_git,
+        format!("#!/bin/sh\nprintf '%s\\n' '{}'\n", linked_core.display()),
+    )?;
+    std::fs::set_permissions(&host_git, std::fs::Permissions::from_mode(0o700))?;
+    let canonical_developer = std::fs::canonicalize(&developer)?;
+    let canonical_core = std::fs::canonicalize(&core)?;
     let mut route = route("codex", "fixture-model");
     route.account_key = None;
     let prompt = Prompt::new("fixture".into());
@@ -6586,35 +6636,60 @@ fn writer_git_core_helpers_are_readable_and_executable_only_for_writers()
         input.provenant.git = &git;
         let launch = crate::codex::Codex.prepare(input)?;
         let profile = &launch.profile.spec;
-        let mut helpers = vec![core.clone()];
-        if cfg!(target_os = "macos") && Path::new("/Library/Developer/CommandLineTools").is_dir() {
-            helpers.push("/Library/Developer/CommandLineTools/usr/libexec/git-core".into());
-        }
-        for helper in helpers {
-            assert_eq!(
-                profile
-                    .tool_exec_roots
-                    .iter()
-                    .any(|grant| grant.path == helper
-                        && grant.scope == provenant_confinement::permissions::PathScope::Subtree),
-                access == Access::WorktreeWrite,
-                "{access:?}: {}",
-                helper.display()
-            );
-            assert!(!profile.tool_writes.iter().any(|grant| grant.path == helper));
-        }
-        assert_eq!(
-            profile.runtime_reads.iter().any(|grant| grant.path == core
-                && grant.scope == provenant_confinement::permissions::PathScope::Subtree),
-            access == Access::WorktreeWrite
-        );
-        // Only the selected installation's helper directory is added.
         assert!(
-            !profile
+            profile
                 .tool_exec_roots
                 .iter()
-                .any(|grant| grant.path == keg)
+                .any(|grant| grant.path == canonical_core
+                    && grant.scope == provenant_confinement::permissions::PathScope::Subtree)
         );
+        assert!(
+            profile
+                .tool_exec_roots
+                .iter()
+                .any(|grant| grant.path == canonical_developer.join("usr/bin")
+                    && grant.scope == provenant_confinement::permissions::PathScope::Subtree)
+        );
+        assert!(
+            profile
+                .runtime_reads
+                .iter()
+                .any(|grant| grant.path == canonical_developer.join("usr/bin")
+                    && grant.scope == provenant_confinement::permissions::PathScope::Subtree)
+        );
+        assert!(profile.process_executables.iter().any(|grant| {
+            grant.path == std::fs::canonicalize(&developer_git).unwrap()
+                && grant.scope == provenant_confinement::permissions::PathScope::Exact
+        }));
+        assert!(
+            !profile
+                .tool_writes
+                .iter()
+                .any(|grant| grant.path.starts_with(&canonical_developer))
+        );
+        assert!(
+            profile
+                .runtime_reads
+                .iter()
+                .any(|grant| grant.path == canonical_core
+                    && grant.scope == provenant_confinement::permissions::PathScope::Subtree)
+        );
+        let wrapper = launch
+            .setup
+            .iter()
+            .find_map(|step| match step {
+                SetupStep::WriteExecutable { path, bytes }
+                    if path.file_name().is_some_and(|name| name == "git") =>
+                {
+                    Some(String::from_utf8(bytes.clone()).unwrap())
+                }
+                _ => None,
+            })
+            .expect("prepared Git wrapper");
+        assert!(wrapper.contains(&format!(
+            "GIT_EXEC_PATH='{}'",
+            std::fs::canonicalize(&core)?.display()
+        )));
     }
     Ok(())
 }
@@ -6653,7 +6728,12 @@ fn lanes_read_git_global_ignore_and_attributes_only_when_present()
     for access in [Access::ReadOnly, Access::WorktreeWrite] {
         let mut paths = granted(access)?;
         paths.sort();
-        assert_eq!(paths, [git.join("attributes"), git.join("ignore")]);
+        let mut expected = vec![git.join("attributes"), git.join("ignore")];
+        if access == Access::WorktreeWrite {
+            expected.push(git.join("config"));
+            expected.sort();
+        }
+        assert_eq!(paths, expected);
     }
     Ok(())
 }

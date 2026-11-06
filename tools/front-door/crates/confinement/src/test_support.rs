@@ -132,13 +132,12 @@ pub(crate) fn fixture_env(
     home: &Path,
     temp: &Path,
 ) -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
-    vec![
+    let mut environment = vec![
         ("HOME".into(), home.as_os_str().to_owned()),
         ("TMPDIR".into(), temp.as_os_str().to_owned()),
         ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
         ("GIT_CONFIG_SYSTEM".into(), "/dev/null".into()),
         ("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()),
-        ("GIT_CONFIG_COUNT".into(), "0".into()),
         ("GIT_OPTIONAL_LOCKS".into(), "0".into()),
         ("GIT_ATTR_NOSYSTEM".into(), "1".into()),
         ("GIT_TERMINAL_PROMPT".into(), "0".into()),
@@ -146,7 +145,9 @@ pub(crate) fn fixture_env(
         ("PAGER".into(), "cat".into()),
         ("LANG".into(), "C".into()),
         ("LC_ALL".into(), "C".into()),
-    ]
+    ];
+    environment.extend(provenant_os::fixture::fixture_git_settings());
+    environment
 }
 
 pub(crate) fn add_poisoned_gitlink(
