@@ -1729,52 +1729,6 @@ impl RunStore {
         call: &Request<'_>,
         _observer: &dyn ProcessObserver,
     ) -> Result<CancelReceipt> {
-        // A child this host handed to a guardian stops through the directory,
-        // scope and requester held then. The lane can rewrite the child's
-        // record and launch summary, so neither decides whether or for whom
-        // it stops.
-        if let Some(held) = self
-            .launched
-            .borrow()
-            .iter()
-            .rev()
-            .find(|held| held.scope.attempt == id)
-        {
-            let Some(handle) = &held.handle else {
-                // The latest handle is dropped only after observing guardian
-                // exit. Earlier superseded generations cannot be selected.
-                let record = self.record(id, call)?;
-                if matches!(record.state, AttemptState::Terminal { .. }) {
-                    self.record_cancellation(
-                        id,
-                        record.generation,
-                        CancellationDisposition::AcknowledgedIneffective,
-                        call,
-                    )?;
-                }
-                return Ok(CancelReceipt::AlreadyTerminal);
-            };
-            let stopped = custody::stop(handle, StopReason::ExplicitCancellation)
-                .map_err(|error| error.to_string());
-            if stopped.is_ok()
-                && let Ok(record) = self.record(id, call)
-                && matches!(record.state, AttemptState::Terminal { .. })
-            {
-                self.record_cancellation(
-                    id,
-                    record.generation,
-                    CancellationDisposition::AcknowledgedIneffective,
-                    call,
-                )?;
-                // The stop receipt still reports what the held handle accepted:
-                // a lane-rewritable record does not decide whether it stopped.
-            }
-            return Ok(match stopped {
-                Ok(StopReceipt::Requested) => CancelReceipt::Requested,
-                Ok(StopReceipt::AlreadyRequested) => CancelReceipt::AlreadyRequested,
-                Err(reason) => CancelReceipt::Unobservable { reason },
-            });
-        }
         let record = self.record(id, call)?;
         if self
             .request(record.run_id, call)?
