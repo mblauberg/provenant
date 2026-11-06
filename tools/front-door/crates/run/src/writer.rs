@@ -2520,7 +2520,6 @@ impl WriterLaunch {
             &crate::db::bytes(&WriterTerminal {
                 schema_version: 1,
                 head: verified_tip,
-                protected_paths: Vec::new(),
             })?,
             crate::RECORD_LIMIT,
         )?;
@@ -2620,7 +2619,6 @@ mod uncommitted_tests {
 pub(crate) struct WriterTerminal {
     pub schema_version: u64,
     pub head: GitOid,
-    pub protected_paths: Vec<provenant_records::PathWire>,
 }
 #[derive(serde::Serialize)]
 struct WriterManifest {

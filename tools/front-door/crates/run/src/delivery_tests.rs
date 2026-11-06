@@ -66,7 +66,6 @@ fn delivery_restart_drives_pending_retryable_and_uncertain_receipts()
             &db::bytes(&writer::WriterTerminal {
                 schema_version: 1,
                 head,
-                protected_paths: vec![],
             })?,
             RECORD_LIMIT,
         )?;
@@ -2500,16 +2499,12 @@ fn a_late_host_limit_fails_the_receipt_at_its_stage_and_keeps_the_reason()
     let host = fixture.prepare()?;
     let head = host.head(&fixture.writer)?;
     let attempt = store.attempt_dir(input.run_id, id, false)?;
-    let path = provenant_records::PathWire::from_relative(&provenant_core::RelativePath::parse(
-        ".github/workflows/ci.yml",
-    )?)?;
     artifacts::seal(
         &attempt,
         "writer-terminal.json",
         &db::bytes(&writer::WriterTerminal {
             schema_version: 1,
             head,
-            protected_paths: vec![path.clone()],
         })?,
         RECORD_LIMIT,
     )?;
@@ -2662,16 +2657,12 @@ fn review_delivery_requires_acceptance_and_exact_head()
     let host = fixture.prepare()?;
     let head = host.head(&fixture.writer)?;
     let attempt = store.attempt_dir(input.run_id, id, false)?;
-    let path = provenant_records::PathWire::from_relative(&provenant_core::RelativePath::parse(
-        ".github/workflows/ci.yml",
-    )?)?;
     artifacts::seal(
         &attempt,
         "writer-terminal.json",
         &db::bytes(&writer::WriterTerminal {
             schema_version: 1,
             head,
-            protected_paths: vec![path.clone()],
         })?,
         RECORD_LIMIT,
     )?;
@@ -2714,7 +2705,7 @@ fn review_delivery_requires_acceptance_and_exact_head()
         WriterDeliveryState::Delivered { .. }
     ));
     let acceptance = receipt.review_acceptance.as_ref().ok_or("acceptance")?;
-    assert_eq!(acceptance.protected_paths, vec![path]);
+    assert!(acceptance.protected_paths.is_empty());
     assert_eq!(acceptance.actor, execution.actor_id);
     assert_eq!(
         store.delivered(id, &call)?.map(|(_, receipt)| receipt),
@@ -2820,7 +2811,6 @@ fn settled_delivery_refuses_dirty_or_changed_head_and_replays_success()
         &db::bytes(&writer::WriterTerminal {
             schema_version: 1,
             head,
-            protected_paths: vec![],
         })?,
         RECORD_LIMIT,
     )?;
@@ -3199,7 +3189,6 @@ impl PrepareFixture {
         let terminal: writer::WriterTerminal = serde_json::from_slice(
             &attempt.read_bounded(OsStr::new("writer-terminal.json"), RECORD_LIMIT)?,
         )?;
-        assert!(terminal.protected_paths.is_empty());
         if advance_after_publish {
             assert_eq!(terminal.head, tip);
         }
