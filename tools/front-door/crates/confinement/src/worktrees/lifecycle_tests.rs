@@ -3022,7 +3022,7 @@ pub(super) struct TestContext<'a> {
 impl<'a> TestContext<'a> {
     pub(super) fn new(fixture: &'a Fixture) -> Result<Self, Box<dyn Error>> {
         let binding_state = fixture._temp.path().join("bindings");
-        fs::create_dir(&binding_state)?;
+        provenant_os::fixture::private_state_dir(&binding_state)?;
         let mut inputs =
             provenant_core::RootInputs::new(fixture.home.clone(), fixture.root.clone());
         inputs.state_dir = Some(binding_state);

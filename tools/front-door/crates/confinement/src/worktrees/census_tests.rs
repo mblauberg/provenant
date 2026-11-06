@@ -218,7 +218,7 @@ fn command_session_is_reused_across_worktree_contexts() -> Result<(), Box<dyn Er
     }
     let fixture = Fixture::new()?;
     let state = fixture._temp.path().join("command-state");
-    fs::create_dir(&state)?;
+    provenant_os::fixture::private_state_dir(&state)?;
     let mut input = provenant_core::RootInputs::new(fixture.home.clone(), fixture.root.clone());
     input.state_dir = Some(state);
     let roots = input.resolve(&provenant_os::fs::SystemPathResolver)?;
@@ -1728,7 +1728,7 @@ fn host_policy_is_scoped_to_config_roots_and_preserves_injected_refusal()
     let fixture = Fixture::new()?;
     let root = canonicalize(&fixture.root)?;
     let state = fixture._temp.path().join("host-config");
-    fs::create_dir(&state)?;
+    provenant_os::fixture::private_state_dir(&state)?;
     fs::write(
         state.join("config.toml"),
         "schema_version=1\n[knobs]\n'confinement.census_ignore_unreadable'=[{path='/Library/Daemon',team_id='TEAM123'}]\n",

@@ -49,7 +49,7 @@ nodes = [
 ```
 
 A dynamic list comes from a patch or from a resolver named `@name` at launch:
-`over = "@review-panel"` replaces `ReviewSpec`, with the host choosing lenses from
+`over = "@review-panel"` selects the resolved panel, with the host choosing lenses from
 risk tier and tags.
 
 **One mutation path.** `admit_patch(graph, parent, patch)` is called by submission,
@@ -63,11 +63,39 @@ or further planner, so replanning after a wave is ordinary.
 
 **Children.** A lane runs `provenant run` or `fabric_run`; the call crosses
 `crates/fabric-mcp/src/lane.rs#HostRelay` and the host writes the journal. Children
-join the same graph, sharing budget, cancellation and trace, and may be writers
-integrating into the parent's branch. Spawning is recorded separately from
-completion dependencies, so a parent can yield its slot while it waits. A composite
-completes when its dynamic producers have closed and its join condition holds.
-Cancellation follows the subtree unless a child was explicitly detached.
+join the host's graph, sharing its budget, cancellation and trace, and may be
+writers integrating into the parent's branch. Spawning is recorded separately
+from completion dependencies, so a parent can yield its slot while it waits. A
+composite completes when its dynamic producers have closed and its join condition
+holds. Cancellation follows the subtree unless a child was explicitly detached.
+
+**Peer placement.** `tools/front-door/src/fabric/peer.rs#peer_submit_graph` gives
+an authenticated submitted attempt its own graph on the receiving host, using
+the ordinary scheduler and checkpoint-before-launch discipline. Its local relay
+serves child launches, graph edits and slot yields. Children default to that host;
+an explicit host uses ordinary placement, so any agent can launch further nodes
+on any configured reachable host. A submitted operation replays into the same
+receiver graph rather than launching another parent.
+
+The origin retains one node for the remote attempt. The peer returns a
+host-and-graph pointer with the original graph/node binding and bounded pages of
+redacted subtree metadata in status. `tools/front-door/src/fabric/unified.rs#enrich_status_rows`
+exposes that pointer; `tools/front-door/src/fabric/unified.rs#unified_graph_output`
+follows those pages' attempt references for graph and node output. Explicit
+attempt output remains the ordinary byte reader. Cancelling the origin node
+sends the existing peer cancellation request; the receiver fences and stops its
+subtree before replying. All communication uses forward SSH requests from the
+origin. A collected terminal peer checkpoint is reported explicitly, so the
+origin can retain its own status row while the attempt record remains readable.
+No reverse connection or replicated journal is required. Budgets and
+recovery are owned by each host's graph; this boundary does not provide a shared
+cross-host spending ledger.
+
+A child's roots and capabilities need not be a subset of its parent's. A lane
+may request what its agent could request by calling the CLI directly; spawning
+does not introduce a narrower authority envelope. The host applies the ordinary
+launch policy to every child: credential roots, state roots and write roots
+that overlap the worktree remain refused at launch.
 
 **A plain lane** is a one-node patch using `task`, with `AttemptSpec` (#2869)
 carrying placement, account and write roots.
@@ -120,16 +148,23 @@ tier and template without counting composite descendants twice.
 `run`, `status`, `output`, `steer`, `stop`, `retry`, `edit`, `templates`, `land`,
 `quota`. Everything else sits behind `--all`. `output --trace` shows the timeline;
 `edit` applies a patch. `status` has one row schema for graph, node and attempt.
-`run [BRIEF] [--use T] [--tier] [--over] [--set] [--file] [--explain] [--wait]` starts
+`run [BRIEF] [--use T] [--tier T | --model ADAPTER/MODEL] [--effort LEVEL]
+[--account NAME] [--host NAME] [--over] [--set] [--file] [--explain] [--wait]` starts
 work, and inside a lane adds a child. `retry` resumes, continues or redoes a target,
 optionally with a new brief or a raised budget. `status --stats --by tier|template`
 reports efficiency. MCP calls the same service with the same JSON and takes
 documents, not file paths.
 
+`--operation-id ID` is available in `help --all` for replay. Attempt controls use
+`--set attempt.host='"workshop"'`, `--set attempt.build_heavy=true`,
+`--set attempt.confidential=true` and `--set attempt.provider_timeout=300`.
+`--host` overrides the attempt host setting. Delivery uses `--use deliver`.
+
 Deleted: `dispatch`, `review`, `lanes`, `resume`, `cancel`, `preset`, `fabric graph`,
 `fabric_graph`, `PRESET_INCOMPATIBLE`, the policy successors and tail chase (#2869),
 child stores, `pattern_plan.rs`, per-preset `[plan]`, `shape_stages`,
-`review_lenses`, and `ReviewSpec` in favour of a panel resolved at launch.
+`review_lenses`, automatic preset rules and pipeline experiments; review uses a
+panel resolved at launch.
 
 ## Consequences
 
@@ -137,9 +172,10 @@ Delivery is one integration branch and one release, after a drain. Pending graph
 finish or are cancelled first and live lanes drain. Terminal checkpoints stay
 decodable or take the existing `retire_unreadable` path, and the release note reports
 any that do. Records that cannot be read are preserved and reported, never dropped.
-User presets are ported by hand. Old child stores stop being written and
-are ingested into telemetry before `gc` decides. All hosts upgrade together, then real
-launches run on each.
+User presets are ported by hand. Old child stores stop being written. Their
+records drop out of statistics: this cutover does not ingest child-store history
+into telemetry. The stores remain on disk for inspection; the cutover never
+deletes them. All hosts upgrade together, then real launches run on each.
 
 Rejected: event sourcing with the checkpoint as a projection, because rewriting
 recovery adds risk for no present need; a state converter, because a drain leaves

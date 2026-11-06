@@ -128,6 +128,22 @@ fn reviewer_fact(
         model: observed.and_then(|r| r.model.clone()),
     })
 }
+/// The graph labels of an attempt's work context: requested tier, template and
+/// parent node. Only a graph node's attempt sets them.
+fn graph_labels(
+    context: Option<&provenant_records::run::WorkContext>,
+) -> (Option<String>, Option<String>, Option<String>) {
+    let context = context.cloned().unwrap_or_default();
+    (context.tier, context.template, context.parent_node)
+}
+
+/// Milliseconds from queueing to the start of the provider process: the launch
+/// slot wait. `None` until the attempt starts, or if the clocks disagree.
+fn slot_wait_ms(queued_at: WallTime, started_at: Option<WallTime>) -> Option<u64> {
+    let waited = started_at?.as_micros().checked_sub(queued_at.as_micros())?;
+    u64::try_from(waited / 1_000).ok()
+}
+
 /// The published fact for a terminal record. A record read from a peer takes the
 /// same path as one read here.
 pub fn fact(r: AttemptRecord) -> Result<AttemptFact> {
@@ -157,6 +173,8 @@ pub fn fact(r: AttemptRecord) -> Result<AttemptFact> {
         .and_then(|route| route.provider.clone())
         .zip(r.session.clone())
         .map(|(adapter, session)| provenant_records::TranscriptRef { adapter, session });
+    let (tier, template, parent_node) = graph_labels(r.context.as_ref());
+    let slot_wait_ms = slot_wait_ms(r.queued_at, r.started_at);
     Ok(AttemptFact {
         context: r.context,
         attempt_id: r.attempt_id,
@@ -182,6 +200,10 @@ pub fn fact(r: AttemptRecord) -> Result<AttemptFact> {
         observed_route: r.observed_route.map(Into::into),
         verified_owner: r.verified_owner,
         lineage: r.retry_of.into_iter().collect(),
+        tier,
+        template,
+        parent_node,
+        slot_wait_ms,
         reason,
         trace: r.trace,
         transcript,
@@ -470,40 +492,7 @@ impl RunStore {
     pub fn run(&self, id: RunId, call: &Request<'_>) -> Result<RunRecord> {
         call.check()?;
         let run = self.run_on(&self.db, id)?;
-        self.held_owner(&run, None)?;
         Ok(run)
-    }
-    /// Every attempt this host view handed to a guardian, once each.
-    pub fn held_attempts(&self) -> Vec<AttemptId> {
-        let mut held: Vec<_> = self
-            .launched
-            .borrow()
-            .iter()
-            .map(|held| held.scope.attempt)
-            .collect();
-        held.sort();
-        held.dedup();
-        held
-    }
-    /// The lane can rewrite a child's records after the host stamps them, so
-    /// the host's view refuses a launched run or attempt naming another owner.
-    fn held_owner(&self, run: &RunRecord, attempt: Option<&AttemptRecord>) -> Result<()> {
-        let Some(requester) = self.sealed_requester else {
-            return Ok(());
-        };
-        let launched = self.launched.borrow();
-        let run_renamed =
-            run.actor_id != requester && launched.iter().any(|held| held.scope.run == run.run_id);
-        let attempt_renamed = attempt.is_some_and(|attempt| {
-            attempt.verified_owner != Some(requester)
-                && launched
-                    .iter()
-                    .any(|held| held.scope.attempt == attempt.attempt_id)
-        });
-        if run_renamed || attempt_renamed {
-            return Err(RunError::Validation("child record names another owner"));
-        }
-        Ok(())
     }
     pub(crate) fn run_on(&self, db: &rusqlite::Connection, id: RunId) -> Result<RunRecord> {
         let raw: Vec<u8> = db
@@ -538,8 +527,7 @@ impl RunStore {
             })
             .collect()
     }
-    /// Snapshot nonterminal refs before a host accepts a child's launch. The
-    /// refs survive partial handoff errors and authorise only that child scope.
+    /// Read nonterminal attempts for a run in submission order.
     pub fn pending_attempts(&self, run: RunId, call: &Request<'_>) -> Result<Vec<AttemptRecord>> {
         let ids: Vec<String> = {
             let mut query = self.db.prepare("SELECT id FROM attempts WHERE run=?1 AND project=?2 AND terminal=0 ORDER BY sequence")?;
@@ -601,8 +589,7 @@ impl RunStore {
         call: &Request<'_>,
         read: RecordRead,
     ) -> Result<AttemptRecord> {
-        let (run, record) = self.record_with_run(id, call, read)?;
-        self.held_owner(&run, Some(&record))?;
+        let (_, record) = self.record_with_run(id, call, read)?;
         Ok(record)
     }
     /// A terminal row may precede the guardian releasing writer custody.
@@ -1336,5 +1323,38 @@ pub(crate) fn verified_route(
                     .is_none_or(|effort| Some(effort) == o.effort.as_ref())
         }
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn slot_wait_is_queue_to_start_and_absent_until_started() {
+        let queued = WallTime::from_micros(1_000_000).unwrap();
+        let started = WallTime::from_micros(2_500_000).unwrap();
+        assert_eq!(slot_wait_ms(queued, Some(started)), Some(1_500));
+        assert_eq!(slot_wait_ms(queued, None), None);
+        assert_eq!(slot_wait_ms(started, Some(queued)), None);
+    }
+
+    #[test]
+    fn graph_labels_come_from_the_work_context() {
+        let context = provenant_records::run::WorkContext {
+            tier: Some("senior".into()),
+            template: Some("review.security".into()),
+            parent_node: Some("map".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            graph_labels(Some(&context)),
+            (
+                Some("senior".into()),
+                Some("review.security".into()),
+                Some("map".into())
+            )
+        );
+        assert_eq!(graph_labels(None), (None, None, None));
     }
 }

@@ -37,6 +37,76 @@ class DocTruthTests(unittest.TestCase):
         path.write_text(text)
         return path
 
+    def test_deleted_commands_fail_even_in_fenced_examples(self):
+        (self.root / "README.md").write_text(
+            "```sh\nprovenant dispatch --route junior\n```\n"
+            "Use `preset show NAME` or `fabric_graph`.\n")
+        result = self.check("--inventory-only", source=False)
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("README.md:2: error: deleted command", result.stdout)
+        self.assertIn("deleted command `fabric_graph`", result.stdout)
+        self.assertIn("deleted command `preset show NAME`", result.stdout)
+
+    def test_each_deleted_verb_fails_as_an_explicit_command(self):
+        guide = self.root / "README.md"
+        for verb in ("dispatch", "review", "lanes", "resume", "cancel", "preset", "fabric_graph"):
+            with self.subTest(verb=verb):
+                guide.write_text(f"Run `provenant {verb} ID`.\n")
+                result = self.check("--inventory-only", source=False)
+                self.assertEqual(result.returncode, 1, result.stdout)
+                self.assertIn(f"deleted command `provenant {verb}`", result.stdout)
+
+    def test_global_options_cannot_hide_deleted_verbs(self):
+        guide = self.root / "README.md"
+        options = (
+            "--project .", "--project=.", "--state-dir /tmp/state",
+            "--state-dir=/tmp/state", "--json --project 'a project' --full",
+            "--state-dir='/tmp/a state' --project=.",
+        )
+        for verb in ("dispatch", "review", "lanes", "resume", "cancel", "preset", "fabric_graph"):
+            for globals_ in options:
+                with self.subTest(verb=verb, globals_=globals_):
+                    guide.write_text(f"```sh\nprovenant {globals_} {verb} ID\n```\n")
+                    result = self.check("--inventory-only", source=False)
+                    self.assertEqual(result.returncode, 1, result.stdout)
+                    self.assertIn(f"README.md:2: error: deleted command `provenant {verb}`",
+                                  result.stdout)
+
+    def test_global_option_values_are_not_commands(self):
+        (self.root / "README.md").write_text(
+            "Use `provenant --project 'dispatch review' run --use review`.\n"
+            "Use `provenant --project=cancel --state-dir /tmp/preset status`.\n")
+        result = self.check("--inventory-only", source=False)
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertEqual(result.stdout, "")
+
+    def test_template_names_fields_and_historical_commands_are_allowed(self):
+        (self.root / "README.md").write_text(
+            "Use `provenant run --use review`, `provenant retry ID` and `status`.\n"
+            "The `review` template has a `preset` parameter and `lanes` field.\n"
+            "Deleted: `provenant cancel ID`.\n"
+            "See `src/dispatch.rs#review` and `fabric_graph.schema.json`.\n")
+        result = self.check("--inventory-only", source=False)
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertEqual(result.stdout, "")
+
+    def test_git_deleted_paths_do_not_become_command_errors(self):
+        def git(*args):
+            return subprocess.run(["git", *args], cwd=self.root, check=True,
+                                  capture_output=True, text=True)
+        git("init", "--quiet")
+        git("config", "user.name", "Michael Blauberg")
+        git("config", "user.email", "103556269+mblauberg@users.noreply.github.com")
+        historical = self.root / "old.txt"
+        historical.write_text("historical file\n")
+        git("add", "old.txt")
+        git("commit", "--quiet", "-m", "test: seed deleted path")
+        git("rm", "--quiet", "old.txt")
+        git("commit", "--quiet", "-m", "test: remove historical path")
+        result = self.check("--inventory-only", "--strict-inventory", source=False)
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertEqual(result.stdout, "")
+
     def test_clean_fixture_is_silent(self):
         shutil.copyfile(FIXTURES / "clean.md", self.root / "docs/runbooks/example.md")
         result = self.check("--strict-inventory")

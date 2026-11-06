@@ -1,0 +1,5 @@
+doc = "Adversarial lens."
+
+[parameters.lens]
+type = "string"
+default = "adversarial"

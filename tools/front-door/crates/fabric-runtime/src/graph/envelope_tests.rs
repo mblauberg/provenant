@@ -1,6 +1,15 @@
 use super::*;
 use serde_json::json;
 
+/// Measure the actual journal representation after durable text externalisation.
+fn persisted_len(stored: &StoredCheckpoint) -> usize {
+    let temp = tempfile::tempdir().unwrap();
+    let directory = Directory::open_anchor(temp.path()).unwrap();
+    let mut value = serde_json::to_value(stored).unwrap();
+    prompt_store::externalise(&directory, "envelope", &mut value).unwrap();
+    canonical_len(&value)
+}
+
 /// Control characters take six canonical bytes each, the worst case.
 fn worst(max: usize) -> String {
     bounded(&"\u{1}".repeat(max), max)
@@ -17,7 +26,7 @@ fn mixed() -> GraphDocument {
     serde_json::from_value(json!({
         "schema_version":1, "graph_id":"envelope-mixed", "delivery":"pr", "integration_branch":"integration/envelope",
         "decision_session":"chair", "nodes":[
-            {"id":"plan", "kind":"plan", "access":"read_only", "prompt":"Slice the work",
+            {"id":"plan", "kind":"task", "access":"read_only", "prompt":"Slice the work",
              "route":{"alias":"senior"}, "plan":{"kinds":["task"], "max_nodes":4}},
             {"id":"review", "access":"read_only", "prompt":"Review", "routes":routes(3)},
             {"id":"choose", "kind":"decide", "access":"read_only", "depends_on":["review"],
@@ -150,8 +159,9 @@ fn filled_asks(plan: &PlannedGraph) -> Vec<NodeAsk> {
             )));
         }
         if let Some(spec) = &node.decide {
-            let session = asks::decide_session(spec, plan.decision_session.as_deref()).unwrap();
-            asks.push(filled_ask(asks::decide_ask(
+            let scope = node.extra.get("repair_scope_gate") == Some(&json!(true));
+            let session = asks::decide_session(spec, plan.decision_session.as_deref()).unwrap_or(&plan.graph_id);
+            let mut ask = asks::decide_ask(
                 &plan.graph_id,
                 node,
                 spec,
@@ -159,7 +169,9 @@ fn filled_asks(plan: &PlannedGraph) -> Vec<NodeAsk> {
                 u64::MAX,
                 None,
                 Some(&worst(MAX_ADVANCE_ERROR_BYTES)),
-            )));
+            );
+            if scope { ask.body = worst(provenant_records::inbox::REQUEST_BODY_BYTES); }
+            asks.push(filled_ask(ask));
         }
     }
     if let Some(session) = &plan.decision_session {
@@ -294,6 +306,7 @@ fn filled_checkpoint(document: &GraphDocument, plan: &PlannedGraph) -> GraphChec
                 } else {
                     filled_outputs(node.composite.is_some(), plans::writer(node))
                 }),
+                previous_attempts: Vec::new(),
                 attempts: node
                     .routes
                     .iter()
@@ -425,8 +438,71 @@ fn worst_case_land_checkpoint_fits_its_bound() {
 }
 
 fn assert_fits(document: GraphDocument) {
+    assert_fits_with_repair_metadata(document, "substantial", false);
+}
+
+#[test]
+fn repair_growth_and_risk_metadata_fit_the_checkpoint_bound() {
+    let document: GraphDocument = serde_json::from_value(json!({
+        "schema_version":1,"graph_id":"repair-envelope","decision_session":"chair","nodes":[
+            {"id":"initial","access":"read_only","prompt":"review","route":{"alias":"senior"}},
+            {"id":"repair","kind":"loop","access":"read_only","depends_on":["initial"],
+                "inputs":[{"node":"initial","outputs":["findings","verdict"]}],
+                "loop":{"review_repair":true,"max_rounds":3,"until":"accepted","decision_session":"chair","body":[
+                    {"id":"fix","access":"worktree_write","worktree":"/fixture/writer","prompt":"repair","route":{"alias":"senior"}},
+                    {"id":"check","access":"read_only","depends_on":["fix"],"source":{"type":"node","node":"fix"},"prompt":"review repair","route":{"alias":"senior"}},
+                    {"id":"accepted","kind":"gate","access":"read_only","depends_on":["check"],"inputs":[{"node":"check","outputs":["verdict"]}],
+                        "condition":{"type":"verdict","expected":"VERDICT: PASS","threshold":"all"}}
+                ]}}
+        ]
+    })).unwrap();
     let plan = planned(&document);
-    let checkpoint = filled_checkpoint(&document, &plan);
+    let positions = plan
+        .nodes
+        .iter()
+        .enumerate()
+        .map(|(index, node)| (node.id.clone(), index))
+        .collect();
+    assert_eq!(
+        plan.nodes
+            .iter()
+            .filter(|node| repair::is_repair_gate(node, &plan, &positions))
+            .count(),
+        3
+    );
+    assert_fits_with_repair_metadata(document.clone(), "terminal", true);
+    assert_fits_with_repair_metadata(document, "substantial", false);
+}
+
+fn assert_fits_with_repair_metadata(document: GraphDocument, tier: &str, grew: bool) {
+    let plan = planned(&document);
+    let mut checkpoint = filled_checkpoint(&document, &plan);
+    let positions = plan
+        .nodes
+        .iter()
+        .enumerate()
+        .map(|(index, node)| (node.id.clone(), index))
+        .collect();
+    for (node, planned) in checkpoint.nodes.iter_mut().zip(&plan.nodes) {
+        if repair::is_repair_gate(planned, &plan, &positions) {
+            node.extra.insert(
+                "repair_growth".into(),
+                json!({"before":"1".repeat(64),"after":"2".repeat(64),"grew":grew}),
+            );
+        }
+        if planned.extra.get("repair_scope_gate") == Some(&json!(true)) {
+            node.extra.insert("owner_notified".into(), true.into());
+        }
+        if let Some(outputs) = &mut node.outputs {
+            outputs.extra.insert("risk_tier".into(), tier.into());
+            if plan.nodes.iter().any(|consumer| {
+                consumer.extra.get("repair_scope_gate") == Some(&json!(true))
+                    && consumer.depends_on.contains(&planned.id)
+            }) {
+                outputs.extra.insert("repair_design".into(), json!({"within_scope":false,"one_way_door":false}));
+            }
+        }
+    }
     let execution = GraphExecution {
         review_base: None,
         extra: Default::default(),
@@ -447,7 +523,7 @@ fn assert_fits(document: GraphDocument) {
         checkpoint,
         execution,
     };
-    let size = canonical_len(&stored);
+    let size = persisted_len(&stored);
     let bound = envelope::checkpoint_bound(&document, &[], &stored.checkpoint.extensions, &plan);
     assert!(
         size <= bound,
@@ -898,190 +974,9 @@ fn ci_failed_checks_and_findings_fit_the_configured_envelope() {
             };
             let bound =
                 envelope::checkpoint_bound(&document, &[], &stored.checkpoint.extensions, &plan);
-            assert!(canonical_len(&stored) <= bound, "cap={cap} count={count}");
+            assert!(persisted_len(&stored) <= bound, "cap={cap} count={count}");
         }
     }
-}
-
-/// The generated big-batch structure, with fixture-sized prompts, expands
-/// every deferred panel at its configured maximum without growing its bound.
-#[test]
-fn five_and_seven_lane_big_batches_reserve_every_deferred_panel() {
-    let fixture: serde_json::Value = serde_json::from_str(include_str!(
-        "../../../../assets/presets/fixtures/big-batch-five-lane-checkpoint.json"
-    ))
-    .unwrap();
-    check_big_batch_panels(serde_json::from_value(fixture.clone()).unwrap());
-    let mut larger = fixture;
-    let lanes = larger["nodes"]
-        .as_array_mut()
-        .unwrap()
-        .iter_mut()
-        .find(|node| node["id"] == "lanes")
-        .unwrap();
-    for number in 5..7 {
-        let composite = lanes["composite"].as_object_mut().unwrap();
-        let original = composite["nodes"][0].to_string();
-        let extra = original
-            .replace("lane-l0", &format!("lane-l{number}"))
-            .replace("/repo/w0", &format!("/repo/w{number}"));
-        composite
-            .get_mut("nodes")
-            .unwrap()
-            .as_array_mut()
-            .unwrap()
-            .push(serde_json::from_str(&extra).unwrap());
-        composite
-            .get_mut("exports")
-            .unwrap()
-            .as_array_mut()
-            .unwrap()
-            .push(json!({"node":format!("lane-l{number}"),"outputs":["result","findings"]}));
-    }
-    check_big_batch_panels(serde_json::from_value(larger).unwrap());
-}
-
-fn check_big_batch_panels(document: GraphDocument) {
-    let limits = crate::config::GraphLimits::default();
-    document.admit(&limits).unwrap();
-    let mut expanded = loops::expand(&document, &[], &limits).unwrap();
-    let mut plan = validate_flat_plan(&expanded, &limits).unwrap().0;
-    let reviews: Vec<_> = plan
-        .nodes
-        .iter()
-        .filter(|node| node.review.is_some())
-        .map(|node| node.id.clone())
-        .collect();
-    assert!(reviews.len() >= 5);
-    let mut expansions = Vec::new();
-    for id in reviews {
-        let source = expanded
-            .nodes
-            .iter()
-            .find(|node| node.id == id)
-            .unwrap()
-            .clone();
-        let addition = fixture_review_expansion(&source, &"1".repeat(40));
-        plans::validate_review_addition(&expanded, &addition).unwrap();
-        let before = graph_envelope_bound(&document, &expansions, &[], &plan);
-        plans::append(&mut expanded, &addition);
-        expansions.push(addition);
-        plan = validate_flat_plan(&expanded, &plans::generous()).unwrap().0;
-        let after = graph_envelope_bound(&document, &expansions, &[], &plan);
-        assert!(after <= before, "review expansion grew {before} to {after}");
-        assert!(graph_envelope_reason(&document, &expansions, &[], &plan).is_none());
-    }
-}
-
-#[test]
-fn independent_review_expansions_can_retain_different_bases() {
-    let fixture: serde_json::Value = serde_json::from_str(include_str!(
-        "../../../../assets/presets/fixtures/big-batch-five-lane-checkpoint.json"
-    )).unwrap();
-    let document: GraphDocument = serde_json::from_value(fixture).unwrap();
-    let limits = plans::generous();
-    let expanded = loops::expand(&document, &[], &limits).unwrap();
-    let sources: Vec<_> = expanded.nodes.iter().filter(|node| node.review.is_some()).take(2).cloned().collect();
-    assert_eq!(sources.len(), 2);
-    let additions: Vec<_> = sources.iter().enumerate().map(|(index, source)| {
-        let mut addition = fixture_review_expansion(source, &"1".repeat(40));
-        addition.review.as_mut().unwrap().base = (if index == 0 { "2" } else { "3" }).repeat(40).parse().unwrap();
-        addition
-    }).collect();
-    assert!(plans::expand(&document, &[], &additions, &limits).is_ok());
-}
-
-fn fixture_review_expansion(source: &GraphNode, subject: &str) -> Expansion {
-    let id = source.id.clone();
-    let spec = source.review.as_ref().unwrap();
-    let templates = source
-        .extra
-        .get("lens_templates")
-        .and_then(serde_json::Value::as_object)
-        .unwrap();
-    let root_id = format!("{id}--review");
-    let mut members = Vec::new();
-    for template in templates.values().take(spec.max_nodes - 1) {
-        let mut value = template.clone();
-        let object = value.as_object_mut().unwrap();
-        let local = object
-            .get("id")
-            .and_then(serde_json::Value::as_str)
-            .unwrap()
-            .to_owned();
-        object.remove("effort");
-        object.insert("id".into(), json!(format!("{root_id}--{local}")));
-        object.insert(
-            "routes".into(),
-            json!([{"alias":"senior"}, {"alias":"senior"}]),
-        );
-        object.insert("depends_on".into(), json!(source.depends_on));
-        if !source.inputs.is_empty() {
-            object.insert("inputs".into(), json!(source.inputs));
-        }
-        if !source.read_roots.is_empty() {
-            object.insert("read_roots".into(), json!(source.read_roots));
-        }
-        object.insert(
-            "source".into(),
-            json!({"type":"commit","commit":subject.to_owned()}),
-        );
-        members.push(serde_json::from_value::<GraphNode>(value).unwrap());
-    }
-    let exports: Vec<_> = members
-        .iter()
-        .map(|member| json!({"node":member.id,"outputs":["result","findings"]}))
-        .collect();
-    let minimum = spec.min_successful.map(|n| {
-        if n == 0 {
-            members.len().saturating_sub(1).max(1)
-        } else {
-            n
-        }
-    });
-    let root: GraphNode = serde_json::from_value(json!({"id":root_id,"kind":"composite","access":"read_only","depends_on":source.depends_on,"composite":{"min_successful":minimum,"nodes":[],"exports":exports}})).unwrap();
-    let mut nodes = vec![root];
-    nodes.extend(members);
-    Expansion {
-        review: Some(ReviewResolution {
-            subject: subject.to_owned().parse().unwrap(),
-            base: subject.to_owned().parse().unwrap(),
-            measured_size: "large".into(),
-            shape: "fixture".into(),
-            source: "fixture".into(),
-            substitutions: Vec::new(),
-        }),
-        extra: Default::default(),
-        source: id,
-        continuation: false,
-        nodes,
-        patterns: vec![],
-    }
-}
-
-#[test]
-fn oversized_deferred_review_is_refused_before_admission() {
-    let document: GraphDocument = serde_json::from_value(json!({
-        "schema_version": 2, "graph_id": "oversized-review", "nodes": [{
-            "id": "review", "kind": "plan", "access": "read_only",
-            "prompt": "review", "source": {"type":"commit", "commit":"1".repeat(40)},
-            "review": {"max_nodes": MAX_CHECKPOINT_BYTES as usize / FINDINGS_BYTES + 1}
-        }]
-    }))
-    .unwrap();
-    let limits = crate::config::GraphLimits {
-        nodes: MAX_CHECKPOINT_BYTES as usize / FINDINGS_BYTES + 10,
-        ..Default::default()
-    };
-    let reason = document.admit(&limits).unwrap_err();
-    let AdmissionError::Envelope(fact) = reason else {
-        panic!("expected typed envelope refusal");
-    };
-    assert!(fact.bound > MAX_CHECKPOINT_BYTES as usize);
-    assert_eq!(
-        fact.to_string(),
-        format!("graph checkpoint could reach {} bytes, over its {}-byte limit; split the graph into smaller batches, or use fewer nodes, routes, loop rounds or extensions, or smaller prompts", fact.bound, MAX_CHECKPOINT_BYTES)
-    );
 }
 
 #[test]
@@ -1129,7 +1024,7 @@ fn disposition_checkpoint_fits_its_reduced_bound() {
         document: document.clone(),
     };
     let size = |checkpoint: &GraphCheckpoint| {
-        canonical_len(&StoredCheckpoint {
+        persisted_len(&StoredCheckpoint {
             extra: Default::default(),
             schema_version: 1,
             digest: "d".repeat(80),
@@ -1145,162 +1040,6 @@ fn disposition_checkpoint_fits_its_reduced_bound() {
         json!("\u{1}".repeat(16 * 1024)),
     );
     assert!(size(&checkpoint) <= bound);
-}
-
-#[test]
-fn five_lane_big_batch_expands_through_runtime() {
-    #[derive(Default)]
-    struct FixtureOwner {
-        launches: usize,
-        deliveries: Vec<Option<provenant_records::run::DeliveryMode>>,
-    }
-    impl AttemptOwner for FixtureOwner {
-        type Error = std::convert::Infallible;
-        fn actor(&self) -> String {
-            "fixture".into()
-        }
-        fn bind_writer_worktree(&mut self, worktree: &str) -> Result<Option<WriterWorktreeBinding>, Self::Error> {
-            Ok(Some(WriterWorktreeBinding { extra: Default::default(), worktree: if std::path::Path::new(worktree).is_absolute() { worktree.to_owned() } else { format!("/fixture/{worktree}") }, head: "1111111111111111111111111111111111111111".into() }))
-        }
-        fn integration_head(&mut self) -> Result<Option<String>, Self::Error> {
-            Ok(Some("1".repeat(40)))
-        }
-        fn resolve_review(
-            &mut self,
-            node: &GraphNode,
-            subject: &str,
-        ) -> Result<Expansion, ReviewResolveError> {
-            Ok(fixture_review_expansion(node, subject))
-        }
-        fn observe_or_start(
-            &mut self,
-            _key: &AttemptKey,
-            _node: NodeInput<'_>,
-            _route: &GraphRoute,
-            access: AccessMode,
-            _worktree: Option<&str>,
-            replay: Replay<'_>,
-        ) -> Result<AttemptObservation, Self::Error> {
-            self.launches += 1;
-            if access == AccessMode::WorktreeWrite {
-                self.deliveries.push(replay.delivery.cloned());
-            }
-            let mut observation =
-                terminal_with_result(AttemptOutcome::Succeeded, &findings_text(""));
-            if let AttemptObservation::Terminal {
-                attempt_ref,
-                branch,
-                commit,
-                ..
-            } = &mut observation
-            {
-                *attempt_ref = Some(format!("h/{}", self.launches));
-                *branch = Some("batch/graph".into());
-                *commit = Some("1".repeat(40));
-            }
-            Ok(observation)
-        }
-    }
-    let document: GraphDocument = serde_json::from_str(include_str!(
-        "../../../../assets/presets/fixtures/big-batch-five-lane-checkpoint.json"
-    ))
-    .unwrap();
-    document.admit(&Default::default()).unwrap();
-    let mut owner = FixtureOwner::default();
-    let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
-    assert_eq!(
-        run.status,
-        GraphStatus::Complete,
-        "{:?}",
-        run.checkpoint.pause_reason
-    );
-    assert!(run.checkpoint.successful());
-    let errors: Vec<_> = run
-        .checkpoint
-        .nodes
-        .iter()
-        .filter_map(|node| node.advance_error.as_ref().map(|error| (&node.id, error)))
-        .collect();
-    assert!(errors.is_empty(), "{errors:?}");
-    assert!(
-        run.checkpoint
-            .expansions
-            .iter()
-            .filter(|expansion| expansion.review.is_some())
-            .count()
-            >= 5
-    );
-    assert!(owner.deliveries.len() >= 5);
-    assert!(owner.deliveries.iter().all(|delivery| matches!(
-        delivery,
-        Some(provenant_records::run::DeliveryMode::Integrate(_))
-    )));
-}
-
-#[test]
-fn review_reservation_includes_declared_large_template_outputs() {
-    let mut fixture: serde_json::Value = serde_json::from_str(include_str!(
-        "../../../../assets/presets/fixtures/big-batch-five-lane-checkpoint.json"
-    ))
-    .unwrap();
-    fn add_ci_limit(value: &mut serde_json::Value) -> bool {
-        match value {
-            serde_json::Value::Object(map) => {
-                if let Some(templates) = map
-                    .get_mut("lens_templates")
-                    .and_then(serde_json::Value::as_object_mut)
-                {
-                    let template = templates.values_mut().next().unwrap();
-                    template["condition"] =
-                        json!({"type":"ci", "failed_checks_max_bytes": MAX_CHECKPOINT_BYTES});
-                    return true;
-                }
-                map.values_mut().any(add_ci_limit)
-            }
-            serde_json::Value::Array(items) => items.iter_mut().any(add_ci_limit),
-            _ => false,
-        }
-    }
-    assert!(add_ci_limit(&mut fixture));
-    let document: GraphDocument = serde_json::from_value(fixture).unwrap();
-    let reason = document.admit(&Default::default()).unwrap_err().to_string();
-    assert!(reason.contains("graph checkpoint could reach"), "{reason}");
-    assert!(reason.contains("split the graph"), "{reason}");
-}
-
-#[test]
-fn whole_review_reservation_covers_frame_verifier_and_synthesis() {
-    let subject = "1".repeat(40);
-    let templates: serde_json::Map<String, serde_json::Value> = (0..10).map(|index| (format!("lens-{index}"), json!({
-        "id":format!("lens-{index}"), "access":"read_only", "prompt":"review", "routes":[{"alias":"senior"},{"alias":"senior"}]
-    }))).collect();
-    let frame = json!({"id":"frame", "access":"read_only", "prompt":"frame", "routes":[{"alias":"senior"},{"alias":"senior"}]});
-    let verify = json!({"id":"verify", "access":"read_only", "prompt":"verify", "routes":[{"alias":"senior"},{"alias":"senior"}]});
-    let synth = json!({"id":"synthesis", "kind":"synthesise", "access":"read_only", "prompt":"synthesis", "dispositions":["accepted","rejected","deferred"], "routes":[{"alias":"senior"},{"alias":"senior"}]});
-    let document: GraphDocument = serde_json::from_value(json!({"schema_version":2,"graph_id":"whole-reservation","nodes":[{
-        "id":"review","kind":"plan","access":"read_only","prompt":"review","source":{"type":"commit","commit":subject},
-        "review":{"shape":null,"risk_tier":null,"kind":null,"size":null,"lenses":[],"min_successful":1,"max_nodes":15},
-        "lens_templates":templates,"panel_templates":{"frame":frame,"verifier":verify,"synthesis":synth},
-        "panel_max_verifiers":1,"panel_shapes":{"standard":{"frame":true,"verifiers":1,"synthesis":"model"}}
-    }]})).unwrap();
-    let mut expanded = plans::expand(&document, &[], &[], &crate::config::GraphLimits::default()).unwrap();
-    let plan = validate_flat_plan(&expanded, &plans::generous()).unwrap().0;
-    let before = graph_envelope_bound(&document, &[], &[], &plan);
-    let mut nodes = vec![json!({"id":"review--r","kind":"composite","access":"read_only","composite":{"nodes":[],"exports":[{"node":"review--r--s","outputs":["result","findings","verdict","commit"]}]}}),
-        json!({"id":"review--r--f","access":"read_only","prompt":"frame","source":{"type":"commit","commit":subject},"routes":[{"alias":"senior"},{"alias":"senior"}]}),
-        json!({"id":"review--r--p","kind":"composite","access":"read_only","depends_on":["review--r--f"],"composite":{"min_successful":1,"nodes":[],"exports":(0..10).map(|index| json!({"node":format!("review--r--p--lens-{index}"),"outputs":["result","findings"]})).collect::<Vec<_>>()}})];
-    for index in 0..10 { nodes.push(json!({"id":format!("review--r--p--lens-{index}"),"access":"read_only","prompt":"review","depends_on":["review--r--f"],"inputs":[{"node":"review--r--f","outputs":["result"]}],"source":{"type":"commit","commit":subject},"routes":[{"alias":"senior"},{"alias":"senior"}]})); }
-    nodes.push(json!({"id":"review--r--v-1","access":"read_only","prompt":"verify","depends_on":["review--r--p"],"inputs":[{"node":"review--r--p","outputs":["result","findings"]}],"source":{"type":"commit","commit":subject},"routes":[{"alias":"senior"},{"alias":"senior"}]}));
-    nodes.push(json!({"id":"review--r--s","kind":"synthesise","access":"read_only","prompt":"synthesis","dispositions":["accepted","rejected","deferred"],"depends_on":["review--r--p","review--r--v-1"],"inputs":[{"node":"review--r--p","outputs":["result","findings"]},{"node":"review--r--v-1","outputs":["result","findings"]}],"source":{"type":"commit","commit":subject},"routes":[{"alias":"senior"},{"alias":"senior"}]}));
-    let addition: Expansion = serde_json::from_value(json!({"source":"review","continuation":false,"patterns":[],"review":{"subject":subject,"base":"2".repeat(40),"measured_size":"large","shape":"standard","source":"fixture"},"nodes":nodes})).unwrap();
-    plans::validate_review_addition(&expanded, &addition).unwrap();
-    let mut missing_frame = addition.clone();
-    missing_frame.nodes.iter_mut().find(|node| node.id.ends_with("--lens-0")).unwrap().depends_on.clear();
-    assert!(plans::validate_review_addition(&expanded, &missing_frame).is_err());
-    plans::append(&mut expanded, &addition);
-    let plan = validate_flat_plan(&expanded, &plans::generous()).unwrap().0;
-    let after = graph_envelope_bound(&document, &[addition], &[], &plan);
-    assert!(after <= before, "review expansion grew {before} to {after}");
 }
 
 #[test]
@@ -1320,4 +1059,41 @@ fn routing_stratum_flows_from_graph_to_nodes() {
     let context = node_context(&plan, node);
     assert_eq!(context.risk_tier.as_deref(), Some("substantial"));
     assert_eq!(context.task_kind.as_deref(), Some("review"));
+}
+
+
+#[test]
+fn principal_scope_report_notification_and_assessment_fit_checkpoint_bound() {
+    let document: GraphDocument = serde_json::from_value(json!({
+        "schema_version":1,"graph_id":"principal-envelope","nodes":[
+            {"id":"design","access":"read_only","prompt":"design","route":{"alias":"principal"}},
+            {"id":"scope","kind":"decide","access":"read_only","depends_on":["design"],
+             "repair_scope_gate":true,"decide":{"question":"Approve changed scope?",
+             "options":[{"id":"approve","label":"Approve"},{"id":"hold","label":"Hold"}]}}
+        ]
+    })).unwrap();
+    assert_fits_with_repair_metadata(document, "substantial", false);
+}
+
+#[test]
+fn live_child_patch_keeps_the_planners_final_fragment_envelope_reserve() {
+    let document = mixed();
+    let plan = planned(&document);
+    let before = envelope::checkpoint_bound(&document, &[], &[], &plan);
+    let live: Expansion = serde_json::from_value(json!({
+        "source":"plan", "continuation":false, "nodes":[],
+        "patch":{"revision":1,"digest":format!("sha256:{}", "a".repeat(64)),"parent":"plan"}
+    })).unwrap();
+    let live_bound = envelope::checkpoint_bound(&document, std::slice::from_ref(&live), &[], &plan);
+    assert!(live_bound >= before, "a live child patch must retain space for the planner's final fragment");
+
+    let mut final_fragment = live.clone();
+    final_fragment.extra.insert("final_fragment".into(), true.into());
+    let closed_bound = envelope::checkpoint_bound(&document, &[final_fragment], &[], &plan);
+    assert!(closed_bound < live_bound, "a final fragment releases its producer's fragment reserve");
+
+    let mut fallback = live;
+    fallback.patch = None;
+    let fallback_bound = envelope::checkpoint_bound(&document, &[fallback], &[], &plan);
+    assert!(fallback_bound < live_bound, "a fallback expansion also closes its producer");
 }

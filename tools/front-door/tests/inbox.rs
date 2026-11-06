@@ -887,6 +887,7 @@ fn request_correlation_edges_verify_host_seals_and_refuse_mismatches() -> Result
                 prompt: "fixture".into(),
                 base: None,
                 pinned_base: None,
+                source_head: None,
                 head: None,
                 route: RequestedRoute::Named {
                     extra: Default::default(),
@@ -894,7 +895,6 @@ fn request_correlation_edges_verify_host_seals_and_refuse_mismatches() -> Result
                     effort: None,
                 },
                 account: None,
-                fallback: vec![],
                 profile: Default::default(),
                 timeout_seconds: 60,
                 delivery_id: None,

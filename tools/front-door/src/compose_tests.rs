@@ -1,5 +1,5 @@
 //! Production CLI dispatch against a fake Codex executable, never live credentials.
-use super::worktree_tests::support::{Result, TestRig, code};
+use super::worktree_tests::support::{Result, TestRig};
 use super::worktree_tests::{git, ok, repository, writer_backend_available, writer_context};
 use std::{
     fs,
@@ -102,20 +102,17 @@ fn fixture() -> Result<TestRig> {
     Ok(rig)
 }
 
-fn dispatch(rig: &TestRig, mode: &str, operation: &str) -> Result<(serde_json::Value, PathBuf)> {
+fn dispatch(rig: &TestRig, mode: &str) -> Result<PathBuf> {
     let mut args = vec![
         "--state-dir".into(),
         rig.state.clone().into_os_string(),
         "--project".into(),
         rig.project.join(".worktrees/compose").into_os_string(),
-        "dispatch".into(),
+        "run".into(),
         "--model".into(),
         "codex/gpt-6-luna".into(),
-        "--operation-id".into(),
-        operation.into(),
-        "--prompt-stdin".into(),
-        "--wait".into(),
-        "30".into(),
+        mode.into(),
+        "--wait=30s".into(),
         "--json".into(),
     ];
     if mode == "writer" {
@@ -123,45 +120,65 @@ fn dispatch(rig: &TestRig, mode: &str, operation: &str) -> Result<(serde_json::V
             "--mode".into(),
             "worktree-write".into(),
             "--worktree".into(),
-            ".worktrees/compose".into(),
+            rig.project.join(".worktrees/compose").into_os_string(),
         ]);
     }
     // The production binary keeps both acquisition and its same-binary
     // guardian on the native boot observer. Only Codex is the test executable.
     let executable = option_env!("CARGO_BIN_EXE_provenant")
         .ok_or("production binary path is only available to integration targets")?;
-    let output = rig.execute_os(Path::new(executable), &args, Some(mode.as_bytes()))?;
-    assert_eq!(
-        code(&output),
-        0,
-        "stdout={} stderr={}",
-        String::from_utf8_lossy(&output.stdout.bytes),
-        String::from_utf8_lossy(&output.stderr.bytes)
-    );
+    let output = rig.execute_os(Path::new(executable), &args, None)?;
+    let stdout = String::from_utf8_lossy(&output.stdout.bytes).into_owned();
+    let stderr = String::from_utf8_lossy(&output.stderr.bytes).into_owned();
     assert!(
-        !String::from_utf8_lossy(&output.stderr.bytes).contains("ignored invalid configuration"),
+        !stderr.contains("ignored invalid configuration"),
         "a domain section is not an unknown key to the census policy read"
     );
-    let value: serde_json::Value = serde_json::from_slice(&output.stdout.bytes)?;
-    let lane = value["data"]["lanes"][0].clone();
-    // Codex's fixture protocol carries no observed answering model. Prove the
-    // confined process exited cleanly without waiving Run's identity gate.
-    let attempt = rig
-        .state
-        .join("runs")
-        .join(lane["run_id"].as_str().ok_or("run id")?)
-        .join("attempts")
-        .join(lane["attempt_id"].as_str().ok_or("attempt id")?);
-    assert!(
-        lane["exit_code"] == 0,
-        "{value}\nprovider stderr: {}",
-        capture(&attempt.join("stderr.log"))?
-    );
+    let value: serde_json::Value = serde_json::from_str(&stdout)
+        .map_err(|error| format!("{error}: stdout={stdout} stderr={stderr}"))?;
+    // Codex's fixture protocol carries no observed answering model, so the
+    // lane settles as failed. Check the provider's exit code independently
+    // of that outcome, as compose-proof precedes its final protocol output.
+    let attempt_ref = value["data"]["checkpoint"]["nodes"][0]["attempts"][0]["attempt_ref"]
+        .as_str()
+        .ok_or_else(|| format!("no attempt: stdout={stdout} stderr={stderr}"))?;
+    let (_, attempt) = attempt_ref.rsplit_once('/').ok_or("attempt reference")?;
+    let attempt = fs::read_dir(rig.state.join("runs"))?
+        .flatten()
+        .map(|run| run.path().join("attempts").join(attempt))
+        .find(|path| path.is_dir())
+        .ok_or_else(|| format!("no attempt directory: stdout={stdout}"))?;
+    let record = attempt_record(rig, &attempt)?;
     assert_eq!(
-        fs::read(attempt.join("provider-state/candidate-0/compose-proof"))?,
-        b"proved"
+        record["state"]["exit_code"],
+        serde_json::json!(0),
+        "provider must exit successfully: state={} stderr={}",
+        record["state"],
+        capture(&attempt.join("stderr.log")).unwrap_or_default()
     );
-    Ok((lane, attempt))
+    let proof =
+        fs::read(attempt.join("provider-state/candidate-0/compose-proof")).map_err(|error| {
+            format!(
+                "compose proof: {error}\nprovider stderr: {}\nstdout={stdout}",
+                capture(&attempt.join("stderr.log")).unwrap_or_default()
+            )
+        })?;
+    assert_eq!(proof, b"proved");
+    Ok(attempt)
+}
+
+fn attempt_record(rig: &TestRig, attempt: &Path) -> Result<serde_json::Value> {
+    let db = rusqlite::Connection::open(rig.state.join("run.sqlite3"))?;
+    let raw: Vec<u8> = db.query_row(
+        "SELECT record FROM attempts WHERE id=?1",
+        [attempt
+            .file_name()
+            .ok_or("attempt name")?
+            .to_str()
+            .ok_or("attempt id")?],
+        |row| row.get(0),
+    )?;
+    Ok(serde_json::from_slice(&raw)?)
 }
 
 fn capture(path: &Path) -> Result<String> {
@@ -190,24 +207,14 @@ pub(crate) fn read_only_dispatch_applies_bound_git_and_project_writes() -> Resul
             fs::write(policy, br#"{"readOnlyWritable":[".agent-run/locks"]}"#)?;
         }
         let mode = if configured { "reader" } else { "reader-empty" };
-        let (_, attempt) = dispatch(&rig, mode, "compose-reader")?;
+        let attempt = dispatch(&rig, mode)?;
         let cargo: serde_json::Value =
             serde_json::from_slice(&fs::read(attempt.join("cargo-setup.json"))?)?;
         assert_eq!(
             cargo,
             serde_json::json!({"status": "skipped", "reason": "read_only_lane"})
         );
-        let db = rusqlite::Connection::open(rig.state.join("run.sqlite3"))?;
-        let raw: Vec<u8> = db.query_row(
-            "SELECT record FROM attempts WHERE id=?1",
-            [attempt
-                .file_name()
-                .ok_or("attempt name")?
-                .to_str()
-                .ok_or("attempt id")?],
-            |row| row.get(0),
-        )?;
-        let record: serde_json::Value = serde_json::from_slice(&raw)?;
+        let record = attempt_record(&rig, &attempt)?;
         let expected: &[&str] = if configured {
             &[".agent-run/locks"]
         } else {
@@ -242,7 +249,7 @@ pub(crate) fn writer_dispatch_uses_lane_cache_and_narrow_provider_state() -> Res
     )?;
     let (_, context) = writer_context(&rig)?;
     let cleanup = super::worktree_tests::writer_process_cleanup(&context);
-    let (_, attempt) = dispatch(&rig, "writer", "compose-writer")?;
+    let attempt = dispatch(&rig, "writer")?;
     let cargo: serde_json::Value =
         serde_json::from_slice(&fs::read(attempt.join("cargo-setup.json"))?)?;
     assert_eq!(
@@ -303,14 +310,10 @@ pub(crate) fn provider() -> Result {
         fs::write(target.join("compose-target"), b"target")?;
         fs::create_dir_all(cargo.join("registry"))?;
         fs::write(cargo.join("registry/compose-home"), b"cargo")?;
-        let child_state = PathBuf::from(
+        let host_state = PathBuf::from(
             std::env::var_os(provenant_core::RUN_STATE_DIRECTORY_ENV)
-                .ok_or("child state missing")?,
+                .ok_or("host state missing")?,
         );
-        let host_state = child_state
-            .parent()
-            .and_then(Path::parent)
-            .ok_or("host state")?;
         denied(&host_state.join("cargo-target-seeds/generations/fixture/target/artifact"))?;
         for shared in [
             ".cargo/registry/compose",

@@ -147,8 +147,8 @@ path = "tests/fake_provider.rs"
 harness = false
 
 [[test]]
-name = "dispatch_provider"
-path = "tests/dispatch_provider.rs"
+name = "graph_provider"
+path = "tests/graph_provider.rs"
 harness = false
 
 [[test]]

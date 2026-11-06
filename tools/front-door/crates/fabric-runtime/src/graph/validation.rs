@@ -2,8 +2,7 @@ use super::*;
 
 pub(super) fn nodes_have_v2(nodes: &[GraphNode]) -> bool {
     nodes.iter().any(|node| {
-        node.review.is_some()
-            || node.extra.contains_key("review_base")
+        node.extra.contains_key("review_base")
             || node.family_group.is_some()
             || node
                 .inputs
@@ -15,7 +14,7 @@ pub(super) fn nodes_have_v2(nodes: &[GraphNode]) -> bool {
                     .any(|input| !input.required_outputs.is_empty())
             })
             || node.plan.as_ref().is_some_and(|spec| {
-                spec.patterns.iter().any(|pattern| {
+                spec.templates.iter().any(|pattern| {
                     pattern.nodes.iter().any(value_has_v2)
                         || pattern
                             .exports
@@ -52,7 +51,6 @@ fn value_has_v2(value: &serde_json::Value) -> bool {
                 || map
                     .get("required_outputs")
                     .is_some_and(|value| value.as_array().is_none_or(|values| !values.is_empty()))
-                || map.get("review").is_some_and(serde_json::Value::is_object)
                 || map.values().any(value_has_v2)
         }
         serde_json::Value::Array(values) => values.iter().any(value_has_v2),
@@ -117,7 +115,7 @@ pub(super) fn validate_output_kinds(document: &GraphDocument) -> Result<(), Admi
         document.nodes.iter().map(|n| (n.id.as_str(), n)).collect();
     for consumer in &document.nodes {
         if consumer.plan.as_ref().is_some_and(|plan| {
-            plan.patterns.iter().any(|pattern| {
+            plan.templates.iter().any(|pattern| {
                 pattern.exports.iter().any(|input| {
                     !input.required_outputs.is_empty() || input.extra.contains_key("required")
                 })
@@ -364,28 +362,14 @@ pub(super) fn validate_flat_plan(
                 "node deadline_seconds must be positive".into(),
             ));
         }
-        if node.review.is_some()
-            && (node.kind != Some(NodeKind::Plan)
-                || node.plan.is_some()
-                || node.access != AccessMode::ReadOnly
-                || node.source.is_none())
-        {
-            return Err(AdmissionError::Plan(
-                "review requires a read-only plan node with a source and no plan".into(),
-            ));
-        }
-        if node
-            .review
+        if let Some(reason) = node
+            .attempt
             .as_ref()
-            .is_some_and(|review| review.max_nodes == 0)
+            .and_then(|spec| attempt_error(node, spec))
         {
-            return Err(AdmissionError::Plan(
-                "review max_nodes must be positive".into(),
-            ));
+            return Err(AdmissionError::Plan(reason.into()));
         }
-        if node.review.is_none() {
-            plans::validate_spec(node).map_err(plan_error)?;
-        }
+        plans::validate_spec(node).map_err(plan_error)?;
         let is_composite = node.kind == Some(NodeKind::Composite);
         if is_composite != node.composite.is_some() {
             return Err(AdmissionError::Plan(
@@ -417,7 +401,7 @@ pub(super) fn validate_flat_plan(
         land::validate_node(node).map_err(plan_error)?;
         let is_gate = node.kind == Some(NodeKind::Gate);
         if is_gate != node.condition.is_some()
-            || !is_gate && node.on_fail.is_some()
+            || !is_gate && node.loop_body.is_none() && node.on_fail.is_some()
             || is_gate
                 && (node.route.is_some()
                     || node.routes.is_some()
@@ -574,13 +558,7 @@ pub(super) fn validate_flat_plan(
                 "graph PR is exclusive with node PRs".into(),
             ));
         }
-        if !is_gate
-            && !is_loop
-            && !is_composite
-            && !is_decide
-            && !is_land
-            && node.review.is_none()
-            && node.prompt.is_empty()
+        if !is_gate && !is_loop && !is_composite && !is_decide && !is_land && node.prompt.is_empty()
             || plans::prompt(node).len() > limits.node_prompt_bytes
         {
             return Err(AdmissionError::Plan("prompt size".into()));
@@ -599,14 +577,7 @@ pub(super) fn validate_flat_plan(
         }
 
         let routes = match (&node.route, &node.routes) {
-            (None, None)
-                if is_gate
-                    || is_loop
-                    || is_composite
-                    || is_decide
-                    || is_land
-                    || node.review.is_some() =>
-            {
+            (None, None) if is_gate || is_loop || is_composite || is_decide || is_land => {
                 Vec::new()
             }
             (Some(route), None) => vec![route.clone()],
@@ -662,7 +633,11 @@ pub(super) fn validate_flat_plan(
                 && let Err(error) = spec.check_launch(&provenant_records::LaunchRequest {
                     model: route.model.as_deref(),
                     effort: route.effort.as_deref(),
-                    write: node.access == AccessMode::WorktreeWrite,
+                    write: node.access == AccessMode::WorktreeWrite
+                        || node
+                            .attempt
+                            .as_ref()
+                            .is_some_and(|spec| !spec.write_roots.is_empty()),
                     ..Default::default()
                 })
             {
@@ -722,7 +697,6 @@ pub(super) fn validate_flat_plan(
         let mut depends_on = node.depends_on.clone();
         depends_on.sort();
         nodes.push(PlannedNode {
-            review: node.review.clone(),
             family_group: node.family_group.clone(),
             context: node.context.clone(),
             extra: node.extra.clone(),
@@ -734,7 +708,14 @@ pub(super) fn validate_flat_plan(
             dispositions: node.dispositions.clone(),
             read_roots: node.read_roots.clone(),
             attachments: node.attachments.clone(),
-            capabilities: node.capabilities.clone(),
+            // An explicit node set wins; a nonempty attempt set stands in for it.
+            capabilities: node.capabilities.clone().or_else(|| {
+                node.attempt
+                    .as_ref()
+                    .filter(|spec| !spec.capabilities.is_empty())
+                    .map(|spec| spec.capabilities.clone())
+            }),
+            attempt: node.attempt.clone().filter(|spec| !spec.is_empty()),
             source: node.source.clone(),
             after_expansion: node.after_expansion.clone(),
             plan: node.plan.clone(),
@@ -747,8 +728,7 @@ pub(super) fn validate_flat_plan(
             round: node.round.clone(),
             kind: match node.kind {
                 Some(
-                    NodeKind::Plan
-                    | NodeKind::Synthesise
+                    NodeKind::Synthesise
                     | NodeKind::Gate
                     | NodeKind::Loop
                     | NodeKind::Composite
@@ -889,6 +869,61 @@ pub(crate) fn valid_identifier(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
 }
 
+/// Why a node's attempt spec cannot launch through the graph, if it cannot.
+/// Worktree creation is owned by the graph, not an individual attempt.
+fn attempt_error(node: &GraphNode, spec: &AttemptSpec) -> Option<&'static str> {
+    if let Some(new) = &spec.new_worktree {
+        if node.access != AccessMode::WorktreeWrite {
+            return Some("new worktree requires a writer");
+        }
+        if node.source.is_some() || node.continues.is_some() {
+            return Some("new worktree cannot override a source binding");
+        }
+        let path = format!(".worktrees/{}", new.branch.replace('/', "-"));
+        if node.worktree.as_deref() != Some(path.as_str())
+            || path.len() > 251
+            || provenant_confinement::repo::GitRefName::branch(&new.branch).is_err()
+            || provenant_confinement::repo::GitRevision::new(&new.base).is_err()
+        {
+            return Some("invalid new worktree binding");
+        }
+    }
+    if spec.write_roots.len() > 32
+        || spec
+            .write_roots
+            .iter()
+            .any(|root| root.is_empty() || root.len() > 4096 || root.contains('\0'))
+    {
+        return Some("invalid write roots");
+    }
+    if node.capabilities.is_some() && !spec.capabilities.is_empty() {
+        return Some("set capabilities on the node or its attempt, not both");
+    }
+    if spec.capabilities.iter().any(|capability| {
+        capability.is_empty() || capability.len() > 64 || capability.contains('\0')
+    }) {
+        return Some("attempt capability must be a bounded name");
+    }
+    let account = spec.account.as_deref()?;
+    if account.is_empty() || account.len() > 64 || account.contains('\0') {
+        return Some("attempt account must be a bounded name");
+    }
+    if node
+        .route
+        .iter()
+        .chain(node.routes.iter().flatten())
+        .any(|route| {
+            route
+                .account
+                .as_deref()
+                .is_some_and(|pinned| pinned != account)
+        })
+    {
+        return Some("attempt account conflicts with a route account");
+    }
+    None
+}
+
 pub(super) fn route_is_bounded(route: &GraphRoute) -> bool {
     fn field(value: &str, limit: usize) -> bool {
         !value.is_empty() && value.len() <= limit && !value.contains('\0')
@@ -921,6 +956,71 @@ pub(super) fn route_is_bounded(route: &GraphRoute) -> bool {
 /// A findings block must parse, each finding needs a disposition from the
 /// declared list with a non-empty reason, and every selected upstream finding
 /// identity must appear exactly once.
+pub(super) fn review_verification_error(
+    node: &PlannedNode,
+    upstream: &[Finding],
+    required: &[Finding],
+    overflow: &[(String, String)],
+    outputs: &NodeOutputs,
+) -> Option<(&'static str, String)> {
+    if !template::review_verifier(node) {
+        return None;
+    }
+    if template::review_behaviour(node).is_some()
+        && outputs.findings.iter().any(|finding| {
+            !upstream.iter().any(|source| source.id == finding.id)
+                && !overflow.iter().any(|(id, _)| id == &finding.id)
+                && (finding
+                    .extra
+                    .get("verification")
+                    .and_then(serde_json::Value::as_str)
+                    != Some("new")
+                    || finding
+                        .reason
+                        .as_ref()
+                        .is_none_or(|reason| reason.trim().is_empty()))
+        })
+    {
+        return Some((
+            "verification_invalid",
+            "new verifier findings need verification=new and an evidence reason".into(),
+        ));
+    }
+    for finding in required {
+        let matches: Vec<_> = outputs
+            .findings
+            .iter()
+            .filter(|output| output.id == finding.id)
+            .collect();
+        if matches.len()
+            != required
+                .iter()
+                .filter(|source| source.id == finding.id)
+                .count()
+            || matches.iter().any(|output| {
+                !output
+                    .extra
+                    .get("verification")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|value| matches!(value, "upheld" | "falsified" | "unverifiable"))
+                    || output
+                        .reason
+                        .as_ref()
+                        .is_none_or(|reason| reason.trim().is_empty())
+            })
+        {
+            return Some((
+                "verification_incomplete",
+                format!(
+                    "finding {} needs exactly one verification and an evidence reason",
+                    finding.id
+                ),
+            ));
+        }
+    }
+    None
+}
+
 pub(super) fn disposition_error(
     dispositions: &[String],
     upstream: &[Finding],
@@ -1098,41 +1198,6 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
         .enumerate()
         .map(|(i, node)| (node.id.clone(), i))
         .collect();
-    for expansion in &checkpoint.expansions {
-        if let Some(review) = &expansion.review {
-            let progress = positions
-                .get(&expansion.source)
-                .map(|index| &checkpoint.nodes[*index])
-                .ok_or_else(|| GraphError::BadCheckpoint {
-                    node: expansion.source.clone(),
-                    invariant: "review expansion must retain its source",
-                })?;
-            let expected = progress
-                .review_base
-                .as_deref()
-                .or(checkpoint.bound_review_base.as_deref())
-                .or(checkpoint.bound_integration_base.as_deref());
-            if expected.is_some_and(|base| review.base.to_string() != base)
-                || progress.review_base.as_deref().is_some_and(|base| {
-                    expansion
-                        .nodes
-                        .iter()
-                        .filter(|node| node.composite.is_none())
-                        .any(|node| {
-                            node.extra
-                                .get("review_base")
-                                .and_then(serde_json::Value::as_str)
-                                != Some(base)
-                        })
-                })
-            {
-                return Err(GraphError::BadCheckpoint {
-                    node: expansion.source.clone(),
-                    invariant: "review expansion must retain its bound base",
-                });
-            }
-        }
-    }
     let active_expansions = checkpoint
         .nodes
         .iter()
@@ -1169,6 +1234,40 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
         });
     }
     for (index, (progress, node)) in checkpoint.nodes.iter().zip(&plan.nodes).enumerate() {
+        let mut historical;
+        let checkpoint = if progress.state.settled() {
+            if let Some(snapshots) = progress
+                .extra
+                .get("settled_dependency_snapshots")
+                .and_then(serde_json::Value::as_object)
+            {
+                historical = checkpoint.clone();
+                for (id, snapshot) in snapshots {
+                    let position = *positions.get(id).ok_or_else(|| GraphError::BadCheckpoint {
+                        node: node.id.clone(),
+                        invariant: "dependency snapshot must name a graph node",
+                    })?;
+                    let mut prior: NodeProgress = serde_json::from_value(snapshot.clone())
+                        .map_err(|_| GraphError::BadCheckpoint {
+                            node: node.id.clone(),
+                            invariant: "dependency snapshot must be valid progress",
+                        })?;
+                    if prior.id != *id || !prior.state.settled() {
+                        return Err(GraphError::BadCheckpoint {
+                            node: node.id.clone(),
+                            invariant: "dependency snapshot must retain settled identity",
+                        });
+                    }
+                    prior.round = historical.nodes[position].round.clone();
+                    historical.nodes[position] = prior;
+                }
+                &historical
+            } else {
+                checkpoint
+            }
+        } else {
+            checkpoint
+        };
         let bad = |invariant| GraphError::BadCheckpoint {
             node: node.id.clone(),
             invariant,
@@ -1202,7 +1301,7 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
                 }),
                 pause,
             ) => {
-                (node.plan.is_some() || plans::writer(node))
+                plans::agent(node)
                     && (pause.is_some() || (*active && *fallback))
                     && fragment_error.is_none_or(|fact| match fact {
                         PlanFailureFact::Structural(limit) => limit.actual > limit.max,
@@ -1262,6 +1361,17 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
             (
                 document.schema_version >= 2 && progress.source_binding != node.source,
                 "source selection must match the expanded plan",
+            ),
+            (
+                progress.extra.get("new_worktree_base").is_some_and(|base| {
+                    node.attempt
+                        .as_ref()
+                        .is_none_or(|spec| spec.new_worktree.is_none())
+                        || base
+                            .as_str()
+                            .is_none_or(|base| base.parse::<provenant_core::GitOid>().is_err())
+                }),
+                "writer provisioning must retain a full commit base",
             ),
             (
                 progress.source_commit.is_some()
@@ -1357,12 +1467,14 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
                     "gate evidence must match state, dependencies and condition",
                 ));
             }
-        } else if progress.gate.is_some() || progress.ci.is_some() {
+        } else if progress.gate.is_some() && !repair::is_repair(node) || progress.ci.is_some() {
             return Err(bad("only gate nodes may carry gate or CI evidence"));
         }
         if progress.state == NodeState::Skipped
             && (dependency_state(node, plan, checkpoint, &positions) != Some(NodeState::Skipped)
-                && !loops::inactive_round(node, checkpoint, &positions)
+                && !loops::inactive_round(node, plan, checkpoint, &positions)
+                && !repair::inactive_lens(node, plan, checkpoint, &positions)
+                && !patch::skipped_by_patch(checkpoint, &node.id)
                 || !progress.attempts.is_empty()
                 || progress.outputs.is_some())
         {
@@ -1558,15 +1670,6 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
                     attempt.state == AttemptState::Terminal
                         && attempt.outcome == Some(AttemptOutcome::Succeeded)
                 }) || fallback_settled(node, progress, document, checkpoint)
-                    || (node.review.is_some()
-                        && progress.source_commit.as_ref().is_some_and(|subject| {
-                            checkpoint.expansions.iter().any(|expansion| {
-                                expansion.source == node.id
-                                    && expansion.review.as_ref().is_some_and(|review| {
-                                        review.subject.to_string() == *subject
-                                    })
-                            })
-                        }))
             }
             NodeState::Failed if progress.advance_error.is_some() => last.is_none_or(|attempt| {
                 attempt.state == AttemptState::Terminal
@@ -1596,31 +1699,6 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
             ));
         }
     }
-    for expansion in &checkpoint.expansions {
-        let Some(review) = &expansion.review else {
-            continue;
-        };
-        let mut expected = Vec::new();
-        for (index, member) in plan.nodes.iter().enumerate() {
-            if review_panel_contains(expansion, member, plan, &positions) {
-                for attempt in &checkpoint.nodes[index].attempts {
-                    if attempt.review_substitution {
-                        expected.push(ReviewSubstitution {
-                            member: member.id.clone(),
-                            route_index: attempt.key.route_index,
-                        });
-                    }
-                }
-            }
-        }
-        expected.sort();
-        if review.substitutions != expected {
-            return Err(GraphError::BadCheckpoint {
-                node: expansion.source.clone(),
-                invariant: "review substitutions must match member attempts",
-            });
-        }
-    }
     Ok(())
 }
 
@@ -1639,11 +1717,17 @@ fn fallback_settled(
         .outputs
         .as_ref()
         .is_some_and(|outputs| outputs.plan.is_some())
-        && plans::fallback_expansion(&node.id, spec, document, node.require_skill_location)
-            .is_ok_and(|derived| {
-                checkpoint
-                    .expansions
-                    .iter()
-                    .any(|expansion| expansion.source == node.id && *expansion == derived)
-            })
+        && plans::fallback_expansion_for_generation(
+            &node.id,
+            spec,
+            document,
+            node.require_skill_location,
+            progress.extra.get("retry_generation"),
+        )
+        .is_ok_and(|derived| {
+            checkpoint
+                .expansions
+                .iter()
+                .any(|expansion| expansion.source == node.id && *expansion == derived)
+        })
 }

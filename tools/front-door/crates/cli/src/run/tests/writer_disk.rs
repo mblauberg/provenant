@@ -56,19 +56,6 @@ fn disk_policy_refusal_uses_resource_projection() {
 
 #[test]
 fn all_refused_render_keeps_the_full_typed_receipt() -> Result<(), Box<dyn std::error::Error>> {
-    let temp = tempfile::tempdir()?;
-    let root = std::fs::canonicalize(temp.path())?;
-    let project = root.join("project");
-    std::fs::create_dir(&project)?;
-    let mut inputs = provenant_core::RootInputs::new(root.join("home"), project.clone());
-    inputs.state_dir = Some(root.join("state"));
-    let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
-    let edge = Edge {
-        roots: &roots,
-        home: &root.join("home"),
-        assets: &project,
-        cwd: &project,
-    };
     let run = provenant_core::RunId::from_bytes([3; 16]);
     let first = AttemptId::from_bytes([1; 16]);
     let second = AttemptId::from_bytes([2; 16]);
@@ -88,7 +75,8 @@ fn all_refused_render_keeps_the_full_typed_receipt() -> Result<(), Box<dyn std::
         {"attempt_id":first,"state":"rejected"},
         {"attempt_id":second,"state":"rejected"}
     ]});
-    let rendered = render_run(reply("run", Ok((data.clone(), String::new()))), &edge);
+    let mut rendered = reply("run", Ok((data.clone(), String::new())));
+    apply_launch_policy(&mut rendered);
     assert_eq!(rendered.result.status, Status::Refused);
     assert!(rendered.result.error.is_some());
     assert_eq!(rendered.result.data, data);
@@ -108,7 +96,8 @@ fn all_refused_render_keeps_the_full_typed_receipt() -> Result<(), Box<dyn std::
             {"attempt_id":first,"state":"rejected"},
             {"attempt_id":second,"state":state}
         ]});
-        let rendered = render_run(reply("run", Ok((mixed.clone(), String::new()))), &edge);
+        let mut rendered = reply("run", Ok((mixed.clone(), String::new())));
+        apply_launch_policy(&mut rendered);
         assert_eq!(rendered.result.status, Status::Ok);
         assert!(rendered.result.error.is_none());
         assert_eq!(rendered.result.data["started"], mixed["started"]);
@@ -446,32 +435,6 @@ fn writer_disk_policy_refusal_keeps_disk_facts_and_safe_recovery() -> Result<(),
             .contains("restore the host disk observation")
     );
     Ok(())
-}
-
-#[test]
-fn retained_tree_diagnostics_preserve_condition_and_occupancy() {
-    use provenant_confinement::worktrees::{Occupancy, WorktreeCondition};
-    for (condition, label) in [
-        (WorktreeCondition::Clean, "clean checkout"),
-        (WorktreeCondition::Ignored, "ignored files present"),
-        (WorktreeCondition::Dirty, "uncommitted edits present"),
-        (
-            WorktreeCondition::GitOperationInProgress,
-            "Git operation in progress",
-        ),
-        (WorktreeCondition::Unknown, "cleanliness unknown"),
-    ] {
-        let note = dispatch::created_tree_state(condition, &Occupancy::Held);
-        assert_eq!(note, format!("{label}; writer custody held"));
-    }
-    let note = dispatch::created_tree_state(
-        WorktreeCondition::Clean,
-        &Occupancy::census_unknown("/fixture".into(), "census incomplete"),
-    );
-    assert!(note.contains("clean checkout; writer occupancy unknown"));
-    assert!(note.contains("census incomplete"));
-    assert!(!note.contains("live writer"));
-    assert!(!note.contains("for gc"));
 }
 
 #[test]

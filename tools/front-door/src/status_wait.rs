@@ -90,6 +90,9 @@ impl Snapshot {
             Target::Operation(id) => {
                 let reply = provenant_cli::run::status(
                     provenant_cli::Status {
+                        session_stream: false,
+                        stats: false,
+                        by: "template".into(),
                         id: Some(format!("operation:{id}")),
                         wait: None,
                         target: Vec::new(),
@@ -138,65 +141,59 @@ impl Snapshot {
                 let mut lanes: Vec<_> = rows
                     .iter()
                     .map(|row| {
-                        let lane = provenant_cli::run::project_lane(row, &[], edge.roots.state.as_path(), &Default::default(), None, false);
-                        let mut value = json!({"run_id": lane.run_id, "task_id": lane.task_id, "attempt_id": lane.attempt_id, "state": lane.state, "reason": lane.reason, "cause": lane.cause, "retry_of": lane.retry_of, "superseded_by": lane.superseded_by});
-                        if let Some(cloud) = lane.cloud {
-                            value["cloud"] = cloud;
-                        }
-                        if let Some(state) = lane.cloud_state {
-                            value["cloud_state"] = json!(state);
-                        }
+                        let lane = provenant_cli::run::project_lane(row, &[], edge.roots.state.as_path(), None, false);
+                        let value = json!({"id": lane.attempt_id, "kind": "attempt", "graph_id": null, "node_id": lane.task_id, "attempt_id": lane.attempt_id, "state": lane.state, "reason": lane.reason});
                         value
                     })
                     .collect();
                 lanes.sort_by_key(|v| v["attempt_id"].to_string());
+                let detail = provenant_cli::run::status_wait_details(target, &rows, edge).map_err(
+                    |error| ReadFailure {
+                        retry: matches!(
+                            error.kind,
+                            provenant_run::ErrorKind::Contention
+                                | provenant_run::ErrorKind::PeerUnavailable
+                        ),
+                        message: error.message,
+                    },
+                )?;
+                let mut data = json!({"rows": lanes});
+                if let Some(detail) = detail {
+                    data["detail"] = json!(detail);
+                }
                 Ok(Self {
                     terminal,
                     notable,
-                    data: json!({"lanes": lanes}),
+                    data,
                 })
             }
             Target::Graph(id) | Target::Auto(id) => {
-                let reply = provenant_cli::run::status(
-                    provenant_cli::Status {
-                        id: Some(id.clone()),
-                        wait: None,
-                        target: Vec::new(),
-                        until: Condition::Any,
-                        follow: false,
-                        limit: 100,
-                        cursor: None,
-                        all: false,
-                    },
-                    true,
-                    edge,
-                );
-                if let Some(error) = reply.result.error {
-                    return Err(ReadFailure {
-                        retry: error.code == provenant_run::ErrorKind::Contention.code(),
-                        message: error.message,
-                    });
+                let rows =
+                    crate::fabric::read_status_rows(id, edge).map_err(|error| ReadFailure {
+                        retry: false,
+                        message: error.to_string(),
+                    })?;
+                let Some(rows) = rows else {
+                    if matches!(target, Target::Auto(_)) {
+                        return Self::read(
+                            &Target::Lane(id.parse().map_err(str::to_owned)?),
+                            edge,
+                            left,
+                            pr_read_timeout,
+                            cancel,
+                        );
+                    }
+                    return Err("graph checkpoint not found".into());
+                };
+                if rows.is_empty() {
+                    return Err("named graph selection is empty".into());
                 }
-                let data = reply.result.data;
-                if data.get("graph_id").is_none() && matches!(target, Target::Auto(_)) {
-                    return Self::read(
-                        &Target::Lane(id.parse().map_err(str::to_owned)?),
-                        edge,
-                        left,
-                        pr_read_timeout,
-                        cancel,
-                    );
-                }
-                let state = data["status"]
-                    .as_str()
-                    .ok_or("graph checkpoint not found")?;
-                let nodes: Vec<_> = data["checkpoint"]["nodes"].as_array().into_iter().flatten().map(|node| {
-                    json!({"id": node["id"], "state": node["state"], "ci": node["ci"]["state"], "pause": node["expansion_pause"]})
-                }).collect();
+                let terminal = graph_rows_terminal(&rows);
+                let notable = terminal || rows.iter().any(|row| row["state"] == "paused");
                 Ok(Self {
-                    terminal: matches!(state, "complete" | "cancelled"),
-                    notable: matches!(state, "paused" | "complete" | "cancelled"),
-                    data: json!({"status": state, "pause_reason": data["pause_reason"], "nodes": nodes}),
+                    terminal,
+                    notable,
+                    data: json!({"rows":rows}),
                 })
             }
             Target::Pr(number) => {
@@ -253,6 +250,36 @@ impl Stop {
             .wait_timeout_while(stopped, duration, |stopped| !*stopped)
             .is_ok_and(|(stopped, _)| !*stopped)
     }
+}
+
+/// A settled graph or node row already proves its attempts drained, and attempt
+/// rows use a wider vocabulary (`timed_out`, `quota_limited`, ...), so an attempt
+/// decides only when no owner row was selected. A collected attempt keeps the
+/// checkpoint's `terminal` row, which has no `finished_at`.
+fn graph_rows_terminal(rows: &[Value]) -> bool {
+    let mut owners = rows
+        .iter()
+        .filter(|row| row["kind"] != "attempt")
+        .peekable();
+    if owners.peek().is_none() {
+        return rows
+            .iter()
+            .all(|row| !row["finished_at"].is_null() || row["state"] == "terminal");
+    }
+    owners.all(|row| {
+        matches!(
+            row["state"].as_str(),
+            Some(
+                "complete"
+                    | "cancelled"
+                    | "succeeded"
+                    | "failed"
+                    | "blocked"
+                    | "skipped"
+                    | "terminal"
+            )
+        )
+    })
 }
 
 struct Update {
@@ -487,6 +514,24 @@ mod tests {
         assert_eq!(wait_exit(true, false), 0);
         assert_eq!(wait_exit(false, true), 124);
     }
+    #[test]
+    fn a_settled_graph_is_terminal_whatever_its_attempt_state() {
+        let graph = |state: &str| json!({"kind": "graph", "state": state});
+        let attempt = |state: &str, finished: Value| json!({"kind": "attempt", "state": state, "finished_at": finished});
+        let done = json!("2026-11-07T00:00:00Z");
+        assert!(graph_rows_terminal(&[
+            graph("complete"),
+            attempt("timed_out", done.clone())
+        ]));
+        assert!(!graph_rows_terminal(&[
+            graph("pending"),
+            attempt("timed_out", done.clone())
+        ]));
+        assert!(graph_rows_terminal(&[attempt("quota_limited", done)]));
+        assert!(!graph_rows_terminal(&[attempt("running", Value::Null)]));
+        assert!(graph_rows_terminal(&[attempt("terminal", Value::Null)]));
+    }
+
     fn update(target: &str, state: &str, terminal: bool) -> Update {
         Update {
             target: target.into(),

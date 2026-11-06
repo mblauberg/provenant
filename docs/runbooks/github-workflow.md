@@ -10,6 +10,17 @@ absent from that file is deleted on the next sync, so never hand-create one.
 Issue intake uses the issue forms under `.github/ISSUE_TEMPLATE/`; blank
 issues are disabled.
 
+Save `delivery.toml` with the `deliver` template, `with.worktree`,
+`with.write_scope` and `with.brief` ([example](presets.md)). Start with
+`provenant run --use deliver --file delivery.toml --explain`, inspect its authority and gates, then submit without `--explain`.
+Use `batch` for parallel slices of about three acceptance items merged into one
+integration branch. Review each slice lightly and the integrated head in full;
+shared contracts precede dependent slices. See [templates](presets.md).
+Observe with `status`, collect `output TARGET` and `output TARGET --trace`,
+use `steer` for a message, `stop` for a subtree, `retry` for unfinished work
+and `edit` for unstarted graph nodes. `templates`, `land` and `quota`
+complete the core interface; `help --all` lists advanced commands.
+
 ## Statuses
 
 | Status | Meaning |
@@ -173,10 +184,11 @@ with an upstream so `gh pr create` finds the branch:
 git push -u origin fix/repo-runbook-mechanics
 ```
 
-A Fabric writer lane has no Git credentials unless `lanes.publish` is on (see
-[lane lifecycle](lane-lifecycle.md)). Otherwise use host delivery with
-`provenant run --prompt-file BRIEF --route senior --branch BRANCH --deliver pr`
-to push its verified commit and open the pull request.
+A Fabric writer has no Git credentials unless `lanes.publish` is on (see
+[lane lifecycle](lane-lifecycle.md)). Otherwise use
+`provenant run --use deliver --file delivery.toml --explain` and check that the composite
+binds the intended branch and host delivery before submitting. The host pushes
+the verified commit and opens the pull request within the approved authority.
 
 ### Pull request
 
@@ -421,7 +433,7 @@ envelopes retain outcomes recorded so far and distinguish `LAND_CONTENTION`,
 #### Landing settings
 
 Set these under `[domains.pr.land]` in host `config.toml`. The generated
-[configuration reference](../reference/config-keys.md#host-land-settings) lists
+[configuration reference](../reference/config-keys-all.md#host-land-settings) lists
 defaults, values and bounds for every key. Policy resolves bundled defaults,
 host settings, `projects.<project>`, `tiers.<tier>`, then invocation overrides;
 omitted fields inherit. The project and tier tables accept the same fields.

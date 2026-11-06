@@ -650,7 +650,7 @@ tools/front-door/tests/accounts.rs release.home-path 72285ca2b4d5ed5b
 tools/front-door/tests/accounts.rs release.home-path b389d435efbab2f8
 tools/front-door/tests/checks.rs release.home-path 3f415e007503a7ad
 tools/front-door/tests/checks.rs release.home-path 40e37f77a9e0f708
-tools/front-door/tests/dispatch_provider.rs release.github-token 39d590f85ded88a7
-tools/front-door/tests/dispatch_provider.rs release.github-token 6c83a52a3e9a10dc
-tools/front-door/tests/dispatch_provider.rs release.github-token c37e191243238824
-tools/front-door/tests/dispatch_provider.rs release.openai-key 339604d6b16ec264
+tools/front-door/tests/graph_provider.rs release.github-token 39d590f85ded88a7
+tools/front-door/tests/graph_provider.rs release.github-token 6c83a52a3e9a10dc
+tools/front-door/tests/graph_provider.rs release.github-token c37e191243238824
+tools/front-door/tests/graph_provider.rs release.openai-key 339604d6b16ec264

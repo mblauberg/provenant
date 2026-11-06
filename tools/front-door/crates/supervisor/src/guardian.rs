@@ -253,22 +253,12 @@ pub(crate) fn handoff(
     Ok(())
 }
 
-/// The host's nested child lane runs for one attempt, read through its opaque
-/// holder context. Only a definite "none" counts: an unreadable store or an
-/// unknown context answers `false`, never `true`.
-pub trait NestedChildStore {
-    fn has_no_nested_runs(&self, context: &[u8]) -> bool;
-}
-
 /// Composition seam for Run's bounded provider decoder and confinement filter.
 #[derive(Default)]
 pub struct GuardianHooks<'a> {
     /// Host disk policy, sampled only while this attempt has a live provider.
     pub disk: Option<&'a dyn DiskPressure>,
     pub children: Option<&'a dyn ChildRegistry>,
-    /// Answers whether the attempt can have no nested child lane when no
-    /// registry is wired.
-    pub nested_children: Option<&'a dyn NestedChildStore>,
     /// Run's terminal transaction. Without one, custody stays fenced after
     /// exit until an explicit recovery verifies Run's release attestations.
     pub holder: Option<&'a dyn Holder>,
@@ -308,6 +298,10 @@ pub trait DiskPressure {
 /// except when the attempt directory is provably removed: there is nowhere to
 /// publish the exit or settle, so only the writer reservation remains.
 pub trait Holder {
+    /// Host graph evidence: unknown or live nested work must prevent escapee stops.
+    fn has_live_children(&self, _context: &[u8]) -> Result<bool> {
+        Ok(false)
+    }
     fn admit(&self, context: &[u8], attempt: &Directory) -> Result<()>;
     /// Stop host-side submission services before descendant cleanup begins.
     /// Failure is bookkeeping evidence, never a provider stop reason.
@@ -541,7 +535,6 @@ pub fn supervise(args: &[OsString], hooks: GuardianHooks<'_>) -> Result<()> {
         registry: hooks.children,
         descendant_stop_allowed: false,
         escapee_stop_allowed: false,
-        nested_children: hooks.nested_children,
         attempt: inherited.attempt_directory,
         writer_dir: evidence,
         lock_dir: inherited.writer_directory,
@@ -611,12 +604,11 @@ struct Driver<'a> {
     protected: std::collections::BTreeSet<ProcessIdentity>,
     registry: Option<&'a dyn ChildRegistry>,
     descendant_stop_allowed: bool,
-    /// A stop aimed at one exact sandbox escapee is safe this tick: either the
-    /// nested-child registry was read (owners it lists that cannot be proven
-    /// stay in `protected`), or no registry is wired and the host reports no
-    /// nested child lane records. Independent of `descendant_stop_allowed`.
+    /// A stop aimed at one exact sandbox escapee is safe this tick: the registry
+    /// is absent or readable, and the host reports no live graph children.
+    /// Unproven registered owners stay protected. Independent of
+    /// `descendant_stop_allowed`.
     escapee_stop_allowed: bool,
-    nested_children: Option<&'a dyn NestedChildStore>,
 }
 /// Calls tracked by key before the sink stops de-duplicating and only adds.
 const USAGE_KEYS: usize = 65_536;

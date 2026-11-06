@@ -5,9 +5,7 @@ description: "Use when work is new or unsettled and needs a spec: acceptance cri
 
 # Scope
 
-Scope is the front human gate. Humans spend their effort here; after approval the
-agents work without them. A good spec lets a fresh agent build and verify the work
-without asking.
+Scope settles intent and authority so a fresh agent can build and verify the work.
 
 ## Spec gate
 
@@ -64,21 +62,18 @@ Never leave a `Spec gap:` line or a guess.
 
 ## Fan-out
 
-Name the preset, then run it with `--explain` first:
+Use `plan` by default to shape unsettled work, `explore` over named areas to
+map evidence, `research` for dated primary sources and `design` for options:
 
 ```sh
-provenant run --preset scout-swarm --prompt-file brief.md --set 'parameters.external=1'
-provenant run --preset fan-out-synthesise --prompt-file options.md --set 'parameters.width=3'
-provenant run --preset scope-then-run --prompt-file brief.md --params-file lane.toml --explain
+provenant run --use plan --file brief.md --explain
+provenant run --use explore --route junior --over src --file questions.md --explain
 ```
 
-- `scout-swarm` maps the ground; `fan-out-synthesise` compares options with no oracle.
-- `scope-then-run` goes on to a build, so use it only when the build is authorised.
-  Its `plan.scope` node ends `VERDICT: PASS|FAIL` and gates the writer.
-- The read-only `scope` preset produces a bounded implementation brief.
-
-The role briefs in `references/` (scout-areas, researcher, architect,
-acceptance-writer, critic) are loaded by those presets. Do not rename them.
+Compose nodes with `after` and `inputs`; use `synthesise` to reconcile returns.
+Read-only scoping grants no build authority. A later `implement` node starts
+only after scope and write authority hold. The briefs in `references/` supply
+scouting, research, architecture, acceptance and critique questions.
 
 ## Land
 

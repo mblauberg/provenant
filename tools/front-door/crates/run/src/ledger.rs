@@ -10,7 +10,7 @@ use crate::{
     db::{immediate, open_database, sql_int},
     *,
 };
-use provenant_core::{Clock, ProjectId, WallTime};
+use provenant_core::{AttemptId, Clock, ProjectId, WallTime};
 use provenant_supervisor::census::{ProcessIdentity, ProcessObservation};
 use rusqlite::{Connection, OptionalExtension, params};
 use std::{
@@ -26,7 +26,8 @@ const LEASES: &str = "
 CREATE TABLE leases (
  attempt TEXT PRIMARY KEY, project TEXT NOT NULL, store BLOB NOT NULL,
  class TEXT NOT NULL DEFAULT 'writer' CHECK(class IN ('writer','read_only')),
- boot TEXT NOT NULL, guardian TEXT NOT NULL, owner_id TEXT NOT NULL
+ boot TEXT NOT NULL, guardian TEXT NOT NULL, owner_id TEXT NOT NULL,
+ yielded INTEGER NOT NULL DEFAULT 0 CHECK(yielded IN (0,1))
 ) STRICT;
 CREATE INDEX lease_projects ON leases(project);
 ";
@@ -48,7 +49,7 @@ CREATE TABLE spacing (
 /// last, so a crash leaves the old ledger whole or the new one.
 pub(crate) fn open(host: &Path, request: &Request<'_>) -> Result<Connection> {
     let (_, db, _initialisation) = open_database(host, FILE, request)?;
-    if version(&db)? < 5 || !timed_spacing(&db)? {
+    if version(&db)? < 6 || !timed_spacing(&db)? {
         immediate(&db, request, |tx| {
             let current_version = version(tx)?;
             match current_version {
@@ -83,7 +84,10 @@ pub(crate) fn open(host: &Path, request: &Request<'_>) -> Result<Connection> {
                 tx.execute_batch("DROP TABLE leases;")?;
                 tx.execute_batch(LEASES)?;
             }
-            tx.execute_batch("PRAGMA user_version=5;")?;
+            if current_version == 5 {
+                tx.execute_batch("ALTER TABLE leases ADD COLUMN yielded INTEGER NOT NULL DEFAULT 0 CHECK(yielded IN (0,1));")?;
+            }
+            tx.execute_batch("PRAGMA user_version=6;")?;
             Ok(())
         })?;
     }
@@ -132,7 +136,7 @@ fn timed_spacing(db: &Connection) -> Result<bool> {
     )?)
 }
 fn version(db: &Connection) -> Result<i64> {
-    Ok(provenant_sqlite::read_version(db, 5)? as i64)
+    Ok(provenant_sqlite::read_version(db, 6)? as i64)
 }
 
 /// Take this attempt's lease when host and project counts and startup spacing
@@ -175,7 +179,12 @@ pub(crate) fn lease(
                 [&id],
                 |r| r.get(0),
             )?;
-            if still_held {
+            let yielded: bool = tx.query_row(
+                "SELECT COALESCE((SELECT yielded FROM leases WHERE attempt=?1),0)",
+                [&id],
+                |r| r.get(0),
+            )?;
+            if still_held && !yielded {
                 return Ok(Some(now));
             }
         }
@@ -194,6 +203,11 @@ pub(crate) fn lease(
             "INSERT INTO spacing(class,boot,last_start) VALUES (?1,?2,?3) ON CONFLICT(class) DO UPDATE SET boot=excluded.boot, last_start=excluded.last_start",
             params![class.as_str(), &host.boot, sql_int(host.micros)?],
         )?;
+        // A yielded lease retains its original guardian and store identity.
+        // Reclaim runs in the relay, which need not be the guardian process.
+        if tx.execute("UPDATE leases SET yielded=0 WHERE attempt=?1", [&id])? > 0 {
+            return Ok(Some(now));
+        }
         let identity = resources
             .guardian_identity()
             .ok_or(RunError::Admission(AdmissionError::GuardianIdentity))?;
@@ -213,6 +227,21 @@ pub(crate) fn lease(
             ],
         )?;
         Ok(Some(now))
+    })
+}
+/// Give up both host and project capacity, retaining custody for reclaim.
+pub(crate) fn yield_lease(
+    db: &Connection,
+    store: &Path,
+    id: AttemptId,
+    request: &Request<'_>,
+) -> Result<()> {
+    immediate(db, request, |tx| {
+        tx.execute(
+            "UPDATE leases SET yielded=1 WHERE attempt=?1 AND store=?2",
+            params![id.to_string(), store.as_os_str().as_bytes()],
+        )?;
+        Ok(())
     })
 }
 /// A reading of the host's monotonic clock and the boot it belongs to.
@@ -340,7 +369,7 @@ pub(crate) fn cap_hit(
     caps: LaneCaps,
 ) -> Result<Option<CapHit>> {
     let (host, in_project, host_writers, project_writers): (i64, i64, i64, i64) = tx.query_row(
-        "SELECT COUNT(*), COUNT(*) FILTER (WHERE project=?1), COUNT(*) FILTER (WHERE class='writer'), COUNT(*) FILTER (WHERE class='writer' AND project=?1) FROM leases",
+        "SELECT COUNT(*), COUNT(*) FILTER (WHERE project=?1), COUNT(*) FILTER (WHERE class='writer'), COUNT(*) FILTER (WHERE class='writer' AND project=?1) FROM leases WHERE yielded=0",
         [project.to_string()],
         |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
     )?;
@@ -387,15 +416,15 @@ pub(crate) fn cap_hit(
         )
     }))
 }
-/// Inspect at most 256 of the oldest existing leases. Normal admission caps
-/// the ledger at no more than 64, so every lease is covered without an unbounded scan.
+/// Inspect at most 256 leases, active ones first. Yielded parents do not count
+/// against caps, so they must not hide a dead active lease from this scan.
 fn prune(tx: &Connection, time: &dyn Clock, resources: &dyn Resources) -> Result<()> {
     let boot = time
         .boot_identity()
         .map_err(|_| RunError::Admission(AdmissionError::Clock))?;
     let leases = {
         let mut statement = tx.prepare(
-            "SELECT rowid, CAST(store AS BLOB), CAST(attempt AS BLOB), CAST(boot AS BLOB), CAST(guardian AS BLOB), CAST(owner_id AS BLOB) FROM leases ORDER BY rowid LIMIT 256",
+            "SELECT rowid, CAST(store AS BLOB), CAST(attempt AS BLOB), CAST(boot AS BLOB), CAST(guardian AS BLOB), CAST(owner_id AS BLOB) FROM leases ORDER BY yielded, rowid LIMIT 256",
         )?;
         statement
             .query_map([], |r| {
@@ -681,7 +710,7 @@ mod tests {
             let identity = serde_json::to_string(&live).unwrap();
             let owner_id = store_identity(&path).unwrap();
             db.execute(
-                "INSERT INTO leases VALUES ('live','p',?1,'writer',?2,?3,?4)",
+                "INSERT INTO leases VALUES ('live','p',?1,'writer',?2,?3,?4,0)",
                 params![dir.path().as_os_str().as_bytes(), boot, identity, owner_id],
             )
             .unwrap();
@@ -751,17 +780,17 @@ mod tests {
         let store = root.as_os_str().as_bytes();
         let owner_id = store_identity(&path).unwrap();
         db.execute(
-            "INSERT INTO leases VALUES ('old','p',?1,'writer','old boot',?2,?3)",
+            "INSERT INTO leases VALUES ('old','p',?1,'writer','old boot',?2,?3,0)",
             params![store, guardian, owner_id],
         )
         .unwrap();
         db.execute(
-            "INSERT INTO leases VALUES ('live','p',?1,'writer',?2,?3,?4)",
+            "INSERT INTO leases VALUES ('live','p',?1,'writer',?2,?3,?4,0)",
             params![store, boot, guardian, owner_id],
         )
         .unwrap();
         db.execute(
-            "INSERT INTO leases VALUES ('malformed','p',?1,'writer',?2,'bad',?3)",
+            "INSERT INTO leases VALUES ('malformed','p',?1,'writer',?2,'bad',?3,0)",
             params![store, boot, owner_id],
         )
         .unwrap();

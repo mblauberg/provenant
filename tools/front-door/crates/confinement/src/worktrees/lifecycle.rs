@@ -519,7 +519,8 @@ fn create_with_default(
     })
 }
 
-fn default_creation_base(
+/// Resolve the remote default for a new writer, with a local HEAD fallback warning.
+pub fn default_creation_base(
     context: &WorktreeContext<'_>,
     facts: &RepoFacts,
     cancel: &CancelToken,

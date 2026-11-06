@@ -55,6 +55,19 @@
         "companion_skills": []
       },
       "note": "Verify source-integrity behaviour against retained owner evidence; never infer authority or completion from status alone."
+    },
+    {
+      "id": "r2867010",
+      "relation": "positive",
+      "prompt": "My graph lane spawns a child without --wait and then exits. How should I orchestrate the child so its work can finish?",
+      "tags": [
+        "child-lifetime"
+      ],
+      "expected": {
+        "primary_skill": "orchestrate",
+        "companion_skills": []
+      },
+      "note": "Explain attached child cancellation on parent settlement; wait before exiting or explicitly detach the child."
     }
   ]
 }

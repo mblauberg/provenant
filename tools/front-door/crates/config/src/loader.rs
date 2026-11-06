@@ -1250,6 +1250,9 @@ fn issue_finding(issue: &Issue) -> Result<Finding, ConfigError> {
         path: user_path()?,
         line: issue.location.line,
         message: match &issue.source {
+            _ if issue.rule == "unknown_key" && key == "domains.fabric.pipelines" => {
+                "domains.fabric.pipelines: pipeline settings, including domains.fabric.pipelines.experiment, have been removed; delete the stale configuration table".into()
+            }
             Some(source)
                 if source.code == "unknown_fallback"
                     || source.code == "unsupported_fallback_effort" =>

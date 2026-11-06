@@ -1646,19 +1646,34 @@ impl HostDeliveryContext {
         {
             return Ok(());
         }
-        if !remote {
+        let checkout = if !remote {
             let trees = self.command(
                 &writer.worktree,
                 "git",
-                &["worktree", "list", "--porcelain"],
+                &["worktree", "list", "--porcelain", "-z"],
                 stage,
             )?;
-            if trees
-                .lines()
-                .any(|line| line == format!("branch {destination}"))
-            {
-                return Err(RunError::Delivery(stage));
-            }
+            trees.split("\0\0").find_map(|record| {
+                record
+                    .split('\0')
+                    .any(|line| line == format!("branch {destination}"))
+                    .then(|| {
+                        record
+                            .split('\0')
+                            .find_map(|line| line.strip_prefix("worktree "))
+                    })
+                    .flatten()
+                    .map(std::path::PathBuf::from)
+            })
+        } else {
+            None
+        };
+        if checkout.is_some() {
+            // An index lock only excludes Git, not the parent's editor or
+            // provider process. Never read-tree into a checkout we do not own:
+            // even a clean preflight can race an overlapping file write.
+            // Keep the child's sealed commit available for explicit pickup.
+            return Err(RunError::IntegrationParentBusy { child_head: head });
         }
         let candidate = if self
             .command(
@@ -1686,12 +1701,19 @@ impl HostDeliveryContext {
             {
                 return Err(RunError::Delivery(stage));
             }
-            let tree = self.command(
-                &writer.worktree,
-                "git",
-                &["merge-tree", "--write-tree", &expected, &head.to_string()],
-                stage,
-            )?;
+            let tree = self
+                .command(
+                    &writer.worktree,
+                    "git",
+                    &["merge-tree", "--write-tree", &expected, &head.to_string()],
+                    stage,
+                )
+                .map_err(|error| match error {
+                    RunError::Delivery(Stage::Integrate) => {
+                        RunError::IntegrationConflict { child_head: head }
+                    }
+                    error => error,
+                })?;
             let tree = GitOid::parse(tree.lines().next().unwrap_or_default())
                 .map_err(|_| RunError::Delivery(stage))?;
             let commit = self.command(
@@ -2238,6 +2260,9 @@ pub(crate) fn failed_state(error: &RunError) -> WriterDeliveryState {
             (Stage::PullRequest, Some(prepare_reason(error)))
         }
         RunError::IntegrationHeadMoved => (Stage::Integrate, None),
+        RunError::IntegrationParentBusy { .. } | RunError::IntegrationConflict { .. } => {
+            (Stage::Integrate, Some(prepare_reason(error)))
+        }
         RunError::DeliveryLimit { stage, .. } | RunError::DeliveryFact { stage, .. } => {
             (*stage, Some(prepare_reason(error)))
         }

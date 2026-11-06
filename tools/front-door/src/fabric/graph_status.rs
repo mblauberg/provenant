@@ -29,6 +29,8 @@ pub(super) fn redact_checkout_paths(
     checkpoint: &mut provenant_fabric_runtime::graph::GraphCheckpoint,
 ) {
     for node in &mut checkpoint.nodes {
+        // Internal immutable dependency evidence may contain bound checkout paths.
+        node.extra.remove("settled_dependency_snapshots");
         if let Some(binding) = &mut node.writer_binding {
             binding.worktree = "[redacted]".into();
             binding.extra.remove("source_directory_identity");

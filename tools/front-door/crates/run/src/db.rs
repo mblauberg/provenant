@@ -1,6 +1,6 @@
 use crate::*;
 use provenant_core::{ActorId, CancelToken, Clock, ProjectId, StateRoot, WaitBudget};
-use provenant_os::fs::{Directory, FsError, LockGuard, LockMode, Metadata};
+use provenant_os::fs::{Directory, FsError, LockGuard, LockMode};
 use rusqlite::{Connection, Transaction, TransactionBehavior};
 use std::{
     ffi::OsStr,
@@ -45,19 +45,6 @@ impl Request<'_> {
         Ok(())
     }
 }
-// Leave room below macOS's common 256-descriptor soft limit for SQLite,
-// publication, guardian launch and the one-descriptor custody probe. Reclaiming
-// exited guardians removes the lifetime limit without raising live FD pressure.
-// A small unit-test cap exercises reclamation without many filesystem syncs.
-pub(crate) const HELD_CHILD_LIMIT: usize = if cfg!(test) { 2 } else { 64 };
-
-/// Keep the scope after supersession or guardian exit for owner checks.
-pub(crate) struct Held {
-    pub(crate) scope: provenant_supervisor::custody::Scope,
-    pub(crate) handle: Option<provenant_supervisor::custody::CustodyHandle>,
-    custody: Metadata,
-}
-
 /// One connection, one owning thread. No transaction survives a call or
 /// includes filesystem publication.
 pub struct RunStore {
@@ -66,91 +53,12 @@ pub struct RunStore {
     pub(crate) context: ExecutionContext,
     pub(crate) writer_registry: std::path::PathBuf,
     pub(crate) repo_facts: provenant_confinement::worktrees::RepoFacts,
-    /// Canonical host home, used to refuse child roots that entry and compile
-    /// must both reject. Absent on stores that never validate children.
-    pub(crate) host_home: Option<std::path::PathBuf>,
     pub(crate) policy: crate::admission::AdmissionPolicy,
-    pub(crate) sealed_requester: Option<ActorId>,
-    pub(crate) sealed_parent_network: Option<NetworkAccess>,
     /// This host's ID, stamped on new attempts when the edge supplies it.
     pub(crate) host: Option<provenant_core::HostId>,
-    /// Scopes and bounded custody handles this host view handed to a guardian.
-    pub(crate) launched: std::cell::RefCell<Vec<Held>>,
-    /// Host-only launch claims survive deletion or rewriting of lane rows.
-    pub(crate) launched_tasks: std::cell::RefCell<
-        std::collections::BTreeSet<(provenant_core::RunId, provenant_core::TaskId)>,
-    >,
     _owner: PhantomData<Rc<()>>,
 }
 impl RunStore {
-    pub(crate) fn check_held_capacity(&self, id: provenant_core::AttemptId) -> Result<()> {
-        let mut launched = self.launched.borrow_mut();
-        let active = || {
-            launched
-                .iter()
-                .filter(|held| held.handle.is_some() && held.scope.attempt != id)
-                .count()
-        };
-        if active() < HELD_CHILD_LIMIT {
-            return Ok(());
-        }
-        for held in launched.iter_mut() {
-            if held
-                .handle
-                .as_ref()
-                .is_some_and(|handle| handle.custody_released(&held.custody))
-            {
-                held.handle = None;
-            }
-        }
-        if launched
-            .iter()
-            .filter(|held| held.handle.is_some() && held.scope.attempt != id)
-            .count()
-            >= HELD_CHILD_LIMIT
-        {
-            return Err(RunError::Validation(
-                "held child custody limit reached; earlier children are still running",
-            ));
-        }
-        Ok(())
-    }
-
-    pub(crate) fn hold_child(
-        &self,
-        handle: provenant_supervisor::custody::CustodyHandle,
-        custody: Metadata,
-    ) {
-        let scope = handle.scope();
-        let mut launched = self.launched.borrow_mut();
-        for held in launched
-            .iter_mut()
-            .filter(|held| held.scope.attempt == scope.attempt)
-        {
-            held.handle = None;
-        }
-        launched.push(Held {
-            scope,
-            handle: Some(handle),
-            custody,
-        });
-    }
-
-    /// The host's view of a child store, opened from the parent attempt's
-    /// sealed holder context. The lane can write this store and its attempt
-    /// summaries, so launch and the started attempt's owner use this requester
-    /// instead of any actor they name. The view refuses a run or attempt it
-    /// launched once its record names another owner, and stops each child
-    /// from the scope and directory it held at hand-off, never from the record.
-    pub fn with_sealed_requester(mut self, requester: ActorId) -> Self {
-        self.sealed_requester = Some(requester);
-        self
-    }
-    /// Network bound verified from the live parent holder's sealed task.
-    pub fn with_sealed_parent_network(mut self, network: NetworkAccess) -> Self {
-        self.sealed_parent_network = Some(network);
-        self
-    }
     /// Stamp new attempts and their events with this host. Supplied by the host
     /// composition edge; absent, the host stays unknown in the trace.
     pub fn with_host(mut self, host: provenant_core::HostId) -> Self {
@@ -172,12 +80,6 @@ impl RunStore {
     /// the host composition edge.
     pub fn with_writer_registry(mut self, state: &std::path::Path) -> Self {
         self.writer_registry = state.to_owned();
-        self
-    }
-    /// The host's canonical home, wherever it lives. Child entry checks use it
-    /// so they refuse a root that encloses it before compile would.
-    pub fn with_host_home(mut self, home: &std::path::Path) -> Self {
-        self.host_home = Some(home.to_owned());
         self
     }
     /// The host state root whose admission ledger and registrations this store
@@ -253,13 +155,8 @@ impl RunStore {
             context: context.clone(),
             writer_registry: context.state_root.as_path().to_owned(),
             repo_facts: Default::default(),
-            host_home: None,
             policy: Default::default(),
-            sealed_requester: None,
-            sealed_parent_network: None,
             host: None,
-            launched: Default::default(),
-            launched_tasks: Default::default(),
             _owner: PhantomData,
         }))
     }
@@ -275,13 +172,8 @@ impl RunStore {
             context: context.clone(),
             writer_registry: context.state_root.as_path().to_owned(),
             repo_facts: Default::default(),
-            host_home: None,
             policy: Default::default(),
-            sealed_requester: None,
-            sealed_parent_network: None,
             host: None,
-            launched: Default::default(),
-            launched_tasks: Default::default(),
             _owner: PhantomData,
         };
         if schema_version < SCHEMA_VERSION {

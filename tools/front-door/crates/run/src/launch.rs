@@ -2,44 +2,12 @@
 //! shaped for the providers crate's launch specification: the composition edge
 //! resolves routes, applies fallback and builds the exact invocation.
 use crate::{artifacts::read_sealed, db::decode, *};
-use provenant_core::{ActorId, AttemptId, OperationId, RunId, TaskId};
+use provenant_core::{ActorId, AttemptId, OperationId, RunId};
 use provenant_supervisor::custody::{
     self, CapturePlan, ExitObservation, OwnedLaunch, ProviderCommand, PublicationReservation, Scope,
 };
-use rusqlite::{OptionalExtension, params};
-use std::{collections::BTreeMap, ffi::OsString, path::PathBuf};
-
-/// Production discovery window for queued child runs.
-pub const QUEUED_RUNS_PAGE_SIZE: usize = 256;
-
-/// Host-validated identity and the network policy inherited at launch.
-#[derive(Clone, Debug)]
-pub struct ValidatedChild {
-    request: CanonicalRequest,
-    parent_network: NetworkAccess,
-}
-impl std::ops::Deref for ValidatedChild {
-    type Target = CanonicalRequest;
-    fn deref(&self) -> &Self::Target {
-        &self.request
-    }
-}
-impl ValidatedChild {
-    pub fn effective_task(&self, task: &TaskRequest) -> TaskRequest {
-        let mut task = task.clone();
-        if task.access.network.is_none() && self.parent_network != NetworkAccess::Open {
-            task.access.network = Some(self.parent_network);
-        }
-        task
-    }
-    #[cfg(test)]
-    pub(crate) fn fixture(request: CanonicalRequest) -> Self {
-        Self {
-            request,
-            parent_network: NetworkAccess::Open,
-        }
-    }
-}
+use rusqlite::params;
+use std::{ffi::OsString, path::PathBuf};
 
 /// An explicit dispatch argument wins over the effective profile default. A
 /// batch with no writer defaults from `lanes.max_concurrency_read_only`
@@ -539,22 +507,15 @@ impl RunStore {
         &self,
         request: &CanonicalRequest,
         task: &TaskRequest,
-        child: Option<&ValidatedChild>,
     ) -> TaskRequest {
-        let mut task = child.map_or_else(|| task.clone(), |value| value.effective_task(task));
+        let mut task = task.clone();
         if (request.parent.is_some() && request.parent_attempt.is_some())
-            || (child.is_none()
-                && (self.sealed_requester.is_some()
-                    || self.context.state_root.as_path() != self.writer_registry()))
+            || self.context.state_root.as_path() != self.writer_registry()
         {
             // A sealed contributor cannot add a capability through a rewritten
             // request. Database access needs a host-validated declaration.
-            if child.is_none() {
-                task.access.database_ipc = false;
-            }
-            let bound = self
-                .sealed_parent_network
-                .unwrap_or(NetworkAccess::Provider);
+            task.access.database_ipc = false;
+            let bound = NetworkAccess::Provider;
             let reach = |network| match network {
                 NetworkAccess::Provider => 0,
                 NetworkAccess::Local => 1,
@@ -575,7 +536,7 @@ impl RunStore {
         let [task] = input.request.tasks.as_slice() else {
             return Err(RunError::Validation("continuation task count"));
         };
-        let effective = self.effective_launch_task(&input.request, task, None);
+        let effective = self.effective_launch_task(&input.request, task);
         let task = &effective;
         let [attempt] = input.attempts.as_slice() else {
             return Err(RunError::Validation("continuation attempt count"));
@@ -702,19 +663,6 @@ pub trait Providers {
     fn runtime_cap(&self, _provider: &str) -> Option<u64> {
         None
     }
-    /// Host policy can reject a result and request a bounded successor. The
-    /// store preserves authority and refuses writer route fallback.
-    fn assess_result(
-        &self,
-        _task: &TaskRequest,
-        _record: &AttemptRecord,
-        _decoded: &Decoded,
-        _handoff: Option<&provenant_records::handoff::Handoff>,
-        _context: Option<&crate::HolderContext>,
-        _policy_attempt: u64,
-    ) -> std::result::Result<crate::ResultAssessment, String> {
-        Ok(crate::ResultAssessment::default())
-    }
     /// Host-selected minimum nice value for this lane.
     fn priority(&self, task: &TaskRequest) -> std::result::Result<u8, String> {
         Ok(provenant_records::run::default_lane_priority(
@@ -727,7 +675,7 @@ pub trait Providers {
     fn check_policy(&self, _task: &TaskRequest) -> std::result::Result<(), PrepareRefusal> {
         Ok(())
     }
-    /// Prepare one task, trying its fallback routes in order. An error is a
+    /// Prepare one task. An error is a
     /// task-local refusal reason; siblings still launch. `resume` is the prior
     /// terminal attempt of a continuation, whose exact session must be used:
     /// without one, refuse rather than start a fresh session.
@@ -796,9 +744,6 @@ enum HandOff {
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub enum Started {
     Launched(AttemptId),
-    /// Held child custody is full, or a policy retry's launch time has not
-    /// come; the attempt stays Queued for a later scan.
-    Deferred(AttemptId),
     Refused {
         attempt: AttemptId,
         reason: String,
@@ -919,586 +864,7 @@ pub fn access_root_allowed(root: &std::path::Path, state: &std::path::Path, read
     (read && release) || (!root.starts_with(state) && !state.starts_with(root))
 }
 
-/// A child's network reach may not exceed its parent's, each write root must
-/// sit inside a parent write root and each read root inside any parent root.
-/// The host repeats submission checks: roots must be existing canonical
-/// directories, clear of state except installed release roots granted for reads.
-#[cfg(test)]
-fn child_access_within(
-    parent: &TaskRequest,
-    child: &TaskRequest,
-    state_root: &std::path::Path,
-    home: Option<&std::path::Path>,
-) -> Result<()> {
-    child_access_within_impl(parent, child, state_root, home, false)
-}
-
-fn child_access_with_diagnostic(
-    parent: &TaskRequest,
-    child: &TaskRequest,
-    state_root: &std::path::Path,
-    home: Option<&std::path::Path>,
-) -> Result<()> {
-    child_access_within_impl(parent, child, state_root, home, true)
-}
-
-fn child_access_within_impl(
-    parent: &TaskRequest,
-    child: &TaskRequest,
-    state_root: &std::path::Path,
-    home: Option<&std::path::Path>,
-    diagnostic: bool,
-) -> Result<()> {
-    if child.access.database_ipc && !parent.access.database_ipc {
-        return Err(RunError::Validation(
-            "child database IPC exceeds parent access",
-        ));
-    }
-    // A child cannot select a different host-bound graph source.
-    if (child.access.source_root.is_some()
-        || child.access.source_identity.is_some()
-        || child.access.source_live)
-        && (child.access.source_root != parent.access.source_root
-            || child.access.source_identity != parent.access.source_identity
-            || child.access.source_live != parent.access.source_live)
-    {
-        return Err(RunError::Validation(
-            "child graph source exceeds parent access",
-        ));
-    }
-    // Materialised graph inputs belong to the node that was given them.
-    if child.access.inputs_root.is_some() && child.access.inputs_root != parent.access.inputs_root {
-        return Err(RunError::Validation(
-            "child graph inputs exceed parent access",
-        ));
-    }
-    let reach = |network| match network {
-        NetworkAccess::Provider => 0,
-        NetworkAccess::Local => 1,
-        NetworkAccess::Open => 2,
-    };
-    if reach(child.access.network(child.writer.is_some()))
-        > reach(parent.access.network(parent.writer.is_some()))
-    {
-        return Err(RunError::Validation("child network exceeds parent access"));
-    }
-    let state =
-        provenant_os::fs::canonicalize(state_root).unwrap_or_else(|_| state_root.to_path_buf());
-    let resolve = |root: &PathBuf, read: bool| {
-        provenant_os::fs::canonicalize(root)
-            .ok()
-            .filter(|canonical| {
-                canonical == root
-                    && canonical.is_dir()
-                    && access_root_allowed(canonical, &state, read)
-            })
-    };
-    for (root, read) in child
-        .access
-        .read_roots
-        .iter()
-        .map(|root| (root, true))
-        .chain(child.access.write_roots.iter().map(|root| (root, false)))
-    {
-        // Apply the same subtree rule as the confinement compiler.
-        if provenant_os::fs::canonicalize(root)
-            .ok()
-            .is_some_and(|canonical| {
-                provenant_confinement::refuses_lane_root(&canonical, read, home)
-            })
-        {
-            return Err(RunError::Confinement(if diagnostic {
-                provenant_confinement::permissions::PermissionError::CredentialGrant {
-                    path: root.clone(),
-                    access: if read { "read" } else { "write" },
-                }
-            } else {
-                provenant_confinement::permissions::PermissionError::CredentialRoot
-            }));
-        }
-    }
-    let writes: Vec<PathBuf> = parent
-        .access
-        .write_roots
-        .iter()
-        .filter_map(|root| resolve(root, false))
-        .collect();
-    let reads: Vec<PathBuf> = parent
-        .access
-        .read_roots
-        .iter()
-        .filter_map(|root| resolve(root, true))
-        .chain(writes.iter().cloned())
-        .collect();
-    let within = |roots: &[PathBuf], granted: &[PathBuf], read| {
-        roots.iter().all(|root| {
-            resolve(root, read)
-                .is_some_and(|root| granted.iter().any(|parent| root.starts_with(parent)))
-        })
-    };
-    // A parent file grant authorises only that file; directory grants cover descendants.
-    for attachment in &child.access.attachments {
-        let canonical = provenant_os::fs::canonicalize(attachment)
-            .ok()
-            .filter(|path| path == attachment && path.is_file())
-            .filter(|path| access_root_allowed(path, &state, true))
-            .filter(|path| !provenant_confinement::refuses_lane_root(path, true, home));
-        if !canonical.is_some_and(|path| {
-            parent.access.attachments.contains(&path)
-                || reads.iter().any(|root| path.starts_with(root))
-        }) {
-            return Err(RunError::Validation(
-                "child attachment exceeds parent access",
-            ));
-        }
-    }
-    if !within(&child.access.write_roots, &writes, false)
-        || !within(&child.access.read_roots, &reads, true)
-    {
-        return Err(RunError::Validation("child root exceeds parent access"));
-    }
-    Ok(())
-}
-
-#[cfg(test)]
-mod release_root_tests {
-    use super::*;
-    use std::path::Path;
-
-    #[test]
-    fn child_attachment_must_be_covered_by_parent()
-    -> std::result::Result<(), Box<dyn std::error::Error>> {
-        let temp = tempfile::tempdir()?;
-        let root = std::fs::canonicalize(temp.path())?;
-        let state = tempfile::tempdir()?;
-        let state = std::fs::canonicalize(state.path())?.join("state");
-        let first = root.join("first.png");
-        let second = root.join("second.png");
-        std::fs::write(&first, b"first")?;
-        std::fs::write(&second, b"second")?;
-        let mut parent = crate::tests::input().request.tasks.remove(0);
-        parent.access.attachments = vec![first.clone()];
-        let mut child = parent.clone();
-        assert!(child_access_within(&parent, &child, &state, None).is_ok());
-        child.access.attachments = vec![second.clone()];
-        assert!(child_access_within(&parent, &child, &state, None).is_err());
-        parent.access.read_roots.push(root.clone());
-        assert!(child_access_within(&parent, &child, &state, None).is_ok());
-        Ok(())
-    }
-
-    /// A read root in a Codex standalone release passes the shared entry
-    /// exception; a write root there stays refused.
-    #[test]
-    fn child_allows_codex_standalone_read_roots()
-    -> std::result::Result<(), Box<dyn std::error::Error>> {
-        // The rule is lexical, so check it without the filesystem first.
-        let shape = std::path::Path::new(
-            "/Users/alice/.codex/packages/standalone/releases/0.163.0-aarch64-apple-darwin/bin",
-        );
-        assert!(
-            !provenant_confinement::refuses_lane_root(shape, true, None),
-            "reads pass entry"
-        );
-        assert!(
-            provenant_confinement::refuses_lane_root(shape, false, None),
-            "writes stay strict"
-        );
-        // Against a machine's real home: build a temp release and walk it
-        // through `child_access_within`. A lane can seal `~/.codex`; then the
-        // fixture cannot exist and the filesystem part is skipped silently.
-        let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
-            return Ok(());
-        };
-        let releases = home.join(".codex/packages/standalone/releases");
-        if std::fs::create_dir_all(&releases).is_err() {
-            return Ok(());
-        }
-        let Ok(temp) = tempfile::tempdir_in(&releases) else {
-            return Ok(());
-        };
-        let release = std::fs::canonicalize(temp.path())?;
-        let state_dir = tempfile::tempdir()?;
-        let state = std::fs::canonicalize(state_dir.path())?.join("state");
-        let mut parent = crate::tests::input().request.tasks.remove(0);
-        parent.access.read_roots = vec![release.clone()];
-        let mut child = parent.clone();
-        child.access.read_roots = vec![release.clone()];
-        child.access.write_roots = vec![];
-        assert!(
-            child_access_within(&parent, &child, &state, Some(&home)).is_ok(),
-            "reads in a standalone release pass entry"
-        );
-        child.access.write_roots = vec![release.clone()];
-        child.access.read_roots = vec![];
-        let error = child_access_within(&parent, &child, &state, Some(&home)).unwrap_err();
-        assert!(error.to_string().contains(
-            &provenant_confinement::permissions::PermissionError::CredentialRoot.to_string()
-        ));
-        Ok(())
-    }
-
-    #[test]
-    fn child_credential_refusal_names_fixture_path_and_guard()
-    -> std::result::Result<(), Box<dyn std::error::Error>> {
-        let temp = tempfile::tempdir()?;
-        let home = std::fs::canonicalize(temp.path())?;
-        let root = home.join(".gemini/skills");
-        std::fs::create_dir_all(&root)?;
-        let mut parent = crate::tests::input().request.tasks.remove(0);
-        parent.access.read_roots = vec![root.clone()];
-        let child = parent.clone();
-        let error = child_access_with_diagnostic(&parent, &child, &home.join("state"), Some(&home))
-            .unwrap_err();
-        let local = error.diagnostic(provenant_records::diagnostic::Destination::Local);
-        let remote = error.diagnostic(provenant_records::diagnostic::Destination::Remote {
-            repository: None,
-            home: Some(&home),
-        });
-        assert!(local.detail.unwrap().contains(&root.display().to_string()));
-        let detail = remote.detail.unwrap();
-        assert!(detail.contains("~/.gemini/skills"), "{detail}");
-        assert!(detail.contains("read grant"), "{detail}");
-        Ok(())
-    }
-
-    #[test]
-    fn child_refuses_credential_and_enclosing_roots()
-    -> std::result::Result<(), Box<dyn std::error::Error>> {
-        let temp = tempfile::tempdir()?;
-        let home = temp.path().join("home");
-        let credential = home.join(".ssh").join("nested");
-        std::fs::create_dir_all(&credential)?;
-        let home = std::fs::canonicalize(home)?;
-        let roots = [
-            std::fs::canonicalize(temp.path())?,
-            home.clone(),
-            std::fs::canonicalize(credential)?,
-        ];
-        for root in roots {
-            let mut parent = crate::tests::input().request.tasks.remove(0);
-            parent.access.read_roots = vec![root.clone()];
-            parent.access.write_roots = vec![root.clone()];
-            for read in [true, false] {
-                let mut child = parent.clone();
-                child.access.read_roots = if read { vec![root.clone()] } else { vec![] };
-                child.access.write_roots = if read { vec![] } else { vec![root.clone()] };
-                let error =
-                    child_access_within(&parent, &child, &temp.path().join("state"), Some(&home))
-                        .unwrap_err();
-                assert!(matches!(
-                    error,
-                    RunError::Confinement(
-                        provenant_confinement::permissions::PermissionError::CredentialRoot
-                    )
-                ));
-            }
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn child_root_table_matches_confinement() {
-        let standalone =
-            "/Users/alice/.codex/packages/standalone/releases/0.163.0-aarch64-apple-darwin";
-        let home = Path::new("/fixture/host-home");
-        for (path, read_allowed, write_allowed) in [
-            ("/Users/alice/.ssh", false, false),
-            ("/Users/alice/.config", false, false),
-            (standalone, true, false),
-            ("/Users/alice/project", true, true),
-        ] {
-            for (flag, read, allowed) in [
-                ("--read-root", true, read_allowed),
-                ("--write-root", false, write_allowed),
-            ] {
-                assert_eq!(
-                    !provenant_confinement::refuses_lane_root(Path::new(path), read, Some(home)),
-                    allowed,
-                    "{flag} {path}"
-                );
-            }
-        }
-        // An injected nonconventional home is refused, matching compile.
-        let home = Path::new("/srv/team/alice");
-        for (path, read_allowed, write_allowed) in [
-            ("/srv/team", false, false),
-            ("/srv/team/alice", false, false),
-            ("/srv/team/alice/.config", false, false),
-            ("/srv/team/alice/project", true, true),
-        ] {
-            for (flag, read, allowed) in [
-                ("--read-root", true, read_allowed),
-                ("--write-root", false, write_allowed),
-            ] {
-                assert_eq!(
-                    !provenant_confinement::refuses_lane_root(Path::new(path), read, Some(home)),
-                    allowed,
-                    "{flag} {path}"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn child_refuses_a_root_enclosing_an_injected_nonconventional_home()
-    -> std::result::Result<(), Box<dyn std::error::Error>> {
-        let temp = tempfile::tempdir()?;
-        let team = temp.path().join("srv/team");
-        let home = team.join("alice");
-        let project = home.join("project");
-        let config = home.join(".config");
-        std::fs::create_dir_all(&project)?;
-        std::fs::create_dir_all(&config)?;
-        let team = std::fs::canonicalize(team)?;
-        let home = std::fs::canonicalize(home)?;
-        let project = std::fs::canonicalize(project)?;
-        let config = std::fs::canonicalize(config)?;
-        let state = temp.path().join("state");
-        for root in [&team, &home, &config] {
-            for read in [true, false] {
-                let mut parent = crate::tests::input().request.tasks.remove(0);
-                parent.access.read_roots = vec![root.clone()];
-                parent.access.write_roots = vec![root.clone()];
-                let mut child = parent.clone();
-                child.access.read_roots = if read { vec![root.clone()] } else { vec![] };
-                child.access.write_roots = if read { vec![] } else { vec![root.clone()] };
-                let error = child_access_within(&parent, &child, &state, Some(&home)).unwrap_err();
-                assert!(matches!(
-                    error,
-                    RunError::Confinement(
-                        provenant_confinement::permissions::PermissionError::CredentialRoot
-                    )
-                ));
-            }
-        }
-        let mut parent = crate::tests::input().request.tasks.remove(0);
-        parent.access.read_roots = vec![project.clone()];
-        parent.access.write_roots = vec![project.clone()];
-        let mut child = parent.clone();
-        child.access.read_roots = vec![project.clone()];
-        child.access.write_roots = vec![project];
-        assert!(child_access_within(&parent, &child, &state, Some(&home)).is_ok());
-        Ok(())
-    }
-
-    #[test]
-    fn child_inherits_only_release_read_roots()
-    -> std::result::Result<(), Box<dyn std::error::Error>> {
-        let temp = tempfile::tempdir()?;
-        let state = std::fs::canonicalize(temp.path())?.join("state");
-        let release = state
-            .join("releases")
-            .join(provenant_records::SourceDigest::from_bytes([1; 32]).to_string());
-        let skills = release.join("skills");
-        std::fs::create_dir_all(&skills)?;
-        std::fs::create_dir_all(state.join("projects"))?;
-        let mut parent = crate::tests::input().request.tasks.remove(0);
-        parent.access.read_roots = vec![release.clone()];
-        let mut child = parent.clone();
-        child.access.read_roots = vec![skills.clone()];
-        assert!(
-            child_access_within(
-                &parent,
-                &child,
-                &state,
-                Some(Path::new("/fixture/host-home"))
-            )
-            .is_ok()
-        );
-        let other = state
-            .join("releases")
-            .join(provenant_records::SourceDigest::from_bytes([2; 32]).to_string());
-        std::fs::create_dir_all(&other)?;
-        child.access.read_roots = vec![other];
-        assert!(
-            child_access_within(
-                &parent,
-                &child,
-                &state,
-                Some(Path::new("/fixture/host-home"))
-            )
-            .is_err()
-        );
-        for root in [
-            state.join("releases"),
-            state.join("projects"),
-            state.clone(),
-            state.join("releases/not-a-digest/skills"),
-            state.join("releases/.provenant-staging.fixture/skills"),
-        ] {
-            std::fs::create_dir_all(&root)?;
-            parent.access.read_roots = vec![root.clone()];
-            child.access.read_roots = vec![root];
-            assert!(
-                child_access_within(
-                    &parent,
-                    &child,
-                    &state,
-                    Some(Path::new("/fixture/host-home"))
-                )
-                .is_err()
-            );
-        }
-        parent.access.write_roots = vec![release];
-        child.access.read_roots.clear();
-        child.access.write_roots = vec![skills];
-        assert!(
-            child_access_within(
-                &parent,
-                &child,
-                &state,
-                Some(Path::new("/fixture/host-home"))
-            )
-            .is_err()
-        );
-        Ok(())
-    }
-}
-
-#[derive(Default)]
-struct ChildAttempts {
-    counts: BTreeMap<TaskId, u64>,
-    refusals: BTreeMap<AttemptId, &'static str>,
-}
-
 impl RunStore {
-    /// Authenticate a lane-local continuation source before inheriting host
-    /// associations. A legacy request cannot prove attempt membership.
-    pub fn check_child_attempt_id(
-        &self,
-        request: &CanonicalRequest,
-        record: &AttemptRecord,
-    ) -> Result<()> {
-        if request.child_attempt_id_version.is_none() {
-            return Err(RunError::Validation("legacy child attempt identity"));
-        }
-        if let Some(reason) = self.child_attempt_reason(record.run_id, request, record)? {
-            return Err(RunError::Validation(reason));
-        }
-        Ok(())
-    }
-
-    fn child_attempt_reason(
-        &self,
-        run: RunId,
-        request: &CanonicalRequest,
-        record: &AttemptRecord,
-    ) -> Result<Option<&'static str>> {
-        self.check_child_run_id(run, request, &record.operation_id)?;
-        Ok(if record.run_id != run {
-            Some("child attempt run does not match")
-        } else if crate::correlation::child_attempt_id(
-            self.context.project_id,
-            run,
-            request,
-            record.task_id,
-        )?
-        .is_some_and(|id| id != record.attempt_id)
-        {
-            Some("child attempt ID does not match host derivation")
-        } else if !request
-            .tasks
-            .iter()
-            .any(|task| task.task_id == record.task_id)
-        {
-            Some("child attempt task missing from request")
-        } else if matches!(record.state, AttemptState::Queued { .. })
-            && self
-                .launched_tasks
-                .borrow()
-                .contains(&(run, record.task_id))
-        {
-            Some("child task already launched")
-        } else {
-            None
-        })
-    }
-    /// Count lane-writable records, including terminal attempts. The task
-    /// index is untrusted and must not hide duplicate decoded task IDs.
-    fn child_attempts(
-        &self,
-        run: RunId,
-        request: &CanonicalRequest,
-        call: &Request<'_>,
-    ) -> Result<ChildAttempts> {
-        call.check()?;
-        let mut query = self
-            .db
-            .prepare("SELECT id,record FROM attempts WHERE run=?1 AND project=?2")?;
-        let mut rows = query.query(params![
-            run.to_string(),
-            self.context.project_id.to_string()
-        ])?;
-        let mut attempts = ChildAttempts::default();
-        while let Some(row) = rows.next()? {
-            let id: String = row.get(0)?;
-            let id = AttemptId::parse(&id).map_err(|_| RunError::Validation("attempt index ID"))?;
-            let raw: Vec<u8> = row.get(1)?;
-            let record: AttemptRecord = crate::db::decode_attempt(&raw)?;
-            if let Some(reason) = self.child_attempt_reason(run, request, &record)? {
-                attempts.refusals.insert(id, reason);
-                continue;
-            }
-            *attempts.counts.entry(record.task_id).or_insert(0) += 1;
-        }
-        Ok(attempts)
-    }
-    /// Validate lane-writable ingress against the host's recorded parent and
-    /// its sealed task. A child never gains authority its parent lacks, and a
-    /// lane cannot propose a writer or delivering child: the host has no
-    /// sealed list of worktrees a lane may delegate, and a writer child in any
-    /// registered worktree could plant code that later runs unconfined. Access
-    /// must sit within the parent's. A child cannot continue an attempt, whose
-    /// retained state the host would copy. The lane can rewrite its store at
-    /// any time, so launch only the request returned here.
-    pub fn validate_child(
-        &self,
-        run: RunId,
-        parent: AttemptId,
-        parent_task: &TaskRequest,
-        parent_depth: u64,
-        maximum: u64,
-        call: &Request<'_>,
-    ) -> Result<ValidatedChild> {
-        let expected = next_lane_depth(parent_depth, maximum)?;
-        let request = self.request(run, call)?;
-        if request.parent_attempt != Some(parent) || request.lane_depth != Some(expected) {
-            return Err(RunError::Validation(
-                "child request does not match host parent record",
-            ));
-        }
-        if request.parent.is_some() {
-            return Err(RunError::Validation(
-                "a child run cannot continue an attempt",
-            ));
-        }
-        self.check_child_run_id(run, &request, &self.run(run, call)?.operation_id)?;
-        let attempts = self.child_attempts(run, &request, call)?;
-        if let Some(reason) = attempts.refusals.values().next() {
-            return Err(RunError::Validation(reason));
-        }
-        if attempts.counts.values().any(|count| *count > 1) {
-            return Err(RunError::Validation("child task has more than one attempt"));
-        }
-        let parent_network = parent_task.access.network(parent_task.writer.is_some());
-        let validated = ValidatedChild {
-            request,
-            parent_network,
-        };
-        for task in &validated.tasks {
-            if task.writer.is_some() || task.deliver.is_some() {
-                return Err(RunError::Validation("a lane cannot propose a writer child"));
-            }
-            child_access_with_diagnostic(
-                parent_task,
-                &validated.effective_task(task),
-                self.context.state_root.as_path(),
-                self.host_home.as_deref(),
-            )?;
-        }
-        Ok(validated)
-    }
     /// Refuse queued proposals without touching any launched provider.
     pub fn refuse_queued(&self, run: RunId, reason: &str, call: &Request<'_>) -> Result<()> {
         let ids: Vec<String> = {
@@ -1530,51 +896,6 @@ impl RunStore {
         }
         Ok(())
     }
-    /// Bounded ingress for the parent host's child launcher. No provider or
-    /// custody action occurs in the submitting lane.
-    pub fn queued_runs(&self, call: &Request<'_>, page_size: usize) -> Result<Vec<RunId>> {
-        call.check()?;
-        let page_size =
-            i64::try_from(page_size).map_err(|_| RunError::Validation("queued runs page size"))?;
-        let records: Vec<Vec<u8>> = {
-            let mut query = self.db.prepare(
-                "SELECT record FROM attempts WHERE project=?1 AND terminal=0 ORDER BY sequence LIMIT ?2",
-            )?;
-            let rows = query.query_map(
-                rusqlite::params![self.context.project_id.to_string(), page_size],
-                |row| row.get(0),
-            )?;
-            rows.collect::<std::result::Result<_, _>>()?
-        };
-        let mut runs = std::collections::BTreeSet::new();
-        for raw in records {
-            let record: AttemptRecord = crate::db::decode_attempt(&raw)?;
-            if matches!(record.state, AttemptState::Queued { .. }) {
-                runs.insert(record.run_id);
-            }
-        }
-        // `create` commits the queued attempts before it seals `request.json`
-        // and the prompts; the operation is only accepted once they exist.
-        let mut ready = Vec::new();
-        for run in runs {
-            let raw: Option<Vec<u8>> = {
-                self.db
-                    .query_row(
-                        "SELECT record FROM operations WHERE project=?1 AND run=?2",
-                        params![self.context.project_id.to_string(), run.to_string()],
-                        |row| row.get(0),
-                    )
-                    .optional()?
-            };
-            let Some(raw) = raw else { continue };
-            let operation: OperationRecord = decode(&raw)?;
-            if operation.state != OperationState::Prepared {
-                ready.push(run);
-            }
-        }
-        Ok(ready)
-    }
-
     pub fn request(&self, run: RunId, call: &Request<'_>) -> Result<CanonicalRequest> {
         Ok(self.request_with_digest(run, call)?.0)
     }
@@ -1627,7 +948,6 @@ impl RunStore {
                 )
             },
             None,
-            None,
             call,
         )
     }
@@ -1653,41 +973,7 @@ impl RunStore {
                     call.clock,
                 )
             },
-            None,
             Some(expected.digest()?),
-            call,
-        )
-    }
-    /// Start a child run from the request `validate_child` returned. The lane
-    /// may have rewritten its store since, so a request whose digest no longer
-    /// matches is refused rather than launched. For the same reason the child
-    /// launches for the store's sealed requester, never the actor the child's
-    /// run record names. Versioned child IDs must match the host derivation;
-    /// legacy attempts without a version remain unindexed.
-    pub fn start_child(
-        &self,
-        run: RunId,
-        validated: &ValidatedChild,
-        providers: &dyn Providers,
-        context: &dyn Fn(&AttemptRecord, ActorId) -> Result<Vec<u8>>,
-        call: &Request<'_>,
-    ) -> Result<Vec<Started>> {
-        self.start_inner(
-            run,
-            providers,
-            context,
-            &|directory, scope, binding| {
-                custody::acquire_writer(
-                    directory,
-                    scope,
-                    binding,
-                    provenant_core::WaitBudget::nonblocking(call.clock.mono_now()),
-                    call.cancel,
-                    call.clock,
-                )
-            },
-            Some((validated, self.child_requester()?)),
-            None,
             call,
         )
     }
@@ -1705,31 +991,18 @@ impl RunStore {
             Scope,
             custody::WriterBinding,
         ) -> custody::Result<custody::CustodyLease>,
-        validated: Option<&ValidatedChild>,
         expected: Option<&CanonicalRequest>,
         call: &Request<'_>,
     ) -> Result<Vec<Started>> {
-        let child = match validated {
-            Some(request) => Some((request, self.child_requester()?)),
-            None => None,
-        };
         self.start_inner(
             run,
             providers,
             context,
             acquire_writer,
-            child,
             expected.map(CanonicalRequest::digest).transpose()?,
             call,
         )
     }
-    pub(crate) fn child_requester(&self) -> Result<ActorId> {
-        self.sealed_requester.ok_or(RunError::Validation(
-            "child launch lacks a sealed requester",
-        ))
-    }
-    /// `child` is a validated child request's digest and its host-held
-    /// requester; a top-level run takes its requester from its own record.
     #[allow(clippy::too_many_arguments)]
     fn start_inner(
         &self,
@@ -1741,7 +1014,6 @@ impl RunStore {
             Scope,
             custody::WriterBinding,
         ) -> custody::Result<custody::CustodyLease>,
-        child: Option<(&ValidatedChild, ActorId)>,
         expected: Option<provenant_core::Digest>,
         call: &Request<'_>,
     ) -> Result<Vec<Started>> {
@@ -1754,30 +1026,7 @@ impl RunStore {
                 "request changed after launch validation",
             ));
         }
-        let requester = match child {
-            Some((validated, _)) if request.digest()? != validated.digest()? => {
-                return Err(RunError::Validation(
-                    "child request changed after validation",
-                ));
-            }
-            Some((_, requester)) => {
-                self.check_child_run_id(run, &request, &self.run(run, call)?.operation_id)?;
-                requester
-            }
-            None => self.run(run, call)?.actor_id,
-        };
-        if self.sealed_parent_network.is_none()
-            && ((request.parent.is_some() && request.parent_attempt.is_some())
-                || (child.is_none()
-                    && (self.sealed_requester.is_some()
-                        || self.context.state_root.as_path() != self.writer_registry())))
-        {
-            use std::io::Write;
-            let _ = writeln!(
-                std::io::stderr().lock(),
-                "warning: parent network unavailable; child-store launch uses the same provider-only profile as other provider-only lanes (macOS egress limitation: #2118)"
-            );
-        }
+        let requester = self.run(run, call)?.actor_id;
         let resume = request
             .parent
             .filter(|_| request.fresh_continuation.is_none())
@@ -1796,29 +1045,7 @@ impl RunStore {
         let mut started = Vec::new();
         for id in ids {
             let id = AttemptId::parse(&id).map_err(|_| RunError::Validation("attempt index ID"))?;
-            // The lane may have added or rewritten rows since validation.
-            // Treat bad ingress as a refusal, so the scan can finish.
-            let child_attempts = child
-                .map(|_| self.child_attempts(run, &request, call))
-                .transpose()?;
-            let child_reason = child_attempts
-                .as_ref()
-                .and_then(|attempts| attempts.refusals.get(&id))
-                .copied();
-            let record = match self.record(id, call) {
-                Ok(record) => record,
-                Err(RunError::Validation(reason)) if child.is_some() => {
-                    started.push(Started::Refused {
-                        attempt: id,
-                        reason: child_reason.unwrap_or(reason).into(),
-                        kind: RefusalKind::PreparationBoundary(
-                            provenant_records::diagnostic::BoundaryClass::Authority,
-                        ),
-                    });
-                    continue;
-                }
-                Err(error) => return Err(error),
-            };
+            let record = self.record(id, call)?;
             if !matches!(record.state, AttemptState::Queued { .. }) {
                 continue;
             }
@@ -1836,149 +1063,14 @@ impl RunStore {
                     .wall_now()
                     .map_err(|_| RunError::Validation("wall clock"))
             };
-            let child_reason = if child_reason.is_some() {
-                child_reason
-            } else if child.is_none() {
-                None
-            } else if let Some(reason) = self.child_attempt_reason(run, &request, &record)? {
-                Some(reason)
-            } else if child_attempts
-                .as_ref()
-                .and_then(|attempts| attempts.counts.get(&record.task_id))
-                .is_some_and(|count| *count > 1)
-            {
-                Some("child task has more than one attempt")
-            } else {
-                None
-            };
-            if let Some(reason) = child_reason {
-                match self.withdraw_with_preparation_failure(
-                    id,
-                    crate::store::Withdrawal {
-                        expected: AttemptState::Queued {
-                            extra: Default::default(),
-                        },
-                        outcome: Outcome::Rejected,
-                        reason,
-                        finished_at: now()?,
-                        failure: None,
-                        terminal_cause: Some(TerminalCause::AccessPolicyRefused),
-                        terminal_note: None,
-                    },
-                    call,
-                ) {
-                    Ok(Some(_)) => {}
-                    Ok(None) | Err(RunError::Conflict) => continue,
-                    Err(error) => return Err(error),
-                }
-                started.push(Started::Refused {
-                    attempt: id,
-                    reason: reason.into(),
-                    kind: RefusalKind::PreparationBoundary(
-                        provenant_records::diagnostic::BoundaryClass::Authority,
-                    ),
-                });
-                continue;
-            }
-            if child.is_some()
-                && let Some(parent) = request.parent_attempt
-            {
-                self.contribution_diagnostic(
-                    record.run_id,
-                    self.capture_child_contribution(parent, &record, call),
-                );
-            }
-            // At the cap the attempt stays Queued: a terminal refusal would spend
-            // the task's only child attempt. Later attempts meet the same cap.
-            if self.sealed_requester.is_some() && self.check_held_capacity(id).is_err() {
-                started.push(Started::Deferred(id));
-                break;
-            }
+
             let (task_index, task) = request
                 .tasks
                 .iter()
                 .enumerate()
                 .find(|(_, task)| task.task_id == record.task_id)
                 .ok_or(RunError::Validation("attempt task missing from request"))?;
-            let mut effective_task =
-                self.effective_launch_task(&request, task, child.map(|(validated, _)| validated));
-            let policy_retry = matches!(
-                record.continuation.as_deref(),
-                Some("policy_continuation" | "policy_fallback")
-            );
-            if policy_retry {
-                if self.sealed_requester.is_some()
-                    || request.parent_attempt.is_some()
-                    || self.context.state_root.as_path() != self.writer_registry()
-                {
-                    return Err(RunError::Validation(
-                        "policy retry requires a host-owned store",
-                    ));
-                }
-                let prior = record
-                    .retry_of
-                    .map(|prior| self.record(prior, call))
-                    .transpose()?;
-                // Every launcher, the settling guardian or a later sweep, waits
-                // for the retry's sealed launch time.
-                if record.continuation.as_deref() == Some("policy_fallback") {
-                    let released = prior
-                        .as_ref()
-                        .is_some_and(|prior| self.custody_released(prior, call).unwrap_or(false));
-                    if !released {
-                        started.push(Started::Deferred(id));
-                        continue;
-                    }
-                }
-                let not_before = match &prior {
-                    Some(prior) => self
-                        .staged_policy_retry(prior)?
-                        .and_then(|retry| retry.not_before_unix_seconds),
-                    None => None,
-                };
-                if not_before.is_some_and(|not_before| {
-                    not_before > now().map_or(i64::MAX, |now| now.as_micros().div_euclid(1_000_000))
-                }) {
-                    started.push(Started::Deferred(id));
-                    continue;
-                }
-                if record.continuation.as_deref() == Some("policy_fallback")
-                    && !retry_keeps_account_pin(
-                        &record.requested_route,
-                        &task.route,
-                        prior
-                            .as_ref()
-                            .and_then(|prior| prior.applied_route.as_ref())
-                            .and_then(|route| route.provider.as_deref()),
-                    )
-                {
-                    effective_task.account = None;
-                }
-                effective_task.route = record.requested_route.clone();
-                effective_task.profile = record.profile.clone();
-                effective_task.fallback.clear();
-                if task.writer.is_some()
-                    && let Some(prior) = &prior
-                    && let Some(h) = prior.head
-                {
-                    let h_str = h.to_string();
-                    // Even an unchanged HEAD can carry uncommitted predecessor
-                    // edits. Mark every settled writer continuation so preparation
-                    // verifies its lineage and reports those paths.
-                    effective_task.source_head = effective_task
-                        .source_head
-                        .or_else(|| effective_task.head.clone());
-                    effective_task.head = Some(h_str);
-                }
-            }
-            let policy_resume = if record.continuation.as_deref() == Some("policy_continuation") {
-                record
-                    .retry_of
-                    .map(|prior| self.record(prior, call))
-                    .transpose()?
-            } else {
-                None
-            };
+            let effective_task = self.effective_launch_task(&request, task);
             let task = &effective_task;
             let task_index = u64::try_from(task_index)
                 .map_err(|_| RunError::Validation("attempt task index"))?;
@@ -2077,16 +1169,7 @@ impl RunStore {
                 })
                 .and_then(|priority| {
                     providers
-                        .prepare(
-                            task,
-                            &prompt,
-                            &paths,
-                            policy_resume.as_ref().or(if policy_retry {
-                                None
-                            } else {
-                                resume.as_ref()
-                            }),
-                        )
+                        .prepare(task, &prompt, &paths, resume.as_ref())
                         .map(|plan| (plan, priority))
                         .map_err(|reason| (reason.kind(), Box::new(reason)))
                 });
@@ -2215,7 +1298,7 @@ impl RunStore {
                 self.record_skipped_routes(id, &plan.skipped_routes, call)?;
             }
             // Capture errors leave the claim available to this or another launcher.
-            self.seal_work(&record, &plan, child.map(|_| &request), call)?;
+            self.seal_work(&record, &plan, call)?;
             // Establish launcher liveness before publishing Starting. Reaping can
             // then distinguish a live pre-custody handoff from an abandoned one.
             let _launcher = match attempt.try_lock(
@@ -2241,12 +1324,6 @@ impl RunStore {
                 Err(RunError::Conflict) => continue,
                 Err(error) => return Err(error),
             };
-            // Consume the host's launch claim before invoking any handoff
-            // callback. Keep it for every outcome, including an uncertain
-            // launch: lane-owned rows cannot authorise another attempt.
-            if child.is_some() && !self.launched_tasks.borrow_mut().insert((run, task.task_id)) {
-                continue;
-            }
             started.push(
                 match self.hand_off(
                     task,
@@ -2419,22 +1496,6 @@ fn set_environment_value(environment: &mut Vec<(OsString, OsString)>, name: &str
     environment.retain(|(existing, _)| existing != &name);
     environment.push((name, OsString::from(value)));
 }
-
-/// An account pin belongs to the provider it was granted with. A redraw of the
-/// granted route keeps it, whatever that route resolves to; a fallback to
-/// another provider resolves a fresh account there.
-fn retry_keeps_account_pin(
-    retry: &RequestedRoute,
-    granted: &RequestedRoute,
-    original_provider: Option<&str>,
-) -> bool {
-    retry == granted
-        || match retry {
-            RequestedRoute::Model { provider, .. } => original_provider == Some(provider.as_str()),
-            _ => original_provider.is_none(),
-        }
-}
-
 /// The configured lane port space, or none when allocation is switched off.
 /// Writer lanes only: read-only lanes run no servers.
 fn lane_port_plan(
@@ -2522,55 +1583,6 @@ mod lane_environment_tests {
         );
     }
 }
-
-#[cfg(test)]
-mod retry_pin_tests {
-    use super::*;
-
-    #[test]
-    fn redraws_of_a_pinned_granted_route_keep_the_pin() {
-        let named = RequestedRoute::Named {
-            extra: Default::default(),
-            name: "implement".into(),
-            effort: None,
-        };
-        let pool = RequestedRoute::Review {
-            extra: Default::default(),
-            name: "review".into(),
-            effort: None,
-            excluded_families: Vec::new(),
-            distinct_families: false,
-            preferred_families: vec![],
-            require_distinct: false,
-        };
-        let model = |provider: &str| RequestedRoute::Model {
-            extra: Default::default(),
-            provider: provider.into(),
-            model: format!("{provider}/model"),
-            effort: None,
-        };
-        // A sessionless capacity redraw of a pinned named or pool route stays
-        // on the pinned account, even after the first draw named a provider.
-        for granted in [&named, &pool] {
-            assert!(retry_keeps_account_pin(granted, granted, Some("codex")));
-            assert!(retry_keeps_account_pin(granted, granted, None));
-        }
-        // The applied model on the same provider keeps it too.
-        assert!(retry_keeps_account_pin(
-            &model("codex"),
-            &named,
-            Some("codex")
-        ));
-        // A fallback to another provider resolves a fresh account there.
-        assert!(!retry_keeps_account_pin(
-            &model("claude"),
-            &named,
-            Some("codex")
-        ));
-        assert!(!retry_keeps_account_pin(&pool, &named, Some("codex")));
-    }
-}
-
 pub(crate) mod hand_off;
 
 #[cfg(test)]
@@ -2643,7 +1655,6 @@ mod resource_status_tests {
                         }
                     }))
                 },
-                None,
                 None,
                 &call,
             )?;

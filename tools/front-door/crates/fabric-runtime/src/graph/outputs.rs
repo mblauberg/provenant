@@ -158,6 +158,30 @@ pub(super) fn make_outputs_with_upstream(
                 .then(|| "verdict malformed, repeated or not final".to_owned())
         }
     });
+    let assessed_risk = result
+        .filter(|capture| !capture.source_truncated && findings_available == Some(true))
+        .and_then(|capture| findings_block(capture).ok())
+        .and_then(|block| serde_json::from_str::<serde_json::Value>(block).ok())
+        .and_then(|block| {
+            block
+                .get("risk_tier")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        })
+        .filter(|tier| {
+            matches!(
+                tier.as_str(),
+                "routine" | "substantial" | "crucial" | "terminal"
+            )
+        });
+    let repair_design = result
+        .filter(|capture| !capture.source_truncated && findings_available == Some(true))
+        .and_then(|capture| findings_block(capture).ok())
+        .and_then(|block| serde_json::from_str::<serde_json::Value>(block).ok())
+        .and_then(|block| block.get("repair_design").cloned())
+        .filter(|design| design.get("within_scope").is_some_and(serde_json::Value::is_boolean)
+            && design.get("one_way_door").is_some_and(serde_json::Value::is_boolean))
+        .map(|design| serde_json::json!({"within_scope":design["within_scope"],"one_way_door":design["one_way_door"]}));
     let result = result.map(|capture| {
         let excerpt = bounded(&capture.excerpt, RESULT_EXCERPT_BYTES);
         ResultOutput {
@@ -172,7 +196,11 @@ pub(super) fn make_outputs_with_upstream(
     });
     let remaining = handoff_remaining;
     NodeOutputs {
-        extra: Default::default(),
+        extra: assessed_risk
+            .map(|tier| ("risk_tier".into(), tier.into()))
+            .into_iter()
+            .chain(repair_design.map(|design| ("repair_design".into(), design)))
+            .collect(),
         verdict_error,
         schema_version: 2,
         result,
@@ -184,6 +212,39 @@ pub(super) fn make_outputs_with_upstream(
         warnings,
         plan: None,
         remaining,
+    }
+}
+
+/// A model may reconcile findings, but omission is not evidence of closure.
+/// Keep every qualified upstream identity unless its output explicitly disposes
+/// of it; parsing has already inherited that identity's original evidence.
+pub(super) fn retain_synthesis_findings(outputs: &mut NodeOutputs, upstream: &[Finding]) {
+    let missing: Vec<_> = upstream
+        .iter()
+        .filter(|source| {
+            !outputs
+                .findings
+                .iter()
+                .any(|finding| finding.id == source.id)
+        })
+        .cloned()
+        .collect();
+    let mut dropped = 0;
+    for finding in missing {
+        outputs.findings.push(finding);
+        if outputs.findings.len() > MAX_FINDINGS
+            || canonical_len(&outputs.findings) > FINDINGS_BYTES
+        {
+            outputs.findings.pop();
+            dropped += 1;
+        }
+    }
+    if dropped > 0 {
+        outputs.findings_available = Some(false);
+        outputs.warnings.truncate(MAX_WARNINGS.saturating_sub(1));
+        outputs.warnings.push(format!(
+            "synthesis findings exceed cap: {dropped} upstream findings omitted; inspect source outputs"
+        ));
     }
 }
 
@@ -402,7 +463,7 @@ fn parse_findings(
         for source in copies {
             let mut entry = entry.clone();
             if let Some(source) = source {
-                if entry.contains_key("disposition")
+                if (entry.contains_key("disposition") || entry.contains_key("verification"))
                     && !entry.contains_key("propagates")
                     && let Some(marker) = source.extra.get("propagates")
                 {
@@ -506,7 +567,14 @@ fn parse_findings(
             finding.extra.retain(|key, _| {
                 matches!(
                     key.as_str(),
-                    "propagates" | "verification" | "lens" | "evidence" | "proposed_fix"
+                    "propagates"
+                        | "verification"
+                        | "lens"
+                        | "evidence"
+                        | "proposed_fix"
+                        | "design_defect"
+                        | "risk_grew"
+                        | "scope_grew"
                 )
             });
             finding.summary.clear();
@@ -585,6 +653,19 @@ pub(super) fn compact_findings(
     }
 }
 
+/// Use the same input projection at settlement and checkpoint replay.
+pub(super) fn upstream_finding(node: &PlannedNode, source: &str, mut finding: Finding) -> Finding {
+    if template::review_behaviour(node) == Some(template::ReviewBehaviour::Verify) {
+        // A delta verifier replaces prior verification; synthesis inherits it.
+        finding.extra.remove("verification");
+    }
+    finding.extra.insert(
+        "propagates".into(),
+        format!("{source}:{}", finding.id).into(),
+    );
+    finding
+}
+
 /// Reject malformed compacted records on checkpoint replay.
 pub(super) fn valid_compacted_findings(
     index: usize,
@@ -603,19 +684,14 @@ pub(super) fn valid_compacted_findings(
     };
     if block.len() > 16 * 1024
         || !outputs.findings.is_empty()
-        || plan.nodes[index].dispositions.is_empty()
+        || (plan.nodes[index].dispositions.is_empty()
+            && !template::review_verifier(&plan.nodes[index]))
     {
         return false;
     }
     let upstream: Vec<_> = selected_findings(&plan.nodes[index], plan, checkpoint, positions)
         .into_iter()
-        .map(|(source, mut finding)| {
-            finding.extra.insert(
-                "propagates".into(),
-                format!("{source}:{}", finding.id).into(),
-            );
-            finding
-        })
+        .map(|(source, finding)| upstream_finding(&plan.nodes[index], &source, finding))
         .collect();
     !upstream.is_empty() && parse_findings(block, &upstream).is_ok()
 }
@@ -628,6 +704,9 @@ pub(super) fn materialised_findings(
     checkpoint: &GraphCheckpoint,
     positions: &std::collections::BTreeMap<String, usize>,
 ) -> Vec<Finding> {
+    if let Some(outputs) = repair::panel_outputs(checkpoint, &checkpoint.nodes[index].id) {
+        return outputs.findings.clone();
+    }
     let Some(outputs) = checkpoint.nodes[index].outputs.as_ref() else {
         return Vec::new();
     };
@@ -640,13 +719,7 @@ pub(super) fn materialised_findings(
     };
     let upstream: Vec<_> = selected_findings(&plan.nodes[index], plan, checkpoint, positions)
         .into_iter()
-        .map(|(source, mut finding)| {
-            finding.extra.insert(
-                "propagates".into(),
-                format!("{source}:{}", finding.id).into(),
-            );
-            finding
-        })
+        .map(|(source, finding)| upstream_finding(&plan.nodes[index], &source, finding))
         .collect();
     parse_findings(block, &upstream)
         .map(|(findings, _, _)| findings)
@@ -1060,16 +1133,15 @@ pub(super) fn render_input(
         return (node.prompt.clone(), false);
     }
     let mut prompt = prefix(&node.prompt, cap).to_owned();
-    let proof_dispositions =
-        if node.dispositions.is_empty() && node.role.as_deref() == Some("review.verify") {
-            vec![
-                "upheld".to_owned(),
-                "falsified".to_owned(),
-                "unverifiable".to_owned(),
-            ]
-        } else {
-            node.dispositions.clone()
-        };
+    let proof_dispositions = if node.dispositions.is_empty() && template::review_verifier(node) {
+        vec![
+            "upheld".to_owned(),
+            "falsified".to_owned(),
+            "unverifiable".to_owned(),
+        ]
+    } else {
+        node.dispositions.clone()
+    };
     if !proof_dispositions.is_empty()
         && node.inputs.iter().any(|input| {
             input
@@ -1654,7 +1726,7 @@ mod alias_tests {
             "id":"F1", "severity":"high", "file":"src/lib.rs", "line":17,
             "summary":"description", "status":"open", "detail":"x".repeat(8000),
             "propagates":"review:F1", "lens":"tests", "evidence":"observed",
-            "proposed_fix":"repair"
+            "proposed_fix":"repair", "design_defect":true, "risk_grew":true, "scope_grew":true
         }))
         .unwrap();
         upstream.summary = "s".repeat(1000);
@@ -1681,6 +1753,9 @@ mod alias_tests {
             assert_eq!(finding.extra["lens"], "tests");
             assert_eq!(finding.extra["evidence"], "observed");
             assert_eq!(finding.extra["proposed_fix"], "repair");
+            for field in ["design_defect", "risk_grew", "scope_grew"] {
+                assert_eq!(finding.extra[field], true);
+            }
             assert_eq!(
                 finding
                     .extra

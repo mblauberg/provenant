@@ -1,19 +1,11 @@
 //! Durable execution records and bounded, project-scoped readers.
 #![forbid(unsafe_code)]
-#![cfg_attr(
-    all(test, feature = "fixture"),
-    allow(
-        dead_code,
-        unused_imports,
-        reason = "the custom continuation driver includes private fixtures without libtest"
-    )
-)]
 mod admission;
 mod artifacts;
 mod board;
 mod completion;
 pub use board::{BoardLane, BoardPage};
-pub use completion::{handoff_progress_guidance, lane_preamble};
+pub use completion::{handoff_progress_guidance, lane_preamble, sanitise_handoff};
 mod controls;
 mod correlation;
 pub use correlation::{WORK_INDEX_FILE, WorkCoverage, WorkIndex, WorkSelector, validate_work};
@@ -27,10 +19,6 @@ mod ledger;
 mod objects;
 mod overview;
 mod plan;
-mod policy;
-pub use policy::{
-    POLICY_ATTEMPT_CEILING, PolicyAction, PolicyCause, PolicyRetry, ResultAssessment,
-};
 mod pr_contribution;
 pub use pr_contribution::{Contribution, Contributions, PullRequest, WEIGHT_ONE};
 pub mod reactions;
@@ -68,9 +56,8 @@ pub use git_context::{
 };
 pub use holder::{HolderContext, HostLaunchContext, RootSeed, RunHolder, SealedTask};
 pub use launch::{
-    Decoded, LaunchPaths, PrepareRefusal, PreparedLaunch, PreparedStart, Providers,
-    QUEUED_RUNS_PAGE_SIZE, RefusalKind, Started, ValidatedChild, WriteGrantLimit,
-    access_root_allowed, capture_plan, concurrency,
+    Decoded, LaunchPaths, PrepareRefusal, PreparedLaunch, PreparedStart, Providers, RefusalKind,
+    Started, WriteGrantLimit, access_root_allowed, capture_plan, concurrency,
 };
 pub use overview::{OverviewAttempt, OverviewState, RunOverview};
 pub use plan::{isolated_read_only_plan, live_read_only_plan, read_only_plan};
@@ -340,6 +327,14 @@ pub enum RunError {
         "host writer delivery failed at Integrate (integration_head_moved): the integration target moved after the round began and a loop round only fast-forwards it; rerun the graph to review the new head"
     )]
     IntegrationHeadMoved,
+    #[error(
+        "host writer delivery deferred at Integrate (parent_busy): the target branch is checked out; commit or preserve the parent's edits and explicitly merge child commit {child_head}, or detach the target checkout and retry delivery; the child commit is retained"
+    )]
+    IntegrationParentBusy { child_head: provenant_core::GitOid },
+    #[error(
+        "host writer delivery failed at Integrate (integration_conflict): merge preparation failed; inspect Git failures or resolve the target's conflict with retained child commit {child_head} in a separate checkout, then retry delivery"
+    )]
+    IntegrationConflict { child_head: provenant_core::GitOid },
     #[error(
         "host writer delivery failed at Prepare (origin refresh): default branch collides with another branch name"
     )]
@@ -822,21 +817,6 @@ mod dispatch_tests;
 mod launch_refusal_tests;
 #[cfg(test)]
 mod tests;
-
-#[cfg(all(test, feature = "fixture"))]
-mod continuation_test_driver;
-
-// The custom integration target reuses this crate root so its same-binary
-// guardian can exercise private settlement fixtures without exported test APIs.
-#[cfg(all(test, feature = "fixture"))]
-#[allow(dead_code)]
-fn main() {
-    if let Err(error) = continuation_test_driver::main() {
-        use std::io::Write;
-        let _ = writeln!(std::io::stderr().lock(), "writer continuation: {error}");
-        std::process::exit(1);
-    }
-}
 
 #[cfg(test)]
 mod diagnostic_projection_tests {

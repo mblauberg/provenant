@@ -5,11 +5,6 @@ thread_local! {
     static TEST_DEFER_PROVIDER_LAUNCH: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-#[cfg(test)]
-thread_local! {
-    static TEST_CANCEL_AFTER_ADMISSION: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
-
 /// Keep a test submission queued after admission, before provider preparation.
 #[cfg(any(test, feature = "fixture"))]
 pub fn with_deferred_provider_launch<T>(action: impl FnOnce() -> T) -> T {
@@ -24,52 +19,7 @@ pub fn with_deferred_provider_launch<T>(action: impl FnOnce() -> T) -> T {
     action()
 }
 
-/// Complete admission without requiring a provider or native sandbox. The
-/// persisted cancellation makes a caller's observation wait terminal.
-#[cfg(test)]
-pub(super) fn with_cancelled_provider_launch<T>(action: impl FnOnce() -> T) -> T {
-    struct Reset;
-    impl Drop for Reset {
-        fn drop(&mut self) {
-            TEST_CANCEL_AFTER_ADMISSION.with(|flag| flag.set(false));
-        }
-    }
-    TEST_CANCEL_AFTER_ADMISSION.with(|flag| flag.set(true));
-    let _reset = Reset;
-    action()
-}
-
 /// Strict manifest: `{schema_version:1,tasks:[...]}`.
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct Manifest {
-    pub(super) schema_version: u64,
-    pub(super) tasks: Vec<ManifestTask>,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct ManifestTask {
-    pub(super) context: Option<provenant_records::run::WorkContext>,
-    #[serde(default)]
-    pub(super) build_heavy: bool,
-    #[serde(default)]
-    pub(super) require_skill_location: bool,
-    pub(super) title: Option<String>,
-    pub(super) base: Option<String>,
-    pub(super) task_id: Option<TaskId>,
-    pub(super) prompt: Option<String>,
-    pub(super) prompt_file: Option<PathBuf>,
-    pub(super) route: run::RequestedRoute,
-    #[serde(default)]
-    pub(super) fallback: Vec<String>,
-    pub(super) delivery_id: Option<DeliveryId>,
-    pub(super) deliver: Option<run::WriterDeliveryRequest>,
-    pub(super) account: Option<String>,
-    /// Per-task network; overrides `--network` for this task.
-    pub(super) network: Option<Switch>,
-}
-
 pub(super) fn read_bounded(path: &Path) -> Result<String, Fail> {
     let invalid = |error: &dyn std::fmt::Display| {
         input_failure(
@@ -272,35 +222,6 @@ pub fn requested(
     }
 }
 
-pub(super) fn fallback(models: &[String]) -> Result<Vec<run::RouteRecord>, Fail> {
-    if models.len() > 2 {
-        return Err(Fail::new(
-            Status::Invalid,
-            ErrorKind::Invalid,
-            "at most two fallback models",
-        ));
-    }
-    models
-        .iter()
-        .map(|model| {
-            ModelId::parse(model).map_err(|_| {
-                Fail::new(
-                    Status::Invalid,
-                    ErrorKind::Invalid,
-                    "fallback must be ADAPTER/ID",
-                )
-            })?;
-            Ok(run::RouteRecord {
-                provider: model.split('/').next().map(Into::into),
-                model: Some(model.clone()),
-                effort: None,
-                account_label: None,
-                ..Default::default()
-            })
-        })
-        .collect()
-}
-
 /// Task IDs default to a value derived from the operation, so replaying the
 /// same operation reproduces the same canonical request.
 pub fn derived_task(operation: &OperationId, index: usize) -> Result<TaskId, Fail> {
@@ -469,21 +390,21 @@ pub(super) fn lane_access_checked(
 
 /// One task of a submission, from CLI flags, a manifest or Fabric.
 pub struct Submitted {
-    pub cloud: Option<provenant_records::run::CloudPlacement>,
+    /// Placement, account and build weight, described as for a graph node.
+    pub attempt: provenant_fabric_runtime::graph::AttemptSpec,
     /// Require the selected adapter to have its own skill location.
     pub require_skill_location: bool,
     pub settlement_retry_limit: Option<u8>,
     pub context: Option<provenant_records::run::WorkContext>,
-    pub build_heavy: bool,
     pub title: Option<String>,
     pub task_id: TaskId,
     pub prompt: String,
     pub base: Option<String>,
     pub pinned_base: Option<provenant_core::GitOid>,
     pub head: Option<String>,
+    /// Original source of a predecessor whose committed head is being retained.
+    pub source_head: Option<String>,
     pub route: run::RequestedRoute,
-    pub account: Option<String>,
-    pub fallback: Vec<String>,
     pub provider_timeout: u64,
     pub delivery_id: Option<DeliveryId>,
     pub deliver: Option<run::WriterDeliveryRequest>,
@@ -695,8 +616,10 @@ pub fn submit_with_host(
     submit_with_host_and_wait(session, edge, submission, call, host, None)
 }
 
+/// Submit with the caller's observation deadline, including the bounded wait
+/// for provider preparation. A detached launcher retains custody after expiry.
 #[allow(clippy::disallowed_methods)] // The caller's wait is a real deadline.
-pub(super) fn submit_with_host_and_wait(
+pub fn submit_with_host_and_wait(
     session: &Session,
     edge: &Edge<'_>,
     submission: Submission,
@@ -714,7 +637,6 @@ pub(super) fn submit_with_host_and_wait(
                 edge,
                 call,
                 Some(host),
-                None,
                 None,
                 deadline.map(|end| end.saturating_duration_since(Instant::now()).as_secs()),
             )
@@ -801,10 +723,22 @@ fn submit_with_launcher(
             task_profile.settlement_retry_limit = task
                 .settlement_retry_limit
                 .map(|limit| limit.min(provenant_routing::MAX_SETTLEMENT_RETRIES));
+            let attempt = task.attempt;
+            if attempt.confidential { task_profile.extra.insert("confidential".into(), serde_json::json!(true)); }
+            if attempt.new_worktree.is_some()
+                || !attempt.capabilities.is_empty()
+                || !attempt.write_roots.is_empty()
+            {
+                return Err(Fail::new(
+                    Status::Invalid,
+                    ErrorKind::Invalid,
+                    "resolve the attempt's new worktree, capabilities and write roots before submission",
+                ));
+            }
             Ok(run::DispatchTask {
-                cloud: task.cloud,
+                cloud: attempt.placement,
                 context: task.context,
-                build_heavy: task.build_heavy,
+                build_heavy: attempt.build_heavy,
                 profile: task_profile,
                 title: task.title,
                 task_id: task.task_id,
@@ -812,10 +746,10 @@ fn submit_with_launcher(
                 base: task.base,
                 pinned_base: task.pinned_base,
                 head: task.head,
+                source_head: task.source_head,
                 route: task.route,
-                account: task.account,
-                fallback: fallback(&task.fallback)?,
-                timeout_seconds: task.provider_timeout,
+                account: attempt.account,
+                timeout_seconds: attempt.provider_timeout.unwrap_or(task.provider_timeout),
                 delivery_id: task.delivery_id,
                 deliver: task.deliver,
                 worktree: task.worktree,
@@ -881,15 +815,6 @@ fn submit_with_launcher(
                 .map_err(run::RunError::from)?;
             }
         }
-    }
-    #[cfg(test)]
-    if TEST_CANCEL_AFTER_ADMISSION.with(std::cell::Cell::get) {
-        for attempt in session.store.pending_attempts(record.run_id, call)? {
-            session
-                .service()
-                .cancel(attempt.attempt_id, "admission fixture complete", call)?;
-        }
-        return Ok((record, Vec::new()));
     }
     #[cfg(any(test, feature = "fixture"))]
     if TEST_DEFER_PROVIDER_LAUNCH.with(std::cell::Cell::get) {

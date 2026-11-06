@@ -17,10 +17,10 @@
     {
       "id": "q235001",
       "relation": "positive",
-      "prompt": "Choose the preset and parameters for codebase scouts plus one external researcher; explain the graph before running it.",
+      "prompt": "Choose the templates and parameters for codebase scouts plus one external researcher; explain the graph before running it.",
       "tags": [
         "direct",
-        "presets"
+        "templates"
       ],
       "expected": {
         "primary_skill": "orchestrate",

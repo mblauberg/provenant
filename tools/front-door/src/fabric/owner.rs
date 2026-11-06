@@ -1,0 +1,3226 @@
+use super::*;
+use std::io::Write as _;
+
+#[derive(Clone, Copy)]
+pub(crate) struct BoundGraphBases {
+    pub(crate) integration: Option<provenant_core::GitOid>,
+    pub(crate) review: Option<provenant_core::GitOid>,
+}
+
+pub(crate) struct BoundGraphOwner<'a> {
+    pub(crate) factory: &'a Factory,
+    pub(crate) repo_facts: provenant_confinement::worktrees::RepoFacts,
+    pub(crate) launch_warnings: Vec<String>,
+    // Both immutable graph bases travel together through every host owner.
+    pub(crate) integration_base: Option<BoundGraphBases>,
+    pub(crate) integration_branch: Option<String>,
+    /// The graph's explicit network reach for every node lane, such as
+    /// `run --network off` bound before automatic preset selection.
+    pub(crate) network: Option<provenant_cli::Switch>,
+    pub(crate) capability_overrides: (Vec<String>, Vec<String>),
+    /// The graph's route-exclusion selectors, passed to each node as the
+    /// `routing.graph_exclude` knob.
+    pub(crate) exclude: Vec<String>,
+    pub(crate) budget: WaitBudget,
+    pub(crate) cancel: &'a CancelToken,
+    pub(crate) prices: Option<Result<provenant_telemetry::PriceTable, String>>,
+    pub(crate) tick: bool,
+}
+
+/// The inbox request for a stored graph ask. The checkpoint keeps the rendered
+/// text, so a replay sends the identical request under the same operation.
+pub(crate) fn graph_ask_input(
+    scope: &provenant_fabric_runtime::graph::AskScope<'_>,
+) -> Result<provenant_fabric_runtime::inbox::InboxInput, FacadeError> {
+    use provenant_fabric_runtime::inbox::InboxInput;
+    use provenant_records::inbox::{RequestDraft, RequestKind, RequestOption};
+    let ask = scope.ask;
+    let operation = provenant_records::CanonicalV1::record_digest(
+        "graph-node-ask",
+        1,
+        &(scope.graph_id, scope.instance_id, &ask.ask_id, &ask.session),
+    )
+    .map_err(|_| FacadeError::StateCorrupt)?;
+    let operation_id = provenant_core::OperationId::parse(&format!(
+        "ask-{}",
+        provenant_core::hex(operation.as_bytes())
+    ))
+    .map_err(|_| FacadeError::StateCorrupt)?;
+    let request = RequestDraft {
+        extra: Default::default(),
+        supersedes: None,
+        deadline: ask.wake_at,
+        work: None,
+        kind: RequestKind::Decision,
+        title: ask.title.clone(),
+        body: ask.body.clone(),
+        blocking: true,
+        options: ask
+            .options
+            .iter()
+            .map(|option| RequestOption {
+                extra: Default::default(),
+                id: option.id.clone(),
+                label: option.label.clone(),
+                // The inbox needs a description; a decide option may leave it out.
+                description: if option.description.is_empty() {
+                    option.label.clone()
+                } else {
+                    option.description.clone()
+                },
+            })
+            .collect(),
+        recommended_option_id: ask.default.clone(),
+        proceeding_with: None,
+    };
+    Ok(InboxInput::Ask {
+        extra: Default::default(),
+        session: ask.session.clone(),
+        request: Box::new(request),
+        operation_id: Some(operation_id),
+    })
+}
+
+/// A notification uses its own immutable inbox operation and never asks for an
+/// answer. Replaying it after a checkpoint failure returns the same receipt.
+pub(crate) fn graph_notification_input(
+    scope: &provenant_fabric_runtime::graph::AskScope<'_>,
+) -> Result<provenant_fabric_runtime::inbox::InboxInput, FacadeError> {
+    use provenant_fabric_runtime::inbox::InboxInput;
+    let mut input = graph_ask_input(scope)?;
+    if let InboxInput::Ask { request, .. } = &mut input {
+        request.kind = provenant_records::inbox::RequestKind::Question;
+        request.blocking = false;
+        request.options.clear();
+        request.recommended_option_id = None;
+    }
+    Ok(input)
+}
+
+pub(crate) fn graph_ask_poll(
+    service: &provenant_fabric_runtime::inbox::InboxService<'_>,
+    scope: &provenant_fabric_runtime::graph::AskScope<'_>,
+    cancel: &CancelToken,
+) -> Result<Option<provenant_fabric_runtime::graph::AskReply>, FacadeError> {
+    use provenant_fabric_runtime::inbox::{InboxFilter, InboxInput, InboxResult};
+    use provenant_records::inbox::RequestState;
+    let inbox_error =
+        |error: provenant_fabric_runtime::inbox::InboxError| FacadeError::DispatchRefused {
+            fact: None,
+            disk: None,
+            reason: format!("graph ask {}: {error}", scope.ask.ask_id),
+        };
+    // The immutable ask and its operation receipt commit together. A crash before
+    // saving graph state replays this exact request, including its original ID.
+    let InboxResult::Saved { receipt } = service
+        .execute(graph_ask_input(scope)?, cancel)
+        .map_err(inbox_error)?
+    else {
+        return Err(FacadeError::StateCorrupt);
+    };
+    let InboxResult::Item { item, .. } = service
+        .execute(
+            InboxInput::List {
+                extra: Default::default(),
+                id: Some(receipt.request_id),
+                session: None,
+                state: InboxFilter::All,
+                limit: 1,
+                cursor: None,
+            },
+            cancel,
+        )
+        .map_err(inbox_error)?
+    else {
+        return Err(FacadeError::StateCorrupt);
+    };
+    if item.request.state != RequestState::Answered {
+        return Ok(None);
+    }
+    let Some(answer) = item.answer else {
+        return Ok(None);
+    };
+    // Acknowledgement precedes action. The immutable answer stays readable after
+    // acknowledgement, so a failed graph checkpoint save loses no decision.
+    service
+        .execute(
+            InboxInput::Acknowledge {
+                extra: Default::default(),
+                id: receipt.request_id,
+                answer_id: answer.id,
+                session: scope.ask.session.clone(),
+                operation_id: Some(
+                    provenant_core::OperationId::parse(&format!("ask-ack-{}", answer.id))
+                        .map_err(|_| FacadeError::StateCorrupt)?,
+                ),
+            },
+            cancel,
+        )
+        .map_err(inbox_error)?;
+    // The graph runtime reads the option or reply text against the ask it stored.
+    Ok(Some(provenant_fabric_runtime::graph::AskReply {
+        option: answer.option_id,
+        text: answer.text,
+        actor: answer.actor.to_string(),
+        at: Some(answer.answered_at),
+    }))
+}
+
+pub(crate) fn graph_ask_edge(
+    factory: &Factory,
+    cancel: &CancelToken,
+    scope: provenant_fabric_runtime::graph::AskScope<'_>,
+    close: bool,
+) -> Result<Option<provenant_fabric_runtime::graph::AskReply>, FacadeError> {
+    use provenant_fabric_runtime::inbox::InboxService;
+    let context = &factory.context;
+    let mut identity = context.identity.clone();
+    // Settlement can run under another client label. Keep the actor saved
+    // before the first ask, just as an attempt retains its launch actor.
+    identity.inbox.actor = scope.actor.parse().map_err(|_| FacadeError::StateCorrupt)?;
+    let refused = |error: &dyn std::fmt::Display| FacadeError::DispatchRefused {
+        fact: None,
+        disk: None,
+        reason: format!("graph ask {}: {error}", scope.ask.ask_id),
+    };
+    // Validate the ordinary inbox edge before opening local state. Graph
+    // asks obey lane and configured home-host restrictions too.
+    provenant_fabric_runtime::inbox::validate_request(
+        &identity,
+        &context.config,
+        context.in_lane,
+        &graph_ask_input(&scope)?,
+    )
+    .map_err(|error| refused(&error))?;
+    let service = InboxService::open(&context.roots.state, &identity, &factory.clock, cancel)
+        .map_err(|error| refused(&error))?;
+    if close {
+        graph_ask_close(&service, &scope, identity.inbox.actor, cancel)?;
+        Ok(None)
+    } else {
+        graph_ask_poll(&service, &scope, cancel)
+    }
+}
+
+pub(crate) fn graph_ask_close(
+    service: &provenant_fabric_runtime::inbox::InboxService<'_>,
+    scope: &provenant_fabric_runtime::graph::AskScope<'_>,
+    actor: provenant_core::ActorId,
+    cancel: &CancelToken,
+) -> Result<(), FacadeError> {
+    use provenant_fabric_runtime::inbox::InboxInput;
+    let InboxInput::Ask {
+        operation_id: Some(operation),
+        ..
+    } = graph_ask_input(scope)?
+    else {
+        return Err(FacadeError::StateCorrupt);
+    };
+    graph_inbox_close(
+        service,
+        &scope.ask.session,
+        &operation,
+        actor,
+        &format!("close graph ask {}", scope.ask.ask_id),
+        cancel,
+    )
+}
+
+/// Supersede the open request raised under `operation` by `actor`, if any.
+/// Closing never creates a request, and a closed one is left as it is.
+pub(crate) fn graph_inbox_close(
+    service: &provenant_fabric_runtime::inbox::InboxService<'_>,
+    session: &str,
+    operation: &provenant_core::OperationId,
+    actor: provenant_core::ActorId,
+    context: &str,
+    cancel: &CancelToken,
+) -> Result<(), FacadeError> {
+    use provenant_fabric_runtime::inbox::{InboxFilter, InboxInput, InboxResult};
+    use provenant_records::inbox::RequestState;
+    let map = |e: provenant_fabric_runtime::inbox::InboxError| FacadeError::DispatchRefused {
+        fact: None,
+        disk: None,
+        reason: format!("{context}: {e}"),
+    };
+    // Find the request through the normal bounded inbox list.
+    let mut cursor = None;
+    loop {
+        let InboxResult::Listed {
+            items, next_cursor, ..
+        } = service
+            .execute(
+                InboxInput::List {
+                    extra: Default::default(),
+                    id: None,
+                    session: Some(session.into()),
+                    state: InboxFilter::All,
+                    limit: 50,
+                    cursor,
+                },
+                cancel,
+            )
+            .map_err(map)?
+        else {
+            return Err(FacadeError::StateCorrupt);
+        };
+        if let Some(item) = items
+            .into_iter()
+            .find(|item| &item.operation_id == operation && item.chair_actor == actor)
+        {
+            if matches!(
+                item.state,
+                RequestState::Withdrawn | RequestState::Superseded | RequestState::Expired
+            ) {
+                return Ok(());
+            }
+            service
+                .execute(
+                    InboxInput::Close {
+                        extra: Default::default(),
+                        id: item.id,
+                        state: RequestState::Superseded,
+                        reason: "Graph decision resolved or cancelled".into(),
+                        expect_revision: item.revision,
+                        operation_id: Some(
+                            provenant_core::OperationId::parse(&format!("ask-close-{}", item.id))
+                                .map_err(|_| FacadeError::StateCorrupt)?,
+                        ),
+                    },
+                    cancel,
+                )
+                .map_err(map)?;
+            return Ok(());
+        }
+        let Some(next) = next_cursor else {
+            return Ok(());
+        };
+        cursor = Some(next);
+    }
+}
+
+pub(crate) fn load_graph_prices(
+    assets: &std::path::Path,
+) -> Result<provenant_telemetry::PriceTable, String> {
+    let path = assets.join("config/telemetry-prices.toml");
+    let text =
+        std::fs::read_to_string(&path).map_err(|error| format!("{}: {error}", path.display()))?;
+    let config = toml_edit::de::from_str::<provenant_telemetry::ConfiguredPrices>(&text)
+        .map_err(|error| format!("{}: invalid price table: {error}", path.display()))?;
+    provenant_telemetry::validate_prices(&config)
+        .map_err(|error| format!("{}: invalid price table: {error}", path.display()))
+}
+
+pub(crate) fn graph_attempt_usage(
+    record: provenant_records::run::AttemptRecord,
+    prices: Option<&provenant_telemetry::PriceTable>,
+    cost_unknown_reason: Option<String>,
+) -> provenant_fabric_runtime::graph::AttemptUsage {
+    let usage = &record.usage;
+    let categories = [
+        usage.uncached_input,
+        usage.cache_read,
+        usage.cache_write,
+        usage.output_excluding_reasoning,
+        usage.reasoning,
+    ];
+    // Reasoning is counted inside output, so providers never report it apart.
+    let tokens_partial = categories[..4].iter().any(Option::is_none);
+    let tokens = categories.iter().any(Option::is_some).then(|| {
+        categories
+            .into_iter()
+            .flatten()
+            .fold(0u64, u64::saturating_add)
+    });
+    let cost = prices
+        .and_then(|prices| {
+            provenant_run::fact(record.clone()).ok().and_then(|fact| {
+                provenant_telemetry::stats([fact], prices, Default::default()).ok()
+            })
+        })
+        .map(|report| report.totals.cost);
+    let cost_partial = cost.as_ref().is_none_or(|cost| cost.complete.is_none());
+    let cost_micro_usd =
+        cost.and_then(|cost| cost.known_lower_bound.map(|money| money.microdollars));
+    // Persist only reporting facts. Provider text, paths and traces never enter events.
+    let mut extra = provenant_records::ExtraFields::default();
+    let mut wall_time_seconds = record.provider_ms.map(|ms| ms.saturating_add(999) / 1000);
+    if let Ok(fact) = provenant_run::fact(record.clone()) {
+        if let Some(started) = fact.started_at {
+            wall_time_seconds = fact
+                .finished_at
+                .as_micros()
+                .checked_sub(started.as_micros())
+                .and_then(|micros| u64::try_from(micros).ok())
+                .map(|micros| micros.saturating_add(999_999) / 1_000_000);
+        }
+        let inputs = [
+            fact.usage.uncached_input,
+            fact.usage.cache_read,
+            fact.usage.cache_write,
+        ];
+        let input_tokens = inputs
+            .into_iter()
+            .collect::<Option<Vec<_>>>()
+            .map(|counts| counts.into_iter().fold(0u64, u64::saturating_add));
+        if let Some(route) = fact
+            .observed_route
+            .as_ref()
+            .or(fact.applied_route.as_ref())
+            .or(fact.resolved_route.as_ref())
+        {
+            extra.insert(
+                "resolved_route".into(),
+                serde_json::json!({
+                    "provider": route.provider, "model": route.model, "effort": route.effort
+                }),
+            );
+        }
+        for (key, value) in [
+            (
+                "cache_read_tokens",
+                serde_json::json!(fact.usage.cache_read),
+            ),
+            ("input_tokens", serde_json::json!(input_tokens)),
+            ("queue_time_ms", serde_json::json!(fact.slot_wait_ms)),
+            ("outcome", serde_json::json!(fact.terminal_state)),
+            ("tier", serde_json::json!(fact.tier)),
+            ("template", serde_json::json!(fact.template)),
+        ] {
+            if !value.is_null() {
+                extra.insert(key.into(), value);
+            }
+        }
+    }
+    provenant_fabric_runtime::graph::AttemptUsage {
+        extra,
+        tokens,
+        cost_micro_usd,
+        wall_time_seconds,
+        tokens_partial,
+        cost_partial,
+        cost_unknown_reason,
+    }
+}
+
+pub(crate) fn decode_graph_document(
+    bytes: &[u8],
+) -> Result<provenant_fabric_runtime::graph::GraphDocument, FacadeError> {
+    #[derive(serde::Deserialize)]
+    struct Header {
+        schema_version: Option<serde_json::Value>,
+    }
+    // Check the version before decoding the graph, so a future schema can
+    // request an upgrade even when its node fields are unknown to this reader.
+    let limits = provenant_records::Limits {
+        max_bytes: provenant_fabric_runtime::config::GraphLimits::document_bytes_bound()
+            .maximum_u64(),
+        ..Default::default()
+    };
+    let header: Header = provenant_records::decode(bytes, limits)
+        .map_err(|_| FacadeError::InvalidInput { detail: None })?;
+    match header
+        .schema_version
+        .as_ref()
+        .and_then(serde_json::Value::as_u64)
+    {
+        Some(1 | 2) => provenant_records::decode(bytes, limits)
+            .map_err(|_| FacadeError::InvalidInput { detail: None }),
+        Some(version) if version > 2 => Err(FacadeError::UpgradeRequired {
+            reader_release: env!("CARGO_PKG_VERSION").into(),
+            writer_release: "unknown".into(),
+            record: "graph document schema".into(),
+            version,
+        }),
+        _ => Err(FacadeError::invalid(
+            provenant_fabric_runtime::coordination::facade::InvalidInputDetail::Schema,
+        )),
+    }
+}
+
+pub(crate) fn graph_journal_error(
+    error: provenant_fabric_runtime::graph::JournalError,
+) -> FacadeError {
+    use provenant_fabric_runtime::graph::JournalError;
+    match error {
+        JournalError::Decode(provenant_records::DecodeError::UnsupportedVersion {
+            found, ..
+        }) if found > 1 => FacadeError::UpgradeRequired {
+            reader_release: env!("CARGO_PKG_VERSION").into(),
+            writer_release: "unknown".into(),
+            record: "graph checkpoint schema".into(),
+            version: found,
+        },
+        JournalError::TooLarge => FacadeError::DispatchRefused {
+            fact: None,
+            disk: None,
+            reason: "graph checkpoint exceeds its byte limit".into(),
+        },
+        JournalError::Filesystem(_)
+        | JournalError::Io(_)
+        | JournalError::DurabilityUnconfirmed(_) => FacadeError::io("access graph journal"),
+        e if e.is_unreadable() => FacadeError::DispatchRefused {
+            fact: None,
+            disk: None,
+            reason: e.to_string(),
+        },
+        _ => FacadeError::StateCorrupt,
+    }
+}
+
+pub(crate) fn graph_result_warning(error: &provenant_run::RunError) -> &'static str {
+    match error {
+        provenant_run::RunError::ArtifactMismatch(_) => {
+            "artifact digest or length does not match its record"
+        }
+        provenant_run::RunError::NotFound => "result artifact is missing",
+        provenant_run::RunError::Filesystem(source) if source.is_not_found() => {
+            "result artifact is missing"
+        }
+        provenant_run::RunError::TooLarge { .. } => "result artifact exceeds the byte limit",
+        _ => "result artifact could not be verified",
+    }
+}
+
+impl BoundGraphOwner<'_> {
+    fn uncertain_peer_placement(
+        &self,
+        attempt: &provenant_fabric_runtime::graph::GraphAttempt,
+    ) -> bool {
+        let Some(name) = attempt
+            .extra
+            .get("placement_host")
+            .and_then(serde_json::Value::as_str)
+        else {
+            return false;
+        };
+        let local = self.factory.context.identity.host;
+        !matches!(name, "local" | "localhost")
+            && !name.parse::<provenant_core::HostId>().is_ok_and(|host| host == local)
+            // A removed peer configuration cannot turn a retained placement
+            // into proof that nothing was accepted on that peer.
+            && self.factory.context.peer_host(name) != Some(local)
+    }
+
+    pub(crate) fn prior_models(&self, attempts: &[String]) -> Result<Vec<String>, FacadeError> {
+        let owner = BinaryRunOwner {
+            factory: self.factory,
+            allow_remote: true,
+            actor: None,
+            chair: None,
+        };
+        let mut models = Vec::new();
+        for reference in attempts {
+            let (host, attempt) = reference.split_once('/').ok_or(FacadeError::StateCorrupt)?;
+            let target = AttemptTarget {
+                extra: Default::default(),
+                host: Some(host.parse().map_err(|_| FacadeError::StateCorrupt)?),
+                attempt: attempt.parse().map_err(|_| FacadeError::StateCorrupt)?,
+            };
+            if let Some(model) = owner
+                .snapshot(target, self.budget, self.cancel)?
+                .applied_route
+                .and_then(|route| route.model)
+            {
+                models.push(model);
+            }
+        }
+        Ok(models)
+    }
+
+    /// The graph exclusions plus, on an alias retry, the models that earlier
+    /// attempts of this node already used. The runtime resolves those models
+    /// from the attempt records, so they arrive as model ids, not references.
+    pub(crate) fn route_exclusions(
+        &self,
+        route: &provenant_fabric_runtime::graph::GraphRoute,
+        prior_models: &[String],
+        accepted: bool,
+    ) -> Vec<String> {
+        let mut exclude = self.exclude.clone();
+        if !accepted && route.alias.is_some() {
+            for model in prior_models {
+                if !exclude.contains(model) {
+                    exclude.push(model.clone());
+                }
+            }
+        }
+        exclude
+    }
+
+    /// Model families that served the writer attempts a reviewer must differ from.
+    pub(crate) fn writer_families(&self, attempts: &[String]) -> Result<Vec<String>, FacadeError> {
+        if attempts.is_empty() {
+            return Ok(Vec::new());
+        }
+        let owner = BinaryRunOwner {
+            factory: self.factory,
+            allow_remote: true,
+            actor: None,
+            chair: None,
+        };
+        let mut families = Vec::new();
+        for reference in attempts {
+            let (host, attempt) = reference.split_once('/').ok_or(FacadeError::StateCorrupt)?;
+            let target = AttemptTarget {
+                extra: Default::default(),
+                host: Some(host.parse().map_err(|_| FacadeError::StateCorrupt)?),
+                attempt: attempt.parse().map_err(|_| FacadeError::StateCorrupt)?,
+            };
+            let record = owner.snapshot(target, self.budget, self.cancel)?;
+            let family = record
+                .applied_route
+                .and_then(|route| route.model)
+                .and_then(|model| provenant_cli::run::model_family(&model));
+            if let Some(family) = family
+                && !families.contains(&family)
+            {
+                families.push(family);
+            }
+        }
+        Ok(families)
+    }
+}
+
+impl provenant_fabric_runtime::graph::CiStatus for BoundGraphOwner<'_> {
+    fn host_stamp(&self) -> Option<provenant_fabric_runtime::graph::CiHostStamp> {
+        Some(provenant_fabric_runtime::graph::CiHostStamp {
+            extra: Default::default(),
+            boot_identity: self.factory.clock.boot_identity().ok()?,
+            host_monotonic_micros: self.factory.clock.host_monotonic_micros().ok()?,
+        })
+    }
+    fn observe_ci(
+        &mut self,
+        target: &str,
+        checks: &[String],
+        failed_checks_max_bytes: usize,
+        max_failed_checks: usize,
+    ) -> provenant_fabric_runtime::graph::CiObservation {
+        crate::pr::status::observe_ci(
+            &self.factory.cwd,
+            target,
+            checks,
+            failed_checks_max_bytes,
+            max_failed_checks,
+        )
+    }
+}
+
+// Review roles come from the shared role library. The framing role
+// `plan.review` prepares the subject and is not an independent review.
+pub(crate) fn graph_review_node(
+    document: &provenant_fabric_runtime::graph::GraphDocument,
+    id: &str,
+) -> bool {
+    document.nodes.iter().any(|node| {
+        node.id == id
+            && node.access == provenant_fabric_runtime::graph::AccessMode::ReadOnly
+            && node.role.as_deref().is_some_and(|role| {
+                role == "lens" || role.starts_with("lens.") || role.starts_with("review.")
+            })
+    })
+}
+
+pub(crate) fn writer_source_identity_matches(
+    checkpoint: &provenant_fabric_runtime::graph::GraphCheckpoint,
+    source: &Path,
+    identity: &provenant_records::run::SourceIdentity,
+) -> bool {
+    checkpoint
+        .nodes
+        .iter()
+        .filter_map(|node| node.writer_binding.as_ref())
+        .filter(|binding| Path::new(&binding.worktree) == source)
+        .all(|binding| {
+            binding
+                .extra
+                .get("source_directory_identity")
+                .and_then(|value| {
+                    serde_json::from_value::<provenant_records::run::SourceIdentity>(value.clone())
+                        .ok()
+                })
+                .as_ref()
+                == Some(identity)
+        })
+}
+
+pub(crate) fn unanimous_preparation_cause(
+    skipped: &[provenant_records::run::SkippedRoute],
+) -> Option<provenant_records::RouteExclusionReason> {
+    let mut causes = skipped.iter().map(|route| route.cause.as_ref());
+    let first = causes.next()??;
+    causes
+        .all(|cause| cause == Some(first))
+        .then(|| first.clone())
+}
+
+fn repair_scope_grew(
+    review: &provenant_routing::ReviewConfig,
+    before: &[String],
+    after: &[String],
+) -> bool {
+    let rank = |tier: Option<&str>| match tier {
+        Some("terminal") => 3,
+        Some("crucial") => 2,
+        Some("substantial") => 1,
+        _ => 0,
+    };
+    let old_floor = review.path_floors(before);
+    let new_floor = review.path_floors(after);
+    after.iter().any(|path| !before.contains(path))
+        || rank(new_floor.tier.as_deref()) > rank(old_floor.tier.as_deref())
+}
+
+/// Re-touching a protected surface can grow semantic risk even when the path
+/// set and its tier are unchanged. This deliberately loose signal only replans.
+fn repair_touches_risk(review: &provenant_routing::ReviewConfig, touched: &[String]) -> bool {
+    review
+        .path_floors(touched)
+        .classes
+        .iter()
+        .any(|class| !matches!(class.as_str(), "routine" | "unknown"))
+}
+
+impl BoundGraphOwner<'_> {
+    fn repair_git(&self, directory: &Path, args: &[&str]) -> Result<String, String> {
+        use provenant_os::exec::{ExecOptions, Executor, Termination};
+        let git = provenant_os::git::git_executable().ok_or("Git executable unavailable")?;
+        let mut argv = vec![git.into_os_string()];
+        argv.extend(args.iter().map(std::ffi::OsString::from));
+        let remaining = std::time::Duration::from_micros(
+            self.budget
+                .remaining(self.factory.clock.mono_now())
+                .as_micros(),
+        )
+        .min(std::time::Duration::from_secs(30));
+        let mut options = ExecOptions::new(&argv, directory, remaining);
+        options.cancel = Some(self.cancel);
+        let output = self
+            .factory
+            .executor
+            .execute(options)
+            .map_err(|_| "repair Git command could not run".to_owned())?;
+        if output.termination != Termination::Exit(0) || output.timed_out || output.stdout.truncated
+        {
+            return Err("repair Git command did not complete within its bounds".into());
+        }
+        String::from_utf8(output.stdout.bytes).map_err(|_| "repair Git output is not UTF-8".into())
+    }
+}
+
+impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
+    fn detect_repair_growth(&mut self, before: &str, after: &str) -> Result<bool, String> {
+        let before =
+            provenant_core::GitOid::parse(before).map_err(|_| "repair source commit is invalid")?;
+        let after =
+            provenant_core::GitOid::parse(after).map_err(|_| "repaired commit is invalid")?;
+        let base = self
+            .integration_base
+            .and_then(|bases| bases.review.or(bases.integration))
+            .ok_or("cannot assess repair growth without a pinned review base")?;
+        let paths = |subject: &provenant_core::GitOid| -> Result<Vec<String>, String> {
+            let range = format!("{base}...{subject}");
+            let names = self.repair_git(
+                &self.factory.cwd,
+                &["diff", "--no-renames", "--name-only", "-z", &range, "--"],
+            )?;
+            Ok(names
+                .split('\0')
+                .filter(|name| !name.is_empty())
+                .map(str::to_owned)
+                .collect())
+        };
+        let old = paths(&before)?;
+        let new = paths(&after)?;
+        let routing: provenant_routing::RoutingConfig =
+            provenant_config::read_domain(self.factory.context.roots.state.as_path(), "routing")
+                .map_err(
+                    |_| "repair review configuration is unavailable; correct routing settings",
+                )?;
+        let delta = self.repair_git(
+            &self.factory.cwd,
+            &[
+                "diff",
+                "--no-renames",
+                "--name-only",
+                "-z",
+                &before.to_string(),
+                &after.to_string(),
+                "--",
+            ],
+        )?;
+        let touched: Vec<String> = delta
+            .split('\0')
+            .filter(|path| !path.is_empty())
+            .map(str::to_owned)
+            .collect();
+        Ok(repair_scope_grew(&routing.review, &old, &new)
+            || repair_touches_risk(&routing.review, &touched))
+    }
+
+    fn resolve_repair_panel(
+        &mut self,
+        document: &provenant_fabric_runtime::graph::GraphDocument,
+        subject: &str,
+    ) -> Result<provenant_fabric_runtime::graph::RepairPanelResolution, String> {
+        let subject = provenant_core::GitOid::parse(subject)
+            .map_err(|_| "repair review subject is invalid")?;
+        let base = self
+            .integration_base
+            .and_then(|bases| bases.review.or(bases.integration))
+            .ok_or("cannot replan review without a pinned base")?;
+        let range = format!("{base}...{subject}");
+        let names = self.repair_git(
+            &self.factory.cwd,
+            &["diff", "--no-renames", "--name-only", "-z", &range, "--"],
+        )?;
+        let paths: Vec<String> = names
+            .split('\0')
+            .filter(|name| !name.is_empty())
+            .map(str::to_owned)
+            .collect();
+        let routing: provenant_routing::RoutingConfig =
+            provenant_config::read_domain(self.factory.context.roots.state.as_path(), "routing")
+                .map_err(
+                    |_| "repair review configuration is unavailable; correct routing settings",
+                )?;
+        let raw = serde_json::to_value(document)
+            .map_err(|_| "repair review document could not be encoded")?;
+        let mut request: provenant_routing::ReviewRequest = raw
+            .get("review")
+            .cloned()
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(|_| "repair review request is invalid; correct graph review settings")?
+            .unwrap_or_default();
+        if request.kind.is_none() {
+            request.kind = raw["context"]["task_kind"].as_str().map(str::to_owned);
+        }
+        // A growth signal does not carry a new tier. Resolve at the highest
+        // tier until the graph carries a measured replacement risk record.
+        request.risk_tier = Some("terminal".into());
+        request.shape = None;
+        request.lenses.clear();
+        let panel = routing
+            .review
+            .resolve_panel(&request, None, &paths, false)
+            .map_err(
+                |_| "repair review panel could not resolve; correct review routing settings",
+            )?;
+        let single = panel.slots.len() == 1;
+        let frame = !single && panel.frame;
+        let verifiers = if single { 0 } else { panel.verifiers };
+        let synthesis = !single && panel.synthesis == provenant_routing::ReviewSynthesis::Model;
+        let advice = panel
+            .slots
+            .iter()
+            .map(|slot| {
+                (
+                    slot.lens.clone(),
+                    if slot.lens == "tests" {
+                        include_str!("../../assets/review-tests-advice.txt").to_owned()
+                    } else {
+                        String::new()
+                    },
+                )
+            })
+            .collect();
+        let slots = panel
+            .slots
+            .into_iter()
+            .map(|slot| {
+                let (key, route) = crate::graph_support::tier_route(
+                    &slot.lens, &slot.tier, None, true,
+                )
+                .map_err(|_| "repair review route is invalid; correct reviewer tier settings")?;
+                let mut fields = serde_json::Map::new();
+                fields.insert(key.into(), route);
+                Ok(provenant_fabric_runtime::graph::RepairPanelSlot {
+                    lens: slot.lens,
+                    route: fields.into(),
+                    family_group: slot
+                        .distinct_families
+                        .then(|| crate::graph_support::format_family_group(slot.group_index)),
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        Ok(provenant_fabric_runtime::graph::RepairPanelResolution {
+            slots,
+            frame,
+            verifiers,
+            synthesis,
+            advice,
+        })
+    }
+
+    fn input_cap_source(&self) -> provenant_fabric_runtime::graph::InputCapSource {
+        self.factory.context.graph_prompt_limit_source
+    }
+
+    fn launch_retry_policy(&self) -> provenant_fabric_runtime::graph::LaunchRetryPolicy {
+        use provenant_config::KnobSource;
+        let mut policy = provenant_fabric_runtime::graph::LaunchRetryPolicy::default();
+        let config = match provenant_config::read_with_domains(
+            &self.factory.context.roots,
+            &provenant_cli::domains::SECTIONS,
+        ) {
+            Ok(config) => config,
+            Err(error) => {
+                use std::io::Write;
+                let _ = writeln!(
+                    std::io::stderr().lock(),
+                    "warning: graph launch retry settings unavailable: {error}; using defaults"
+                );
+                return policy;
+            }
+        };
+        if let Some(knob) = config.knobs.get("lanes.launch_retry_limit") {
+            if let Some(value) = knob.value.as_u64().and_then(|n| u8::try_from(n).ok()) {
+                policy.limit = value;
+            }
+            policy.limit_source = match knob.source {
+                KnobSource::Default => "default",
+                KnobSource::Profile => "profile",
+                KnobSource::Override => "override",
+            }
+            .into();
+        }
+        if let Some(value) = config
+            .knobs
+            .get("lanes.launch_retry_first_seconds")
+            .and_then(|knob| knob.value.as_u64())
+        {
+            policy.first_seconds = value;
+        }
+        if let Some(value) = config
+            .knobs
+            .get("lanes.launch_retry_max_seconds")
+            .and_then(|knob| knob.value.as_u64())
+        {
+            policy.max_seconds = value;
+        }
+        policy
+    }
+
+    fn admission_timeout_seconds(&self) -> Option<u64> {
+        let configured = provenant_confinement::run_config::RunConfig::read(
+            self.factory.context.roots.state.as_path(),
+        )
+        .ok()
+        .and_then(|config| {
+            config.admission_seconds_for(&self.factory.context.identity.project.to_string())
+        });
+        let effective = provenant_run::AdmissionPolicy::resolve_timeout(None, configured);
+        Some(effective.seconds)
+    }
+    type Error = FacadeError;
+    fn resolve_review_base(
+        &mut self,
+        reference: &str,
+        worktree: Option<&str>,
+    ) -> Result<Option<String>, Self::Error> {
+        let directory = worktree.map_or_else(
+            || self.factory.cwd.clone(),
+            |path| self.factory.cwd.join(path),
+        );
+        self.factory
+            .resolve_base(&directory, reference, &self.repo_facts, self.cancel)
+            .map(|base| Some(base.to_string()))
+    }
+
+    fn take_launch_warnings(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.launch_warnings)
+    }
+
+    fn resolve_creation_base(
+        &mut self,
+        reference: &str,
+        default_base: bool,
+    ) -> Result<Option<String>, Self::Error> {
+        if default_base {
+            let (base, warnings) = provenant_confinement::worktrees::with_context_using_facts(
+                &self.factory.context.roots,
+                &self.factory.home,
+                &self.factory.cwd,
+                &self.factory.clock,
+                self.cancel,
+                &self.repo_facts,
+                |context| {
+                    provenant_confinement::worktrees::default_creation_base(
+                        context,
+                        &self.repo_facts,
+                        self.cancel,
+                    )
+                },
+            )
+            .map_err(landing::repository_fact_error)?;
+            for warning in warnings {
+                let _ = writeln!(std::io::stderr().lock(), "warning: {warning}");
+                self.launch_warnings.push(warning);
+            }
+            return Ok(Some(base.to_string()));
+        }
+        self.resolve_review_base(reference, None)
+    }
+
+    fn retry_allowance(
+        &self,
+        node: &provenant_records::ExtraFields,
+        graph: &provenant_records::ExtraFields,
+    ) -> Result<Option<(u8, String)>, Self::Error> {
+        Ok(Some(graph_retry_allowance(
+            node,
+            graph,
+            &self.factory.context.roots,
+        )))
+    }
+
+    fn preparation_fallback_evidence(
+        &mut self,
+        key: &provenant_fabric_runtime::graph::AttemptKey,
+        reference: &str,
+    ) -> Result<Option<provenant_fabric_runtime::graph::PreparationFallbackEvidence>, Self::Error>
+    {
+        let (host, attempt) = reference.split_once('/').ok_or(FacadeError::StateCorrupt)?;
+        // Only this host can verify its writer fences and custody lock.
+        if host != self.factory.context.identity.host.to_string() {
+            return Ok(None);
+        }
+        let owner = BinaryRunOwner {
+            factory: self.factory,
+            allow_remote: false,
+            actor: None,
+            chair: None,
+        };
+        let store = owner.store_with_facts(self.cancel, &self.repo_facts)?;
+        let call = owner.call(self.cancel);
+        let record = store
+            .record(
+                attempt.parse().map_err(|_| FacadeError::StateCorrupt)?,
+                &call,
+            )
+            .map_err(run_error)?;
+        if record.operation_id != graph_operation("graph-attempt-operation", key)?
+            || record.context.as_ref().is_none_or(|context| {
+                context.graph_id.as_deref() != Some(key.graph_id.as_str())
+                    || context.node_id.as_deref() != Some(key.node_id.as_str())
+            })
+        {
+            return Ok(None);
+        }
+        let custody_released = store.custody_released(&record, &call).map_err(run_error)?;
+        Ok(record.preparation_failure.map(|failure| {
+            provenant_fabric_runtime::graph::PreparationFallbackEvidence {
+                failure,
+                handoff: if record.provider_launched == Some(false) {
+                    provenant_routing::FallbackHandoff::Local
+                } else {
+                    provenant_routing::FallbackHandoff::UncertainOrLaunched
+                },
+                custody_released,
+            }
+        }))
+    }
+
+    fn quota_alias_redraw(
+        &mut self,
+        key: &provenant_fabric_runtime::graph::AttemptKey,
+        reference: &str,
+    ) -> Result<bool, Self::Error> {
+        use provenant_records::run::{AttemptState, Outcome, RequestedRoute};
+        let (host, attempt) = reference.split_once('/').ok_or(FacadeError::StateCorrupt)?;
+        // Only the owning host can prove terminal custody and the sealed output.
+        if host != self.factory.context.identity.host.to_string() {
+            return Ok(false);
+        }
+        let owner = BinaryRunOwner {
+            factory: self.factory,
+            allow_remote: false,
+            actor: None,
+            chair: None,
+        };
+        let store = owner.store_with_facts(self.cancel, &self.repo_facts)?;
+        let call = owner.call(self.cancel);
+        let record = store
+            .record(
+                attempt.parse().map_err(|_| FacadeError::StateCorrupt)?,
+                &call,
+            )
+            .map_err(run_error)?;
+        if record.operation_id != graph_operation("graph-attempt-operation", key)?
+            || record.context.as_ref().is_none_or(|context| {
+                context.graph_id.as_deref() != Some(key.graph_id.as_str())
+                    || context.node_id.as_deref() != Some(key.node_id.as_str())
+            })
+            || !matches!(
+                record.state,
+                AttemptState::Terminal {
+                    outcome: Outcome::QuotaLimited,
+                    ..
+                }
+            )
+            || !matches!(record.requested_route, RequestedRoute::Named { .. })
+            || record
+                .applied_route
+                .as_ref()
+                .and_then(|route| route.model.as_ref())
+                .is_none()
+            || !store.custody_released(&record, &call).map_err(run_error)?
+        {
+            return Ok(false);
+        }
+        // Main 4c52d7f28 deliberately permits partial output and writer commits.
+        // The checks above prove identity, typed quota, named alias, an applied
+        // member, and released custody; the kernel separately bounds redraws.
+        Ok(matches!(
+            record.requested_route,
+            RequestedRoute::Named { .. }
+        ))
+    }
+
+    fn preparation_refusal_cause(
+        &mut self,
+        key: &provenant_fabric_runtime::graph::AttemptKey,
+        reference: &str,
+    ) -> Result<Option<provenant_records::RouteExclusionReason>, Self::Error> {
+        let (host, attempt) = reference.split_once('/').ok_or(FacadeError::StateCorrupt)?;
+        if host != self.factory.context.identity.host.to_string() {
+            return Ok(None);
+        }
+        let owner = BinaryRunOwner {
+            factory: self.factory,
+            allow_remote: false,
+            actor: None,
+            chair: None,
+        };
+        let store = owner.store_with_facts(self.cancel, &self.repo_facts)?;
+        let call = owner.call(self.cancel);
+        let record = store
+            .record(
+                attempt.parse().map_err(|_| FacadeError::StateCorrupt)?,
+                &call,
+            )
+            .map_err(run_error)?;
+        if record.operation_id != graph_operation("graph-attempt-operation", key)?
+            || record.context.as_ref().is_none_or(|context| {
+                context.graph_id.as_deref() != Some(key.graph_id.as_str())
+                    || context.node_id.as_deref() != Some(key.node_id.as_str())
+            })
+        {
+            return Ok(None);
+        }
+        Ok(unanimous_preparation_cause(&record.skipped_routes))
+    }
+
+    fn attempt_models(&mut self, attempts: &[String]) -> Result<Vec<String>, Self::Error> {
+        self.prior_models(attempts)
+    }
+
+    fn bind_writer_worktree(
+        &mut self,
+        path: &str,
+    ) -> Result<Option<provenant_fabric_runtime::graph::WriterWorktreeBinding>, Self::Error> {
+        let request = provenant_run::resolve_writer(
+            self.factory.context.roots.state.as_path(),
+            &self.factory.cwd,
+            Path::new(path),
+        )
+        .map_err(run_error)?;
+        let writer = provenant_run::prepare_writer_with_facts(
+            &request,
+            self.factory.context.roots.state.as_path(),
+            self.factory.context.identity.project, &self.repo_facts)
+        .map_err(|error| match error {
+            provenant_run::RunError::Validation("writer needs a branch") => FacadeError::DispatchRefused {
+                fact: Some(provenant_fabric_runtime::coordination::facade::DispatchRefusalFact::DetachedWriter),
+                disk: None,
+                reason: "writer needs a branch".into(),
+            },
+            other => run_error(other),
+        })?;
+        let worktree = writer
+            .worktree
+            .path()
+            .to_str()
+            .ok_or(FacadeError::InvalidInput { detail: None })?
+            .to_owned();
+        let identity = writer.worktree.identity();
+        Ok(Some(
+            provenant_fabric_runtime::graph::WriterWorktreeBinding {
+                extra: [(
+                    "source_directory_identity".into(),
+                    serde_json::json!({
+                        "device": identity.device, "inode": identity.inode,
+                    }),
+                )]
+                .into(),
+                worktree,
+                head: writer.source_commit().to_string(),
+            },
+        ))
+    }
+
+    fn provision_writer_worktree(
+        &mut self,
+        path: &str,
+        branch: &str,
+        base: &str,
+    ) -> Result<Option<provenant_fabric_runtime::graph::WriterWorktreeBinding>, Self::Error> {
+        provenant_cli::fabric::graph_relay::provision_writer(
+            &self.factory.context,
+            path,
+            branch,
+            base,
+            self.cancel,
+        )
+        .map_err(|error| FacadeError::DispatchRefused {
+            fact: None,
+            disk: None,
+            reason: error.to_string(),
+        })?;
+        self.bind_writer_worktree(path)
+    }
+
+    fn provision_child_worktree(&mut self, path: &str, source: &str) -> Result<bool, Self::Error> {
+        provenant_cli::fabric::graph_relay::provision_child(
+            &self.factory.context,
+            path,
+            source,
+            self.cancel,
+        )
+        .map(|()| true)
+        .map_err(|_| FacadeError::io("provision writer worktree"))
+    }
+
+    fn bound_graph_bases(
+        &self,
+    ) -> (
+        Option<provenant_core::GitOid>,
+        Option<provenant_core::GitOid>,
+    ) {
+        self.integration_base
+            .map_or((None, None), |bases| (bases.review, bases.integration))
+    }
+
+    fn applied_route(
+        &mut self,
+        reference: &str,
+    ) -> Result<Option<provenant_fabric_runtime::graph::GraphRoute>, Self::Error> {
+        let (host, attempt) = reference.split_once('/').ok_or(FacadeError::StateCorrupt)?;
+        let target = AttemptTarget {
+            extra: Default::default(),
+            host: Some(host.parse().map_err(|_| FacadeError::StateCorrupt)?),
+            attempt: attempt.parse().map_err(|_| FacadeError::StateCorrupt)?,
+        };
+        let owner = BinaryRunOwner {
+            factory: self.factory,
+            allow_remote: true,
+            actor: None,
+            chair: None,
+        };
+        Ok(owner
+            .snapshot(target, self.budget, self.cancel)?
+            .applied_route
+            .map(|route| provenant_fabric_runtime::graph::GraphRoute {
+                extra: Default::default(),
+                adapter: route.provider,
+                model: route.model,
+                effort: route.effort,
+                account: route.account_label,
+                name: None,
+                alias: None,
+            }))
+    }
+
+    fn review_range(
+        &mut self,
+        reference: &str,
+        explicit_base: bool,
+    ) -> Result<provenant_fabric_runtime::graph::ReviewRange, Self::Error> {
+        use provenant_fabric_runtime::graph::ReviewRange;
+        let (host, attempt) = reference.split_once('/').ok_or(FacadeError::StateCorrupt)?;
+        if host != self.factory.context.identity.host.to_string() {
+            return Ok(ReviewRange::Unknown);
+        }
+        let owner = BinaryRunOwner {
+            factory: self.factory,
+            allow_remote: true,
+            actor: None,
+            chair: None,
+        };
+        let store = owner.store_with_facts(self.cancel, &self.repo_facts)?;
+        let call = owner.call(self.cancel);
+        let record = store
+            .record(
+                attempt.parse().map_err(|_| FacadeError::StateCorrupt)?,
+                &call,
+            )
+            .map_err(run_error)?;
+        let request = store.request(record.run_id, &call).map_err(run_error)?;
+        let task = request
+            .tasks
+            .iter()
+            .find(|task| task.task_id == record.task_id)
+            .ok_or(FacadeError::StateCorrupt)?;
+        if !explicit_base
+            && self
+                .integration_base
+                .is_none_or(|bases| bases.review.is_none() && bases.integration.is_none())
+        {
+            return Ok(ReviewRange::NoBase);
+        }
+        Ok(match task.base.as_ref().zip(task.head.as_ref()) {
+            Some((base, head)) => ReviewRange::Resolved {
+                base: base.clone(),
+                head: head.clone(),
+            },
+            None => ReviewRange::Unknown,
+        })
+    }
+    fn respect_ci_wake(&self) -> bool {
+        self.tick
+    }
+    fn ci_poll_backoff(&self, node_id: &str) -> provenant_fabric_runtime::graph::CiPollBackoff {
+        let config = &self.factory.context.config.graph;
+        config
+            .ci_poll_overrides
+            .get(node_id)
+            .copied()
+            .unwrap_or(config.ci_poll_backoff)
+    }
+    fn integration_head(&mut self) -> Result<Option<String>, Self::Error> {
+        let branch =
+            self.integration_branch
+                .as_deref()
+                .ok_or_else(|| FacadeError::DispatchRefused {
+                    fact: None,
+                    disk: None,
+                    reason: "an integration source requires graph.integration_branch".into(),
+                })?;
+        let reference = match branch.strip_prefix("origin/") {
+            Some(branch) => format!("refs/remotes/origin/{branch}"),
+            None => format!("refs/heads/{branch}"),
+        };
+        self.factory
+            .resolve_base(&self.factory.cwd, &reference, &self.repo_facts, self.cancel)
+            .map(|base| Some(base.to_string()))
+    }
+    fn ci_status(&mut self) -> Option<&mut dyn provenant_fabric_runtime::graph::CiStatus> {
+        Some(self)
+    }
+    fn actor(&self) -> String {
+        self.factory.context.identity.inbox.actor.to_string()
+    }
+    fn validate_expansion(
+        &mut self,
+        document: &provenant_fabric_runtime::graph::GraphDocument,
+        _checkpoint: &provenant_fabric_runtime::graph::GraphCheckpoint,
+    ) -> Result<(), Self::Error> {
+        for node in &document.nodes {
+            if let Some(provenant_records::run::DeliveryMode::Integrate(target)) = &node.delivery {
+                provenant_run::HostDeliveryContext::validate_integration_target(
+                    &self.factory.cwd,
+                    target,
+                )
+                .map_err(run_error)?;
+            }
+        }
+        Ok(())
+    }
+    fn node_ask(
+        &mut self,
+        scope: provenant_fabric_runtime::graph::AskScope<'_>,
+    ) -> Result<Option<provenant_fabric_runtime::graph::AskReply>, Self::Error> {
+        graph_ask_edge(self.factory, self.cancel, scope, false)
+    }
+    fn notify_owner(
+        &mut self,
+        scope: provenant_fabric_runtime::graph::AskScope<'_>,
+    ) -> Result<bool, Self::Error> {
+        use provenant_fabric_runtime::inbox::{InboxResult, InboxService};
+        let context = &self.factory.context;
+        let mut identity = context.identity.clone();
+        identity.inbox.actor = scope.actor.parse().map_err(|_| FacadeError::StateCorrupt)?;
+        let input = graph_notification_input(&scope)?;
+        let refused = |error: &dyn std::fmt::Display| FacadeError::DispatchRefused {
+            fact: None,
+            disk: None,
+            reason: format!("graph owner notification {}: {error}", scope.ask.ask_id),
+        };
+        provenant_fabric_runtime::inbox::validate_request(
+            &identity,
+            &context.config,
+            context.in_lane,
+            &input,
+        )
+        .map_err(|error| refused(&error))?;
+        let service = InboxService::open(
+            &context.roots.state,
+            &identity,
+            &self.factory.clock,
+            self.cancel,
+        )
+        .map_err(|error| refused(&error))?;
+        let result = service
+            .execute(input, self.cancel)
+            .map_err(|error| refused(&error))?;
+        Ok(matches!(result, InboxResult::Saved { .. }))
+    }
+    fn close_node_ask(
+        &mut self,
+        scope: provenant_fabric_runtime::graph::AskScope<'_>,
+    ) -> Result<(), Self::Error> {
+        graph_ask_edge(self.factory, self.cancel, scope, true).map(|_| ())
+    }
+    fn wall_now(&self) -> Option<provenant_core::WallTime> {
+        self.factory.clock.wall_now().ok()
+    }
+    fn land_policy(
+        &self,
+        tier: provenant_records::workflow::RiskTier,
+    ) -> provenant_fabric_runtime::config::LandChoice {
+        let project = self.factory.context.identity.project.to_string();
+        self.factory
+            .context
+            .config
+            .graph
+            .land
+            .choose(Some(&project), tier)
+    }
+    fn land(
+        &mut self,
+        request: provenant_fabric_runtime::graph::LandRequest<'_>,
+    ) -> Result<provenant_fabric_runtime::graph::LandObservation, Self::Error> {
+        Ok(crate::pr::land::graph_land(
+            &self.factory.cwd,
+            self.factory.context.roots.state.as_path(),
+            request.branch,
+            request.head,
+            request.pull_request,
+            request.authority.is_some(),
+            self.factory.workers,
+        ))
+    }
+    fn cost_unknown_reason(&mut self) -> Option<String> {
+        let graph_budget = &self.factory.context.config.graph.budget;
+        if graph_budget.per_graph.cost_usd.is_none() && graph_budget.per_node.cost_usd.is_none() {
+            return None;
+        }
+        self.prices
+            .get_or_insert_with(|| load_graph_prices(&self.factory.assets))
+            .as_ref()
+            .err()
+            .cloned()
+    }
+    fn deliver_graph(
+        &mut self,
+        document: &provenant_fabric_runtime::graph::GraphDocument,
+        checkpoint: &provenant_fabric_runtime::graph::GraphCheckpoint,
+    ) -> Result<Option<String>, Self::Error> {
+        let branch = document
+            .integration_branch
+            .as_deref()
+            .ok_or(FacadeError::InvalidInput { detail: None })?;
+        let session = BinaryRunOwner {
+            factory: self.factory,
+            allow_remote: false,
+            actor: None,
+            chair: None,
+        }
+        .session_with_facts(self.cancel, &self.repo_facts)?;
+        let call = provenant_run::Request {
+            clock: &self.factory.clock,
+            cancel: self.cancel,
+        };
+        let mut body = format!("Graph {}\n\n", document.graph_id);
+        let mut reviews = Vec::new();
+        for node in &checkpoint.nodes {
+            if let Some(summary) = node.deterministic_summary() {
+                body.push_str(&summary);
+                continue;
+            }
+            let reference = node
+                .attempts
+                .last()
+                .and_then(|attempt| attempt.attempt_ref.as_deref())
+                .ok_or(FacadeError::StateCorrupt)?;
+            let (_, id) = reference.split_once('/').ok_or(FacadeError::StateCorrupt)?;
+            let id = id.parse().map_err(|_| FacadeError::StateCorrupt)?;
+            let attempt = session.service().status(id, &call).map_err(run_error)?;
+            body.push_str(&format!(
+                "Node {}: attempt {id}, run {}\n\n",
+                node.id, attempt.run_id
+            ));
+            if graph_review_node(document, &node.id) {
+                // Retain each launched review route, including failed attempts
+                // before a successful retry. These are evidence, not a verdict.
+                for review in &node.attempts {
+                    let Some(reference) = review.attempt_ref.as_deref() else {
+                        continue;
+                    };
+                    let (_, id) = reference.split_once('/').ok_or(FacadeError::StateCorrupt)?;
+                    let id = id.parse().map_err(|_| FacadeError::StateCorrupt)?;
+                    let record = session.service().status(id, &call).map_err(run_error)?;
+                    let mut facts = provenant_cli::run::recorded_attempt_facts(&record);
+                    facts.role = document
+                        .nodes
+                        .iter()
+                        .find(|spec| spec.id == node.id)
+                        .and_then(|spec| spec.role.clone())
+                        .or(facts.role);
+                    // Each row describes its own result, including failed
+                    // routes before a retry. Never borrow a later verdict.
+                    facts.verdict = record.result.as_ref().and_then(|_| {
+                        let captured = session.store.stream_result(id, &call, None).ok()?;
+                        (!captured.verdict_invalid)
+                            .then_some(captured.verdict)?
+                            .map(String::from)
+                    });
+                    facts.head = node
+                        .source_commit
+                        .as_deref()
+                        .and_then(|head| provenant_core::GitOid::parse(head).ok())
+                        .or(facts.head);
+                    reviews.push(facts);
+                }
+            }
+        }
+        body.push_str(&provenant_cli::pr_body::independent_review_rows(&reviews));
+        let url = provenant_run::HostDeliveryContext::capture()
+            .with_repo_facts(&self.repo_facts)
+            .deliver_graph_pr(
+                &self.factory.cwd,
+                branch,
+                self.integration_base
+                    .and_then(|bases| bases.integration)
+                    .ok_or(FacadeError::Conflict)?,
+                &body,
+            )
+            .map_err(run_error)?;
+        Ok(Some(url))
+    }
+    fn usage(
+        &mut self,
+        attempt_ref: &str,
+    ) -> Result<provenant_fabric_runtime::graph::AttemptUsage, Self::Error> {
+        let (host, attempt) = attempt_ref
+            .split_once('/')
+            .ok_or(FacadeError::StateCorrupt)?;
+        let target = AttemptTarget {
+            extra: Default::default(),
+            host: Some(host.parse().map_err(|_| FacadeError::StateCorrupt)?),
+            attempt: attempt.parse().map_err(|_| FacadeError::StateCorrupt)?,
+        };
+        let owner = BinaryRunOwner {
+            factory: self.factory,
+            allow_remote: true,
+            actor: None,
+            chair: None,
+        };
+        let record = owner.snapshot(target, self.budget, self.cancel)?;
+        let cost_unknown_reason = self.cost_unknown_reason();
+        let prices = self
+            .prices
+            .get_or_insert_with(|| load_graph_prices(&self.factory.assets));
+        Ok(graph_attempt_usage(
+            record,
+            prices.as_ref().ok(),
+            cost_unknown_reason,
+        ))
+    }
+
+    fn attempt_families(&mut self, attempts: &[String]) -> Result<Vec<String>, Self::Error> {
+        self.writer_families(attempts)
+    }
+
+    fn materialise_inputs(
+        &mut self,
+        key: &provenant_fabric_runtime::graph::AttemptKey,
+        requests: &[provenant_fabric_runtime::graph::InputRequest],
+        cap: usize,
+    ) -> Option<provenant_fabric_runtime::graph::MaterialisedInputs> {
+        Some(graph_inputs::materialise(
+            self.factory,
+            self.budget,
+            self.cancel,
+            key,
+            requests,
+            cap,
+        ))
+    }
+
+    fn placement_host_id(&self, name: &str) -> Result<Option<String>, Self::Error> {
+        let local = self.factory.context.identity.host;
+        let host = if matches!(name, "local" | "localhost")
+            || name
+                .parse::<provenant_core::HostId>()
+                .is_ok_and(|host| host == local)
+        {
+            local
+        } else {
+            self.factory
+                .context
+                .peer_host(name)
+                .ok_or(FacadeError::UnknownHost)?
+        };
+        Ok(Some(host.to_string()))
+    }
+
+    fn stop_cancelled_attempt(
+        &mut self,
+        attempt: &provenant_fabric_runtime::graph::GraphAttempt,
+    ) -> Result<(), Self::Error> {
+        let mut owner = BinaryRunOwner {
+            factory: self.factory,
+            allow_remote: true,
+            actor: None,
+            chair: None,
+        };
+        self.factory
+            .cancel_graph_attempt(&mut owner, attempt, self.budget, self.cancel)
+    }
+
+    fn cancelled_attempt_settled(
+        &mut self,
+        attempt: &provenant_fabric_runtime::graph::GraphAttempt,
+    ) -> Result<bool, Self::Error> {
+        if let Some(settled) =
+            self.factory
+                .cancel_peer_submission(attempt, false, self.budget, self.cancel)?
+        {
+            return Ok(settled);
+        }
+        let owner = BinaryRunOwner {
+            factory: self.factory,
+            allow_remote: true,
+            actor: Some(
+                attempt
+                    .launch_actor
+                    .parse()
+                    .map_err(|_| FacadeError::StateCorrupt)?,
+            ),
+            chair: None,
+        };
+        if let Some(reference) = attempt.attempt_ref.as_deref() {
+            let (host, id) = reference.split_once('/').ok_or(FacadeError::StateCorrupt)?;
+            let host = host.parse().map_err(|_| FacadeError::StateCorrupt)?;
+            let target = AttemptTarget {
+                extra: Default::default(),
+                host: Some(host),
+                attempt: id.parse().map_err(|_| FacadeError::StateCorrupt)?,
+            };
+            if host == self.factory.context.identity.host {
+                let store = owner.store_with_facts(self.cancel, &self.repo_facts)?;
+                let call = owner.call(self.cancel);
+                if let Some(observation) = provenant_cli::fabric::graph_cloud::installed(
+                    &store,
+                    target.attempt,
+                    "",
+                    reference,
+                    &call,
+                    &self.factory.cwd,
+                    std::time::Duration::from_micros(
+                        self.budget
+                            .remaining(self.factory.clock.mono_now())
+                            .as_micros(),
+                    ),
+                    true,
+                )
+                .map_err(|_| FacadeError::InvalidInput { detail: None })?
+                {
+                    return Ok(matches!(
+                        observation,
+                        provenant_fabric_runtime::graph::AttemptObservation::Terminal { .. }
+                    ));
+                }
+            }
+            let record = owner.snapshot(target, self.budget, self.cancel)?;
+            if record.extra.get("peer_subtree").is_some_and(|subtree| {
+                matches!(subtree["status"].as_str(), Some("pending" | "paused"))
+            }) {
+                return Ok(false);
+            }
+            return Ok(matches!(
+                record.state,
+                provenant_records::run::AttemptState::Terminal { .. }
+            ) && record.custody_pending == Some(false));
+        }
+        let operation = graph_operation("graph-attempt-operation", &attempt.key)?;
+        let store = owner.store_with_facts(self.cancel, &self.repo_facts)?;
+        let call = owner.call(self.cancel);
+        match store.operation(&operation, &call).map_err(run_error)? {
+            // Absence in this host's store cannot settle an uncertain peer
+            // launch whose accepted target has not reached the graph yet.
+            None => Ok(!self.uncertain_peer_placement(attempt)),
+            Some(operation) => {
+                use provenant_run::{AttemptFilter, AttemptReader};
+                let attempts = store
+                    .attempts(
+                        AttemptFilter {
+                            run_id: Some(operation.run_id),
+                            task_id: None,
+                        },
+                        &call,
+                    )
+                    .map_err(run_error)?;
+                let mut found = false;
+                for fact in attempts {
+                    let fact = fact.map_err(run_error)?;
+                    let record = store.record(fact.attempt_id, &call).map_err(run_error)?;
+                    found = true;
+                    let reference = format!(
+                        "{}/{}",
+                        self.factory.context.identity.host, record.attempt_id
+                    );
+                    if let Some(observation) = provenant_cli::fabric::graph_cloud::installed(
+                        &store,
+                        record.attempt_id,
+                        "",
+                        &reference,
+                        &call,
+                        &self.factory.cwd,
+                        std::time::Duration::from_micros(
+                            self.budget
+                                .remaining(self.factory.clock.mono_now())
+                                .as_micros(),
+                        ),
+                        true,
+                    )
+                    .map_err(|_| FacadeError::InvalidInput { detail: None })?
+                    {
+                        if matches!(
+                            observation,
+                            provenant_fabric_runtime::graph::AttemptObservation::Terminal { .. }
+                        ) {
+                            continue;
+                        }
+                        return Ok(false);
+                    }
+                    if !store.custody_released(&record, &call).map_err(run_error)? {
+                        return Ok(false);
+                    }
+                }
+                // A prepared operation with no attempt never admitted work;
+                // an unknown launch without evidence must remain unresolved.
+                Ok(found || operation.state == provenant_run::OperationState::Prepared)
+            }
+        }
+    }
+
+    fn launch_accepted(
+        &mut self,
+        attempt: &provenant_fabric_runtime::graph::GraphAttempt,
+    ) -> Result<bool, Self::Error> {
+        if attempt.attempt_ref.is_some() {
+            return Ok(true);
+        }
+        let owner = BinaryRunOwner {
+            factory: self.factory,
+            allow_remote: true,
+            actor: Some(
+                attempt
+                    .launch_actor
+                    .parse()
+                    .map_err(|_| FacadeError::StateCorrupt)?,
+            ),
+            chair: None,
+        };
+        let operation_id = graph_operation("graph-attempt-operation", &attempt.key)?;
+        let store = owner.store_with_facts(self.cancel, &self.repo_facts)?;
+        let call = owner.call(self.cancel);
+        Ok(store
+            .operation(&operation_id, &call)
+            .map_err(run_error)?
+            .is_some_and(|operation| operation.state != provenant_run::OperationState::Prepared))
+    }
+
+    fn launch_refused_before_acceptance(
+        &mut self,
+        attempt: &provenant_fabric_runtime::graph::GraphAttempt,
+    ) -> Result<bool, Self::Error> {
+        if attempt.attempt_ref.is_some() {
+            return Ok(false);
+        }
+        let owner = BinaryRunOwner {
+            factory: self.factory,
+            allow_remote: true,
+            actor: Some(
+                attempt
+                    .launch_actor
+                    .parse()
+                    .map_err(|_| FacadeError::StateCorrupt)?,
+            ),
+            chair: None,
+        };
+        let operation = graph_operation("graph-attempt-operation", &attempt.key)?;
+        let store = owner.store_with_facts(self.cancel, &self.repo_facts)?;
+        let call = owner.call(self.cancel);
+        // An absent local operation proves nothing about a peer submission;
+        // local prelaunch refusals keep their existing cancellation semantics.
+        Ok(
+            match store.operation(&operation, &call).map_err(run_error)? {
+                Some(operation) => operation.state == provenant_run::OperationState::Prepared,
+                None => !self.uncertain_peer_placement(attempt),
+            },
+        )
+    }
+
+    fn observe_or_start(
+        &mut self,
+        key: &provenant_fabric_runtime::graph::AttemptKey,
+        node: provenant_fabric_runtime::graph::NodeInput<'_>,
+        route: &provenant_fabric_runtime::graph::GraphRoute,
+        access: provenant_fabric_runtime::graph::AccessMode,
+        worktree: Option<&str>,
+        replay: provenant_fabric_runtime::graph::Replay<'_>,
+    ) -> Result<provenant_fabric_runtime::graph::AttemptObservation, Self::Error> {
+        use provenant_fabric_runtime::graph::{AttemptObservation, AttemptOutcome};
+        let mut owner = BinaryRunOwner {
+            factory: self.factory,
+            allow_remote: true,
+            actor: None,
+            chair: None,
+        };
+        let operation_id = graph_operation("graph-attempt-operation", key)?;
+        let cancel = self.cancel;
+        let blocked = |owner: &BinaryRunOwner<'_>| -> Result<Option<String>, FacadeError> {
+            let store = owner.store_with_facts(cancel, &self.repo_facts)?;
+            Ok(store
+                .operation(&operation_id, &owner.call(cancel))
+                .map_err(run_error)?
+                .filter(|operation| operation.state == provenant_run::OperationState::Blocked)
+                .map(|operation| {
+                    operation
+                        .blocked_reason
+                        .unwrap_or_else(|| "custody release failed".into())
+                }))
+        };
+        let (target, reference) = if let Some(reference) = replay.stored_ref {
+            // An accepted attempt is observed by reference: operation replay is
+            // actor-scoped, so resubmitting under another actor would launch again.
+            let (host, attempt) = reference.split_once('/').ok_or(FacadeError::StateCorrupt)?;
+            let target = AttemptTarget {
+                extra: Default::default(),
+                host: Some(host.parse().map_err(|_| FacadeError::StateCorrupt)?),
+                attempt: attempt.parse().map_err(|_| FacadeError::StateCorrupt)?,
+            };
+            (target, Some(reference.to_owned()))
+        } else {
+            let host = node
+                .attempt
+                .and_then(|spec| spec.host.as_deref())
+                .map(|name| {
+                    let local = self.factory.context.identity.host;
+                    if matches!(name, "local" | "localhost")
+                        || name
+                            .parse::<provenant_core::HostId>()
+                            .is_ok_and(|host| host == local)
+                    {
+                        Ok(local)
+                    } else {
+                        self.factory
+                            .context
+                            .peer_host(name)
+                            .ok_or(FacadeError::UnknownHost)
+                    }
+                })
+                .transpose()?;
+            if host.is_some_and(|host| host != self.factory.context.identity.host)
+                && (access != provenant_fabric_runtime::graph::AccessMode::ReadOnly
+                    || node.attempt.is_some_and(|spec| {
+                        spec.placement.is_some() || spec.new_worktree.is_some()
+                    }))
+            {
+                return Err(FacadeError::WorktreeNotApplicable);
+            }
+            if node
+                .attempt
+                .and_then(|spec| spec.placement.as_ref())
+                .is_some()
+                && access != provenant_fabric_runtime::graph::AccessMode::ReadOnly
+            {
+                return Err(FacadeError::invalid(InvalidInputDetail::Field(
+                    "node".into(),
+                )));
+            }
+            // Replaying an accepted operation must observe its existing writer,
+            // even after that writer has advanced beyond the pinned start.
+            owner.actor = Some(
+                replay
+                    .launch_actor
+                    .parse()
+                    .map_err(|_| FacadeError::StateCorrupt)?,
+            );
+            if let Some(reason) = blocked(&owner)? {
+                return Err(FacadeError::DispatchRefused {
+                    fact: None,
+                    disk: None,
+                    reason,
+                });
+            }
+            let operation_id = graph_operation("graph-attempt-operation", key)?;
+            let store = owner.store_with_facts(self.cancel, &self.repo_facts)?;
+            let call = owner.call(self.cancel);
+            let operation = store.operation(&operation_id, &call).map_err(run_error)?;
+            let accepted = operation.as_ref().is_some_and(|operation| {
+                operation.state != provenant_run::OperationState::Prepared
+            });
+            // A graph retry is a new attempt, but retains the predecessor's
+            // original source pin and terminal writer head. Mark continuations
+            // even when both heads agree so preparation checks dirty remnants.
+            let mut submission_prompt = node.prompt.to_owned();
+            let mut writer_predecessor = None;
+            let (mut source_head, mut successor_head) = if !accepted
+                && access == provenant_fabric_runtime::graph::AccessMode::WorktreeWrite
+                && let Some(previous) = key
+                    .extra
+                    .get("previous_attempt_ref")
+                    .and_then(serde_json::Value::as_str)
+            {
+                let (host, previous) = previous.split_once('/').ok_or(FacadeError::StateCorrupt)?;
+                if host != self.factory.context.identity.host.to_string() {
+                    return Err(FacadeError::OwnerUnavailable);
+                }
+                let previous = store
+                    .record(
+                        previous.parse().map_err(|_| FacadeError::StateCorrupt)?,
+                        &call,
+                    )
+                    .map_err(run_error)?;
+                if previous.context.as_ref().is_none_or(|context| {
+                    context.graph_id.as_deref() != Some(key.graph_id.as_str())
+                        || context.node_id.as_deref() != Some(key.node_id.as_str())
+                }) || !matches!(
+                    previous.state,
+                    provenant_records::run::AttemptState::Terminal { .. }
+                ) || !store
+                    .custody_released(&previous, &call)
+                    .map_err(run_error)?
+                {
+                    return Err(FacadeError::Conflict);
+                }
+                if matches!(
+                    previous.requested_route,
+                    provenant_records::run::RequestedRoute::Named { .. }
+                ) && matches!(
+                    previous.state,
+                    provenant_records::run::AttemptState::Terminal {
+                        outcome: provenant_records::run::Outcome::QuotaLimited,
+                        ..
+                    }
+                ) {
+                    submission_prompt.push_str("\n\nThe previous member stopped on quota. Inspect the retained worktree and any commits, then continue the original task from that work rather than restart. Use another eligible member of the same alias.");
+                }
+                let request = store.request(previous.run_id, &call).map_err(run_error)?;
+                let previous_task = request
+                    .tasks
+                    .iter()
+                    .find(|task| task.task_id == previous.task_id)
+                    .ok_or(FacadeError::StateCorrupt)?;
+                let writer = provenant_run::resolve_writer(
+                    self.factory.context.roots.state.as_path(),
+                    &self.factory.cwd,
+                    Path::new(worktree.ok_or(FacadeError::StateCorrupt)?),
+                )
+                .map_err(run_error)?;
+                if previous_task.writer.as_ref() != Some(&writer) {
+                    return Err(FacadeError::Conflict);
+                }
+                store
+                    .check_continuation_writer(previous.attempt_id, &call)
+                    .map_err(run_error)?;
+                writer_predecessor = Some(previous.attempt_id);
+                let original = previous_task
+                    .source_head
+                    .as_ref()
+                    .or(previous_task.head.as_ref())
+                    .cloned()
+                    .or_else(|| node.source_commit.map(str::to_owned));
+                let current = previous
+                    .head
+                    .map(|head| head.to_string())
+                    .or_else(|| previous_task.head.clone());
+                (original, current)
+            } else {
+                (None, None)
+            };
+
+            // A crash can leave an accepted operation without a checkpoint
+            // reference. Preserve its immutable labels, including legacy None.
+            let mut accepted_knobs = None;
+            let mut accepted_route = None;
+            let mut accepted_retry_limit = None;
+            let mut accepted_access = None;
+            let mut accepted_skill_location = None;
+            let mut accepted_attempt = None;
+            let mut context = match &operation {
+                Some(operation) => match store.request(operation.run_id, &call) {
+                    Ok(request) => {
+                        let task = request.tasks.first().ok_or(FacadeError::StateCorrupt)?;
+                        if accepted {
+                            use provenant_run::{AttemptFilter, AttemptReader};
+                            let session = owner.session(self.cancel)?;
+                            let mut attempts = session
+                                .store
+                                .attempts(
+                                    AttemptFilter {
+                                        run_id: Some(operation.run_id),
+                                        task_id: Some(task.task_id),
+                                    },
+                                    &call,
+                                )
+                                .map_err(run_error)?;
+                            let attempt = attempts
+                                .next()
+                                .ok_or(FacadeError::StateCorrupt)?
+                                .map_err(run_error)?;
+                            let record = session
+                                .store
+                                .record(attempt.attempt_id, &call)
+                                .map_err(run_error)?;
+                            if record.prompt.bytes > provenant_records::run::RECORD_LIMIT {
+                                return Err(FacadeError::StateCorrupt);
+                            }
+                            let mut bytes = Vec::new();
+                            loop {
+                                let offset = bytes.len() as u64;
+                                let prompt = session
+                                    .store
+                                    .read_output(
+                                        attempt.attempt_id,
+                                        provenant_run::ArtifactPart::Prompt,
+                                        provenant_run::ByteRange {
+                                            offset,
+                                            ..Default::default()
+                                        },
+                                        &session.context,
+                                        &call,
+                                    )
+                                    .map_err(run_error)?;
+                                if !prompt.complete
+                                    || prompt.len != record.prompt.bytes
+                                    || prompt.digest != task.prompt_digest
+                                    || prompt.offset != offset
+                                    || prompt.next_offset != offset + prompt.bytes.len() as u64
+                                    || prompt.next_offset > record.prompt.bytes
+                                    || (!prompt.eof && prompt.next_offset <= offset)
+                                    || prompt.eof != (prompt.next_offset == record.prompt.bytes)
+                                {
+                                    return Err(FacadeError::StateCorrupt);
+                                }
+                                bytes.extend(prompt.bytes);
+                                if prompt.eof {
+                                    break;
+                                }
+                            }
+                            submission_prompt =
+                                String::from_utf8(bytes).map_err(|_| FacadeError::StateCorrupt)?;
+                            source_head = task.source_head.clone();
+                            successor_head = task.head.clone();
+                            accepted_knobs = Some(task.profile.overrides.clone());
+                            accepted_route = Some(task.route.clone());
+                            accepted_retry_limit = Some(task.profile.settlement_retry_limit);
+                            accepted_access = Some(task.access.clone());
+                            accepted_skill_location = Some(task.profile.require_skill_location);
+                            accepted_attempt = Some(provenant_fabric_runtime::graph::AttemptSpec {
+                                placement: task.cloud.clone(),
+                                account: task.account.clone(),
+                                build_heavy: task.build_heavy,
+                                confidential: task
+                                    .profile
+                                    .extra
+                                    .get("confidential")
+                                    .and_then(serde_json::Value::as_bool)
+                                    .unwrap_or(false),
+                                provider_timeout: Some(task.provider_timeout_seconds),
+                                ..Default::default()
+                            });
+                        }
+                        task.context.clone()
+                    }
+                    Err(provenant_run::RunError::NotFound)
+                        if operation.state == provenant_run::OperationState::Prepared =>
+                    {
+                        Some(node.context)
+                    }
+                    Err(error) => return Err(run_error(error)),
+                },
+                None => Some(node.context),
+            };
+            if !accepted && let Some(context) = &mut context {
+                context.writer_predecessor = writer_predecessor;
+            }
+            let source_commit = successor_head.as_deref().or(node.source_commit);
+            let excluded_families = self.writer_families(node.distinct_from_attempts)?;
+            // An exact route cannot be substituted, so required separation is
+            // decided here, before any worktree advance or submission. An
+            // accepted operation is observed as it was launched.
+            if !accepted
+                && let Some(model) = &route.model
+                && exact_route_refused(
+                    &exact_model(route.adapter.as_deref(), model),
+                    &excluded_families,
+                    node.require_distinct,
+                )
+            {
+                return Ok(AttemptObservation::Terminal {
+                    attempt_ref: None,
+                    outcome: AttemptOutcome::AdapterUnavailable,
+                    launched: false,
+                    result: None,
+                    result_warning: None,
+                    result_path: None,
+                    branch: None,
+                    commit: None,
+                });
+            }
+            // Preserve the specific detached-writer refusal in node status.
+            if !accepted
+                && access == provenant_fabric_runtime::graph::AccessMode::WorktreeWrite
+                && let Some(path) = worktree
+            {
+                let writer = provenant_run::resolve_writer(
+                    self.factory.context.roots.state.as_path(),
+                    &self.factory.cwd,
+                    Path::new(path),
+                )
+                .map_err(|error| match error {
+                    provenant_run::RunError::Validation("writer needs a branch") => {
+                        FacadeError::DispatchRefused {
+                            fact: Some(provenant_fabric_runtime::coordination::facade::DispatchRefusalFact::DetachedWriter),
+                            disk: None,
+                            reason: "writer needs a branch".into(),
+                        }
+                    }
+                    other => run_error(other),
+                })?;
+                if let Err(provenant_run::RunError::Validation("writer needs a branch")) =
+                    provenant_run::prepare_writer_with_facts(
+                        &writer,
+                        self.factory.context.roots.state.as_path(),
+                        self.factory.context.identity.project,
+                        &self.repo_facts,
+                    )
+                {
+                    return Err(FacadeError::DispatchRefused {
+                        fact: Some(provenant_fabric_runtime::coordination::facade::DispatchRefusalFact::DetachedWriter),
+                        disk: None,
+                        reason: "writer needs a branch".into(),
+                    });
+                }
+            }
+            if !accepted
+                && access == provenant_fabric_runtime::graph::AccessMode::WorktreeWrite
+                && matches!(
+                    replay.delivery,
+                    Some(provenant_records::run::DeliveryMode::Integrate(_))
+                )
+                && let (Some(base), Some(commit)) = (
+                    self.integration_base.and_then(|bases| bases.integration),
+                    source_commit,
+                )
+            {
+                let head = commit
+                    .parse()
+                    .map_err(|_| FacadeError::InvalidInput { detail: None })?;
+                let descends = provenant_confinement::worktrees::with_context_using_facts(
+                    &self.factory.context.roots,
+                    &self.factory.home,
+                    &self.factory.cwd,
+                    &self.factory.clock,
+                    self.cancel,
+                    &self.repo_facts,
+                    |context| {
+                        provenant_confinement::worktrees::is_ancestor(
+                            context,
+                            base,
+                            head,
+                            self.cancel,
+                        )
+                    },
+                )
+                .map_err(|error| graph_writer_initialisation_error(commit, error))?;
+                if !descends {
+                    return Err(FacadeError::DispatchRefused {
+                        fact: None,
+                        disk: None,
+                        reason: format!(
+                            "node {}: lane source {head} does not descend from integration base {base}",
+                            key.node_id
+                        ),
+                    });
+                }
+            }
+            if !accepted
+                && access == provenant_fabric_runtime::graph::AccessMode::WorktreeWrite
+                // A continuation already owns its predecessor's checkout.
+                // Preparation verifies its exact head and ancestry; advancing
+                // it here would refuse the uncommitted work it must retain.
+                && source_head.is_none()
+                && let (Some(path), Some(commit)) = (worktree, source_commit)
+            {
+                let head = commit
+                    .parse()
+                    .map_err(|_| FacadeError::InvalidInput { detail: None })?;
+                provenant_confinement::worktrees::with_context_using_facts(
+                    &self.factory.context.roots,
+                    &self.factory.home,
+                    &self.factory.cwd,
+                    &self.factory.clock,
+                    self.cancel,
+                    &self.repo_facts,
+                    |context| {
+                        provenant_confinement::worktrees::fast_forward(
+                            context,
+                            Path::new(path),
+                            head,
+                            self.cancel,
+                        )
+                    },
+                )
+                .map_err(|error| graph_writer_initialisation_error(commit, error))?;
+            }
+            let delivery = if let Some(mode) = replay.delivery {
+                let branch = if let Some(path) = worktree {
+                    let writer = provenant_run::resolve_writer(
+                        self.factory.context.roots.state.as_path(),
+                        &self.factory.cwd,
+                        Path::new(path),
+                    )
+                    .map_err(run_error)?;
+                    provenant_run::prepare_writer_with_facts(
+                        &writer,
+                        self.factory.context.roots.state.as_path(),
+                        self.factory.context.identity.project,
+                        &self.repo_facts,
+                    )
+                    .map_err(run_error)?
+                    .branch
+                    .as_str()
+                    .trim_start_matches("refs/heads/")
+                    .to_owned()
+                } else {
+                    String::new()
+                };
+                // A continuing writer pushes only to the branch it continues.
+                if let Some(bound) = replay.branch
+                    && bound != branch
+                {
+                    return Err(FacadeError::DispatchRefused {
+                        fact: None,
+                        disk: None,
+                        reason: format!(
+                            "graph writer worktree is on {branch}, not the continued branch {bound}"
+                        ),
+                    });
+                }
+                provenant_run::HostDeliveryContext::destination(mode.clone(), &branch)
+                    .map_err(run_error)?
+                    .map(|mut request| {
+                        request.fast_forward_only = replay.fast_forward_only;
+                        request
+                    })
+            } else {
+                None
+            };
+            let review_base = if access == provenant_fabric_runtime::graph::AccessMode::ReadOnly {
+                provenant_fabric_runtime::graph::FileJournal::execution(
+                    &self.factory.context.roots.state,
+                    self.factory.context.identity.project,
+                    &key.graph_id,
+                )
+                .map_err(graph_journal_error)?
+                .and_then(|execution| execution.review_base)
+            } else {
+                None
+            };
+            // Writer separation is mandatory; sibling diversity remains a preference.
+            let enforced = node.require_distinct && !excluded_families.is_empty();
+            let mut avoided_families = excluded_families;
+            let mut preferred_families = Vec::new();
+            for family in node.family_peers {
+                let target = if enforced {
+                    &mut preferred_families
+                } else {
+                    &mut avoided_families
+                };
+                if !target.contains(family) {
+                    target.push(family.clone());
+                }
+            }
+            let exclude = self.route_exclusions(route, node.prior_attempts, accepted);
+            let base = if accepted {
+                store
+                    .request(
+                        operation.as_ref().ok_or(FacadeError::StateCorrupt)?.run_id,
+                        &call,
+                    )
+                    .map_err(run_error)?
+                    .tasks
+                    .first()
+                    .ok_or(FacadeError::StateCorrupt)?
+                    .base_ref
+                    .clone()
+            } else if access == provenant_fabric_runtime::graph::AccessMode::ReadOnly
+                && source_commit.is_some()
+            {
+                node.review_base
+                    .map(str::to_owned)
+                    // A review base recorded with the graph execution comes next,
+                    // then the integration base.
+                    .or_else(|| review_base.map(|base| base.to_string()))
+                    .or_else(|| {
+                        self.integration_base
+                            .and_then(|bases| bases.integration)
+                            .map(|base| base.to_string())
+                    })
+                    // Preserve the prior fallback without requiring origin/HEAD.
+                    .or_else(|| source_commit.map(str::to_owned))
+            } else {
+                source_commit.map(|head| {
+                    self.integration_base
+                        .and_then(|bases| bases.integration)
+                        .map_or_else(|| head.to_owned(), |base| base.to_string())
+                })
+            };
+            // Peer roots retain the exact requested route, including family
+            // exclusions, rather than resolving a second, broader alias.
+            let peer_root = provenant_fabric_runtime::graph::FileJournal::execution(
+                &self.factory.context.roots.state,
+                self.factory.context.identity.project,
+                &key.graph_id,
+            )
+            .map_err(graph_journal_error)?
+            .is_some_and(|execution| {
+                execution
+                    .extra
+                    .get("peer_origin_context")
+                    .and_then(|origin| origin["node_id"].as_str())
+                    == Some(key.node_id.as_str())
+            });
+            if peer_root && !accepted {
+                source_head = route
+                    .extra
+                    .get("peer_source_head")
+                    .map(|value| {
+                        serde_json::from_value(value.clone()).map_err(|_| FacadeError::StateCorrupt)
+                    })
+                    .transpose()?
+                    .flatten();
+            }
+            let accepted_route = accepted_route.or(if peer_root {
+                route
+                    .extra
+                    .get("peer_requested_route")
+                    .map(|value| {
+                        serde_json::from_value(value.clone()).map_err(|_| FacadeError::StateCorrupt)
+                    })
+                    .transpose()?
+            } else {
+                None
+            });
+            let input = SubmitInput::Submit {
+                extra: Default::default(),
+                operation_id,
+                tasks: vec![SubmittedTask {
+                    require_skill_location: accepted_skill_location
+                        .unwrap_or(node.require_skill_location),
+                    context,
+                    extra: Default::default(),
+                    build_heavy: node.attempt.is_some_and(|spec| spec.build_heavy),
+                    base,
+                    head: source_commit.map(str::to_owned),
+                    source_head,
+                    account: route
+                        .account
+                        .clone()
+                        .or_else(|| node.attempt.and_then(|spec| spec.account.clone())),
+                    access,
+                    capabilities: None,
+                    capability_sources: Default::default(),
+                    worktree: (access
+                        == provenant_fabric_runtime::graph::AccessMode::WorktreeWrite)
+                        .then(|| worktree.map(str::to_owned))
+                        .flatten(),
+                    prompt: submission_prompt,
+                    title: Some(node.title.to_owned()),
+                    route: accepted_route.unwrap_or(match &route.model {
+                        None if route.name.is_some() => {
+                            provenant_records::run::RequestedRoute::Adapter {
+                                extra: Default::default(),
+                                provider: route
+                                    .adapter
+                                    .clone()
+                                    .ok_or(FacadeError::InvalidInput { detail: None })?,
+                                name: route
+                                    .name
+                                    .clone()
+                                    .ok_or(FacadeError::InvalidInput { detail: None })?,
+                            }
+                        }
+                        Some(model) => {
+                            let adapter = route
+                                .adapter
+                                .as_ref()
+                                .ok_or(FacadeError::InvalidInput { detail: None })?;
+                            provenant_records::run::RequestedRoute::Model {
+                                extra: Default::default(),
+                                provider: adapter.clone(),
+                                model: exact_model(Some(adapter), model),
+                                effort: route.effort.clone(),
+                            }
+                        }
+                        None if !avoided_families.is_empty() => {
+                            provenant_records::run::RequestedRoute::Review {
+                                extra: Default::default(),
+                                name: route
+                                    .alias
+                                    .clone()
+                                    .ok_or(FacadeError::InvalidInput { detail: None })?,
+                                effort: route.effort.clone(),
+                                excluded_families: avoided_families,
+                                distinct_families: true,
+                                preferred_families,
+                                require_distinct: enforced,
+                            }
+                        }
+                        None => provenant_records::run::RequestedRoute::Named {
+                            extra: Default::default(),
+                            name: route
+                                .alias
+                                .clone()
+                                .ok_or(FacadeError::InvalidInput { detail: None })?,
+                            effort: route.effort.clone(),
+                        },
+                    }),
+                    timeout_seconds: lane_timeout(
+                        node.deadline_seconds,
+                        self.factory.context.config.limits.graph_timeout_seconds,
+                    ),
+                    delivery_id: None,
+                    deliver: delivery,
+                    new_worktree: None,
+                }],
+                concurrency: Some(1),
+                knobs: if let Some(knobs) = accepted_knobs {
+                    knobs
+                } else {
+                    let mut knobs = Vec::new();
+                    if !exclude.is_empty() {
+                        knobs.push(format!(
+                            "routing.graph_exclude={}",
+                            serde_json::Value::from(exclude)
+                        ));
+                    }
+                    knobs
+                },
+                host,
+            };
+            // Operation replay is actor-scoped: submit under the recorded launch actor.
+            owner.actor = Some(
+                provenant_core::ActorId::parse(replay.launch_actor)
+                    .map_err(|_| FacadeError::StateCorrupt)?,
+            );
+            let mut grants = if accepted {
+                accepted_access.ok_or(FacadeError::StateCorrupt)?
+            } else {
+                let configured = provenant_config::read_with_domains(
+                    &self.factory.context.roots,
+                    &provenant_cli::domains::SECTIONS,
+                )
+                .map_err(|_| FacadeError::InvalidInput { detail: None })?;
+                let default_capabilities = configured
+                    .domains
+                    .lanes
+                    .projects
+                    .get(&self.factory.context.identity.project.to_string())
+                    .map(|settings| settings.capabilities.as_slice())
+                    .unwrap_or_default();
+                let mut capabilities = node
+                    .capabilities
+                    .unwrap_or_else(|| {
+                        if access == provenant_fabric_runtime::graph::AccessMode::WorktreeWrite {
+                            default_capabilities
+                        } else {
+                            &[]
+                        }
+                    })
+                    .to_vec();
+                capabilities.retain(|name| {
+                    if name == "postgres" {
+                        true
+                    } else {
+                        provenant_cli::run::warn_ignored_capability("node or project ", name);
+                        false
+                    }
+                });
+                if access == provenant_fabric_runtime::graph::AccessMode::WorktreeWrite {
+                    for capability in &self.capability_overrides.0 {
+                        if capability != "postgres" {
+                            provenant_cli::run::warn_ignored_capability("flag ", capability);
+                            continue;
+                        }
+                        if !capabilities.contains(capability) {
+                            capabilities.push(capability.clone());
+                        }
+                    }
+                }
+                capabilities.retain(|name| !self.capability_overrides.1.contains(name));
+                let mut seen = std::collections::BTreeSet::new();
+                capabilities.retain(|name| seen.insert(name.clone()));
+                let mut grants = provenant_cli::run::lane_access(
+                    &provenant_cli::Access {
+                        attach: node
+                            .attachments
+                            .iter()
+                            .map(|path| {
+                                let path = Path::new(path);
+                                if path.is_absolute() {
+                                    path.to_owned()
+                                } else {
+                                    self.factory.cwd.join(path)
+                                }
+                            })
+                            .collect(),
+                        mode: Some(provenant_cli::Mode::ReadOnly),
+                        worktree: (access
+                            == provenant_fabric_runtime::graph::AccessMode::WorktreeWrite)
+                            .then(|| worktree.map(PathBuf::from))
+                            .flatten(),
+                        read_root: node
+                            .read_roots
+                            .iter()
+                            .map(|root| {
+                                let path = Path::new(root);
+                                if path.is_absolute() {
+                                    path.to_path_buf()
+                                } else {
+                                    self.factory.cwd.join(path)
+                                }
+                            })
+                            .collect(),
+                        write_root: node
+                            .attempt
+                            .into_iter()
+                            .flat_map(|spec| &spec.write_roots)
+                            .map(|root| {
+                                let path = Path::new(root);
+                                if path.is_absolute() {
+                                    path.to_owned()
+                                } else {
+                                    self.factory.cwd.join(path)
+                                }
+                            })
+                            .collect(),
+                        network: self.network,
+                        capability: capabilities.clone(),
+                        no_capability: Vec::new(),
+                    },
+                    self.factory.context.roots.state.as_path(),
+                    &self.factory.home,
+                )
+                .map_err(dispatch_refused)?;
+                if !capabilities.is_empty() {
+                    let sources: Vec<_> = capabilities.iter().map(|name| {
+                    let inherited = node.capability_sources.and_then(|v| v.as_array()).into_iter().flatten()
+                        .find(|entry| entry["name"] == *name).and_then(|entry| entry["source"].as_str());
+                    serde_json::json!({"name": name, "source": if self.capability_overrides.0.contains(name) { "flag" } else { inherited.unwrap_or(if node.capabilities.is_some() { "node" } else { "project default" }) }})
+                }).collect();
+                    grants
+                        .extra
+                        .insert("capability_sources".into(), serde_json::json!(sources));
+                }
+                grants
+            };
+            if !accepted {
+                grants.inputs_root = node.inputs_dir.map(Path::to_path_buf);
+                if access == provenant_fabric_runtime::graph::AccessMode::ReadOnly
+                    && source_commit.is_some()
+                {
+                    grants.source_root = {
+                        let path = worktree.map_or(self.factory.cwd.as_path(), Path::new);
+                        let source = provenant_run::resolve_reader_source(
+                            self.factory.context.roots.state.as_path(),
+                            &self.factory.cwd,
+                            path,
+                        )
+                        .map_err(|_| FacadeError::DispatchRefused {
+                            fact: None,
+                            disk: None,
+                            reason:
+                                "graph source checkout is no longer registered with the project"
+                                    .into(),
+                        })?;
+                        let directory = provenant_os::fs::Directory::open_anchor(&source)
+                            .map_err(|_| FacadeError::ConfinementRefused { resource: None })?;
+                        let identity = directory
+                            .metadata()
+                            .map_err(|_| FacadeError::ConfinementRefused { resource: None })?;
+                        let source_identity = provenant_records::run::SourceIdentity {
+                            device: identity.device,
+                            inode: identity.inode,
+                        };
+                        if worktree.is_some()
+                            && let Some(checkpoint) =
+                                provenant_fabric_runtime::graph::FileJournal::read_checkpoint(
+                                    &self.factory.context.roots.state,
+                                    self.factory.context.identity.project,
+                                    &key.graph_id,
+                                )
+                                .map_err(graph_journal_error)?
+                            && !writer_source_identity_matches(
+                                &checkpoint,
+                                &source,
+                                &source_identity,
+                            )
+                        {
+                            return Err(FacadeError::DispatchRefused {
+                                fact: None,
+                                disk: None,
+                                reason: "graph source checkout identity changed or is unavailable"
+                                    .into(),
+                            });
+                        }
+                        grants.source_identity = Some(source_identity);
+                        // A preset may lower its source worktree to a read root.
+                        // The immutable view replaces those live-source grants.
+                        grants.read_roots.retain(|root| !root.starts_with(&source));
+                        Some(source)
+                    };
+                }
+            }
+            if !accepted
+                && access == provenant_fabric_runtime::graph::AccessMode::ReadOnly
+                && source_commit.is_none()
+                && let Some(warning) = provenant_cli::run::read_only_checkout_warning(
+                    self.factory.context.roots.state.as_path(),
+                    grants.source_root.as_deref().unwrap_or(&self.factory.cwd),
+                )
+            {
+                let _ = writeln!(std::io::stderr().lock(), "warning: {warning}");
+                self.launch_warnings.push(warning);
+            }
+            if let Some(network) = route.extra.get("peer_network").filter(|_| peer_root) {
+                grants.network = serde_json::from_value(network.clone())
+                    .map_err(|_| FacadeError::StateCorrupt)?;
+            }
+            let peer_retry = route
+                .extra
+                .get("peer_retry_limit")
+                .filter(|_| peer_root)
+                .map(|value| {
+                    serde_json::from_value(value.clone()).map_err(|_| FacadeError::StateCorrupt)
+                })
+                .transpose()?;
+            let retry_limit =
+                accepted_retry_limit.unwrap_or(peer_retry.unwrap_or(node.settlement_retries));
+            let mut attempt = accepted_attempt.unwrap_or_else(|| {
+                let mut attempt = node.attempt.cloned().unwrap_or_default();
+                attempt.account = route.account.clone().or(attempt.account);
+                attempt
+            });
+            // The graph checkpoint owns worktree provisioning; submission receives
+            // the resolved checkout, never a second request to create it.
+            attempt.new_worktree = None;
+            // These fields have already been resolved into the sealed access grants.
+            attempt.write_roots.clear();
+            attempt.capabilities.clear();
+            let receipt = owner.submit_with_access(
+                input,
+                self.budget,
+                self.cancel,
+                grants,
+                retry_limit,
+                Some(attempt),
+                &self.repo_facts,
+            )?;
+            if let Some(reason) = blocked(&owner)? {
+                return Err(FacadeError::DispatchRefused {
+                    fact: None,
+                    disk: None,
+                    reason,
+                });
+            }
+            owner.actor = None;
+            let target = receipt
+                .targets
+                .into_iter()
+                .next()
+                .ok_or(FacadeError::StateCorrupt)?;
+            let reference = Some(format!(
+                "{}/{}",
+                target.host.unwrap_or(self.factory.context.identity.host),
+                target.attempt
+            ));
+            (target, reference)
+        };
+        if target
+            .host
+            .is_none_or(|host| host == self.factory.context.identity.host)
+        {
+            let store = owner.store_with_facts(self.cancel, &self.repo_facts)?;
+            let call = owner.call(self.cancel);
+            if let Some(observation) = provenant_cli::fabric::graph_cloud::installed(
+                &store,
+                target.attempt,
+                node.prompt,
+                reference.as_deref().ok_or(FacadeError::StateCorrupt)?,
+                &call,
+                &self.factory.cwd,
+                std::time::Duration::from_micros(
+                    self.budget
+                        .remaining(self.factory.clock.mono_now())
+                        .as_micros(),
+                ),
+                false,
+            )
+            .map_err(|_| FacadeError::InvalidInput { detail: None })?
+            {
+                return Ok(observation);
+            }
+        }
+        let attempt = owner.snapshot(target.clone(), self.budget, self.cancel)?;
+        // A remote parent is one origin node until its receiver-owned graph
+        // has drained, including children that outlive the provider process.
+        if target
+            .host
+            .is_some_and(|host| host != self.factory.context.identity.host)
+            && attempt
+                .extra
+                .get("peer_subtree")
+                .and_then(|value| value["status"].as_str())
+                .is_some_and(|status| matches!(status, "pending" | "paused"))
+        {
+            return Ok(AttemptObservation::Pending {
+                attempt_ref: reference,
+            });
+        }
+        use provenant_records::run::{AttemptState, Outcome};
+        match attempt.state {
+            AttemptState::Terminal { outcome, .. } => {
+                let remote = target
+                    .host
+                    .is_some_and(|host| host != self.factory.context.identity.host);
+                let store = owner.store_with_facts(self.cancel, &self.repo_facts)?;
+                let call = owner.call(self.cancel);
+                let custody = if remote {
+                    attempt
+                        .extra
+                        .get("graph_custody_released")
+                        .and_then(serde_json::Value::as_bool)
+                        .ok_or(provenant_run::RunError::NotFound)
+                } else {
+                    store.custody_released(&attempt, &call)
+                };
+                match custody {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        return Ok(AttemptObservation::Pending {
+                            attempt_ref: reference,
+                        });
+                    }
+                    Err(_) => {
+                        return Ok(AttemptObservation::Unknown {
+                            attempt_ref: reference,
+                        });
+                    }
+                }
+                let pickup = if remote {
+                    None
+                } else {
+                    store
+                        .delivered(attempt.attempt_id, &call)
+                        .map_err(run_error)?
+                };
+                let effective_delivery = pickup
+                    .as_ref()
+                    .map(|(_, receipt)| receipt)
+                    .or(attempt.delivery.as_ref());
+                let launched = attempt.provider_launched.unwrap_or(true);
+                let (result, result_warning) =
+                    if attempt.result.is_some() || outcome == Outcome::Succeeded {
+                        let captured = if remote {
+                            remote_graph_result(
+                                &mut owner,
+                                &target,
+                                node.required_verdict,
+                                self.budget,
+                                self.cancel,
+                            )
+                            .map_err(|_| provenant_run::RunError::NotFound)
+                        } else {
+                            store.stream_result(attempt.attempt_id, &call, node.required_verdict)
+                        };
+                        match captured {
+                            Ok(mut result) => {
+                                if remote && let Some(artifact) = &attempt.result {
+                                    // Output pages prove the redacted stream. Graph evidence
+                                    // still identifies the peer's sealed original artifact.
+                                    result.digest = artifact.digest.to_string();
+                                    result.source_truncated = artifact.bytes
+                                    > provenant_records::result_capture::ResultCapture::HEAD_BYTES
+                                        as u64;
+                                }
+                                (Some(Box::new(result)), None)
+                            }
+                            Err(error) => (None, Some(graph_result_warning(&error).to_owned())),
+                        }
+                    } else {
+                        (None, None)
+                    };
+                // An unverifiable artifact is an integrity failure regardless
+                // of the provider outcome. In particular, it must not trigger
+                // route fallback for authentication or quota failures.
+                Ok(AttemptObservation::Terminal {
+                    launched,
+                    attempt_ref: reference,
+                    outcome: if result_warning.is_some() {
+                        AttemptOutcome::OtherFailure
+                    } else if let Some(failure) = attempt.preparation_failure {
+                        match failure {
+                            provenant_records::run::PreparationFailure::AuthRequired => {
+                                AttemptOutcome::AuthRequired
+                            }
+                            provenant_records::run::PreparationFailure::UsageLimited => {
+                                AttemptOutcome::UsageLimited
+                            }
+                            provenant_records::run::PreparationFailure::AdapterUnavailable => {
+                                AttemptOutcome::AdapterUnavailable
+                            }
+                        }
+                    } else {
+                        match outcome {
+                            Outcome::Succeeded
+                                if effective_delivery.is_some_and(|delivery| {
+                                    matches!(
+                                    delivery.state,
+                                    provenant_records::run::WriterDeliveryState::Failed { .. }
+                                        | provenant_records::run::WriterDeliveryState::NotAttempted { .. }
+                                )
+                                }) =>
+                            {
+                                AttemptOutcome::OtherFailure
+                            }
+                            Outcome::Succeeded => AttemptOutcome::Succeeded,
+                            Outcome::AuthRequired => AttemptOutcome::AuthRequired,
+                            Outcome::RateLimited | Outcome::QuotaLimited => {
+                                AttemptOutcome::UsageLimited
+                            }
+                            Outcome::TimedOut if matches!(
+                                &attempt.state,
+                                AttemptState::Terminal { extra, .. }
+                                    if extra.get("terminal_cause").cloned()
+                                        .and_then(|value| serde_json::from_value::<provenant_records::run::TerminalCause>(value).ok())
+                                        == Some(provenant_records::run::TerminalCause::TokenBudget)
+                            ) => AttemptOutcome::OtherFailure,
+                            Outcome::TimedOut if node.deadline_seconds.is_some() => {
+                                AttemptOutcome::DeadlineExceeded
+                            }
+                            Outcome::TimedOut => AttemptOutcome::OtherFailure,
+                            // A route refused before launch leaves the next route free to try.
+                            Outcome::ModelUnavailable => AttemptOutcome::AdapterUnavailable,
+                            Outcome::Rejected if !launched => AttemptOutcome::AdapterUnavailable,
+                            Outcome::ReviewRequired
+                                if attempt.partial_signals.as_slice() == [provenant_records::run::PartialSignal::DeclaredStop] =>
+                            {
+                                AttemptOutcome::DeclaredStop
+                            }
+                            Outcome::Failed => AttemptOutcome::TaskFailed,
+                            Outcome::ReviewRequired => AttemptOutcome::ReviewRequired,
+                            // Uncommitted edits need the chair, so the node fails without fallback.
+                            Outcome::Uncommitted => AttemptOutcome::OtherFailure,
+                            _ => AttemptOutcome::OtherFailure,
+                        }
+                    },
+                    result,
+                    result_warning,
+                    result_path: attempt.result.as_ref().and_then(|_| {
+                        (target.host.unwrap_or(self.factory.context.identity.host)
+                            == self.factory.context.identity.host)
+                            .then(|| {
+                                self.factory
+                                    .context
+                                    .roots
+                                    .state
+                                    .as_path()
+                                    .join(format!(
+                                        "runs/{}/attempts/{}/result.md",
+                                        attempt.run_id, attempt.attempt_id
+                                    ))
+                                    .to_string_lossy()
+                                    .into_owned()
+                            })
+                    }),
+                    branch: effective_delivery.map(|receipt| receipt.branch.clone()),
+                    commit: if access == provenant_fabric_runtime::graph::AccessMode::WorktreeWrite
+                    {
+                        attempt.head.map(|head| head.to_string())
+                    } else {
+                        node.source_commit.map(str::to_owned)
+                    },
+                })
+            }
+            _ => Ok(AttemptObservation::Pending {
+                attempt_ref: reference,
+            }),
+        }
+    }
+}
+/// Resolve the existing routing allowance, retaining explicit zero overrides.
+pub(crate) fn graph_retry_allowance(
+    node: &provenant_records::ExtraFields,
+    graph: &provenant_records::ExtraFields,
+    roots: &provenant_core::Roots,
+) -> (u8, String) {
+    let mut warnings = Vec::new();
+    let mut read = |extra: &provenant_records::ExtraFields, key: &str| -> Option<u8> {
+        let retry = extra.get(key)?;
+        let value = retry
+            .get("retries")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|value| u8::try_from(value).ok())
+            .filter(|value| *value <= provenant_routing::MAX_SETTLEMENT_RETRIES);
+        if value.is_none() {
+            warnings.push(format!("ignored invalid {key}.retries"));
+        }
+        value
+    };
+    let node_retry = read(node, "retry");
+    let preset_retry = read(node, "preset_retry").or_else(|| read(graph, "retry"));
+    let host = match provenant_config::read_with_domains(roots, &provenant_cli::domains::SECTIONS) {
+        Ok(config) => matches!(
+            config.origins.get("domains.routing.settlement_retries"),
+            Some(provenant_config::Origin::User { .. })
+        )
+        .then_some(config.domains.routing.settlement_retries),
+        Err(_) => {
+            warnings.push("host retry setting unavailable".into());
+            None
+        }
+    };
+    let allowance = provenant_routing::resolve_retry_allowance(node_retry, preset_retry, host);
+    let origin = match allowance.origin {
+        provenant_routing::RetryAllowanceOrigin::Node => "node",
+        provenant_routing::RetryAllowanceOrigin::Preset => "preset",
+        provenant_routing::RetryAllowanceOrigin::HostConfig => "host_config",
+        provenant_routing::RetryAllowanceOrigin::ShippedDefault => "shipped_default",
+    };
+    let origin = if warnings.is_empty() {
+        origin.to_owned()
+    } else {
+        format!("{origin}; {}", warnings.join("; "))
+    };
+    (allowance.retries, origin)
+}
+
+/// A graph document's optional top-level `exclude` list of route-exclusion
+/// selectors, inherited by every node it launches.
+pub(crate) fn graph_exclude(
+    document: &provenant_fabric_runtime::graph::GraphDocument,
+) -> Result<Vec<String>, FacadeError> {
+    match document.extra.get("exclude") {
+        None => Ok(Vec::new()),
+        Some(value) => value
+            .as_array()
+            .ok_or(FacadeError::InvalidInput { detail: None })?
+            .iter()
+            .map(|item| {
+                item.as_str()
+                    .map(str::to_owned)
+                    .ok_or(FacadeError::InvalidInput { detail: None })
+            })
+            .collect(),
+    }
+}
+/// A graph document's optional top-level `network` (`"on"` or `"off"`),
+/// applied to every node lane it launches.
+pub(crate) fn graph_network(
+    document: &provenant_fabric_runtime::graph::GraphDocument,
+) -> Result<Option<provenant_cli::Switch>, FacadeError> {
+    match document.extra.get("network") {
+        None => Ok(None),
+        Some(value) => match value.as_str() {
+            Some("on") => Ok(Some(provenant_cli::Switch::On)),
+            Some("off") => Ok(Some(provenant_cli::Switch::Off)),
+            _ => Err(FacadeError::InvalidInput { detail: None }),
+        },
+    }
+}
+
+pub(crate) fn graph_capability_overrides(
+    document: &provenant_fabric_runtime::graph::GraphDocument,
+) -> Result<(Vec<String>, Vec<String>), FacadeError> {
+    let parse = |key| {
+        document.extra.get(key).map_or(Ok(Vec::new()), |value| {
+            serde_json::from_value(value.clone())
+                .map_err(|_| FacadeError::InvalidInput { detail: None })
+        })
+    };
+    Ok((parse("capability")?, parse("no_capability")?))
+}
+
+/// A graph route's exact model in `ADAPTER/ID` form.
+pub(crate) fn exact_model(adapter: Option<&str>, model: &str) -> String {
+    match adapter {
+        Some(adapter) if !model.contains('/') => format!("{adapter}/{model}"),
+        _ => model.to_owned(),
+    }
+}
+
+/// Whether required family separation refuses an exact route before launch.
+/// As for routed reviews, a model whose family is unknown is treated as
+/// excluded once any family is.
+pub(crate) fn exact_route_refused(
+    model: &str,
+    excluded_families: &[String],
+    require_distinct: bool,
+) -> bool {
+    require_distinct
+        && !excluded_families.is_empty()
+        && provenant_cli::run::model_family(model)
+            .is_none_or(|family| excluded_families.contains(&family))
+}
+
+pub(crate) fn restore_scratch_source(
+    directory: &Path,
+    name: &std::ffi::OsStr,
+    bytes: &[u8],
+) -> Result<(), FacadeError> {
+    let directory = provenant_os::fs::Directory::open_anchor(directory)
+        .map_err(|_| FacadeError::io("access graph scratch"))?;
+    match directory.metadata_at(name, false) {
+        Ok(_) => Ok(()),
+        Err(error) if error.is_not_found() => {
+            match directory.atomic_write(
+                name,
+                ".graph-recover.",
+                bytes,
+                provenant_os::fs::PublishMode::NoReplace,
+            ) {
+                Ok(publication) => publication
+                    .require_durable()
+                    .map_err(|_| FacadeError::io("restore graph scratch")),
+                Err(error) if error.is_exists() => Ok(()),
+                Err(_) => Err(FacadeError::io("restore graph scratch")),
+            }
+        }
+        Err(_) => Err(FacadeError::io("access graph scratch")),
+    }
+}
+
+#[cfg(test)]
+mod journal_error_tests {
+    #[test]
+    fn repair_scope_comparison_detects_new_paths() {
+        let review = provenant_routing::ReviewConfig::default();
+        let original = vec!["src/a.rs".to_owned()];
+        assert!(!super::repair_scope_grew(&review, &original, &original));
+        assert!(super::repair_scope_grew(
+            &review,
+            &original,
+            &["src/a.rs".into(), "src/b.rs".into()]
+        ));
+        assert!(super::repair_scope_grew(
+            &review,
+            &original,
+            &["src/b.rs".into()]
+        ));
+        assert!(!super::repair_scope_grew(&review, &original, &[]));
+    }
+
+    #[test]
+    fn repair_detects_risk_inside_already_reviewed_paths() {
+        let review = provenant_routing::ReviewConfig::default();
+        let paths = vec!["src/credentials.rs".to_owned()];
+        assert!(!super::repair_scope_grew(&review, &paths, &paths));
+        assert!(super::repair_touches_risk(&review, &paths));
+        assert!(!super::repair_touches_risk(&review, &[]));
+        assert!(!super::repair_touches_risk(&review, &["README.md".into()]));
+    }
+
+    #[test]
+    fn unreadable_graph_journal_preserves_the_cause() {
+        use super::{FacadeError, graph_journal_error};
+        use provenant_fabric_runtime::graph::JournalError;
+        for error in [
+            JournalError::BadEnvelope,
+            JournalError::BadDigest,
+            JournalError::RetiredLoopCheckpoint,
+            JournalError::InvalidTopology,
+        ] {
+            let reason = error.to_string();
+            assert_eq!(
+                graph_journal_error(error),
+                FacadeError::DispatchRefused {
+                    fact: None,
+                    disk: None,
+                    reason
+                },
+            );
+        }
+        assert_eq!(
+            graph_journal_error(JournalError::GraphMismatch),
+            FacadeError::StateCorrupt
+        );
+    }
+}
+
+/// Stream the result through the existing authenticated, bounded output API.
+/// The serving host verifies each artifact read; capture remains on the chair.
+fn remote_graph_result(
+    owner: &mut BinaryRunOwner<'_>,
+    target: &AttemptTarget,
+    required: Option<&str>,
+    budget: WaitBudget,
+    cancel: &CancelToken,
+) -> Result<provenant_records::result_capture::CapturedResult, FacadeError> {
+    capture_graph_output(target, required, |offset| {
+        owner.output(
+            OutputInput::Read {
+                extra: Default::default(),
+                target: target.clone(),
+                part: OutputPart::Result,
+                offset,
+                max_bytes: provenant_records::run::OUTPUT_LIMIT,
+            },
+            budget,
+            cancel,
+        )
+    })
+}
+
+fn capture_graph_output(
+    target: &AttemptTarget,
+    required: Option<&str>,
+    mut read: impl FnMut(u64) -> Result<OutputResult, FacadeError>,
+) -> Result<provenant_records::result_capture::CapturedResult, FacadeError> {
+    let mut capture = provenant_records::result_capture::ResultCapture::new(required);
+    let mut offset = 0;
+    let mut expected_digest = None;
+    loop {
+        let response = read(offset)?;
+        let OutputResult::Chunk {
+            target: observed,
+            part: OutputPart::Result,
+            offset: observed_offset,
+            next_offset,
+            eof,
+            digest,
+            bytes,
+            ..
+        } = response
+        else {
+            return Err(FacadeError::StateCorrupt);
+        };
+        if observed != *target
+            || observed_offset != offset
+            || next_offset < offset
+            || next_offset > provenant_records::run::RESULT_LIMIT
+            || expected_digest.is_some_and(|expected| expected != digest)
+        {
+            return Err(FacadeError::StateCorrupt);
+        }
+        expected_digest = Some(digest);
+        let bytes = match bytes {
+            OutputBytes::Utf8(text) => text.into_bytes(),
+            OutputBytes::Base64(encoded) => {
+                provenant_fabric_runtime::handoff::decode_base64(&encoded)
+                    .ok_or(FacadeError::StateCorrupt)?
+            }
+        };
+        if next_offset - offset != bytes.len() as u64 || (!eof && next_offset == offset) {
+            return Err(FacadeError::StateCorrupt);
+        }
+        capture.push(&bytes);
+        offset = next_offset;
+        if eof {
+            let mut result = capture.finish();
+            if result.digest != digest.to_string() {
+                return Err(FacadeError::StateCorrupt);
+            }
+            result.source_truncated =
+                offset > provenant_records::result_capture::ResultCapture::HEAD_BYTES as u64;
+            result.handoff = result.handoff.and_then(|handoff| {
+                handoff
+                    .map(|handoff| {
+                        provenant_run::sanitise_handoff(&handoff)
+                            .map_err(|_| "handoff sanitisation failed")
+                    })
+                    .transpose()
+            });
+            return Ok(result);
+        }
+    }
+}
+
+#[cfg(test)]
+mod peer_capture_tests {
+    #[allow(
+        unused_imports,
+        reason = "the custom worktree driver includes this module without libtest"
+    )]
+    use super::*;
+    #[test]
+    fn peer_result_capture_pages_the_complete_stream_and_checks_each_chunk()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let target = AttemptTarget {
+            extra: Default::default(),
+            host: Some(provenant_core::HostId::from_bytes([1; 16])),
+            attempt: provenant_core::AttemptId::from_bytes([2; 16]),
+        };
+        let text = "x".repeat(130_000) + "\nVERDICT: PASS\n";
+        let digest = provenant_core::Digest::from_bytes(
+            *provenant_records::CanonicalV1::file_digest(text.as_bytes()).bytes(),
+        );
+        let chunk = |offset: u64| {
+            let end = (offset + provenant_records::run::OUTPUT_LIMIT).min(text.len() as u64);
+            OutputResult::Chunk {
+                extra: Default::default(),
+                target: target.clone(),
+                part: OutputPart::Result,
+                state: "succeeded".into(),
+                reason: None,
+                offset,
+                next_offset: end,
+                eof: end == text.len() as u64,
+                digest,
+                bytes: OutputBytes::Utf8(text[offset as usize..end as usize].into()),
+            }
+        };
+        let mut pages = 0;
+        let result = capture_graph_output(&target, Some("VERDICT: PASS"), |offset| {
+            pages += 1;
+            Ok(chunk(offset))
+        })?;
+        assert_eq!(pages, 2);
+        assert!(result.matched_required);
+        assert_eq!(result.verdict.as_deref(), Some("VERDICT: PASS"));
+        assert_eq!(result.digest, digest.to_string());
+        for malformed in [0, 1, 2, 3] {
+            assert!(matches!(
+                capture_graph_output(&target, None, |offset| {
+                    let mut response = chunk(offset);
+                    if let OutputResult::Chunk {
+                        target,
+                        offset: start,
+                        next_offset,
+                        digest,
+                        ..
+                    } = &mut response
+                    {
+                        match malformed {
+                            0 => target.attempt = provenant_core::AttemptId::from_bytes([9; 16]),
+                            1 => *start += 1,
+                            2 => *next_offset = offset,
+                            _ => *digest = provenant_core::Digest::from_bytes([9; 32]),
+                        }
+                    }
+                    Ok(response)
+                }),
+                Err(FacadeError::StateCorrupt)
+            ));
+        }
+        Ok(())
+    }
+}

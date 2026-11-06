@@ -20,7 +20,7 @@ and the other primary. Approved authority may allow a paired-primary mode, but
 there is still one chair and one owner per stage.
 
 Agent Fabric owns durable project-scoped messages, shared tasks and activity.
-Its thin MCP dispatch and batch front door delegates to the same orchestration
+Its thin MCP run front door delegates to the same orchestration
 owners that run the provider CLIs directly; it does not implement provider
 mechanics itself. Coordination that must return an answer uses a correlated
 Fabric exchange where one is available. Otherwise, a named degraded artefact
@@ -106,9 +106,14 @@ workflow.
 The bundled routing catalogue provides weighted `utility`, `junior`, `senior`,
 `principal`, `writing` and `design` pools; each task selects one named route or
 one exact model. Bind the applied route and effort from each attempt to the
-receipt, and never invent role or effort values. Dispatch graphs with
-`provenant run --preset NAME` (inspect first with `--explain`); the core path
-is `run`, `status`, `land N` and `quota`, and `help --all` lists the rest. Pools,
+receipt, and never invent role or effort values. Start graphs with
+`provenant run --use TEMPLATE` (inspect first with `--explain`). Templates are
+leaves or composites; `task` handles one assignment, `plan` shapes work, `batch`
+integrates parallel slices and `deliver` carries implementation through landing.
+Default implementation slices to `run --route junior`; raise tiers for design.
+The core commands are `run`, `status`, `output`, `steer`, `stop`, `retry`,
+`edit`, `templates`, `land` and `quota`; `help --all` lists the rest.
+Use `output --trace` for the timeline and `edit` for revisioned graph patches. Pools,
 pacing, the council, run attempts and the state root are in
 `docs/runbooks/model-routing.md`. Prefer per-run controls: editing a global
 provider configuration, such as `~/.codex/config.toml`, needs explicit
@@ -135,7 +140,7 @@ found.
 ## Review ladder
 
 Lens coverage is the primary measure of a review: cover the questions the change
-needs before considering family spread. Use `review --plan on` by default.
+needs before considering family spread. Use `provenant run --use review` by default.
 The planner reads the pinned diff, acceptance criteria, dependency boundaries,
 reversibility and oracle strength;
 the planner picks lenses and their route tiers from the panel. Configured path

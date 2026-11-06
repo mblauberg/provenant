@@ -2,16 +2,16 @@
 Owner: provenant-config
 Anchor: config/harness-knobs.json
 
-Read effective configuration with `provenant config show`. The Rust config
+Use `provenant config schema` for the compact settings, `config schema --all`
+for advanced tuning and `config show` for effective values. The Rust config
 owner reads the selected state root's `config.toml` and validates owner sections.
 Run `provenant config check` to list every warning with its file and key.
 Use `--state-dir /absolute/path` to select an isolated root. Change the
 profile or a knob with `provenant config set profile economy` or
 `provenant config set lanes.max_concurrency 4`; `config unset KNOB` reverts it.
 
-Profiles are `balanced` and `economy`. Override a knob for one run
-with `provenant run --knob NAME=VALUE` (the terminal path; agents use
-`fabric_run` (`op: submit`)'s `knobs`).
+Profiles are `balanced` and `economy`. Template documents carry per-run
+limits; MCP `fabric_run` uses the same document service.
 
 ## Precedence and stamps
 
@@ -65,11 +65,12 @@ profile name, effective knob values and exact dispatch overrides, and
 continuations keep that stamp.
 
 `chair.refusal_notice` accepts `inbox` (the default) or `off`. For a recorded
-pre-admission refusal with a bound chair, the dispatch response posts a
+pre-admission refusal with a bound chair, the graph submission posts a
 path-free notice to that chair's inbox. Retrying the same operation reuses the
 message identity. If posting fails or the dispatcher stops before sending,
 restore inbox access and run `provenant reconcile` from the submitting session.
-Reconcile retries up to 320 pending notices and reports when more remain.
+Reconcile retries all pending notices, continuing past an individual failure,
+and reports when any notice still needs recovery.
 
 ## Graph launch retries
 
@@ -188,8 +189,8 @@ Batch concurrency resolves from the profile by batch class. A batch with any
 batch with none uses `lanes.max_concurrency_read_only` (registry default 16).
 A `lanes.max_concurrency` you set yourself (in `[knobs]` or with `--knob`) also
 caps the read-only default unless you set `lanes.max_concurrency_read_only`
-too; a preset does not. An explicit `--concurrency N` (1 to 16) or Fabric
-`concurrency` wins for either. The `economy` preset sets 4 and 8 respectively.
+too; a profile default does not. Document concurrency overrides the default.
+The `economy` profile sets 4 and 8 respectively.
 
 Batch concurrency is separate from host admission. Each lane has a class, and
 spacing defaults to zero. Set `[domains.fabric.lanes] start_spacing_ms` to
@@ -208,7 +209,7 @@ the admission deadline and is then refused with the cap, setting and source. On
 macOS it defers starts at critical kernel memory pressure by default. Set `domains.fabric.lanes.memory_pressure_threshold`
 to `warning` to defer at warning and critical, or `never` to disable this gate.
 The 5 % memory floor warns on every platform; the disk floor
-applies to both classes. `lanes` shows a queued or starting lane's
+applies to both classes. `status` shows a queued or starting lane's
 class and what it is waiting for, such as `read-only startup spacing: 1.2 s
 left of 2.0 s`.
 
@@ -259,18 +260,18 @@ the slot its own parent holds and waits until it times out; keep
 A command that finds every slot taken waits, prints
 `provenant: waiting for a build slot (n of m in use)` on its own stderr, and
 repeats the message about every 60 seconds. While it waits it also writes
-`build-slot-wait.PID` (one per command) in the lane's scratch directory, and `lanes` and
+`build-slot-wait.PID` (one per command) in the lane's scratch directory, and `status` and
 `status` show the lane as waiting (`build slot: ...`) the way they show an
 admission wait. The host trusts only which of two fixed waits the file names
 and that it was refreshed in the last 150 seconds. A slot wait also records when
-it began and how many slots were held, so `lanes` shows
+it began and how many slots were held, so `status` shows
 `build slot: waiting N of M (longest first); H of S slots held`: N is the lane's
 rank among this project's waiting lanes by time waited, M how many of them wait,
 and H of S the slots held by any project on the host. Slots go to whichever
 waiter polls first, so the rank is an estimate, not a queue position. Writer lanes are told in their preamble
 that this wait is normal and bounded, and to keep waiting rather than stop. It gives up after
 `build_wait_minutes` (default 30) with an error that names the slot count and
-suggests `provenant lanes` to find the holders. The same bounded wait and
+suggests `provenant status` to find the holders. The same bounded wait and
 progress message apply while the command waits for another build's
 `.cargo-lock` on its target directory, which it does before it takes a slot so
 a slot is never held by a build that Cargo would queue anyway. Both waits share
@@ -280,7 +281,7 @@ Linux the child is also signalled if the shim is killed outright, so a build
 does not keep compiling after the shim and its slot are gone. Provenant repairs
 the slot directory when it launches a lane: it restores the 0700 and 0600 modes
 and recreates a missing, non-regular or hard-linked slot file. Waiting blocks
-that command only, not the lane or its admission. `lanes` does not report
+that command only, not the lane or its admission. `status` does not report
 build waits; the message is in the lane's output.
 
 The slots are files `slot-0.lock` to `slot-N-1.lock` under
@@ -470,14 +471,14 @@ Homebrew or npm when its resolved executable identifies that installation.
 An unknown installation produces one activity note until its method becomes
 known or a command override is configured.
 
-Lanes hold shared leases from provider preparation through completion; updates
-need an exclusive lease. Busy providers are excluded from a lane's candidates
-without delaying other providers. Only when every candidate is busy does
-preparation wait, for up to 30 seconds total, before asking for a retry.
-Cancellation interrupts this wait. Nested launches retry missing executable
-discovery under the lease using the host's sealed search directories.
-Provider children inherit their shared lease: a long-lived background process
-keeps it and defers updates until it exits.
+Provider preparation takes shared leases; updates need an exclusive lease.
+Busy providers are excluded from a lane's candidates without delaying other
+providers. When every candidate is busy, preparation waits up to the caller's
+`--wait`, capped at 30 seconds, then proceeds with the installed provider.
+Cancellation interrupts this wait. Preparation releases its leases before
+launching the provider; providers and their children inherit no update lease.
+Nested launches retry missing executable discovery under the preparation lease
+using the host's sealed search directories.
 
 The updater inherits the exclusive lease, keeping it held if the worker is
 killed. On timeout the worker kills the updater's whole process group. The
@@ -513,8 +514,8 @@ runtime_deadline_seconds = 7200
 
 The deadline runs on the wall clock, so a host that sleeps through it stops the
 provider on waking. The attempt settles as `timed_out`, releases its worktree
-and lock, and `lanes` shows the deadline of each running lane and a
-`provenant resume` hint for a timed-out one.
+and lock, and `status` shows the deadline of each running lane and a
+`provenant retry` hint for a timed-out one.
 
 ## Store busy timeout
 
@@ -863,23 +864,6 @@ push_conflict_markers = false
 The default is `true`. Default-branch deletion, non-fast-forward updates to the
 default branch and default-branch pushes from linked worktrees are still
 refused. An unreadable config keeps the check on.
-
-## Brief read-root warnings
-
-When a run brief names an existing path outside the lane's effective read roots,
-submit and `--explain` print an advisory warning. Bare `/`, `~` and ancestors of
-effective read roots are skipped. To turn the warning off across the host or for
-one project:
-
-```toml
-[domains.run]
-brief_read_root_warnings = false
-
-[domains.run.projects."PROJECT_ID"]
-brief_read_root_warnings = false
-```
-
-The default is `true`. An unreadable config keeps the warning on.
 
 ## Routing pools
 

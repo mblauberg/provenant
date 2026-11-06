@@ -13,7 +13,7 @@ use std::{
     io::Write,
     path::{Path, PathBuf},
     thread,
-    time::{Duration, Instant},
+    time::Duration,
 };
 use support::{Result, TestRig, code};
 
@@ -229,11 +229,11 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
     provenant_supervisor::fixture::run_libtest(
         args,
         &[
+            "graph_stop_cancels_live_delivery_fetch_and_seed_preparation",
             "gc_fetches_default_and_removes_only_clean_merged_worktrees",
             "gc_output_requires_terminal_lanes_and_respects_keep_recent_dirty_and_links",
             "gc_disk_alert_is_once_per_dip_and_manual_preview_does_not_latch",
-            "dispatch_refuses_low_disk_writers",
-            "resume_refuses_low_disk_writer",
+            "graph_run_refuses_low_disk_writers",
             "gc_reports_terminal_tmp_paths_and_bytes_in_json_and_text",
             "lane_prepare_isolates_nested_state",
             "lane_prepare_isolates_nested_claude_state",
@@ -244,7 +244,7 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
             "read_only_lane_builds_and_tests_cargo_in_scratch",
             "read_only_dispatch_applies_bound_git_and_project_writes",
             "writer_dispatch_uses_lane_cache_and_narrow_provider_state",
-            "writer_quota_continuation_succeeds_and_lens_diff_base_stays_node_source",
+            "writer_graph_output_preserves_lens_diff_base",
             "writer_dispatch_edits_a_linked_worktree",
             "second_writer_is_refused_while_first_holds_the_worktree",
             "writer_terminal_refuses_sequencer_state",
@@ -261,7 +261,7 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
             "gc_reports_transient_and_preserves_unobserved_project_array",
             "gc_pressure_collects_only_the_selected_primary_project",
             "gc_refuses_bare_projects_and_their_linked_checkout_fallback",
-            "provider_state_gc_sweeps_children_and_refuses_replaced_roots",
+            "provider_state_gc_sweeps_host_and_refuses_replaced_roots",
             "merged_pruning_keeps_dirty_unmerged_and_out_of_scope_worktrees",
             "merged_pruning_deletes_a_merged_branch_without_a_worktree",
             "remove_by_name_follows_the_branch_merge_state",
@@ -282,7 +282,7 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
             "pr_land_writer_lock_preserves_dirty_and_output_cases",
             "pr_land_dirty_primary_does_not_block_later_batches",
             "pr_land_recovery_uses_recorded_merged_head",
-            "pr_land_preserves_terminal_writer_evidence_in_parent_and_child_stores",
+            "pr_land_preserves_terminal_writer_evidence_in_host_store",
             "pr_land_primary_with_separate_git_directory",
             "pr_land_out_of_tree_with_separate_git_directory",
             "pr_land_refuses_each_unsafe_step_and_reports_the_rest",
@@ -306,11 +306,11 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
                 "pr_contribution_land_warns_when_binding_fails" => crate::pr_land_tests::pr_contribution_land_warns_when_binding_fails(),
                 "pr_contribution_unbound_project" => crate::pr_land_tests::pr_contribution_unbound_project(),
                 "pr_contribution_roundtrip" => crate::pr_land_tests::pr_contribution_roundtrip(),
+                "graph_stop_cancels_live_delivery_fetch_and_seed_preparation" => graph_stop_cancels_live_delivery_fetch_and_seed_preparation(),
                 "gc_fetches_default_and_removes_only_clean_merged_worktrees" => gc_fetches_default_and_removes_only_clean_merged_worktrees(),
                 "gc_output_requires_terminal_lanes_and_respects_keep_recent_dirty_and_links" => gc_output_requires_terminal_lanes_and_respects_keep_recent_dirty_and_links(),
                 "gc_disk_alert_is_once_per_dip_and_manual_preview_does_not_latch" => gc_disk_alert_is_once_per_dip_and_manual_preview_does_not_latch(),
-                "dispatch_refuses_low_disk_writers" => dispatch_refuses_low_disk_writers(),
-                "resume_refuses_low_disk_writer" => resume_refuses_low_disk_writer(),
+                "graph_run_refuses_low_disk_writers" => graph_run_refuses_low_disk_writers(),
                 "gc_reports_terminal_tmp_paths_and_bytes_in_json_and_text" => gc_reports_terminal_tmp_paths_and_bytes_in_json_and_text(),
                 "lane_prepare_isolates_nested_state" => lane_prepare_isolates_nested_state(),
                 "lane_prepare_isolates_nested_claude_state" => lane_prepare_isolates_nested_claude_state(),
@@ -336,8 +336,8 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
                     crate::compose_tests::writer_dispatch_uses_lane_cache_and_narrow_provider_state(
                     )
                 }
-                "writer_quota_continuation_succeeds_and_lens_diff_base_stays_node_source" => {
-                    crate::fabric::peer_tests::writer_quota_continuation_succeeds_and_lens_diff_base_stays_node_source()
+                "writer_graph_output_preserves_lens_diff_base" => {
+                    crate::fabric::peer_tests::writer_graph_output_preserves_lens_diff_base()
                 }
                 "writer_dispatch_edits_a_linked_worktree" => {
                     writer_dispatch_edits_a_linked_worktree()
@@ -370,8 +370,8 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
                 "gc_idle_keeps_live_and_unobservable_writers_and_removes_free_cache" => {
                     gc_idle_keeps_live_and_unobservable_writers_and_removes_free_cache()
                 }
-                "provider_state_gc_sweeps_children_and_refuses_replaced_roots" => {
-                    crate::provider_retention::provider_state_gc_sweeps_children_and_refuses_replaced_roots()
+                "provider_state_gc_sweeps_host_and_refuses_replaced_roots" => {
+                    crate::provider_retention::provider_state_gc_sweeps_host_and_refuses_replaced_roots()
                 }
                 "gc_pressure_collects_only_the_selected_primary_project" => gc_pressure_collects_only_the_selected_primary_project(),
                 "gc_refuses_bare_projects_and_their_linked_checkout_fallback" => gc_refuses_bare_projects_and_their_linked_checkout_fallback(),
@@ -413,7 +413,7 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
                 "pr_land_writer_lock_preserves_dirty_and_output_cases" => crate::pr_land_tests::pr_land_writer_lock_preserves_dirty_and_output_cases(),
                 "pr_land_dirty_primary_does_not_block_later_batches" => crate::pr_land_tests::pr_land_dirty_primary_does_not_block_later_batches(),
                 "pr_land_recovery_uses_recorded_merged_head" => crate::pr_land_tests::pr_land_recovery_uses_recorded_merged_head(),
-                "pr_land_preserves_terminal_writer_evidence_in_parent_and_child_stores" => crate::pr_land_tests::pr_land_preserves_terminal_writer_evidence_in_parent_and_child_stores(),
+                "pr_land_preserves_terminal_writer_evidence_in_host_store" => crate::pr_land_tests::pr_land_preserves_terminal_writer_evidence_in_host_store(),
                 "pr_land_refuses_each_unsafe_step_and_reports_the_rest" => {
                     crate::pr_land_tests::pr_land_refuses_each_unsafe_step_and_reports_the_rest()
                 }
@@ -1238,7 +1238,6 @@ pub(super) fn start_writer(
             )
         },
         None,
-        None,
         call,
     )?)
 }
@@ -1321,7 +1320,6 @@ pub(super) fn writer_run(
                     model: "claude/test-model".into(),
                     effort: None,
                 },
-                fallback: Vec::new(),
                 authority_digest: provenant_core::Digest::from_bytes([seed; 32]),
                 writer: Some(writer),
                 provider_timeout_seconds: 20,
@@ -1608,13 +1606,6 @@ pub(super) fn wait_for_writer_release(store: &provenant_run::RunStore) -> Result
     released
         .then_some(())
         .ok_or_else(|| "writer reservation was not released after terminal publication".into())
-}
-
-fn pause(duration: Duration) {
-    let deadline = Instant::now() + duration;
-    while let Some(left) = deadline.checked_duration_since(Instant::now()) {
-        thread::park_timeout(left);
-    }
 }
 
 struct ReleaseOnDrop(PathBuf);
@@ -2935,30 +2926,23 @@ fn cross_project_writer_names_both_projects() -> Result {
     )?;
     let worktree = foreign.project.join(".worktrees/foreign");
     assert!(worktree.exists());
-    let prompt = selected.root.join("prompt.txt");
-    fs::write(&prompt, "hello")?;
-    let output = command(
-        &selected,
-        &[
-            "dispatch",
-            "--prompt-file",
-            prompt.to_str().ok_or("prompt")?,
-            "--model",
-            "codex/gpt-6-luna",
-            "--mode",
-            "worktree-write",
-            "--worktree",
-            worktree.to_str().ok_or("foreign worktree")?,
-            "--operation-id",
-            "cross-project-writer",
-            "--json",
-        ],
-    )?;
-    let value = json(&output)?;
-    assert_eq!(code(&output), 1, "{value}");
-    assert_eq!(value["status"], "refused", "{value}");
-    assert_eq!(value["error"]["code"], "WRITER_PROJECT_MISMATCH", "{value}");
-    let message = value["error"]["message"].as_str().ok_or("message")?;
+    let (_, context) = writer_context(&selected)?;
+    let error =
+        provenant_run::resolve_writer(context.state_root.as_path(), &selected.project, &worktree)
+            .err()
+            .ok_or("cross-project writer was accepted")?;
+    let provenant_run::RunError::WriterProjectMismatch {
+        worktree: actual,
+        project,
+        selected: selected_project,
+    } = &error
+    else {
+        return Err(format!("wrong refusal: {error}").into());
+    };
+    assert_eq!(actual, &worktree);
+    assert_eq!(project, &foreign.project);
+    assert_eq!(selected_project, &selected.project);
+    let message = error.to_string();
     for project in [&selected.project, &foreign.project] {
         let name = project.to_str().ok_or("project path")?;
         assert!(message.contains(name), "{message} does not name {name}");
@@ -2978,39 +2962,16 @@ fn git_created_and_recreated_worktrees_are_dispatchable() -> Result {
         &rig,
         &["worktree", "add", "-qb", "stale-again", ".worktrees/stale"],
     )?;
-    let prompt = rig.root.join("prompt.txt");
-    fs::write(&prompt, "hello")?;
-    let prompt = prompt.to_str().ok_or("prompt path")?;
-    let dispatch = |operation: &str| -> Result<Value> {
-        json(&command(
-            &rig,
-            &[
-                "dispatch",
-                "--prompt-file",
-                prompt,
-                "--model",
-                "codex/id",
-                "--mode",
-                "worktree-write",
-                "--worktree",
-                ".worktrees/stale",
-                "--operation-id",
-                operation,
-                "--json",
-            ],
-        )?)
-    };
     let (_, context) = writer_context(&rig)?;
     let request = provenant_run::resolve_writer(
         context.state_root.as_path(),
         &rig.project,
         Path::new(".worktrees/stale"),
     )?;
-    provenant_run::prepare_writer(&request, context.state_root.as_path(), context.project_id)?;
-    // Dispatch gets past custody without any registration repair.
-    let after = dispatch("stale-after")?;
-    let message = after["error"]["message"].as_str().unwrap_or_default();
-    assert!(!message.contains("writer scope refused"), "{after}");
+    let writer =
+        provenant_run::prepare_writer(&request, context.state_root.as_path(), context.project_id)?;
+    assert_eq!(writer.worktree.path(), rig.project.join(".worktrees/stale"));
+    assert_eq!(writer.branch.as_str(), "refs/heads/stale-again");
     Ok(())
 }
 
@@ -3526,7 +3487,7 @@ fn lane_prepare_with(cases: &[(&str, bool, bool, u8)], probe: Probe) -> Result {
         let frames = concat!(
             "{\"jsonrpc\":\"2.0\",\"id\":999,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-11-25\",\"capabilities\":{},\"clientInfo\":{\"name\":\"fixture\",\"version\":\"1\"}}}\n",
             "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n",
-            "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"fabric_run\",\"arguments\":{\"op\":\"submit\",\"operation_id\":\"nested-depth\",\"tasks\":[{\"prompt\":\"read only\",\"route\":{\"kind\":\"model\",\"provider\":\"codex\",\"model\":\"gpt-6-luna\"},\"timeout_seconds\":1}],\"concurrency\":1,\"wait_seconds\":1}}}\n"
+            "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"fabric_run\",\"arguments\":{\"op\":\"run\",\"use\":\"task\",\"brief\":\"read only\",\"explain\":true}}}\n"
         );
         let mut options = provenant_os::exec::ExecOptions::new(
             &launch.argv,
@@ -3555,15 +3516,10 @@ fn lane_prepare_with(cases: &[(&str, bool, bool, u8)], probe: Probe) -> Result {
             .iter()
             .find(|reply| reply["id"] == 1)
             .ok_or("MCP reply")?["result"];
-        assert_eq!(mcp_error_code(result), "lane_depth", "{result}");
+        assert_lane_child_preview(result)?;
         assert!(!roots.state.as_path().join("tmp/results").exists());
-        assert!(
-            rig.state
-                .join("children")
-                .join(paths.attempt_id.to_string())
-                .join("tmp/results")
-                .is_dir()
-        );
+        assert!(permissions.scratch.path.join("results").is_dir());
+        assert!(!rig.state.join("children").exists());
         assert!(!worktree.join("provenant-mcp.json").exists());
         assert!(!worktree.join("provenant-settings.json").exists());
         assert_eq!(
@@ -3578,56 +3534,6 @@ fn lane_prepare_with(cases: &[(&str, bool, bool, u8)], probe: Probe) -> Result {
             )?,
             ""
         );
-        // Raise the host limit only for a second call. It must create records
-        // in the configured child store without launching in the lane.
-        if adapter == "codex" && !writer {
-            fs::write(rig.state.join("config.toml"), config(2))?;
-            let mut options = provenant_os::exec::ExecOptions::new(
-                &launch.argv,
-                &launch.cwd,
-                Duration::from_secs(10),
-            );
-            options.env = Some(&launch.environment);
-            options.stdin = Some(frames.as_bytes());
-            let output = provenant_os::exec::SystemExecutor::new(1)?.execute(options)?;
-            assert_eq!(
-                code(&output),
-                0,
-                "{}",
-                String::from_utf8_lossy(&output.stderr.bytes)
-            );
-            assert!(
-                rig.state
-                    .join("children")
-                    .join(paths.attempt_id.to_string())
-                    .join("run.sqlite3")
-                    .exists()
-            );
-            let mut inputs = provenant_core::RootInputs::new(home.clone(), rig.project.clone());
-            inputs.state_dir = Some(
-                rig.state
-                    .join("children")
-                    .join(paths.attempt_id.to_string()),
-            );
-            let queued_context = provenant_run::ExecutionContext {
-                state_root: inputs.resolve(&provenant_os::fs::SystemPathResolver)?.state,
-                ..context.clone()
-            };
-            let queued = provenant_run::RunStore::open(&queued_context, &call)?;
-            assert_eq!(
-                queued
-                    .queued_runs(&call, provenant_run::QUEUED_RUNS_PAGE_SIZE)?
-                    .len(),
-                1,
-                "lane launched its own child"
-            );
-            // This depth probe must not consume startup spacing when the
-            // confined fixture raises the host limit again.
-            for run in queued.queued_runs(&call, provenant_run::QUEUED_RUNS_PAGE_SIZE)? {
-                queued.refuse_queued(run, "depth probe only", &call)?;
-            }
-            fs::write(rig.state.join("config.toml"), config(1))?;
-        }
         let parent_context = provenant_run::HolderContext {
             schema_version: 1,
             roots: provenant_run::RootSeed {
@@ -3747,6 +3653,9 @@ pub(crate) fn lane_provider() -> Result {
     // A real provider hands its MCP child a baseline PATH. Mirror that with
     // this fake's own directory first, so the nested dispatch resolves it.
     let mut env = env;
+    if let Some(tmp) = std::env::var_os("TMPDIR") {
+        env.push(("TMPDIR".into(), tmp));
+    }
     if env.iter().all(|(key, _)| key != "PATH") {
         let mut directories = vec![
             std::env::current_exe()?
@@ -3784,7 +3693,11 @@ pub(crate) fn lane_provider() -> Result {
         .collect::<Vec<_>>();
     let mut options = ExecOptions::new(&argv, &cwd, Duration::from_secs(8));
     options.env = Some(&stripped);
-    options.stdin = Some(&input);
+    // Explanation is side-effect free. An actual child request still needs
+    // the parent relay identity even if a provider drops its lane variables.
+    let stripped_input =
+        String::from_utf8(input.clone())?.replace("\"explain\":true", "\"explain\":false");
+    options.stdin = Some(stripped_input.as_bytes());
     let stripped_output = SystemExecutor::new(1)?.execute(options)?;
     assert_eq!(
         code(&stripped_output),
@@ -3805,7 +3718,7 @@ pub(crate) fn lane_provider() -> Result {
             .find(|reply| reply["id"] == 1)
             .map(|reply| mcp_error_code(&reply["result"]))
             .ok_or("stripped MCP reply")?,
-        "invalid_input"
+        "graph_relay_unavailable"
     );
     // Exercise the same publisher used by CLI overflow under confinement.
     let home = PathBuf::from(std::env::var_os("HOME").ok_or("HOME")?);
@@ -3858,7 +3771,7 @@ fn verify_lane_profile(
     attempt: &Path,
     state: &Path,
     frames: &[u8],
-    config: &dyn Fn(u8) -> String,
+    _config: &dyn Fn(u8) -> String,
     parent: &provenant_run::HolderContext,
     probe: Option<Probe>,
 ) -> Result {
@@ -4334,358 +4247,15 @@ if (process.argv[2] === 'child') {
         .filter(|line| !line.is_empty())
         .map(serde_json::from_slice::<Value>)
         .collect::<std::result::Result<Vec<_>, _>>()?;
-    assert_eq!(
-        replies
-            .iter()
-            .find(|reply| reply["id"] == 1)
-            .map(|reply| mcp_error_code(&reply["result"]))
-            .ok_or("confined MCP reply")?,
-        "lane_depth"
-    );
-    // Admission below the limit must also open the isolated child store under
-    // the profile, rather than only exercising the early depth refusal.
-    let child = launch
-        .environment
+    let result = &replies
         .iter()
-        .find(|(key, _)| key == provenant_core::RUN_STATE_DIRECTORY_ENV)
-        .map(|(_, value)| PathBuf::from(value))
-        .ok_or("child store environment")?;
-    let run_count = || -> Result<usize> {
-        match fs::read_dir(child.join("runs")) {
-            Ok(entries) => Ok(entries.collect::<std::io::Result<Vec<_>>>()?.len()),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(0),
-            Err(error) => Err(error.into()),
-        }
-    };
-    // Startup spacing is host-wide: the child would otherwise wait out any
-    // spacing after the parent's own start, past this test's deadline.
-    // Clear only the last-start time; the lease counts stay real.
-    let ledger = state.join("admission.sqlite3");
-    if ledger.exists() {
-        let db = rusqlite::Connection::open(&ledger)?;
-        db.busy_timeout(Duration::from_secs(5))?;
-        db.execute("DELETE FROM spacing", [])?;
-    }
-    fs::write(state.join("config.toml"), config(2))?;
-    let mut inputs =
-        provenant_core::RootInputs::new(confinement.home.clone(), parent.roots.checkout.clone());
-    inputs.state_dir = Some(child.clone());
-    let child_context = provenant_run::ExecutionContext {
-        state_root: inputs.resolve(&provenant_os::fs::SystemPathResolver)?.state,
-        project_id: parent.project_id,
-        actor_id: parent.actor_id,
-        read_prompts: true,
-    };
-    let clock = provenant_os::clock::SystemClock::new();
-    let call = writer_call(&clock, &cancel)?;
-    // Admission is not launch: the host decides from its sealed parent task.
-    let admit = |frames: &str| -> Result<provenant_core::AttemptId> {
-        let before = run_count()?;
-        let mut options = ExecOptions::new(&mcp_argv, &launch.cwd, Duration::from_secs(10));
-        options.env = Some(&launch.environment);
-        options.stdin = Some(frames.as_bytes());
-        let nested = executor.execute(options)?;
-        assert_eq!(
-            code(&nested),
-            0,
-            "{}",
-            String::from_utf8_lossy(&nested.stderr.bytes)
-        );
-        assert!(
-            run_count()? > before,
-            "confined child admission created no run"
-        );
-        // The child must be admitted as a target, not merely leave a record.
-        let accepted = nested
-            .stdout
-            .bytes
-            .split(|byte| *byte == b'\n')
-            .filter(|line| !line.is_empty())
-            .map(serde_json::from_slice::<Value>)
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        let targets = &accepted
-            .iter()
-            .find(|reply| reply["id"] == 1)
-            .ok_or("confined child reply")?["result"]["structuredContent"]["receipt"]["targets"];
-        assert_eq!(
-            targets.as_array().map(Vec::len),
-            Some(1),
-            "confined child was not admitted: {targets}"
-        );
-        Ok(provenant_core::AttemptId::parse(
-            targets[0]["attempt"].as_str().ok_or("child attempt id")?,
-        )?)
-    };
-    let nested_frames =
-        String::from_utf8(frames.to_vec())?.replace("nested-depth", "confined-child");
-    if confinement.writer.is_some() {
-        // A writer lane cannot hand a writer child any registered worktree:
-        // the host refuses the proposal before any provider launches.
-        for (name, worktree) in [
-            ("confined-writer", ".worktrees/nested-child"),
-            ("confined-parent-writer", ".worktrees/writer"),
-        ] {
-            let proposal = admit(&nested_frames.replace("confined-child", name).replace(
-                "\"timeout_seconds\":1",
-                &format!(
-                    "\"timeout_seconds\":1,\"access\":\"worktree_write\",\"worktree\":\"{worktree}\""
-                ),
-            ))?;
-            let store = provenant_run::RunStore::open(&child_context, &call)?;
-            let refused = await_terminal(&store, proposal, &call)?;
-            assert_terminal_outcome(&refused, provenant_run::Outcome::Rejected)?;
-            assert_ne!(refused.provider_launched, Some(true), "{worktree}");
-            let provenant_run::AttemptState::Terminal { reason, .. } = &refused.state else {
-                return Err("writer proposal was not terminal".into());
-            };
-            assert!(
-                reason
-                    .as_deref()
-                    .is_some_and(|reason| reason.contains("a lane cannot propose a writer child")),
-                "{worktree}: {reason:?}"
-            );
-        }
-    }
-    let cancel_child =
-        launch.route.provider.as_deref() == Some("codex") && confinement.writer.is_none();
-    let nested_frames = if cancel_child {
-        nested_frames
-            .replace("read only", "wait for host cancellation")
-            .replace("\"timeout_seconds\":1", "\"timeout_seconds\":10")
-    } else {
-        nested_frames
-    };
-    // The host must reach the confined fake child, including when a Claude
-    // parent cannot read Codex credentials.
-    let attempt_id = admit(&nested_frames)?;
-    let store = provenant_run::RunStore::open(&child_context, &call)?;
-    let forged = provenant_core::ActorId::from_bytes([66; 16]);
-    if cancel_child {
-        let run = store.record(attempt_id, &call)?.run_id;
-        let launched = child.join(format!(
-            "runs/{run}/attempts/{attempt_id}/provider-state/candidate-0/fake-child-launched"
-        ));
-        provenant_test_support::wait_for(
-            &format!("confined child launch: {}", launched.display()),
-            Duration::from_secs(8),
-            || launched.exists(),
-            |exists| *exists,
-        )?;
-        // The lane can write its child's store and attempt directory. It
-        // marks the child finished, renames the requester in its launch
-        // summary and plants a stop the guardian ignores. The host must still
-        // stop the child, from the scope and requester it held at hand-off.
-        let attempt = child.join(format!("runs/{run}/attempts/{attempt_id}"));
-        let mut finished = store.record(attempt_id, &call)?;
-        let original = finished.clone();
-        let mut sibling = finished.clone();
-        finished.state = provenant_run::AttemptState::Terminal {
-            extra: Default::default(),
-            outcome: provenant_run::Outcome::Rejected,
-            exit_code: None,
-            finished_at: finished.queued_at,
-            reason: Some("rejected, says the lane".into()),
-        };
-        finished.started_at = None;
-        let mut result = serde_json::to_value(&finished.prompt)?;
-        result["path"]["path"] = format!("attempts/{attempt_id}/result.md").into();
-        finished.result = Some(serde_json::from_value(result)?);
-        rusqlite::Connection::open(child.join("run.sqlite3"))?.execute(
-            "UPDATE attempts SET record=?1, terminal=1 WHERE id=?2",
-            rusqlite::params![
-                provenant_records::CanonicalV1::bytes(&finished)?.as_bytes(),
-                attempt_id.to_string()
-            ],
-        )?;
-        let path = attempt.join("launch.json");
-        let mut summary: Value = serde_json::from_slice(&fs::read(&path)?)?;
-        assert_eq!(summary["requester"], serde_json::to_value(parent.actor_id)?);
-        summary["requester"] = serde_json::to_value(forged)?;
-        fs::remove_file(&path)?;
-        fs::write(&path, serde_json::to_vec(&summary)?)?;
-        let scope = &summary["scope"];
-        let planted = serde_json::json!({
-            "schema_version": 1,
-            "scope": scope,
-            "request_id": format!("{run}.{attempt_id}.{}.cancel", scope["generation"]),
-            "requester": forged,
-            "reason": "explicit_cancellation",
-        });
-        fs::write(attempt.join("cancel.json"), serde_json::to_vec(&planted)?)?;
-        // Scan reads of lane-written rows once ended the host's launcher
-        // before its stop. First an undecodable attempt row, then a queued
-        // sibling whose run the lane renames, so the owner check refuses it.
-        let db = rusqlite::Connection::open(child.join("run.sqlite3"))?;
-        let owner: Vec<u8> = db.query_row(
-            "SELECT record FROM runs WHERE id=?1",
-            [run.to_string()],
-            |row| row.get(0),
-        )?;
-        let (project, task): (String, String) = db.query_row(
-            "SELECT project, task FROM attempts WHERE id=?1",
-            [attempt_id.to_string()],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )?;
-        let garbage = provenant_core::AttemptId::from_bytes([67; 16]);
-        db.execute(
-            "INSERT INTO attempts(id,run,project,task,number,revision,terminal,record) VALUES (?1,?2,?3,?4,2,1,0,x'00')",
-            rusqlite::params![garbage.to_string(), run.to_string(), project, task],
-        )?;
-        // Several of the launcher's 100 ms scans see it.
-        pause(Duration::from_millis(500));
-        db.execute("DELETE FROM attempts WHERE id=?1", [garbage.to_string()])?;
-        sibling.attempt_id = provenant_core::AttemptId::from_bytes([68; 16]);
-        sibling.state = provenant_run::AttemptState::Queued {
-            extra: Default::default(),
-        };
-        sibling.generation = 0;
-        sibling.attempt_number = 2;
-        sibling.revision = 1;
-        sibling.started_at = None;
-        let mut prompt = serde_json::to_value(&sibling.prompt)?;
-        prompt["path"]["path"] = prompt["path"]["path"]
-            .as_str()
-            .ok_or("prompt path")?
-            .replace(&attempt_id.to_string(), &sibling.attempt_id.to_string())
-            .into();
-        sibling.prompt = serde_json::from_value(prompt)?;
-        let mut renamed = store.run(run, &call)?;
-        renamed.actor_id = forged;
-        db.execute_batch("BEGIN")?;
-        db.execute(
-            "INSERT INTO attempts(id,run,project,task,number,revision,terminal,record) VALUES (?1,?2,?3,?4,2,1,0,?5)",
-            rusqlite::params![
-                sibling.attempt_id.to_string(),
-                run.to_string(),
-                project,
-                task,
-                provenant_records::CanonicalV1::bytes(&sibling)?.as_bytes()
-            ],
-        )?;
-        db.execute(
-            "UPDATE runs SET record=?1 WHERE id=?2",
-            rusqlite::params![
-                provenant_records::CanonicalV1::bytes(&renamed)?.as_bytes(),
-                run.to_string()
-            ],
-        )?;
-        db.execute_batch("COMMIT")?;
-        // Several of the launcher's 100 ms scans see it.
-        pause(Duration::from_millis(500));
-        // The launcher reports the refused read, after it stops the child.
-        let reported = host.provider_exited(
-            &parent.encode()?,
-            Some(provenant_supervisor::machine::StopReason::ExplicitCancellation),
-        );
-        // The forged terminal record stands, so the guardian's own exit is
-        // the evidence. Unstopped, the child would run to its wall deadline.
-        let process_exit = attempt.join("process-exit.json");
-        provenant_test_support::wait_for(
-            &format!("cancelled child process exit: {}", process_exit.display()),
-            Duration::from_secs(8),
-            || process_exit.exists(),
-            |exists| *exists,
-        )?;
-        let exit: Value = serde_json::from_slice(&fs::read(attempt.join("process-exit.json"))?)?;
-        assert_eq!(exit["stop_reason"], "explicit_cancellation", "{exit}");
-        let Err(provenant_supervisor::custody::CustodyError::Io(reported)) = reported else {
-            return Err(format!("launcher hid the refused read: {reported:?}").into());
-        };
-        assert!(
-            reported.to_string().contains("names another owner"),
-            "{reported}"
-        );
-        db.execute(
-            "DELETE FROM attempts WHERE id=?1",
-            [sibling.attempt_id.to_string()],
-        )?;
-        db.execute(
-            "UPDATE runs SET record=?1 WHERE id=?2",
-            rusqlite::params![owner, run.to_string()],
-        )?;
-        // The forged terminal row bypassed Run's terminal transaction, leaving
-        // admission held. Restore the running row so the guardian can settle
-        // it before the next profile starts. Restore the trigger in the same
-        // transaction, before the row is visible again.
-        let trigger: String = db.query_row(
-            "SELECT sql FROM sqlite_master WHERE type='trigger' AND name='immutable_terminal_update'",
-            [],
-            |row| row.get(0),
-        )?;
-        db.execute_batch("BEGIN; DROP TRIGGER immutable_terminal_update;")?;
-        db.execute(
-            "UPDATE attempts SET record=?1, terminal=0 WHERE id=?2",
-            rusqlite::params![
-                provenant_records::CanonicalV1::bytes(&original)?.as_bytes(),
-                attempt_id.to_string()
-            ],
-        )?;
-        db.execute_batch(&trigger)?;
-        db.execute_batch("COMMIT")?;
-    }
-    let record = await_terminal(&store, attempt_id, &call)?;
-    let provenant_run::AttemptState::Terminal { reason, .. } = &record.state else {
-        return Err("child attempt was not terminal".into());
-    };
-    let reason = reason.as_deref().unwrap_or_default();
-    // Host setup links the registered credential. The parent's profile has
-    // no cross-provider credential read.
-    assert!(!reason.contains("setup failed"), "{reason}");
-    if launch.route.provider.as_deref() == Some("codex") {
-        let candidates = child.join(format!(
-            "runs/{}/attempts/{attempt_id}/provider-state",
-            record.run_id
-        ));
-        let linked = fs::read_dir(&candidates)?
-            .map(|entry| Ok(fs::read_link(entry?.path().join("auth.json")).ok()))
-            .collect::<Result<Vec<_>>>()?;
-        assert_eq!(
-            linked.into_iter().flatten().collect::<Vec<_>>(),
-            vec![confinement.home.join(".codex/auth.json")],
-            "{reason}"
-        );
-    }
-    if !cancel_child {
-        assert_eq!(record.provider_launched, Some(true), "{reason}");
-    }
-    // The lane's operation keeps its own actor. The host launches for, and
-    // records as owner, the requester sealed in the parent's holder context.
-    let actor: String = rusqlite::Connection::open(child.join("run.sqlite3"))?.query_row(
-        "SELECT actor FROM operations WHERE run=?1",
-        [record.run_id.to_string()],
-        |row| row.get(0),
-    )?;
-    assert_ne!(actor, parent.actor_id.to_string());
-    assert_eq!(store.run(record.run_id, &call)?.actor_id, parent.actor_id);
-    assert_eq!(record.verified_owner, Some(parent.actor_id));
-    if !cancel_child {
-        let summary: Value = serde_json::from_slice(&fs::read(child.join(format!(
-            "runs/{}/attempts/{attempt_id}/launch.json",
-            record.run_id
-        )))?)?;
-        assert_eq!(summary["requester"], serde_json::to_value(parent.actor_id)?);
-    }
-    let provider_state = child.join(format!(
-        "runs/{}/attempts/{attempt_id}/provider-state",
-        record.run_id
-    ));
-    assert!(
-        provider_state
-            .join("candidate-0/fake-child-launched")
-            .exists(),
-        "{reason}"
-    );
+        .find(|reply| reply["id"] == 1)
+        .ok_or("confined MCP reply")?["result"];
+    assert_lane_child_preview(result)?;
+    // The child-store submission/scanner has been deleted. Graph child
+    // admission is covered through the host relay fixtures.
     host.provider_exited(&parent.encode()?, None)?;
-    fs::write(state.join("config.toml"), config(1))?;
-    // The in-lane fabric context opens read-only and reaches the host through
-    // the relay, so it creates no git home in the child store.
-    assert!(!child.join("tmp/git-home").exists());
-    // Host probes leave no directory or lease behind once the child launched.
-    let probes: Vec<_> = fs::read_dir(state)?
-        .filter_map(|entry| entry.ok()?.file_name().into_string().ok())
-        .filter(|name| name.starts_with("probe-"))
-        .collect();
-    assert!(probes.is_empty(), "{probes:?}");
+    assert!(!state.join("children").exists());
     let denied = [
         attempt.join("custody.lock"),
         attempt.join("reserve"),
@@ -4754,7 +4324,25 @@ impl Executor for FixtureCredential {
     }
 }
 
-/// Identity and submit report errors in text; other tools keep structured codes.
+// Confinement startup exercises the shared graph child request without a
+// launch. The host relay tests own admission, depth limits and cancellation.
+fn assert_lane_child_preview(result: &Value) -> Result {
+    assert!(
+        result.get("isError").is_none_or(|value| value == false),
+        "{result}"
+    );
+    let operation: provenant_fabric_runtime::graph::relay::RelayOp =
+        serde_json::from_value(result["structuredContent"].clone())?;
+    let provenant_fabric_runtime::graph::relay::RelayOp::Add(request) = operation else {
+        return Err(format!("expected a graph child request: {result}").into());
+    };
+    assert_eq!(request.template, "task", "{result}");
+    assert_eq!(request.brief, "read only", "{result}");
+    assert!(!request.writer, "{result}");
+    Ok(())
+}
+
+/// Identity reports errors in text; other tools keep structured codes.
 fn mcp_error_code(result: &Value) -> &str {
     result["structuredContent"]["code"]
         .as_str()
@@ -5065,16 +4653,8 @@ fn gc_output_requires_terminal_lanes_and_respects_keep_recent_dirty_and_links() 
             .get(&path),
         Some(&true)
     );
-    // A queued child lane also blocks output pruning.
-    let mut child_inputs = provenant_core::RootInputs::new(rig.home.clone(), rig.project.clone());
-    child_inputs.state_dir = Some(rig.state.join("children/nested"));
-    let child_context = provenant_run::ExecutionContext {
-        state_root: child_inputs
-            .resolve(&provenant_os::fs::SystemPathResolver)?
-            .state,
-        ..context.clone()
-    };
-    let child_store = open_writer_store(&child_context)?;
+    // A queued child in the host graph also blocks output pruning.
+    let child_store = open_writer_store(&context)?;
     let child_run = writer_run(writer, "gc-child", 111, "nested")?;
     child_store.create(&child_run, &call)?;
     assert!(!before_child.is_current());
@@ -5254,7 +4834,7 @@ fn gc_reports_terminal_tmp_paths_and_bytes_in_json_and_text() -> Result {
     Ok(())
 }
 
-fn dispatch_refuses_low_disk_writers() -> Result {
+fn graph_run_refuses_low_disk_writers() -> Result {
     let rig = repository()?;
     ok(&rig, &["worktree", "create", "low-disk", "--json"])?;
     let (roots, _) = writer_context(&rig)?;
@@ -5264,227 +4844,73 @@ fn dispatch_refuses_low_disk_writers() -> Result {
         rig.state.join("config.toml"),
         "schema_version=1\n[gc]\nfree_floor='18446744073709551615B'\n",
     )?;
-    let prompt = rig.root.join("prompt.md");
-    fs::write(&prompt, "hello")?;
+    let document = rig.root.join("low-disk.json");
+    fs::write(
+        &document,
+        serde_json::to_vec(&serde_json::json!({
+            "schema_version": 2, "graph_id":"low-disk", "nodes":[{
+                "id":"writer", "prompt":"hello", "access":"worktree_write",
+                "worktree":rig.project.join(".worktrees/low-disk"),
+                "write_scope":["."], "route":{"adapter":"codex","model":"gpt-6-luna"}
+            }]
+        }))?,
+    )?;
     let output = command(
         &rig,
         &[
-            "dispatch",
-            "--prompt-file",
-            prompt.to_str().ok_or("prompt")?,
-            "--model",
-            "codex/gpt-6-luna",
-            "--mode",
-            "worktree-write",
-            "--worktree",
-            ".worktrees/low-disk",
-            "--operation-id",
-            "low-disk",
+            "run",
+            "--file",
+            document.to_str().ok_or("document")?,
             "--json",
         ],
     )?;
     let value = json(&output)?;
     assert_eq!(code(&output), 1, "{value}");
-    assert_eq!(value["status"], "refused", "{value}");
-    let message = value["error"]["message"].as_str().ok_or("message")?;
+    assert_eq!(value["status"], "failed", "{value}");
+    assert_eq!(value["data"]["outcome"], "failed", "{value}");
+    let node = &value["data"]["checkpoint"]["nodes"][0];
+    assert_eq!(node["state"], "blocked", "{value}");
+    assert_eq!(node["advance_error_code"], "launch_refused", "{value}");
+    assert!(node["attempts"][0]["attempt_ref"].is_null(), "{value}");
+    let message = node["advance_error"].as_str().ok_or("message")?;
     assert!(
         message.contains("available") && message.contains("floor 18446744073709551615"),
         "{message}"
     );
-    assert!(
-        value["error"]["repair"]
-            .as_str()
-            .is_some_and(|repair| repair.contains("provenant gc")),
-        "{value}"
-    );
+    assert!(message.contains("provenant gc"), "{message}");
     assert!(!rig.state.join("runs").exists());
-    // Exercise read-only admission with the real command edge, stopping before
-    // provider preparation: neither native sandboxing nor account readiness is
-    // the disk-floor subject of this test.
-    let args: Vec<OsString> = ["--admission-only", "--state-dir"]
-        .into_iter()
-        .map(OsString::from)
-        .chain(std::iter::once(rig.state.as_os_str().to_owned()))
-        .chain(
-            [
-                "dispatch",
-                "--prompt-file",
-                prompt.to_str().ok_or("prompt")?,
-                "--model",
-                "codex/gpt-6-luna",
-                "--operation-id",
-                "low-disk-reader",
-                "--json",
-            ]
-            .into_iter()
-            .map(OsString::from),
-        )
-        .collect();
-    let output = rig.execute_os(&std::env::current_exe()?, &args, None)?;
-    assert_eq!(code(&output), 0, "{output:?}");
-    let reader = json(&output)?;
-    assert_eq!(reader["status"], "ok", "{reader}");
-    assert!(rig.state.join("runs").exists());
-    let run = reader["data"]["run_id"].as_str().ok_or("reader run")?;
-    let request: Value = serde_json::from_slice(&fs::read(
-        rig.state.join("runs").join(run).join("request.json"),
-    )?)?;
-    assert!(request["tasks"][0]["writer"].is_null(), "{request}");
-    Ok(())
-}
-
-fn resume_refuses_low_disk_writer() -> Result {
-    use provenant_run::AttemptReader;
-    let rig = repository()?;
-    ok(&rig, &["worktree", "create", "resume-disk", "--json"])?;
-    let (_, context) = writer_context(&rig)?;
-    let store = open_writer_store(&context)?;
-    let clock = provenant_os::clock::SystemClock::new();
-    let cancel = provenant_core::CancelToken::new();
-    let call = writer_call(&clock, &cancel)?;
-    let input = writer_run(
-        provenant_run::WriterRequest {
-            extra: Default::default(),
-            project: rig.project.clone(),
-            worktree: rig.project.join(".worktrees/resume-disk"),
-        },
-        "resume-disk-prior",
-        211,
-        "prior",
-    )?;
-    store.create(&input, &call)?;
-    let id = input.attempts[0].attempt_id;
-    // Publish a synthetic provider exit through the normal immutable-record API.
-    let exit = provenant_supervisor::custody::ExitObservation {
-        publication: provenant_supervisor::custody::PublicationState::Durable,
-        scope: provenant_supervisor::custody::Scope {
-            run: input.run_id,
-            attempt: id,
-            generation: 0,
-        },
-        termination: Some(provenant_os::exec::Termination::Exit(0)),
-        never_spawned: false,
-        launch_refusal: None,
-        stop_reason: None,
-        delivered_signals: vec![],
-        reaped: vec![],
-        omitted_reaped: 0,
-        spared: vec![],
-        cancel_delivered_before_exit: None,
-        omitted_spared: 0,
-        warnings: vec![],
-        omitted_warnings: 0,
-        terminal_observed: true,
-        unresolved_cleanup: false,
-        unresolved_pids: vec![],
-        settlement_evidence:
-            provenant_supervisor::custody::SettlementEvidence::DarwinCensusAndCustodyLease,
-        stdout: Default::default(),
-        stderr: Default::default(),
-    };
-    let attempt = rig
-        .state
-        .join(format!("runs/{}/attempts/{id}", input.run_id));
-    let mut evidence = serde_json::to_value(&exit)?;
-    evidence["schema_version"] = 1.into();
-    use std::os::unix::fs::OpenOptionsExt;
-    let mut file = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(attempt.join("process-exit.json"))?;
-    file.write_all(&serde_json::to_vec(&evidence)?)?;
-    drop(file);
-    store.publish_terminal(
-        id,
-        store.record(id, &call)?.revision,
-        &provenant_run::TerminalPublication {
-            terminal_cause: None,
-            terminal_note: None,
-            outcome: provenant_run::Outcome::Succeeded,
-            started_at: Some(input.created_at),
-            finished_at: clock.wall_now()?,
-            provider_ms: Some(1),
-            reason: None,
-            result: "prior result",
-            complete: true,
-            redacted: false,
-            resolved_route: Some(fixture_route()),
-            applied_route: Some(fixture_route()),
-            observed_route: Some(fixture_route()),
-            usage: Default::default(),
-            session: Some("fixture-session".into()),
-            partial_signals: Vec::new(),
-        },
-        &exit,
-        &call,
-    )?;
-    drop(store);
     fs::write(
-        rig.state.join("config.toml"),
-        "schema_version=1\n[gc]\nfree_floor='18446744073709551615B'\n",
+        &document,
+        serde_json::to_vec(&serde_json::json!({
+            "schema_version": 2, "graph_id":"low-disk-reader", "nodes":[{
+                "id":"reader", "prompt":"hello", "access":"read_only",
+                "route":{"adapter":"fixture-unavailable","model":"one"}
+            }]
+        }))?,
     )?;
-    let prompt = rig.root.join("resume.txt");
-    fs::write(&prompt, "continue")?;
-    let output = command(
+    let reader = command(
         &rig,
         &[
-            "resume",
-            &id.to_string(),
-            "--prompt-file",
-            prompt.to_str().ok_or("prompt")?,
-            "--operation-id",
-            "resume-disk-low",
+            "run",
+            "--file",
+            document.to_str().ok_or("document")?,
             "--json",
         ],
     )?;
-    let value = json(&output)?;
-    assert_eq!(code(&output), 1, "{value}");
-    assert_eq!(value["status"], "refused", "{value}");
-    assert_eq!(value["error"]["code"], "REFUSED", "{value}");
-    assert!(
-        value["error"]["message"]
-            .as_str()
-            .ok_or("message")?
-            .contains("provenant gc"),
-        "{value}"
+    let reader_value = json(&reader)?;
+    assert_eq!(code(&reader), 1, "{reader_value}");
+    assert_eq!(reader_value["status"], "failed", "{reader_value}");
+    let reader_node = &reader_value["data"]["checkpoint"]["nodes"][0];
+    assert_eq!(reader_node["state"], "failed", "{reader_value}");
+    assert_eq!(
+        reader_node["attempts"][0]["outcome"], "adapter_unavailable",
+        "{reader_value}"
     );
-    let store = open_writer_store(&context)?;
-    // The CLI continuation belongs to its actor, rather than the fixture actor.
-    let db = rusqlite::Connection::open(rig.state.join("run.sqlite3"))?;
-    let run: String = db.query_row(
-        "SELECT run FROM operations WHERE project=?1 AND operation=?2",
-        rusqlite::params![context.project_id.to_string(), "resume-disk-low"],
-        |row| row.get(0),
-    )?;
-    let run = provenant_core::RunId::parse(&run)?;
-    let attempts = store
-        .attempts(
-            provenant_run::AttemptFilter {
-                run_id: Some(run),
-                task_id: None,
-            },
-            &call,
-        )?
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-    assert_eq!(attempts.len(), 1);
-    let refused = store.record(attempts[0].attempt_id, &call)?;
-    assert!(matches!(
-        refused.state,
-        provenant_run::AttemptState::Terminal {
-            outcome: provenant_run::Outcome::Rejected,
-            ..
-        }
-    ));
-    assert!(refused.applied_route.is_none());
     assert!(
-        !rig.state
-            .join(format!(
-                "runs/{}/attempts/{}/launch.json",
-                run, attempts[0].attempt_id
-            ))
-            .exists()
+        reader_node["attempts"][0]["attempt_ref"].as_str().is_some(),
+        "{reader_value}"
     );
+    assert!(rig.state.join("runs").exists());
     Ok(())
 }
 
@@ -5537,6 +4963,172 @@ fn gc_disk_alert_is_once_per_dip_and_manual_preview_does_not_latch() -> Result {
             .count(),
         2
     );
+    Ok(())
+}
+
+// Port the former dispatch preparation cancellation regression through the
+// graph front door. Entering seeding a second time proves the first launcher
+// released the same worktree's custody before stop returned.
+fn graph_stop_cancels_live_delivery_fetch_and_seed_preparation() -> Result {
+    use std::os::unix::fs::PermissionsExt;
+    if !writer_backend_available()? {
+        return Ok(());
+    }
+    for phase in ["delivery", "seed"] {
+        let mut rig = repository()?;
+        let _cleanup = rig.process_cleanup();
+        let gate = rig.root.join("preparation-gate");
+        fs::create_dir(&gate)?;
+        fs::write(gate.join("hold"), b"hold")?;
+        let git_exe = provenant_os::git::git_executable().ok_or("git")?;
+        let remote = rig.root.join("remote.git");
+        git(&rig, &["init", "--bare", remote.to_str().ok_or("remote")?])?;
+        git(
+            &rig,
+            &["remote", "add", "origin", remote.to_str().ok_or("remote")?],
+        )?;
+        git(&rig, &["push", "origin", "HEAD:refs/heads/main"])?;
+        ok(
+            &rig,
+            &[
+                "worktree",
+                "create",
+                "preparation",
+                "--base",
+                "HEAD",
+                "--json",
+            ],
+        )?;
+        let worktree = rig.project.join(".worktrees/preparation");
+        let bin = rig.root.join("provider-bin");
+        fs::create_dir(&bin)?;
+        let codex = bin.join("codex");
+        fs::write(
+            &codex,
+            "#!/bin/sh\ncase \"$1\" in --version) printf 'codex-cli 1.0.0\\n';; login) printf 'Logged in using ChatGPT\\n';; *) printf '{\"type\":\"thread.started\",\"thread_id\":\"fixture-preparation\"}\\n';; esac\n",
+        )?;
+        fs::set_permissions(&codex, fs::Permissions::from_mode(0o700))?;
+        let gh = bin.join("gh");
+        fs::write(
+            &gh,
+            "#!/bin/sh\ncase \"$*\" in *token*) printf 'fixture-token\\n';; *) printf 'gh version 2.0.0\\n';; esac\n",
+        )?;
+        fs::set_permissions(&gh, fs::Permissions::from_mode(0o700))?;
+        rig.env.retain(|(key, _)| key != "PATH");
+        rig.env.push((
+            "PATH".into(),
+            format!("{}:/usr/bin:/bin", bin.display()).into(),
+        ));
+        let account = rig.root.join("codex");
+        fs::write(
+            account.join("auth.json"),
+            br#"{"tokens":{"account_id":"fixture-preparation"}}"#,
+        )?;
+        support::register_account(
+            &rig,
+            "codex",
+            "preparation",
+            "fixture-preparation",
+            &account,
+        )?;
+        if phase == "delivery" {
+            let wrapper = bin.join("git");
+            fs::write(
+                &wrapper,
+                format!(
+                    "#!/bin/sh\ncase \" $* \" in *' fetch '*) if [ -f '{}/hold' ]; then : > '{}/entered'; exec /bin/sleep 30; fi;; esac\nexec '{}' \"$@\"\n",
+                    gate.display(),
+                    gate.display(),
+                    git_exe.display()
+                ),
+            )?;
+            fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o700))?;
+            rig.env.retain(|(key, _)| key != "PROVENANT_GIT");
+            rig.env
+                .push(("PROVENANT_GIT".into(), wrapper.into_os_string()));
+        } else {
+            rig.env.push((
+                "PROVENANT_FIXTURE_HOLD_SEED".into(),
+                gate.clone().into_os_string(),
+            ));
+        }
+        let submit = |rig: &TestRig, id: &str, delivery: &str| -> Result<Value> {
+            let file = rig.root.join(format!("{id}.json"));
+            fs::write(
+                &file,
+                serde_json::to_vec(&serde_json::json!({
+                    "graph_id":id, "nodes":[{"id":"writer", "use":"task", "brief":"reply OK",
+                        "access":"worktree_write", "worktree":worktree, "delivery":delivery,
+                        "route":{"adapter":"codex", "model":"codex/gpt-6-luna", "account":"preparation"}}]
+                }))?,
+            )?;
+            let output = command(
+                rig,
+                &[
+                    "run",
+                    "--file",
+                    file.to_str().ok_or("graph file")?,
+                    "--wait=1s",
+                    "--json",
+                ],
+            )?;
+            assert!(matches!(code(&output), 0 | 124), "{phase}: {output:?}");
+            json(&output)
+        };
+        let first = submit(
+            &rig,
+            "preparation-first",
+            if phase == "delivery" { "push" } else { "none" },
+        )?;
+        provenant_test_support::wait_for(
+            "graph preparation entered",
+            Duration::from_secs(20),
+            || gate.join("entered").exists(),
+            |ready| *ready,
+        )?;
+        assert!(
+            first["data"]["checkpoint"]["nodes"][0]["attempts"][0]["attempt_ref"].is_string(),
+            "{phase}: {first}"
+        );
+        let before = std::time::Instant::now();
+        let stopped = ok(&rig, &["stop", "preparation-first", "--wait=3s", "--json"])?;
+        assert!(
+            before.elapsed() < Duration::from_secs(4),
+            "{phase}: {stopped}"
+        );
+        assert_eq!(
+            stopped["data"]["rows"][0]["state"], "cancelled",
+            "{phase}: {stopped}"
+        );
+        fs::remove_file(gate.join("hold"))?;
+        fs::remove_file(gate.join("entered"))?;
+        let next_gate = rig.root.join("next-seed-gate");
+        fs::create_dir(&next_gate)?;
+        fs::write(next_gate.join("hold"), b"hold")?;
+        rig.env
+            .retain(|(key, _)| key != "PROVENANT_FIXTURE_HOLD_SEED");
+        rig.env.push((
+            "PROVENANT_FIXTURE_HOLD_SEED".into(),
+            next_gate.clone().into_os_string(),
+        ));
+        let next = submit(&rig, "preparation-next", "none")?;
+        provenant_test_support::wait_for(
+            "next graph acquired the writer and entered seeding",
+            Duration::from_secs(20),
+            || next_gate.join("entered").exists(),
+            |ready| *ready,
+        )?;
+        assert!(
+            next["data"]["checkpoint"]["nodes"][0]["attempts"][0]["attempt_ref"].is_string(),
+            "{phase}: {next}"
+        );
+        let stopped = ok(&rig, &["stop", "preparation-next", "--wait=3s", "--json"])?;
+        assert_eq!(
+            stopped["data"]["rows"][0]["state"], "cancelled",
+            "{phase}: {stopped}"
+        );
+        fs::remove_file(next_gate.join("hold"))?;
+    }
     Ok(())
 }
 

@@ -148,19 +148,23 @@ def schema_files(data):
         files[f"schemas/{name}"] = json.dumps(data[name], ensure_ascii=False, indent=2, sort_keys=True) + "\n"
     text = header("Published JSON Schemas", "provenant-records print-wire-schemas")
     text += (
-        "These JSON Schemas (draft 2020-12) describe the `--json` envelope the CLI emits\n"
-        "today (`schema_version` 1) for `lanes`, `status`, `output`, `cancel` and `land`.\n"
-        "Their lane rows share the same projection. MCP schemas describe planned\n"
+        "These JSON Schemas (draft 2020-12) describe retained version 1 wire records.\n"
+        "Their lane rows share the same projection. Historical schema filenames and\n"
+        "titles are record identifiers, not current command guidance. Use the\n"
+        "[CLI reference](cli.md) for the graph commands. MCP schemas describe planned\n"
         "structuredContent; version 2 is not emitted yet.\n\n"
-        "A non-ok status may carry `error: null` (for example a `lanes --wait` timeout or an\n"
-        "unobservable cancel) and partial `data`, so the command schemas check `data` only\n"
-        "for `ok`, `pending` and `waiting`. A failed cancel carries `data: {operation_id}`\n"
-        "with no `receipts`. Validate failures that carry an `error` object against\n"
+        "A non-ok status may carry `error: null` and partial `data`, so the schemas\n"
+        "check `data` only for `ok`, `pending` and `waiting`. An unobserved stop may\n"
+        "carry only `data: {operation_id}` without `receipts`. Validate failures\n"
+        "that carry an `error` object against\n"
         "[`error.schema.json`](schemas/error.schema.json).\n\n"
         "| Schema | Describes |\n|---|---|\n"
     )
     for name in names:
-        text += f"| [`{name}`](schemas/{name}) | {data[name].get('title', '')} |\n"
+        title = data[name].get('title', '')
+        if name in ("cancel.schema.json", "lanes.schema.json"):
+            title = "Historical " + name.removesuffix(".schema.json") + " record envelope"
+        text += f"| [`{name}`](schemas/{name}) | {title} |\n"
     text += (
         "\n## Edge error codes\n\n"
         "Stable `error.code` values emitted outside the run owner (those are listed in the\n"
@@ -189,6 +193,7 @@ HOST_SECTIONS = (
     ("host_lane_settings", "Host lane settings", "Omit a key for its default."),
     ("host_lane_build_settings", "Host lane build settings",
      "Omit a key for its host-dependent default; -1 also selects automatic behaviour."),
+    ("host_run_settings", "Host run settings", "Omit a key for its default."),
     ("host_land_settings", "Host land settings", "Omit a key for its default."),
     ("host_graph_settings", "Host graph settings", "Omit a key for its default."),
     ("host_gc_settings", "Host GC settings", "Omit a key for its default."),
@@ -200,7 +205,35 @@ HOST_SECTIONS = (
 )
 
 
-def config_reference(data):
+def config_reference(data, all_fields=False):
+    if not all_fields and "documented_fields" in data:
+        text = header("Configuration keys", KNOBS.as_posix())
+        text += ("Use `provenant config schema` for effective values, or `provenant config schema --all` "
+                 "for all editable fields and their effective values; the [advanced reference](config-keys-all.md) "
+                 "documents host policy and tuning.\n\n")
+        text += "| Key | Default | Effect |\n|---|---|---|\n"
+        documented = set(data["documented_fields"])
+        for name in data["documented_fields"]:
+            contract = data["knobs"].get(name)
+            if contract is None:
+                for section in data.values():
+                    if isinstance(section, dict) and "settings" in section:
+                        prefix = section.get("path", "") + "."
+                        if name.startswith(prefix):
+                            contract = section["settings"].get(name[len(prefix):])
+                            if contract is not None:
+                                break
+            if contract is None and name.startswith("providers.{provider}."):
+                contract = data.get("provider_updates", {}).get(name.rsplit(".", 1)[1])
+            if contract is None and name == "profile":
+                contract = {"default": "balanced", "effect": "Select balanced or economy defaults"}
+            if contract is None:
+                raise ValueError(f"documented configuration field has no contract: {name}")
+            text += f"| `{name}` | {contract.get('default', 'unset')} | {contract.get('effect', '')} |\n"
+        if len(documented) >= 40:
+            raise ValueError("compact configuration surface must contain fewer than 40 fields")
+        return text
+
     text = header("Configuration keys", KNOBS.as_posix())
     for key, title, intro in HOST_SECTIONS:
         host = data.get(key)
@@ -210,8 +243,16 @@ def config_reference(data):
                  "| Key | Default | Effect |\n|---|---|---|\n")
         for name, setting in host["settings"].items():
             auto = setting.get("auto_value")
-            allowed = setting.get("allowed") or (
-                f"{setting['min']} to {setting['max']}" + (f" or {auto} for auto" if auto is not None else ""))
+            allowed = setting.get("allowed")
+            if not allowed:
+                if "min" in setting and "max" in setting:
+                    allowed = f"{setting['min']} to {setting['max']}"
+                elif "min" in setting:
+                    allowed = f"{setting['min']} or more"
+                else:
+                    allowed = ", ".join(str(value) for value in setting.get("values", [setting["type"]]))
+                if auto is not None:
+                    allowed += f" or {auto} for auto"
             text += f"| `{name}` | {setting['default']} | {setting['effect']} ({allowed}). |\n"
         text += "\n"
     history = data.get("quota_history")
@@ -230,7 +271,7 @@ def config_reference(data):
             text += f"| `{key}` | {cell(value)} |\n"
         text += "\n"
     remainder = {key: value for key, value in data.items()
-                 if key not in {"knobs", "provider_updates", "quota_history", *(section[0] for section in HOST_SECTIONS)}}
+                 if key not in {"knobs", "documented_fields", "provider_updates", "quota_history", *(section[0] for section in HOST_SECTIONS)}}
     if remainder:
         text += "## Registry and profiles\n\n" + fenced(remainder)
     return text.rstrip() + "\n"
@@ -257,6 +298,7 @@ def generate(root, binary=None):
         gap("cli.md", f"{WORKSPACE}/Cargo.toml is missing; CLI catalogue unavailable")
     for source, name, render in [
         (KNOBS, "config-keys.md", config_reference),
+        (KNOBS, "config-keys-all.md", lambda data: config_reference(data, all_fields=True)),
     ]:
         if (root / source).is_file():
             try:

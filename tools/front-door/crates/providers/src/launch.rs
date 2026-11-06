@@ -1217,6 +1217,9 @@ pub(crate) fn git_global_files(config_home: &Path) -> Vec<PathGrant> {
         .map(|name| config_home.join(name))
         .into_iter()
         .filter(|path| path.is_file())
+        // XDG configuration commonly lives behind a dotfiles symlink. Exact
+        // grants and their held parent anchors must use the physical spelling.
+        .filter_map(|path| std::fs::canonicalize(path).ok())
         .map(exact)
         .collect()
 }

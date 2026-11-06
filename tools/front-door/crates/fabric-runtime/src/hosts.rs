@@ -97,8 +97,11 @@ pub enum PeerError {
     Refused { error: facade::FacadeError },
 }
 impl PeerError {
-    pub fn code(&self) -> &'static str {
-        facade::FacadeError::from(self).code()
+    pub fn code(&self) -> &str {
+        if let Self::Refused { error } = self {
+            return error.code();
+        }
+        facade::FacadeError::from(self).static_code()
     }
 }
 
@@ -421,6 +424,14 @@ pub enum PeerAction {
         extra: provenant_records::ExtraFields,
         operation_id: OperationId,
     },
+    /// Cancel or inspect cancellation of a receiver-owned graph by its stable submission.
+    CancelSubmission {
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
+        submission: OperationId,
+        operation_id: OperationId,
+        stop: bool,
+    },
     LandingPush {
         #[serde(flatten)]
         extra: provenant_records::ExtraFields,
@@ -527,7 +538,8 @@ impl PeerRequest {
         match &self.action {
             PeerAction::Inbox { input, .. } => input.operation_id().cloned(),
             PeerAction::Coordination { operation_id, .. } => operation_id.clone(),
-            PeerAction::LandingPush { operation_id, .. } => Some(operation_id.clone()),
+            PeerAction::LandingPush { operation_id, .. }
+            | PeerAction::CancelSubmission { operation_id, .. } => Some(operation_id.clone()),
             PeerAction::SessionHandoff { input, .. } => Some(input.operation_id.clone()),
             PeerAction::Submit {
                 input: facade::SubmitInput::Submit { operation_id, .. },
@@ -706,6 +718,11 @@ pub enum PeerResult {
         #[serde(flatten)]
         extra: provenant_records::ExtraFields,
     },
+    SubmissionCancelled {
+        settled: bool,
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
+    },
     RunStatuses {
         #[serde(with = "crate::runs::attempts_wire")]
         data: Vec<provenant_records::run::AttemptRecord>,
@@ -778,7 +795,7 @@ pub struct PeerResultError {
 
 impl PeerResultError {
     /// Preserve the refusal code supplied by the peer.
-    pub fn code(&self) -> &'static str {
+    pub fn code(&self) -> &str {
         self.error.code()
     }
 }
@@ -1323,7 +1340,6 @@ mod tests {
             graph: Default::default(),
             lanes: Default::default(),
             plan: Default::default(),
-            pipelines: Default::default(),
             limits: crate::config::Limits {
                 body_bytes: 65536,
                 input_frame_bytes: 1048576,

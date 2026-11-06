@@ -1,0 +1,216 @@
+{
+  "context": {
+    "pattern": "fan-out-synthesise",
+    "preset": "fan-out-synthesise"
+  },
+  "graph_id": "preset-e6c2e5bd80465e7658d9cd2f39ee9593",
+  "nodes": [
+    {
+      "access": "read_only",
+      "depends_on": [],
+      "id": "plan",
+      "kind": "task",
+      "plan": {
+        "disjoint_waves": true,
+        "fallback": {
+          "exports": [
+            {
+              "node": "branch-1",
+              "outputs": [
+                "result"
+              ]
+            },
+            {
+              "node": "branch-2",
+              "outputs": [
+                "result"
+              ]
+            }
+          ],
+          "nodes": [
+            {
+              "access": "read_only",
+              "depends_on": [],
+              "id": "branch-1",
+              "prompt": "brief",
+              "routes": [
+                {
+                  "alias": "senior"
+                },
+                {
+                  "alias": "senior"
+                }
+              ],
+              "title": "branch-1"
+            },
+            {
+              "access": "read_only",
+              "depends_on": [],
+              "id": "branch-2",
+              "prompt": "brief",
+              "routes": [
+                {
+                  "alias": "senior"
+                },
+                {
+                  "alias": "senior"
+                }
+              ],
+              "title": "branch-2"
+            }
+          ]
+        },
+        "kinds": [
+          "task",
+          "synthesise"
+        ],
+        "max_nodes": 24,
+        "patterns": [
+          {
+            "exports": [
+              {
+                "node": "worker",
+                "outputs": [
+                  "result"
+                ]
+              }
+            ],
+            "name": "worker",
+            "nodes": [
+              {
+                "acceptance_checks": [
+                  "Answer the question from the repository and cite the evidence"
+                ],
+                "access": "read_only",
+                "id": "worker",
+                "prompt": "brief\n\nYour question: ${question}",
+                "routes": [
+                  {
+                    "alias": "${route}"
+                  },
+                  {
+                    "alias": "${route}"
+                  }
+                ],
+                "title": "worker"
+              }
+            ],
+            "parameters": {
+              "question": {
+                "doc": "The one question this worker answers.",
+                "type": "string"
+              },
+              "route": {
+                "default": "senior",
+                "doc": "Route alias for the worker.",
+                "enum": [
+                  "junior",
+                  "principal",
+                  "senior"
+                ],
+                "type": "string"
+              }
+            }
+          }
+        ],
+        "patterns_only": true,
+        "wire_exports": true
+      },
+      "prompt": "You shape the graph. You choose its parts from an allow-listed catalogue; you never write code and never widen access.\n\nShape the graph for: brief\nHost limits: at most 24 nodes and pattern instances; a lane's\nbudget_seconds is at most 3600; routes you may assign:\njunior, senior, principal (host routes: junior, principal, senior). Registered writer\nworktrees you may assign: none registered.\nChoose how many workers to run and give each one distinct question to answer, on a route that suits its difficulty. Prefer the default width unless the brief clearly needs fewer or more, and never repeat a question.\nRead the evidence from earlier stages and the repository, and look outward\nwhen a choice depends on current practice. Express the shape only as pattern\ninstances. Instances that no depends_on orders are one wave and must write\ndisjoint scopes. Explain your choices in two or three sentences before the\nfragment block.\n",
+      "role": "plan.shape",
+      "role_digest": "sha256:5ad13ac9c5d959f1c19a74924e0c34fdc24c5f7975a194c84a4dd5ebdb5e5e70",
+      "routes": [
+        {
+          "alias": "principal"
+        },
+        {
+          "alias": "principal"
+        }
+      ],
+      "title": "plan"
+    },
+    {
+      "access": "read_only",
+      "depends_on": [
+        "plan"
+      ],
+      "id": "synthesis",
+      "inputs": [
+        {
+          "node": "plan",
+          "outputs": [
+            "result"
+          ]
+        }
+      ],
+      "kind": "synthesise",
+      "prompt": "brief",
+      "routes": [
+        {
+          "alias": "senior"
+        },
+        {
+          "alias": "senior"
+        }
+      ],
+      "title": "synthesis"
+    }
+  ],
+  "provenance": {
+    "origins": {
+      "parameters.branches.default": "bundled",
+      "parameters.branches.doc": "bundled",
+      "parameters.branches.max": "bundled",
+      "parameters.branches.type": "bundled",
+      "parameters.local_check_policy": "bundled",
+      "parameters.min_branches.doc": "bundled",
+      "parameters.min_branches.min": "bundled",
+      "parameters.min_branches.optional": "bundled",
+      "parameters.min_branches.type": "bundled",
+      "parameters.route.default": "bundled",
+      "parameters.route.doc": "bundled",
+      "parameters.route.type": "bundled",
+      "parameters.synthesis_route.doc": "bundled",
+      "parameters.synthesis_route.optional": "bundled",
+      "parameters.synthesis_route.type": "bundled",
+      "parameters.width.default": "bundled",
+      "parameters.width.doc": "bundled",
+      "parameters.width.max": "bundled",
+      "parameters.width.min": "bundled",
+      "parameters.width.type": "bundled",
+      "pattern.cost": "bundled",
+      "pattern.level": "bundled",
+      "pattern.select_when": "bundled",
+      "pattern.summary": "bundled",
+      "pattern.tags": "bundled",
+      "plan.explicit": "bundled",
+      "plan.guidance": "bundled",
+      "plan.patterns": "bundled",
+      "plan.replaces": "bundled",
+      "roles.plan.shape": "bundled",
+      "stages": "bundled"
+    },
+    "plan": {
+      "applied": "on",
+      "degraded": null,
+      "reason": "planning requested",
+      "requested": "on",
+      "route": "principal"
+    },
+    "preset": "fan-out-synthesise",
+    "roles": {
+      "plan.shape": {
+        "digest": "sha256:5ad13ac9c5d959f1c19a74924e0c34fdc24c5f7975a194c84a4dd5ebdb5e5e70",
+        "extends": [
+          "plan.shape",
+          "plan"
+        ],
+        "origin": "bundled",
+        "references": []
+      }
+    },
+    "substitutions": [],
+    "warnings": []
+  },
+  "schema_version": 1
+}

@@ -164,51 +164,6 @@ pub enum SeparationOutcome {
     Unconstrained,
 }
 
-/// Deferred review configuration supplied to the host resolver.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ReviewSpec {
-    pub shape: Option<String>,
-    pub risk_tier: Option<String>,
-    pub kind: Option<String>,
-    pub size: Option<String>,
-    #[serde(default)]
-    pub risk_tags: Vec<String>,
-    pub worktree: Option<String>,
-    #[serde(default)]
-    pub lenses: Vec<ReviewLens>,
-    pub min_successful: Option<usize>,
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub reduce_verdict: bool,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub export_first: Vec<OutputKind>,
-    pub max_nodes: usize,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ReviewLens {
-    pub name: String,
-    pub when: Option<String>,
-    pub tier: serde_json::Value,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ReviewResolution {
-    pub subject: provenant_core::GitOid,
-    pub base: provenant_core::GitOid,
-    pub measured_size: String,
-    pub shape: String,
-    pub source: String,
-    /// Replacement attempts made for members of this resolved panel.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub substitutions: Vec<ReviewSubstitution>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-pub struct ReviewSubstitution {
-    pub member: String,
-    pub route_index: u16,
-}
-
 // Wire presence is transient decoding metadata, not part of node identity.
 #[derive(Clone, Debug, Default)]
 pub(super) struct TopologyPresence(pub [bool; 2]);
@@ -220,10 +175,59 @@ impl PartialEq for TopologyPresence {
 }
 impl Eq for TopologyPresence {}
 
+/// Execution specification for an attempt, carrying what a plain lane expresses.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttemptSpec {
+    /// Peer name or host ID; omitted means local execution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+    /// Require a confidential-safe route.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub confidential: bool,
+    /// Provider execution timeout in seconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_timeout: Option<u64>,
+    #[serde(flatten)]
+    pub extra: provenant_records::ExtraFields,
+    /// Placement override for cloud execution.
+    #[serde(default, alias = "cloud", skip_serializing_if = "Option::is_none")]
+    pub placement: Option<provenant_records::run::CloudPlacement>,
+    /// A writer worktree branch created from base.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub new_worktree: Option<crate::coordination::facade::NewWorktree>,
+    /// Account label for routing and quota accounting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<String>,
+    /// Explicit capabilities granted to this attempt.
+    #[serde(default, alias = "capability", skip_serializing_if = "Vec::is_empty")]
+    pub capabilities: Vec<String>,
+    /// Use build-heavy scheduling priority.
+    #[serde(default, alias = "build_weight", skip_serializing_if = "is_false")]
+    pub build_heavy: bool,
+    /// Explicit write roots outside the worktree.
+    #[serde(default, alias = "write_root", skip_serializing_if = "Vec::is_empty")]
+    pub write_roots: Vec<String>,
+}
+
+impl AttemptSpec {
+    pub fn is_empty(&self) -> bool {
+        self.host.is_none()
+            && !self.confidential
+            && self.provider_timeout.is_none()
+            && self.placement.is_none()
+            && self.new_worktree.is_none()
+            && self.account.is_none()
+            && self.capabilities.is_empty()
+            && !self.build_heavy
+            && self.write_roots.is_empty()
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GraphNode {
+    /// Attempt specification carrying placement, new worktree, account, capability, build weight and write roots.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub review: Option<ReviewSpec>,
+    pub attempt: Option<AttemptSpec>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub family_group: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -497,34 +501,6 @@ impl GraphDocument {
         let expansion_limits = expansion_safety_limits(limits);
         let expanded = loops::expand(self, &[], &expansion_limits)?;
         let (plan, _) = validate_flat_plan(&expanded, &expansion_limits)?;
-        for node in &expanded.nodes {
-            if node.review.is_some() {
-                let longest_lens = node
-                    .extra
-                    .get("lens_templates")
-                    .and_then(serde_json::Value::as_object)
-                    .into_iter()
-                    .flat_map(|templates| templates.values())
-                    .filter_map(|template| template.get("id").and_then(serde_json::Value::as_str))
-                    .map(str::len)
-                    .max()
-                    .unwrap_or(0);
-                // The host prefixes each lens with `--r--p--`; reserve room
-                // for panel-generated identities even when no lens is selected.
-                if node
-                    .id
-                    .len()
-                    .saturating_add(8)
-                    .saturating_add(longest_lens.max(32))
-                    > 200
-                {
-                    return Err(AdmissionError::Plan(
-                        "deferred review node id leaves insufficient room for expanded review ids"
-                            .into(),
-                    ));
-                }
-            }
-        }
         if let Some(reason) = structural_limit(&expanded, &plan, limits) {
             return Err(AdmissionError::StructuralLimit(reason));
         }
@@ -590,7 +566,6 @@ pub struct GraphInspection {
 #[serde(rename_all = "snake_case")]
 pub enum NodeKind {
     Composite,
-    Plan,
     Task,
     Synthesise,
     Gate,
@@ -1075,6 +1050,9 @@ pub struct NodeProgress {
     pub last_launch_retry: Option<LaunchRetry>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outputs: Option<NodeOutputs>,
+    /// Immutable evidence from earlier node redos, included in budget accounting.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub previous_attempts: Vec<GraphAttempt>,
     /// One durable row per route actually tried, in route order.
     pub attempts: Vec<GraphAttempt>,
 }
@@ -1305,7 +1283,7 @@ impl GraphCheckpoint {
     }
 
     pub(super) fn node_successful(&self, node: &NodeProgress) -> bool {
-        if loops::handled_gate(self, node) {
+        if loops::handled_gate(self, node) || repair::handled_panel(self, node) {
             return true;
         }
         let mut current = node;
@@ -1333,6 +1311,11 @@ impl GraphCheckpoint {
 }
 
 impl NodeProgress {
+    /// All attempt evidence in launch order, including previous redos.
+    pub fn recorded_attempts(&self) -> impl DoubleEndedIterator<Item = &GraphAttempt> {
+        self.previous_attempts.iter().chain(&self.attempts)
+    }
+
     pub(super) fn truncation(&self) -> Option<(&[usize], usize)> {
         match self.truncation_cause.as_ref()? {
             NodeDecisionCause::CompositeFindingsTruncated {
@@ -1490,6 +1473,9 @@ pub struct NodeInput<'a> {
     pub attachments: &'a [String],
     pub capabilities: Option<&'a [String]>,
     pub capability_sources: Option<&'a serde_json::Value>,
+    /// The node's attempt spec: an account for routes that name none, and
+    /// build weight. Capabilities are already folded into `capabilities`.
+    pub attempt: Option<&'a AttemptSpec>,
     /// Attempts of the source writer whose model families must be avoided.
     pub distinct_from_attempts: &'a [String],
     /// Refuse a route inside distinct_from_attempts' families. family_peers

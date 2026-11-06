@@ -1,0 +1,210 @@
+# Composite nodes share the leaf template schema. This catalogue is separate
+# so leaf briefs and composite topology have independent owners.
+[review-panel]
+doc = "Review through a host-selected topology and lenses."
+exports = [{ node = "selected", outputs = ["result", "findings", "verdict"] }]
+nodes = [
+  { id = "selected", use = "review-shape-${item}", over = "@review-topology", reduce_verdict = true },
+]
+
+[review-shape-f0-v0-s0]
+doc = "Review with a host-selected framing, verification and synthesis topology."
+exports = [{ node = "lenses", outputs = ["result", "findings", "verdict"] }]
+nodes = [
+  { id = "lenses", use = "review", over = "@review-panel", reduce_verdict = true, with = { lens = "${item}", advice = { resolver = "review-advice-${item}" } }, required_verdict = "VERDICT: PASS" },
+]
+
+[review-shape-f0-v0-s1]
+doc = "Review with a host-selected framing, verification and synthesis topology."
+exports = [{ node = "synthesis", outputs = ["result", "findings", "verdict"] }]
+nodes = [
+  { id = "lenses", use = "review", over = "@review-panel", with = { lens = "${item}", advice = { resolver = "review-advice-${item}" } }, required_verdict = "VERDICT: PASS" },
+  { id = "synthesis", use = "review.synthesis", after = ["lenses"], require_findings = true, required_verdict = "VERDICT: PASS", inputs = [{ node = "lenses", outputs = ["result", "findings"] }] },
+]
+
+[review-shape-f0-v1-s0]
+doc = "Review with a host-selected framing, verification and synthesis topology."
+exports = [{ node = "lenses", outputs = ["result", "findings", "verdict"] }, { node = "verify", outputs = ["result", "findings"] }]
+nodes = [
+  { id = "lenses", use = "review", over = "@review-panel", reduce_verdict = true, with = { lens = "${item}", advice = { resolver = "review-advice-${item}" } }, required_verdict = "VERDICT: PASS" },
+  { id = "verify", use = "review.verify", over = "@review-verifiers", after = ["lenses"], inputs = [{ node = "lenses", outputs = ["result", "findings"] }] },
+]
+
+[review-shape-f0-v1-s1]
+doc = "Review with a host-selected framing, verification and synthesis topology."
+exports = [{ node = "synthesis", outputs = ["result", "findings", "verdict"] }]
+nodes = [
+  { id = "lenses", use = "review", over = "@review-panel", with = { lens = "${item}", advice = { resolver = "review-advice-${item}" } }, required_verdict = "VERDICT: PASS" },
+  { id = "verify", use = "review.verify", over = "@review-verifiers", after = ["lenses"], inputs = [{ node = "lenses", outputs = ["result", "findings"] }] },
+  { id = "synthesis", use = "review.synthesis", after = ["lenses", "verify"], require_findings = true, required_verdict = "VERDICT: PASS", inputs = [{ node = "lenses", outputs = ["result", "findings"] }, { node = "verify", outputs = ["result", "findings"] }] },
+]
+
+[review-shape-f1-v0-s0]
+doc = "Review with a host-selected framing, verification and synthesis topology."
+exports = [{ node = "lenses", outputs = ["result", "findings", "verdict"] }]
+nodes = [
+  { id = "frame", use = "task", brief = "Frame the pinned review subject and its acceptance criteria for the independent lenses." },
+  { id = "lenses", use = "review", over = "@review-panel", after = ["frame"], inputs = [{ node = "frame", outputs = ["result"] }], reduce_verdict = true, with = { lens = "${item}", advice = { resolver = "review-advice-${item}" } }, required_verdict = "VERDICT: PASS" },
+]
+
+[review-shape-f1-v0-s1]
+doc = "Review with a host-selected framing, verification and synthesis topology."
+exports = [{ node = "synthesis", outputs = ["result", "findings", "verdict"] }]
+nodes = [
+  { id = "frame", use = "task", brief = "Frame the pinned review subject and its acceptance criteria for the independent lenses." },
+  { id = "lenses", use = "review", over = "@review-panel", after = ["frame"], inputs = [{ node = "frame", outputs = ["result"] }], with = { lens = "${item}", advice = { resolver = "review-advice-${item}" } }, required_verdict = "VERDICT: PASS" },
+  { id = "synthesis", use = "review.synthesis", after = ["lenses"], require_findings = true, required_verdict = "VERDICT: PASS", inputs = [{ node = "lenses", outputs = ["result", "findings"] }] },
+]
+
+[review-shape-f1-v1-s0]
+doc = "Review with a host-selected framing, verification and synthesis topology."
+exports = [{ node = "lenses", outputs = ["result", "findings", "verdict"] }, { node = "verify", outputs = ["result", "findings"] }]
+nodes = [
+  { id = "frame", use = "task", brief = "Frame the pinned review subject and its acceptance criteria for the independent lenses." },
+  { id = "lenses", use = "review", over = "@review-panel", after = ["frame"], inputs = [{ node = "frame", outputs = ["result"] }], reduce_verdict = true, with = { lens = "${item}", advice = { resolver = "review-advice-${item}" } }, required_verdict = "VERDICT: PASS" },
+  { id = "verify", use = "review.verify", over = "@review-verifiers", after = ["lenses"], inputs = [{ node = "lenses", outputs = ["result", "findings"] }] },
+]
+
+[review-shape-f1-v1-s1]
+doc = "Review with a host-selected framing, verification and synthesis topology."
+exports = [{ node = "synthesis", outputs = ["result", "findings", "verdict"] }]
+nodes = [
+  { id = "frame", use = "task", brief = "Frame the pinned review subject and its acceptance criteria for the independent lenses." },
+  { id = "lenses", use = "review", over = "@review-panel", after = ["frame"], inputs = [{ node = "frame", outputs = ["result"] }], with = { lens = "${item}", advice = { resolver = "review-advice-${item}" } }, required_verdict = "VERDICT: PASS" },
+  { id = "verify", use = "review.verify", over = "@review-verifiers", after = ["lenses"], inputs = [{ node = "lenses", outputs = ["result", "findings"] }] },
+  { id = "synthesis", use = "review.synthesis", after = ["lenses", "verify"], require_findings = true, required_verdict = "VERDICT: PASS", inputs = [{ node = "lenses", outputs = ["result", "findings"] }, { node = "verify", outputs = ["result", "findings"] }] },
+]
+
+[research-swarm]
+doc = "Research named questions and reconcile dated evidence."
+nodes = [
+  { id = "researchers", use = "research", over = "${items}", min_ok = "${min_ok}", brief = "${brief}: ${item}" },
+  { id = "synthesis", use = "synthesise", after = ["researchers"], inputs = [{ node = "researchers", outputs = ["result"] }] },
+]
+[research-swarm.parameters]
+brief = { type = "string", default = "Answer with cited evidence" }
+items = { type = "list", default = ["the question in the brief"], min = 1 }
+min_ok = { type = "integer", default = 1, min = 1 }
+
+[explore-swarm]
+doc = "Explore named areas and reconcile repository evidence."
+nodes = [
+  { id = "explorers", use = "explore", over = "${items}", min_ok = "${min_ok}", brief = "${brief}: ${item}" },
+  { id = "synthesis", use = "synthesise", after = ["explorers"], inputs = [{ node = "explorers", outputs = ["result"] }] },
+]
+[explore-swarm.parameters]
+brief = { type = "string", default = "Answer with cited evidence" }
+items = { type = "list", default = ["the repository"], min = 1 }
+min_ok = { type = "integer", default = 1, min = 1 }
+
+[batch]
+exports = [{ node = "repair", outputs = ["result"] }]
+doc = "Implement named slices into one integration branch, then review it."
+nodes = [
+  { id = "slices", use = "implement", over = "${items}", min_ok = "${min_ok}", brief = "Implement slice ${item}: ${brief}", delivery = "integrate:${integration_branch}", worktree = "${worktree}", write_scope = "${write_scope}" },
+  { id = "review", use = "findings-panel", after = ["slices"], source = { type = "integration" } },
+  { id = "repair", use = "review-repair", after = ["review"], inputs = [{ node = "review", outputs = ["findings", "verdict"] }], with = { worktree = "${worktree}", write_scope = "${write_scope}", integration_branch = "${integration_branch}", max_repair_cycles = "${max_repair_cycles}" } },
+]
+[batch.parameters]
+max_repair_cycles = { type = "integer", default = 3, min = 1, max = 3 }
+items = { type = "list", default = ["implementation"], min = 1 }
+min_ok = { type = "integer", default = 1, min = 1 }
+brief = { type = "string", default = "Meet the acceptance checks." }
+integration_branch = { type = "string", default = "batch/integration" }
+worktree = { type = "string", default = "" }
+write_scope = { type = "list", default = [] }
+
+[deliver]
+identity = "content"
+exports = [
+  { node = "implement", outputs = ["branch", "commit"] },
+  { node = "review", outputs = ["result", "findings", "verdict"] },
+]
+doc = "Implement an approved brief through CI, review and landing."
+nodes = [
+  { id = "implement", use = "implement", brief = "${brief}", delivery = "pr", worktree = "${worktree}", write_scope = "${write_scope}" },
+  { id = "initial-review", use = "findings-panel", after = ["implement"], source = { type = "node", node = "implement" } },
+  { id = "repair", use = "review-repair", after = ["initial-review"], inputs = [{ node = "initial-review", outputs = ["findings", "verdict"] }], with = { writer = "implement", worktree = "${worktree}", write_scope = "${write_scope}", max_repair_cycles = "${max_repair_cycles}" } },
+  { id = "ci", kind = "gate", access = "read_only", after = ["repair"], condition = { type = "ci", target = { node = "implement" } } },
+  { id = "review", use = "review-panel", after = ["ci"], source = { type = "head", node = "implement" } },
+  { id = "accept", kind = "gate", access = "read_only", after = ["review"], condition = { type = "verdict", expected = "VERDICT: PASS", threshold = "all" }, inputs = [{ node = "review", outputs = ["verdict"] }] },
+  { id = "land", kind = "land", access = "read_only", after = ["accept"], land = { node = "implement", tier = "substantial" } },
+]
+[deliver.parameters]
+max_repair_cycles = { type = "integer", default = 3, min = 1, max = 3 }
+brief = { type = "string", default = "Meet the acceptance checks." }
+worktree = { type = "string", default = "" }
+write_scope = { type = "list", default = [] }
+
+[task-once]
+nodes = [{ id = "task", use = "task", brief = "${brief}" }]
+[task-once.parameters]
+brief = { type = "string", default = "Do the brief." }
+
+[plan-once]
+nodes = [{ id = "plan", use = "plan", brief = "Plan: ${brief}" }]
+[plan-once.parameters]
+brief = { type = "string", default = "Scope the task." }
+
+[task-chain]
+nodes = [
+  { id = "first", use = "task", brief = "${brief}" },
+  { id = "second", use = "task", brief = "${brief}", after = ["first"], inputs = [{ node = "first", outputs = ["result"] }] },
+]
+
+[task-chain.parameters]
+brief = { type = "string", default = "Do the brief." }
+
+[task-fan-out]
+exports = [{ node = "tasks", outputs = ["result"] }]
+nodes = [{ id = "tasks", use = "task", over = "${items}", min_ok = "${min_ok}", brief = "${brief}: ${item}" }]
+[task-fan-out.parameters]
+brief = { type = "string", default = "Answer with cited evidence" }
+items = { type = "list", default = ["first view", "second view"], min = 1 }
+min_ok = { type = "integer", default = 1, min = 1 }
+
+[task-fan-out-synthesise]
+nodes = [
+  { id = "tasks", use = "task-fan-out", with = { items = "${items}", min_ok = "${min_ok}", brief = "${brief}" } },
+  { id = "synthesis", use = "synthesise", after = ["tasks"], inputs = [{ node = "tasks", outputs = ["result"] }] },
+]
+[task-fan-out-synthesise.parameters]
+brief = { type = "string", default = "Answer with cited evidence" }
+items = { type = "list", default = ["first view", "second view"], min = 1 }
+min_ok = { type = "integer", default = 1, min = 1 }
+
+[plan-then-deliver]
+nodes = [
+  { id = "plan", use = "plan", brief = "Plan: ${brief}" },
+  { id = "deliver", use = "deliver", after = ["plan"], inputs = [{ node = "plan", outputs = ["result"] }], with = { brief = "${brief}", worktree = "${worktree}", write_scope = "${write_scope}" } },
+]
+[plan-then-deliver.parameters]
+brief = { type = "string", default = "Meet the acceptance checks." }
+worktree = { type = "string", default = "" }
+write_scope = { type = "list", default = [] }
+
+[findings-panel]
+doc = "Collect qualified findings without treating reported defects as an execution failure."
+exports = [{ node = "synthesis", outputs = ["result", "findings", "verdict"] }]
+nodes = [
+  { id = "lenses", use = "review", over = "@review-panel", with = { lens = "${item}", advice = { resolver = "review-advice-${item}" } } },
+  { id = "synthesis", use = "review.synthesis", after = ["lenses"], require_findings = true, inputs = [{ node = "lenses", outputs = ["result", "findings"] }] },
+]
+
+[review-repair]
+doc = "Bounded repairs followed by principal scoping when the design cannot close review."
+exports = [{ node = "cycles", outputs = ["result"] }, { node = "continue", outputs = ["result"] }]
+nodes = [
+  { id = "cycles", use = "repair", repeat = { until = "accepted", max_rounds = "${max_repair_cycles}", review_repair = true }, on_fail = "design", with = { worktree = "${worktree}", write_scope = "${write_scope}", writer = "${writer}", integration_branch = "${integration_branch}", lenses = "${lenses}" } },
+  { id = "design", use = "design", after = ["cycles"], inputs = [{ node = "cycles", outputs = ["result", "findings"] }], brief = "Read only. Diagnose the concrete design defect or recurring finding. Return the root constraint, two or three options with trade-offs and migration implications, the smallest viable slice, and acceptance evidence. End with a findings block containing schema_version 1, findings [], and repair_design with boolean within_scope and one_way_door fields. Set within_scope true only when the smallest slice stays inside approved scope. The host notifies the owner and gates changed scope or a one-way door. Do not change files or widen authority." },
+  { id = "continue", use = "plan", after = ["design", "scope-approved"], inputs = [{ node = "design", outputs = ["result"] }], brief = "Turn the principal's smallest viable slice into a graph patch. Continue delivery using the authorised repair-slice template after the host scope gate. Owner approval does not expand the supplied literal write authority. Re-plan the full panel with @review-panel when risk tier or scope grows. Run verification and independent review of the new head. Keep all writes inside the supplied literal scope. Do not start another three-cycle review repair loop." },
+  { id = "scope", kind = "decide", access = "read_only", after = ["design"], repair_scope_gate = true, decide = { question = "Approve the principal's changed scope or one-way door? Read the principal design report before deciding. Approval does not expand the graph's literal write authority.", options = [{ id = "approve", label = "Approve the proposed slice" }, { id = "hold", label = "Hold for a revised design" }] } },
+  { id = "scope-approved", kind = "gate", access = "read_only", after = ["scope"], inputs = [{ node = "scope", outputs = ["verdict"] }], condition = { type = "verdict", expected = "approve", threshold = "all" } },
+]
+[review-repair.parameters]
+max_repair_cycles = { type = "integer", default = 3, min = 1, max = 3 }
+worktree = { type = "string", default = "" }
+write_scope = { type = "list", min = 1 }
+writer = { type = "string", default = "" }
+lenses = { type = "list", default = ["correctness", "security", "tests", "contract", "design", "adversarial"], min = 1 }
+integration_branch = { type = "string", default = "" }

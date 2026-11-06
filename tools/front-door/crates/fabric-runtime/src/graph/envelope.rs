@@ -19,172 +19,6 @@ const LOOP_PAUSE_TEXT_BYTES: usize = 256;
 const UNKNOWN_USAGE_TEXT_BYTES: usize = 64;
 /// Space for each runtime-owned refusal code, including future causes.
 pub(super) const REFUSAL_CODE_BYTES: usize = 64;
-/// Space for a deferred review node's expanded progress and serialized record.
-/// A prospective expansion is also checked against this reservation.
-const REVIEW_NODE_RESERVE: usize = 40 * 1024;
-const REVIEW_RECORD_RESERVE: usize = 256 * 1024;
-
-fn deferred_review_bound(node: &PlannedNode, review: &ReviewSpec) -> usize {
-    let templates = node.extra.get("lens_templates").map_or(0, canonical_len);
-    let panel_templates = node
-        .extra
-        .get("panel_templates")
-        .and_then(serde_json::Value::as_object);
-    let panel_bytes = panel_templates.map_or(0, |templates| {
-        let one = |key: &str| {
-            templates
-                .get(key)
-                .filter(|value| !value.is_null())
-                .map_or(0, canonical_len)
-        };
-        let verifiers = node
-            .extra
-            .get("panel_max_verifiers")
-            .and_then(serde_json::Value::as_u64)
-            .and_then(|count| usize::try_from(count).ok())
-            .unwrap_or(review.max_nodes)
-            .min(review.max_nodes);
-        one("frame")
-            .saturating_add(one("synthesis"))
-            .saturating_add(one("verifier").saturating_mul(verifiers))
-    });
-    let inherited = canonical_len(&(
-        &node.depends_on,
-        &node.inputs,
-        &node.read_roots,
-        &node.attachments,
-    ));
-    // A custom lens can have a disposition projection or CI evidence larger
-    // than an ordinary review leaf. Reserve those declared additions too.
-    let template_extra = node
-        .extra
-        .get("lens_templates")
-        .and_then(serde_json::Value::as_object)
-        .into_iter()
-        .flat_map(|templates| templates.values())
-        .fold(0usize, |total, template| {
-            let dispositions = template
-                .get("dispositions")
-                .and_then(serde_json::Value::as_array)
-                .is_some_and(|items| !items.is_empty());
-            let composite = template
-                .get("composite")
-                .is_some_and(|value| !value.is_null());
-            let ci = template.get("condition").filter(|condition| {
-                condition.get("type").and_then(serde_json::Value::as_str) == Some("ci")
-            });
-            let ci_bytes = ci.map_or(0, |condition| {
-                let bytes = condition
-                    .get("failed_checks_max_bytes")
-                    .and_then(serde_json::Value::as_u64)
-                    .and_then(|value| usize::try_from(value).ok())
-                    .unwrap_or_else(ci::default_failed_checks_max_bytes);
-                let count = condition
-                    .get("max_failed_checks")
-                    .and_then(serde_json::Value::as_u64)
-                    .and_then(|value| usize::try_from(value).ok())
-                    .unwrap_or_else(ci::default_max_failed_checks)
-                    .min(bytes / 32);
-                bytes
-                    .saturating_mul(2)
-                    .saturating_add(count.saturating_mul(256))
-            });
-            total
-                .saturating_add(if dispositions {
-                    DISPOSITION_FINDINGS_BYTES
-                } else {
-                    0
-                })
-                .saturating_add(if composite {
-                    COMPOSITE_EXCERPT_BYTES
-                } else {
-                    0
-                })
-                .saturating_add(ci_bytes)
-        });
-    // Explicit tiers may provide longer route lists than the two ordinary
-    // read-only retries; each extra attempt has its own bounded progress row.
-    let route_extra = review
-        .lenses
-        .iter()
-        .filter_map(|lens| lens.tier.as_array())
-        .fold(0usize, |total, routes| {
-            total.saturating_add(routes.len().saturating_sub(2).saturating_mul(2_048))
-        });
-    review
-        .max_nodes
-        .saturating_sub(1)
-        .saturating_mul(REVIEW_NODE_RESERVE)
-        .saturating_add(REVIEW_RECORD_RESERVE)
-        .saturating_add(templates.saturating_mul(2))
-        // A planned review persists the captured catalogue in the review
-        // expansion and again in the planner's bounded fragment and fallback.
-        .saturating_add(
-            node.extra
-                .get("review_planner")
-                .map_or(0, |planner| canonical_len(planner).saturating_mul(4)),
-        )
-        .saturating_add(if node.extra.contains_key("review_planner") {
-            fn pattern_nodes(node: &serde_json::Value) -> usize {
-                1_usize.saturating_add(
-                    node.pointer("/composite/nodes")
-                        .and_then(serde_json::Value::as_array)
-                        .map_or(0, |children| {
-                            children.iter().fold(0_usize, |total, child| {
-                                total.saturating_add(pattern_nodes(child))
-                            })
-                        }),
-                )
-            }
-            let model_nodes = node
-                .extra
-                .get("review_planner")
-                .and_then(|planner| planner.get("max_nodes"))
-                .and_then(serde_json::Value::as_u64)
-                .and_then(|n| usize::try_from(n).ok())
-                .unwrap_or(review.max_nodes);
-            let pattern_width = node
-                .extra
-                .get("review_planner")
-                .and_then(|planner| planner.pointer("/catalogue/patterns"))
-                .and_then(serde_json::Value::as_array)
-                .into_iter()
-                .flatten()
-                .map(|pattern| {
-                    1_usize.saturating_add(
-                        pattern
-                            .get("nodes")
-                            .and_then(serde_json::Value::as_array)
-                            .map_or(0, |nodes| {
-                                nodes.iter().fold(0_usize, |total, node| {
-                                    total.saturating_add(pattern_nodes(node))
-                                })
-                            }),
-                    )
-                })
-                .max()
-                .unwrap_or(2);
-            model_nodes
-                .saturating_add(review.max_nodes)
-                .saturating_mul(pattern_width)
-                .saturating_mul(REVIEW_NODE_RESERVE)
-        } else {
-            0
-        })
-        // Verifier templates can be instantiated more than once.
-        .saturating_add(panel_bytes.saturating_mul(2))
-        .saturating_add(if panel_templates.is_some() {
-            DISPOSITION_FINDINGS_BYTES + COMPOSITE_EXCERPT_BYTES
-        } else {
-            0
-        })
-        .saturating_add(template_extra)
-        .saturating_add(route_extra)
-        // Explicit lens tiers can carry route lists copied into both the
-        // expansion record and the eventual attempt rows.
-        .saturating_add(canonical_len(review).saturating_mul(2))
-        .saturating_add(inherited.saturating_mul(review.max_nodes).saturating_mul(2))
-}
 
 pub(super) fn reason(
     document: &GraphDocument,
@@ -298,8 +132,8 @@ pub(super) fn checkpoint_bound(
     let fixed = [
         ENVELOPE_KEYS_BYTES,
         DIRECTORY_BYTES,
-        canonical_len(document),
-        canonical_len(&skeleton),
+        prompt_store::compacted_len(document),
+        prompt_store::compacted_len(&skeleton),
         // instance ID, ask actor, PR URL, integration pin, pause reason and plan digest
         64 + HOST_ID_BYTES
             + OUTPUT_FIELD_BYTES
@@ -325,24 +159,26 @@ pub(super) fn checkpoint_bound(
             *rounds = (*rounds).max(round.round);
         }
     }
+    let positions = plan
+        .nodes
+        .iter()
+        .enumerate()
+        .map(|(index, node)| (node.id.clone(), index))
+        .collect();
     plan.nodes
         .iter()
         .map(|node| {
             // An admitted planner never stores its fragment again.
-            let admitted = expansions.iter().any(|e| e.source == node.id);
+            let admitted = expansions
+                .iter()
+                .any(|e| e.source == node.id && e.closes_producer());
             node_bound(
                 plan,
                 node,
                 loop_rounds.get(node.id.as_str()).copied().unwrap_or(0),
                 admitted,
+                repair::is_repair_gate(node, plan, &positions),
             )
-            .saturating_add(if admitted {
-                0
-            } else {
-                node.review
-                    .as_ref()
-                    .map_or(0, |review| deferred_review_bound(node, review))
-            })
             .saturating_add(1)
         })
         .chain(fixed)
@@ -372,12 +208,13 @@ fn node_bound(
     node: &PlannedNode,
     loop_rounds: usize,
     admitted: bool,
+    repair_gate: bool,
 ) -> usize {
-    let expands = node.plan.is_some() || plans::writer(node);
+    let expands = plans::agent(node);
     let gate = node.condition.is_some();
     let ci = matches!(node.condition, Some(GateCondition::Ci { .. }));
     let boundary = gate || node.loop_body.is_some();
-    let skeleton = NodeProgress {
+    let mut skeleton = NodeProgress {
         extra: [(
             "retry".into(),
             serde_json::json!({"retries":u8::MAX,"origin":"shipped_default"}),
@@ -392,7 +229,7 @@ fn node_bound(
         writer_binding_pending: plans::writer(node),
         review_base: node.extra.get("review_base").map(|_| "1".repeat(64)),
         review_base_pending: false,
-        fragment: (node.plan.is_some() && !admitted).then(String::new),
+        fragment: (plans::agent(node) && !admitted).then(String::new),
         handoff: plans::writer(node).then(String::new),
         expansion_pause: expands.then(String::new),
         expansion_cause: expands.then_some(NodeDecisionCause::PlanExpansionPaused {
@@ -494,10 +331,38 @@ fn node_bound(
                 remaining: Some(Vec::new()),
             }
         }),
+        previous_attempts: Vec::new(),
         attempts: Vec::new(),
         launch_retry: None,
         last_launch_retry: None,
     };
+    // Only a repair acceptance gate can retain a measured growth cache.
+    // Ordinary agent nodes may still report risk assessments in their output.
+    if repair_gate {
+        skeleton.extra.insert(
+            "repair_growth".into(),
+            serde_json::json!({"before":"1".repeat(64),"after":"1".repeat(64),"grew":false}),
+        );
+    }
+    if node.extra.get("repair_scope_gate") == Some(&serde_json::Value::Bool(true)) {
+        skeleton.extra.insert("owner_notified".into(), true.into());
+    }
+    // `substantial` is the longest accepted risk tier, and false is the
+    // longest cached growth boolean. Commit IDs may be SHA-256 (64 bytes).
+    if let Some(outputs) = &mut skeleton.outputs {
+        outputs
+            .extra
+            .insert("risk_tier".into(), "substantial".into());
+        if plan.nodes.iter().any(|consumer| {
+            consumer.extra.get("repair_scope_gate") == Some(&serde_json::Value::Bool(true))
+                && consumer.depends_on.contains(&node.id)
+        }) {
+            outputs.extra.insert(
+                "repair_design".into(),
+                serde_json::json!({"within_scope":false,"one_way_door":false}),
+            );
+        }
+    }
     let mut bytes = canonical_len(&skeleton)
         + 64 // source commit
         + MAX_ADVANCE_ERROR_BYTES; // advance error
@@ -515,8 +380,10 @@ fn node_bound(
     if expands {
         bytes += MAX_ADVANCE_ERROR_BYTES; // expansion pause
     }
-    if node.plan.is_some() && !admitted {
-        bytes += plans::STORED_BLOCK_BYTES;
+    if plans::agent(node) && !admitted {
+        // Final blocks are always externalised by prompt_store. Reserve the
+        // digest and escaped envelope pointer, including the node index.
+        bytes += 256;
     }
     if plans::writer(node) {
         bytes += plans::STORED_HANDOFF_BYTES;
@@ -530,7 +397,10 @@ fn node_bound(
     }
     if let Some(spec) = &node.decide {
         // One ask per decide node: a withdrawn ask is replaced, not kept.
-        let session = asks::decide_session(spec, plan.decision_session.as_deref()).unwrap_or("");
+        let repair_scope =
+            node.extra.get("repair_scope_gate") == Some(&serde_json::Value::Bool(true));
+        let session = asks::decide_session(spec, plan.decision_session.as_deref())
+            .unwrap_or(if repair_scope { &plan.graph_id } else { "" });
         let ask = asks::decide_ask(
             &plan.graph_id,
             node,
@@ -540,7 +410,16 @@ fn node_bound(
             None,
             Some(""),
         );
-        bytes += ask_bound(ask, MAX_ADVANCE_ERROR_BYTES);
+        bytes += ask_bound(
+            ask,
+            if repair_scope {
+                // The scope decision includes a principal report; `bounded`
+                // limits the whole dynamic body in canonical bytes.
+                provenant_records::inbox::REQUEST_BODY_BYTES + 27 // .retry- plus a u64 generation
+            } else {
+                MAX_ADVANCE_ERROR_BYTES
+            },
+        );
     }
     if let Some(spec) = &node.land {
         // branch, head, ask ID, actor and note; one ask, whose body names the
@@ -583,11 +462,8 @@ fn node_bound(
         bytes = bytes.saturating_add(6 * 4096 + 256);
     }
     if !boundary {
-        let excerpt = if node.composite.is_some() {
-            COMPOSITE_EXCERPT_BYTES
-        } else {
-            RESULT_EXCERPT_BYTES
-        };
+        // Result excerpts, like final blocks, are content-addressed text.
+        let excerpt = 256;
         // digest, excerpt, path, verdict, verdict error, findings, branch,
         // commit, warnings, remaining
         bytes += 80
@@ -663,27 +539,6 @@ fn node_bound(
                 .map(|id| canonical_len(id) + 1)
                 .sum::<usize>()
             + selections * 768;
-        // A resolved panel can also record this route as a substitution.
-        if node.access == AccessMode::ReadOnly
-            && node.role.as_deref().is_some_and(|role| {
-                role == "lens" || role.starts_with("lens.") || role == "review.verify"
-            })
-        {
-            let copies = if node.role.as_deref() == Some("review.verify") {
-                plan.nodes
-                    .iter()
-                    .filter(|other| {
-                        other.review.is_some()
-                            && other.id.rsplit_once("--").map(|(scope, _)| scope)
-                                == node.id.rsplit_once("--").map(|(scope, _)| scope)
-                    })
-                    .count()
-                    .max(1)
-            } else {
-                1
-            };
-            bytes += copies.saturating_mul(node.id.len() + 64);
-        }
     }
     bytes
 }

@@ -5,8 +5,7 @@ description: "Use to build an approved software change through the deliver loop:
 
 # Implement
 
-The `deliver` preset is the default loop. This skill covers what the preset
-does not: what to hand it, how to map work onto its nodes, and when to stop.
+Use `implement` for a slice and `deliver` for the full delivery loop.
 
 ## Entry
 
@@ -15,38 +14,37 @@ verified, non-goals, risk tier and write authority (the tracker issue or the
 scope digest). Missing inputs go back to `scope`. Do not invent owner decisions;
 record an engineering call as `Decided (<source>): <reason>` and proceed.
 
-Before starting an issue, show tracker lint advice and proceed even if checks
-are unavailable. If the entry path already supplied advice, use that; otherwise
-run `provenant tracker lint N` (or `--file PATH` for a local spec).
+Show `provenant tracker lint N` advice before starting an issue unless already
+supplied; unavailable checks do not block work.
 
-Repository specifics (verify commands, commit and PR rules, review ladder) come
-from the repo's own `AGENTS.md`, `CONTRIBUTING` and runbooks. Look there first.
-Where the repository defines test tiers, use T0 for touched work, T1 for
-named targets, and leave T2 and T3 to CI or a configured host.
+Read repository checks, commit rules and review floors in `AGENTS.md` and
+runbooks. Run targeted checks locally; leave full suites to CI.
 
 ## How it runs
 
-```sh
-provenant run --preset deliver --prompt-file ISSUE.md \
-  --set 'parameters.worktree="WT"' --set 'parameters.risk_tier="substantial"' \
-  --set 'parameters.land_tier="substantial"' --set 'parameters.spec="#N"' --explain
+Register a writer worktree first (`provenant worktree create slice --base BASE`).
+Save `slice.toml`, replacing the path, scope and brief:
+
+```toml
+use = "implement"
+tier = "junior"
+worktree = "/absolute/project/.worktrees/slice"
+write_scope = ["src"]
+brief = "Meet the approved criteria; run the named checks, commit and report."
 ```
 
-Check the explanation, then submit the same command without `--explain` (add
-`--wait 2h` when no one is watching). Nodes run in order: `write`, `ci` (a
-repair loop bounded by `max_iterations`), `review` (`review`), `accept`
-and `land`. `risk_tier` picks the review shape and `land_tier` (default `substantial`) the
-landing gate, so set both to the approved tier. Routine and substantial work
-lands automatically; crucial and terminal work asks the `decision_session`,
-which must then be set. Follow a run with
-`provenant status` and `provenant fabric graph status ID`; take over a stalled
-landing with `provenant land N --head SHA --wait`.
+Run `provenant run --route junior --file slice.toml --explain`, then omit
+`--explain` to submit.
 
-Split a large dependent change into a stack; see the [stacked PR workflow](../../docs/runbooks/github-workflow.md#stacked-pull-requests).
+Check authority, write scopes and gates in the explanation,
+then submit without `--explain`. `deliver` is the default composite; use
+`implement` for one slice, `implement.fix` for a known defect, and `batch` for
+parallel slices into one integration branch. Use `plan` when the shape is open.
+See [templates](../../docs/runbooks/presets.md).
 
-Other shapes: `generator-evaluator` for a slice that stays in your worktree,
-`big-batch` for several lanes, `single` when the change is routine. Read
-`docs/runbooks/presets.md` for parameters.
+Follow `provenant status`, collect `provenant output TARGET`, and use `retry`
+for unfinished work. `edit` changes unstarted nodes. Landing uses
+`provenant land N --head SHA --wait` after the integrated head meets its gates.
 
 ## Writing the brief
 
@@ -56,16 +54,20 @@ instruction to stop and report instead of widening scope. One writer per
 worktree. Name the method skill: `test-design` for observable behaviour,
 `refactor` for restructuring, `diagnose` for an unknown cause.
 
-The preset does not yet implement the planner-led policy or review repair loop.
-Run `review --plan on` and supplement its panel to meet HARNESS floors.
-`deliver` has no gate for that supplemental review, so pass `land=0` when the
-panel needs supplementing and land by hand once it passes. A failed council
-stops `deliver`. A separate writer repairs accepted findings,
-then the raising lenses re-review the delta. After three cycles or a concrete
-design concern, obtain read-only principal scoping; proceed within approved
-scope and notify the owner, but wait at changed scope or one-way doors.
+A separate fresh writer attempt repairs qualified review findings; the raising
+lenses re-review the delta. `max_repair_cycles` defaults to three and accepts
+one to three, independently of the CI repair limit. A recurring finding or an
+evidenced design defect escalates early to read-only principal scoping. Proceed
+within approved scope: the principal records `repair_design` booleans
+`within_scope` and `one_way_door` in its findings block. The host notifies the
+owner and bypasses its `decide` wait only for explicit approved scope with no
+one-way door. Changed scope, one-way doors and missing assessments wait on that
+host decision before any continuation writer. Approval retains the original
+literal write authority. A failed replanned panel feeds its qualified findings
+into the remaining repair cycles. If no separate route is available, continue in a fresh
+attempt on the available route with a recorded separation warning.
 
-## Rules the preset cannot enforce
+## Writer rules
 
 - The implementer may not edit a failing acceptance test or weaken an
   assertion to pass. A changed test is reported with the reason.

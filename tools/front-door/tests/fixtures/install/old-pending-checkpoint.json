@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "digest": "sha256:a4bbd5e9cd6d607edb67a8ecffa7c00695b8b64362ba61e641b6846773eb20b8",
+  "checkpoint": {
+    "schema_version": 1,
+    "graph_id": "old-pending-fixture",
+    "plan_digest": "sha256:427466990d1d0c9be77871215efb9a969596dc2ad80ec039d29f67ffcc2112f8",
+    "cancelled": false,
+    "nodes": [
+      {
+        "id": "reader",
+        "worktree": null,
+        "state": "pending",
+        "attempts": []
+      }
+    ]
+  },
+  "execution": {
+    "directory": "/synthetic/upgrade-fixture",
+    "document": {
+      "schema_version": 1,
+      "graph_id": "old-pending-fixture",
+      "nodes": [
+        {
+          "id": "reader",
+          "prompt": "Synthetic upgrade drain fixture",
+          "access": "read_only",
+          "depends_on": [],
+          "route": {
+            "adapter": "fixture",
+            "model": "fixture/model"
+          }
+        }
+      ]
+    }
+  }
+}

@@ -245,3 +245,371 @@ fn lane_messaging_uses_the_host_attempt_actor_and_closes_with_the_endpoint() -> 
     assert_eq!(closed["isError"], true);
     Ok(())
 }
+
+#[test]
+fn lane_run_submits_child_through_parent_relay() -> Result {
+    use provenant_fabric_runtime::graph::relay::RelayOp;
+    let mut rig = TestRig::new()?;
+    host(&rig, &["fabric", "identity", "--json"])?;
+    let attempt = AttemptId::from_bytes(provenant_os::fs::entropy_128()?);
+    let (sent, received) = std::sync::mpsc::channel();
+    let relay = match provenant_fabric_mcp::lane::HostRelay::start_with_graph(
+        provenant_providers::LaneRuntime::fabric_socket(attempt),
+        provenant_records::Limits::CONFIG,
+        |_, _, _| {
+            Err(provenant_fabric_mcp::tools::ServiceError::Cli {
+                code: "unexpected_coordination".into(),
+                message: "expected a graph frame".into(),
+                data: Value::Null,
+            })
+        },
+        move |arguments, _, _| {
+            sent.send(arguments)
+                .map_err(|_| provenant_fabric_mcp::tools::ServiceError::Cli {
+                    code: "fixture_closed".into(),
+                    message: "fixture receiver closed".into(),
+                    data: Value::Null,
+                })?;
+            Ok(json!({"parent_attempt":attempt.to_string(),"revision":2}))
+        },
+    ) {
+        Ok(relay) => relay,
+        Err(error)
+            if error.kind() == std::io::ErrorKind::PermissionDenied
+                && provenant_cli::fabric::in_lane() =>
+        {
+            provenant_test_support::skip_sandbox_dependent_test(format!(
+                "relay socket unavailable in lane: {error}"
+            ))?;
+            return Ok(());
+        }
+        Err(error) => return Err(error.into()),
+    };
+    lane_environment(&mut rig, attempt)?;
+    let launched = host(
+        &rig,
+        &[
+            "run",
+            "Inspect the child",
+            "--use",
+            "explore",
+            "--tier",
+            "junior",
+            "--json",
+        ],
+    )?;
+    assert_eq!(launched["data"]["parent_attempt"], attempt.to_string());
+    let frame = received.recv_timeout(std::time::Duration::from_secs(2))?;
+    let RelayOp::Add(child) = serde_json::from_value(frame)? else {
+        return Err("expected child admission".into());
+    };
+    assert_eq!(child.template, "explore");
+    assert_eq!(child.brief, "Inspect the child");
+    assert_eq!(child.tier.as_deref(), Some("junior"));
+    assert!(!child.detached);
+    host(
+        &rig,
+        &[
+            "run",
+            "Inspect the child",
+            "--use",
+            "explore",
+            "--tier",
+            "junior",
+            "--json",
+        ],
+    )?;
+    let frame = received.recv_timeout(std::time::Duration::from_secs(2))?;
+    let RelayOp::Add(repeated) = serde_json::from_value(frame)? else {
+        return Err("expected repeated child admission".into());
+    };
+    assert_eq!(repeated.brief, child.brief);
+    assert_ne!(repeated.id, child.id);
+    assert_ne!(repeated.idempotency_key, child.idempotency_key);
+    // The legacy CLI recognised the parent marker on its own. Keep that
+    // confinement boundary even when the other lane markers are absent.
+    rig.env.retain(|(key, _)| {
+        key != provenant_core::RUN_STATE_DIRECTORY_ENV && key != provenant_run::LANE_DEPTH_ENV
+    });
+    let launched = host(&rig, &["run", "Parent marker only", "--json"])?;
+    assert_eq!(launched["data"]["parent_attempt"], attempt.to_string());
+    let frame = received.recv_timeout(std::time::Duration::from_secs(2))?;
+    let RelayOp::Add(child) = serde_json::from_value(frame)? else {
+        return Err("expected child admission from parent marker".into());
+    };
+    assert_eq!(child.brief, "Parent marker only");
+    assert_eq!(child.template, "task");
+    let stopped = host(&rig, &["stop", "parent--child", "--json"])?;
+    assert_eq!(stopped["data"]["parent_attempt"], attempt.to_string());
+    let frame = received.recv_timeout(std::time::Duration::from_secs(2))?;
+    let RelayOp::Stop { node } = serde_json::from_value(frame)? else {
+        return Err("expected subtree stop through parent relay".into());
+    };
+    assert_eq!(node, "parent--child");
+    // Relay admission and control must not write a second run store in the lane.
+    let child_store = rig.state.join("children").join(attempt.to_string());
+    assert_eq!(std::fs::read_dir(child_store)?.count(), 0);
+    drop(relay);
+    Ok(())
+}
+
+#[test]
+fn lane_edit_admits_revision_through_host_relay() -> Result {
+    use provenant_core::{Clock, WaitBudget};
+    use provenant_fabric_runtime::graph::{
+        FileJournal, GraphCheckpoint, GraphDocument, GraphExecution, GraphJournal,
+    };
+    let mut rig = TestRig::new()?;
+    let explanation = host(&rig, &["run", "Initial", "--explain", "--json"])?;
+    let document: GraphDocument = serde_json::from_value(explanation["data"]["document"].clone())?;
+    let graph_id = document.graph_id.clone();
+    let mut inputs = RootInputs::new(rig.home.clone(), rig.project.clone());
+    inputs.state_dir = Some(rig.state.clone());
+    let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+    let context = provenant_cli::fabric::Context::open(roots, &rig.home, &rig.project)?;
+    let attempt = AttemptId::from_bytes(provenant_os::fs::entropy_128()?);
+    let reference = format!("{}/{attempt}", context.identity.host);
+    let checkpoint: GraphCheckpoint = serde_json::from_value(json!({
+        "schema_version":1,"graph_id":graph_id,"plan_digest":"test",
+        "nodes":[{"id":"task","worktree":null,"state":"running","attempts":[{
+            "key":{"graph_id":graph_id,"node_id":"task","route_index":0},
+            "launched":true,"route":{"alias":"senior"},"state":"running",
+            "attempt_ref":reference,"launch_actor":"actor"
+        }]}]
+    }))?;
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let budget = WaitBudget::cli(clock.mono_now(), 55)?;
+    let mut journal = FileJournal::open(
+        &context.roots.state,
+        context.identity.project,
+        &graph_id,
+        budget,
+        &cancel,
+        &clock,
+    )?;
+    journal.bind(GraphExecution {
+        extra: Default::default(),
+        directory: rig.project.clone(),
+        document,
+        review_base: None,
+        integration_base: None,
+    })?;
+    journal.save(&checkpoint)?;
+    drop(journal);
+    let state = context.roots.state.clone();
+    let project = context.identity.project;
+    let patch = json!({"schema_version":1,"expected_revision":0,"idempotency_key":"direct-edit","nodes":[{"id":"direct","use":"task","brief":"Direct"}]});
+    let request = json!({"op":"edit","id":graph_id,"patch":patch});
+    let result = provenant_cli::fabric::graph_relay::serve(
+        &context,
+        &attempt.to_string(),
+        request.clone(),
+        budget,
+        &cancel,
+        &clock,
+    )?;
+    assert_eq!(result["revision"], 1);
+    let replay = provenant_cli::fabric::graph_relay::serve(
+        &context,
+        &attempt.to_string(),
+        request,
+        budget,
+        &cancel,
+        &clock,
+    )?;
+    assert_eq!(replay["replayed"], true);
+    let saved = FileJournal::read_status_checkpoint(&state, project, &graph_id)?
+        .ok_or("missing checkpoint")?;
+    assert!(saved.nodes.iter().any(|node| node.id == "task--direct"));
+    let events = FileJournal::read_events(&state, project, &graph_id)?;
+    assert!(
+        events
+            .iter()
+            .any(|event| event.kind == provenant_fabric_runtime::graph::GraphEventKind::Patch)
+    );
+    let relay = provenant_fabric_mcp::lane::HostRelay::start_with_graph(
+        provenant_providers::LaneRuntime::fabric_socket(attempt),
+        provenant_records::Limits::CONFIG,
+        |_, _, _| {
+            Err(provenant_fabric_mcp::tools::ServiceError::Cli {
+                code: "unexpected".into(),
+                message: "unexpected coordination".into(),
+                data: Value::Null,
+            })
+        },
+        move |arguments, cancel, within| {
+            let budget = provenant_fabric_mcp::lane::host_budget(&clock, within)?;
+            provenant_cli::fabric::graph_relay::serve(
+                &context,
+                &attempt.to_string(),
+                arguments,
+                budget,
+                cancel,
+                &clock,
+            )
+        },
+    );
+    let relay = match relay {
+        Ok(relay) => relay,
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+            provenant_test_support::skip_sandbox_dependent_test(format!(
+                "native lane socket unavailable: {error}"
+            ))?;
+            return Ok(());
+        }
+        Err(error) => return Err(error.into()),
+    };
+    lane_environment(&mut rig, attempt)?;
+    let path = rig.root.join("patch.json");
+    std::fs::write(
+        &path,
+        serde_json::to_vec(
+            &json!({"schema_version":1,"expected_revision":1,"idempotency_key":"live-edit","nodes":[{"id":"next","use":"task","brief":"Next"}]}),
+        )?,
+    )?;
+    let path = path.to_str().ok_or("patch path")?;
+    let result = host(&rig, &["edit", &graph_id, "--file", path, "--json"])?;
+    assert_eq!(result["data"]["revision"], 2);
+    let replay = host(&rig, &["edit", &graph_id, "--file", path, "--json"])?;
+    assert_eq!(replay["data"]["replayed"], true);
+    let saved = FileJournal::read_status_checkpoint(&state, project, &graph_id)?
+        .ok_or("missing checkpoint")?;
+    assert!(saved.nodes.iter().any(|node| node.id == "task--next"));
+    let events = FileJournal::read_events(&state, project, &graph_id)?;
+    assert!(
+        events
+            .iter()
+            .any(|event| event.kind == provenant_fabric_runtime::graph::GraphEventKind::Patch)
+    );
+    drop(relay);
+    Ok(())
+}
+
+#[test]
+fn lane_cli_and_mcp_compile_rich_child_launches_without_local_submission() -> Result {
+    let mut rig = TestRig::new()?;
+    host(&rig, &["fabric", "identity", "--json"])?;
+    host(&rig, &["fabric", "task", "list", "--json"])?;
+    lane_environment(&mut rig, AttemptId::from_bytes([78; 16]))?;
+    let preview = host(
+        &rig,
+        &[
+            "run",
+            "Fix ${item}",
+            "--use",
+            "implement",
+            "--over",
+            "one,two",
+            "--detached",
+            "--explain",
+            "--json",
+        ],
+    )?;
+    assert_eq!(preview["data"]["detached"], true);
+    let children = preview["data"]["launch"]["node"]["composite"]["nodes"]
+        .as_array()
+        .ok_or("CLI compiled fanout")?;
+    assert_eq!(children.len(), 2);
+    assert!(
+        children
+            .iter()
+            .all(|child| child["access"] == "worktree_write")
+    );
+    let arguments = json!({"op":"run", "document":{
+        "parameters":{"subject":{"type":"string"}},
+        "brief":"Inspect ${subject}", "tier":"junior", "access":"read_only",
+        "detached":true, "idempotency_key":"rich-mcp-preview"
+    }, "set":{"subject":"compiled MCP"}, "explain":true});
+    let preview = mcp(&rig, "fabric_run", arguments.clone())?;
+    assert_ne!(preview["isError"], true, "{preview}");
+    let value = &preview["structuredContent"];
+    assert_eq!(value["launch"]["node"]["prompt"], "Inspect compiled MCP");
+    assert_eq!(value["detached"], true);
+    let repeated = mcp(&rig, "fabric_run", arguments)?;
+    assert_eq!(repeated["structuredContent"], *value);
+    Ok(())
+}
+
+#[test]
+fn lane_cli_and_mcp_share_wait_receipts_and_observation_errors() -> Result {
+    use provenant_fabric_runtime::graph::relay::RelayOp;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+    let mut rig = TestRig::new()?;
+    host(&rig, &["fabric", "task", "list", "--json"])?;
+    let attempt = AttemptId::from_bytes(provenant_os::fs::entropy_128()?);
+    let fail_observation = Arc::new(AtomicBool::new(false));
+    let failure = Arc::clone(&fail_observation);
+    let _relay = provenant_fabric_mcp::lane::HostRelay::start_with_graph(
+        provenant_providers::LaneRuntime::fabric_socket(attempt),
+        provenant_records::Limits::CONFIG,
+        |_, _, _| {
+            Err(provenant_fabric_mcp::tools::ServiceError::Cli {
+                code: "unexpected_coordination".into(),
+                message: "expected graph request".into(),
+                data: Value::Null,
+            })
+        },
+        move |arguments, _, _| match serde_json::from_value::<RelayOp>(arguments)? {
+            RelayOp::Add(child) => {
+                assert_eq!(child.brief, "Observe child");
+                // Admission may outlast the requested observation window.
+                for _ in 0..22 {
+                    provenant_os::sys::wait_pause(std::time::Duration::from_millis(50));
+                }
+                Ok(json!({"parent_attempt":attempt.to_string(),"revision":2}))
+            }
+            RelayOp::Wait { .. } => Ok(json!({"waiting":true})),
+            RelayOp::Children if failure.load(Ordering::SeqCst) => {
+                Err(provenant_fabric_mcp::tools::ServiceError::Cli {
+                    code: "observation_fixture".into(),
+                    message: "scripted observation failure".into(),
+                    data: Value::Null,
+                })
+            }
+            RelayOp::Children => Ok(json!({"children":[{"node":"parent--child","settled":true}]})),
+            _ => panic!("unexpected graph operation"),
+        },
+    )?;
+    lane_environment(&mut rig, attempt)?;
+    let zero_wait = mcp(
+        &rig,
+        "fabric_run",
+        json!({"op":"run","brief":"Observe child","wait_seconds":0}),
+    )?;
+    assert_eq!(zero_wait["isError"], true, "{zero_wait}");
+    assert_eq!(zero_wait["structuredContent"]["code"], "invalid_input");
+    assert_eq!(
+        zero_wait["structuredContent"]["path"],
+        "arguments.wait_seconds"
+    );
+    for fail in [false, true] {
+        fail_observation.store(fail, Ordering::SeqCst);
+        let cli = host(&rig, &["run", "Observe child", "--wait=1s", "--json"])?;
+        let mcp = mcp(
+            &rig,
+            "fabric_run",
+            json!({"op":"run","brief":"Observe child","wait_seconds":1}),
+        )?;
+        assert_ne!(mcp["isError"], true, "{mcp}");
+        let value = &cli["data"];
+        assert_eq!(*value, mcp["structuredContent"]);
+        assert_eq!(value["receipt"]["revision"], 2);
+        if fail {
+            assert!(
+                value["observation_error"]
+                    .as_str()
+                    .ok_or("observation diagnostic")?
+                    .contains("observation_fixture")
+            );
+            assert!(value.get("children").is_none());
+        } else {
+            assert_eq!(value["children"]["children"][0]["settled"], true);
+            assert!(value.get("observation_error").is_none());
+        }
+    }
+    Ok(())
+}

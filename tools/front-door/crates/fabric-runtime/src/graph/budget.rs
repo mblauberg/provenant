@@ -212,9 +212,14 @@ pub(super) fn budget_reason(
         let mut seconds = 0u64;
         let mut unknown = [false; 3];
         for attempt in node
-            .attempts
+            .previous_attempts
             .iter()
-            .filter(|attempt| attempt.state == AttemptState::Terminal && attempt.launched)
+            .chain(
+                node.attempts
+                    .iter()
+                    .filter(|attempt| attempt.state == AttemptState::Terminal),
+            )
+            .filter(|attempt| attempt.launched)
         {
             let usage = attempt.usage.as_ref();
             let values = [
@@ -294,7 +299,7 @@ pub(super) fn update_usage_warnings(checkpoint: &mut GraphCheckpoint) {
     let mut settled: Vec<_> = checkpoint
         .nodes
         .iter()
-        .flat_map(|node| node.attempts.iter().map(move |attempt| (node, attempt)))
+        .flat_map(|node| node.recorded_attempts().map(move |attempt| (node, attempt)))
         .collect();
     settled.sort_by_key(|(_, attempt)| attempt.settled);
     let mut warnings = Vec::new();

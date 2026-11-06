@@ -19,33 +19,16 @@ use std::path::PathBuf;
 
 type Error = Box<dyn std::error::Error>;
 
-/// Drain a refusal notice on a dispatch response and on an identical replay.
-pub(crate) fn post_dispatch_refusal(
-    edge: &provenant_cli::run::Edge<'_>,
-    reply: &provenant_cli::run::Reply,
+/// Deliver the notice owed by a refused graph submission, including replay.
+/// Failures leave the durable obligation for `reconcile` to retry.
+pub(crate) fn post_operation_refusal(
+    operation: &OperationId,
+    context: &provenant_cli::fabric::Context,
+    store: &provenant_run::RunStore,
+    call: &provenant_run::Request<'_>,
 ) -> Result<(), Error> {
-    if reply.result.error.is_none() || provenant_cli::fabric::in_lane() {
-        return Ok(());
-    }
-    let Some(id) = reply.result.data["operation_id"].as_str() else {
-        return Ok(());
-    };
-    let context = provenant_cli::fabric::Context::open(edge.roots.clone(), edge.home, edge.cwd)?;
-    let clock = SystemClock::new();
-    let cancel = CancelToken::new();
-    let call = provenant_run::Request {
-        clock: &clock,
-        cancel: &cancel,
-    };
-    let execution = provenant_run::ExecutionContext {
-        state_root: edge.roots.state.clone(),
-        project_id: context.identity.project,
-        actor_id: context.identity.inbox.actor,
-        read_prompts: false,
-    };
-    let store = provenant_run::RunStore::open(&execution, &call)?;
-    if let Some(record) = store.operation(&id.parse()?, &call)? {
-        post_verified_refusal(&record, &context, &store, edge.roots, &call)?;
+    if let Some(record) = store.operation(operation, call)? {
+        post_verified_refusal(&record, context, store, &context.roots, call)?;
     }
     Ok(())
 }
@@ -207,30 +190,6 @@ pub(crate) fn post_refusal_notice(
         created_at: time,
     };
     Ok(store.send(&message, &request)?)
-}
-
-/// Run the launch and the reactions in the documented order. `launch` calls
-/// its argument at most once: a delayed retry calls it before its wait, so the
-/// reactions are not held behind the wait. If it never does, the reactions run
-/// after it, whether or not it failed. The first error in time order is
-/// reported, and neither step prevents the other.
-pub(crate) fn seam(
-    launch: impl FnOnce(&mut dyn FnMut()) -> Result<(), String>,
-    react: impl FnOnce() -> Result<(), Error>,
-) -> Result<(), Error> {
-    let mut react = Some(react);
-    let mut early = None;
-    let launched = launch(&mut || {
-        if let Some(react) = react.take() {
-            early = Some(react());
-        }
-    });
-    let late = react.map(|react| react());
-    if let Some(Err(error)) = early {
-        return Err(error);
-    }
-    launched.map_err(std::io::Error::other)?;
-    late.unwrap_or(Ok(()))
 }
 
 /// Who settled, and where its state lives.
@@ -501,7 +460,6 @@ mod tests {
     use provenant_records::run::ChairBinding;
     #[allow(unused_imports)]
     use std::cell::RefCell;
-
     #[test]
     fn refusal_recovery_attempts_other_notices_after_a_failure() {
         let mut delivered = Vec::new();
@@ -514,67 +472,6 @@ mod tests {
         });
         assert_eq!(delivered, [2, 3]);
         assert_eq!(result.unwrap_err().to_string(), "unverified chair");
-    }
-
-    #[test]
-    fn seam_runs_reactions_once_before_a_delayed_wait() {
-        let calls = RefCell::new(Vec::new());
-        let result = seam(
-            |before| {
-                calls.borrow_mut().push("launch-start");
-                before();
-                calls.borrow_mut().push("launch-wait");
-                Ok(())
-            },
-            || {
-                calls.borrow_mut().push("react");
-                Ok(())
-            },
-        );
-        assert!(result.is_ok());
-        assert_eq!(*calls.borrow(), ["launch-start", "react", "launch-wait"]);
-    }
-
-    #[test]
-    fn seam_runs_reactions_once_without_a_successor() {
-        let count = RefCell::new(0);
-        seam(
-            |_| Ok(()),
-            || {
-                *count.borrow_mut() += 1;
-                Ok(())
-            },
-        )
-        .unwrap();
-        assert_eq!(*count.borrow(), 1);
-    }
-
-    #[test]
-    fn a_failed_launch_still_runs_reactions_and_reports_first() {
-        let count = RefCell::new(0);
-        let error = seam(
-            |_| Err("launch".into()),
-            || {
-                *count.borrow_mut() += 1;
-                Err("react".into())
-            },
-        )
-        .unwrap_err();
-        assert_eq!(*count.borrow(), 1);
-        assert_eq!(error.to_string(), "launch");
-    }
-
-    #[test]
-    fn an_early_reaction_error_is_not_replaced_by_a_later_launch_error() {
-        let error = seam(
-            |before| {
-                before();
-                Err("launch".into())
-            },
-            || Err("react".into()),
-        )
-        .unwrap_err();
-        assert_eq!(error.to_string(), "react");
     }
 
     fn roots(base: &std::path::Path) -> Roots {

@@ -2,6 +2,7 @@ use super::*;
 
 /// Active attempts plus the twenty most recent settled lanes.
 pub fn status(command: crate::Status, _json_output: bool, edge: &Edge<'_>) -> Reply {
+    let explicit_target = command.id.is_some();
     let mut summary = None;
     let mut out = reply(
         "status",
@@ -26,6 +27,21 @@ pub fn status(command: crate::Status, _json_output: bool, edge: &Edge<'_>) -> Re
                     .filter(|record| record.state == run::OperationState::Refused)
                     .ok_or(run::RunError::NotFound)?;
                 return render_refused_operation(record);
+            }
+            if command.id.is_none()
+                && matches!(
+                    crate::fabric::Context::open_read_only(edge.roots.clone(), edge.home, edge.cwd),
+                    Err(crate::fabric::EdgeError::Invalid)
+                )
+            {
+                let mut data = json!({"lanes": [], "next_cursor": null});
+                let mut human = "no work\n".to_owned();
+                append_native_status(
+                    Some(provenant_telemetry::native_attempts::read(edge.roots)),
+                    &mut data,
+                    &mut human,
+                );
+                return Ok((data, human));
             }
             if let Some(graph_id) = command.id.as_deref().filter(|id| graph_identifier(id))
                 && let Some((data, human)) = paused_graph_status(edge, &call, graph_id)?
@@ -67,7 +83,6 @@ pub fn status(command: crate::Status, _json_output: bool, edge: &Edge<'_>) -> Re
                 return Ok((data, human));
             };
             let session = Session { store, context };
-            let _ = session.store.reap(&call);
             let full = command.all || command.id.is_some();
             let mut query = lane_query(
                 &session,
@@ -123,7 +138,7 @@ pub fn status(command: crate::Status, _json_output: bool, edge: &Edge<'_>) -> Re
                 .map_err(|error| Fail::new(Status::Error, ErrorKind::Io, error))?;
             let waits = session.store.lane_waits(&rows, &call);
             let now = now(&clock)?;
-            let human = if command.all {
+            let mut human = if command.all {
                 let cooldowns = read_lane_cooldowns(session.context.state_root.as_path());
                 render_lanes(
                     &rows,
@@ -136,6 +151,15 @@ pub fn status(command: crate::Status, _json_output: bool, edge: &Edge<'_>) -> Re
             } else {
                 compact_status(&rows, &waits, now)
             };
+
+            let (mut data, _) = render_lanes(
+                &rows,
+                &waits,
+                next,
+                session.context.state_root.as_path(),
+                None,
+            );
+            append_provider_errors(&session, &rows, &mut data, &mut human);
             let continuation = next.map(|cursor| {
                 let target = targets
                     .first()
@@ -153,45 +177,11 @@ pub fn status(command: crate::Status, _json_output: bool, edge: &Edge<'_>) -> Re
                     .unwrap_or_default();
                 format!("provenant status {target} --all --cursor {cursor}")
             });
-            let lines: Vec<LaneLine> = rows
-                .iter()
-                .map(|lane| {
-                    let (_, reason) =
-                        provenant_records::wire::LaneRow::state_and_label(&lane.state);
-                    let state = lane_display_state(lane);
-                    let reason = reason.or_else(|| {
-                        waits
-                            .iter()
-                            .find(|wait| wait.attempt_id == lane.attempt_id)
-                            .map(|wait| wait.waiting_for.clone())
-                    });
-                    LaneLine {
-                        id: lane.attempt_id.to_string(),
-                        state,
-                        model: lane
-                            .applied_route
-                            .as_ref()
-                            .and_then(|route| route.model.clone())
-                            .unwrap_or_else(|| "unresolved".into()),
-                        reason: reason.unwrap_or_default(),
-                        provider_error: None,
-                        result_path: None,
-                    }
-                })
-                .collect();
+            let lines = lane_lines(&data);
             let mut compact = lane_summary(&lines, continuation);
             // The compact view keeps the paths a writer may change unreviewed.
             compact.lines.push(exempt_line.trim_end().to_owned());
             let mut human = format!("{human}{exempt_line}");
-            let successors = policy_successors(&session, &rows, &call)?;
-            let (mut data, _) = render_lanes_with_lineage(
-                &rows,
-                &waits,
-                next,
-                session.context.state_root.as_path(),
-                None,
-                &successors,
-            );
             if let Some(object) = data.as_object_mut() {
                 object.remove("capacity_cooldowns");
             }
@@ -225,9 +215,105 @@ pub fn status(command: crate::Status, _json_output: bool, edge: &Edge<'_>) -> Re
             Ok((data, human))
         })(),
     );
+    if out.result.error.is_none() {
+        if !explicit_target {
+            omit_listing_write_grants(&[], &mut out.result.data);
+        }
+        let rows = status_rows(&out.result.data);
+        let mut data = json!({"rows": rows, "next_cursor": out.result.data["next_cursor"]});
+        for key in [
+            "review_exempt",
+            "native_attempts_error",
+            "cloud_jobs",
+            "operation",
+            "refused_operations",
+        ] {
+            if let Some(value) = out.result.data.get(key) {
+                data[key] = value.clone();
+            }
+        }
+        out.result.data = data;
+    }
     out.summary = summary;
     out.read_only = true;
     out
+}
+
+/// Bounded failed-attempt diagnostics accompanying a status-wait snapshot.
+/// Common status rows stay stable; details retain provider errors and result
+/// locations that a caller needs after an attempt fails.
+pub fn status_wait_details(
+    target: &Target,
+    rows: &[run::AttemptRecord],
+    edge: &Edge<'_>,
+) -> Result<Option<String>, Fail> {
+    if !rows.iter().any(|row| {
+        matches!(
+            row.state,
+            run::AttemptState::Terminal {
+                outcome: run::Outcome::Failed,
+                ..
+            }
+        )
+    }) {
+        return Ok(None);
+    }
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let call = request(&clock, &cancel)?;
+    let resolved = targets::resolve(edge, target, true)?;
+    let (session, _) = targets::read_resolved(edge, resolved, &call)?;
+    let (mut data, mut human) =
+        render_lanes(rows, &[], None, session.context.state_root.as_path(), None);
+    append_provider_errors(&session, rows, &mut data, &mut human);
+    let summary = lane_summary(&lane_lines(&data), None);
+    Ok(Some(summary.lines.join("\n")))
+}
+
+/// Stable status projection shared by graph, node and attempt selections.
+fn status_rows(data: &Value) -> Vec<Value> {
+    if let Some(graph) = data["graph_id"].as_str() {
+        return vec![json!({"id": graph, "kind": "graph", "graph_id": graph,
+            "node_id": null, "attempt_id": null, "state": data["status"],
+            "reason": data["cancel_reason"].as_str().or(data["pause_reason"].as_str())})];
+    }
+    data["lanes"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|lane| {
+            // The common row envelope augments the owner's projection: terminal
+            // causes, settlement evidence and retry lineage remain observable.
+            let mut row = lane.clone();
+            row["id"] = lane["attempt_id"].clone();
+            row["kind"] = "attempt".into();
+            row["graph_id"] = lane["graph_id"].clone();
+            row["node_id"] = lane["task_id"].clone();
+            row["reason"] = lane["reason"].clone();
+            row
+        })
+        .chain(
+            data["native_attempts"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|attempt| {
+                    let mut row = attempt.clone();
+                    row["kind"] = "attempt".into();
+                    row["graph_id"] = Value::Null;
+                    row["node_id"] = Value::Null;
+                    row["attempt_id"] = attempt["id"].clone();
+                    row["state"] = if attempt["ended_at"].is_null() {
+                        "running"
+                    } else {
+                        "settled"
+                    }
+                    .into();
+                    row["reason"] = Value::Null;
+                    row
+                }),
+        )
+        .collect()
 }
 
 fn render_refused_operation(record: run::OperationRecord) -> Result<(Value, String), Fail> {
@@ -455,6 +541,33 @@ fn paused_graph_reply(
 #[cfg(test)]
 mod graph_status_tests {
     #[test]
+    fn unified_status_rows_preserve_common_envelope_and_owner_evidence() {
+        let graph = super::status_rows(&serde_json::json!({
+            "graph_id": "g", "status": "paused", "pause_reason": "budget"
+        }));
+        let attempts = super::status_rows(&serde_json::json!({"lanes": [{
+            "attempt_id": "a", "task_id": "n", "state": "running",
+            "terminal_cause": {"code": "quota"}, "retry_of": "previous",
+            "settlement": {"complete": true}
+        }]}));
+        for key in graph[0].as_object().unwrap().keys() {
+            assert!(attempts[0].get(key).is_some(), "missing common field {key}");
+        }
+        assert_eq!(
+            attempts[0]["terminal_cause"],
+            serde_json::json!({"code": "quota"})
+        );
+        assert_eq!(attempts[0]["retry_of"], "previous");
+        assert_eq!(
+            attempts[0]["settlement"],
+            serde_json::json!({"complete": true})
+        );
+        assert_eq!(graph[0]["reason"], "budget");
+        assert_eq!(attempts[0]["kind"], "attempt");
+        assert_eq!(attempts[0]["state"], "running");
+    }
+
+    #[test]
     fn graph_target_status_shows_cancellation_reason() {
         let checkpoint: provenant_fabric_runtime::graph::GraphCheckpoint =
             serde_json::from_value(serde_json::json!({
@@ -594,7 +707,7 @@ pub(super) fn lane_summary(lanes: &[LaneLine], continuation: Option<String>) -> 
             if lane_rank(&lane.state) == 0 {
                 format!("provenant output {}", lane.id)
             } else {
-                format!("provenant lanes --id {} --wait 4m", lane.id)
+                format!("provenant status {} --wait=4m", lane.id)
             }
         })
     });
@@ -769,12 +882,6 @@ pub(super) fn report(
     let canonical = session.store.request(record.run_id, call)?;
     if let Some(rows) = data["lanes"].as_array_mut() {
         for row in rows {
-            if let Some(id) = row["attempt_id"].as_str().and_then(|id| id.parse().ok()) {
-                let tail = session.store.policy_tail(id, call)?;
-                if tail.attempt_id != id {
-                    row["superseded_by"] = json!(tail.attempt_id);
-                }
-            }
             if let Some(task) = canonical
                 .tasks
                 .iter()
@@ -873,16 +980,6 @@ pub(super) fn delivery_state_text(state: &provenant_records::run::WriterDelivery
     }
 }
 
-pub(super) fn render_lanes(
-    lanes: &[run::AttemptRecord],
-    waits: &[run::LaneWait],
-    next: Option<u64>,
-    root: &Path,
-    cooldowns: Option<(&[provenant_quota::AccountRecord], i64)>,
-) -> (Value, String) {
-    render_lanes_with_lineage(lanes, waits, next, root, cooldowns, &Default::default())
-}
-
 /// Read one retained attempt without reaping or changing its history.
 pub fn project_retained_attempt(
     target: &Target,
@@ -908,12 +1005,11 @@ pub fn project_retained_attempt(
             "attempt is not in that run/task",
         ));
     }
-    let successors = policy_successors(&session, std::slice::from_ref(&record), &call)?;
+
     Ok(project_lane(
         &record,
         &[],
         session.context.state_root.as_path(),
-        &successors,
         clock.wall_now().ok(),
         false,
     ))
@@ -923,7 +1019,6 @@ pub fn project_lane(
     lane: &run::AttemptRecord,
     waits: &[run::LaneWait],
     root: &Path,
-    successors: &std::collections::BTreeMap<AttemptId, AttemptId>,
     now_wall: Option<WallTime>,
     observe_host: bool,
 ) -> provenant_records::wire::LaneRow {
@@ -966,7 +1061,7 @@ pub fn project_lane(
     let mut projected = provenant_records::wire::LaneRow::project(
         lane,
         provenant_records::wire::LaneProjectionFacts {
-            superseded_by: successors.get(&lane.attempt_id).copied(),
+            superseded_by: lane.superseded_by,
             waiting_for,
             lane_class: wait.map(|wait| wait.lane_class.as_str().to_owned()),
             overdue: now_wall.map(|now| run::overdue_at(lane, now)),
@@ -987,15 +1082,14 @@ pub fn project_lane(
     projected
 }
 
-pub(super) fn render_lanes_with_lineage(
+pub(super) fn render_lanes(
     lanes: &[run::AttemptRecord],
     waits: &[run::LaneWait],
     next: Option<u64>,
     root: &Path,
     cooldowns: Option<(&[provenant_quota::AccountRecord], i64)>,
-    successors: &std::collections::BTreeMap<AttemptId, AttemptId>,
 ) -> (Value, String) {
-    render_lanes_with_view(lanes, waits, next, root, cooldowns, successors, true)
+    render_lanes_with_view(lanes, waits, next, root, cooldowns, true)
 }
 
 pub(super) fn render_lanes_with_view(
@@ -1004,7 +1098,6 @@ pub(super) fn render_lanes_with_view(
     next: Option<u64>,
     root: &Path,
     cooldowns: Option<(&[provenant_quota::AccountRecord], i64)>,
-    successors: &std::collections::BTreeMap<AttemptId, AttemptId>,
     observe_host: bool,
 ) -> (Value, String) {
     let mut human = String::new();
@@ -1012,7 +1105,7 @@ pub(super) fn render_lanes_with_view(
     let rows: Vec<Value> = lanes
         .iter()
         .map(|lane| {
-            let projected = project_lane(lane, waits, root, successors, now_wall, observe_host);
+            let projected = project_lane(lane, waits, root, now_wall, observe_host);
             let state = projected.state.clone();
             let route = lane
                 .applied_route
@@ -1053,7 +1146,7 @@ pub(super) fn render_lanes_with_view(
             } else {
                 format!("{state} (partial)")
             };
-            let state_text = match successors.get(&lane.attempt_id) {
+            let state_text = match lane.superseded_by {
                 Some(id) => format!("{state_text} → retrying ({id})"),
                 None => state_text,
             };
@@ -1081,7 +1174,7 @@ pub(super) fn render_lanes_with_view(
                     .is_some_and(|session| !session.is_empty())
                 {
                     human.push_str(&format!(
-                        "  continue: provenant resume {} --prompt-file PROMPT\n",
+                        "  continue: provenant retry {} --prompt-file PROMPT\n",
                         lane.attempt_id
                     ));
                 }
@@ -1103,7 +1196,7 @@ pub(super) fn render_lanes_with_view(
                 .is_some_and(|session| !session.is_empty())
             {
                 human.push_str(&format!(
-                    "  continue: provenant resume {} --prompt-file PROMPT\n",
+                    "  continue: provenant retry {} --prompt-file PROMPT\n",
                     lane.attempt_id
                 ));
             }
@@ -1129,7 +1222,7 @@ pub(super) fn render_lanes_with_view(
                         .is_some_and(|session| !session.is_empty())
                 {
                     human.push_str(&format!(
-                        "  continue: provenant resume {} --prompt-file PROMPT\n",
+                        "  continue: provenant retry {} --prompt-file PROMPT\n",
                         lane.attempt_id
                     ));
                 } else if capacity {
@@ -1307,6 +1400,34 @@ pub fn lanes_streaming(
 
 /// A read-only page for the hook. Emit each record before reading the next so
 /// a timed-out child still leaves complete, bounded records in its output.
+/// Bounded session inventory moved from the retired `lanes` command to `status`.
+pub fn status_session_stream(
+    command: crate::Status,
+    edge: &Edge<'_>,
+    out: &mut dyn std::io::Write,
+) -> Reply {
+    let result = session_inventory_page(
+        command.all,
+        command.limit,
+        command.cursor.unwrap_or(0),
+        edge,
+        &mut |line| {
+            out.write_all(line.as_bytes())
+                .and_then(|_| out.flush())
+                .map_err(|_| {
+                    Fail::new(
+                        Status::Error,
+                        ErrorKind::Io,
+                        "cannot write session attempt stream",
+                    )
+                })
+        },
+    );
+    let mut response = reply("status", result);
+    response.read_only = true;
+    response
+}
+
 fn session_lane_page(
     command: &Lanes,
     edge: &Edge<'_>,
@@ -1327,6 +1448,16 @@ fn session_lane_page(
             "invalid session lane stream",
         ));
     }
+    session_inventory_page(command.all, command.limit, 0, edge, out)
+}
+
+fn session_inventory_page(
+    all: bool,
+    limit: u64,
+    after: u64,
+    edge: &Edge<'_>,
+    out: &mut dyn FnMut(&str) -> Result<(), Fail>,
+) -> Result<(Value, String), Fail> {
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
     let call = request(&clock, &cancel)?;
@@ -1338,9 +1469,8 @@ fn session_lane_page(
     let session = Session { store, context };
     // Match the normal listing's recovery of a dead guardian before observing
     // the page; the hook reports only records this read actually completed.
-    let _ = session.store.reap(&call);
-    let mut query = lane_query(&session, &[], command.all, command.limit, 0, &call)?;
-    query.newest_first = command.all;
+    let mut query = lane_query(&session, &[], all, limit, after, &call)?;
+    query.newest_first = all;
     let mut failed = false;
     session.store.lanes_streaming(&query, &call, |total, entry, next| {
         if failed { return; }
@@ -1349,7 +1479,7 @@ fn session_lane_page(
             Some((cursor, lane)) => {
                 let (state, reason) = state_and_reason(&lane.state);
                 let reason = reason.or_else(|| {
-                    (!command.all)
+                    (!all)
                         .then(|| session.store.lane_waits(std::slice::from_ref(lane), &call))
                         .and_then(|waits| waits.first().map(|wait| wait.waiting_for.clone()))
                 });
@@ -1445,7 +1575,7 @@ pub(super) fn lanes_inner(
         return Err(Fail::new(
             Status::Invalid,
             ErrorKind::Invalid,
-            "targets belong to different projects; run one `provenant lanes --id ID --wait 4m` command per project",
+            "targets belong to different projects; run one `provenant status ID --wait=4m` command per project",
         ));
     }
     let command = &normalised;
@@ -1474,7 +1604,7 @@ pub(super) fn lanes_inner(
         open_read_only(edge, &call)?
     };
     let Some(store) = store else {
-        let root = execution_state(edge.roots, edge.home, edge.assets)?;
+        let root = &edge.roots.state;
         let cooldowns = read_lane_cooldowns(root.as_path());
         let (mut data, human) = render_lanes(
             &[],
@@ -1523,7 +1653,6 @@ pub(super) fn lanes_inner(
         None => 0,
     };
     // A lane whose guardian died is settled by the next read, not left running.
-    let _ = session.store.reap(&call);
     let mut query = lane_query(
         &session,
         &command.id,
@@ -1591,14 +1720,13 @@ pub(super) fn lanes_inner(
         .map_err(|error| Fail::new(Status::Error, ErrorKind::Io, error))?;
     let waits = session.store.lane_waits(&lanes, &call);
     let cooldowns = read_lane_cooldowns(session.context.state_root.as_path());
-    let successors = policy_successors(&session, &lanes, &call)?;
-    let (mut data, mut human) = render_lanes_with_lineage(
+
+    let (mut data, mut human) = render_lanes(
         &lanes,
         &waits,
         next,
         session.context.state_root.as_path(),
         lane_cooldown_view(&cooldowns),
-        &successors,
     );
     append_provider_errors(&session, &lanes, &mut data, &mut human);
     attach_handoffs(&session, &lanes, &mut data);
@@ -1750,14 +1878,7 @@ pub(super) fn route_label(record: &run::AttemptRecord) -> String {
 /// Receipt facts shared by explicit PR opening and graph delivery. Workflow
 /// review receipts, when present, are added by the caller that owns that store.
 pub fn recorded_attempt_facts(record: &run::AttemptRecord) -> AttemptFacts {
-    let lane = project_lane(
-        record,
-        &[],
-        Path::new("/"),
-        &Default::default(),
-        None,
-        false,
-    );
+    let lane = project_lane(record, &[], Path::new("/"), None, false);
     let state = lane.state;
     let exit_code = lane.exit_code;
     AttemptFacts {

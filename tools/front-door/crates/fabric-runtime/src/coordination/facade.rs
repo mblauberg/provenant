@@ -47,6 +47,9 @@ pub struct SubmittedTask {
     pub base: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub head: Option<String>,
+    /// Original writer source, retained when a graph retry starts from a later head.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_head: Option<String>,
     pub route: provenant_records::run::RequestedRoute,
     pub timeout_seconds: u64,
     #[serde(default)]
@@ -191,6 +194,7 @@ pub enum DispatchRefusalFact {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "value", rename_all = "snake_case")]
 pub enum InvalidInputDetail {
+    GraphReason(String),
     Schema,
     LandingLock,
     UnresolvableBase(String),
@@ -204,8 +208,22 @@ pub enum InvalidInputDetail {
 }
 
 impl InvalidInputDetail {
+    pub fn graph_reason(reason: impl std::fmt::Display) -> Self {
+        Self::GraphReason(reason.to_string())
+    }
+
     fn safe_text(&self) -> Option<String> {
         match self {
+            Self::GraphReason(reason) => {
+                if crate::graph::patch::scan_for_secrets(reason).is_err() {
+                    return Some("graph refused: diagnostic contains a secret".into());
+                }
+                let reason: String = reason.chars().take(4096).flat_map(|character| {
+                    if character.is_control() { character.escape_default().collect::<Vec<_>>() }
+                    else { vec![character] }
+                }).collect();
+                Some(format!("graph refused: {reason}"))
+            }
             Self::Schema => Some("graph document schema_version is invalid".into()),
             Self::LandingLock => Some("landing lock required".into()),
             Self::UnresolvableBase(name) => safe_base_ref(name)
@@ -238,6 +256,13 @@ pub enum FacadeError {
     /// has one. Absent on the wire when empty, so older readers still decode it.
     #[error("invalid input{}", invalid_detail(.detail))]
     InvalidInput {
+        #[serde(flatten, with = "invalid_detail_wire")]
+        detail: Option<InvalidInputDetail>,
+    },
+    /// A graph relay refusal retains its named cause across CLI and MCP.
+    #[error("graph relay refused: {refusal_code}")]
+    GraphRelayRefused {
+        refusal_code: String,
         #[serde(flatten, with = "invalid_detail_wire")]
         detail: Option<InvalidInputDetail>,
     },
@@ -320,6 +345,10 @@ pub enum FacadeError {
     HostDeliveryLimit {
         fact: provenant_records::diagnostic::DeliveryLimit,
     },
+    #[error("no configured peer has this host label")]
+    UnknownHost,
+    #[error("peer placement requires a read-only attempt without a local worktree")]
+    WorktreeNotApplicable,
     #[error("local worktree does not exist; create it with `provenant worktree create`")]
     WorktreeMissing,
     #[error(
@@ -554,7 +583,7 @@ impl FacadeError {
         use provenant_records::diagnostic::Diagnostic;
         let mut projected = Diagnostic::new(self.code());
         match self {
-            Self::InvalidInput { detail: Some(detail) } => {
+            Self::InvalidInput { detail: Some(detail) } | Self::GraphRelayRefused { detail: Some(detail), .. } => {
                 if let Some(detail) = detail.safe_text() {
                     projected = projected.detail(detail);
                 }
@@ -635,10 +664,27 @@ impl FacadeError {
         projected
     }
 
-    pub const fn code(&self) -> &'static str {
+    pub fn code(&self) -> &str {
+        if let Self::GraphRelayRefused { refusal_code, .. } = self
+            && !refusal_code.is_empty()
+            && refusal_code.len() <= 128
+            && refusal_code
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+        {
+            return refusal_code;
+        }
+        self.static_code()
+    }
+
+    /// Error category for callers projecting a temporary facade conversion.
+    pub const fn static_code(&self) -> &'static str {
         match self {
+            Self::UnknownHost => "UNKNOWN_HOST",
+            Self::WorktreeNotApplicable => "WORKTREE_NOT_APPLICABLE",
             Self::OwnerUnavailable => "owner_unavailable",
             Self::InvalidInput { .. } => "invalid_input",
+            Self::GraphRelayRefused { .. } => "graph_relay_refused",
             Self::NotFound => "not_found",
             Self::Conflict | Self::GenerationConflict { .. } => "conflict",
             Self::NotTerminal => "not_terminal",
@@ -705,6 +751,17 @@ fn safe_base_ref(name: &str) -> Option<&str> {
 pub(super) fn safe_input_field(field: &str) -> Option<&str> {
     let allowed = [
         "scope",
+        "use",
+        "brief",
+        "over",
+        "set",
+        "node",
+        "by",
+        "tier",
+        "templates",
+        "read_roots",
+        "op",
+        "source_head",
         "paths",
         "path",
         "key",
@@ -719,6 +776,7 @@ pub(super) fn safe_input_field(field: &str) -> Option<&str> {
         "deliver",
         "remote",
         "branch",
+        "integration_branch",
         "route",
         "adapter",
         "provider",
@@ -787,7 +845,15 @@ mod invalid_detail_wire {
             && let Some(text) = fact.safe_text()
         {
             map.serialize_entry("detail", &text)?;
-            map.serialize_entry("detail_fact", fact)?;
+            let safe_fact = match fact {
+                InvalidInputDetail::GraphReason(_) => InvalidInputDetail::GraphReason(
+                    text.strip_prefix("graph refused: ")
+                        .unwrap_or(&text)
+                        .to_owned(),
+                ),
+                fact => fact.clone(),
+            };
+            map.serialize_entry("detail_fact", &safe_fact)?;
         }
         map.end()
     }
@@ -989,6 +1055,25 @@ impl From<&provenant_fabric_store::Error> for FacadeError {
 #[cfg(test)]
 mod diagnostic_tests {
     use super::FacadeError;
+
+    #[test]
+    fn graph_reason_wire_contains_only_disclosed_text() -> Result<(), Box<dyn std::error::Error>> {
+        for reason in [
+            "sk-abcdefghijklmnopqrstuvwx".to_owned(),
+            "line\ncontrol\u{1b}".to_owned(),
+            "long".repeat(4096),
+        ] {
+            let error = FacadeError::invalid(super::InvalidInputDetail::graph_reason(&reason));
+            let wire = serde_json::to_value(&error)?;
+            let text = wire["detail"].as_str().ok_or("detail")?;
+            let fact = wire["detail_fact"]["value"].as_str().ok_or("fact")?;
+            assert_eq!(text, format!("graph refused: {fact}"));
+            assert!(!fact.chars().any(char::is_control));
+            assert!(fact.chars().count() <= 4096);
+            assert!(!serde_json::to_string(&wire)?.contains("sk-abcdefghijklmnopqrstuvwx"));
+        }
+        Ok(())
+    }
 
     #[test]
     fn an_unresolvable_base_is_named_but_unsafe_text_is_not() {
@@ -1441,7 +1526,6 @@ pub trait F3Facade {
         Ok(EventCoverage::default())
     }
     type Identity: Serialize;
-    type Submit: Serialize;
     type Run: Serialize;
     type Hosts: Serialize;
 
@@ -1451,12 +1535,6 @@ pub trait F3Facade {
         budget: WaitBudget,
         cancel: &CancelToken,
     ) -> Result<Self::Identity, FacadeError>;
-    fn submit(
-        &mut self,
-        input: SubmitInput,
-        budget: WaitBudget,
-        cancel: &CancelToken,
-    ) -> Result<Self::Submit, FacadeError>;
     fn run(
         &mut self,
         input: RunInput,

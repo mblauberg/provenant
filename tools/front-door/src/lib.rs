@@ -1,3 +1,5 @@
+mod graph_interface;
+mod graph_support;
 // The process edge composes typed owners and owns ordinary result delivery.
 // `main.rs` parses and calls `dispatch`; the worktree driver includes this
 // file and dispatches with its fixture seams. Plain comments only: `include!`
@@ -12,7 +14,6 @@ mod console;
 mod disk;
 mod disk_guard;
 pub mod event_intake;
-mod experiment;
 mod fabric;
 mod tick;
 mod tick_agent;
@@ -31,27 +32,9 @@ mod overflow;
 mod pr;
 #[cfg(test)]
 mod pr_land_tests;
-mod preset;
-#[cfg(test)]
-#[allow(
-    dead_code,
-    unused_imports,
-    reason = "the custom worktree test driver includes this library without the test harness"
-)]
-mod preset_deliver_tests;
-mod preset_roles;
-mod preset_select;
-#[cfg(test)]
-#[allow(
-    dead_code,
-    unused_imports,
-    reason = "the custom worktree test driver includes this library without the test harness"
-)]
-mod preset_tests;
 mod process_tree;
 mod provider_retention;
 mod release_smoke;
-mod review;
 mod roots;
 mod settlement;
 mod status_wait;
@@ -376,7 +359,9 @@ fn sync_registered_account(
 /// What a config command does: show, describe the schema, edit, or list history.
 enum ConfigAction<'a> {
     Show,
-    Schema,
+    Schema {
+        all: bool,
+    },
     Edit(provenant_config::KnobEdit<'a>),
     Apply {
         patch: &'a std::path::Path,
@@ -417,9 +402,15 @@ fn config_command(command: &str, action: ConfigAction, globals: &provenant_cli::
                 value["revision"] = revision.into();
                 value
             }
-            ConfigAction::Schema => {
+            ConfigAction::Schema { all } => {
                 let (resolved, revision) = config::show(&roots, sections)?;
-                serde_json::to_value(config::schema(&resolved, sections, revision)?)?
+                let mut schema = config::schema(&resolved, sections, revision)?;
+                if !all {
+                    schema
+                        .fields
+                        .retain(|field| config::documented_field(&field.path));
+                }
+                serde_json::to_value(schema)?
             }
             ConfigAction::Edit(edit) => {
                 let edited =
@@ -579,7 +570,11 @@ fn supervise(descriptors: &[u64], globals: &provenant_cli::Globals, process: &dy
         clock: process.clock(),
     };
     process.holder(&holder, &mut |holder| {
-        let holder = provenant_cli::run::HostHolder::new(holder);
+        let workers = process.workers();
+        let holder =
+            provenant_cli::run::HostHolder::new(holder).with_graph_wake(move |context, id| {
+                fabric::advance_live_graph(context, id, workers).map_err(|error| error.to_string())
+            });
         let disk = disk_guard::LaneDisk::default();
         let (Ok(mut stdout_filter), Ok(mut stderr_filter)) = (
             provenant_confinement::redact::Redactor::new([]),
@@ -596,7 +591,6 @@ fn supervise(descriptors: &[u64], globals: &provenant_cli::Globals, process: &dy
         let hooks = provenant_supervisor::GuardianHooks {
             disk: Some(&disk),
             holder: Some(&holder),
-            nested_children: Some(&holder),
             stdout_decoder: Some(holder.stdout_decoder()),
             stderr_decoder: Some(holder.stderr_decoder()),
             stdout_filter: Some(&mut stdout_filter),
@@ -626,7 +620,7 @@ fn supervise(descriptors: &[u64], globals: &provenant_cli::Globals, process: &dy
 }
 fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
     let globals = &inv.globals;
-    let mut command = match inv.command {
+    let command = match inv.command {
         Command::Hook(hook) => return hooks::run(hook, globals),
         Command::ProcessTree { root } => return process_tree::run(root, globals),
         command => command,
@@ -653,28 +647,6 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
             return install::home_error(&inv.leaf, &error.to_string(), globals);
         }
         return fail(&inv.leaf, status, code, &error.to_string(), globals);
-    }
-    if let Command::Run(ref mut cmd) = command
-        && cmd.placement.is_none()
-        && cmd.preset.is_none()
-        && cmd.host.is_none()
-        && !matches!(cmd.access.mode(), provenant_cli::Mode::WorktreeWrite)
-        && cmd.access.worktree.is_none()
-        && cmd.branch.is_none()
-        && cmd.worktree_branch.is_none()
-        && let Ok(resolved) = roots::resolve(globals, Workspace::Project, Product::Required)
-        && let Some(project) =
-            provenant_cli::run::preview_project_id(&resolved.roots, &resolved.project)
-        && let Ok(config) =
-            provenant_config::read_with_domains(&resolved.roots, &provenant_cli::domains::SECTIONS)
-        && let Some(target) = config
-            .domains
-            .lanes
-            .projects
-            .get(&project.to_string())
-            .and_then(|project| project.cloud_target.as_ref())
-    {
-        cmd.placement = Some(format!("cloud:{target}"));
     }
     match command {
         Command::ProcessTree { .. } => unreachable!("process-tree returned before root validation"),
@@ -894,8 +866,8 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
         Command::Config(provenant_cli::Config::Show) => {
             config_command("config show", ConfigAction::Show, globals)
         }
-        Command::Config(provenant_cli::Config::Schema) => {
-            config_command("config schema", ConfigAction::Schema, globals)
+        Command::Config(provenant_cli::Config::Schema { all }) => {
+            config_command("config schema", ConfigAction::Schema { all }, globals)
         }
         Command::Config(provenant_cli::Config::Apply {
             file,
@@ -964,9 +936,6 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
             page,
             wait,
         })) => fabric::events(page, wait, globals, process.workers()),
-        Command::Fabric(provenant_cli::Fabric::Graph(graph)) => {
-            fabric::graph(graph, globals, process.workers())
-        }
         Command::Fabric(provenant_cli::Fabric::Landing(
             landing @ (provenant_cli::fabric::Landing::Push { .. }
             | provenant_cli::fabric::Landing::Reconcile { .. }),
@@ -1008,54 +977,18 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
                 ),
             }
         }
-        Command::Preset(cmd) => preset::command(cmd, globals),
-        Command::Run(cmd)
-            if cmd.preset.is_some()
-                || (cmd.placement.is_none()
-                    && cmd.input.manifest.is_none()
-                    && (cmd.input.prompt_file.is_some() || cmd.input.prompt_stdin)
-                    && cmd.route.model.is_none()
-                    && cmd.route.route.is_none()) =>
-        {
-            let ignored = &inv.preset_incompatible_flags;
-            if cmd.preset.is_none() && !ignored.is_empty() {
-                return fail_with_repair(
-                    &inv.leaf,
-                    Outcome::Invalid,
-                    "preset",
-                    &format!(
-                        "automatic preset selection cannot apply {}",
-                        ignored.join(", ")
-                    ),
-                    Some(
-                        "Add --model or --route to run one lane with these flags, or remove them \
-                         and let preset selection choose the graph.",
-                    ),
-                    globals,
-                );
-            }
-            preset::run(*cmd, globals, process.workers())
+        Command::Run(cmd) => graph_interface::run(*cmd, globals, process.workers()),
+        Command::Edit(cmd) => graph_interface::edit(cmd, globals, process.workers()),
+        Command::Templates(cmd) => graph_interface::templates(cmd, globals, process.workers()),
+        Command::Stats(cmd) => {
+            graph_interface::stats("stats", cmd.id, cmd.by, globals, process.workers())
         }
-        Command::Run(cmd) => run_edge(&inv.leaf, globals, |edge| {
-            let mut reply = provenant_cli::run::run(*cmd, edge);
-            if settlement::post_dispatch_refusal(edge, &reply).is_err() {
-                reply
-                    .human
-                    .push_str("refusal notice could not be delivered; inspect the chair binding and notice configuration\n");
-                reply.result.data["refusal_notice_error"] = serde_json::json!(true);
-            }
-            if let Err(error) =
-                fabric::settle_dispatched_attempts(edge, &mut reply, process.workers())
-            {
-                reply
-                    .human
-                    .push_str(&format!("worktree retained: {error}\n"));
-                reply.result.data["worktree_settlement_error"] =
-                    serde_json::json!(error.to_string());
-            }
-            reply
+        Command::Status(cmd) if cmd.session_stream => run_edge(&inv.leaf, globals, |edge| {
+            provenant_cli::run::status_session_stream(cmd, edge, &mut io::stdout().lock())
         }),
-        Command::Review(cmd) => review::run(cmd, globals, process.workers()),
+        Command::Status(cmd) if cmd.stats => {
+            graph_interface::stats("status", cmd.id, cmd.by, globals, process.workers())
+        }
         Command::Status(cmd)
             if cmd.wait.is_some()
                 && cmd.target.is_empty()
@@ -1075,9 +1008,26 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
             })
         }
         Command::Status(cmd) if cmd.wait.is_some() => status_wait::run(cmd, globals),
-        Command::Status(cmd) => run_edge(&inv.leaf, globals, |edge| {
-            provenant_cli::run::status(cmd, globals.json, edge)
-        }),
+        Command::Status(cmd) => {
+            if let Some(id) = &cmd.id
+                && let Some(code) = fabric::unified_graph_command(
+                    id,
+                    fabric::GraphCommand::Status { wait: None },
+                    globals,
+                    process.workers(),
+                )
+            {
+                return code;
+            }
+            run_edge(&inv.leaf, globals, |edge| {
+                let all_graphs = cmd.id.is_none();
+                let mut reply = provenant_cli::run::status(cmd, globals.json, edge);
+                if all_graphs {
+                    fabric::append_graph_status(&mut reply, globals, process.workers());
+                }
+                reply
+            })
+        }
         Command::Land {
             numbers,
             head,
@@ -1101,41 +1051,63 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
             globals,
             process.workers(),
         ),
-        Command::Dispatch(cmd) => run_edge(&inv.leaf, globals, |edge| {
-            let mut reply = provenant_cli::run::dispatch(*cmd, edge);
-            if let Err(error) =
-                fabric::settle_dispatched_attempts(edge, &mut reply, process.workers())
-            {
-                reply
-                    .human
-                    .push_str(&format!("worktree retained: {error}\n"));
-                reply.result.data["worktree_settlement_error"] =
-                    serde_json::json!(error.to_string());
-            }
-            reply
-        }),
-        Command::Lanes(cmd) if cmd.watch.is_some() || cmd.session_stream => {
-            run_edge(&inv.leaf, globals, |edge| {
-                provenant_cli::run::lanes_streaming(
-                    cmd,
-                    edge,
-                    globals.json,
-                    &mut provenant_cli::run::write_line,
-                )
-            })
-        }
-        Command::Lanes(cmd) => run_edge(&inv.leaf, globals, |edge| {
-            provenant_cli::run::lanes(cmd, edge)
-        }),
         Command::Output(cmd) => run_edge(&inv.leaf, globals, |edge| {
+            if let Some(reply) =
+                fabric::unified_graph_output(&cmd, edge, globals, process.workers())
+            {
+                return reply;
+            }
             provenant_cli::run::output(cmd, edge)
         }),
-        Command::Cancel(cmd) => run_edge(&inv.leaf, globals, |edge| {
-            provenant_cli::run::cancel(cmd, edge)
-        }),
-        Command::Resume(cmd) => run_edge(&inv.leaf, globals, |edge| {
-            provenant_cli::run::resume(cmd, edge)
-        }),
+        Command::Stop(cmd) => {
+            if provenant_cli::fabric::in_lane() {
+                return run_edge(&inv.leaf, globals, |edge| {
+                    provenant_cli::run::cancel(cmd, edge)
+                });
+            }
+            if let Some(code) = fabric::unified_graph_command(
+                &fabric::target_text(&cmd.target),
+                fabric::GraphCommand::Stop {
+                    reason: cmd.reason.clone(),
+                    wait: cmd.wait,
+                },
+                globals,
+                process.workers(),
+            ) {
+                return code;
+            }
+            fail(
+                &inv.leaf,
+                Outcome::Refused,
+                "GRAPH_REQUIRED",
+                "retained non-graph lanes are read-only",
+                globals,
+            )
+        }
+        Command::Retry(cmd) => {
+            if let Some(code) = fabric::unified_graph_command(
+                &fabric::target_text(&cmd.attempt.0),
+                fabric::GraphCommand::Retry {
+                    extend: &cmd.extend,
+                    node: cmd.node.as_deref(),
+                    brief: cmd.brief.as_deref(),
+                    legacy_prompt: cmd.prompt.prompt_file.is_some() || cmd.prompt.prompt_stdin,
+                    no_fallback: cmd.no_fallback,
+                    wait: cmd.wait,
+                },
+                globals,
+                process.workers(),
+            ) {
+                return code;
+            }
+            fail(
+                &inv.leaf,
+                Outcome::Refused,
+                "GRAPH_REQUIRED",
+                "retained non-graph lanes are read-only",
+                globals,
+            )
+        }
         Command::Lane(cmd) => run_edge(&inv.leaf, globals, |edge| {
             let mut reply = provenant_cli::run::lane(cmd, edge);
             if let Err(error) =
@@ -1229,11 +1201,16 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
                 provenant_cli::mileage::run(cmd, edge)
             })
         }
-        Command::Steer(args) => human_inbox(
-            provenant_cli::inbox::HumanCommand::Steer(args),
-            &inv.leaf,
-            globals,
-        ),
+        Command::Steer(args) => {
+            if let Some(code) = fabric::unified_graph_steer(&args, globals, process.workers()) {
+                return code;
+            }
+            human_inbox(
+                provenant_cli::inbox::HumanCommand::Steer(args),
+                &inv.leaf,
+                globals,
+            )
+        }
         Command::Chair(provenant_cli::Chair::Message(args)) => human_inbox(
             provenant_cli::inbox::HumanCommand::ChairMessage(args),
             &inv.leaf,
@@ -1496,19 +1473,49 @@ pub fn dispatch(parsed: ParseOutcome, process: &dyn Process) -> u8 {
     }) {
         provenant_sqlite::set_busy_timeout(timeout);
     }
-    let usage_roots = if matches!(
-        verb.as_str(),
-        "workflow session show"
-            | "workflow session diff"
-            | "chair summary show"
-            | "chair summary diff"
-            | "console changes"
-            | "console projects"
-            | "console sessions"
-            | "console overview"
-            | "console board"
-            | "console tree"
-    ) {
+    // Protocol servers frame their own admission refusals. Observation,
+    // settlement and cancellation must remain available to drain old work.
+    let needs_cutover_guard = matches!(
+        &parsed,
+        ParseOutcome::Invocation(inv)
+            if matches!(&inv.command, Command::Native(provenant_cli::Native::Start { .. }))
+    );
+    if needs_cutover_guard
+        && let Some(resolved) = &resolved
+        && let Err(error) = install::cutover_pending_guard(&resolved.roots.state)
+    {
+        return fail(
+            &verb,
+            Outcome::Refused,
+            "UPGRADE_DRAIN_REQUIRED",
+            &error,
+            globals,
+        );
+    }
+    let read_only_graph = match &parsed {
+        ParseOutcome::Invocation(inv) => {
+            matches!(&inv.command, Command::Run(args) if args.explain)
+                || matches!(
+                    &inv.command,
+                    Command::Templates(_) | Command::Status(_) | Command::Stats(_)
+                )
+        }
+        _ => false,
+    };
+    let usage_roots = if read_only_graph
+        || matches!(
+            verb.as_str(),
+            "workflow session show"
+                | "workflow session diff"
+                | "chair summary show"
+                | "chair summary diff"
+                | "console changes"
+                | "console projects"
+                | "console sessions"
+                | "console overview"
+                | "console board"
+                | "console tree"
+        ) {
         None
     } else {
         resolved

@@ -6,27 +6,21 @@
 use super::watch::{self, Scope};
 use super::{Condition, Edge, Fail, Reply, Status, condition_met, reply, state_and_reason};
 use crate::{
-    Cancel, Dispatch, Lanes, Output, Part,
+    Cancel, Lanes, Output, Part,
     fabric::{Context, PeerFailure},
 };
 use provenant_core::{
-    AttemptId, CancelToken, Clock, DeliveryId, HostId, OperationId, Roots, RunId, TaskId,
-    WaitBudget, WallTime,
+    AttemptId, CancelToken, Clock, HostId, OperationId, Roots, RunId, TaskId, WaitBudget, WallTime,
 };
 use provenant_fabric_runtime::{
     coordination::facade::{
-        AttemptTarget, FacadeError, NewWorktree, OutputBytes, OutputInput, OutputPart,
-        OutputResult, RunInput, SubmitInput, SubmittedTask,
+        AttemptTarget, FacadeError, OutputBytes, OutputInput, OutputPart, OutputResult, RunInput,
     },
-    graph::AccessMode,
     hosts::{PeerAction, PeerResult},
     identity::{Address, CrossHostProjectKey},
     runs::RunResult,
 };
-use provenant_os::{
-    clock::SystemClock,
-    fs::{Directory, PublishMode},
-};
+use provenant_os::{clock::SystemClock, fs::Directory};
 use provenant_run as run;
 use run::ErrorKind;
 use serde::{Deserialize, Serialize};
@@ -42,31 +36,6 @@ const PLACEMENTS: &str = "fabric/remote-runs";
 const PLACEMENT_LIMIT: u64 = 64 * 1024;
 /// Each poll is one SSH round trip, so waits poll less often than local ones.
 const POLL: Duration = Duration::from_secs(2);
-
-pub(super) struct Task {
-    pub(super) context: Option<provenant_records::run::WorkContext>,
-    pub(super) build_heavy: bool,
-    pub(super) require_skill_location: bool,
-    pub(super) title: Option<String>,
-    pub(super) base: Option<String>,
-    pub(super) head: Option<String>,
-    pub(super) prompt: String,
-    pub(super) route: run::RequestedRoute,
-    pub(super) account: Option<String>,
-    pub(super) delivery_id: Option<DeliveryId>,
-    pub(super) deliver: Option<run::WriterDeliveryRequest>,
-}
-pub(super) struct Batch {
-    pub(super) operation_id: OperationId,
-    pub(super) tasks: Vec<Task>,
-    pub(super) concurrency: Option<u64>,
-    pub(super) knobs: Vec<String>,
-    pub(super) provider_timeout: u64,
-    /// A writer's worktree, created by the peer in its own clone.
-    pub(super) new_worktree: Option<NewWorktree>,
-    pub(super) capabilities: Option<Vec<String>>,
-    pub(super) capability_sources: std::collections::BTreeMap<String, String>,
-}
 
 /// Where a run lives. The peer owns everything else about it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -192,6 +161,7 @@ fn read(directory: &Directory, name: &str, run: RunId) -> Result<Placement, Fail
 }
 /// Record a placement. Replaying the operation refreshes its attempts; any
 /// other existing record for the run is a conflict.
+#[cfg(test)]
 fn save(roots: &Roots, placement: &Placement) -> Result<(), Fail> {
     let directory = directory(roots)?;
     let name = format!("{}.json", placement.run_id);
@@ -229,7 +199,7 @@ fn save(roots: &Roots, placement: &Placement) -> Result<(), Fail> {
             OsStr::new(&name),
             ".placement-",
             &bytes,
-            PublishMode::Replace,
+            provenant_os::fs::PublishMode::Replace,
         )
         .map_err(io_fail)?
         .require_durable()
@@ -384,23 +354,6 @@ impl Peer {
         super::apply_lane_wait_suppression(&mut lanes, &waits);
         Ok(lanes)
     }
-    /// Read a named receipt and its current policy successor from each owner.
-    fn records_following(
-        &self,
-        selected: &[(HostId, AttemptId)],
-        remaining: Duration,
-    ) -> Result<Vec<run::AttemptRecord>, Fail> {
-        let window = Window::new(remaining);
-        let mut call = |host, action, left| self.call_within(host, action, left);
-        let mut pairs = selected.to_vec();
-        let mut lanes = read_records(&pairs, &window, &mut call)?;
-        follow_peer_successors(&mut lanes, &mut pairs, &window, &mut call)?;
-        let waits = fetch_waits(&lanes, &pairs, |host, action| {
-            call(host, action, window.next()?)
-        });
-        super::apply_lane_wait_suppression(&mut lanes, &waits);
-        Ok(lanes)
-    }
     /// The peer's newest lanes that `keep` accepts, plus every lane `tracked`
     /// has seen running that those no longer include. Both reads together take
     /// no longer than `remaining`.
@@ -414,8 +367,7 @@ impl Peer {
         let window = Window::new(remaining);
         let mut call = |host, action, left| self.call_within(host, action, left);
         let mut lanes = read_newest(host, &window, tracked, keep, &mut call)?;
-        let mut selected: Vec<_> = lanes.iter().map(|lane| (host, lane.attempt_id)).collect();
-        follow_peer_successors(&mut lanes, &mut selected, &window, &mut call)?;
+        let selected: Vec<_> = lanes.iter().map(|lane| (host, lane.attempt_id)).collect();
         lanes.retain(|lane| keep(lane));
         let waits = fetch_waits(&lanes, &selected, |owner, action| {
             call(owner, action, window.next()?)
@@ -443,7 +395,7 @@ impl Peer {
         seconds: u64,
     ) -> Result<(Vec<run::AttemptRecord>, bool), Fail> {
         poll_until(
-            |remaining| self.records_following(selected, remaining),
+            |remaining| self.records_within(selected, remaining),
             condition,
             Duration::from_secs(seconds),
             POLL,
@@ -551,40 +503,6 @@ fn read_records(
         .into_iter()
         .collect::<Option<_>>()
         .ok_or_else(corrupt)
-}
-
-/// Resolve each observed policy tail on its owner, retaining every receipt.
-fn follow_peer_successors(
-    lanes: &mut Vec<run::AttemptRecord>,
-    pairs: &mut Vec<(HostId, AttemptId)>,
-    window: &Window,
-    call: &mut Call<'_>,
-) -> Result<(), Fail> {
-    for (lane, (host, _)) in lanes.iter_mut().zip(pairs.iter()) {
-        lane.trace.host = Some(*host);
-    }
-    for _ in 0..provenant_run::POLICY_ATTEMPT_CEILING {
-        let next: BTreeSet<_> = lanes
-            .iter()
-            .filter_map(|lane| {
-                lane.superseded_by
-                    .zip(lane.trace.host)
-                    .map(|(id, host)| (host, id))
-                    .filter(|pair| !pairs.contains(pair))
-            })
-            .collect();
-        if next.is_empty() {
-            break;
-        }
-        let next: Vec<_> = next.into_iter().collect();
-        let mut records = read_records(&next, window, call)?;
-        for (lane, (host, _)) in records.iter_mut().zip(&next) {
-            lane.trace.host = Some(*host);
-        }
-        pairs.extend(next);
-        lanes.extend(records);
-    }
-    Ok(())
 }
 
 /// A peer's newest lanes that `keep` accepts, then the tracked lanes they
@@ -725,11 +643,7 @@ fn render_peer_lanes(
     next: Option<u64>,
     state: &std::path::Path,
 ) -> (Value, String) {
-    let successors = lanes
-        .iter()
-        .filter_map(|lane| lane.superseded_by.map(|id| (lane.attempt_id, id)))
-        .collect();
-    super::render_lanes_with_view(lanes, waits, next, state, None, &successors, false)
+    super::render_lanes_with_view(lanes, waits, next, state, None, false)
 }
 
 /// Local lane rendering plus each row's owning host. Result paths are the
@@ -820,10 +734,6 @@ pub(super) fn qualifier_site(edge: &Edge<'_>, qualifier: RunId) -> Option<Site> 
     }
 }
 
-pub(super) fn names_peer(edge: &Edge<'_>, host: &str) -> Result<bool, Fail> {
-    Ok(Peer::open(edge)?.context.peer_host(host).is_some())
-}
-
 pub(super) fn unknown_host(host: &str) -> Fail {
     Fail::new(
         Status::Invalid,
@@ -834,230 +744,6 @@ pub(super) fn unknown_host(host: &str) -> Fail {
     )
 }
 
-/// The worktree a peer writer asks the peer to create. One writer per
-/// worktree, so a manifest cannot share it.
-pub(super) fn new_worktree(command: &Dispatch) -> Result<NewWorktree, Fail> {
-    if command.input.manifest.is_some() {
-        return Err(unsupported("a manifest with a peer writer"));
-    }
-    let (Some(branch), Some(base)) = (&command.branch, &command.base) else {
-        return Err(Fail::new(
-            Status::Invalid,
-            ErrorKind::WorktreeNotApplicable,
-            "--worktree names a path on this host; a peer writer takes --branch and --base",
-        ));
-    };
-    if provenant_confinement::repo::GitRefName::branch(branch).is_err()
-        || provenant_confinement::repo::GitRevision::new(base).is_err()
-    {
-        return Err(Fail::new(
-            Status::Invalid,
-            ErrorKind::Invalid,
-            "invalid --branch or --base",
-        ));
-    }
-    Ok(NewWorktree {
-        extra: Default::default(),
-        base: base.clone(),
-        branch: branch.clone(),
-    })
-}
-
-fn submitted_task(
-    task: Task,
-    new_worktree: Option<NewWorktree>,
-    timeout_seconds: u64,
-    capabilities: Option<Vec<String>>,
-    capability_sources: std::collections::BTreeMap<String, String>,
-) -> SubmittedTask {
-    SubmittedTask {
-        context: task.context,
-        extra: Default::default(),
-        build_heavy: task.build_heavy,
-        require_skill_location: task.require_skill_location,
-        title: task.title,
-        // A writer's base belongs to its new worktree request.
-        base: if new_worktree.is_none() || task.head.is_some() {
-            task.base
-        } else {
-            None
-        },
-        head: task.head,
-        account: task.account,
-        access: if new_worktree.is_some() {
-            AccessMode::WorktreeWrite
-        } else {
-            AccessMode::ReadOnly
-        },
-        worktree: None,
-        capabilities,
-        capability_sources,
-        new_worktree,
-        prompt: task.prompt,
-        route: task.route,
-        timeout_seconds,
-        delivery_id: task.delivery_id,
-        deliver: task.deliver,
-    }
-}
-
-#[allow(clippy::disallowed_methods)] // One wall-clock budget spans peer submission and polling.
-pub(super) fn dispatch(
-    edge: &Edge<'_>,
-    host: &str,
-    batch: Batch,
-    wait: Option<u64>,
-) -> Result<(Value, String, bool), Fail> {
-    let deadline =
-        wait.and_then(|seconds| Instant::now().checked_add(Duration::from_secs(seconds)));
-    let remaining = || {
-        deadline.map_or(Duration::MAX, |end| {
-            end.saturating_duration_since(Instant::now())
-        })
-    };
-    let peer = Peer::open(edge)?;
-    let project = peer.project()?;
-    let host = peer
-        .context
-        .peer_host(host)
-        .ok_or_else(|| unknown_host(host))?;
-    let timeout_seconds = batch.provider_timeout;
-    let access = if batch.new_worktree.is_some() {
-        AccessMode::WorktreeWrite
-    } else {
-        AccessMode::ReadOnly
-    };
-    let tasks = batch
-        .tasks
-        .into_iter()
-        .map(|task| {
-            submitted_task(
-                task,
-                batch.new_worktree.clone(),
-                timeout_seconds,
-                batch.capabilities.clone(),
-                batch.capability_sources.clone(),
-            )
-        })
-        .collect();
-    let concurrency = batch
-        .concurrency
-        .map(u16::try_from)
-        .transpose()
-        .map_err(|_| Fail::new(Status::Invalid, ErrorKind::Invalid, "concurrency"))?;
-    let input = SubmitInput::Submit {
-        extra: Default::default(),
-        operation_id: batch.operation_id.clone(),
-        tasks,
-        concurrency,
-        knobs: batch.knobs,
-        host: None,
-    };
-    let PeerResult::Submitted {
-        data: receipt,
-        extra: _,
-    } = peer
-        .call_within(
-            host,
-            PeerAction::Submit {
-                extra: Default::default(),
-                input,
-            },
-            remaining(),
-        )
-        .map_err(|mut failure| {
-            if failure.kind == ErrorKind::LaunchUnknown {
-                failure.message = format!("launch preparation: {}", failure.message);
-            }
-            failure
-        })?
-    else {
-        return Err(corrupt());
-    };
-    if receipt.operation_id != batch.operation_id
-        || receipt.targets.is_empty()
-        || receipt.targets.iter().any(|t| t.host != Some(host))
-        || receipt.worktree.is_some() != (access == AccessMode::WorktreeWrite)
-        || receipt.worktree.as_ref().map(|w| &w.branch)
-            != batch.new_worktree.as_ref().map(|w| &w.branch)
-    {
-        return Err(corrupt());
-    }
-    let selected: Vec<_> = receipt.targets.iter().map(|t| (host, t.attempt)).collect();
-    let lanes = peer.records_within(&selected, remaining())?;
-    let run_id = lanes.first().ok_or_else(corrupt)?.run_id;
-    if lanes.iter().any(|lane| lane.run_id != run_id) {
-        return Err(corrupt());
-    }
-    save(
-        edge.roots,
-        &Placement {
-            extra: Default::default(),
-            schema_version: 1,
-            host,
-            project,
-            operation_id: batch.operation_id.clone(),
-            run_id,
-            attempts: lanes
-                .iter()
-                .map(|lane| Placed {
-                    extra: Default::default(),
-                    task_id: lane.task_id,
-                    attempt_id: lane.attempt_id,
-                })
-                .collect(),
-        },
-    )?;
-    let (lanes, met) = match wait {
-        Some(_) if remaining().is_zero() => (lanes, Some(false)),
-        Some(_) => {
-            let (lanes, met) = poll_until(
-                |left| peer.records_following(&selected, left),
-                Condition::All,
-                remaining(),
-                POLL,
-            )?;
-            (lanes, Some(met))
-        }
-        None => (lanes, None),
-    };
-    // A waited report makes no peer read after the wait's deadline.
-    let (mut data, human) = if met.is_some() {
-        render_with_waits(&lanes, &[], &selected, edge.roots.state.as_path())
-    } else {
-        render(&peer, &lanes, &selected, edge)
-    };
-    data["run_id"] = json!(run_id);
-    data["operation_id"] = json!(batch.operation_id);
-    data["host"] = json!(host);
-    if let Some(met) = met {
-        data["condition_met"] = json!(met);
-        if !met && let Some(id) = super::silent_lane(&lanes) {
-            data["timed_out"] = json!(false);
-            data["reason"] = json!(format!("provider silent; lane {id} is still running"));
-        }
-    }
-    // Undelivered commits stay in the peer's worktree; say where.
-    let human = match &receipt.worktree {
-        Some(worktree) => {
-            data["worktree"] =
-                json!({ "host": host, "path": worktree.path, "branch": worktree.branch });
-            format!(
-                "worktree {} {} (on the peer)\n{human}",
-                provenant_fabric_runtime::hosts::plain_text(&worktree.branch, usize::MAX),
-                provenant_fabric_runtime::hosts::plain_text(&worktree.path, usize::MAX)
-            )
-        }
-        None => human,
-    };
-    Ok((
-        data,
-        format!("run {run_id}\n{human}"),
-        met == Some(false) && super::silent_lane(&lanes).is_none(),
-    ))
-}
-
-/// Forward `lanes --id` when every target names a peer run.
 pub(super) fn lanes(
     command: &Lanes,
     edge: &Edge<'_>,
@@ -1112,7 +798,7 @@ pub(super) fn lanes(
             explicit: true,
             snapshot: true,
         };
-        let fetch = |remaining| peer.records_following(&selected, remaining);
+        let fetch = |remaining| peer.records_within(&selected, remaining);
         let first = selected
             .first()
             .map(|(host, _)| *host)
@@ -1356,7 +1042,7 @@ pub(super) fn resolve_prefix(
         return Err(Fail::new(
             Status::Invalid,
             ErrorKind::Invalid,
-            "peer history exceeds its enumeration limit; run `provenant lanes --host PEER --all` and use a full attempt ID",
+            "peer history exceeds its enumeration limit; use a full attempt ID from the peer's `provenant status --all`",
         ));
     }
     let candidates = records
@@ -1612,7 +1298,7 @@ fn chunk_response(
 pub(super) fn cancel(command: &Cancel, placement: &Placement, edge: &Edge<'_>) -> Reply {
     let mut status = Status::Ok;
     let mut out = reply(
-        "cancel",
+        "stop",
         (|| {
             let target = &command.target;
             let selected = placement.select_target(target)?;
@@ -1849,372 +1535,6 @@ mod tests {
     use provenant_core::RootInputs;
 
     type Result<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
-    #[test]
-    fn peer_tail_pages_to_eof_and_rejects_a_changed_artifact() -> Result {
-        let target = AttemptTarget {
-            extra: Default::default(),
-            attempt: AttemptId::from_bytes([1; 16]),
-            host: None,
-        };
-        let chunk = |text: &str, offset, eof, byte| OutputResult::Chunk {
-            extra: [("attempt_id".into(), json!(target.attempt))].into(),
-            target: target.clone(),
-            part: OutputPart::Result,
-            state: "succeeded".into(),
-            reason: None,
-            offset,
-            next_offset: offset + text.len() as u64,
-            eof,
-            digest: provenant_core::Digest::from_bytes([byte; 32]),
-            bytes: OutputBytes::Utf8(text.into()),
-        };
-        let first = chunk("before\n", 0, false, 1);
-        let last = collect_tail(first.clone(), 1, 64, |offset| {
-            assert_eq!(offset, 7);
-            Ok(chunk("verdict\n", offset, true, 1))
-        })
-        .map_err(|fail| fail.message)?;
-        let (_, text) = chunk_response(
-            target.attempt,
-            HostId::from_bytes([2; 16]),
-            &Part::Result,
-            last,
-        )
-        .map_err(|fail| fail.message)?;
-        assert_eq!(text, "verdict\n");
-        assert!(
-            collect_tail(first, 1, 64, |offset| Ok(chunk(
-                "changed\n",
-                offset,
-                true,
-                2
-            )))
-            .is_err()
-        );
-        Ok(())
-    }
-    #[test]
-    fn peer_event_tail_preserves_whole_records_across_pages() -> Result {
-        let target = AttemptTarget {
-            extra: Default::default(),
-            attempt: AttemptId::from_bytes([1; 16]),
-            host: None,
-        };
-        let chunk = |sequence, eof| OutputResult::Chunk {
-            extra: [("attempt_id".into(), json!(target.attempt))].into(),
-            target: target.clone(),
-            part: OutputPart::Events,
-            state: "succeeded".into(),
-            reason: None,
-            offset: sequence - 1,
-            next_offset: sequence,
-            eof,
-            digest: provenant_core::Digest::from_bytes([sequence as u8; 32]),
-            bytes: OutputBytes::Utf8(json!([{"sequence":sequence}]).to_string()),
-        };
-        let last = collect_tail(chunk(1, false), 1, 1024, |offset| {
-            assert_eq!(offset, 1);
-            Ok(chunk(2, true))
-        })
-        .map_err(|fail| fail.message)?;
-        let (_, text) = chunk_response(
-            target.attempt,
-            HostId::from_bytes([2; 16]),
-            &Part::Events,
-            last,
-        )
-        .map_err(|fail| fail.message)?;
-        assert_eq!(
-            serde_json::from_str::<Value>(&text)?,
-            json!([{"sequence":2}])
-        );
-        Ok(())
-    }
-
-    fn lane(seed: u8, state: &str) -> Result<run::AttemptRecord> {
-        Ok(serde_json::from_value(json!({
-            "schema_version": 1,
-            "attempt_id": AttemptId::from_bytes([seed; 16]),
-            "run_id": RunId::from_bytes([2; 16]),
-            "project_id": provenant_core::ProjectId::from_bytes([3; 16]),
-            "task_id": TaskId::from_bytes([seed; 16]),
-            "operation_id": "peer-wait",
-            "attempt_number": 1,
-            "revision": 1,
-            "generation": 1,
-            "requested_route": {"kind":"model","provider":"claude","model":"claude/claude-sonnet-5"},
-            "applied_route": null,
-            "authority_digest": provenant_core::Digest::from_bytes([5; 32]),
-            "queued_at": WallTime::from_micros(100)?,
-            "state": {"state": state},
-            "usage": {},
-            "prompt": {
-                "path": {"encoding":"utf8","path":"prompt.txt"},
-                "digest": provenant_records::CanonicalV1::file_digest(b""),
-                "bytes": 1,
-                "complete": true,
-                "redacted": false
-            }
-        }))?)
-    }
-
-    #[test]
-    fn peer_wait_follows_policy_successor() -> Result {
-        let host = HostId::from_bytes([9; 16]);
-        let mut old = done(1, 10);
-        let mut retry = running(2);
-        old.superseded_by = Some(retry.attempt_id);
-        retry.retry_of = Some(old.attempt_id);
-        let mut lanes = vec![old.clone()];
-        let mut pairs = vec![(host, old.attempt_id)];
-        let window = Window::new(Duration::from_secs(10));
-        let mut call = |asked_host, action, _| {
-            assert_eq!(asked_host, host);
-            let PeerAction::RunStatuses { targets, .. } = action else {
-                return Err(corrupt());
-            };
-            assert_eq!(targets.len(), 1);
-            assert_eq!(targets[0].attempt, retry.attempt_id);
-            Ok(PeerResult::RunStatuses {
-                data: vec![retry.clone()],
-                extra: Default::default(),
-            })
-        };
-        follow_peer_successors(&mut lanes, &mut pairs, &window, &mut call)
-            .map_err(|e| e.message)?;
-        assert_eq!(lanes.len(), 2);
-        assert!(!condition_met(&lanes, Condition::Any));
-        Ok(())
-    }
-
-    #[test]
-    fn peer_lane_views_show_policy_lineage() -> Result {
-        let mut old = lane(1, "queued")?;
-        let mut retry = lane(2, "queued")?;
-        let old_id = old.attempt_id;
-        let next_id = retry.attempt_id;
-        old.superseded_by = Some(next_id);
-        retry.retry_of = Some(old_id);
-        let (data, human) = render_peer_lanes(
-            &[old.clone(), retry],
-            &[],
-            None,
-            std::path::Path::new("/state"),
-        );
-        assert_eq!(data["lanes"][0]["superseded_by"], json!(next_id));
-        assert_eq!(data["lanes"][1]["retry_of"], json!(old_id));
-        assert!(human.contains(&format!("retrying ({next_id})")));
-        let event: Value = serde_json::from_str(&watch::json_line_with_successor(
-            &old,
-            None,
-            old.superseded_by,
-        ))?;
-        assert_eq!(event["superseded_by"], json!(next_id));
-        Ok(())
-    }
-
-    #[test]
-    fn peer_lanes_do_not_show_local_capacity_cooldowns() -> Result {
-        let temp = tempfile::tempdir()?;
-        let state = temp.path().join("state");
-        let route = run::RouteRecord {
-            extra: Default::default(),
-            provider: Some("codex".into()),
-            model: Some("codex/model".into()),
-            effort: None,
-            account_label: Some("work".into()),
-            account_key: Some("key".into()),
-            source: None,
-            pool_selection: None,
-        };
-        let now = SystemClock::new().wall_now()?.as_timestamp().as_second();
-        crate::quota::persist_capacity_cooldown(&state, &route, now, 600)?;
-        let (data, human) = render_with_waits(&[], &[], &[], &state);
-        assert_eq!(data["capacity_cooldowns"], json!([]));
-        assert!(!human.contains("capacity cooldown"));
-        Ok(())
-    }
-
-    #[test]
-    fn a_peers_unstarted_lanes_show_their_class_and_wait_like_local_ones() -> Result {
-        let host = HostId::from_bytes([9; 16]);
-        let (queued, starting) = (lane(1, "queued")?, lane(2, "starting")?);
-        let lanes = [queued.clone(), starting.clone()];
-        let selected: Vec<_> = lanes.iter().map(|l| (host, l.attempt_id)).collect();
-        let wait = |lane: &run::AttemptRecord, text: &str| run::LaneWait {
-            extra: Default::default(),
-            attempt_id: lane.attempt_id,
-            lane_class: run::LaneClass::ReadOnly,
-            waiting_for: text.into(),
-        };
-        let mut asked = Vec::new();
-        let waits = fetch_waits(&lanes, &selected, |host, action| {
-            let PeerAction::LaneWaits { targets, .. } = action else {
-                return Err(corrupt());
-            };
-            asked.push((host, targets.iter().map(|t| t.attempt).collect::<Vec<_>>()));
-            Ok(PeerResult::LaneWaits {
-                data: vec![
-                    wait(&queued, "launch: not yet handed to a guardian"),
-                    wait(&starting, "read-only startup spacing: 1.2 s left of 2.0 s"),
-                    // Not asked about, so not believed.
-                    run::LaneWait {
-                        extra: Default::default(),
-                        attempt_id: AttemptId::from_bytes([77; 16]),
-                        lane_class: run::LaneClass::Writer,
-                        waiting_for: "stray".into(),
-                    },
-                ],
-                extra: Default::default(),
-            })
-        });
-        assert_eq!(
-            asked,
-            vec![(host, vec![queued.attempt_id, starting.attempt_id])]
-        );
-        assert_eq!(waits.len(), 2);
-        let (data, human) =
-            render_with_waits(&lanes, &waits, &selected, std::path::Path::new("/state"));
-        assert_eq!(data["lanes"][0]["lane_class"], "read_only");
-        assert_eq!(
-            data["lanes"][0]["waiting_for"],
-            "launch: not yet handed to a guardian"
-        );
-        assert_eq!(
-            data["lanes"][1]["waiting_for"],
-            "read-only startup spacing: 1.2 s left of 2.0 s"
-        );
-        assert_eq!(data["lanes"][1]["host"], json!(host));
-        assert!(human.contains("(read-only startup spacing: 1.2 s left of 2.0 s)"));
-        Ok(())
-    }
-
-    #[test]
-    fn a_peer_that_cannot_say_leaves_a_lane_without_a_wait() -> Result {
-        let host = HostId::from_bytes([9; 16]);
-        let (running, starting) = (lane(3, "running")?, lane(4, "starting")?);
-        let lanes = [running.clone(), starting.clone()];
-        let selected: Vec<_> = lanes.iter().map(|l| (host, l.attempt_id)).collect();
-        let mut asked = Vec::new();
-        // An older peer refuses the action it does not know.
-        let waits = fetch_waits(&lanes, &selected, |_, action| {
-            if let PeerAction::LaneWaits { targets, .. } = action {
-                asked.extend(targets.iter().map(|t| t.attempt));
-            }
-            Err(corrupt())
-        });
-        assert!(waits.is_empty());
-        // Running lanes are asked too, for provider-silence suppression.
-        assert_eq!(asked, vec![running.attempt_id, starting.attempt_id]);
-        let (data, _) =
-            render_with_waits(&lanes, &waits, &selected, std::path::Path::new("/state"));
-        assert_eq!(data["lanes"][1]["lane_class"], Value::Null);
-        assert_eq!(data["lanes"][1]["waiting_for"], Value::Null);
-        Ok(())
-    }
-
-    #[test]
-    fn peer_writer_moves_its_base_and_skill_requirement_into_the_new_worktree() -> Result {
-        let route = run::RequestedRoute::Model {
-            extra: Default::default(),
-            provider: "fixture".into(),
-            model: "fixture/model".into(),
-            effort: None,
-        };
-        let task = submitted_task(
-            Task {
-                context: None,
-                build_heavy: true,
-                require_skill_location: true,
-                title: Some("Make the change".into()),
-                base: Some("main".into()),
-                head: None,
-                prompt: "write the change".into(),
-                route: route.clone(),
-                account: None,
-                delivery_id: None,
-                deliver: None,
-            },
-            Some(NewWorktree {
-                extra: Default::default(),
-                base: "main".into(),
-                branch: "writer/change".into(),
-            }),
-            600,
-            None,
-            Default::default(),
-        );
-        let actual = serde_json::to_value(SubmitInput::Submit {
-            extra: Default::default(),
-            operation_id: OperationId::parse("peer-writer")?,
-            tasks: vec![task],
-            concurrency: Some(1),
-            knobs: vec![],
-            host: None,
-        })?;
-        assert_eq!(actual["op"], "submit");
-        // The whole task, so a stray field or a rewritten prompt fails.
-        assert_eq!(
-            actual["tasks"][0],
-            json!({
-                "access": "worktree_write",
-                "build_heavy": true,
-                "require_skill_location": true,
-                "account": null,
-                "deliver": null,
-                "delivery_id": null,
-                "new_worktree": {"base": "main", "branch": "writer/change"},
-                "prompt": "write the change",
-                "title": "Make the change",
-                "route": serde_json::to_value(route)?,
-                "timeout_seconds": 600,
-                "worktree": null
-            })
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn read_only_peer_forwards_the_context_ref_and_original_prompt() {
-        let task = submitted_task(
-            Task {
-                context: Some(provenant_records::run::WorkContext {
-                    graph_id: Some("graph".into()),
-                    node_id: Some("inspect".into()),
-                    pattern: Some("council".into()),
-                    ..Default::default()
-                }),
-                build_heavy: false,
-                require_skill_location: false,
-                title: None,
-                base: Some("main".into()),
-                head: None,
-                prompt: "review".into(),
-                route: run::RequestedRoute::Named {
-                    extra: Default::default(),
-                    name: "utility".into(),
-                    effort: None,
-                },
-                account: None,
-                delivery_id: None,
-                deliver: None,
-            },
-            None,
-            600,
-            None,
-            Default::default(),
-        );
-        assert_eq!(task.base.as_deref(), Some("main"));
-        assert_eq!(task.prompt, "review");
-        assert_eq!(
-            task.context
-                .as_ref()
-                .and_then(|context| context.pattern.as_deref()),
-            Some("council")
-        );
-        assert_eq!(task.access, AccessMode::ReadOnly);
-    }
-
     #[test]
     fn remote_output_carries_the_attempt_state_and_reason() -> Result {
         let attempt = AttemptId::from_bytes([3; 16]);

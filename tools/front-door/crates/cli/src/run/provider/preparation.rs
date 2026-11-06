@@ -396,8 +396,10 @@ pub(super) fn available_provider_leases(
     clock: &dyn provenant_core::Clock,
     cancel: &provenant_core::CancelToken,
 ) -> Result<std::collections::BTreeMap<String, provenant_os::fs::LockGuard>, ProviderLeaseError> {
-    let budget = provenant_core::WaitBudget::cli(clock.mono_now(), wait.unwrap_or(30).min(30))
-        .map_err(|error| ProviderLeaseError::Other(error.to_string()))?;
+    let budget = provenant_core::WaitBudget::up_to(
+        clock.mono_now(),
+        provenant_core::DurationMicros::from_micros(wait.unwrap_or(30).min(30) * 1_000_000),
+    );
     loop {
         if cancel.is_cancelled() {
             return Err(ProviderLeaseError::Cancelled);
@@ -466,7 +468,7 @@ pub(super) enum PrepareError {
     #[error("{0}")]
     SourceAuthority(String),
     #[error("{0}")]
-    DirtyWriter(String),
+    WriterContinuation(String),
     #[error(transparent)]
     SourceHead(#[from] SourceHeadError),
     #[error(transparent)]
@@ -617,7 +619,7 @@ impl PrepareError {
             }
             error @ (Self::GraphInputsAuthority(_)
             | Self::SourceAuthority(_)
-            | Self::DirtyWriter(_)) => {
+            | Self::WriterContinuation(_)) => {
                 let mut refusal = run::PrepareRefusal::from(error.to_string());
                 refusal.boundary_class = provenant_records::diagnostic::BoundaryClass::Authority;
                 refusal
@@ -689,7 +691,7 @@ fn preparation_preserves_typed_boundaries_without_classifying_other_errors() {
     for error in [
         PrepareError::GraphInputsAuthority("invalid graph inputs root".into()),
         PrepareError::SourceAuthority("source grant overlaps".into()),
-        PrepareError::DirtyWriter("uncommitted predecessor edits".into()),
+        PrepareError::WriterContinuation("uncommitted predecessor edits".into()),
     ] {
         assert_eq!(
             error.into_refusal().boundary_class,
@@ -949,7 +951,6 @@ pub(super) fn prepare_with_wait(
             None,
             &locate,
             fixture_token,
-            false,
             wait,
         )?;
         if launch.route.model.as_deref() != Some(model) {
@@ -978,7 +979,6 @@ pub(super) fn prepare_with_wait(
         resume,
         &locate,
         fixture_token,
-        false,
         wait,
     )
 }
@@ -1313,7 +1313,6 @@ pub(super) fn prepare_candidates(
     resume: Option<&run::AttemptRecord>,
     locate: &dyn Fn(&str) -> Result<PathBuf, String>,
     fixture_token: Option<&provenant_providers::claude::OauthToken>,
-    redirected: bool,
     wait: Option<u64>,
 ) -> Result<run::PreparedLaunch, PrepareError> {
     if let run::RequestedRoute::Adapter { provider, name, .. } = &task.route {
@@ -1371,8 +1370,7 @@ pub(super) fn prepare_candidates(
             serde_json::json!({"kind": "compiled"}),
         ),
     };
-    if task.fallback.is_empty()
-        && let run::RequestedRoute::Model { model, .. } = &task.route
+    if let run::RequestedRoute::Model { model, .. } = &task.route
         && let Some((adapter, _)) = model.split_once('/')
     {
         check_launch_prompt(prompt_text, paths, Some(adapter), argv_limit, argv_origin)?;
@@ -1425,51 +1423,20 @@ pub(super) fn prepare_candidates(
     } else {
         source.clone()
     };
-    // Status is evidence for both the brief and a source refusal. Failure to
-    // collect it must never masquerade as a clean predecessor worktree.
-    let uncommitted = if let (Some(writer), Some(_)) = (&writer, &task.source_head) {
-        writer
-            .uncommitted_paths(&git)
-            .map_err(|error| format!("cannot inspect uncommitted predecessor edits: {error}"))?
-    } else {
-        Vec::new()
-    };
-    if let Some(writer) = &writer {
-        if let Some(source_head) = task.source_head.as_deref() {
-            let predecessor = task
-                .head
-                .as_deref()
-                .ok_or("missing predecessor head for writer continuation")?
-                .parse()
-                .map_err(|_| "invalid pinned writer predecessor head")?;
-            let source = source_head
-                .parse()
-                .map_err(|_| "invalid pinned writer source")?;
-            let lineage = writer.require_continuation_source(&git, source, predecessor);
-            if !uncommitted.is_empty() {
-                let detail = lineage.err().map_or_else(
-                    || format!("writer continuation from {source} to {predecessor}"),
-                    |error| error.to_string(),
-                );
-                return Err(PrepareError::DirtyWriter(format!(
-                    "{detail}; uncommitted predecessor edits: {}",
-                    uncommitted.join(", ")
-                )));
-            }
-            lineage?;
-        } else if let Some(head) = task.head.as_deref() {
-            writer.require_source(head.parse().map_err(|_| "invalid pinned writer source")?)?;
-        }
-    }
+    let writer_context = writer
+        .as_ref()
+        .map(|writer| writer_source_context(writer, task, &git))
+        .transpose()?
+        .flatten();
     // Publishing is opt-in (`lanes.publish`): it hands the lane the GitHub
-    // credential. Missing gh tools or configuration leave the
+    // credential. Missing gh tools, or both configuration and a host token, leave the
     // writer able to do local work without publishing credential access.
     let publishing_gh = publishing_requested(
         writer.is_some(),
         task.access.network(true) == NetworkAccess::Open,
         &task.profile.knobs,
     )
-    .then(|| publishing_executable(&home, &locate))
+    .then(|| publishing_executable(&home, &locate, std::env::var_os("GH_TOKEN").as_deref()))
     .flatten();
     let git_context = task
         .base
@@ -1500,7 +1467,9 @@ pub(super) fn prepare_candidates(
         Some(prior) => continuation_request(prior)?,
         None => route_request(task)?,
     };
-    request.intent = route_request(task)?.intent;
+    let task_request = route_request(task)?;
+    request.intent = task_request.intent;
+    request.confidential = task_request.confidential;
     let catalogue = provenant_routing::Catalogue::bundled().map_err(|e| e.to_string())?;
     let mut eligible = provenant_routing::probe_adapters(
         &request,
@@ -2011,44 +1980,6 @@ pub(super) fn prepare_candidates(
             reasons.push(skip(&label, SkipKind::Refused, "read-only model policy"));
             continue;
         }
-        // A child store is writable by its parent lane. Pick the reliable
-        // fallback before launch there, rather than trust a later retry record.
-        if paths.lane_depth > 1
-            && model_policy.result.check == Some(true)
-            && !request.intent.writes
-            && resume.is_none()
-        {
-            if redirected {
-                reasons.push(skip(
-                    &label,
-                    SkipKind::Refused,
-                    "restricted nested route needs a reliable read-only fallback",
-                ));
-                continue;
-            }
-            let fallback = nested_policy_fallback(task, &route, &model_policy)?;
-            let mut prepared = prepare_candidates(
-                registry,
-                provider_registry,
-                &fallback,
-                prompt_text,
-                paths,
-                None,
-                locate,
-                fixture_token,
-                true,
-                wait,
-            )?;
-            prepared.skipped_routes.insert(
-                0,
-                skip(
-                    &label,
-                    SkipKind::Refused,
-                    "nested route selected its result-policy fallback before launch",
-                ),
-            );
-            return Ok(prepared);
-        }
         let Some(registration) = provider_registry
             .iter()
             .find(|registration| registration.adapter.id() == route.adapter)
@@ -2431,6 +2362,10 @@ pub(super) fn prepare_candidates(
             }
             None => prompt_text.to_owned(),
         };
+        let text = match &writer_context {
+            Some(context) => format!("{context}\n\n{text}"),
+            None => text,
+        };
         let text = if !task.access.attachments.is_empty()
             && !AdapterSpec::get(adapter.id()).is_some_and(|spec| spec.launch.image_input)
         {
@@ -2476,9 +2411,6 @@ pub(super) fn prepare_candidates(
                 continue;
             }
         };
-        let child_state = state_root
-            .join("children")
-            .join(paths.attempt_id.to_string());
         let (plan, observed_head, repository, worktree_gitdir) = match confinement_request(
             project_id,
             ConfinementRoots {
@@ -2651,7 +2583,6 @@ pub(super) fn prepare_candidates(
                     executable: &provenant_executable,
                     git: &git,
                     state: roots.state.as_path(),
-                    child_state: &child_state,
                     home: &home,
                     depth: paths.lane_depth,
                     attempt: paths.attempt_id,
@@ -2782,6 +2713,9 @@ pub(super) fn prepare_candidates(
             spec.configure_shell(scratch, adapter_spec);
         }
         if let Some(gh) = publishing_gh.as_ref() {
+            // Resolve the login before composing gh's wrapper: token launches
+            // use a private empty config directory, independent of host links.
+            super::gh_auth::inject(&executor, gh, &home, cancel, &mut spec.env);
             let policy = provenant_config::GithubPolicy::read(&roots.state, project_id)
                 .map_err(|error| error.to_string())?;
             let publishing = spec.configure_publishing(scratch, &git, gh, &home, &policy);
@@ -2915,7 +2849,7 @@ pub(super) fn prepare_candidates(
             entry.map(|e| e.label.as_str()),
             &task.route,
             resume.is_some(),
-            redirected || current_candidate > 0,
+            current_candidate > 0,
         );
         if let Some(warning) = provider
             .extra
@@ -2978,7 +2912,9 @@ pub(super) fn prepare_candidates(
             .clone()
             .or_else(|| reader_gh.then(|| locate("gh").ok()).flatten())
         {
-            super::gh_auth::inject(&executor, &gh, &home, cancel, &mut spec.env);
+            if writer.is_none() {
+                super::gh_auth::inject(&executor, &gh, &home, cancel, &mut spec.env);
+            }
             if adapter_spec.is_some_and(|spec| {
                 spec.github_auth == Some(provenant_records::GithubAuth::ShellEnvironment)
             }) && spec.env.iter().any(|(key, _)| key == "GH_TOKEN")
@@ -3444,7 +3380,6 @@ mod user_skills_tests {
                             executable: &executable,
                             git: &executable,
                             state: &root,
-                            child_state: &root,
                             home: &home,
                             depth: 1,
                             attempt: AttemptId::from_bytes([7; 16]),

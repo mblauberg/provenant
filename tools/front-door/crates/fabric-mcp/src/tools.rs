@@ -141,6 +141,80 @@ impl ChairInput {
 }
 
 pub trait McpFacade: F3Facade {
+    /// Shared graph interface. Documents and patches cross this boundary as JSON,
+    /// never as paths resolved on behalf of an MCP caller.
+    fn graph_document(
+        &mut self,
+        _input: Value,
+        _budget: WaitBudget,
+        _cancel: &CancelToken,
+    ) -> Result<Value, ServiceError> {
+        Err(FacadeError::OwnerUnavailable.into())
+    }
+
+    /// Compile a lane launch without writing a local graph or coordination store.
+    fn compile_lane_run(
+        &self,
+        input: &Value,
+    ) -> Result<provenant_fabric_runtime::graph::relay::RelayOp, ServiceError> {
+        lane_run_request(input)
+    }
+
+    /// Submit and optionally observe a lane child through the shared reply contract.
+    fn relay_document(
+        &mut self,
+        input: &Value,
+        _budget: WaitBudget,
+        cancel: &CancelToken,
+    ) -> Result<Value, ServiceError> {
+        let operation = self.compile_lane_run(input)?;
+        if input["explain"] == true {
+            return Ok(serde_json::to_value(operation)?);
+        }
+        let receipt = self.add_from_lane(
+            &operation,
+            cancel,
+            std::time::Duration::from_secs(crate::MAX_WAIT_SECONDS),
+        )?;
+        if let Some(seconds) = input["wait_seconds"].as_u64() {
+            return Ok(
+                match self.wait_for_children(cancel, std::time::Duration::from_secs(seconds)) {
+                    Ok(children) => serde_json::json!({"receipt":receipt,"children":children}),
+                    Err(error) => {
+                        serde_json::json!({"receipt":receipt,"observation_error":error.to_string()})
+                    }
+                },
+            );
+        }
+        Ok(receipt)
+    }
+
+    /// A lane launch is a graph mutation owned by its host. Production composition
+    /// forwards this to the CLI's `graph_relay::from_lane`.
+    fn add_from_lane(
+        &mut self,
+        _operation: &provenant_fabric_runtime::graph::relay::RelayOp,
+        _cancel: &CancelToken,
+        _within: std::time::Duration,
+    ) -> Result<Value, ServiceError> {
+        Err(ServiceError::Cli {
+            code: "graph_relay_unavailable".into(),
+            message: "lane graph relay unavailable".into(),
+            data: Value::Null,
+        })
+    }
+    /// Wait through the lane graph relay so the parent yields its slot.
+    fn wait_for_children(
+        &mut self,
+        _cancel: &CancelToken,
+        _within: std::time::Duration,
+    ) -> Result<Value, ServiceError> {
+        Err(ServiceError::Cli {
+            code: "graph_relay_unavailable".into(),
+            message: "lane graph relay unavailable".into(),
+            data: Value::Null,
+        })
+    }
     fn inbox_owner(
         &mut self,
         input: InboxInput,
@@ -183,13 +257,12 @@ pub enum ToolCall {
     Events(EventsInput, Option<OperationId>),
     Claim(ClaimInput, Option<OperationId>),
     Landing(LandingInput, Option<OperationId>),
-    Submit(SubmitInput),
-    SubmitWait(SubmitInput, u64, bool),
     RunDetailed(RunInput),
     Run(RunInput),
     Output(OutputInput),
     Hosts(HostsInput),
-    Graph(GraphInput),
+    GraphDocument(Value),
+    GraphTrace(Value),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -219,11 +292,12 @@ impl ToolCall {
             Self::Events(..) => schema::ToolKind::Events,
             Self::Claim(..) => schema::ToolKind::Claim,
             Self::Landing(..) => schema::ToolKind::Claim,
-            Self::Submit(_) | Self::SubmitWait(..) | Self::RunDetailed(_) => schema::ToolKind::Run,
+            Self::RunDetailed(_) => schema::ToolKind::Run,
             Self::Run(_) => schema::ToolKind::Run,
             Self::Output(_) => schema::ToolKind::Output,
             Self::Hosts(_) => schema::ToolKind::Identity,
-            Self::Graph(_) => schema::ToolKind::Graph,
+            Self::GraphDocument(_) => schema::ToolKind::Run,
+            Self::GraphTrace(_) => schema::ToolKind::Output,
         }
     }
     // Never persist arbitrary caller-supplied tool names.
@@ -306,15 +380,11 @@ impl ToolCall {
             | Self::Claim(ClaimInput::Renew { lease_seconds, .. }, _) => lease(*lease_seconds),
             Self::Landing(LandingInput::Acquire { lease_seconds, .. }, _)
             | Self::Landing(LandingInput::Renew { lease_seconds, .. }, _) => lease(*lease_seconds),
-            Self::Submit(SubmitInput::Submit { tasks, .. })
-            | Self::SubmitWait(SubmitInput::Submit { tasks, .. }, ..) => {
-                for (index, task) in tasks.iter().enumerate() {
-                    body(&task.prompt, &format!("tasks[{index}].prompt"))?;
-                }
-                Ok(())
-            }
             Self::Run(RunInput::List { limit, .. })
             | Self::RunDetailed(RunInput::List { limit, .. }) => page(u64::from(*limit)),
+            Self::GraphDocument(input) | Self::GraphTrace(input) => {
+                body(&input.to_string(), "document")
+            }
             Self::Run(RunInput::Resume { prompt, .. })
             | Self::RunDetailed(RunInput::Resume { prompt, .. }) => body(prompt, "prompt"),
             Self::Output(OutputInput::Read { max_bytes, .. })
@@ -327,6 +397,12 @@ impl ToolCall {
     fn is_mutation(&self) -> bool {
         if let Self::Inbox(input, _) = self {
             return input.is_mutation();
+        }
+        if let Self::GraphDocument(input) = self {
+            return matches!(
+                input["op"].as_str(),
+                Some("run" | "edit" | "stop" | "retry")
+            ) && input["explain"] != true;
         }
         matches!(
             self,
@@ -353,11 +429,6 @@ impl ToolCall {
                     _
                 )
                 | Self::Chair(ChairInput::SummaryUpdate { .. } | ChairInput::LogAppend { .. })
-                | Self::Graph(
-                    GraphInput::Run { .. } | GraphInput::Cancel { .. } | GraphInput::Resume { .. }
-                )
-                | Self::Submit(_)
-                | Self::SubmitWait(..)
                 | Self::Run(RunInput::Cancel { .. } | RunInput::Resume { .. })
                 | Self::RunDetailed(RunInput::Cancel { .. } | RunInput::Resume { .. })
         )
@@ -498,24 +569,6 @@ impl ToolCall {
     /// MCP arguments remain strict even when shared peer records retain fields
     /// from newer writers. The catalogue owns the argument field boundary.
     pub fn parse(name: &str, arguments: Value) -> Result<Self, InvalidInput> {
-        // The shared serde record accepts peer-ingress worktree creation.
-        // MCP cannot request it; reject the field (including null) at its edge.
-        if schema::tool_kind(name) == Some(schema::ToolKind::Run)
-            && arguments["op"] == "submit"
-            && let Some(index) =
-                arguments
-                    .get("tasks")
-                    .and_then(Value::as_array)
-                    .and_then(|tasks| {
-                        tasks
-                            .iter()
-                            .position(|task| task.get("new_worktree").is_some())
-                    })
-        {
-            return Err(InvalidInput::Arguments {
-                path: format!("arguments.tasks[{index}].new_worktree"),
-            });
-        }
         let mut arguments = arguments;
         // `fabric_context` defaults to inspect; a single-operation tool has one operation.
         let default_operation = match schema::tool_kind(name) {
@@ -543,11 +596,10 @@ impl ToolCall {
             return Err(InvalidInput::Arguments { path });
         }
         let mut detail = false;
-        let mut submit_wait = 30;
         if let Some(object) = arguments.as_object_mut() {
             if schema::tool_kind(name) == Some(schema::ToolKind::Run) {
                 if let Some(value) = object.remove("detail") {
-                    if !matches!(operation.as_str(), "submit" | "status" | "wait" | "cancel") {
+                    if !matches!(operation.as_str(), "status" | "wait") {
                         return Err(InvalidInput::Arguments {
                             path: "arguments.detail".into(),
                         });
@@ -555,26 +607,6 @@ impl ToolCall {
                     detail = value.as_bool().ok_or_else(|| InvalidInput::Arguments {
                         path: "arguments.detail".into(),
                     })?;
-                }
-                if operation == "submit"
-                    && let Some(value) = object.remove("wait_seconds")
-                {
-                    submit_wait = value
-                        .as_u64()
-                        .filter(|v| (1..=crate::MAX_WAIT_SECONDS).contains(v))
-                        .ok_or_else(|| InvalidInput::Arguments {
-                            path: "arguments.wait_seconds".into(),
-                        })?;
-                }
-                if matches!(operation.as_str(), "submit" | "cancel" | "resume")
-                    && !object.contains_key("operation_id")
-                {
-                    object.insert(
-                        "operation_id".into(),
-                        Value::String(new_operation_id().map_err(|_| InvalidInput::Arguments {
-                            path: "arguments.operation_id".into(),
-                        })?),
-                    );
                 }
                 if operation == "list" {
                     object.entry("limit").or_insert(serde_json::json!(20));
@@ -696,13 +728,23 @@ impl ToolCall {
                 parse!(LandingInput, Landing, operation_id.clone())
             }
             Some(schema::ToolKind::Claim) => parse!(ClaimInput, Claim, operation_id.clone()),
-            Some(schema::ToolKind::Run) if operation == "submit" => {
-                parse!(SubmitInput, SubmitWait, submit_wait, detail)
+            Some(schema::ToolKind::Run)
+                if matches!(
+                    operation,
+                    "run" | "edit" | "templates" | "stop" | "retry" | "output"
+                ) || operation == "status" && arguments.get("target").is_none() =>
+            {
+                Ok(Self::GraphDocument(arguments.clone()))
+            }
+            Some(schema::ToolKind::Output) if operation == "trace" => {
+                let mut input = arguments.clone();
+                input["op"] = serde_json::json!("output");
+                input["trace"] = serde_json::json!(true);
+                Ok(Self::GraphTrace(input))
             }
             Some(schema::ToolKind::Run) if detail => parse!(RunInput, RunDetailed),
             Some(schema::ToolKind::Run) => parse!(RunInput, Run),
             Some(schema::ToolKind::Output) => parse!(OutputInput, Output),
-            Some(schema::ToolKind::Graph) => parse!(GraphInput, Graph),
             None => Err(InvalidInput::UnknownTool),
         }?;
         let validation = match &call {
@@ -795,9 +837,7 @@ impl ToolCall {
                     ..
                 },
             ) => OperationId::parse(id).ok(),
-            Self::Submit(SubmitInput::Submit { operation_id, .. })
-            | Self::SubmitWait(SubmitInput::Submit { operation_id, .. }, ..)
-            | Self::Run(
+            Self::Run(
                 RunInput::Cancel { operation_id, .. } | RunInput::Resume { operation_id, .. },
             )
             | Self::RunDetailed(
@@ -825,18 +865,36 @@ impl ToolCall {
             Self::Events(input, _) => input.validate_input(WaitTransport::Mcp),
             Self::Claim(input, _) => input.validate_input(WaitTransport::Mcp),
             Self::Landing(input, _) => input.validate_input(WaitTransport::Mcp),
-            Self::Submit(input) | Self::SubmitWait(input, ..) => {
-                input.validate_input(WaitTransport::Mcp)
-            }
             Self::Run(input) | Self::RunDetailed(input) => input.validate_input(WaitTransport::Mcp),
             Self::Output(input) => input.validate_input(WaitTransport::Mcp),
             Self::Hosts(input) => input.validate_input(WaitTransport::Mcp),
-            Self::Graph(input) => input.validate_input(WaitTransport::Mcp),
+            Self::GraphDocument(input) | Self::GraphTrace(input) => {
+                if schema::invalid_path("fabric_run", input).is_some() {
+                    Err(InputError::new("document"))
+                } else {
+                    Ok(())
+                }
+            }
         }
         .map_err(ServiceError::Invalid)?;
         if let Some(limits) = &service.limits {
             self.validate_limits(limits)
                 .map_err(ServiceError::Invalid)?;
+        }
+        if service.in_lane
+            && let Self::GraphDocument(input) = &self
+            && input["op"] == "run"
+        {
+            if let Some(seconds) = input["wait_seconds"].as_u64() {
+                service.budget(seconds)?;
+            }
+            let budget = service.budget(crate::MAX_WAIT_SECONDS)?;
+            let value = service.facade.relay_document(input, budget, cancel)?;
+            return service.limit_response(
+                response(self.name(), value),
+                input["explain"] != true,
+                false,
+            );
         }
         if service.in_lane
             && service.lane_relay_reads
@@ -866,9 +924,6 @@ impl ToolCall {
                     | Self::Events(..)
                     | Self::Claim(..)
                     | Self::Landing(..)
-                    | Self::Graph(..)
-                    | Self::Submit(SubmitInput::Submit { host: Some(_), .. })
-                    | Self::SubmitWait(SubmitInput::Submit { host: Some(_), .. }, ..)
             )
         {
             return Err(CoordinationError::LaneMutation.into());
@@ -1089,124 +1144,6 @@ impl ToolCall {
                     )
                 }
             }
-            Self::Submit(input) => call!(facade, submit, input),
-            Self::SubmitWait(input, wait_seconds, detail) => {
-                let receipt = serde_json::to_value(service.facade.submit(input, budget, cancel)?)?;
-                let targets: Vec<AttemptTarget> = serde_json::from_value(
-                    receipt
-                        .get("targets")
-                        .cloned()
-                        .ok_or(FacadeError::StateCorrupt)?,
-                )?;
-                let wait_budget = service.budget(wait_seconds)?;
-                let wait = service.facade.run(
-                    RunInput::Wait {
-                        extra: Default::default(),
-                        targets: targets.clone(),
-                        condition: WaitCondition::All,
-                        wait_seconds,
-                    },
-                    wait_budget,
-                    cancel,
-                );
-                let mut value = serde_json::json!({"receipt": receipt});
-                match wait {
-                    Ok(run) => {
-                        let mut run = serde_json::to_value(run)?;
-                        if !detail {
-                            project_run(&mut run, false)?;
-                        }
-                        let timed_out = run
-                            .get("timed_out")
-                            .and_then(Value::as_bool)
-                            .unwrap_or(false);
-                        let unfinished = run
-                            .get("satisfied")
-                            .and_then(Value::as_bool)
-                            .is_some_and(|satisfied| !satisfied);
-                        let reason = run.get("reason").cloned();
-                        value["wait"] = run;
-                        if timed_out || unfinished {
-                            if let Some(reason) = reason {
-                                value["reason"] = reason;
-                            }
-                            value["continuation"] = serde_json::json!(
-                                "Use fabric_run wait with the receipt targets, then fabric_output to read the result."
-                            );
-                        } else {
-                            let mut outputs = Vec::new();
-                            let output_budget = service.budget(crate::MAX_WAIT_SECONDS)?;
-                            for target in targets {
-                                let remaining = service.limits.as_ref().map_or(16_384, |limits| {
-                                    limits
-                                        .result_bytes
-                                        .saturating_sub(
-                                            serde_json::to_vec(&value)
-                                                .map_or(u64::MAX, |v| v.len() as u64),
-                                        )
-                                        .saturating_sub(
-                                            serde_json::to_vec(&outputs)
-                                                .map_or(u64::MAX, |v| v.len() as u64),
-                                        )
-                                        .saturating_sub(1024)
-                                        .min(16_384)
-                                        / 2
-                                });
-                                if remaining == 0 {
-                                    value["continuation"] = serde_json::json!(
-                                        "Use fabric_output to read the remaining results using the receipt targets."
-                                    );
-                                    break;
-                                }
-                                match service.facade.output(
-                                    OutputInput::Read {
-                                        extra: Default::default(),
-                                        target: target.clone(),
-                                        part: OutputPart::Result,
-                                        offset: 0,
-                                        max_bytes: remaining,
-                                    },
-                                    output_budget,
-                                    cancel,
-                                ) {
-                                    Ok(output) => outputs.push(serde_json::to_value(output)?),
-                                    Err(error) => {
-                                        outputs.push(serde_json::json!({"target": target, "error": ServiceError::Facade(error).structured_error()}));
-                                        value["continuation"] = serde_json::json!(
-                                            "Use fabric_output to read each result using the receipt targets."
-                                        );
-                                    }
-                                }
-                            }
-                            value["outputs"] = Value::Array(outputs);
-                        }
-                    }
-                    Err(error) => {
-                        value["continuation"] = serde_json::json!(
-                            "Use fabric_run wait with the receipt targets, then fabric_output to read the result."
-                        );
-                        value["timed_out"] = Value::Bool(matches!(error, FacadeError::Timeout));
-                        value["observation_error"] = ServiceError::Facade(error).structured_error();
-                    }
-                }
-                if let Some(limits) = &service.limits {
-                    let size = serde_json::to_vec(&value)?.len() as u64;
-                    if size > limits.result_bytes {
-                        value
-                            .as_object_mut()
-                            .ok_or(FacadeError::StateCorrupt)?
-                            .remove("outputs");
-                        value
-                            .as_object_mut()
-                            .ok_or(FacadeError::StateCorrupt)?
-                            .remove("wait");
-                        value["continuation"] = serde_json::json!(
-                            "Use fabric_run wait with the receipt targets, then fabric_output to read the result."
-                        );
-                    }
-                }
-                response(tool_name, value)
-            }
             Self::Run(input) => {
                 let operation_id = match &input {
                     RunInput::Cancel { operation_id, .. }
@@ -1306,7 +1243,9 @@ impl ToolCall {
                     },
                 )
             }
-            Self::Graph(input) => call!(facade, graph, input),
+            Self::GraphDocument(input) | Self::GraphTrace(input) => {
+                call!(facade, graph_document, input)
+            }
         };
         service.limit_response(result, mutation, output)
     }
@@ -1500,6 +1439,101 @@ impl ServiceError {
         );
         detail
     }
+}
+
+/// Lower a lane's ordinary run request to the host's graph mutation relay.
+/// The host chooses the child worktree and scans the brief before persistence.
+pub fn lane_run_request(
+    input: &Value,
+) -> Result<provenant_fabric_runtime::graph::relay::RelayOp, ServiceError> {
+    use provenant_fabric_runtime::graph::relay::{ChildRequest, RelayOp};
+    let invalid = || {
+        ServiceError::Cli {
+        code: "invalid_input".into(),
+        message: "child runs accept a template, brief, tier, access mode and write scope; use a graph patch for other controls".into(),
+        data: Value::Null,
+    }
+    };
+    let node = input.get("document").unwrap_or(input);
+    if !node.is_object()
+        || node.get("nodes").is_some()
+        || node.get("templates").is_some()
+        || input.get("over").is_some()
+        || input
+            .get("set")
+            .is_some_and(|value| value.as_object().is_none_or(|fields| !fields.is_empty()))
+        || ["worktree", "branch", "base", "attempt"]
+            .iter()
+            .any(|key| node.get(*key).is_some() || input.get(*key).is_some())
+    {
+        return Err(invalid());
+    }
+    if node.as_object().is_none_or(|fields| {
+        fields.keys().any(|key| {
+            !matches!(
+                key.as_str(),
+                "op" | "document"
+                    | "id"
+                    | "brief"
+                    | "use"
+                    | "tier"
+                    | "access"
+                    | "write_scope"
+                    | "explain"
+                    | "wait_seconds"
+                    | "detached"
+                    | "idempotency_key"
+                    | "set"
+            )
+        })
+    }) {
+        return Err(invalid());
+    }
+    let field = |name: &str| input.get(name).or_else(|| node.get(name));
+    let text = |name: &str| -> Result<Option<String>, ServiceError> {
+        field(name)
+            .map(|value| value.as_str().map(str::to_owned).ok_or_else(invalid))
+            .transpose()
+    };
+    let brief = text("brief")?.unwrap_or_default();
+    let template = text("use")?.unwrap_or_else(|| "task".into());
+    let tier = text("tier")?;
+    let writer = match field("access") {
+        None => false,
+        Some(value) if value == "read_only" => false,
+        Some(value) if value == "worktree_write" => true,
+        _ => return Err(invalid()),
+    };
+    let write_scope = field("write_scope")
+        .map(|value| serde_json::from_value(value.clone()).map_err(|_| invalid()))
+        .transpose()?
+        .unwrap_or_default();
+    let idempotency_key = text("idempotency_key")?.unwrap_or(
+        provenant_os::fs::entropy_128()
+            .map(|bytes| provenant_core::hex(&bytes))
+            .map_err(|_| invalid())?,
+    );
+    if idempotency_key.is_empty() || idempotency_key.len() > 200 {
+        return Err(invalid());
+    }
+    let digest =
+        provenant_records::CanonicalV1::file_digest(idempotency_key.as_bytes()).to_string();
+    Ok(RelayOp::Add(ChildRequest {
+        id: format!("child-{}", &digest[7..39]),
+        template,
+        brief,
+        tier,
+        timeout_seconds: None,
+        writer,
+        write_scope,
+        detached: field("detached")
+            .map(|value| value.as_bool().ok_or_else(invalid))
+            .transpose()?
+            .unwrap_or(false),
+        idempotency_key,
+        reason: Some("run".into()),
+        launch: None,
+    }))
 }
 
 fn new_operation_id() -> Result<String, provenant_fabric_runtime::coordination::CoordinationError> {
@@ -1817,10 +1851,6 @@ pub fn tool_error(tool: Option<&str>, code: &str, detail: Value) -> Value {
 
 pub fn catalogue() -> &'static [Value] {
     schema::catalogue()
-}
-
-pub fn legacy_catalogue() -> &'static [Value] {
-    schema::legacy_catalogue()
 }
 
 #[cfg(test)]

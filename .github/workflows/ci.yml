@@ -357,11 +357,20 @@ jobs:
           PROVENANT_POSTGRES_REQUIRED: "1"
         run: |
           ../../scripts/run-native-test-group custody cargo nextest run --profile ci --archive-file "$RUNNER_TEMP/macos-tests.tar.zst" -E '((package(=provenant-supervisor) | package(=provenant-confinement) | package(=provenant-os) | package(=provenant-providers)) & !(test(=worktrees::census_tests::native_unreadable_windowserver_allows_cleanup_of_a_merged_clean_tree) | test(=worktrees::census_tests::native_full_census_places_clean_merged_worktree_and_same_user_sleep) | (package(=provenant-os) & test(sys::pid::tests::native_)) | test(=tests::claude_network_on_native_tls_files_are_readable))) | (package(=provenant-cli) & test(=run::provider::project_paths::tests::configured_shared_path_allows_lane_lock_contended_by_host))'
+      - name: Run macOS census tests
+        if: ${{ !cancelled() }}
+        working-directory: tools/front-door
+        env:
+          PROVENANT_CONFINEMENT_REQUIRED: "1"
+          PROVENANT_POSTGRES_REQUIRED: "1"
+        run: |
           PROVENANT_STATE_DIR="$RUNNER_TEMP/provenant-native-host" ../../scripts/run-native-test-group census cargo nextest run --profile ci --archive-file "$RUNNER_TEMP/macos-tests.tar.zst" --success-output immediate -E '(test(=worktrees::census_tests::native_unreadable_windowserver_allows_cleanup_of_a_merged_clean_tree) | test(=worktrees::census_tests::native_full_census_places_clean_merged_worktree_and_same_user_sleep) | (package(=provenant-os) & test(sys::pid::tests::native_)))'
       - name: Run macOS Cargo seed tests
+        if: ${{ !cancelled() }}
         working-directory: tools/front-door
         run: ../../scripts/run-native-test-group cargo-seed cargo nextest run --profile ci --archive-file "$RUNNER_TEMP/macos-tests.tar.zst" -E 'package(=provenant-run) & test(cargo_seed)'
       - name: Run dispatch confinement integration tests
+        if: ${{ !cancelled() }}
         working-directory: tools/front-door
         env:
           PROVENANT_CONFINEMENT_REQUIRED: "1"
@@ -381,8 +390,7 @@ jobs:
           | test(=writer_terminal_refuses_sequencer_state)
           | test(=writer_production_plan_denies_outside_writes)
           | test(=writer_protected_changes_wait_for_review_and_ignore_upstream)
-          | test(=writer_reconcile_refuses_unfinished_cherry_pick_and_releases))
-          | (binary(=writer_continuation) & (test(=writer_continuation_launches_pinned_to_predecessor_head) | test(=unfinished_writer_continuation_launches_in_previously_owned_worktree)))'
+          | test(=writer_reconcile_refuses_unfinished_cherry_pick_and_releases))'
       - name: Run native writer capability probes
         if: ${{ !cancelled() }}
         working-directory: tools/front-door
@@ -391,11 +399,13 @@ jobs:
           PROVENANT_LANE_TOOLS_REQUIRED: "1"
         run: ../../scripts/run-native-test-group capability cargo nextest run --profile ci --archive-file "$RUNNER_TEMP/macos-tests.tar.zst" -E 'binary(=worktrees) & test(=lane_prepare_isolates_nested_writer_state)'
       - name: Run provider dispatch integration tests
+        if: ${{ !cancelled() }}
         working-directory: tools/front-door
         env:
           PROVENANT_CONFINEMENT_REQUIRED: "1"
-        run: ../../scripts/run-native-test-group provider-dispatch cargo nextest run --profile ci --archive-file "$RUNNER_TEMP/macos-tests.tar.zst" -E 'binary(=dispatch_provider) | binary(=command_adapter)'
+        run: ../../scripts/run-native-test-group provider-dispatch cargo nextest run --profile ci --archive-file "$RUNNER_TEMP/macos-tests.tar.zst" -E 'binary(=graph_provider) | binary(=command_adapter)'
       - name: Require Claude network and native TLS file probes
+        if: ${{ !cancelled() }}
         working-directory: tools/front-door
         env:
           PROVENANT_CONFINEMENT_REQUIRED: "1"

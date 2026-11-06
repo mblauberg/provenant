@@ -40,13 +40,32 @@ run_selector() {
 
 result=$(run_selector)
 test "$result" = 'run_macos=false
-run_rust=true'
+run_rust=false'
 grep -F 'skills/topic.md' "$tmp/log" >/dev/null
 grep -F 'Selected run_macos=false' "$tmp/log" >/dev/null
 if grep -F 'tools/front-door/main.rs' "$tmp/log" >/dev/null; then
   echo 'base-only Rust changes must not select macOS checks' >&2
   exit 1
 fi
+
+# Documentation prose takes the same fast path; a mixed code change does not.
+git -C "$repo" checkout -q --detach "$common"
+mkdir -p "$repo/docs/specs"
+printf '%s\n' prose > "$repo/docs/specs/contract.md"
+git -C "$repo" add .
+git -C "$repo" commit -qm 'update documentation'
+head=$(git -C "$repo" rev-parse HEAD)
+result=$(run_selector)
+test "$result" = 'run_macos=false
+run_rust=false'
+mkdir -p "$repo/tools/front-door"
+printf '%s\n' code > "$repo/tools/front-door/topic.rs"
+git -C "$repo" add .
+git -C "$repo" commit -qm 'mix in code'
+head=$(git -C "$repo" rev-parse HEAD)
+result=$(run_selector)
+test "$result" = 'run_macos=true
+run_rust=true'
 
 # Inventory-only edits must exercise the evidence gate on macOS.
 git -C "$repo" checkout -q --detach "$common"
@@ -101,7 +120,7 @@ test "$(cat "$output")" = 'run_macos=true
 run_rust=true'
 grep -F 'No merge base found' "$tmp/log" >/dev/null
 
-# Release-note fragments alone skip Rust; mixing in anything else keeps it.
+# Release notes and skill prose skip Rust; structured assets and code retain it.
 git -C "$repo" checkout -q --detach "$common"
 mkdir -p "$repo/docs/release-notes/next.d"
 printf '%s\n' note > "$repo/docs/release-notes/next.d/1-x.md"
@@ -114,6 +133,24 @@ run_rust=false'
 printf '%s\n' topic > "$repo/skills/topic.md"
 git -C "$repo" add .
 git -C "$repo" commit -qm 'fragment and skill'
+head=$(git -C "$repo" rev-parse HEAD)
+result=$(run_selector)
+test "$result" = 'run_macos=false
+run_rust=false'
+printf '%s\n' '{}' > "$repo/skills/rules.json"
+git -C "$repo" add .
+git -C "$repo" commit -qm 'structured skill asset'
+head=$(git -C "$repo" rev-parse HEAD)
+result=$(run_selector)
+test "$result" = 'run_macos=false
+run_rust=true'
+
+# An executable never takes the prose path, whatever its name.
+git -C "$repo" checkout -q --detach "$common"
+printf '%s\n' '#!/bin/sh' > "$repo/skills/run.md"
+chmod +x "$repo/skills/run.md"
+git -C "$repo" add .
+git -C "$repo" commit -qm 'executable named as Markdown'
 head=$(git -C "$repo" rev-parse HEAD)
 result=$(run_selector)
 test "$result" = 'run_macos=false

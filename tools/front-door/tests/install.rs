@@ -1609,6 +1609,71 @@ chmod +x "$2/bin/provenant"
 }
 
 #[test]
+fn upgrade_preflight_preserves_old_checkpoint_and_names_the_drain_step() -> Result {
+    let rig = TestRig::new()?;
+    let project = "11111111111111111111111111111111";
+    let directory = rig.state.join(format!("fabric/graphs/{project}"));
+    fs::create_dir_all(&directory)?;
+    for path in [
+        rig.state.join("fabric"),
+        rig.state.join("fabric/graphs"),
+        directory.clone(),
+    ] {
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+    }
+    let checkpoint = include_bytes!("fixtures/install/old-pending-checkpoint.json");
+    // Verify the hand-built old envelope itself, without serialising new graph types.
+    let old: serde_json::Value = serde_json::from_slice(checkpoint)?;
+    let seal = provenant_records::CanonicalV1::record_digest(
+        "fabric-graph-checkpoint",
+        2,
+        &(&old["checkpoint"], &old["execution"]),
+    )?;
+    assert_eq!(old["digest"], seal.to_string());
+    let path = directory.join("graph-old-pending-fixture.json");
+    fs::write(&path, checkpoint)?;
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
+    let result = rig.command(&[
+        "install",
+        "--source",
+        rig.root.to_str().ok_or("fixture source")?,
+        "--upgrade-preflight",
+    ])?;
+    assert_eq!(code(&result), 2, "{result:?}");
+    let output = String::from_utf8(result.stdout.bytes)?;
+    assert!(output.contains(&format!(
+        "Pending graph {project}/old-pending-fixture: finish or cancel it with the previous release before upgrading"
+    )), "{output}");
+    assert_eq!(fs::read(&path)?, checkpoint);
+    // An older installer can ignore the preflight refusal under --yes. The
+    // new binary must still refuse before launching a provider or graph.
+    let launch = rig.command(&["run", "New work", "--json"])?;
+    let refusal: serde_json::Value = serde_json::from_slice(&launch.stdout.bytes)?;
+    assert_eq!(refusal["error"]["code"], "UPGRADE_DRAIN_REQUIRED");
+    assert!(
+        refusal["error"]["message"]
+            .as_str()
+            .ok_or("refusal message")?
+            .contains("previous release")
+    );
+    assert_eq!(fs::read(path)?, checkpoint);
+    let presets = rig.project.join(".provenant/presets");
+    fs::create_dir_all(&presets)?;
+    let preset = presets.join("local.toml");
+    fs::write(&preset, "synthetic preset")?;
+    let result = rig.command(&[
+        "install",
+        "--source",
+        rig.root.to_str().ok_or("fixture source")?,
+        "--upgrade-preflight",
+    ])?;
+    assert!(
+        String::from_utf8(result.stdout.bytes)?.contains(preset.to_str().ok_or("preset path")?)
+    );
+    Ok(())
+}
+
+#[test]
 fn upgrade_requires_a_receipt_before_download_or_build() -> Result {
     let rig = TestRig::new()?.without_state()?;
     let result = rig.command(&["upgrade", "--json"])?;
@@ -1977,6 +2042,111 @@ esac
         assert!(installed_app.join("old-build").exists());
         assert!(!installed_app.join(MENU_EXECUTABLE).exists());
     }
+    // Both entry points inspect the state with the staged release before replacing it.
+    rig.env
+        .push(("PROVENANT_TEST_MISSING_APPS".into(), "1".into()));
+    let project = "11111111111111111111111111111111";
+    let markers = rig.state.join(format!("fabric/graphs/{project}/pending"));
+    fs::create_dir_all(&markers)?;
+    for path in [
+        rig.state.join("fabric"),
+        rig.state.join("fabric/graphs"),
+        rig.state.join(format!("fabric/graphs/{project}")),
+        markers.clone(),
+    ] {
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+    }
+    fs::write(markers.join("complete"), "")?;
+    let old_checkpoint = include_bytes!("fixtures/install/old-pending-checkpoint.json");
+    let checkpoint_path = markers
+        .parent()
+        .ok_or("graph directory")?
+        .join("graph-old-pending-fixture.json");
+    fs::write(&checkpoint_path, old_checkpoint)?;
+    fs::set_permissions(&checkpoint_path, fs::Permissions::from_mode(0o600))?;
+    fs::write(markers.join("old-pending-fixture.pending"), "")?;
+    let db_path = rig.state.join("run.sqlite3");
+    let db = rusqlite::Connection::open(&db_path)?;
+    db.execute_batch("CREATE TABLE attempts (project TEXT, run TEXT, id TEXT, record BLOB, terminal INTEGER); INSERT INTO attempts VALUES ('project-one','run-one','lane-one',X'7b7d',0);")?;
+    drop(db);
+    let child_store = rig.state.join("children/child-one");
+    fs::create_dir_all(&child_store)?;
+    let child_db = rusqlite::Connection::open(child_store.join("run.sqlite3"))?;
+    child_db.execute_batch("CREATE TABLE attempts (project TEXT, run TEXT, id TEXT, record BLOB, terminal INTEGER); INSERT INTO attempts VALUES ('project-two','run-two','child-lane',X'7b7d',0);")?;
+    drop(child_db);
+    let preset = rig.root.join("config/provenant/presets/custom.toml");
+    fs::create_dir_all(preset.parent().ok_or("preset parent")?)?;
+    fs::write(&preset, "name = 'custom'\n")?;
+    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../install.sh");
+    // First cutover calls the new installer directly, without --yes: an older
+    // installed CLI may forward --yes itself and bypass the drain refusal.
+    let direct = rig.execute_os(
+        Path::new("/bin/sh"),
+        &[
+            script.into_os_string(),
+            "--upgrade".into(),
+            "--state-dir".into(),
+            rig.state.clone().into_os_string(),
+            "--tag".into(),
+            "v9.8.7".into(),
+        ],
+        None,
+    )?;
+    assert_eq!(code(&direct), 2, "{direct:?}");
+    assert_eq!(fs::read(&checkpoint_path)?, old_checkpoint);
+    let output = String::from_utf8(direct.stdout.bytes)?;
+    for expected in [
+        "old-pending-fixture",
+        "finish or cancel it with the previous release before upgrading",
+        "lane-one",
+        "child-lane",
+        "custom.toml",
+    ] {
+        assert!(output.contains(expected), "{output}");
+    }
+    let stopped = rig.command(&["upgrade", "--json"])?;
+    let stopped_value: serde_json::Value = serde_json::from_slice(&stopped.stdout.bytes)?;
+    assert_eq!(
+        stopped_value["data"][0]["success"], false,
+        "{stopped_value}"
+    );
+    assert_eq!(stopped_value["data"].as_array().unwrap().len(), 1);
+    for expected in [
+        "old-pending-fixture",
+        "finish or cancel it with the previous release before upgrading",
+        "lane-one",
+        "child-lane",
+        "custom.toml",
+    ] {
+        assert!(
+            stopped_value.to_string().contains(expected),
+            "{stopped_value}"
+        );
+    }
+    let forced = rig.command(&["upgrade", "--yes", "--json"])?;
+    let forced_value: serde_json::Value = serde_json::from_slice(&forced.stdout.bytes)?;
+    assert_eq!(forced_value["data"][0]["success"], true, "{forced_value}");
+    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../install.sh");
+    let direct_forced = rig.execute_os(
+        Path::new("/bin/sh"),
+        &[
+            script.into_os_string(),
+            "--upgrade".into(),
+            "--yes".into(),
+            "--state-dir".into(),
+            rig.state.clone().into_os_string(),
+            "--tag".into(),
+            "v9.8.7".into(),
+        ],
+        None,
+    )?;
+    assert_eq!(code(&direct_forced), 0, "{direct_forced:?}");
+    rig.env
+        .retain(|(key, _)| key != "PROVENANT_TEST_MISSING_APPS");
+    fs::remove_dir_all(rig.state.join("fabric/graphs"))?;
+    fs::remove_dir_all(rig.state.join("children"))?;
+    fs::remove_file(db_path)?;
+    fs::remove_file(preset)?;
     fs::write(&curl_log, "")?;
     let result = rig.command(&["upgrade", "--hosts", "all", "--json"])?;
     let value: serde_json::Value = serde_json::from_slice(&result.stdout.bytes)?;

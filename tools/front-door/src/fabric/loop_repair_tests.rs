@@ -74,6 +74,7 @@ fn loop_round_settlement_retains_lane_owned_noop_worktree() -> Result<(), Box<dy
             lane_depth: 1,
             parent_attempt: None,
             tasks: vec![provenant_run::DispatchTask {
+                    source_head: None,
                 cloud: None,
                 context: Some(provenant_records::run::WorkContext {
                     graph_id: Some("loop-settlement".into()),
@@ -93,7 +94,6 @@ fn loop_round_settlement_retains_lane_owned_noop_worktree() -> Result<(), Box<dy
                     effort: None,
                 },
                 account: None,
-                fallback: vec![],
                 timeout_seconds: 30,
                 delivery_id: None,
                 deliver: None,
@@ -127,7 +127,7 @@ fn loop_round_settlement_retains_lane_owned_noop_worktree() -> Result<(), Box<dy
         directory: fixture.rig.project.clone(),
         document: document.clone(),
     })?;
-    let mut bound = BoundGraphOwner { repo_facts: Default::default(),
+    let mut bound = BoundGraphOwner { launch_warnings: Vec::new(), repo_facts: Default::default(),
         integration_branch: None,
         factory: &factory,
         integration_base: None,
@@ -262,7 +262,7 @@ fn bound_loop_inbox_keeps_original_actor_under_another_client()
         actor: &actor,
         ask: &ask,
     };
-    let mut owner = BoundGraphOwner { repo_facts: Default::default(),
+    let mut owner = BoundGraphOwner { launch_warnings: Vec::new(), repo_facts: Default::default(),
         integration_branch: None,
         factory: &factory,
         integration_base: None,

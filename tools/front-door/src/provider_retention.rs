@@ -1,8 +1,8 @@
-//! GC composition for terminal provider state, including nested run stores.
+//! GC composition for terminal provider state.
 use provenant_core::{ActorId, CancelToken, Clock, ProjectId, Roots};
 use provenant_os::{clock::SystemClock, fs::Directory};
 use provenant_run::{ExecutionContext, ProviderStateGc, ProviderStateIssue, Request, RunStore};
-use std::{ffi::OsStr, path::Path};
+use std::path::Path;
 
 #[cfg(test)]
 pub(crate) fn collect(
@@ -63,7 +63,6 @@ fn collect_retention(
         dry_run,
         temporary_only,
         projects,
-        0,
         None,
         &mut report,
     );
@@ -81,14 +80,10 @@ fn collect_store(
     dry_run: bool,
     temporary_only: bool,
     projects: Option<&[ProjectId]>,
-    depth: usize,
     expected: Option<&Directory>,
     report: &mut ProviderStateGc,
 ) {
     let result = (|| -> Result<(), Box<dyn std::error::Error>> {
-        if depth > 32 {
-            return Err("child store depth limit".into());
-        }
         let directory = match Directory::open_anchor(path) {
             Ok(directory) => directory,
             Err(error) if error.is_not_found() => return Ok(()),
@@ -97,11 +92,11 @@ fn collect_store(
         if let Some(expected) = expected
             && !directory.metadata()?.same_identity(&expected.metadata()?)
         {
-            return Err("child store changed identity".into());
+            return Err("run store changed identity".into());
         }
         let state_root = crate::roots::child(home, assets, path.to_owned())?.state;
         if state_root.as_path() != path {
-            return Err("child store path was redirected".into());
+            return Err("run store path was redirected".into());
         }
         let context = ExecutionContext {
             state_root,
@@ -161,30 +156,6 @@ fn collect_store(
             report.kept.append(&mut collected.kept);
             report.errors.append(&mut collected.errors);
         }
-        let children = match directory.open_verified_directory(OsStr::new("children")) {
-            Ok(children) => children,
-            Err(error) if error.is_not_found() => return Ok(()),
-            Err(error) => return Err(error.into()),
-        };
-        for name in children.entries()? {
-            let name = name?;
-            // Keep the verified descriptor live while its child store is read.
-            let child = children.open_verified_directory(&name)?;
-            collect_store(
-                host,
-                &path.join("children").join(&name),
-                home,
-                assets,
-                days,
-                logs_days,
-                dry_run,
-                temporary_only,
-                projects,
-                depth + 1,
-                Some(&child),
-                report,
-            );
-        }
         Ok(())
     })();
     if let Err(error) = result {
@@ -196,7 +167,7 @@ fn collect_store(
 }
 
 #[cfg(test)]
-pub(crate) fn provider_state_gc_sweeps_children_and_refuses_replaced_roots()
+pub(crate) fn provider_state_gc_sweeps_host_and_refuses_replaced_roots()
 -> Result<(), Box<dyn std::error::Error>> {
     use provenant_core::{AttemptId, OperationId, RootInputs, RunId, TaskId, WallTime};
     use provenant_records::CanonicalV1;
@@ -209,7 +180,7 @@ pub(crate) fn provider_state_gc_sweeps_children_and_refuses_replaced_roots()
     let mut inputs = RootInputs::new(home.clone(), assets.clone());
     inputs.state_dir = Some(base.join("state"));
     let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
-    let child_path = roots.state.as_path().join("children/child");
+    let child_path = roots.state.as_path().to_owned();
     fs::DirBuilder::new()
         .recursive(true)
         .mode(0o700)
@@ -238,8 +209,7 @@ pub(crate) fn provider_state_gc_sweeps_children_and_refuses_replaced_roots()
         request: serde_json::from_value(serde_json::json!({
             "schema_version":1, "concurrency":1, "parent":null, "tasks":[{
                 "task_id": task, "prompt_digest": CanonicalV1::file_digest(b""),
-                "route": {"kind":"model","provider":"codex","model":"codex/fixture"}, "fallback":[],
-                "authority_digest": provenant_core::Digest::from_bytes([0;32]),
+                "route": {"kind":"model","provider":"codex","model":"codex/fixture"}, "authority_digest": provenant_core::Digest::from_bytes([0;32]),
                 "provider_timeout_seconds":20, "delivery_id":null }]
         }))?,
     }, &call)?;
@@ -318,7 +288,7 @@ pub(crate) fn provider_state_gc_sweeps_children_and_refuses_replaced_roots()
     let preview = collect(&roots, &home, &assets, 7, true);
     assert!(preview.errors.is_empty(), "{:?}", preview.errors);
     assert_eq!(preview.expired_events, (events_before.len() - 1) as u64);
-    let reader = RunStore::open_disk_read_only(&context, &call)?.ok_or("child store")?;
+    let reader = RunStore::open_disk_read_only(&context, &call)?.ok_or("run store")?;
     assert_eq!(
         reader.events(0, 64, Some(attempt), &call)?.len(),
         events_before.len()
@@ -336,7 +306,7 @@ pub(crate) fn provider_state_gc_sweeps_children_and_refuses_replaced_roots()
     assert_eq!(report.attempt_tmp[0].bytes, preview.attempt_tmp[0].bytes);
     assert!(!temporary.exists());
     assert!(!candidate.exists());
-    let reader = RunStore::open_disk_read_only(&context, &call)?.ok_or("child store")?;
+    let reader = RunStore::open_disk_read_only(&context, &call)?.ok_or("run store")?;
     assert_eq!(
         reader.run(run, &call)?.run_id,
         run,
@@ -348,7 +318,7 @@ pub(crate) fn provider_state_gc_sweeps_children_and_refuses_replaced_roots()
         "retained runs keep chair associations"
     );
     let retained = reader.events(0, 64, Some(attempt), &call)?;
-    assert_eq!(retained.len(), 1, "child store keeps newest event");
+    assert_eq!(retained.len(), 1, "run store keeps newest event");
     assert_eq!(
         retained[0].sequence,
         events_before.last().ok_or("last event")?.sequence
@@ -376,7 +346,6 @@ pub(crate) fn provider_state_gc_sweeps_children_and_refuses_replaced_roots()
         false,
         false,
         None,
-        1,
         Some(&expected),
         &mut report,
     );

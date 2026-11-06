@@ -383,7 +383,6 @@ pub(super) fn input() -> PreparedRun {
                     effort: Some("high".into()),
                 },
                 account: None,
-                fallback: vec![],
                 authority_digest: Digest::from_bytes([5; 32]),
                 provider_timeout_seconds: 3600,
                 delivery_id: None,
@@ -1305,6 +1304,10 @@ fn older_request_bytes_are_verified_before_decoding() -> TestResult {
         "profile".into(),
         serde_json::to_value(&input.request.tasks[0].profile)?,
     );
+    // The historic request always wrote fallback, including an empty list.
+    // Construct those persisted bytes explicitly: current tasks no longer
+    // execute policy successors, but their old fields must remain readable.
+    task.insert("fallback".into(), serde_json::json!([]));
     assert_eq!(task.len(), 9);
     let mut raw = crate::db::bytes(&value)?;
     let digest = CanonicalV1::record_digest("run-request", 1, &value)?;
@@ -1321,6 +1324,10 @@ fn older_request_bytes_are_verified_before_decoding() -> TestResult {
     )?;
     let decoded = store.request(input.run_id, &call)?;
     assert_eq!(decoded.tasks[0].profile, input.request.tasks[0].profile);
+    assert_eq!(
+        decoded.tasks[0].extra.get("fallback"),
+        Some(&serde_json::json!([]))
+    );
     assert_ne!(decoded.digest()?, digest);
 
     raw[0] ^= 1;
@@ -1797,11 +1804,7 @@ fn read_only_open_treats_missing_store_and_schema_as_empty() -> TestResult {
     assert!(RunStore::open_read_only(&context, &call)?.is_none());
     assert!(!context.state_root.as_path().exists());
 
-    std::fs::create_dir_all(context.state_root.as_path())?;
-    std::fs::set_permissions(
-        context.state_root.as_path(),
-        std::fs::Permissions::from_mode(0o700),
-    )?;
+    provenant_os::fixture::private_state_dir(context.state_root.as_path())?;
     let database = context.state_root.as_path().join("run.sqlite3");
     std::fs::write(&database, [])?;
     std::fs::set_permissions(&database, std::fs::Permissions::from_mode(0o600))?;
@@ -2103,21 +2106,11 @@ fn publication_crashes_preserve_committed_records_and_allow_retry() -> TestResul
         } else {
             assert!(store.attempt(id, &call).is_ok());
         }
-        if phase == "reserved" {
-            // Queued rows exist, but request.json is unsealed: not launchable.
-            assert!(store.queued_runs(&call, QUEUED_RUNS_PAGE_SIZE)?.is_empty());
-        }
         // A replay mints fresh IDs; it must land on the reserved ones.
         let mut replay = self::input();
         replay.run_id = RunId::from_bytes([9; 16]);
         replay.attempts[0].attempt_id = AttemptId::from_bytes([10; 16]);
         assert_eq!(store.create(&replay, &call)?.run_id, input.run_id);
-        if phase == "reserved" {
-            assert_eq!(
-                store.queued_runs(&call, QUEUED_RUNS_PAGE_SIZE)?,
-                vec![input.run_id]
-            );
-        }
         if !phase.starts_with("withdraw-") {
             seal_exit_fixture(&store, &input)?;
         }

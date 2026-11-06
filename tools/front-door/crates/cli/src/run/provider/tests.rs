@@ -373,71 +373,6 @@ fn writer_preparation_missing_pnpm_names_searched_path() -> Result<(), Box<dyn s
     Ok(())
 }
 
-#[test]
-fn nested_result_policy_uses_a_reliable_route_without_broadening_authority()
--> Result<(), Box<dyn std::error::Error>> {
-    use provenant_routing::{
-        Catalogue, Fallback, ModelId, RouteChoice, RouteIntent, RoutingConfig, RoutingContext,
-    };
-    let catalogue = Catalogue::bundled()?;
-    let config = RoutingConfig::default();
-    let model = ModelId::parse("agy/gemini-3.8-flash")?;
-    let route = provenant_routing::resolve(
-        &provenant_routing::RouteRequest {
-            intent: RouteIntent::default(),
-            choice: RouteChoice::Model(model.clone()),
-            effort: None,
-            confidential: false,
-            fallback: Fallback::None,
-        },
-        &RoutingContext {
-            policy_account_hint: None,
-            choice_context: None,
-            catalogue: &catalogue,
-            config: &config,
-            registry: REGISTRY,
-            availability: &[],
-            quota: &[],
-            capacity_cooldowns: &[],
-            accounts: &[],
-            quota_policies: &[],
-            readiness: None,
-            access: &[],
-            now: provenant_core::WallTime::from_micros(0)?,
-            host: "fixture",
-        },
-    )?;
-    let mut input = super::super::tests::trace_run(
-        30,
-        provenant_core::AttemptId::from_bytes([31; 16]),
-        provenant_core::WallTime::from_micros(0)?,
-    )?;
-    let mut task = input.request.tasks.remove(0);
-    task.account = Some("agy-work".into());
-    let policy = config
-        .model_policy
-        .effective(
-            &model,
-            None,
-            provenant_core::WallTime::from_unix_seconds(0).expect("valid policy instant"),
-        )
-        .policy;
-    let fallback = super::nested_policy_fallback(&task, &route, &policy)?;
-    assert!(
-        matches!(fallback.route, run::RequestedRoute::Model { ref model, ref effort, .. } if model == "codex/gpt-6-luna" && effort.as_deref() == Some("high"))
-    );
-    assert_eq!(fallback.authority_digest, task.authority_digest);
-    assert_eq!(fallback.access, task.access);
-    assert!(fallback.account.is_none());
-    task.access.write_roots.push("/fixture/work".into());
-    assert_eq!(
-        super::nested_policy_fallback(&task, &route, &policy)
-            .err()
-            .as_deref(),
-        Some("model policy fallback requires read-only authority")
-    );
-    Ok(())
-}
 use super::*;
 
 #[test]
@@ -456,10 +391,28 @@ fn publishing_is_optional_without_gh_configuration() -> Result<(), Box<dyn std::
     let home = temp.path().canonicalize()?;
     let executable = std::env::current_exe()?.canonicalize()?;
     assert_eq!(
-        publishing_executable(&home, &|_| Ok(executable.clone())),
+        publishing_executable(&home, &|_| Ok(executable.clone()), None),
         None
     );
     assert!(!home.join(".config/gh").exists());
+    assert_eq!(
+        publishing_executable(
+            &home,
+            &|_| Ok(executable.clone()),
+            Some(std::ffi::OsStr::new("fixture-token"))
+        ),
+        Some(executable.clone())
+    );
+    for invalid in ["", "token\n", "token with spaces"] {
+        assert_eq!(
+            publishing_executable(
+                &home,
+                &|_| Ok(executable.clone()),
+                Some(std::ffi::OsStr::new(invalid))
+            ),
+            None
+        );
+    }
     Ok(())
 }
 
@@ -473,15 +426,18 @@ fn publishing_canonicalises_symlinked_gh_and_ignores_missing_tools()
     let gh = home.join("gh");
     std::os::unix::fs::symlink(&executable, &gh)?;
     assert_eq!(
-        publishing_executable(&home, &|_| Ok(gh.clone())),
+        publishing_executable(&home, &|_| Ok(gh.clone()), None),
         Some(executable)
     );
     assert_eq!(
-        publishing_executable(&home, &|_| Err("not installed".into())),
+        publishing_executable(&home, &|_| Err("not installed".into()), None),
         None
     );
     std::fs::remove_file(&gh)?;
-    assert_eq!(publishing_executable(&home, &|_| Ok(gh.clone())), None);
+    assert_eq!(
+        publishing_executable(&home, &|_| Ok(gh.clone()), None),
+        None
+    );
     Ok(())
 }
 
@@ -1217,7 +1173,6 @@ fn launch_prompt_refuses_invalid_input_before_account_resolution()
                 effort: None,
             },
             account: None,
-            fallback: vec![],
             authority_digest: provenant_core::Digest::from_bytes([4; 32]),
             writer: None,
             deliver: None,
@@ -1353,6 +1308,17 @@ fn candidate_leases_skip_busy_providers_and_share_one_deadline()
         provenant_core::WallTime::from_micros(0)?,
         provenant_core::MonoTime::from_micros(0),
     );
+    let immediate = available_provider_leases(
+        temp.path(),
+        &["codex", "cursor"],
+        Some(0),
+        &clock,
+        &provenant_core::CancelToken::new(),
+    )?;
+    assert!(immediate.contains_key("cursor"));
+    assert!(!immediate.contains_key("codex"));
+    assert_eq!(clock.mono_now().as_micros(), 0);
+    drop(immediate);
     let leases = available_provider_leases(
         temp.path(),
         &["codex", "cursor"],
@@ -1365,6 +1331,15 @@ fn candidate_leases_skip_busy_providers_and_share_one_deadline()
     assert_eq!(clock.mono_now().as_micros(), 0);
     drop(leases);
     let _b = provenant_os::provider_fence::acquire(temp.path(), "cursor", LockMode::Exclusive)?;
+    let immediate = available_provider_leases(
+        temp.path(),
+        &["codex", "cursor"],
+        Some(0),
+        &clock,
+        &provenant_core::CancelToken::new(),
+    )?;
+    assert!(immediate.is_empty());
+    assert_eq!(clock.mono_now().as_micros(), 0);
     let leases = available_provider_leases(
         temp.path(),
         &["codex", "cursor"],
@@ -1809,7 +1784,6 @@ fn registry_provider_resolves_prepares_and_reports_quota(
         readiness_dir.join(format!("{adapter_name}.json")),
         serde_json::to_vec(&stale)?,
     )?;
-    assert!(super::super::catalogued(&model, None).is_ok());
     let task = run::TaskRequest {
         cloud: None,
         context: None,
@@ -1830,7 +1804,6 @@ fn registry_provider_resolves_prepares_and_reports_quota(
             effort: None,
         },
         account: Some(account_key.into()),
-        fallback: vec![],
         authority_digest: Digest::from_bytes([4; 32]),
         writer: None,
         deliver: None,
@@ -1864,7 +1837,6 @@ fn registry_provider_resolves_prepares_and_reports_quota(
             }
         },
         None,
-        false,
         None,
     )?;
     assert_eq!(prepared.route.provider.as_deref(), Some(adapter_name));
@@ -2028,7 +2000,6 @@ fn opencode_stale_auth_prepares_with_an_unverified_warning()
             effort: None,
         },
         account: Some("go".into()),
-        fallback: vec![],
         authority_digest: Digest::from_bytes([4; 32]),
         writer: None,
         deliver: None,
@@ -2099,16 +2070,19 @@ fn writer_plan_stages_scratch_in_private_temporary_directory()
     // same process environment that production preparation reads.
     const CHILD: &str = "PROVENANT_TEST_WRITER_TOKEN_CHILD";
     if std::env::var_os(CHILD).is_none() {
-        // A separate test process isolates the fixture token from parallel tests.
-        #[allow(clippy::disallowed_methods)]
-        let status = std::process::Command::new(std::env::current_exe()?)
-            .arg("writer_plan_stages_scratch_in_private_temporary_directory")
-            .env(CHILD, "1")
-            .env("GH_TOKEN", "fixture-host-token")
-            .env_remove("GIT_CONFIG_GLOBAL")
-            .env_remove("XDG_CONFIG_HOME")
-            .status()?;
-        assert!(status.success());
+        // Each auth layout runs the real preparation boundary in an isolated
+        // process; neither depends on another test's host credential state.
+        for layout in ["missing", "symlink", "symlink-xdg"] {
+            #[allow(clippy::disallowed_methods)]
+            let status = std::process::Command::new(std::env::current_exe()?)
+                .arg("writer_plan_stages_scratch_in_private_temporary_directory")
+                .env(CHILD, layout)
+                .env("GH_TOKEN", "fixture-host-token")
+                .env_remove("GIT_CONFIG_GLOBAL")
+                .env_remove("XDG_CONFIG_HOME")
+                .status()?;
+            assert!(status.success(), "GitHub config layout {layout}");
+        }
         return Ok(());
     }
 
@@ -2121,6 +2095,11 @@ fn writer_plan_stages_scratch_in_private_temporary_directory()
     let git_home = base.join("git-home");
     for path in [&home, &state, &project, &assets, &git_home] {
         std::fs::DirBuilder::new().mode(0o700).create(path)?;
+    }
+    if std::env::var_os(CHILD).as_deref() == Some(std::ffi::OsStr::new("symlink-xdg")) {
+        let config = base.join("host-xdg-config");
+        std::fs::create_dir(&config)?;
+        std::os::unix::fs::symlink(config, home.join(".config"))?;
     }
     let executor = SystemExecutor::new(1)?;
     let git = init_fixture_repository(&executor, &project, &git_home)?;
@@ -2219,11 +2198,6 @@ fn writer_plan_stages_scratch_in_private_temporary_directory()
             effort: None,
         },
         account: None,
-        fallback: vec![run::RouteRecord {
-            provider: Some("codex".into()),
-            model: Some("codex/gpt-5.3-codex".into()),
-            ..Default::default()
-        }],
         authority_digest: Digest::from_bytes([4; 32]),
         writer: Some(run::WriterRequest {
             extra: Default::default(),
@@ -2426,7 +2400,6 @@ printf 'agy 1.0.0\n'
                 model: "agy/gemini-3.8-flash".into(),
                 effort: None,
             };
-            request.fallback.clear();
             if !write {
                 request.writer = None;
             }
@@ -2786,7 +2759,6 @@ printf 'agy 1.0.0\n'
                 executable: &codex_runtime,
                 git: &git,
                 state: &state,
-                child_state: &state.join("children"),
                 home: &home,
                 depth: 1,
                 attempt: attempt_id,
@@ -2886,7 +2858,19 @@ printf 'agy 1.0.0\n'
     }
     // Exercise the host project policy through preparation and the actual
     // generated shim, with a fake gh so no GitHub access is needed.
-    std::fs::create_dir_all(home.join(".config/gh"))?;
+    std::fs::create_dir_all(home.join(".config"))?;
+    if std::env::var_os(CHILD)
+        .as_deref()
+        .is_some_and(|layout| layout != "missing")
+    {
+        let gh_config = base.join("host-gh-config");
+        std::fs::create_dir(&gh_config)?;
+        // Token launches must not consult even a malformed host configuration.
+        std::fs::write(gh_config.join("config.yml"), "fixture: [unterminated\n")?;
+        std::os::unix::fs::symlink(gh_config, home.join(".config/gh"))?;
+    } else {
+        assert!(!home.join(".config/gh").exists());
+    }
     let gh = assets.join("gh");
     std::fs::write(&gh, b"#!/bin/sh\nif [ \"$1\" = auth ] && [ \"$2\" = token ]; then exit 1; fi\nprintf 'forwarded\\n'\n")?;
     std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o700))?;
@@ -2901,6 +2885,8 @@ printf 'agy 1.0.0\n'
     std::fs::create_dir_all(dotfiles.join("xdg/git"))?;
     std::fs::write(dotfiles.join("global"), "[fixture]\n global = true\n")?;
     std::fs::write(dotfiles.join("xdg/git/config"), "[fixture]\n xdg = true\n")?;
+    std::fs::write(dotfiles.join("xdg/git/ignore"), "fixture-ignore\n")?;
+    std::fs::write(dotfiles.join("xdg/git/attributes"), "*.fixture text\n")?;
     std::os::unix::fs::symlink(dotfiles.join("global"), home.join(".gitconfig"))?;
     std::os::unix::fs::symlink(dotfiles.join("xdg/git"), home.join(".config/git"))?;
     let publishing_paths = run::LaunchPaths {
@@ -2949,6 +2935,45 @@ printf 'agy 1.0.0\n'
             .any(|(key, value)| key == "GH_TOKEN" && value == "fixture-host-token")
     );
     assert!(!launch.environment.iter().any(|(key, _)| key == "GH_TOKEN"));
+    let gh_config = publishing_paths.temporary.join("candidate-0/gh-config");
+    assert!(gh_config.is_dir());
+    assert!(
+        publishing
+            .environment
+            .iter()
+            .any(|(key, value)| key == "GH_CONFIG_DIR" && value == gh_config.as_os_str())
+    );
+    assert_eq!(std::fs::read_dir(&gh_config)?.count(), 0);
+    let gh_shim = std::fs::read_to_string(publishing_paths.temporary.join("candidate-0/bin/gh"))?;
+    assert!(gh_shim.contains(gh_config.to_str().ok_or("gh config path")?));
+    assert!(
+        !gh_shim.contains(
+            home.join(".config/gh")
+                .to_str()
+                .ok_or("host gh config path")?
+        )
+    );
+    // If gh is installed, exercise its real configuration parser without a
+    // network request. The private directory gives the ordinary default even
+    // when the host config is linked or absent.
+    if let Ok(real_gh) = find_executable("gh") {
+        let argv = [
+            real_gh.into_os_string(),
+            "config".into(),
+            "get".into(),
+            "git_protocol".into(),
+        ];
+        let environment = [
+            ("HOME".into(), home.as_os_str().to_owned()),
+            ("GH_CONFIG_DIR".into(), gh_config.as_os_str().to_owned()),
+            ("GH_TOKEN".into(), "fixture-host-token".into()),
+        ];
+        let mut options = ExecOptions::new(&argv, &project, Duration::from_secs(5));
+        options.env = Some(&environment);
+        let actual = executor.execute(options)?;
+        assert_eq!(actual.termination, Termination::Exit(0));
+        assert_eq!(actual.stdout.bytes, b"https\n");
+    }
     let profile = &publishing
         .confinement
         .as_ref()
@@ -2968,6 +2993,82 @@ printf 'agy 1.0.0\n'
         provenant_confinement::permissions::AnchoredDirectory::open_canonical(
             target.parent().ok_or("config parent")?,
         )?;
+    }
+    // The original spelling really is unsuitable for the launcher's canonical
+    // anchor boundary: a plan containing it would fail before provider launch.
+    assert!(
+        provenant_confinement::permissions::AnchoredDirectory::open_canonical(
+            home.join(".config/git"),
+        )
+        .is_err()
+    );
+    // Follow the launcher's real grant-anchor and compilation boundary. Merely
+    // inspecting the plan misses non-canonical optional XDG file grants.
+    let confinement = publishing
+        .confinement
+        .as_ref()
+        .ok_or("publishing confinement")?;
+    let writer = confinement
+        .writer
+        .as_ref()
+        .map(|writer| (&writer.worktree, &writer.branch));
+    if let (Some((worktree, branch)), AccessMode::WorktreeWrite(authority)) =
+        (writer, &confinement.plan.permissions().mode)
+    {
+        provenant_confinement::permissions::prepare_writer_directories(
+            worktree, branch, authority, &home,
+        )?;
+    }
+    // Run the real canonical-anchor check on every host-config read. The
+    // unrelated built-in /bin grants follow macOS's filesystem layout, so the
+    // complete native anchor/command pass below remains macOS-only.
+    for grant in &confinement.profile.spec.runtime_reads {
+        if grant.path.starts_with(home.join(".config")) || grant.path.starts_with(&dotfiles) {
+            let anchor = match grant.scope {
+                PathScope::Exact => grant.path.parent().ok_or("config anchor")?,
+                PathScope::Subtree => grant.path.as_path(),
+            };
+            provenant_confinement::permissions::AnchoredDirectory::open_canonical(anchor)?;
+        }
+    }
+    let rendered = provenant_confinement::permissions::snapshot::render(
+        confinement.plan.permissions(),
+        &confinement.profile,
+        &home,
+    )?;
+    assert!(!rendered.is_empty());
+    #[cfg(target_os = "macos")]
+    {
+        let directories = provenant_confinement::permissions::required_anchors(
+            confinement.plan.permissions(),
+            &confinement.profile,
+            writer,
+        )
+        .into_iter()
+        .map(provenant_confinement::permissions::AnchoredDirectory::open_canonical)
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+        let anchors = provenant_confinement::permissions::Anchors {
+            home: &home,
+            directories: &directories,
+            worktree: writer,
+        };
+        let compiled = provenant_confinement::permissions::snapshot::compile(
+            confinement.plan.permissions(),
+            &confinement.profile,
+            &anchors,
+        )?;
+        let confined_command = compiled.command(&publishing.argv, &attempt_id)?;
+        assert!(!confined_command.is_empty());
+    }
+    for name in ["ignore", "attributes"] {
+        let expected = dotfiles.join("xdg/git").join(name).canonicalize()?;
+        assert!(
+            profile
+                .spec
+                .runtime_reads
+                .iter()
+                .any(|grant| grant.path == expected)
+        );
     }
     let worktree = &publishing_task
         .writer
@@ -3103,59 +3204,6 @@ printf 'agy 1.0.0\n'
         provenant_os::exec::Termination::Exit(0)
     );
     assert_eq!(allowed.stdout.bytes, b"forwarded\n");
-    // The preferred provider is updating, so preparation must select the
-    // explicit fallback rather than just omit an unrelated busy adapter.
-    let mut fallback_task = task.clone();
-    let fallback_prompt = "Busy preferred provider fallback";
-    fallback_task.prompt_digest =
-        provenant_records::CanonicalV1::file_digest(fallback_prompt.as_bytes());
-    fallback_task.route = run::RequestedRoute::Model {
-        extra: Default::default(),
-        provider: "codex".into(),
-        model: "codex/gpt-5.3-codex".into(),
-        effort: None,
-    };
-    fallback_task.fallback = vec![run::RouteRecord {
-        provider: Some("cursor".into()),
-        model: Some("cursor/gpt-5.3-codex-low".into()),
-        ..Default::default()
-    }];
-    let fallback_paths = run::LaunchPaths {
-        attempt_id: paths.attempt_id,
-        operation_id: paths.operation_id.clone(),
-        task_index: paths.task_index,
-        lane_depth: paths.lane_depth,
-        run_id: paths.run_id,
-        deadline_unix_ms: paths.deadline_unix_ms,
-        scratch: attempt.join("fallback-scratch"),
-        provider_state: attempt.join("fallback-provider-state"),
-        temporary: attempt.join("fallback-tmp"),
-        temporary_alias: None,
-    };
-    for path in [
-        &fallback_paths.scratch,
-        &fallback_paths.provider_state,
-        &fallback_paths.temporary,
-    ] {
-        std::fs::DirBuilder::new().mode(0o700).create(path)?;
-    }
-    let fallback_launch = prepare_with(
-        &registry,
-        &fallback_task,
-        fallback_prompt,
-        &fallback_paths,
-        None,
-        |adapter| {
-            assert_eq!(adapter, "cursor", "busy preferred provider was probed");
-            Ok(executable.clone())
-        },
-        None,
-    )?;
-    assert_eq!(fallback_launch.route.provider.as_deref(), Some("cursor"));
-    assert_eq!(
-        fallback_launch.route.model.as_deref(),
-        Some("cursor/gpt-5.3-codex-low")
-    );
     // A named pool redraws after an adapter disappears during local preparation.
     // The first two lookups establish availability; the third refuses the first
     // selected member, and the next lookup admits the remaining member.
@@ -3170,7 +3218,6 @@ printf 'agy 1.0.0\n'
         name: "redraw-fixture".into(),
         effort: None,
     };
-    redraw_task.fallback.clear();
     let redraw_prompt = "pool redraw fixture";
     redraw_task.prompt_digest =
         provenant_records::CanonicalV1::file_digest(redraw_prompt.as_bytes());
@@ -3179,12 +3226,12 @@ printf 'agy 1.0.0\n'
         provider_state: attempt.join("redraw-provider-state"),
         temporary: attempt.join("redraw-tmp"),
         temporary_alias: None,
-        attempt_id: fallback_paths.attempt_id,
-        operation_id: fallback_paths.operation_id.clone(),
-        task_index: fallback_paths.task_index,
-        lane_depth: fallback_paths.lane_depth,
-        run_id: fallback_paths.run_id,
-        deadline_unix_ms: fallback_paths.deadline_unix_ms,
+        attempt_id: paths.attempt_id,
+        operation_id: paths.operation_id.clone(),
+        task_index: paths.task_index,
+        lane_depth: paths.lane_depth,
+        run_id: paths.run_id,
+        deadline_unix_ms: paths.deadline_unix_ms,
     };
     for path in [
         &redraw_paths.scratch,
@@ -3237,12 +3284,12 @@ printf 'agy 1.0.0\n'
         provider_state: attempt.join("no-redraw-provider-state"),
         temporary: attempt.join("no-redraw-tmp"),
         temporary_alias: None,
-        attempt_id: fallback_paths.attempt_id,
-        operation_id: fallback_paths.operation_id.clone(),
-        task_index: fallback_paths.task_index,
-        lane_depth: fallback_paths.lane_depth,
-        run_id: fallback_paths.run_id,
-        deadline_unix_ms: fallback_paths.deadline_unix_ms,
+        attempt_id: paths.attempt_id,
+        operation_id: paths.operation_id.clone(),
+        task_index: paths.task_index,
+        lane_depth: paths.lane_depth,
+        run_id: paths.run_id,
+        deadline_unix_ms: paths.deadline_unix_ms,
     };
     for path in [
         &no_retry_paths.scratch,
@@ -3296,7 +3343,7 @@ printf 'agy 1.0.0\n'
         provider_state: attempt.join("review-provider-state"),
         temporary: attempt.join("review-tmp"),
         temporary_alias: None,
-        ..fallback_paths
+        ..redraw_paths
     };
     for path in [
         &review_paths.scratch,
@@ -3540,185 +3587,8 @@ printf 'agy 1.0.0\n'
     Ok(())
 }
 
-// Exercise the owner-to-preparation path so the dirty refusal regression also
-// fails when launch forgets to mark an unchanged predecessor HEAD.
-fn prepare_policy_writer_successor(
-    registry: &Registry<'_>,
-    task: &run::TaskRequest,
-    prompt: &str,
-    executable: &Path,
-) -> Result<String, Box<dyn std::error::Error>> {
-    use provenant_core::{ActorId, CancelToken, Clock};
-    use provenant_supervisor::custody::{
-        ExitObservation, PublicationState, Scope, SettlementEvidence,
-    };
-    let clock = provenant_os::clock::SystemClock::new();
-    let cancel = CancelToken::new();
-    let call = run::Request {
-        clock: &clock,
-        cancel: &cancel,
-    };
-    let store = run::RunStore::open(
-        &run::ExecutionContext {
-            state_root: registry.roots.ok_or("roots")?.state.clone(),
-            project_id: registry.project_id.ok_or("project")?,
-            actor_id: ActorId::from_bytes([40; 16]),
-            read_prompts: true,
-        },
-        &call,
-    )?;
-    let mut input = super::super::tests::trace_run(
-        40,
-        provenant_core::AttemptId::from_bytes([39; 16]),
-        clock.wall_now()?,
-    )?;
-    input.request.parent_attempt = None;
-    input.request.tasks = vec![task.clone()];
-    input.request.tasks[0].head = task.source_head.clone();
-    input.request.tasks[0].source_head = None;
-    input.attempts[0].task_id = task.task_id;
-    input.attempts[0].prompt = prompt.into();
-    store.create(&input, &call)?;
-    let old = store.record(input.attempts[0].attempt_id, &call)?;
-    let exit = ExitObservation {
-        publication: PublicationState::Durable,
-        scope: Scope {
-            run: old.run_id,
-            attempt: old.attempt_id,
-            generation: old.generation,
-        },
-        termination: Some(provenant_os::exec::Termination::Exit(0)),
-        never_spawned: false,
-        launch_refusal: None,
-        stop_reason: None,
-        delivered_signals: vec![],
-        reaped: vec![],
-        omitted_reaped: 0,
-        spared: vec![],
-        omitted_spared: 0,
-        cancel_delivered_before_exit: None,
-        warnings: vec![],
-        omitted_warnings: 0,
-        terminal_observed: false,
-        unresolved_cleanup: false,
-        unresolved_pids: vec![],
-        settlement_evidence: SettlementEvidence::DarwinCensusAndCustodyLease,
-        stdout: Default::default(),
-        stderr: Default::default(),
-    };
-    let mut wire = serde_json::to_value(&exit)?;
-    wire.as_object_mut().ok_or("exit")?.remove("publication");
-    wire["schema_version"] = 1.into();
-    let attempt = registry
-        .state_root
-        .ok_or("state")?
-        .join(format!("runs/{}/attempts/{}", old.run_id, old.attempt_id));
-    let directory = provenant_os::fs::Directory::open_anchor(&attempt)?;
-    for (name, value) in [
-        ("process-exit.json", wire),
-        (
-            "writer-terminal.json",
-            serde_json::json!({"schema_version":1,"head":task.head,"protected_paths":[]}),
-        ),
-    ] {
-        directory
-            .atomic_write(
-                name.as_ref(),
-                ".fixture-",
-                &serde_json::to_vec(&value)?,
-                provenant_os::fs::PublishMode::NoReplace,
-            )?
-            .require_durable()?;
-    }
-    store.stage_policy_retry(
-        &old,
-        &run::PolicyRetry {
-            schema_version: 2,
-            cause: run::PolicyCause::Quota,
-            action: run::PolicyAction::Retry,
-            route: old.requested_route.clone(),
-            resume: false,
-            max_attempts: 2,
-            instruction: "Continue".into(),
-            not_before_unix_seconds: None,
-        },
-        &call,
-    )?;
-    store.publish_terminal(
-        old.attempt_id,
-        old.revision,
-        &run::TerminalPublication {
-            terminal_cause: None,
-            terminal_note: None,
-            outcome: run::Outcome::QuotaLimited,
-            finished_at: clock.wall_now()?,
-            started_at: None,
-            provider_ms: None,
-            reason: None,
-            result: "quota",
-            complete: false,
-            redacted: false,
-            resolved_route: None,
-            applied_route: None,
-            observed_route: None,
-            usage: Default::default(),
-            session: None,
-            partial_signals: vec![],
-        },
-        &exit,
-        &call,
-    )?;
-    struct Capture<'a, 'b> {
-        registry: &'a Registry<'b>,
-        executable: &'a Path,
-    }
-    impl run::Providers for Capture<'_, '_> {
-        fn prepare(
-            &self,
-            task: &run::TaskRequest,
-            prompt: &str,
-            paths: &run::LaunchPaths,
-            _: Option<&run::AttemptRecord>,
-        ) -> Result<run::PreparedLaunch, run::PrepareRefusal> {
-            prepare_with(
-                self.registry,
-                task,
-                prompt,
-                paths,
-                None,
-                |_| Ok(self.executable.into()),
-                None,
-            )
-            .map_err(|e| e.to_string().into())
-        }
-        fn decode(
-            &self,
-            _: &run::RouteRecord,
-            _: &[u8],
-            _: &ExitObservation,
-            _: &Path,
-        ) -> Result<run::Decoded, String> {
-            unreachable!()
-        }
-    }
-    let capture = Capture {
-        registry,
-        executable,
-    };
-    let custody = directory.try_lock(
-        std::ffi::OsStr::new(provenant_records::AttemptFile::CustodyLock.name()),
-        provenant_os::fs::LockMode::Exclusive,
-    )?;
-    drop(custody);
-    let started = store.start(input.run_id, &capture, &|_, _| unreachable!(), &call)?;
-    match started.as_slice() {
-        [run::Started::Refused { reason, .. }] => Ok(reason.clone()),
-        _ => Err(format!("expected refusal: {started:?}").into()),
-    }
-}
-
 #[test]
-fn writer_continuation_refuses_and_preserves_uncommitted_edits()
+fn writer_continuation_preserves_and_reports_uncommitted_edits()
 -> Result<(), Box<dyn std::error::Error>> {
     writer_continuation_dirty_brief(true)
 }
@@ -3731,9 +3601,7 @@ fn writer_continuation_with_unchanged_head_reports_dirty_paths()
 
 fn writer_continuation_dirty_brief(committed: bool) -> Result<(), Box<dyn std::error::Error>> {
     use provenant_confinement::{UtilityBudget, UtilityRuntime, worktrees};
-    use provenant_core::{
-        AttemptId, CancelToken, Clock, Digest, OperationId, RunId, TaskId, WaitBudget,
-    };
+    use provenant_core::{CancelToken, Clock, Digest, TaskId, WaitBudget};
     use provenant_os::clock::SystemClock;
     use provenant_os::exec::{ExecOptions, Executor, SystemExecutor, Termination};
     use std::{
@@ -3746,9 +3614,8 @@ fn writer_continuation_dirty_brief(committed: bool) -> Result<(), Box<dyn std::e
     let home = base.join("home");
     let state = base.join("state");
     let project = base.join("repo");
-    let assets = base.join("release");
     let git_home = base.join("git-home");
-    for path in [&home, &state, &project, &assets, &git_home] {
+    for path in [&home, &state, &project, &git_home] {
         std::fs::DirBuilder::new().mode(0o700).create(path)?;
     }
     let executor = SystemExecutor::new(1)?;
@@ -3796,11 +3663,6 @@ fn writer_continuation_dirty_brief(committed: bool) -> Result<(), Box<dyn std::e
         },
         &cancel,
     )?;
-    let executable = assets.join("cursor/bin/agent");
-    std::fs::create_dir_all(executable.parent().ok_or("provider bin")?)?;
-    std::fs::write(&executable, b"#!/bin/sh\nprintf 'fixture-cursor 1.0\\n'\n")?;
-    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700))?;
-
     let worktree = project.join(".worktrees/writer");
     let source_head = run::resolve_git_base(&git, &project, "HEAD")?;
 
@@ -3831,28 +3693,6 @@ fn writer_continuation_dirty_brief(committed: bool) -> Result<(), Box<dyn std::e
         "uncommitted dirty edit",
     )?;
 
-    let run_id = RunId::from_bytes([20; 16]);
-    let attempt_id = AttemptId::from_bytes([21; 16]);
-    let attempt = state.join(format!("runs/{run_id}/attempts/{attempt_id}"));
-    let paths = run::LaunchPaths {
-        attempt_id,
-        operation_id: OperationId::parse("writer-continuation-dirty")?,
-        task_index: 0,
-        lane_depth: 1,
-        run_id,
-        deadline_unix_ms: u64::MAX,
-        scratch: attempt.join("scratch"),
-        provider_state: attempt.join("provider-state"),
-        temporary: attempt.join("tmp"),
-        temporary_alias: None,
-    };
-    for path in [&paths.scratch, &paths.provider_state, &paths.temporary] {
-        std::fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(path)?;
-    }
-
     let prompt = "Fix remaining issues in continuation";
     let task = run::TaskRequest {
         cloud: None,
@@ -3874,7 +3714,6 @@ fn writer_continuation_dirty_brief(committed: bool) -> Result<(), Box<dyn std::e
             effort: None,
         },
         account: None,
-        fallback: vec![],
         authority_digest: Digest::from_bytes([23; 32]),
         writer: Some(run::WriterRequest {
             extra: Default::default(),
@@ -3887,49 +3726,35 @@ fn writer_continuation_dirty_brief(committed: bool) -> Result<(), Box<dyn std::e
         access: Default::default(),
     };
 
-    let registry = Registry {
-        roots: Some(&roots),
-        home: Some(&home),
-        assets: Some(&assets),
-        cwd: Some(&project),
-        state_root: Some(&state),
-        project_id: Some(binding.project_id()),
-        cancel: Some(&cancel),
-        host: None,
-        repo_facts: Default::default(),
-    };
-
-    let reason = prepare_policy_writer_successor(&registry, &task, prompt, &executable)?;
-    assert!(
-        reason.contains("uncommitted predecessor edits: uncommitted_leftover.txt"),
-        "{reason}"
-    );
-    assert!(reason.contains(&source_head), "{reason}");
-    assert!(reason.contains(&predecessor_head), "{reason}");
+    let writer = run::prepare_writer_with_facts(
+        task.writer.as_ref().ok_or("writer request")?,
+        &state,
+        binding.project_id(),
+        &Default::default(),
+    )?;
+    let context = writer_source_context(&writer, &task, &git)?.ok_or("retained paths missing")?;
+    assert!(context.contains("uncommitted_leftover.txt"), "{context}");
     assert_eq!(
         std::fs::read_to_string(worktree.join("uncommitted_leftover.txt"))?,
         "uncommitted dirty edit"
     );
 
-    // If continuation check refuses, uncommitted edits are named in the refusal message
+    // A source mismatch still refuses and names both commits and retained edits.
     let mut bad_task = task.clone();
     bad_task.source_head = Some("0".repeat(40));
-    let error = prepare_with(
-        &registry,
-        &bad_task,
-        prompt,
-        &paths,
-        None,
-        |_| Ok(executable.clone()),
-        None,
-    )
-    .err()
-    .ok_or("mismatched continuation should refuse")?;
+    let error = writer_source_context(&writer, &bad_task, &git)
+        .err()
+        .ok_or("mismatched continuation should refuse")?;
     let error_text = error.to_string();
+    assert!(error_text.contains(&"0".repeat(40)), "{error_text}");
+    assert!(error_text.contains(&predecessor_head), "{error_text}");
     assert!(
         error_text.contains("uncommitted predecessor edits: uncommitted_leftover.txt"),
         "refusal must list uncommitted predecessor edits: {error_text}"
     );
+    let mut moved_task = task.clone();
+    moved_task.head = Some("1".repeat(40));
+    assert!(writer_source_context(&writer, &moved_task, &git).is_err());
 
     // Inject a Git that works for ancestry but refuses status. Exercise both
     // the brief path and the mismatch path: neither may hide missing evidence.
@@ -3942,23 +3767,10 @@ fn writer_continuation_dirty_brief(committed: bool) -> Result<(), Box<dyn std::e
         ),
     )?;
     std::fs::set_permissions(&status_git, std::fs::Permissions::from_mode(0o700))?;
-    let host = run::HostLaunchContext::from_environment(&state, &project, status_git);
-    let failing_registry = Registry {
-        host: Some(&host),
-        ..registry
-    };
     for candidate in [&task, &bad_task] {
-        let error = prepare_with(
-            &failing_registry,
-            candidate,
-            prompt,
-            &paths,
-            None,
-            |_| Ok(executable.clone()),
-            None,
-        )
-        .err()
-        .ok_or("status failure must refuse preparation")?;
+        let error = writer_source_context(&writer, candidate, &status_git)
+            .err()
+            .ok_or("status failure must refuse preparation")?;
         assert!(
             error
                 .to_string()
@@ -4347,7 +4159,7 @@ fn user_sessions_and_pruned_codex_state_remain_resumable() -> Result<(), Box<dyn
                 request: serde_json::from_value(serde_json::json!({
                     "schema_version": 1, "concurrency": 1, "parent": null,
                     "tasks": [{ "task_id": prior.task_id, "prompt_digest": provenant_records::CanonicalV1::file_digest(b""),
-                        "route": prior.requested_route, "fallback": [], "authority_digest": prior.authority_digest,
+                        "route": prior.requested_route, "authority_digest": prior.authority_digest,
                         "provider_timeout_seconds": 20, "delivery_id": null }]
                 }))?,
             };
@@ -4487,7 +4299,6 @@ fn user_sessions_and_pruned_codex_state_remain_resumable() -> Result<(), Box<dyn
                     executable: Path::new("/fixture/provenant/bin/provenant"),
                     git: Path::new("/usr/bin/git"),
                     state: context.state_root.as_path(),
-                    child_state: &base.join("children"),
                     home: &home,
                     depth: 1,
                     attempt: AttemptId::from_bytes([6; 16]),
@@ -5175,7 +4986,6 @@ fn codex_attachment_argv_contains_image_flag() -> Result<(), Box<dyn std::error:
             executable: Path::new("/fixture/provenant/bin/provenant"),
             git: Path::new("/usr/bin/git"),
             state: Path::new("/state"),
-            child_state: Path::new("/state/children"),
             home: Path::new("/home/user"),
             depth: 1,
             attempt: provenant_core::AttemptId::from_bytes([7; 16]),

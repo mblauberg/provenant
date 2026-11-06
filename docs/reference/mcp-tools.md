@@ -452,7 +452,7 @@ Source: `tools/front-door/crates/fabric-mcp/tests/fixtures/all-tool-schemas.json
   "_meta": {
     "io.provenant/schemaVersion": 2
   },
-  "description": "Submit and wait for results, list, inspect, wait for, cancel or resume runs. List returns compact attempts newest first; pass next_after as after to continue. Set detail for full records.",
+  "description": "Run template briefs or graph documents, edit graphs, inspect templates and report status or trace. Documents and patches are JSON objects, never file paths.",
   "inputSchema": {
     "$defs": {
       "AttemptTarget": {
@@ -477,49 +477,12 @@ Source: `tools/front-door/crates/fabric-mcp/tests/fixtures/all-tool-schemas.json
         ],
         "type": "object"
       },
-      "ContextLabel": {
-        "anyOf": [
-          {
-            "maxLength": 256,
-            "type": "string"
-          },
-          {
-            "type": "null"
-          }
-        ]
-      },
       "Id": {
         "pattern": "^[0-9a-f]{32}$",
-        "type": "string"
-      },
-      "OperationId": {
-        "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
         "type": "string"
       }
     },
     "oneOf": [
-      {
-        "additionalProperties": false,
-        "properties": {
-          "detail": {
-            "type": "boolean"
-          },
-          "op": {
-            "const": "cancel"
-          },
-          "operation_id": {
-            "$ref": "#/$defs/OperationId"
-          },
-          "target": {
-            "$ref": "#/$defs/AttemptTarget"
-          }
-        },
-        "required": [
-          "op",
-          "target"
-        ],
-        "type": "object"
-      },
       {
         "additionalProperties": false,
         "properties": {
@@ -550,39 +513,6 @@ Source: `tools/front-door/crates/fabric-mcp/tests/fixtures/all-tool-schemas.json
       {
         "additionalProperties": false,
         "properties": {
-          "expected_generation": {
-            "maximum": 18446744073709551615,
-            "minimum": 0,
-            "type": "integer"
-          },
-          "no_fallback": {
-            "type": "boolean"
-          },
-          "op": {
-            "const": "resume"
-          },
-          "operation_id": {
-            "$ref": "#/$defs/OperationId"
-          },
-          "prompt": {
-            "maxLength": 65536,
-            "type": "string"
-          },
-          "target": {
-            "$ref": "#/$defs/AttemptTarget"
-          }
-        },
-        "required": [
-          "expected_generation",
-          "op",
-          "prompt",
-          "target"
-        ],
-        "type": "object"
-      },
-      {
-        "additionalProperties": false,
-        "properties": {
           "detail": {
             "type": "boolean"
           },
@@ -596,336 +526,6 @@ Source: `tools/front-door/crates/fabric-mcp/tests/fixtures/all-tool-schemas.json
         "required": [
           "op",
           "target"
-        ],
-        "type": "object"
-      },
-      {
-        "additionalProperties": false,
-        "properties": {
-          "concurrency": {
-            "anyOf": [
-              {
-                "maximum": 16,
-                "minimum": 1,
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "detail": {
-            "type": "boolean"
-          },
-          "host": {
-            "anyOf": [
-              {
-                "$ref": "#/$defs/Id"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "knobs": {
-            "items": {
-              "maxLength": 256,
-              "type": "string"
-            },
-            "maxItems": 64,
-            "minItems": 0,
-            "type": "array"
-          },
-          "op": {
-            "const": "submit"
-          },
-          "operation_id": {
-            "$ref": "#/$defs/OperationId"
-          },
-          "tasks": {
-            "items": {
-              "additionalProperties": false,
-              "properties": {
-                "access": {
-                  "enum": [
-                    "read_only",
-                    "worktree_write"
-                  ],
-                  "type": "string"
-                },
-                "account": {
-                  "anyOf": [
-                    {
-                      "maxLength": 64,
-                      "type": "string"
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                },
-                "base": {
-                  "anyOf": [
-                    {
-                      "maxLength": 1024,
-                      "type": "string"
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                },
-                "build_heavy": {
-                  "type": "boolean"
-                },
-                "capabilities": {
-                  "anyOf": [
-                    {
-                      "items": {
-                        "maxLength": 64,
-                        "type": "string"
-                      },
-                      "maxItems": 16,
-                      "minItems": 0,
-                      "type": "array"
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                },
-                "context": {
-                  "anyOf": [
-                    {
-                      "additionalProperties": false,
-                      "properties": {
-                        "experiment_arm": {
-                          "$ref": "#/$defs/ContextLabel"
-                        },
-                        "graph_id": {
-                          "$ref": "#/$defs/ContextLabel"
-                        },
-                        "node_id": {
-                          "$ref": "#/$defs/ContextLabel"
-                        },
-                        "pattern": {
-                          "$ref": "#/$defs/ContextLabel"
-                        },
-                        "preset": {
-                          "$ref": "#/$defs/ContextLabel"
-                        },
-                        "role": {
-                          "$ref": "#/$defs/ContextLabel"
-                        },
-                        "role_digest": {
-                          "$ref": "#/$defs/ContextLabel"
-                        },
-                        "selection_source": {
-                          "$ref": "#/$defs/ContextLabel"
-                        },
-                        "shadow_of": {
-                          "$ref": "#/$defs/ContextLabel"
-                        },
-                        "work_item": {
-                          "$ref": "#/$defs/ContextLabel"
-                        }
-                      },
-                      "required": [],
-                      "type": "object"
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                },
-                "deliver": {
-                  "anyOf": [
-                    {
-                      "additionalProperties": false,
-                      "properties": {
-                        "branch": {
-                          "maxLength": 1024,
-                          "type": "string"
-                        },
-                        "open_pr": {
-                          "type": "boolean"
-                        },
-                        "remote": {
-                          "maxLength": 64,
-                          "type": "string"
-                        }
-                      },
-                      "required": [
-                        "branch",
-                        "remote"
-                      ],
-                      "type": "object"
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                },
-                "delivery_id": {
-                  "anyOf": [
-                    {
-                      "$ref": "#/$defs/Id"
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                },
-                "head": {
-                  "anyOf": [
-                    {
-                      "maxLength": 64,
-                      "type": "string"
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                },
-                "prompt": {
-                  "maxLength": 65536,
-                  "type": "string"
-                },
-                "route": {
-                  "oneOf": [
-                    {
-                      "additionalProperties": false,
-                      "properties": {
-                        "kind": {
-                          "const": "adapter"
-                        },
-                        "name": {
-                          "maxLength": 128,
-                          "type": "string"
-                        },
-                        "provider": {
-                          "maxLength": 128,
-                          "type": "string"
-                        }
-                      },
-                      "required": [
-                        "kind",
-                        "name",
-                        "provider"
-                      ],
-                      "type": "object"
-                    },
-                    {
-                      "additionalProperties": false,
-                      "properties": {
-                        "effort": {
-                          "anyOf": [
-                            {
-                              "maxLength": 128,
-                              "type": "string"
-                            },
-                            {
-                              "type": "null"
-                            }
-                          ]
-                        },
-                        "kind": {
-                          "const": "model"
-                        },
-                        "model": {
-                          "maxLength": 128,
-                          "type": "string"
-                        },
-                        "provider": {
-                          "maxLength": 128,
-                          "type": "string"
-                        }
-                      },
-                      "required": [
-                        "kind",
-                        "model",
-                        "provider"
-                      ],
-                      "type": "object"
-                    },
-                    {
-                      "additionalProperties": false,
-                      "properties": {
-                        "effort": {
-                          "anyOf": [
-                            {
-                              "maxLength": 128,
-                              "type": "string"
-                            },
-                            {
-                              "type": "null"
-                            }
-                          ]
-                        },
-                        "kind": {
-                          "const": "named"
-                        },
-                        "name": {
-                          "maxLength": 128,
-                          "type": "string"
-                        }
-                      },
-                      "required": [
-                        "kind",
-                        "name"
-                      ],
-                      "type": "object"
-                    }
-                  ]
-                },
-                "timeout_seconds": {
-                  "maximum": 14400,
-                  "minimum": 1,
-                  "type": "integer"
-                },
-                "title": {
-                  "anyOf": [
-                    {
-                      "maxLength": 256,
-                      "type": "string"
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                },
-                "worktree": {
-                  "anyOf": [
-                    {
-                      "maxLength": 4096,
-                      "type": "string"
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                }
-              },
-              "required": [
-                "prompt",
-                "route",
-                "timeout_seconds"
-              ],
-              "type": "object"
-            },
-            "maxItems": 64,
-            "minItems": 1,
-            "type": "array"
-          },
-          "wait_seconds": {
-            "maximum": 55,
-            "minimum": 1,
-            "type": "integer"
-          }
-        },
-        "required": [
-          "op",
-          "tasks"
         ],
         "type": "object"
       },
@@ -964,6 +564,256 @@ Source: `tools/front-door/crates/fabric-mcp/tests/fixtures/all-tool-schemas.json
           "op",
           "targets",
           "wait_seconds"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "maxLength": 200,
+            "type": "string"
+          },
+          "op": {
+            "const": "edit"
+          },
+          "patch": {
+            "type": "object"
+          }
+        },
+        "required": [
+          "id",
+          "op",
+          "patch"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "maxLength": 200,
+            "type": "string"
+          },
+          "op": {
+            "const": "output"
+          },
+          "trace": {
+            "const": true
+          }
+        },
+        "required": [
+          "id",
+          "op",
+          "trace"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "brief": {
+            "maxLength": 65536,
+            "type": "string"
+          },
+          "extend": {
+            "items": {
+              "maxLength": 256,
+              "type": "string"
+            },
+            "maxItems": 64,
+            "minItems": 0,
+            "type": "array"
+          },
+          "id": {
+            "maxLength": 200,
+            "type": "string"
+          },
+          "node": {
+            "maxLength": 200,
+            "type": "string"
+          },
+          "op": {
+            "const": "retry"
+          },
+          "wait_seconds": {
+            "maximum": 55,
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "op"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "access": {
+            "enum": [
+              "read_only",
+              "worktree_write"
+            ],
+            "type": "string"
+          },
+          "base": {
+            "maxLength": 1024,
+            "type": "string"
+          },
+          "branch": {
+            "maxLength": 1024,
+            "type": "string"
+          },
+          "brief": {
+            "maxLength": 65536,
+            "type": "string"
+          },
+          "detached": {
+            "type": "boolean"
+          },
+          "document": {
+            "type": "object"
+          },
+          "explain": {
+            "type": "boolean"
+          },
+          "idempotency_key": {
+            "maxLength": 200,
+            "type": "string"
+          },
+          "op": {
+            "const": "run"
+          },
+          "operation_id": {
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+            "type": "string"
+          },
+          "over": {
+            "anyOf": [
+              {
+                "items": {
+                  "maxLength": 1024,
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "maxLength": 128,
+                "type": "string"
+              }
+            ]
+          },
+          "set": {
+            "type": "object"
+          },
+          "tier": {
+            "maxLength": 128,
+            "type": "string"
+          },
+          "use": {
+            "maxLength": 128,
+            "type": "string"
+          },
+          "wait_seconds": {
+            "maximum": 55,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "worktree": {
+            "maxLength": 4096,
+            "type": "string"
+          },
+          "write_scope": {
+            "items": {
+              "maxLength": 4096,
+              "type": "string"
+            },
+            "maxItems": 32,
+            "minItems": 0,
+            "type": "array"
+          }
+        },
+        "required": [
+          "op"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "by": {
+            "enum": [
+              "tier",
+              "template",
+              "node"
+            ],
+            "type": "string"
+          },
+          "id": {
+            "maxLength": 200,
+            "type": "string"
+          },
+          "op": {
+            "const": "status"
+          },
+          "stats": {
+            "type": "boolean"
+          },
+          "wait_seconds": {
+            "maximum": 55,
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "op"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "maxLength": 200,
+            "type": "string"
+          },
+          "op": {
+            "const": "stop"
+          },
+          "reason": {
+            "maxLength": 256,
+            "type": "string"
+          },
+          "wait_seconds": {
+            "maximum": 55,
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "op"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "maxLength": 128,
+            "type": "string"
+          },
+          "op": {
+            "const": "templates"
+          },
+          "templates": {
+            "type": "object"
+          }
+        },
+        "required": [
+          "op"
         ],
         "type": "object"
       }
@@ -1109,6 +959,23 @@ Source: `tools/front-door/crates/fabric-mcp/tests/fixtures/all-tool-schemas.json
         "required": [
           "op",
           "target"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "maxLength": 200,
+            "type": "string"
+          },
+          "op": {
+            "const": "trace"
+          }
+        },
+        "required": [
+          "id",
+          "op"
         ],
         "type": "object"
       }
@@ -1836,112 +1703,6 @@ Source: `tools/front-door/crates/fabric-mcp/tests/fixtures/all-tool-schemas.json
     "type": "object"
   },
   "name": "fabric_lease"
-}
-```
-
-### `fabric_graph`
-
-```json
-{
-  "_meta": {
-    "io.provenant/schemaVersion": 2
-  },
-  "description": "Run, inspect, cancel or resume a checkpointed graph. Run and resume take a project-local document path.",
-  "inputSchema": {
-    "oneOf": [
-      {
-        "additionalProperties": false,
-        "properties": {
-          "id": {
-            "pattern": "^[A-Za-z0-9._-]{1,64}$",
-            "type": "string"
-          },
-          "op": {
-            "const": "cancel"
-          },
-          "reason": {
-            "anyOf": [
-              {
-                "maxLength": 256,
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          }
-        },
-        "required": [
-          "id",
-          "op"
-        ],
-        "type": "object"
-      },
-      {
-        "additionalProperties": false,
-        "properties": {
-          "document": {
-            "maxLength": 4096,
-            "type": "string"
-          },
-          "extend": {
-            "items": {
-              "maxLength": 256,
-              "pattern": "^[^=\\u0000]+=[^\\u0000]+$",
-              "type": "string"
-            },
-            "maxItems": 64,
-            "minItems": 0,
-            "type": "array"
-          },
-          "op": {
-            "const": "resume"
-          }
-        },
-        "required": [
-          "document",
-          "op"
-        ],
-        "type": "object"
-      },
-      {
-        "additionalProperties": false,
-        "properties": {
-          "document": {
-            "maxLength": 4096,
-            "type": "string"
-          },
-          "op": {
-            "const": "run"
-          }
-        },
-        "required": [
-          "document",
-          "op"
-        ],
-        "type": "object"
-      },
-      {
-        "additionalProperties": false,
-        "properties": {
-          "id": {
-            "pattern": "^[A-Za-z0-9._-]{1,64}$",
-            "type": "string"
-          },
-          "op": {
-            "const": "status"
-          }
-        },
-        "required": [
-          "id",
-          "op"
-        ],
-        "type": "object"
-      }
-    ],
-    "type": "object"
-  },
-  "name": "fabric_graph"
 }
 ```
 

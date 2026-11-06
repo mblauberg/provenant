@@ -543,6 +543,11 @@ impl ValidateInput for SubmitInput {
                         MAX_REFERENCE_BYTES,
                     )?;
                     optional_text(task.head.as_deref(), &format!("{path}.head"), 64)?;
+                    optional_text(
+                        task.source_head.as_deref(),
+                        &format!("{path}.source_head"),
+                        64,
+                    )?;
                     optional_text(task.account.as_deref(), &format!("{path}.account"), 64)?;
                     optional_text(
                         task.worktree.as_deref(),

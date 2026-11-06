@@ -1,7 +1,7 @@
 //! CLI-owned grammar with mounted owner subtrees.
 use crate::metadata::CatalogueArg;
 use clap::{Args, Parser, Subcommand, ValueEnum, builder::TypedValueParser};
-use provenant_core::{DeliveryId, GitOid, OperationId, RunId, TaskId};
+use provenant_core::{GitOid, OperationId, RunId, TaskId};
 pub use provenant_records::Harness;
 use std::{ffi::OsString, path::PathBuf, str::FromStr};
 
@@ -19,8 +19,6 @@ pub struct Invocation {
     pub command: Command,
     /// Space-separated subcommand path, such as `quota tick`.
     pub leaf: String,
-    /// Explicit flags that cannot be applied to an automatically selected preset.
-    pub preset_incompatible_flags: Vec<String>,
 }
 #[derive(Debug, Default)]
 pub struct Globals {
@@ -63,13 +61,10 @@ pub enum Command {
         root: u32,
     },
     /// Post a human decision, assumption or question
-    #[command(add = crate::metadata::CoreCommand(4, "provenant ask --file request.json --session SESSION --json"))]
     Ask(crate::inbox::Ask),
     /// List, inspect, close and acknowledge human requests
-    #[command(add = crate::metadata::CoreCommand(5, "provenant inbox --json"))]
     Inbox(Box<crate::inbox::Inbox>),
     /// Answer a request using the revision you saw
-    #[command(add = crate::metadata::CoreCommand(6, "provenant help answer"))]
     Answer(Box<crate::inbox::Answer>),
     /// Register and list provider accounts
     #[command(subcommand)]
@@ -86,7 +81,6 @@ pub enum Command {
     #[command(subcommand)]
     Fabric(crate::fabric::Fabric),
     /// Install the release for chosen harnesses
-    #[command(add = crate::metadata::CoreCommand(7, "provenant install"))]
     Install(Install),
     /// Upgrade the recorded installation on this host and Fabric peers
     Upgrade(Upgrade),
@@ -95,19 +89,17 @@ pub enum Command {
     /// Inspect and edit model routing
     #[command(subcommand)]
     Route(crate::route::Route),
-    /// List and inspect pipeline presets
-    #[command(subcommand)]
-    Preset(Preset),
-    /// Dispatch, wait and read the result
-    #[command(add = crate::metadata::CoreCommand(0, "provenant run --prompt-file brief.md --route senior"))]
-    Run(Box<Dispatch>),
-    /// Dispatch and collect a configured review shape
-    Review(Review),
-    /// Show lanes or wait on lanes, graphs and PRs
+    /// Start work from a template or graph document
+    #[command(add = crate::metadata::CoreCommand(0, "provenant run 'Meet the acceptance criteria' --use task"))]
+    Run(Box<GraphRunArgs>),
+    /// Show graph, node and attempt status
     #[command(add = crate::metadata::CoreCommand(1, "provenant status"))]
     Status(Status),
+    /// Report graph attempt efficiency
+    #[command(hide = true)]
+    Stats(GraphStats),
     /// Merge on green CI and prune the merged worktree
-    #[command(add = crate::metadata::CoreCommand(2, "provenant land 1947 --wait"))]
+    #[command(add = crate::metadata::CoreCommand(8, "provenant land 1947 --wait"))]
     Land {
         /// Pull request numbers in landing order
         #[arg(catalog_u64_range = 1..)]
@@ -134,18 +126,24 @@ pub enum Command {
         #[arg(long)]
         explain: bool,
     },
-    /// Start a provider lane or manifest of lanes
-    Dispatch(Box<Dispatch>),
-    /// List lanes or wait on their state
-    Lanes(Lanes),
-    /// Read a lane attempt's output
+    /// Read graph, node or attempt output
+    #[command(add = crate::metadata::CoreCommand(2, "provenant output ID"))]
     Output(Output),
-    /// Cancel a run, task or attempt
-    Cancel(Cancel),
-    /// Resume an attempt with a new prompt
-    Resume(Resume),
+    /// Stop a graph, node or attempt subtree
+    #[command(name = "stop", add = crate::metadata::CoreCommand(4, "provenant stop ID"))]
+    Stop(Cancel),
+    /// Retry a graph, node or attempt
+    #[command(name = "retry", add = crate::metadata::CoreCommand(5, "provenant retry ID"))]
+    Retry(Resume),
     /// Queue a steering message for a lane when its provider supports control
+    #[command(add = crate::metadata::CoreCommand(3, "provenant steer ID --file message.md"))]
     Steer(crate::inbox::Steer),
+    /// Apply a patch to unstarted graph nodes
+    #[command(add = crate::metadata::CoreCommand(6, "provenant edit ID --file patch.json"))]
+    Edit(Edit),
+    /// List or show templates from all layers
+    #[command(add = crate::metadata::CoreCommand(7, "provenant templates"))]
+    Templates(Templates),
     /// Deliver a settled writer attempt
     #[command(subcommand)]
     Lane(Lane),
@@ -158,7 +156,7 @@ pub enum Command {
     #[command(subcommand)]
     Native(Native),
     /// Show and refresh provider quota
-    #[command(add = crate::metadata::CoreCommand(3, "provenant quota"))]
+    #[command(add = crate::metadata::CoreCommand(9, "provenant quota"))]
     Quota {
         #[command(subcommand)]
         command: Option<crate::quota::Quota>,
@@ -415,21 +413,6 @@ mod viewer_tests {
     use super::*;
 
     #[test]
-    fn dispatch_accepts_skill_location_requirement() {
-        let invocation = RawInvocation::try_parse_from([
-            "provenant",
-            "run",
-            "--require-skill-location",
-            "--prompt-stdin",
-        ])
-        .unwrap();
-        let Command::Run(dispatch) = invocation.command else {
-            panic!("expected run")
-        };
-        assert!(dispatch.require_skill_location);
-    }
-
-    #[test]
     fn viewer_revision_flags_reject_zero() {
         for args in [
             vec![
@@ -561,7 +544,11 @@ pub enum Config {
     Show,
     /// List each editable field with its type, bounds, default, effective
     /// value, source layer and whether a restart is needed.
-    Schema,
+    Schema {
+        /// Include advanced configuration fields
+        #[arg(long)]
+        all: bool,
+    },
     /// Validate a JSON patch of `{"field": value}` (null clears a field) and
     /// commit all of it or none, if the configuration is still at the revision.
     Apply {
@@ -654,133 +641,65 @@ impl Access {
     }
 }
 #[derive(Debug, Args)]
-#[group(id = "dispatch_input", required = true, multiple = false)]
-pub struct DispatchInput {
-    /// Read the prompt from this file
-    #[arg(long)]
-    pub prompt_file: Option<PathBuf>,
-    /// Read the prompt from standard input
-    #[arg(long)]
-    pub prompt_stdin: bool,
-    /// Dispatch the tasks in this manifest file
-    #[arg(long)]
-    pub manifest: Option<PathBuf>,
-}
-#[derive(Debug, Args)]
-#[command(group(clap::ArgGroup::new("writer_target").args(["worktree", "branch", "worktree_branch"])))]
-pub struct Dispatch {
-    /// Placement: local or named cloud target in cloud:NAME form.
-    #[arg(long, conflicts_with = "preset")]
-    pub placement: Option<String>,
-    /// Override the cloud provider.
-    #[arg(long)]
-    pub cloud_provider: Option<String>,
-    /// Override the provider environment ID.
-    #[arg(long)]
-    pub cloud_environment: Option<String>,
-    /// Override the requested cloud model.
-    #[arg(long)]
-    pub cloud_model: Option<String>,
-    /// Override the requested cloud effort.
-    #[arg(long)]
-    pub cloud_effort: Option<String>,
-    /// Override the cloud repository source.
-    #[arg(long)]
-    pub cloud_repository: Option<String>,
-    /// Override the repository branch made available to the cloud job.
-    #[arg(long)]
-    pub cloud_branch: Option<String>,
-    /// Override the cloud job deadline in seconds.
-    #[arg(long)]
-    pub cloud_deadline: Option<u64>,
-    /// Expand and run a named pipeline preset
-    #[arg(long, catalog_requires = "prompt_file")]
-    pub preset: Option<String>,
-    /// Override a preset value (PATH=TOML_VALUE); quote TOML strings; repeatable
-    #[arg(long = "set", catalog_requires = "preset")]
-    pub preset_set: Vec<String>,
-    /// Read preset parameters from a TOML table file; --set overrides it
-    #[arg(long = "params-file", catalog_requires = "preset")]
-    pub preset_params_file: Option<PathBuf>,
-    /// Planner front-end: auto, on or off; the default is [domains.fabric.plan] mode
-    #[arg(long = "plan", catalog_requires = "preset", value_parser = ["auto", "on", "off"])]
-    pub preset_plan: Option<String>,
-    /// Give this preset run a new graph identity, for example to rerun after a cancel
-    #[arg(long, catalog_requires = "preset")]
-    pub fresh: bool,
-    /// Explain roles, limits and the expanded graph without running it
-    #[arg(long)]
-    pub explain: bool,
-    /// Risk tier supplied to preset selection and model-choice preferences
-    #[arg(long)]
-    pub risk_tier: Option<String>,
-    /// Task kind supplied to preset selection and model-choice preferences
-    #[arg(long)]
-    pub task_kind: Option<String>,
-    /// Changed or declared path supplied to automatic preset selection (repeatable)
-    #[arg(long = "path")]
-    pub selection_paths: Vec<String>,
-    /// Require the selected adapter to provide a skill location
-    #[arg(long)]
-    pub require_skill_location: bool,
-    /// Use the build-heavy scheduling priority
-    #[arg(long)]
-    pub build_heavy: bool,
-    #[command(flatten)]
-    pub input: DispatchInput,
-    /// Caller-chosen ID that makes retries idempotent
-    #[arg(long, default_value = "", value_parser = operation_id, hide = true, hide_default_value = true)]
-    pub operation_id: OperationId,
-    /// Short human title for this task
-    #[arg(long, conflicts_with = "manifest")]
-    pub title: Option<String>,
-    /// Fabric task this lane serves
-    #[arg(long)]
-    pub task_id: Option<TaskId>,
-    /// Delivery this lane belongs to
-    #[arg(long)]
-    pub delivery_id: Option<DeliveryId>,
-    /// Host delivery: none, push, integrate:<branch> (local), or pr (origin)
-    #[arg(long)]
-    pub deliver: Option<provenant_records::run::DeliveryMode>,
-    #[command(flatten)]
-    pub route: RouteRequest,
-    /// Pin a registered account (key or label) instead of resolving one
-    #[arg(long)]
-    pub account: Option<String>,
-    #[command(flatten)]
-    pub access: Access,
-    /// Provider timeout in seconds
-    #[arg(long, default_value = "3600", default_value_if("mode", "worktree-write", "10800"), catalog_u64_range = 1..=provenant_core::MAX_LANE_RUNTIME_SECONDS)]
-    pub provider_timeout: u64,
-    /// Manifest lanes or preset graph attempts to run at once (1 to 16)
-    #[arg(long, catalog_u64_range = 1..=16)]
-    pub concurrency: Option<u64>,
-    /// Override an effective harness knob for this dispatch (NAME=VALUE).
-    #[arg(long = "knob")]
-    pub knobs: Vec<String>,
-    /// Configured peer (label or host ID) to run the dispatch on
+pub struct GraphRunArgs {
+    /// Place attempts on this peer name or host ID
     #[arg(long)]
     pub host: Option<String>,
-    /// New writer branch; run creates an owned worktree locally or on --host
-    #[arg(long, catalog_requires_all = ["host", "base"])]
+    /// Use this exact adapter/model instead of a route tier
+    #[arg(long, conflicts_with = "tier")]
+    pub model: Option<String>,
+    /// Override model reasoning effort
+    #[arg(long)]
+    pub effort: Option<String>,
+    /// Account label for routing and quota accounting
+    #[arg(long)]
+    pub account: Option<String>,
+    /// Stable operation identity for replay
+    #[arg(long, hide = true, value_parser = explicit_operation_id)]
+    pub operation_id: Option<OperationId>,
+    /// Brief for the selected template
+    pub brief: Option<String>,
+    /// Select a layered template [default: task]
+    #[arg(long = "use")]
+    pub template: Option<String>,
+    /// Override the template's route tier
+    #[arg(long, visible_alias = "route")]
+    pub tier: Option<String>,
+    /// Access for a plain task; writer targets imply worktree-write
+    #[arg(long, value_parser = ["read-only", "worktree-write"])]
+    pub mode: Option<String>,
+    /// Existing writer worktree
+    #[arg(long, conflicts_with = "branch")]
+    pub worktree: Option<PathBuf>,
+    /// Create an owned writer worktree on this branch
+    #[arg(long, requires = "base")]
     pub branch: Option<String>,
-    /// Create or reuse a clean local writer worktree owned by this lane
-    #[arg(long, conflicts_with_all = ["worktree", "branch", "host", "manifest"])]
-    pub worktree_branch: Option<String>,
-    /// Chair-verified full commit SHA to review (must exist on the executing host)
-    #[arg(long)]
-    pub head: Option<String>,
-    /// Git base for attempt history and a new writer branch
-    #[arg(long)]
+    /// Git base for a new writer branch
+    #[arg(long, requires = "branch")]
     pub base: Option<String>,
-    /// Wait for task or preset graph settlement (seconds, or a duration such as 30m)
-    #[arg(long, catalog_duration())]
+    /// Paths the writer may change, relative to its worktree; repeatable
+    #[arg(long = "write-scope")]
+    pub write_scope: Vec<String>,
+    /// Copy the node over named items, or a resolver such as @review-panel
+    #[arg(long, value_delimiter = ',')]
+    pub over: Vec<String>,
+    /// Bind a template parameter or attempt.FIELD (NAME=TOML_VALUE); repeatable
+    #[arg(long = "set")]
+    pub set: Vec<String>,
+    /// Read a graph document (JSON or TOML), or a plain text brief
+    #[arg(long)]
+    pub file: Option<PathBuf>,
+    /// Let this child outlive parent and graph cancellation (inside a lane only)
+    #[arg(long)]
+    pub detached: bool,
+    /// Explain the compiled graph without starting work
+    #[arg(long)]
+    pub explain: bool,
+    /// Wait for settlement (default 1 hour; use --wait=30m for a duration)
+    #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "1h", catalog_duration())]
     pub wait: Option<u64>,
-    /// Admission timeout before launch (seconds, or a duration such as 10m)
-    #[arg(long, value_parser = duration_seconds)]
-    pub admission_timeout: Option<u64>,
 }
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Target {
     /// Deferred selection when at least one ID is a unique hexadecimal prefix.
@@ -793,6 +712,29 @@ impl FromStr for Target {
     type Err = &'static str;
     fn from_str(text: &str) -> Result<Self, Self::Err> {
         let parts: Vec<_> = text.split('/').collect();
+        // Graph and node names are resolved by the graph owner before lane IDs.
+        if parts.len() <= 2
+            && parts.iter().all(|part| {
+                !part.is_empty()
+                    && part.len() <= 200
+                    && part.bytes().all(|byte| {
+                        byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.')
+                    })
+            })
+            && parts.iter().any(|part| {
+                part.len() < 8
+                    || part.len() > 32
+                    || part.bytes().any(|byte| byte.is_ascii_uppercase())
+                    || !part.bytes().all(|byte| byte.is_ascii_hexdigit())
+            })
+        {
+            return Ok(Self {
+                selection: Some(text.to_owned()),
+                run: None,
+                task: None,
+                attempt: None,
+            });
+        }
         if parts.len() > 3
             || parts.iter().any(|part| {
                 !(8..=32).contains(&part.len())
@@ -805,7 +747,7 @@ impl FromStr for Target {
         }
         if parts.iter().any(|part| part.len() < 32) {
             return Ok(Self {
-                selection: Some(text.to_ascii_lowercase()),
+                selection: Some(text.to_owned()),
                 run: None,
                 task: None,
                 attempt: None,
@@ -1028,7 +970,7 @@ pub enum Part {
     /// The provider's own transcript, tailed in place
     Transcript,
 }
-#[derive(Debug, Args)]
+#[derive(Debug, Clone, Args)]
 pub struct Output {
     /// Attempt ID, RUN/ATTEMPT, HOST/ATTEMPT or RUN/TASK/ATTEMPT; a RUN or RUN/TASK reads its newest settled attempt, and receipt needs exactly one
     pub attempt: Attempt,
@@ -1072,7 +1014,7 @@ pub struct Cancel {
     pub wait: Option<u64>,
 }
 #[derive(Debug, Args)]
-#[group(id = "resume_prompt", required = true, multiple = false)]
+#[group(id = "resume_prompt", multiple = false)]
 pub struct Prompt {
     /// Read the prompt from this file
     #[arg(long)]
@@ -1083,6 +1025,15 @@ pub struct Prompt {
 }
 #[derive(Debug, Args)]
 pub struct Resume {
+    /// Retry only the named node rather than recovering its graph
+    #[arg(long, conflicts_with = "no_fallback")]
+    pub node: Option<String>,
+    /// Replace the target brief
+    #[arg(long, conflicts_with_all = ["prompt_file", "prompt_stdin"])]
+    pub brief: Option<String>,
+    /// Raise a graph limit or budget (KEY=VALUE); may be repeated
+    #[arg(long, value_name = "KEY=VALUE")]
+    pub extend: Vec<String>,
     /// Attempt ID, or RUN/ATTEMPT or RUN/TASK/ATTEMPT
     pub attempt: Attempt,
     /// Caller-chosen ID that makes retries idempotent
@@ -1183,7 +1134,7 @@ pub enum Experiments {
 }
 #[derive(Debug, Args)]
 pub struct ExperimentShow {
-    /// Experiment name from domains.fabric.pipelines.experiment
+    /// Historical experiment name recorded in offline outcomes
     pub id: String,
     #[command(flatten)]
     pub pipeline: PipelineOptions,
@@ -1618,7 +1569,6 @@ mod target_tests {
         assert!(format!("/{attempt}").parse::<Attempt>().is_err());
         for invalid in [
             "",
-            "invalid",
             &format!("{run}//{attempt}"),
             &format!("{run}/{task}/{attempt}/extra"),
         ] {
@@ -1670,7 +1620,25 @@ pub(crate) fn duration_seconds(value: &str) -> Result<u64, &'static str> {
         .ok_or("duration must be 1s to 4h; run `provenant help` for examples")
 }
 #[derive(Debug, Args)]
+pub struct GraphStats {
+    /// Graph ID, node or attempt selector
+    pub id: Option<String>,
+    /// Group efficiency by node, requested tier or template
+    #[arg(long, value_parser = ["node", "tier", "template"], default_value = "template")]
+    pub by: String,
+}
+
+#[derive(Clone, Debug, Args)]
 pub struct Status {
+    /// Stream a bounded attempt inventory page for the session collector.
+    #[arg(long, hide = true, conflicts_with_all = ["stats", "wait", "id", "target", "follow"])]
+    pub session_stream: bool,
+    /// Report attempt efficiency without counting composite aggregates
+    #[arg(long, conflicts_with = "wait")]
+    pub stats: bool,
+    /// Group efficiency by node, requested tier or template
+    #[arg(long, requires = "stats", value_parser = ["node", "tier", "template"], default_value = "template")]
+    pub by: String,
     /// Wait for mixed targets (no value uses domains.wait.timeout_seconds)
     #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "configured", catalog_status_wait(), conflicts_with_all = ["all", "cursor"])]
     pub wait: Option<u64>,
@@ -1702,4 +1670,21 @@ fn parse_landing_tier(value: &str) -> Result<String, String> {
     ))
     .map(|_| value.to_owned())
     .map_err(|_| "expected routine, substantial, crucial or terminal".into())
+}
+
+#[derive(Debug, Args)]
+pub struct Edit {
+    /// Graph ID
+    pub id: String,
+    /// Patch document (JSON or TOML)
+    #[arg(long)]
+    pub file: PathBuf,
+}
+#[derive(Debug, Args)]
+pub struct Templates {
+    /// Template to show; omit to list effective templates
+    pub name: Option<String>,
+    /// Document containing inline templates (JSON or TOML)
+    #[arg(long)]
+    pub file: Option<PathBuf>,
 }

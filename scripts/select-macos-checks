@@ -2,7 +2,7 @@
 set -eu
 
 # set_output MACOS [RUST]: Rust defaults to true so every conservative path
-# keeps the full gate; only the docs-only allowlist below turns it off.
+# keeps the full gate; only the prose allowlist below turns it off.
 set_output() {
   printf 'run_macos=%s\nrun_rust=%s\n' "$1" "${2:-true}" >> "$GITHUB_OUTPUT"
   printf 'Selected run_macos=%s run_rust=%s\n' "$1" "${2:-true}"
@@ -33,13 +33,15 @@ if ! git merge-base "$BASE_SHA" "$HEAD_SHA" >/dev/null 2>&1; then
   exit 0
 fi
 
-changed=$(git diff --name-only "$BASE_SHA...$HEAD_SHA")
+changed=$(git diff --no-renames --name-only "$BASE_SHA...$HEAD_SHA")
 printf 'Changed paths since merge base:\n%s\n' "$changed"
-# Rust jobs may be skipped only when every changed path is prose that no Rust
-# test, build script or embedded asset reads. skills/ and roles/ are embedded by
-# build.rs, and docs/specs and docs/runbooks are read by tests, so they run Rust.
-docs_only='^(docs/(release-notes|adr|evals|telemetry|research)/|docs/(glossary|model-dossier)\.md$)'
-if [ -n "$changed" ] && ! printf '%s\n' "$changed" | grep -Evq "$docs_only"; then
+# Markdown assets still pass harness, reference, writing and documentation checks.
+# Executable or structured skill assets and the native inventory retain Rust
+# and native coverage. Treat renames as deletion plus addition.
+prose_only='^(skills/.*\.md|docs/.*\.md|[^/]+\.md)$'
+# A Markdown name proves nothing about an executable or a symlink.
+not_plain=$(git diff --no-renames --raw "$BASE_SHA...$HEAD_SHA" | awk '$2 != "100644" && $2 != "000000"')
+if [ -n "$changed" ] && [ -z "$not_plain" ] && ! printf '%s\n' "$changed" | grep -Evq "$prose_only" && ! printf '%s\n' "$changed" | grep -qx 'docs/runbooks/ci.md'; then
   set_output false false
   exit 0
 fi

@@ -81,16 +81,6 @@ boundary = "authority"
 reason = "Retained state copying must remain on the anchored filesystem."
 
 [[guard]]
-site = "run/src/launch.rs#child_access_within_impl"
-boundary = "authority"
-reason = "A child cannot exceed its parent access or select another graph source."
-
-[[guard]]
-site = "run/src/launch.rs#child_access_within_impl"
-boundary = "credentials"
-reason = "Child roots may not reach credential stores, including through canonicalised paths."
-
-[[guard]]
 site = "run/src/launch.rs#applied_write_grants"
 boundary = "authority"
 reason = "Applied write grant paths must be representable so continuation and handoff use the selected attempt's actual authority."
@@ -222,11 +212,6 @@ boundary = "authority"
 reason = "If the stored prompt cannot be reopened, its bytes cannot be verified against the authorised task and no substitute prompt is launched."
 
 [[guard]]
-site = "run/src/launch.rs#RunStore::start_inner"
-boundary = "authority"
-reason = "A child attempt must still belong to the validated request and cannot duplicate a child task when the host reads it for launch."
-
-[[guard]]
 site = "cli/src/run/provider/preparation.rs#check_graph_inputs_root"
 boundary = "authority"
 reason = "A graph-bound task may receive only its own node's input directory, without a redirected path."
@@ -262,9 +247,9 @@ boundary = "authority"
 reason = "Provider writes cannot modify the immutable source view supplied to the task."
 
 [[guard]]
-site = "cli/src/run/provider/preparation.rs#prepare_candidates"
+site = "cli/src/run/provider/confinement.rs#writer_source_context"
 boundary = "authority"
-reason = "A writer continuation cannot take over a predecessor's worktree while its edits are uncommitted."
+reason = "A writer continuation requires readable predecessor status and a head descended from its pinned source; retained uncommitted edits are reported in its brief."
 
 [[guard]]
 site = "run/src/launch/hand_off.rs#RunStore::hand_off"
@@ -299,7 +284,7 @@ reason = "A continuation must retain its recorded worktree ownership and cannot 
 [[guard]]
 site = "run/src/launch/hand_off.rs#RunStore::hand_off"
 boundary = "authority"
-reason = "A writer continuation cannot discard uncommitted predecessor edits, and an attempt changed after custody acquisition cannot be handed off."
+reason = "An attempt changed after custody acquisition cannot be handed off."
 
 [[guard]]
 site = "run/src/launch.rs#RunStore::start_inner"
@@ -652,16 +637,6 @@ reason = "Unrepresentable optional build-slot shim configuration leaves the laun
 site = "providers/src/identity.rs#RegisteredAccount::validate_route"
 boundary = "authority"
 reason = "The selected account must match the route it authorises."
-
-[[guard]]
-site = "run/src/launch.rs#RunStore::check_child_attempt_id"
-boundary = "authority"
-reason = "Child attempts must be host-derived members of the validated request."
-
-[[guard]]
-site = "run/src/launch.rs#RunStore::validate_child"
-boundary = "authority"
-reason = "Child parent, depth, attempts and permitted delegation must match host authority."
 
 [[guard]]
 site = "run/src/admission.rs#RunStore::admit"

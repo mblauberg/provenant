@@ -622,11 +622,13 @@ name = "provenant-fabric-runtime"
 version = "1.6.10"
 dependencies = [
  "provenant-config",
+ "provenant-confinement",
  "provenant-core",
  "provenant-fabric-store",
  "provenant-os",
  "provenant-records",
  "provenant-routing",
+ "provenant-sqlite",
  "provenant-test-support",
  "rusqlite",
  "serde",

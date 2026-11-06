@@ -86,10 +86,10 @@ should not depend on judgement:
 - **Records** of every attempt, its output, cost and final state.
 - **Coordination** between sessions through durable messages, tasks and claims.
 
-Preset graphs are the default dispatch: `provenant run --preset NAME` expands a
-bundled or repository preset into a graph. Direct single-lane dispatch is the
-alternative for one bounded job, and hand-written graphs through
-`provenant fabric graph` remain available for a known shape.
+Templates expand into graphs: `provenant run --use NAME` starts a bundled,
+user or repository template. A plain `provenant run BRIEF` uses the `task`
+template for one bounded assignment. `provenant run --file GRAPH` submits a
+hand-written graph; `--explain` inspects it before launch.
 
 ## What you get
 
@@ -160,17 +160,15 @@ Start a read-only lane:
 > This starts a real agent and uses quota on whichever account is chosen.
 
 ```sh
-printf '%s\n' 'Summarise this repository structure in three bullets.' | \
-  provenant run \
-    --prompt-stdin --route junior
+provenant run 'Summarise this repository structure in three bullets.' --tier junior
 provenant status                        # active and recent lanes
 ```
 
-A writer lane gets its own worktree, and the host pushes the verified result:
+A writer lane gets its own worktree:
 
 ```sh
-provenant run --prompt-file BRIEF.md \
-  --route senior --branch fix/example --base origin/main --deliver pr
+provenant run --file BRIEF.md \
+  --tier senior --branch fix/example --base origin/main
 ```
 
 Inside a harness, agents do the same through Fabric MCP tools, so in practice
@@ -257,7 +255,7 @@ involved. Usage counters never log arguments, prompts or results.
 | `provenant telemetry trace` | A timeline of attempts across hosts, for [Perfetto](https://ui.perfetto.dev) |
 | `provenant status` | Active and recent lanes; `--all` and `--json` show full records |
 | `provenant output <attempt>` | A lane's recorded output |
-| `provenant resume <attempt>` | Continue an attempt with a new prompt |
+| `provenant retry <attempt>` | Continue an attempt with a new prompt |
 | `provenant workflow session` | Save, show or hand off a session checkpoint |
 
 Use these to tune your setup with evidence: shift route weights towards models

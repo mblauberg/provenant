@@ -32,6 +32,28 @@ pub fn host_budget(
         .cap_at(now.checked_add(DurationMicros::from_micros(within.as_micros() as u64))?))
 }
 
+/// Relay frame for a lane adding to its own graph. It is not an MCP tool:
+/// the host resolves the parent node from the attempt the relay serves.
+pub const GRAPH_TOOL: &str = "graph";
+
+/// Host handler for graph frames: arguments, cancellation, caller budget.
+pub trait GraphHandler:
+    Fn(Value, &CancelToken, Duration) -> Result<Value, ServiceError> + Sync
+{
+}
+impl<T: Fn(Value, &CancelToken, Duration) -> Result<Value, ServiceError> + Sync> GraphHandler
+    for T
+{
+}
+
+fn no_graph(_: Value, _: &CancelToken, _: Duration) -> Result<Value, ServiceError> {
+    Err(ServiceError::Cli {
+        code: "graph_relay_unavailable".into(),
+        message: "this attempt is not a graph node".into(),
+        data: Value::Null,
+    })
+}
+
 const MAX_BYTES: u64 = 1_048_576;
 const IO_TIMEOUT: Duration = Duration::from_secs(1);
 
@@ -118,6 +140,20 @@ impl HostRelay {
         + Sync
         + 'static,
     ) -> io::Result<Self> {
+        Self::start_with_graph(path, limits, handler, no_graph)
+    }
+
+    /// As [`Self::start`], also serving [`GRAPH_TOOL`] frames, through which
+    /// a lane adds children to the graph it runs in.
+    pub fn start_with_graph(
+        path: PathBuf,
+        limits: provenant_records::Limits,
+        handler: impl Fn(ToolCall, &CancelToken, Duration) -> Result<Value, ServiceError>
+        + Send
+        + Sync
+        + 'static,
+        graph: impl GraphHandler + Send + 'static,
+    ) -> io::Result<Self> {
         let parent = path.parent().ok_or(io::ErrorKind::InvalidInput)?;
         match std::fs::DirBuilder::new().mode(0o700).create(parent) {
             Ok(()) => {}
@@ -150,7 +186,7 @@ impl HostRelay {
         let cancel = relay.cancel.clone();
         relay.thread = Some(thread::Builder::new().name("fabric-relay".into()).spawn(
             move || {
-                serve_connections(limits, &handler, &cancel, |send| {
+                serve_connections(limits, &handler, &graph, &cancel, |send| {
                     while !cancel.is_cancelled() {
                         match listener.accept() {
                             Ok((stream, _)) => {
@@ -185,6 +221,7 @@ impl HostRelay {
 fn serve_connections(
     limits: provenant_records::Limits,
     handler: &(impl Fn(ToolCall, &CancelToken, Duration) -> Result<Value, ServiceError> + Sync),
+    graph: &impl GraphHandler,
     cancel: &CancelToken,
     accept: impl FnOnce(mpsc::SyncSender<UnixStream>),
 ) {
@@ -201,7 +238,7 @@ fn serve_connections(
                     };
                     match received {
                         Ok(mut stream) => {
-                            let _ = serve_one(&mut stream, limits, handler, cancel);
+                            let _ = serve_one_with(&mut stream, limits, handler, graph, cancel);
                         }
                         Err(mpsc::RecvTimeoutError::Timeout) => {}
                         Err(mpsc::RecvTimeoutError::Disconnected) => break,
@@ -321,10 +358,59 @@ fn write_bytes(
     Ok(())
 }
 
+#[cfg(test)]
 pub(crate) fn serve_one(
     stream: &mut UnixStream,
     limits: provenant_records::Limits,
     handler: &impl Fn(ToolCall, &CancelToken, Duration) -> Result<Value, ServiceError>,
+    cancel: &CancelToken,
+) -> io::Result<()> {
+    serve_one_with(stream, limits, handler, &no_graph, cancel)
+}
+
+/// A queued caller must still be present and confirm its remaining budget
+/// before any effect. A timed-out queued call cannot execute.
+fn confirm_budget(
+    stream: &mut UnixStream,
+    deadline: Instant,
+    cancel: &CancelToken,
+) -> io::Result<Duration> {
+    write(stream, &Reply::Ready, deadline, cancel)?;
+    let mut milliseconds = [0; 4];
+    read_bytes(
+        stream,
+        &mut milliseconds,
+        Instant::now() + IO_TIMEOUT,
+        cancel,
+    )?;
+    let milliseconds =
+        u64::from(u32::from_be_bytes(milliseconds)).min(crate::MAX_WAIT_SECONDS * 1000);
+    if milliseconds == 0 {
+        return Err(io::ErrorKind::TimedOut.into());
+    }
+    Ok(Duration::from_millis(milliseconds))
+}
+
+fn reply(result: Result<Value, ServiceError>) -> Reply {
+    match result {
+        Ok(value) => Reply::Ok(value),
+        Err(error) => Reply::Error {
+            code: error.code().into(),
+            detail: error.structured_error(),
+            cause: service_cause(&error),
+            operation_id: match &error {
+                ServiceError::Mutation { operation_id, .. } => Some(operation_id.clone()),
+                _ => None,
+            },
+        },
+    }
+}
+
+pub(crate) fn serve_one_with(
+    stream: &mut UnixStream,
+    limits: provenant_records::Limits,
+    handler: &impl Fn(ToolCall, &CancelToken, Duration) -> Result<Value, ServiceError>,
+    graph: &impl GraphHandler,
     cancel: &CancelToken,
 ) -> io::Result<()> {
     stream.set_nonblocking(true)?;
@@ -332,50 +418,30 @@ pub(crate) fn serve_one(
     let bytes = read(stream, limits.max_bytes, deadline, cancel)?;
     let request: Request = provenant_records::decode(bytes.as_slice(), limits)
         .map_err(|_| io::Error::from(io::ErrorKind::InvalidData))?;
-    let reply = match ToolCall::parse(&request.tool, request.arguments) {
-        Ok(call) => {
-            write(stream, &Reply::Ready, deadline, cancel)?;
-            // A queued caller must still be present and confirm its remaining
-            // budget before any effect. A timed-out queued call cannot execute.
-            let mut milliseconds = [0; 4];
-            read_bytes(
-                stream,
-                &mut milliseconds,
-                Instant::now() + IO_TIMEOUT,
-                cancel,
-            )?;
-            let milliseconds =
-                u64::from(u32::from_be_bytes(milliseconds)).min(crate::MAX_WAIT_SECONDS * 1000);
-            if milliseconds == 0 {
-                return Err(io::ErrorKind::TimedOut.into());
+    let reply = if request.tool == GRAPH_TOOL {
+        let within = confirm_budget(stream, deadline, cancel)?;
+        reply(graph(request.arguments, cancel, within))
+    } else {
+        match ToolCall::parse(&request.tool, request.arguments) {
+            Ok(call) => {
+                let within = confirm_budget(stream, deadline, cancel)?;
+                reply(handler(call, cancel, within))
             }
-            match handler(call, cancel, Duration::from_millis(milliseconds)) {
-                Ok(value) => Reply::Ok(value),
-                Err(error) => Reply::Error {
-                    code: error.code().into(),
-                    detail: error.structured_error(),
-                    cause: service_cause(&error),
-                    operation_id: match &error {
-                        ServiceError::Mutation { operation_id, .. } => Some(operation_id.clone()),
-                        _ => None,
-                    },
-                },
-            }
+            Err(crate::tools::InvalidInput::Validated(error)) => Reply::Error {
+                code: "invalid_input".into(),
+                detail: ServiceError::Invalid(error.clone()).structured_error(),
+                cause: Some(FacadeError::from(
+                    &provenant_fabric_runtime::coordination::CoordinationError::Input(error),
+                )),
+                operation_id: None,
+            },
+            Err(_) => Reply::Error {
+                code: "invalid_input".into(),
+                detail: Value::Null,
+                cause: None,
+                operation_id: None,
+            },
         }
-        Err(crate::tools::InvalidInput::Validated(error)) => Reply::Error {
-            code: "invalid_input".into(),
-            detail: ServiceError::Invalid(error.clone()).structured_error(),
-            cause: Some(FacadeError::from(
-                &provenant_fabric_runtime::coordination::CoordinationError::Input(error),
-            )),
-            operation_id: None,
-        },
-        Err(_) => Reply::Error {
-            code: "invalid_input".into(),
-            detail: Value::Null,
-            cause: None,
-            operation_id: None,
-        },
     };
     let deadline = Instant::now() + IO_TIMEOUT;
     if serde_json::to_vec(&reply)?.len() as u64 > MAX_BYTES {
@@ -403,6 +469,25 @@ pub(crate) fn mutate(
     let mut stream = UnixStream::connect(path).map_err(|_| ServiceError::FabricOwnerUnavailable)?;
     exchange_within(&mut stream, request, cancel, within)
 }
+/// Send a graph frame from a lane: add a child, or mark the caller waiting.
+/// The host answers with a receipt and journals the change before replying.
+pub fn graph(
+    path: &Path,
+    arguments: Value,
+    cancel: &CancelToken,
+    within: Duration,
+) -> Result<Value, ServiceError> {
+    mutate(
+        path,
+        &Request {
+            tool: GRAPH_TOOL.into(),
+            arguments,
+        },
+        cancel,
+        within,
+    )
+}
+
 #[cfg(test)]
 pub(crate) fn exchange(
     stream: &mut UnixStream,
@@ -607,14 +692,173 @@ mod tests {
     }
 
     #[test]
-    fn relay_retains_typed_input_and_io_facts_without_source_text()
+    fn graph_frames_reach_the_graph_handler_with_codes_kept()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let graph_handler = |arguments: Value, _: &CancelToken, within: Duration| {
+            assert!(!within.is_zero());
+            if arguments["id"] == "deep" {
+                return Err(ServiceError::Cli {
+                    code: "child_depth".into(),
+                    message: "limits.child_depth=8".into(),
+                    data: Value::Null,
+                });
+            }
+            let id = arguments["id"].as_str().unwrap_or_default();
+            Ok(serde_json::json!({"node": format!("a--{id}"), "replayed": false}))
+        };
+        let call = |id: &str,
+                    graph_handler: &(
+                         dyn Fn(Value, &CancelToken, Duration) -> Result<Value, ServiceError> + Sync
+                     )| {
+            let (mut client, mut server) = UnixStream::pair()?;
+            thread::scope(|scope| {
+                let serving = scope.spawn(|| {
+                    serve_one_with(
+                        &mut server,
+                        provenant_records::Limits::CONFIG,
+                        &|_, _, _| Err(FacadeError::StateCorrupt.into()),
+                        &|arguments, cancel: &CancelToken, within| {
+                            graph_handler(arguments, cancel, within)
+                        },
+                        &CancelToken::new(),
+                    )
+                });
+                let request = Request {
+                    tool: GRAPH_TOOL.into(),
+                    arguments: serde_json::json!({"op":"add","id":id}),
+                };
+                let result = exchange(&mut client, &request, &CancelToken::new());
+                serving.join().unwrap().unwrap();
+                Ok::<_, io::Error>(result)
+            })
+        };
+        assert_eq!(call("fix", &graph_handler)??["node"], "a--fix");
+        assert_eq!(
+            call("deep", &graph_handler)?.unwrap_err().code(),
+            "child_depth"
+        );
+        // A relay without a graph refuses graph frames before any effect.
+        assert_eq!(
+            call("fix", &no_graph)?.unwrap_err().code(),
+            "graph_relay_unavailable"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn lost_child_add_reply_replays_the_durable_receipt_over_the_relay()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_fabric_runtime::graph::{
+            GraphCheckpoint, GraphDocument, patch, relay, template,
+        };
+        use serde_json::json;
+        let document: GraphDocument = serde_json::from_value(json!({
+            "schema_version":1,"graph_id":"relay-replay","nodes":[{
+                "id":"parent","access":"read_only","prompt":"Work","route":{"alias":"senior"}
+            }]
+        }))?;
+        let checkpoint: GraphCheckpoint = serde_json::from_value(json!({
+            "schema_version":1,"graph_id":"relay-replay","plan_digest":"unused",
+            "nodes":[{"id":"parent","state":"running","worktree":null,"attempts":[]}]
+        }))?;
+        // Only serialised checkpoint bytes cross calls, like reopening the host
+        // journal after an acknowledgement is lost.
+        let stored = Mutex::new(serde_json::to_vec(&checkpoint)?);
+        let handler = |arguments: Value, _: &CancelToken, _: Duration| {
+            let request: relay::ChildRequest =
+                serde_json::from_value(arguments).map_err(|_| FacadeError::StateCorrupt)?;
+            let mut bytes = stored.lock().map_err(|_| FacadeError::StateCorrupt)?;
+            let mut checkpoint: GraphCheckpoint =
+                serde_json::from_slice(&bytes).map_err(|_| FacadeError::StateCorrupt)?;
+            let library = template::TemplateLibrary::bundled();
+            let limits = Default::default();
+            let resolvers = Default::default();
+            let context = patch::PatchContext {
+                library: &library,
+                resolvers: &resolvers,
+                limits: &limits,
+                scan: &|_| Ok(()),
+                journal: None,
+            };
+            let receipt = relay::admit_child(
+                &mut patch::LiveGraph {
+                    document: &document,
+                    checkpoint: &mut checkpoint,
+                },
+                "parent",
+                &request,
+                &context,
+            )
+            .map_err(|error| ServiceError::Cli {
+                code: error.code.into(),
+                message: error.message,
+                data: Value::Null,
+            })?;
+            *bytes = serde_json::to_vec(&checkpoint)?;
+            Ok(serde_json::to_value(receipt)?)
+        };
+        let request = Request {
+            tool: GRAPH_TOOL.into(),
+            arguments: json!({
+                "id":"writer","brief":"Fix parser","writer":true,"idempotency_key":"add-1"
+            }),
+        };
+        let first = {
+            let (mut client, mut server) = UnixStream::pair()?;
+            thread::scope(|scope| -> Result<Value, Box<dyn std::error::Error>> {
+                let serving = scope.spawn(|| {
+                    serve_one_with(
+                        &mut server,
+                        provenant_records::Limits::CONFIG,
+                        &|_, _, _| Err(FacadeError::StateCorrupt.into()),
+                        &handler,
+                        &CancelToken::new(),
+                    )
+                });
+                let receipt = exchange(&mut client, &request, &CancelToken::new())?;
+                serving.join().unwrap()?;
+                Ok(receipt)
+            })?
+        };
+        // The lane did not retain the first acknowledgement and retries the add.
+        let (mut client, mut server) = UnixStream::pair()?;
+        let replay = thread::scope(|scope| -> Result<Value, Box<dyn std::error::Error>> {
+            let serving = scope.spawn(|| {
+                serve_one_with(
+                    &mut server,
+                    provenant_records::Limits::CONFIG,
+                    &|_, _, _| Err(FacadeError::StateCorrupt.into()),
+                    &handler,
+                    &CancelToken::new(),
+                )
+            });
+            let receipt = exchange(&mut client, &request, &CancelToken::new())?;
+            serving.join().unwrap()?;
+            Ok(receipt)
+        })?;
+        assert_eq!(first["replayed"], false);
+        assert_eq!(replay["replayed"], true);
+        assert_eq!(replay["revision"], first["revision"]);
+        assert_eq!(replay["worktree"], ".worktrees/relay-replay-parent--writer");
+        let checkpoint: GraphCheckpoint = serde_json::from_slice(&stored.into_inner().unwrap())?;
+        assert_eq!(
+            checkpoint
+                .nodes
+                .iter()
+                .filter(|node| node.id == "parent--writer")
+                .count(),
+            1
+        );
+        assert_eq!(checkpoint.expansions.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn relay_rejects_invalid_graph_input_and_retains_typed_io_facts()
     -> Result<(), Box<dyn std::error::Error>> {
         let invalid = Request {
             tool: "fabric_run".into(),
-            arguments: serde_json::json!({"op":"submit","tasks":[{
-                "title":"TOKEN_SENTINEL\u{1b}", "prompt":"work",
-                "route":{"kind":"named","name":"utility"}, "timeout_seconds":1
-            }]}),
+            arguments: serde_json::json!({"op":"run", "brief":{"TOKEN_SENTINEL":false}}),
         };
         let (mut client, mut server) = UnixStream::pair()?;
         thread::scope(|scope| {
@@ -629,13 +873,6 @@ mod tests {
             let error = exchange(&mut client, &invalid, &CancelToken::new()).unwrap_err();
             let value = error.structured_error();
             assert_eq!(value["code"], "invalid_input");
-            assert!(value["detail"].as_str().unwrap().contains("tasks[0].title"));
-            assert!(
-                value["detail"]
-                    .as_str()
-                    .unwrap()
-                    .contains("control characters")
-            );
             assert!(!value.to_string().contains("TOKEN_SENTINEL"));
             serving.join().unwrap().unwrap();
         });
@@ -891,6 +1128,7 @@ mod tests {
         serve_connections(
             provenant_records::Limits::CONFIG,
             &handler,
+            &no_graph,
             &cancel,
             |send| {
                 thread::scope(|scope| {

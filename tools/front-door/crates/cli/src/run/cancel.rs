@@ -10,16 +10,44 @@ pub fn cancel(command: Cancel, edge: &Edge<'_>) -> Reply {
 }
 
 pub(super) fn cancel_inner(mut command: Cancel, edge: &Edge<'_>) -> Reply {
+    if crate::fabric::in_lane() {
+        let node = command.target.selection.clone().unwrap_or_else(|| {
+            [
+                command.target.run.map(|id| id.to_string()),
+                command.target.task.map(|id| id.to_string()),
+                command.target.attempt.map(|id| id.to_string()),
+            ]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join("/")
+        });
+        let cancel = CancelToken::new();
+        let result = crate::fabric::graph_relay::from_lane(
+            &provenant_fabric_runtime::graph::relay::RelayOp::Stop { node },
+            &cancel,
+            Duration::from_secs(55),
+        )
+        .map(|value| (value, "Subtree stop requested\n".into()))
+        .map_err(|error| {
+            Fail::new(
+                Status::Refused,
+                ErrorKind::LaneCoordinationRefused,
+                error.to_string(),
+            )
+        });
+        return reply("stop", result);
+    }
     let candidate = match targets::resolve(edge, &command.target, true) {
         Ok(candidate) => candidate,
-        Err(fail) => return reply("cancel", Err(fail)),
+        Err(fail) => return reply("stop", Err(fail)),
     };
     command.target = candidate.target.clone();
     match targets::placement(edge, &candidate.target, true) {
         Ok(Some(placement)) => {
             if crate::fabric::in_lane() {
                 return reply(
-                    "cancel",
+                    "stop",
                     Err(Fail::new(
                         Status::Refused,
                         ErrorKind::LaneCoordinationRefused,
@@ -30,11 +58,11 @@ pub(super) fn cancel_inner(mut command: Cancel, edge: &Edge<'_>) -> Reply {
             return remote::cancel(&command, &placement, edge);
         }
         Ok(None) => {}
-        Err(fail) => return reply("cancel", Err(fail)),
+        Err(fail) => return reply("stop", Err(fail)),
     }
     let mut status = Status::Ok;
     let mut out = reply(
-        "cancel",
+        "stop",
         (|| {
             let clock = SystemClock::new();
             let cancel = CancelToken::new();
@@ -198,14 +226,13 @@ pub(super) fn cancel_inner(mut command: Cancel, edge: &Edge<'_>) -> Reply {
                     .map(|id| session.service().status(id, &call))
                     .collect::<Result<Vec<_>, _>>()?;
                 let waits = session.store.lane_waits(&lanes, &call);
-                let successors = policy_successors(&session, &lanes, &call)?;
-                let (rendered, _) = render_lanes_with_lineage(
+
+                let (rendered, _) = render_lanes(
                     &lanes,
                     &waits,
                     None,
                     session.context.state_root.as_path(),
                     None,
-                    &successors,
                 );
                 data["lanes"] = rendered["lanes"].clone();
             }

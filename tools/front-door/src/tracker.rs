@@ -6,11 +6,7 @@ use provenant_cli::{
 };
 use provenant_records::{CommandResult, Outcome};
 use serde::{Deserialize, Serialize};
-use std::{
-    collections::BTreeMap,
-    path::Path,
-    time::{Duration, Instant},
-};
+use std::{collections::BTreeMap, path::Path, time::Duration};
 
 #[derive(Clone, Deserialize)]
 struct IssueType {
@@ -199,63 +195,6 @@ fn project_root(directory: &Path) -> std::path::PathBuf {
         .unwrap_or_else(|_| directory.to_path_buf())
 }
 
-#[allow(
-    clippy::disallowed_methods,
-    reason = "real-time deadline bounds forge advice"
-)]
-fn advice_fetch(
-    fetches: &mut usize,
-    deadline: Instant,
-    fetch: impl FnOnce(Duration) -> Result<Issue, String>,
-) -> Result<Issue, String> {
-    let remaining = deadline.saturating_duration_since(Instant::now());
-    if *fetches >= 5 || remaining.is_zero() {
-        return Err("advice fetch limit reached".into());
-    }
-    *fetches += 1;
-    fetch(remaining)
-}
-
-/// Report advice immediately before work starts, regardless of lint availability.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "entry advice has a real-time budget"
-)]
-pub(crate) fn advise_then<T>(
-    root: &Path,
-    spec: &str,
-    path: Option<&Path>,
-    out: &mut impl std::io::Write,
-    proceed: impl FnOnce() -> T,
-) -> T {
-    let root = project_root(root);
-    let spec = spec.trim();
-    if spec.is_empty() {
-        return proceed();
-    }
-    let number = spec
-        .trim_start_matches('#')
-        .parse::<u64>()
-        .ok()
-        .filter(|n| *n > 0);
-    let numbers: Vec<_> = number.into_iter().collect();
-    let deadline = Instant::now() + Duration::from_secs(3);
-    let mut fetches = 0;
-    let report = collect(
-        &root,
-        &numbers,
-        if number.is_some() { None } else { path },
-        "task",
-        &mut |n| {
-            advice_fetch(&mut fetches, deadline, |remaining| {
-                issue(&root, n, remaining)
-            })
-        },
-    );
-    let _ = out.write_all(human(&report).as_bytes());
-    proceed()
-}
-
 #[cfg(test)]
 mod tests {
     #[allow(
@@ -319,23 +258,6 @@ mod tests {
     }
 
     #[test]
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "test exercises the real-time deadline"
-    )]
-    fn tracker_advice_bounds_fetches_and_deadline() {
-        let mut count = 0;
-        let deadline = Instant::now() + Duration::from_secs(3);
-        for _ in 0..5 {
-            assert!(advice_fetch(&mut count, deadline, |_| Err("offline".into())).is_err());
-        }
-        assert!(advice_fetch(&mut count, deadline, |_| panic!("over limit")).is_err());
-        let mut count = 0;
-        assert!(advice_fetch(&mut count, Instant::now(), |_| panic!("expired")).is_err());
-        assert_eq!(count, 0);
-    }
-
-    #[test]
     fn tracker_unknown_config_key_preserves_settings() -> Result<(), Box<dyn Error>> {
         let dir = tempfile::tempdir()?;
         std::fs::create_dir(dir.path().join(".provenant"))?;
@@ -347,31 +269,6 @@ mod tests {
         let config = config(dir.path(), &mut warnings);
         assert_eq!(config.acceptance, tracker::Severity::Off);
         assert!(warnings.iter().any(|s| s.contains("extra")));
-        Ok(())
-    }
-
-    #[test]
-    fn tracker_advice_shows_warnings_and_returns_to_caller() -> Result<(), Box<dyn Error>> {
-        let dir = tempfile::tempdir()?;
-        std::fs::write(
-            dir.path().join("issue.md"),
-            "Acceptance: works\nVerify: test\nSee gone.rs#Gone",
-        )?;
-        let mut output = Vec::new();
-        let mut proceeded = false;
-        let result = advise_then(
-            dir.path(),
-            "issue.md",
-            Some(&dir.path().join("issue.md")),
-            &mut output,
-            || {
-                proceeded = true;
-                42
-            },
-        );
-        assert!(String::from_utf8(output)?.contains("gone.rs#Gone"));
-        assert!(proceeded);
-        assert_eq!(result, 42);
         Ok(())
     }
 }

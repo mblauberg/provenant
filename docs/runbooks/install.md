@@ -56,13 +56,41 @@ provenant upgrade
 provenant upgrade --from-source /absolute/path/to/provenant --hosts all
 ```
 
-Drain writer lanes on each host before upgrading: let running providers exit
-and settle before installing the release, then launch new writers afterwards.
-The host does not force-cancel running lanes or retain a legacy object verifier.
-An older interrupted settlement can resume through `provenant reconcile --id RUN`
-when its private object directory remains. A missing private source is refused
-with instructions to recover commits on the host and start a fresh run. See
-[lane Git and import](../specs/run.md#lane-git-and-import).
+Before upgrading, finish or stop pending graphs and let active writers settle
+on every host. Install on all hosts before launching new work. Preserve and
+report unreadable records; never drop them. Check `provenant status`, collect
+`provenant output TARGET` and inspect `provenant output TARGET --trace` before
+using `retry` for unfinished work.
+
+For the graph cutover, finish or cancel every pending graph and drain all live
+lanes before upgrading: there is no state converter. Port user presets by hand
+to templates before using them with the new release. Old child-store directories
+are no longer written; retain them for telemetry ingestion before garbage
+collection decides what can be removed. Upgrade every host together, then test
+a real launch on each host. Report terminal checkpoints that cannot be read;
+keep their records for inspection and use the unreadable-record retirement path
+when appropriate.
+
+The staged release checks each host for pending graphs, live lanes and user
+presets before installation. Resolve the reported findings and rerun the upgrade,
+or pass `--yes` to `provenant upgrade` or `install.sh --upgrade` to proceed
+despite them. A failure to inspect the state stops the upgrade.
+Older installed CLI versions may invoke the installer with `--yes` themselves;
+for the first graph-cutover upgrade, run the new `install.sh --upgrade` without
+`--yes` on each host to see and act on its preflight before proceeding:
+
+```sh
+# Use the new release's installer directly for the first graph cutover.
+sh /absolute/path/to/new-release/install.sh --upgrade
+```
+
+Do not use the already-installed `provenant upgrade` for this first cutover;
+its older wrapper can forward `--yes` and bypass the drain refusal.
+
+The core commands are `run`, `status`, `output`, `steer`, `stop`, `retry`,
+`edit`, `templates`, `land` and `quota`. Use `run --use task` for a
+bounded assignment or `run --use deliver` for implementation through landing;
+see [templates](presets.md). `provenant help --all` lists advanced commands.
 
 Upgrade requires a receipt. It downloads one release tag for this host and all
 registered Fabric peers, or builds the selected source checkout on every host.

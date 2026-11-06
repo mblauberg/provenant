@@ -1,23 +1,22 @@
-//! Run's composition edge: `dispatch`, `lanes`, `output`, `cancel`, `resume`,
+//! Attempt execution and retained lane observations: `status`, `output`,
 //! `reconcile` and `telemetry stats`, and the provider seam that the
 //! same-binary guardian holder shares.
 use crate::{
-    Cancel, Condition, Dispatch, Lanes, Mode, Output, Part, PricesRefresh, Reconcile, Resume,
-    Stats, Switch, Target, Trace, limits,
+    Cancel, Condition, Lanes, Output, Part, PricesRefresh, Reconcile, Resume, Stats, Switch,
+    Target, Trace, limits,
 };
 use provenant_core::{
-    ActorId, AttemptId, CancelToken, Clock, DeliveryId, DurationMicros, OperationId, Roots, RunId,
-    TaskId, WallTime,
+    ActorId, AttemptId, CancelToken, Clock, DeliveryId, OperationId, Roots, RunId, TaskId, WallTime,
 };
 use provenant_fabric_runtime::hosts::plain_text;
 use provenant_os::{clock::SystemClock, fs::entropy_128};
 use provenant_providers::{OutcomeStatus, ProviderEvent, REGISTRY};
 use provenant_records::{CanonicalV1, CommandError, CommandResult, Outcome as Status};
-use provenant_routing::{BoundedModels, Fallback, ModelId, RouteChoice, RouteName};
+use provenant_routing::{Fallback, ModelId, RouteChoice, RouteName};
 use provenant_run as run;
 use provenant_supervisor::custody::ExitObservation;
 use run::ErrorKind;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::{Value, json};
 use std::{
     collections::BTreeMap,
@@ -26,12 +25,11 @@ use std::{
     time::{Duration, Instant},
 };
 
-mod assess;
 mod cancel;
-mod children;
 pub mod cloud_owner;
 pub mod cloud_store;
-mod dispatch;
+mod holder;
+mod launch;
 mod output;
 mod provider;
 mod reconcile;
@@ -44,10 +42,9 @@ mod telemetry;
 mod wait;
 mod watch;
 mod worktree;
-use assess::*;
 pub use cancel::*;
-pub use children::HostHolder;
-pub use dispatch::*;
+pub use holder::HostHolder;
+pub use launch::*;
 pub use output::*;
 pub(crate) use provider::find_executable as provider_executable;
 #[cfg(feature = "fixture")]
@@ -180,9 +177,25 @@ fn reply_waited(command: &str, outcome: Result<(Value, String, bool), Fail>) -> 
     } else if expired {
         out.result.status = Status::Timeout;
     }
-    dispatch::apply_launch_policy(&mut out);
+    apply_launch_policy(&mut out);
     out
 }
+/// Preserve the launch receipt while projecting a typed launch refusal.
+fn apply_launch_policy(out: &mut Reply) {
+    if out.result.error.is_none()
+        && let Some(started) = out.result.data.get("started")
+        && let Ok(started) = serde_json::from_value::<Vec<run::Started>>(started.clone())
+        && let Err(failure) = check_launch_policy(&started)
+    {
+        out.result.status = failure.status;
+        out.result.error = Some(command_error(&failure));
+    }
+}
+
+pub fn read_only_checkout_warning(state: &Path, source: &Path) -> Option<String> {
+    provider::confinement::read_only_checkout_warning(state, source)
+}
+
 fn reply(command: &str, outcome: Result<(Value, String), Fail>) -> Reply {
     match outcome {
         Ok((data, human)) => Reply {
@@ -292,6 +305,14 @@ impl Registry<'_> {
         Ok(())
     }
 }
+const CAPACITY: &str = "provider capacity";
+
+fn capacity_reason(reason: &str) -> bool {
+    reason
+        .strip_prefix(CAPACITY)
+        .is_some_and(|rest| rest.starts_with(": "))
+}
+
 fn writer_gc_settings(state: &Path) -> provenant_config::GcSettings {
     provenant_config::GcSettings::read(state).unwrap_or_else(|error| {
         use std::io::Write;
@@ -366,113 +387,6 @@ impl run::Providers for Registry<'_> {
             .get(provider)?
             .runtime_deadline_seconds
     }
-    fn assess_result(
-        &self,
-        task: &run::TaskRequest,
-        record: &run::AttemptRecord,
-        decoded: &run::Decoded,
-        handoff: Option<&provenant_records::handoff::Handoff>,
-        context: Option<&run::HolderContext>,
-        policy_attempt: u64,
-    ) -> Result<run::ResultAssessment, String> {
-        let Some(route) = record.applied_route.as_ref() else {
-            return Ok(Default::default());
-        };
-        let Some(model) = route.model.as_deref() else {
-            return Ok(Default::default());
-        };
-        let model = ModelId::parse(model).map_err(|error| error.to_string())?;
-        let context_roots = context
-            .map(|context| {
-                let mut inputs = provenant_core::RootInputs::new(
-                    context.roots.home.clone(),
-                    context.roots.checkout.clone(),
-                );
-                inputs.state_dir = Some(context.disk_roots().0.to_owned());
-                inputs
-                    .resolve(&provenant_os::fs::SystemPathResolver)
-                    .map_err(|error| error.to_string())
-            })
-            .transpose()?;
-        let routing = match context_roots.as_ref().or(self.roots) {
-            Some(roots) => {
-                provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)
-                    .map_err(|error| error.to_string())?
-                    .domains
-                    .routing
-            }
-            None => Default::default(),
-        };
-        let now = SystemClock::new()
-            .wall_now()
-            .map_err(|error| error.to_string())?;
-        let policy = routing
-            .model_policy
-            .effective(&model, route.account_key.as_deref(), now)
-            .policy;
-        let mut assessment =
-            assess_model_result(&policy, task, record, decoded, handoff, policy_attempt)?;
-        if route.extra.contains_key("host_native") {
-            // The host row is fresh-only. Provider-level policy retries would
-            // reconstruct a model route and lose its agent and provenance.
-            assessment.retry = None;
-            return Ok(assessment);
-        }
-        if assessment.refusal.is_some() || assessment.retry.is_some() {
-            return Ok(assessment);
-        }
-        // A quota-stopped writer with a recorded unfinished handoff may
-        // continue its retained worktree on another eligible account.
-        let quota_handoff_recovery =
-            if quota_handoff_recovery_eligible(decoded.outcome, task, handoff) {
-                if let (Some(roots), Some(adapter), Some(key)) = (
-                    context_roots.as_ref().or(self.roots),
-                    route.provider.as_deref(),
-                    route.account_key.as_deref(),
-                ) {
-                    let config =
-                        provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)
-                            .map_err(|error| error.to_string())?;
-                    let accounts = config.domains.accounts.with_derived_accounts();
-                    let quota =
-                        crate::quota::read_cache_at(roots.state.as_path()).unwrap_or_default();
-                    let (quota, policies) = crate::route::account_evidence(
-                        &config.domains.quota,
-                        quota,
-                        now.unix_seconds(),
-                        REGISTRY,
-                    );
-                    let catalogue = provenant_routing::Catalogue::bundled()
-                        .map_err(|error| error.to_string())?;
-                    unspent_alternative(
-                        accounts
-                            .entries
-                            .values()
-                            .filter(|entry| entry.adapter == adapter)
-                            .map(|entry| entry.key.as_str()),
-                        &quota,
-                        &policies,
-                        key,
-                        &model,
-                        &catalogue,
-                        now.unix_seconds(),
-                    )
-                } else {
-                    false
-                }
-            } else {
-                false
-            };
-        Ok(assess_settlement_retry(
-            &routing,
-            task,
-            record,
-            decoded,
-            policy_attempt,
-            now.unix_seconds(),
-            quota_handoff_recovery,
-        ))
-    }
     fn priority(&self, task: &run::TaskRequest) -> Result<u8, String> {
         let roots = self.roots.ok_or("routing context is unavailable")?;
         let priority = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)
@@ -481,7 +395,10 @@ impl run::Providers for Registry<'_> {
             .fabric
             .lanes
             .priority;
-        Ok(priority.for_lane(task.writer.is_some(), task.build_heavy))
+        Ok(priority.for_lane(
+            run::Service::has_writes(task.writer.is_some(), &task.access.write_roots),
+            task.build_heavy,
+        ))
     }
     fn check_policy(&self, task: &run::TaskRequest) -> Result<(), run::PrepareRefusal> {
         let Some(writer) = &task.writer else {
@@ -530,7 +447,7 @@ impl run::Providers for Registry<'_> {
         // identity lookup has no `.local/share` fallback and decodes capture
         // nothing when the launch environment unset `XDG_DATA_HOME`.
         let holder_home = Some(context.roots.home.as_path());
-        // A child store must never write host capacity evidence.
+        // Only the configured host store may write shared capacity evidence.
         if configuration_root != context.roots.state_root {
             return Registry {
                 home: holder_home,
@@ -936,8 +853,7 @@ impl Registry<'_> {
                 free_pool: pool.as_deref() == Some("opencode-free"),
             };
             // Routing reads the shared quota store, which a lane can neither
-            // read nor write: a nested refusal stays in the attempt reason
-            // rather than landing in a child store nothing routes from. A
+            // read nor write: a lane refusal stays in the attempt reason. A
             // refusal without a pool holds only this model on a known account.
             let lane = std::env::var_os(provenant_core::RUN_STATE_DIRECTORY_ENV).is_some();
             if !lane && (pool.is_some() || route.account_key.is_some()) {
@@ -1062,19 +978,6 @@ fn route_request(task: &run::TaskRequest) -> Result<provenant_routing::RouteRequ
             effort.clone(),
         ),
     };
-    let fallback = if task.fallback.is_empty() {
-        Fallback::None
-    } else {
-        Fallback::Models(
-            BoundedModels::new(
-                task.fallback
-                    .iter()
-                    .map(|r| model(r.model.as_deref().unwrap_or_default()))
-                    .collect::<Result<_, _>>()?,
-            )
-            .map_err(|error| error.to_string())?,
-        )
-    };
     Ok(provenant_routing::RouteRequest {
         intent: provenant_routing::RouteIntent {
             writes: run::Service::has_writes(task.writer.is_some(), &task.access.write_roots),
@@ -1099,8 +1002,13 @@ fn route_request(task: &run::TaskRequest) -> Result<provenant_routing::RouteRequ
         },
         choice,
         effort,
-        fallback,
-        confidential: false,
+        fallback: Fallback::None,
+        confidential: task
+            .profile
+            .extra
+            .get("confidential")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
     })
 }
 
@@ -1117,40 +1025,12 @@ impl Session {
 fn request<'a>(clock: &'a SystemClock, cancel: &'a CancelToken) -> Result<run::Request<'a>, Fail> {
     Ok(run::Request { clock, cancel })
 }
-/// Shared Fabric identity/config, isolated Run custody for a lane's children.
-pub fn execution_state(
-    roots: &Roots,
-    home: &Path,
-    assets: &Path,
-) -> Result<provenant_core::StateRoot, Fail> {
-    let Some(path) = std::env::var_os(provenant_core::RUN_STATE_DIRECTORY_ENV) else {
-        return Ok(roots.state.clone());
-    };
-    let mut inputs = provenant_core::RootInputs::new(home.into(), assets.into());
-    inputs.state_dir = Some(path.into());
-    let state = inputs
-        .resolve(&provenant_os::fs::SystemPathResolver)
-        .map_err(|error| Fail::new(Status::Refused, ErrorKind::LaneContext, error.to_string()))?
-        .state;
-    if !state
-        .as_path()
-        .starts_with(roots.state.as_path().join("children"))
-    {
-        return Err(Fail::new(
-            Status::Refused,
-            ErrorKind::LaneContext,
-            "child Run store is outside the lane namespace",
-        ));
-    }
-    Ok(state)
-}
-
 fn execution_context(edge: &Edge<'_>) -> Result<run::ExecutionContext, Fail> {
     let (roots, project_id, actor_id) =
         crate::fabric::identity(edge.roots.clone(), edge.home, edge.cwd)
             .map_err(|error| Fail::new(Status::Error, ErrorKind::Identity, error.to_string()))?;
     Ok(run::ExecutionContext {
-        state_root: execution_state(&roots, edge.home, edge.assets)?,
+        state_root: roots.state.clone(),
         project_id,
         actor_id,
         read_prompts: true,

@@ -160,7 +160,24 @@ impl crate::LaunchSpec {
         };
         let git_path = text(git)?;
         let gh_path = text(gh)?;
-        let gh_config = shell_quote(&text(&home.join(".config/gh"))?);
+        // A host-resolved token needs no persisted gh login. Give gh its own
+        // empty configuration directory so linked or unreadable host dotfiles
+        // cannot prevent a token-authenticated publishing command.
+        let gh_config_root = if self
+            .env
+            .iter()
+            .any(|(key, value)| key == "GH_TOKEN" && !value.is_empty())
+        {
+            let root = scratch.join("gh-config");
+            self.setup.push(SetupStep::CreateDir(root.clone()));
+            self.env.retain(|(key, _)| key != "GH_CONFIG_DIR");
+            self.env
+                .push(("GH_CONFIG_DIR".into(), root.as_os_str().to_owned()));
+            root
+        } else {
+            home.join(".config/gh")
+        };
+        let gh_config = shell_quote(&text(&gh_config_root)?);
         let gh = format!("GH_CONFIG_DIR={gh_config} {}", shell_quote(&gh_path));
         let config = scratch.join("publishing.gitconfig");
         let config_text = format!(
@@ -524,8 +541,6 @@ pub struct LaneRuntime<'a> {
     /// Canonical host-selected Git, also pinned in MCP and hook environments.
     pub git: &'a Path,
     pub state: &'a Path,
-    /// Isolated Run store for this attempt's children; never its own custody.
-    pub child_state: &'a Path,
     pub home: &'a Path,
     pub depth: u64,
     pub attempt: AttemptId,
@@ -551,7 +566,6 @@ impl LaneRuntime<'_> {
             self.git,
             self.state,
             self.assets,
-            self.child_state,
             self.home,
         ]
         .iter()
@@ -565,7 +579,7 @@ impl LaneRuntime<'_> {
             "PROVENANT_AGENT_LABEL": format!("lane-{}", self.attempt),
             "PROVENANT_LANE_DEPTH": self.depth.to_string(),
             "PROVENANT_PARENT_ATTEMPT_ID": self.attempt.to_string(),
-            RUN_STATE_DIRECTORY_ENV: self.child_state,
+            RUN_STATE_DIRECTORY_ENV: self.state,
             STATE_DIRECTORY_ENV: self.state,
             "HOME": self.home,
             "PROVENANT_ROOT": self.assets,
@@ -710,7 +724,7 @@ impl LaneRuntime<'_> {
                 "PROVENANT_PARENT_ATTEMPT_ID".into(),
                 self.attempt.to_string().into(),
             ),
-            (RUN_STATE_DIRECTORY_ENV.into(), self.child_state.into()),
+            (RUN_STATE_DIRECTORY_ENV.into(), self.state.into()),
         ]);
         Ok(())
     }
@@ -736,10 +750,6 @@ impl LaneRuntime<'_> {
         profile
             .runtime_reads
             .push(subtree(self.state.join("projects")));
-        // Run databases and custody are private to child_state. Explicit exact
-        // reads include WAL companions; never grant the Fabric directory.
-        setup.push(SetupStep::CreateDir(self.child_state.to_owned()));
-        profile.state_writes.push(subtree(self.child_state));
         for name in [
             "fabric/fabric.sqlite3",
             "fabric/fabric.sqlite3-wal",
@@ -2383,14 +2393,17 @@ mod tests {
         let bad = PathBuf::from(OsString::from_vec(b"/fixture/\xff".to_vec()));
         let lane = LaneRuntime {
             executable: Path::new("/fixture/provenant"),
-            git: Path::new("/fixture/git"),
+            git: &bad,
             state: Path::new("/fixture/state"),
-            child_state: &bad,
             home: Path::new("/fixture/home"),
             depth: 1,
             attempt: AttemptId::from_bytes([1; 16]),
             assets: Path::new("/fixture/assets"),
         };
+        assert!(matches!(
+            lane.mcp(Harness::Codex),
+            Err(ProviderError::InvalidPath)
+        ));
         let mut codex = Vec::new();
         lane.codex(&mut codex)?;
         assert!(codex.is_empty());
@@ -2417,7 +2430,6 @@ mod tests {
                     executable: Path::new("/fixture/provenant"),
                     git: Path::new("/fixture/git"),
                     state: Path::new("/fixture/state"),
-                    child_state: Path::new("/fixture/state/children/attempt"),
                     home: Path::new("/fixture/home"),
                     depth: 1,
                     attempt: AttemptId::from_bytes([byte; 16]),
@@ -2434,7 +2446,7 @@ mod tests {
 
     #[test]
     #[allow(clippy::disallowed_methods)]
-    fn lane_path_pins_provenant_and_child_context_after_shell_scrubbing()
+    fn lane_path_pins_provenant_and_graph_context_after_shell_scrubbing()
     -> Result<(), Box<dyn std::error::Error>> {
         use crate::{Adapter, Prompt, codex::Codex};
         use std::os::unix::fs::PermissionsExt;
@@ -2456,12 +2468,11 @@ mod tests {
             crate::tests::fixture_input(&route, &plan, &prompt, Path::new("/fixture/repo"), None);
         input.provenant.executable = &executable;
         let lane = &input.provenant;
-        let child_state = lane.child_state.to_owned();
         let host_state = lane.state.to_owned();
         let expected_context = [
             lane.home.display().to_string(),
             lane.state.display().to_string(),
-            lane.child_state.display().to_string(),
+            lane.state.display().to_string(),
             lane.attempt.to_string(),
             lane.depth.to_string(),
             lane.git.display().to_string(),
@@ -2499,12 +2510,7 @@ mod tests {
                 .process_executables
                 .contains(&exact(&executable))
         );
-        assert!(
-            spec.profile
-                .spec
-                .state_writes
-                .contains(&subtree(&child_state))
-        );
+        assert!(spec.profile.spec.state_writes.is_empty());
         assert!(
             !spec
                 .profile
@@ -2513,7 +2519,7 @@ mod tests {
                 .contains(&subtree(&host_state))
         );
         for args in [
-            vec!["run", "--mode", "read-only", "--prompt", "two words"],
+            vec!["run", "--use", "task", "two words"],
             vec!["output", "child-id"],
         ] {
             let output = std::process::Command::new("/bin/sh")

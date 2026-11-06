@@ -17,7 +17,7 @@
           "acceptance_checks": [
             "Verify the slice"
           ],
-          "kind": "plan",
+          "kind": "task",
           "access": "read_only",
           "id": "plan--nested",
           "prompt": "Do a slice\n\nWrite scope: src\nAcceptance checks:\nVerify the slice",
@@ -28,7 +28,8 @@
             "alias": "senior"
           }
         }
-      ]
+      ],
+      "final_result": true
     },
     {
       "source": "plan--nested",
@@ -51,7 +52,8 @@
             "alias": "senior"
           }
         }
-      ]
+      ],
+      "final_result": true
     }
   ],
   "remaining": {
@@ -139,7 +141,7 @@
   "settlements": 4,
   "schema_version": 1,
   "graph_id": "planned",
-  "plan_digest": "sha256:f3b225c543721fc293a9801fe271b7008a2b800ddbf3b0e8740ebb8d41ea95f4",
+  "plan_digest": "sha256:0989c7cefe79588e0f980d84fdbee919a90d8ff742f6edce488e332e9bd6acd0",
   "nodes": [
     {
       "title": "plan",
@@ -149,8 +151,8 @@
       "outputs": {
         "schema_version": 2,
         "result": {
-          "digest": "sha256:39d3f33387183e4c2f40b5ac3d52a28280fe509d5ec7f62055a65f286b18b607",
-          "excerpt": "```fragment\n{\"nodes\":[{\"acceptance_checks\":[\"Verify the slice\"],\"access\":\"read_only\",\"goal\":\"Do a slice\",\"id\":\"nested\",\"kind\":\"plan\",\"plan\":{\"kinds\":[\"task\"],\"max_nodes\":1},\"write_scope\":[\"src\"]}],\"schema_version\":1}\n```",
+          "digest": "sha256:05cd64f15df64e963edcf0a796a8423deb75489ed6c917b8aa23a5fce762b0c0",
+          "excerpt": "```fragment\n{\"nodes\":[{\"acceptance_checks\":[\"Verify the slice\"],\"access\":\"read_only\",\"goal\":\"Do a slice\",\"id\":\"nested\",\"kind\":\"task\",\"plan\":{\"kinds\":[\"task\"],\"max_nodes\":1},\"write_scope\":[\"src\"]}],\"schema_version\":1}\n```",
           "truncated": false,
           "path": null
         },
@@ -180,7 +182,8 @@
           "launch_actor": "",
           "settled": 1
         }
-      ]
+      ],
+      "children_cancelled": true
     },
     {
       "title": "plan--nested",
@@ -221,7 +224,8 @@
           "launch_actor": "",
           "settled": 2
         }
-      ]
+      ],
+      "children_cancelled": true
     },
     {
       "title": "plan--nested--inner",
@@ -262,7 +266,8 @@
           "launch_actor": "",
           "settled": 3
         }
-      ]
+      ],
+      "children_cancelled": true
     },
     {
       "title": "after",
@@ -303,7 +308,8 @@
           "launch_actor": "",
           "settled": 4
         }
-      ]
+      ],
+      "children_cancelled": true
     }
   ]
 }

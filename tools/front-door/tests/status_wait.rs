@@ -43,7 +43,7 @@ fn seed(rig: &TestRig) -> Result<(RunStore, AttemptId)> {
     let request: CanonicalRequest = serde_json::from_value(json!({"schema_version":1,"tasks":[{
         "task_id":task,"prompt_digest":provenant_records::CanonicalV1::file_digest(b"fake lane"),
         "route":{"kind":"model","provider":"fixture","model":"fixture/model","effort":null},
-        "fallback":[],"authority_digest":Digest::from_bytes([5;32]),"provider_timeout_seconds":30,"delivery_id":null}],"concurrency":1,"parent":null}))?;
+        "authority_digest":Digest::from_bytes([5;32]),"provider_timeout_seconds":30,"delivery_id":null}],"concurrency":1,"parent":null}))?;
     let store = RunStore::open(&context, &call)?;
     let attempt = AttemptId::from_bytes([4; 16]);
     store.create(
@@ -69,6 +69,9 @@ fn graph(rig: &TestRig, delivered: bool) -> Result {
     let mut inputs = RootInputs::new(rig.home.clone(), rig.project.clone());
     inputs.state_dir = Some(rig.state.clone());
     let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+    // Graph status resolves through the host Fabric identity, as real graph
+    // submission does. A raw Run store alone does not initialise that identity.
+    provenant_cli::fabric::Context::open(roots.clone(), &rig.home, &rig.project)?;
     let project = provenant_config::bind_project(
         &roots,
         provenant_config::ProjectLocation::new(rig.project.join(".git"))?,
@@ -218,8 +221,8 @@ fn refused_operation_wait_returns_immediately_with_nonzero_status() -> Result {
     assert!(started.elapsed() < Duration::from_secs(10));
     let result: Value = serde_json::from_slice(&output.stdout.bytes)?;
     assert_eq!(
-        result["data"]["operation"]["refusal"]["code"],
-        "UNSUPPORTED"
+        result["data"]["operation"]["refusal"]["code"], "UNSUPPORTED",
+        "{result}"
     );
     assert_eq!(result["data"]["condition_met"], true);
     assert_eq!(result["data"]["timed_out"], false);

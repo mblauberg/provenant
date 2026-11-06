@@ -1060,6 +1060,12 @@ mod lineage_tests {
                 worktree: info.path.clone(),
             };
             original.request.tasks[0].writer = Some(writer.clone());
+            original.request.tasks[0].head = Some(info.head.to_string());
+            original.request.tasks[0].context = Some(provenant_records::run::WorkContext {
+                graph_id: Some("graph-writer-lineage".into()),
+                node_id: Some(format!("writer-{index}")),
+                ..Default::default()
+            });
             store.create(&original, &call)?;
             let record = store.record(prior, &call)?;
             crate::prepare_writer(&writer, &store.writer_registry, project_id)?.snapshot(
@@ -1156,6 +1162,68 @@ mod lineage_tests {
                 clock.wall_now()?,
                 &call,
             )?;
+            // A graph retry has a fresh run and no run-policy retry_of. Its
+            // sealed predecessor still protects it against ownership changes
+            // between admission and the launch-custody check below.
+            let mut graph = crate::tests::input();
+            graph.run_id = RunId::from_bytes([180 + index as u8; 16]);
+            graph.operation_id = format!("graph-retry-{index}").parse()?;
+            graph.attempts[0].attempt_id = AttemptId::from_bytes([190 + index as u8; 16]);
+            graph.request.tasks[0] = original.request.tasks[0].clone();
+            let graph_task = &mut graph.request.tasks[0];
+            graph_task.source_head = graph_task.head.clone();
+            graph_task
+                .context
+                .as_mut()
+                .ok_or("graph context")?
+                .writer_predecessor = Some(prior);
+            store.create(&graph, &call)?;
+            let graph_record = store.record(graph.attempts[0].attempt_id, &call)?;
+            assert!(graph_record.retry_of.is_none());
+            let tree = crate::prepare_writer(&writer, &store.writer_registry, project_id)?;
+            store.check_launch_writer_lineage(
+                &graph_record,
+                &graph.request.tasks[0],
+                &tree.worktree,
+                &call,
+            )?;
+            let mut other_node = graph.request.tasks[0].clone();
+            other_node.context.as_mut().ok_or("graph context")?.node_id = Some("unrelated".into());
+            assert!(matches!(
+                store.check_launch_writer_lineage(
+                    &graph_record,
+                    &other_node,
+                    &tree.worktree,
+                    &call
+                ),
+                Err(RunError::WriterLineage("graph predecessor context"))
+            ));
+            for field in ["writer", "source", "head"] {
+                let mut mismatch = graph.request.tasks[0].clone();
+                match field {
+                    "writer" => {
+                        mismatch.writer.as_mut().ok_or("writer")?.worktree =
+                            project.join(".worktrees/other");
+                    }
+                    "source" => mismatch.source_head = Some("0".repeat(40)),
+                    "head" => mismatch.head = Some("1".repeat(40)),
+                    _ => unreachable!(),
+                }
+                assert!(
+                    matches!(
+                        store.check_launch_writer_lineage(
+                            &graph_record,
+                            &mismatch,
+                            &tree.worktree,
+                            &call
+                        ),
+                        Err(RunError::WriterLineage(
+                            "graph predecessor writer or source"
+                        ))
+                    ),
+                    "graph predecessor accepted mismatched {field}"
+                );
+            }
             let next = Resume {
                 prior,
                 expected_generation: 0,
@@ -1195,6 +1263,17 @@ mod lineage_tests {
                     label: None,
                 },
             )?;
+            assert!(matches!(
+                store.check_launch_writer_lineage(
+                    &graph_record,
+                    &graph.request.tasks[0],
+                    &tree.worktree,
+                    &call
+                ),
+                Err(RunError::WriterLineage(
+                    "continuation worktree belongs to another lane"
+                ))
+            ));
             assert!(matches!(
                 store.check_continuation_writer(next.attempt_id, &call),
                 Err(RunError::WriterLineage(
@@ -1958,51 +2037,6 @@ impl RunStore {
     /// Cancel one attempt. Queued work is withdrawn; started work gets a stop
     /// request. A handoff that has not yet published its launch summary is
     /// retried within the call budget.
-    /// Stop a parent's children on its explicit stop, returning each failure.
-    /// Every child handed to a guardian stops from the scope held at
-    /// hand-off, including one start launched after the parent's scan read
-    /// its snapshot. The lane-writable record decides only for `accepted`
-    /// children, with the generation the scan expected, that never reached
-    /// a guardian.
-    pub fn stop_children(
-        &self,
-        accepted: std::collections::BTreeSet<(AttemptId, u64)>,
-        reason: &str,
-        call: &Request<'_>,
-    ) -> Vec<String> {
-        let held = self.held_attempts();
-        let unheld = accepted
-            .into_iter()
-            .filter(|(id, _)| !held.contains(id))
-            .map(|(id, generation)| (id, Some(generation)));
-        let mut errors = Vec::new();
-        for (id, generation) in held.iter().map(|id| (*id, None)).chain(unheld) {
-            if let Some(generation) = generation {
-                let record = match self.record(id, call) {
-                    Ok(record) => record,
-                    Err(error) => {
-                        errors.push(error.to_string());
-                        continue;
-                    }
-                };
-                if matches!(record.state, AttemptState::Terminal { .. }) {
-                    continue;
-                }
-                let still_queued = matches!(record.state, AttemptState::Queued { .. })
-                    && record.generation.checked_add(1) == Some(generation);
-                if record.generation != generation && !still_queued {
-                    errors.push("accepted child generation changed".into());
-                    continue;
-                }
-            }
-            match self.cancel(id, reason, call) {
-                Ok(CancelReceipt::Unobservable { reason }) => errors.push(reason),
-                Err(error) => errors.push(error.to_string()),
-                Ok(_) => {}
-            }
-        }
-        errors
-    }
     // Cancellation coordinates with a real guardian handoff under a hard cap.
     pub fn cancel(&self, id: AttemptId, reason: &str, call: &Request<'_>) -> Result<CancelReceipt> {
         self.cancel_with_observer(id, reason, call, &SystemProcessObserver)
@@ -2014,52 +2048,6 @@ impl RunStore {
         call: &Request<'_>,
         _observer: &dyn ProcessObserver,
     ) -> Result<CancelReceipt> {
-        // A child this host handed to a guardian stops through the directory,
-        // scope and requester held then. The lane can rewrite the child's
-        // record and launch summary, so neither decides whether or for whom
-        // it stops.
-        if let Some(held) = self
-            .launched
-            .borrow()
-            .iter()
-            .rev()
-            .find(|held| held.scope.attempt == id)
-        {
-            let Some(handle) = &held.handle else {
-                // The latest handle is dropped only after observing guardian
-                // exit. Earlier superseded generations cannot be selected.
-                let record = self.record(id, call)?;
-                if matches!(record.state, AttemptState::Terminal { .. }) {
-                    self.record_cancellation(
-                        id,
-                        record.generation,
-                        CancellationDisposition::AcknowledgedIneffective,
-                        call,
-                    )?;
-                }
-                return Ok(CancelReceipt::AlreadyTerminal);
-            };
-            let stopped = custody::stop(handle, StopReason::ExplicitCancellation)
-                .map_err(|error| error.to_string());
-            if stopped.is_ok()
-                && let Ok(record) = self.record(id, call)
-                && matches!(record.state, AttemptState::Terminal { .. })
-            {
-                self.record_cancellation(
-                    id,
-                    record.generation,
-                    CancellationDisposition::AcknowledgedIneffective,
-                    call,
-                )?;
-                // The stop receipt still reports what the held handle accepted:
-                // a lane-rewritable record does not decide whether it stopped.
-            }
-            return Ok(match stopped {
-                Ok(StopReceipt::Requested) => CancelReceipt::Requested,
-                Ok(StopReceipt::AlreadyRequested) => CancelReceipt::AlreadyRequested,
-                Err(reason) => CancelReceipt::Unobservable { reason },
-            });
-        }
         let record = self.record(id, call)?;
         if self
             .request(record.run_id, call)?
@@ -2284,6 +2272,68 @@ impl RunStore {
         )?;
         self.check_writer_lineage(&prior, &launch.worktree, call)
     }
+    /// Called after writer custody is acquired. Graph retries are separate runs,
+    /// so their sealed predecessor must be checked independently of `retry_of`.
+    pub(crate) fn check_launch_writer_lineage(
+        &self,
+        record: &AttemptRecord,
+        task: &TaskRequest,
+        tree: &provenant_confinement::VerifiedWorktree,
+        call: &Request<'_>,
+    ) -> Result<()> {
+        if record.retry_of.is_some() {
+            // A manual continuation follows its immediate run predecessor,
+            // whose launch already checked any older graph predecessor.
+            return self.check_writer_lineage(record, tree, call).map(|_| ());
+        }
+        let Some(context) = task.context.as_ref() else {
+            return Ok(());
+        };
+        let Some(prior) = context.writer_predecessor else {
+            return Ok(());
+        };
+        let previous = self.record(prior, call)?;
+        if !matches!(previous.state, AttemptState::Terminal { .. })
+            || !self.custody_released(&previous, call)?
+        {
+            return Err(RunError::Nonterminal);
+        }
+        if context.graph_id.is_none()
+            || context.node_id.is_none()
+            || previous.context.as_ref().is_none_or(|previous| {
+                previous.graph_id != context.graph_id || previous.node_id != context.node_id
+            })
+        {
+            return Err(RunError::WriterLineage("graph predecessor context"));
+        }
+        let request = self.request(previous.run_id, call)?;
+        let previous_task = request
+            .tasks
+            .iter()
+            .find(|task| task.task_id == previous.task_id)
+            .ok_or(RunError::WriterLineage("graph predecessor task"))?;
+        let source = previous_task
+            .source_head
+            .as_ref()
+            .or(previous_task.head.as_ref());
+        let head = previous
+            .head
+            .map(|head| head.to_string())
+            .or_else(|| previous_task.head.clone());
+        if task.writer.is_none()
+            || task.writer != previous_task.writer
+            || task.source_head.is_none()
+            || task.source_head.as_ref() != source
+            || task.head.is_none()
+            || task.head != head
+        {
+            return Err(RunError::WriterLineage(
+                "graph predecessor writer or source",
+            ));
+        }
+        self.check_writer_lineage(&previous, tree, call)?;
+        Ok(())
+    }
     pub(crate) fn check_writer_lineage(
         &self,
         record: &AttemptRecord,
@@ -2443,7 +2493,6 @@ impl RunStore {
                     ),
                     route: prior.requested_route.clone(),
                     account: task.account.clone(),
-                    fallback: vec![],
                     authority_digest: prior.authority_digest,
                     writer: writer
                         .map(|(writer, _)| writer.clone())

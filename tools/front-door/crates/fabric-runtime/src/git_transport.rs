@@ -79,7 +79,9 @@ impl GitTransportError {
     pub fn code(&self) -> &'static str {
         match self {
             Self::PushUnknown { .. } | Self::PushUnresolved { .. } => "LAUNCH_UNKNOWN",
-            Self::Store(error) => crate::coordination::facade::FacadeError::from(error).code(),
+            Self::Store(error) => {
+                crate::coordination::facade::FacadeError::from(error).static_code()
+            }
             Self::PushNotFound { .. } => "not_found",
             Self::Invalid(_) | Self::InvalidRemote => "invalid_input",
             Self::DirtyWorktree

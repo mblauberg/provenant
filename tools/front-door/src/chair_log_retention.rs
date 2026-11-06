@@ -101,7 +101,7 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let tmp = tempfile::tempdir()?;
         let state = tmp.path().join("state");
-        std::fs::create_dir(&state)?;
+        provenant_os::fixture::private_state_dir(&state)?;
         let mut inputs = RootInputs::new(tmp.path().join("home"), tmp.path().join("checkout"));
         inputs.state_dir = Some(state.clone());
         let root = StateRoot::resolve(&inputs, &SystemPathResolver)?;

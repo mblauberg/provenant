@@ -518,12 +518,23 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 
 | Argument | Contract |
 |---|---|
+| `--all` | `{"defaults": ["false"], "description": "Include advanced configuration fields", "name": "all", "values": ["true", "false"]}` |
 | `--help` | `{"description": "Print help", "name": "help"}` |
 | `--version` | `{"description": "Print version", "name": "version"}` |
 
 ```json
 {
-  "description": "List each editable field with its type, bounds, default, effective value, source layer and whether a restart is needed"
+  "description": "List each editable field with its type, bounds, default, effective value, source layer and whether a restart is needed",
+  "groups": [
+    {
+      "arguments": [
+        "all"
+      ],
+      "multiple": true,
+      "name": "Schema",
+      "required": false
+    }
+  ]
 }
 ```
 
@@ -702,145 +713,6 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 ```json
 {
   "description": "Show this agent's project and inbox identity"
-}
-```
-
-## `provenant fabric graph`
-
-| Argument | Contract |
-|---|---|
-| `--help` | `{"description": "Print help", "name": "help"}` |
-| `--version` | `{"description": "Print version", "name": "version"}` |
-
-```json
-{
-  "description": "Run and track task graphs"
-}
-```
-
-## `provenant fabric graph run`
-
-| Argument | Contract |
-|---|---|
-| `--document` | `{"description": "Project-local graph file; bare names default to .provenant/scratch/graphs", "name": "document", "required": true}` |
-| `--help` | `{"description": "Print help", "name": "help"}` |
-| `--version` | `{"description": "Print version", "name": "version"}` |
-
-```json
-{
-  "description": "Run a task graph document",
-  "groups": [
-    {
-      "arguments": [
-        "document"
-      ],
-      "multiple": true,
-      "name": "Run",
-      "required": false
-    }
-  ]
-}
-```
-
-## `provenant fabric graph status`
-
-| Argument | Contract |
-|---|---|
-| `id` | `{"description": "Graph ID, project-local document path or document SHA-256 hash", "name": "id", "positional": true, "required": true}` |
-| `--help` | `{"description": "Print help", "name": "help"}` |
-| `--version` | `{"description": "Print version", "name": "version"}` |
-
-```json
-{
-  "description": "Show a task graph's status",
-  "groups": [
-    {
-      "arguments": [
-        "id"
-      ],
-      "multiple": true,
-      "name": "Status",
-      "required": false
-    }
-  ]
-}
-```
-
-## `provenant fabric graph wait`
-
-| Argument | Contract |
-|---|---|
-| `id` | `{"description": "Graph ID, project-local document path or document SHA-256 hash", "name": "id", "positional": true, "required": true}` |
-| `--wait` | `{"bounds": [1, 14400], "description": "Wait limit (seconds or a duration such as 30m)", "name": "wait", "required": true}` |
-| `--help` | `{"description": "Print help", "name": "help"}` |
-| `--version` | `{"description": "Print version", "name": "version"}` |
-
-```json
-{
-  "description": "Wait for a task graph to settle without advancing it",
-  "groups": [
-    {
-      "arguments": [
-        "id",
-        "wait"
-      ],
-      "multiple": true,
-      "name": "Wait",
-      "required": false
-    }
-  ]
-}
-```
-
-## `provenant fabric graph cancel`
-
-| Argument | Contract |
-|---|---|
-| `id` | `{"description": "Graph ID, project-local document path or document SHA-256 hash", "name": "id", "positional": true, "required": true}` |
-| `--reason` | `{"bounds": [0, 256], "description": "Why the graph was cancelled (up to 256 bytes)", "name": "reason"}` |
-| `--help` | `{"description": "Print help", "name": "help"}` |
-| `--version` | `{"description": "Print version", "name": "version"}` |
-
-```json
-{
-  "description": "Cancel a task graph",
-  "groups": [
-    {
-      "arguments": [
-        "id",
-        "reason"
-      ],
-      "multiple": true,
-      "name": "Cancel",
-      "required": false
-    }
-  ]
-}
-```
-
-## `provenant fabric graph resume`
-
-| Argument | Contract |
-|---|---|
-| `--document` | `{"description": "Graph ID, project-local graph document or document SHA-256 hash", "name": "document", "required": true}` |
-| `--extend` | `{"description": "Raise a limit, budget or loop allowance, or decide a paused loop (KEY=VALUE); may be repeated", "name": "extend", "repeatable": true}` |
-| `--help` | `{"description": "Print help", "name": "help"}` |
-| `--version` | `{"description": "Print version", "name": "version"}` |
-
-```json
-{
-  "description": "Resume a task graph from its document",
-  "groups": [
-    {
-      "arguments": [
-        "document",
-        "extend"
-      ],
-      "multiple": true,
-      "name": "Resume",
-      "required": false
-    }
-  ]
 }
 ```
 
@@ -1825,6 +1697,7 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 | `--hooks` | `{"description": "Enable hooks, or remove unchanged owned hooks (omission keeps ownership)", "name": "hooks", "values": ["on", "off"]}` |
 | `--adopt-existing` | `{"defaults": ["false"], "description": "Adopt matching existing files instead of refusing", "name": "adopt_existing", "values": ["true", "false"]}` |
 | `--dry-run` | `{"defaults": ["false"], "description": "Plan the install without changing anything", "name": "dry_run", "values": ["true", "false"]}` |
+| `--upgrade-preflight` | `{"defaults": ["false"], "description": "Check state before a graph cutover (installer use only)", "name": "upgrade_preflight", "values": ["true", "false"]}` |
 | `--help` | `{"description": "Print help", "name": "help"}` |
 | `--version` | `{"description": "Print version", "name": "version"}` |
 
@@ -1839,7 +1712,8 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
         "bin_dir",
         "hooks",
         "adopt_existing",
-        "dry_run"
+        "dry_run",
+        "upgrade_preflight"
       ],
       "multiple": true,
       "name": "Install",
@@ -1853,6 +1727,7 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 
 | Argument | Contract |
 |---|---|
+| `--yes` | `{"defaults": ["false"], "description": "Proceed after the upgrade preflight reports work to drain or port", "name": "yes", "values": ["true", "false"]}` |
 | `--from-source` | `{"description": "Build this checkout instead of downloading the latest release", "name": "from_source"}` |
 | `--hosts` | `{"defaults": ["all"], "description": "Upgrade this host and every registered Fabric peer", "name": "hosts", "values": ["all"]}` |
 | `--help` | `{"description": "Print help", "name": "help"}` |
@@ -1864,6 +1739,7 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
   "groups": [
     {
       "arguments": [
+        "yes",
         "from_source",
         "hosts"
       ],
@@ -2309,267 +2185,66 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 }
 ```
 
-## `provenant preset`
-
-| Argument | Contract |
-|---|---|
-| `--help` | `{"description": "Print help", "name": "help"}` |
-| `--version` | `{"description": "Print version", "name": "version"}` |
-
-```json
-{
-  "description": "List and inspect pipeline presets"
-}
-```
-
-## `provenant preset list`
-
-| Argument | Contract |
-|---|---|
-| `--help` | `{"description": "Print help", "name": "help"}` |
-| `--version` | `{"description": "Print version", "name": "version"}` |
-
-```json
-{
-  "description": "List available presets"
-}
-```
-
-## `provenant preset show`
-
-| Argument | Contract |
-|---|---|
-| `name` | `{"description": "Preset name, or with --roles a role name to show", "name": "name", "positional": true}` |
-| `--roles` | `{"defaults": ["false"], "description": "List the role library (cards, tiers, families, references and origins)", "name": "roles", "values": ["true", "false"]}` |
-| `--help` | `{"description": "Print help", "name": "help"}` |
-| `--version` | `{"description": "Print version", "name": "version"}` |
-
-```json
-{
-  "description": "Show effective preset values and parameters, or the role library; --full includes origins",
-  "groups": [
-    {
-      "arguments": [
-        "name",
-        "roles"
-      ],
-      "multiple": true,
-      "name": "Show",
-      "required": false
-    }
-  ]
-}
-```
-
-## `provenant preset explain`
-
-| Argument | Contract |
-|---|---|
-| `name` | `{"description": "Explain one preset, or omit to explain the current rule selection", "name": "name", "positional": true}` |
-| `--risk` | `{"description": "Risk tier supplied to selection rules", "name": "risk"}` |
-| `--kind` | `{"description": "Task kind supplied to selection rules", "name": "kind"}` |
-| `--path` | `{"description": "Changed or declared path supplied to selection rules (repeatable)", "name": "paths", "repeatable": true}` |
-| `--size` | `{"description": "Prompt size band supplied to selection rules", "name": "size"}` |
-| `--ready` | `{"defaults": ["false"], "description": "Mark the work as ready, bypassing the readiness route", "name": "ready", "values": ["true", "false"]}` |
-| `--underspecified` | `{"conflicts": ["ready"], "defaults": ["false"], "description": "Route underspecified work through the configured readiness rule", "name": "underspecified", "values": ["true", "false"]}` |
-| `--help` | `{"description": "Print help", "name": "help"}` |
-| `--version` | `{"description": "Print version", "name": "version"}` |
-
-```json
-{
-  "description": "Explain when to use a preset, its cost, and its typed parameters",
-  "groups": [
-    {
-      "arguments": [
-        "name",
-        "risk",
-        "kind",
-        "paths",
-        "size",
-        "ready",
-        "underspecified"
-      ],
-      "multiple": true,
-      "name": "Explain",
-      "required": false
-    }
-  ]
-}
-```
-
 ## `provenant run`
 
 | Argument | Contract |
 |---|---|
-| `--placement` | `{"conflicts": ["preset"], "description": "Placement: local or named cloud target in cloud:NAME form", "name": "placement"}` |
-| `--cloud-provider` | `{"description": "Override the cloud provider", "name": "cloud_provider"}` |
-| `--cloud-environment` | `{"description": "Override the provider environment ID", "name": "cloud_environment"}` |
-| `--cloud-model` | `{"description": "Override the requested cloud model", "name": "cloud_model"}` |
-| `--cloud-effort` | `{"description": "Override the requested cloud effort", "name": "cloud_effort"}` |
-| `--cloud-repository` | `{"description": "Override the cloud repository source", "name": "cloud_repository"}` |
-| `--cloud-branch` | `{"description": "Override the repository branch made available to the cloud job", "name": "cloud_branch"}` |
-| `--cloud-deadline` | `{"description": "Override the cloud job deadline in seconds", "name": "cloud_deadline"}` |
-| `--set` | `{"description": "Override a preset value (PATH=TOML_VALUE); quote TOML strings; repeatable", "name": "preset_set", "repeatable": true, "requires": ["preset"]}` |
-| `--params-file` | `{"description": "Read preset parameters from a TOML table file; --set overrides it", "name": "preset_params_file", "requires": ["preset"]}` |
-| `--plan` | `{"description": "Planner front-end: auto, on or off; the default is [domains.fabric.plan] mode", "name": "preset_plan", "requires": ["preset"], "values": ["auto", "on", "off"]}` |
-| `--fresh` | `{"defaults": ["false"], "description": "Give this preset run a new graph identity, for example to rerun after a cancel", "name": "fresh", "requires": ["preset"], "values": ["true", "false"]}` |
-| `--explain` | `{"defaults": ["false"], "description": "Explain roles, limits and the expanded graph without running it", "name": "explain", "values": ["true", "false"]}` |
-| `--risk-tier` | `{"description": "Risk tier supplied to preset selection and model-choice preferences", "name": "risk_tier"}` |
-| `--task-kind` | `{"description": "Task kind supplied to preset selection and model-choice preferences", "name": "task_kind"}` |
-| `--path` | `{"description": "Changed or declared path supplied to automatic preset selection (repeatable)", "name": "selection_paths", "repeatable": true}` |
-| `--require-skill-location` | `{"defaults": ["false"], "description": "Require the selected adapter to provide a skill location", "name": "require_skill_location", "values": ["true", "false"]}` |
-| `--build-heavy` | `{"defaults": ["false"], "description": "Use the build-heavy scheduling priority", "name": "build_heavy", "values": ["true", "false"]}` |
-| `--prompt-file` | `{"description": "Read the prompt from this file", "name": "prompt_file"}` |
-| `--prompt-stdin` | `{"defaults": ["false"], "description": "Read the prompt from standard input", "name": "prompt_stdin", "values": ["true", "false"]}` |
-| `--operation-id` | `{"defaults": [""], "description": "Caller-chosen ID that makes retries idempotent", "name": "operation_id"}` |
-| `--title` | `{"conflicts": ["manifest"], "description": "Short human title for this task", "name": "title"}` |
-| `--task-id` | `{"description": "Fabric task this lane serves", "name": "task_id"}` |
-| `--delivery-id` | `{"description": "Delivery this lane belongs to", "name": "delivery_id"}` |
-| `--deliver` | `{"description": "Host delivery: none, push, integrate:<branch> (local), or pr (origin)", "name": "deliver"}` |
-| `--read-heavy` | `{"defaults": ["false"], "description": "Optimise selection for read-heavy work", "name": "read_heavy", "values": ["true", "false"]}` |
-| `--route` | `{"description": "Named route, or ADAPTER/NAME for a model-less adapter such as command/fmt-check", "name": "route"}` |
-| `--effort` | `{"description": "Reasoning effort", "name": "effort"}` |
-| `--confidential` | `{"defaults": ["false"], "description": "Require a confidential-safe route", "name": "confidential", "values": ["true", "false"]}` |
-| `--fallback` | `{"bounds": [0, 2], "description": "Fallback models in ADAPTER/ID form, comma separated", "name": "fallback"}` |
-| `--exclude` | `{"description": "Keep a provider (claude), account (label, entry or ADAPTER/KEY) or exact model (ADAPTER/ID) out of a named route's pool (repeatable). A pinned --model is never affected", "name": "exclude", "repeatable": true}` |
-| `--account` | `{"description": "Pin a registered account (key or label) instead of resolving one", "name": "account"}` |
-| `--mode` | `{"description": "Access mode: read-only or worktree-write [default: read-only]", "name": "mode", "values": ["read-only", "worktree-write"]}` |
-| `--read-root` | `{"bounds": [0, 32], "description": "Extra directory the lane may read (repeatable)", "name": "read_root", "repeatable": true}` |
-| `--attach` | `{"bounds": [0, 32], "description": "Image file to attach to the lane (repeatable)", "name": "attach", "repeatable": true}` |
-| `--write-root` | `{"bounds": [0, 32], "description": "Extra directory the lane may write, outside Git metadata (repeatable)", "name": "write_root", "repeatable": true}` |
-| `--network` | `{"description": "Network access [default: on]", "name": "network", "values": ["on", "off"]}` |
-| `--capability` | `{"bounds": [0, 16], "description": "Grant a named capability: postgres (repeatable)", "name": "capability", "repeatable": true}` |
-| `--no-capability` | `{"bounds": [0, 16], "description": "Remove a project-default capability (repeatable)", "name": "no_capability", "repeatable": true}` |
-| `--provider-timeout` | `{"bounds": [1, 14400], "conditional_defaults": [["read-only", "3600"], ["worktree-write", "10800"]], "defaults": ["3600"], "description": "Provider timeout in seconds", "name": "provider_timeout"}` |
-| `--concurrency` | `{"bounds": [1, 16], "description": "Manifest lanes or preset graph attempts to run at once (1 to 16)", "name": "concurrency"}` |
-| `--knob` | `{"description": "Override an effective harness knob for this dispatch (NAME=VALUE)", "name": "knobs", "repeatable": true}` |
-| `--host` | `{"description": "Configured peer (label or host ID) to run the dispatch on", "name": "host"}` |
-| `--worktree-branch` | `{"conflicts": ["worktree", "branch", "host", "manifest"], "description": "Create or reuse a clean local writer worktree owned by this lane", "name": "worktree_branch"}` |
-| `--head` | `{"description": "Chair-verified full commit SHA to review (must exist on the executing host)", "name": "head"}` |
-| `--base` | `{"description": "Git base for attempt history and a new writer branch", "name": "base"}` |
-| `--admission-timeout` | `{"description": "Admission timeout before launch (seconds, or a duration such as 10m)", "name": "admission_timeout"}` |
-| `--preset` | `{"conflicts": ["manifest", "prompt_stdin", "model", "route", "effort", "account", "fallback", "mode", "branch", "worktree_branch", "host", "deliver", "write_root", "knobs", "delivery_id", "head", "base", "title", "build_heavy", "read_heavy", "confidential", "provider_timeout", "operation_id"], "description": "Expand and run a named pipeline preset", "name": "preset", "requires": ["prompt_file"]}` |
-| `--model` | `{"conflicts": ["route"], "description": "Exact model in ADAPTER/ID form", "name": "model"}` |
-| `--manifest` | `{"conflicts": ["task_id", "delivery_id", "model", "route", "effort", "account", "fallback", "mode", "worktree", "deliver", "read_root", "attach", "write_root"], "description": "Dispatch the tasks in this manifest file", "name": "manifest"}` |
-| `--worktree` | `{"description": "Bind an existing preset writer worktree; single tasks can create an owned worktree for a missing branch name", "name": "worktree"}` |
-| `--wait` | `{"bounds": [1, 14400], "defaults": ["240"], "description": "Wait for task or preset graph settlement (seconds, or a duration such as 30m)", "name": "wait"}` |
-| `--branch` | `{"description": "Create or reuse an owned writer worktree for this branch, locally or on --host", "name": "branch"}` |
+| `--host` | `{"description": "Place attempts on this peer name or host ID", "name": "host"}` |
+| `--model` | `{"conflicts": ["tier"], "description": "Use this exact adapter/model instead of a route tier", "name": "model"}` |
+| `--effort` | `{"description": "Override model reasoning effort", "name": "effort"}` |
+| `--account` | `{"description": "Account label for routing and quota accounting", "name": "account"}` |
+| `--operation-id` | `{"description": "Stable operation identity for replay", "name": "operation_id"}` |
+| `brief` | `{"description": "Brief for the selected template", "name": "brief", "positional": true}` |
+| `--use` | `{"description": "Select a layered template [default: task]", "name": "template"}` |
+| `--tier` | `{"description": "Override the template's route tier", "name": "tier"}` |
+| `--mode` | `{"description": "Access for a plain task; writer targets imply worktree-write", "name": "mode", "values": ["read-only", "worktree-write"]}` |
+| `--worktree` | `{"conflicts": ["branch"], "description": "Existing writer worktree", "name": "worktree"}` |
+| `--branch` | `{"description": "Create an owned writer worktree on this branch", "name": "branch"}` |
+| `--base` | `{"description": "Git base for a new writer branch", "name": "base"}` |
+| `--write-scope` | `{"description": "Paths the writer may change, relative to its worktree; repeatable", "name": "write_scope", "repeatable": true}` |
+| `--over` | `{"description": "Copy the node over named items, or a resolver such as @review-panel", "name": "over", "repeatable": true}` |
+| `--set` | `{"description": "Bind a template parameter or attempt.FIELD (NAME=TOML_VALUE); repeatable", "name": "set", "repeatable": true}` |
+| `--file` | `{"description": "Read a graph document (JSON or TOML), or a plain text brief", "name": "file"}` |
+| `--detached` | `{"defaults": ["false"], "description": "Let this child outlive parent and graph cancellation (inside a lane only)", "name": "detached", "values": ["true", "false"]}` |
+| `--explain` | `{"defaults": ["false"], "description": "Explain the compiled graph without starting work", "name": "explain", "values": ["true", "false"]}` |
+| `--wait` | `{"bounds": [1, 14400], "description": "Wait for settlement (default 1 hour; use --wait=30m for a duration)", "name": "wait"}` |
 | `--help` | `{"description": "Print help", "name": "help"}` |
 | `--version` | `{"description": "Print version", "name": "version"}` |
 
 ```json
 {
   "constraints": [
-    "single prompt selects a preset by rules when model, route and preset are omitted",
-    "operation-id is generated when omitted; supply it for planned retries",
-    "manifest conflicts with per-task route, access and metadata",
-    "concurrency requires manifest or preset",
-    "single-task worktree, or a peer writer's branch, requires worktree-write",
-    "preset worktree bindings require an existing registered worktree",
-    "fallback conflicts with a writer and has at most two distinct models",
-    "prompt and manifest inputs are at most 1 MiB"
+    "a brief uses task by default; --use selects a layered template",
+    "--set binds template parameters using TOML values",
+    "--file accepts a graph document or a plain text brief",
+    "inside a lane, work joins the calling node's graph as a child"
   ],
-  "description": "Dispatch, wait and read the result",
+  "description": "Start work from a template or graph document",
   "groups": [
     {
-      "arguments": [],
-      "multiple": true,
-      "name": "Dispatch",
-      "required": false
-    },
-    {
       "arguments": [
-        "prompt_file",
-        "prompt_stdin",
-        "manifest"
-      ],
-      "multiple": false,
-      "name": "dispatch_input",
-      "required": true
-    },
-    {
-      "arguments": [
-        "read_heavy",
+        "host",
         "model",
-        "route",
         "effort",
-        "confidential",
-        "fallback",
-        "exclude"
-      ],
-      "multiple": true,
-      "name": "RouteRequest",
-      "required": false
-    },
-    {
-      "arguments": [
+        "account",
+        "operation_id",
+        "brief",
+        "template",
+        "tier",
         "mode",
         "worktree",
-        "read_root",
-        "attach",
-        "write_root",
-        "network",
-        "capability",
-        "no_capability"
-      ],
-      "multiple": true,
-      "name": "Access",
-      "required": false
-    },
-    {
-      "arguments": [
-        "worktree",
         "branch",
-        "worktree_branch"
-      ],
-      "multiple": false,
-      "name": "writer_target",
-      "required": false
-    }
-  ]
-}
-```
-
-## `provenant review`
-
-| Argument | Contract |
-|---|---|
-| `target` | `{"description": "Git commit to review", "name": "target", "positional": true, "required": true}` |
-| `--brief-file` | `{"description": "File containing the review brief", "name": "brief_file", "required": true}` |
-| `--shape` | `{"description": "Override the selected review shape", "name": "shape"}` |
-| `--risk` | `{"description": "Risk tier used to select a shape", "name": "risk"}` |
-| `--kind` | `{"description": "Task kind used to select a shape", "name": "kind"}` |
-| `--risk-tag` | `{"description": "Add a conditional review lens (security, concurrency, or terminal)", "name": "risk_tags", "repeatable": true, "values": ["security", "concurrency", "terminal"]}` |
-| `--range` | `{"description": "Git range whose changed paths select the shape", "name": "range"}` |
-| `--exclude` | `{"description": "Keep a provider, account or exact model out of every reviewer pool (repeatable); see &#96;provenant route resolve --help&#96;", "name": "exclude", "repeatable": true}` |
-| `--explain` | `{"defaults": ["false"], "description": "Show the selected panel without dispatching reviewers", "name": "explain", "values": ["true", "false"]}` |
-| `--plan` | `{"description": "Planner front-end: auto, on or off", "name": "plan", "values": ["auto", "on", "off"]}` |
-| `--fresh` | `{"defaults": ["false"], "description": "Start a new graph even if this review already ran", "name": "fresh", "values": ["true", "false"]}` |
-| `--wait` | `{"bounds": [1, 14400], "defaults": ["3600"], "description": "Overall wait limit (seconds or a duration such as 30m)", "name": "wait"}` |
-| `--help` | `{"description": "Print help", "name": "help"}` |
-| `--version` | `{"description": "Print version", "name": "version"}` |
-
-```json
-{
-  "description": "Dispatch and collect a configured review shape",
-  "groups": [
-    {
-      "arguments": [
-        "target",
-        "brief_file",
-        "shape",
-        "risk",
-        "kind",
-        "risk_tags",
-        "range",
-        "exclude",
+        "base",
+        "write_scope",
+        "over",
+        "set",
+        "file",
+        "detached",
         "explain",
-        "plan",
-        "fresh",
         "wait"
       ],
       "multiple": true,
-      "name": "Review",
+      "name": "GraphRunArgs",
       "required": false
     }
   ]
@@ -2580,6 +2255,9 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 
 | Argument | Contract |
 |---|---|
+| `--session-stream` | `{"conflicts": ["stats", "wait", "id", "target", "follow"], "defaults": ["false"], "description": "Stream a bounded attempt inventory page for the session collector", "name": "session_stream", "values": ["true", "false"]}` |
+| `--stats` | `{"conflicts": ["wait"], "defaults": ["false"], "description": "Report attempt efficiency without counting composite aggregates", "name": "stats", "values": ["true", "false"]}` |
+| `--by` | `{"defaults": ["template"], "description": "Group efficiency by node, requested tier or template", "name": "by", "values": ["node", "tier", "template"]}` |
 | `--wait` | `{"bounds": [1, 14400], "conflicts": ["all", "cursor"], "description": "Wait for mixed targets (no value uses domains.wait.timeout_seconds)", "name": "wait"}` |
 | `--target` | `{"description": "Observe lane:ID, graph:ID, operation:ID, pr:NUMBER or land:NUMBER (repeatable)", "name": "target", "repeatable": true, "requires": ["wait"]}` |
 | `--until` | `{"defaults": ["any"], "description": "Return on any transition or when all targets are terminal", "name": "until", "requires": ["wait"], "values": ["any", "all"]}` |
@@ -2598,10 +2276,13 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
     "with --wait, --json emits newline-delimited snapshot/transition events and a final end event; timeout exits 124",
     "follow waits for all targets to be terminal; land targets only observe their PR"
   ],
-  "description": "Show lanes or wait on lanes, graphs and PRs",
+  "description": "Show graph, node and attempt status",
   "groups": [
     {
       "arguments": [
+        "session_stream",
+        "stats",
+        "by",
         "wait",
         "target",
         "until",
@@ -2662,184 +2343,6 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 }
 ```
 
-## `provenant dispatch`
-
-| Argument | Contract |
-|---|---|
-| `--placement` | `{"conflicts": ["preset"], "description": "Placement: local or named cloud target in cloud:NAME form", "name": "placement"}` |
-| `--cloud-provider` | `{"description": "Override the cloud provider", "name": "cloud_provider"}` |
-| `--cloud-environment` | `{"description": "Override the provider environment ID", "name": "cloud_environment"}` |
-| `--cloud-model` | `{"description": "Override the requested cloud model", "name": "cloud_model"}` |
-| `--cloud-effort` | `{"description": "Override the requested cloud effort", "name": "cloud_effort"}` |
-| `--cloud-repository` | `{"description": "Override the cloud repository source", "name": "cloud_repository"}` |
-| `--cloud-branch` | `{"description": "Override the repository branch made available to the cloud job", "name": "cloud_branch"}` |
-| `--cloud-deadline` | `{"description": "Override the cloud job deadline in seconds", "name": "cloud_deadline"}` |
-| `--set` | `{"description": "Override a preset value (PATH=TOML_VALUE); quote TOML strings; repeatable", "name": "preset_set", "repeatable": true, "requires": ["preset"]}` |
-| `--params-file` | `{"description": "Read preset parameters from a TOML table file; --set overrides it", "name": "preset_params_file", "requires": ["preset"]}` |
-| `--plan` | `{"description": "Planner front-end: auto, on or off; the default is [domains.fabric.plan] mode", "name": "preset_plan", "requires": ["preset"], "values": ["auto", "on", "off"]}` |
-| `--fresh` | `{"defaults": ["false"], "description": "Give this preset run a new graph identity, for example to rerun after a cancel", "name": "fresh", "requires": ["preset"], "values": ["true", "false"]}` |
-| `--explain` | `{"defaults": ["false"], "description": "Explain roles, limits and the expanded graph without running it", "name": "explain", "values": ["true", "false"]}` |
-| `--risk-tier` | `{"description": "Risk tier supplied to preset selection and model-choice preferences", "name": "risk_tier"}` |
-| `--task-kind` | `{"description": "Task kind supplied to preset selection and model-choice preferences", "name": "task_kind"}` |
-| `--path` | `{"description": "Changed or declared path supplied to automatic preset selection (repeatable)", "name": "selection_paths", "repeatable": true}` |
-| `--require-skill-location` | `{"defaults": ["false"], "description": "Require the selected adapter to provide a skill location", "name": "require_skill_location", "values": ["true", "false"]}` |
-| `--build-heavy` | `{"defaults": ["false"], "description": "Use the build-heavy scheduling priority", "name": "build_heavy", "values": ["true", "false"]}` |
-| `--prompt-file` | `{"description": "Read the prompt from this file", "name": "prompt_file"}` |
-| `--prompt-stdin` | `{"defaults": ["false"], "description": "Read the prompt from standard input", "name": "prompt_stdin", "values": ["true", "false"]}` |
-| `--operation-id` | `{"defaults": [""], "description": "Caller-chosen ID that makes retries idempotent", "name": "operation_id"}` |
-| `--title` | `{"conflicts": ["manifest"], "description": "Short human title for this task", "name": "title"}` |
-| `--task-id` | `{"description": "Fabric task this lane serves", "name": "task_id"}` |
-| `--delivery-id` | `{"description": "Delivery this lane belongs to", "name": "delivery_id"}` |
-| `--deliver` | `{"description": "Host delivery: none, push, integrate:<branch> (local), or pr (origin)", "name": "deliver"}` |
-| `--read-heavy` | `{"defaults": ["false"], "description": "Optimise selection for read-heavy work", "name": "read_heavy", "values": ["true", "false"]}` |
-| `--route` | `{"description": "Named route, or ADAPTER/NAME for a model-less adapter such as command/fmt-check", "name": "route"}` |
-| `--effort` | `{"description": "Reasoning effort", "name": "effort"}` |
-| `--confidential` | `{"defaults": ["false"], "description": "Require a confidential-safe route", "name": "confidential", "values": ["true", "false"]}` |
-| `--fallback` | `{"bounds": [0, 2], "description": "Fallback models in ADAPTER/ID form, comma separated", "name": "fallback"}` |
-| `--exclude` | `{"description": "Keep a provider (claude), account (label, entry or ADAPTER/KEY) or exact model (ADAPTER/ID) out of a named route's pool (repeatable). A pinned --model is never affected", "name": "exclude", "repeatable": true}` |
-| `--account` | `{"description": "Pin a registered account (key or label) instead of resolving one", "name": "account"}` |
-| `--mode` | `{"description": "Access mode: read-only or worktree-write [default: read-only]", "name": "mode", "values": ["read-only", "worktree-write"]}` |
-| `--worktree` | `{"description": "Checkout to read or write; a writer can create an owned worktree for a missing branch name", "name": "worktree"}` |
-| `--read-root` | `{"bounds": [0, 32], "description": "Extra directory the lane may read (repeatable)", "name": "read_root", "repeatable": true}` |
-| `--attach` | `{"bounds": [0, 32], "description": "Image file to attach to the lane (repeatable)", "name": "attach", "repeatable": true}` |
-| `--write-root` | `{"bounds": [0, 32], "description": "Extra directory the lane may write, outside Git metadata (repeatable)", "name": "write_root", "repeatable": true}` |
-| `--network` | `{"description": "Network access [default: on]", "name": "network", "values": ["on", "off"]}` |
-| `--capability` | `{"bounds": [0, 16], "description": "Grant a named capability: postgres (repeatable)", "name": "capability", "repeatable": true}` |
-| `--no-capability` | `{"bounds": [0, 16], "description": "Remove a project-default capability (repeatable)", "name": "no_capability", "repeatable": true}` |
-| `--provider-timeout` | `{"bounds": [1, 14400], "conditional_defaults": [["read-only", "3600"], ["worktree-write", "10800"]], "defaults": ["3600"], "description": "Provider timeout in seconds", "name": "provider_timeout"}` |
-| `--knob` | `{"description": "Override an effective harness knob for this dispatch (NAME=VALUE)", "name": "knobs", "repeatable": true}` |
-| `--host` | `{"description": "Configured peer (label or host ID) to run the dispatch on", "name": "host"}` |
-| `--branch` | `{"description": "New writer branch; run creates an owned worktree locally or on --host", "name": "branch", "requires": ["host", "base"]}` |
-| `--worktree-branch` | `{"conflicts": ["worktree", "branch", "host", "manifest"], "description": "Create or reuse a clean local writer worktree owned by this lane", "name": "worktree_branch"}` |
-| `--head` | `{"description": "Chair-verified full commit SHA to review (must exist on the executing host)", "name": "head"}` |
-| `--base` | `{"description": "Git base for attempt history and a new writer branch", "name": "base"}` |
-| `--wait` | `{"bounds": [1, 14400], "description": "Wait for task or preset graph settlement (seconds, or a duration such as 30m)", "name": "wait"}` |
-| `--admission-timeout` | `{"description": "Admission timeout before launch (seconds, or a duration such as 10m)", "name": "admission_timeout"}` |
-| `--preset` | `{"conflicts": ["manifest", "prompt_stdin", "model", "route", "effort", "account", "fallback", "mode", "branch", "worktree_branch", "host", "deliver", "write_root", "knobs", "delivery_id", "head", "base", "title", "build_heavy", "read_heavy", "confidential", "provider_timeout", "operation_id"], "description": "Expand and run a named pipeline preset", "name": "preset", "requires": ["prompt_file"]}` |
-| `--model` | `{"conflicts": ["route"], "description": "Exact model in ADAPTER/ID form", "name": "model"}` |
-| `--manifest` | `{"conflicts": ["task_id", "delivery_id", "model", "route", "effort", "account", "fallback", "mode", "worktree", "deliver", "read_root", "attach", "write_root"], "description": "Dispatch the tasks in this manifest file", "name": "manifest"}` |
-| `--concurrency` | `{"bounds": [1, 16], "description": "Manifest lanes or preset graph attempts to run at once (1 to 16)", "name": "concurrency", "requires": ["manifest"]}` |
-| `--help` | `{"description": "Print help", "name": "help"}` |
-| `--version` | `{"description": "Print version", "name": "version"}` |
-
-```json
-{
-  "constraints": [
-    "single prompt requires exactly one of model or route",
-    "operation-id is generated when omitted; supply it for planned retries",
-    "manifest conflicts with per-task route, access and metadata",
-    "concurrency requires manifest",
-    "worktree, or a peer writer's branch, is required with, and only valid for, worktree-write",
-    "fallback conflicts with a writer and has at most two distinct models",
-    "prompt and manifest inputs are at most 1 MiB"
-  ],
-  "description": "Start a provider lane or manifest of lanes",
-  "groups": [
-    {
-      "arguments": [],
-      "multiple": true,
-      "name": "Dispatch",
-      "required": false
-    },
-    {
-      "arguments": [
-        "prompt_file",
-        "prompt_stdin",
-        "manifest"
-      ],
-      "multiple": false,
-      "name": "dispatch_input",
-      "required": true
-    },
-    {
-      "arguments": [
-        "read_heavy",
-        "model",
-        "route",
-        "effort",
-        "confidential",
-        "fallback",
-        "exclude"
-      ],
-      "multiple": true,
-      "name": "RouteRequest",
-      "required": false
-    },
-    {
-      "arguments": [
-        "mode",
-        "worktree",
-        "read_root",
-        "attach",
-        "write_root",
-        "network",
-        "capability",
-        "no_capability"
-      ],
-      "multiple": true,
-      "name": "Access",
-      "required": false
-    },
-    {
-      "arguments": [
-        "worktree",
-        "branch",
-        "worktree_branch"
-      ],
-      "multiple": false,
-      "name": "writer_target",
-      "required": false
-    }
-  ]
-}
-```
-
-## `provenant lanes`
-
-| Argument | Contract |
-|---|---|
-| `--session-stream` | `{"defaults": ["false"], "description": "Stream a bounded page for the SessionStart collector", "name": "session_stream", "values": ["true", "false"]}` |
-| `--id` | `{"description": "Show this attempt ID or RUN[/TASK[/ATTEMPT]] (repeatable)", "name": "id", "repeatable": true}` |
-| `--host` | `{"conflicts": ["id", "cursor"], "description": "List, wait on or watch a configured peer's own lanes, by label or host ID", "name": "host"}` |
-| `--session` | `{"conflicts": ["all"], "description": "Keep lanes submitted by this session (its agent label)", "name": "session"}` |
-| `--all` | `{"defaults": ["false"], "description": "Show every lane, newest first", "name": "all", "values": ["true", "false"]}` |
-| `--limit` | `{"bounds": [1, 100], "defaults": ["50"], "description": "Maximum lanes per page (1 to 100)", "name": "limit"}` |
-| `--cursor` | `{"conflicts": ["wait", "watch"], "description": "Continue from a previous page's cursor", "name": "cursor"}` |
-| `--wait` | `{"bounds": [1, 14400], "conflicts": ["watch"], "description": "Wait for settlement (seconds, or a duration such as 30m). An oversized unseen default backlog is summarised with its count and newest 100 lanes", "name": "wait"}` |
-| `--condition` | `{"conflicts": ["watch"], "defaults": ["any"], "description": "Wait for any or all lanes to settle", "name": "condition", "requires": ["wait"], "values": ["any", "all"]}` |
-| `--watch` | `{"bounds": [1, 14400], "conflicts": ["all", "states", "cursor"], "description": "Print one line per lane state change until every selected lane has settled or this many seconds pass (default 14400)", "name": "watch"}` |
-| `--state` | `{"conflicts": ["wait", "watch"], "description": "Keep lanes in any of these states", "name": "states", "repeatable": true, "values": ["cloud_submitting", "cloud_running", "cloud_passed", "cloud_failed", "cloud_setup_failed", "cloud_cancelled", "cloud_cancellation_unconfirmed", "cloud_unknown", "queued", "starting", "running", "settling", "succeeded", "review_required", "failed", "rejected", "timed_out", "rate_limited", "quota_limited", "auth_required", "model_unavailable", "permission_denied", "quarantined", "lost", "uncommitted", "cancelled", "input_required"]}` |
-| `--since` | `{"description": "Keep lanes queued within this many seconds, or since an RFC3339 time. With --wait or --watch, count lanes that settled since then", "name": "since"}` |
-| `--help` | `{"description": "Print help", "name": "help"}` |
-| `--version` | `{"description": "Print version", "name": "version"}` |
-
-```json
-{
-  "description": "List lanes or wait on their state",
-  "groups": [
-    {
-      "arguments": [
-        "session_stream",
-        "id",
-        "host",
-        "session",
-        "all",
-        "limit",
-        "cursor",
-        "wait",
-        "condition",
-        "watch",
-        "states",
-        "since"
-      ],
-      "multiple": true,
-      "name": "Lanes",
-      "required": false
-    }
-  ]
-}
-```
-
 ## `provenant output`
 
 | Argument | Contract |
@@ -2864,7 +2367,7 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
     "a result shows whole up to 12 KiB, then its head and tail; at most 8 changed paths of 120 bytes are named; missing evidence is null",
     "peer tail scans share a 30-second deadline and reject changing artifacts"
   ],
-  "description": "Read a lane attempt's output",
+  "description": "Read graph, node or attempt output",
   "groups": [
     {
       "arguments": [
@@ -2886,7 +2389,7 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 }
 ```
 
-## `provenant cancel`
+## `provenant stop`
 
 | Argument | Contract |
 |---|---|
@@ -2899,7 +2402,7 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 
 ```json
 {
-  "description": "Cancel a run, task or attempt",
+  "description": "Stop a graph, node or attempt subtree",
   "groups": [
     {
       "arguments": [
@@ -2916,10 +2419,13 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 }
 ```
 
-## `provenant resume`
+## `provenant retry`
 
 | Argument | Contract |
 |---|---|
+| `--node` | `{"conflicts": ["no_fallback"], "description": "Retry only the named node rather than recovering its graph", "name": "node"}` |
+| `--brief` | `{"conflicts": ["prompt_file", "prompt_stdin"], "description": "Replace the target brief", "name": "brief"}` |
+| `--extend` | `{"description": "Raise a graph limit or budget (KEY=VALUE); may be repeated", "name": "extend", "repeatable": true}` |
 | `attempt` | `{"description": "Attempt ID, or RUN/ATTEMPT or RUN/TASK/ATTEMPT", "name": "attempt", "positional": true, "required": true}` |
 | `--operation-id` | `{"defaults": [""], "description": "Caller-chosen ID that makes retries idempotent", "name": "operation_id"}` |
 | `--no-fallback` | `{"defaults": ["false"], "description": "Refuse instead of starting fresh when provider continuation is unavailable", "name": "no_fallback", "values": ["true", "false"]}` |
@@ -2936,7 +2442,7 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
     "prompt is at most 1 MiB; expected generation is 0",
     "operation-id is generated when omitted; supply it for planned retries"
   ],
-  "description": "Resume an attempt with a new prompt",
+  "description": "Retry a graph, node or attempt",
   "groups": [
     {
       "arguments": [],
@@ -2951,7 +2457,7 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
       ],
       "multiple": false,
       "name": "resume_prompt",
-      "required": true
+      "required": false
     }
   ]
 }
@@ -2961,7 +2467,7 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 
 | Argument | Contract |
 |---|---|
-| `attempt` | `{"description": "Attempt ID", "name": "attempt", "positional": true, "required": true}` |
+| `attempt` | `{"description": "Attempt ID, graph ID or graph/node target", "name": "attempt", "positional": true, "required": true}` |
 | `--text-stdin` | `{"defaults": ["false"], "description": "Read the message from standard input (at most 4 KiB; input must finish within 5 seconds)", "name": "text_stdin", "required": true, "values": ["true", "false"]}` |
 | `--operation-id` | `{"name": "operation_id"}` |
 | `--help` | `{"description": "Print help", "name": "help"}` |
@@ -2979,6 +2485,58 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
       ],
       "multiple": true,
       "name": "Steer",
+      "required": false
+    }
+  ]
+}
+```
+
+## `provenant edit`
+
+| Argument | Contract |
+|---|---|
+| `id` | `{"description": "Graph ID", "name": "id", "positional": true, "required": true}` |
+| `--file` | `{"description": "Patch document (JSON or TOML)", "name": "file", "required": true}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
+
+```json
+{
+  "description": "Apply a patch to unstarted graph nodes",
+  "groups": [
+    {
+      "arguments": [
+        "id",
+        "file"
+      ],
+      "multiple": true,
+      "name": "Edit",
+      "required": false
+    }
+  ]
+}
+```
+
+## `provenant templates`
+
+| Argument | Contract |
+|---|---|
+| `name` | `{"description": "Template to show; omit to list effective templates", "name": "name", "positional": true}` |
+| `--file` | `{"description": "Document containing inline templates (JSON or TOML)", "name": "file"}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
+
+```json
+{
+  "description": "List or show templates from all layers",
+  "groups": [
+    {
+      "arguments": [
+        "name",
+        "file"
+      ],
+      "multiple": true,
+      "name": "Templates",
       "required": false
     }
   ]
@@ -3278,7 +2836,7 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 
 | Argument | Contract |
 |---|---|
-| `id` | `{"description": "Experiment name from domains.fabric.pipelines.experiment", "name": "id", "positional": true, "required": true}` |
+| `id` | `{"description": "Historical experiment name recorded in offline outcomes", "name": "id", "positional": true, "required": true}` |
 | `--main-ref` | `{"defaults": ["main"], "description": "Local main-line ref to analyse; no fetch is performed", "name": "main_ref"}` |
 | `--ci-file` | `{"description": "Recorded gh main-branch run list JSON; absent means CI not_measured", "name": "ci_file"}` |
 | `--outcome-days` | `{"bounds": [1, 3650], "defaults": ["14"], "description": "Days after a merge to attribute escaped defects", "name": "outcome_days"}` |

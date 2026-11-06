@@ -1,0 +1,6 @@
+doc = "Reconcile inputs."
+brief = "Reconcile your inputs into one answer. Keep evidence, name conflicts and say which input each conclusion rests on."
+tier = "senior"
+access = "read_only"
+kind = "synthesise"
+outputs = ["result"]

@@ -36,6 +36,15 @@ fn snapshot(path: &Path) -> Result<Vec<(PathBuf, Vec<u8>)>> {
 }
 
 #[test]
+fn status_reads_an_unregistered_project_without_creating_state() -> Result {
+    let empty = TestRig::new()?.without_state()?;
+    let status = call(&empty, &["status"], 0)?;
+    assert_eq!(status["data"]["rows"], serde_json::json!([]));
+    assert!(!empty.state.exists());
+    Ok(())
+}
+
+#[test]
 fn board_read_only() -> Result {
     use provenant_core::{
         ActorId, AttemptId, CancelToken, Clock, Digest, OperationId, ProjectId, RootInputs, RunId,
@@ -79,7 +88,7 @@ fn board_read_only() -> Result {
     let proposal: CanonicalRequest = serde_json::from_value(json!({"schema_version":1,"tasks":[{
         "task_id":task,"prompt_digest":provenant_records::CanonicalV1::file_digest(b"private"),
         "route":{"kind":"model","provider":"fixture","model":"fixture/model","effort":null},
-        "fallback":[],"authority_digest":Digest::from_bytes([5;32]),"provider_timeout_seconds":30,"delivery_id":null}],"concurrency":1,"parent":null}))?;
+        "authority_digest":Digest::from_bytes([5;32]),"provider_timeout_seconds":30,"delivery_id":null}],"concurrency":1,"parent":null}))?;
     let store = RunStore::open(&context, &request)?;
     for n in 1..=2 {
         store.create(

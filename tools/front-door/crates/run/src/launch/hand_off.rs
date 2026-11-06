@@ -177,24 +177,6 @@ impl RunStore {
             call.clock,
         )
         .map_err(|e| custody_local("publication reservation", &e))?;
-        // Clone before acquiring custody: failure leaves no writer reservation.
-        let held = if self.sealed_requester.is_some() {
-            Some((
-                custody::hold(
-                    reservation
-                        .directory()
-                        .try_clone()
-                        .map_err(|e| local("publication reservation", &e))?,
-                    scope,
-                    requester,
-                ),
-                reservation
-                    .custody_metadata()
-                    .map_err(|e| local("publication reservation", &e))?,
-            ))
-        } else {
-            None
-        };
         let writer = plan.confinement.as_mut().and_then(|c| c.writer.as_mut());
         if task.writer.as_ref().map(|w| w.worktree.as_path())
             != writer.as_ref().map(|w| w.worktree.path())
@@ -246,12 +228,12 @@ impl RunStore {
                 }
             };
         }
-        if record.retry_of.is_some()
-            && let Some(writer) = plan
-                .confinement
-                .as_ref()
-                .and_then(|plan| plan.writer.as_ref())
-            && let Err(error) = self.check_writer_lineage(record, &writer.worktree, call)
+        if let Some(writer) = plan
+            .confinement
+            .as_ref()
+            .and_then(|plan| plan.writer.as_ref())
+            && let Err(error) =
+                self.check_launch_writer_lineage(record, task, &writer.worktree, call)
         {
             let refusal = if matches!(error, RunError::Nonterminal) {
                 HandOff::Boundary {
@@ -263,32 +245,6 @@ impl RunStore {
                 typed_local("writer lineage", &error)
             };
             local_or_withdraw!(Err::<(), _>(refusal));
-        }
-        if task.source_head.is_some()
-            && let Some(writer) = plan
-                .confinement
-                .as_ref()
-                .and_then(|plan| plan.writer.as_ref())
-        {
-            let git = local_or_withdraw!(
-                provenant_os::git::git_executable()
-                    .ok_or_else(|| local("Git", &RunError::GitUnavailable))
-            );
-            let paths = local_or_withdraw!(
-                writer
-                    .uncommitted_paths(&git)
-                    .map_err(|error| typed_local("writer status", &error))
-            );
-            if !paths.is_empty() {
-                local_or_withdraw!(Err::<(), _>(HandOff::Boundary {
-                    message: format!(
-                        "writer continuation: uncommitted predecessor edits: {}",
-                        paths.join(", ")
-                    ),
-                    class: provenant_records::diagnostic::BoundaryClass::Authority,
-                    cause: None,
-                }));
-            }
         }
         // Reconcile may have withdrawn this attempt before the lease existed.
         match self.record(id, call) {
@@ -454,10 +410,6 @@ impl RunStore {
         );
         if local_or_withdraw!(cancel_requested()) {
             local_or_withdraw!(Err::<(), _>(local("launch", &CANCELLED_BEFORE_LAUNCH)));
-        }
-        // Held before launch: an unconfirmed handoff may still have a guardian.
-        if let Some((held, custody)) = held {
-            self.hold_child(held, custody);
         }
         custody::launch(
             OwnedLaunch {
@@ -1140,7 +1092,6 @@ mod tests {
                     &crate::dispatch_tests::Ready,
                     &|_, _| Ok(Vec::new()),
                     &acquire,
-                    None,
                     None,
                     &call,
                 )

@@ -277,7 +277,7 @@ pub(super) fn choose(
             super::Status::Invalid,
             super::ErrorKind::NotFound,
             format!(
-                "no lane matches {selection}; use a unique prefix of 8 or more characters or the full ID, as `provenant lanes --all` lists them"
+                "no lane matches {selection}; use a unique prefix of 8 or more characters or the full ID, as `provenant status --all` lists them"
             ),
         )),
         1 => Ok(selected.remove(0)),
@@ -314,7 +314,7 @@ pub(super) fn resolve(
     target: &Target,
     allow_run: bool,
 ) -> Result<Candidate, Fail> {
-    let mut selection = text(target);
+    let mut selection = text(target).to_ascii_lowercase();
     if let Some((qualifier, attempt)) = selection.split_once('/')
         && !attempt.contains('/')
         && let Ok(qualifier) = qualifier.parse()
@@ -485,7 +485,7 @@ mod tests {
         }
     }
     #[test]
-    fn prefixes_require_eight_hex_characters_and_keep_qualified_forms() {
+    fn selectors_keep_qualified_forms_and_reject_empty_components() {
         for selection in [
             "01010101",
             "01010101/02020202",
@@ -496,8 +496,6 @@ mod tests {
             assert!(selection.parse::<crate::Attempt>().is_ok());
         }
         for selection in [
-            "0101010",
-            "0101010z",
             "01010101/",
             "/01010101",
             "01010101/02020202/03030303/04040404",
@@ -757,7 +755,6 @@ mod tests {
                 effort: None,
             },
             account: None,
-            fallback: vec![],
             profile: Default::default(),
             authority_digest: provenant_core::Digest::from_bytes([5; 32]),
             provider_timeout_seconds: 3600,

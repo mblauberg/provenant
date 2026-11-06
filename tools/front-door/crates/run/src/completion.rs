@@ -114,7 +114,8 @@ impl RunStore {
     }
 }
 
-pub(crate) fn sanitise_handoff(handoff: &Handoff) -> Result<Handoff> {
+/// Redact decoded handoff values before a graph consumes local or peer output.
+pub fn sanitise_handoff(handoff: &Handoff) -> Result<Handoff> {
     transform_handoff(handoff, |text| {
         let safe = provenant_confinement::redact::known_shapes(text.as_bytes())
             .map_err(|_| RunError::Validation("handoff redaction failed"))?;
@@ -264,40 +265,10 @@ mod tests {
             }
             Ok(result)
         }
-        fn assess_result(
-            &self,
-            _: &TaskRequest,
-            record: &AttemptRecord,
-            _: &Decoded,
-            handoff: Option<&Handoff>,
-            _: Option<&HolderContext>,
-            policy_attempt: u64,
-        ) -> std::result::Result<ResultAssessment, String> {
-            if policy_attempt != 1 {
-                return Ok(ResultAssessment::default());
-            }
-            let handoff = handoff.ok_or("holder did not recover progress")?;
-            if handoff.fenced().contains("sk-abcdefghijklmnopqrstuvwx") {
-                return Err("unsanitised progress reached assessment".into());
-            }
-            Ok(ResultAssessment {
-                retry: Some(PolicyRetry {
-                    schema_version: 2,
-                    cause: crate::PolicyCause::Capacity,
-                    action: crate::PolicyAction::Retry,
-                    route: record.requested_route.clone(),
-                    resume: false,
-                    max_attempts: 2,
-                    instruction: "Continue on the next eligible account.".into(),
-                    not_before_unix_seconds: None,
-                }),
-                ..Default::default()
-            })
-        }
     }
 
     #[test]
-    fn provider_death_retains_progress_and_supplies_the_fresh_retry_brief() -> TestResult {
+    fn provider_death_retains_sanitised_progress() -> TestResult {
         let temp = tempfile::tempdir()?;
         let clock = clock();
         let cancel = provenant_core::CancelToken::new();
@@ -384,176 +355,12 @@ mod tests {
         // Progress survives temporary cleanup and provider history expiry.
         crate::artifacts::remove_entry_tree(&attempt, OsStr::new("provider-state"))?;
         assert_eq!(store.handoff(&old)?, Some(handoff.clone()));
-        let mut next = store.pending_attempts(input.run_id, &call)?.remove(0);
-        let prompt =
-            String::from_utf8(store.artifact_bytes(next.run_id, &next.prompt, RECORD_LIMIT)?)?;
-        assert!(prompt.contains("exact prompt") && prompt.contains(&handoff.fenced()));
-        assert!(!prompt.contains(secret_shape));
-        assert!(prompt.contains("Keep the parser API") && prompt.contains("Parser tests passed"));
-        assert_eq!(next.authority_digest, old.authority_digest);
-        assert!(next.applied_route.is_none());
-        assert_eq!(next.continuation.as_deref(), Some("policy_fallback"));
-        let route = RouteRecord {
-            account_label: Some("two".into()),
-            account_key: Some("fixture-two".into()),
-            ..crate::tests::route()
-        };
-        next.applied_route = Some(route.clone());
-        next.resolved_route = Some(route);
-        next.provider_launched = Some(true);
-        next.state = AttemptState::Running {
-            extra: Default::default(),
-        };
-        store.db.execute(
-            "UPDATE attempts SET record=?1 WHERE id=?2",
-            rusqlite::params![crate::db::bytes(&next)?, next.attempt_id.to_string()],
-        )?;
-        let next_dir = store.attempt_dir(next.run_id, next.attempt_id, false)?;
-        let mut second_exit = exit();
-        second_exit.scope.attempt = next.attempt_id;
-        input.attempts[0].attempt_id = next.attempt_id;
-        seal_observation(&store, &input, &second_exit)?;
-        let terminal = store.finish(
-            next.attempt_id,
-            &next_dir,
-            &second_exit,
-            &RecoveringAccounts,
-            &call,
-        )?;
-        assert!(matches!(
-            terminal.state,
-            AttemptState::Terminal {
-                outcome: Outcome::Succeeded,
-                ..
-            }
-        ));
-        assert_ne!(old.applied_route, terminal.applied_route);
         assert_eq!(
             std::fs::read_to_string(worktree.join("partial.txt"))?,
             "parser implementation survives"
         );
         Ok(())
     }
-
-    struct StoppingResult {
-        outcome: Outcome,
-        cause: PolicyCause,
-    }
-    impl Providers for StoppingResult {
-        fn prepare(
-            &self,
-            _: &TaskRequest,
-            _: &str,
-            _: &LaunchPaths,
-            _: Option<&AttemptRecord>,
-        ) -> std::result::Result<PreparedLaunch, PrepareRefusal> {
-            Err("holder-only fixture does not launch".into())
-        }
-        fn decode(
-            &self,
-            route: &RouteRecord,
-            _: &[u8],
-            _: &provenant_supervisor::custody::ExitObservation,
-            _: &Path,
-        ) -> std::result::Result<Decoded, String> {
-            Ok(Decoded {
-                terminal_cause: None,
-                outcome: self.outcome,
-                complete: true,
-                result: "Result policy fixture".into(),
-                observed_route: Some(route.clone()),
-                ..decoded()
-            })
-        }
-        fn assess_result(
-            &self,
-            _: &TaskRequest,
-            _: &AttemptRecord,
-            _: &Decoded,
-            _: Option<&Handoff>,
-            _: Option<&HolderContext>,
-            _: u64,
-        ) -> std::result::Result<ResultAssessment, String> {
-            Ok(ResultAssessment {
-                cause: Some(self.cause),
-                refusal: (self.cause == PolicyCause::Unfinished
-                    || self.outcome == Outcome::Succeeded)
-                    .then(|| "model reported unfinished work; continuation limit exhausted".into()),
-                ..Default::default()
-            })
-        }
-    }
-
-    #[test]
-    fn holder_records_stops_and_replay_preserves_outcomes() -> TestResult {
-        for cause in [PolicyCause::ResultCheck, PolicyCause::Unfinished] {
-            for outcome in [Outcome::Succeeded, Outcome::Uncommitted, Outcome::Failed] {
-                for interrupted in [false, true] {
-                    let temp = tempfile::tempdir()?;
-                    let clock = clock();
-                    let cancel = provenant_core::CancelToken::new();
-                    let call = call(&clock, &cancel);
-                    let store = RunStore::open(&context(temp.path())?, &call)?;
-                    let input = input();
-                    store.create(&input, &call)?;
-                    seal_observation(&store, &input, &exit())?;
-                    let id = input.attempts[0].attempt_id;
-                    let mut old = store.record(id, &call)?;
-                    let route = crate::tests::route();
-                    old.resolved_route = Some(route.clone());
-                    old.applied_route = Some(route);
-                    old.provider_launched = Some(true);
-                    old.state = AttemptState::Running {
-                        extra: Default::default(),
-                    };
-                    store.db.execute(
-                        "UPDATE attempts SET record=?1 WHERE id=?2",
-                        rusqlite::params![crate::db::bytes(&old)?, id.to_string()],
-                    )?;
-                    let attempt = store.attempt_dir(old.run_id, id, false)?;
-                    let provider = StoppingResult { outcome, cause };
-                    if interrupted {
-                        // Crash boundary: decision sealed, terminal intent not
-                        // yet written. Recovery must re-decode the provider result.
-                        store.stage_policy_stop(
-                            &old,
-                            cause,
-                            Some("model reported unfinished work; continuation limit exhausted"),
-                        )?;
-                    }
-                    let terminal = store.finish(id, &attempt, &exit(), &provider, &call)?;
-                    let expected =
-                        if cause == PolicyCause::ResultCheck && outcome == Outcome::Uncommitted {
-                            Outcome::Uncommitted
-                        } else {
-                            Outcome::Failed
-                        };
-                    assert!(
-                        matches!(terminal.state, AttemptState::Terminal { outcome, .. } if outcome == expected),
-                        "{cause:?} {outcome:?} interrupted={interrupted}: {:?}",
-                        terminal.state
-                    );
-                    if cause == PolicyCause::Unfinished
-                        && matches!(outcome, Outcome::Succeeded | Outcome::Uncommitted)
-                    {
-                        assert!(
-                            matches!(&terminal.state, AttemptState::Terminal { reason: Some(reason), .. } if reason == "model reported unfinished work; continuation limit exhausted")
-                        );
-                    }
-                    let decision = store
-                        .staged_policy_retry(&terminal)?
-                        .ok_or("missing stop")?;
-                    assert_eq!(
-                        (decision.cause, decision.action),
-                        (cause, PolicyAction::Stop)
-                    );
-                    assert_eq!(store.policy_tail(id, &call)?.attempt_id, id);
-                }
-            }
-        }
-        Ok(())
-    }
-
     #[test]
     fn final_handoff_redacts_decoded_strings_and_revalidates_bounds() -> TestResult {
         for prefix in ["\n", "\t"] {
@@ -634,18 +441,6 @@ mod tests {
         let mut result = decoded();
         result.result = Handoff::from_json(&snapshot("stopped_early"))?.fenced();
         store.capture_handoff(&attempt, &old, &result)?;
-        let retry = PolicyRetry {
-            schema_version: 2,
-            cause: crate::PolicyCause::Capacity,
-            action: crate::PolicyAction::Retry,
-            route: old.requested_route.clone(),
-            resume: false,
-            max_attempts: 2,
-            instruction: "Continue.".into(),
-            not_before_unix_seconds: None,
-        };
-        assert!(!store.stage_policy_retry(&old, &retry, &call)?);
-        assert!(store.staged_policy_retry(&old)?.is_none());
         store
             .db
             .execute("DELETE FROM admission WHERE attempt=?1", [id.to_string()])?;

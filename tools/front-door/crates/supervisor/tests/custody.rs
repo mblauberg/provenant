@@ -7,7 +7,7 @@ use provenant_os::{
     fs::{Directory, FileHandle, LockMode},
 };
 use provenant_supervisor::{
-    ChildRegistry, ExitPublisher, GuardianHooks, NestedChildStore, RegisteredChild,
+    ChildRegistry, ExitPublisher, GuardianHooks, RegisteredChild,
     census::{Census, CensusError, ProcessIdentity, ProcessObservation, ProcessObserver},
     custody::*,
     fixture,
@@ -1471,6 +1471,25 @@ fn escapee_is_ended_beside_an_unprovable_nested_owner_without_repeated_failures(
     wait_for_identity_absence(&owner_identity)?;
     Ok(())
 }
+/// Host graph-child evidence at the production custody seam.
+struct GraphChildrenHolder(PathBuf);
+impl provenant_supervisor::Holder for GraphChildrenHolder {
+    fn admit(&self, _: &[u8], _: &Directory) -> std::result::Result<(), CustodyError> {
+        Ok(())
+    }
+    fn has_live_children(&self, _: &[u8]) -> std::result::Result<bool, CustodyError> {
+        Ok(self.0.join("live-graph-children").try_exists()?)
+    }
+    fn terminal(
+        &self,
+        context: &[u8],
+        attempt: &Directory,
+        exit: &ExitObservation,
+        recovery: &Recovery,
+    ) -> std::result::Result<(), CustodyError> {
+        RefusingHolder { clock: false }.terminal(context, attempt, exit, recovery)
+    }
+}
 /// A host holder whose admission always fails, as the refusal its marker names.
 struct RefusingHolder {
     clock: bool,
@@ -1537,9 +1556,8 @@ fn the_guardian_names_an_unreadable_host_clock_in_its_admission_refusal(root: &P
     }
     Ok(())
 }
-/// The production shape: no registry is wired, so the host's child store
-/// decides. A store with no nested run ends the escapee; one with a run, which
-/// could hold a nested owner, leaves it alive and reported.
+/// The production shape queries the host for live graph children before
+/// ending an escapee. Live children keep cleanup unresolved.
 #[cfg(target_os = "macos")]
 fn escapee_is_ended_only_when_the_host_reports_no_nested_runs(root: &Path) -> Result<()> {
     let home = root.join("HOME");
@@ -1568,14 +1586,12 @@ fn escapee_is_ended_only_when_the_host_reports_no_nested_runs(root: &Path) -> Re
         let exit = exited(&handle)?;
         Ok((exit, escapee, stream))
     };
-    // The lane's MCP creates its store at startup, with no nested run.
-    std::fs::create_dir_all(home.join("children/attempt/tmp"))?;
-    std::fs::write(home.join("children/attempt/run.sqlite3"), b"")?;
+    // The host initially reports no live graph children.
     let (exit, escapee, _stream) = case("empty")?;
     assert!(!exit.unresolved_cleanup, "{exit:?}");
     wait_for_identity_absence(&escapee)?;
-    std::fs::create_dir_all(home.join("children/attempt/runs/nested-run"))?;
-    let (exit, escapee, stream) = case("records")?;
+    std::fs::write(home.join("live-graph-children"), b"pending")?;
+    let (exit, escapee, stream) = case("live-graph-children")?;
     assert!(exit.unresolved_cleanup, "{exit:?}");
     assert_eq!(exit.unresolved_pids, vec![escapee.pid], "{exit:?}");
     process_identity(escapee.pid)?;
@@ -1729,17 +1745,6 @@ fn cancel_after_unresolved_exit_republishes_a_settled_exit(root: &Path) -> Resul
     Ok(())
 }
 
-struct FileNestedChildren {
-    home: PathBuf,
-}
-impl NestedChildStore for FileNestedChildren {
-    fn has_no_nested_runs(&self, _: &[u8]) -> bool {
-        match std::fs::read_dir(self.home.join("children/attempt/runs")) {
-            Ok(mut entries) => entries.next().is_none(),
-            Err(error) => error.kind() == io::ErrorKind::NotFound,
-        }
-    }
-}
 struct FileChildRegistry {
     home: PathBuf,
 }
@@ -3027,9 +3032,8 @@ fn main() -> Result<()> {
         let home = std::env::var_os("HOME")
             .map(PathBuf::from)
             .ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))?;
-        // The production shape wires no registry; only the host's child store.
+        // The production shape wires no child registry.
         let production_shape = home.join(S2_PRODUCTION_SHAPE).is_file();
-        let store = FileNestedChildren { home: home.clone() };
         let refusal_marker = home.join(S2_REFUSE_ADMISSION);
         let jump_marker = home.join(S2_WALL_JUMP);
         let jump = std::fs::read_to_string(&jump_marker)
@@ -3042,6 +3046,7 @@ fn main() -> Result<()> {
             sleeping,
             jump: jump.unwrap_or(0),
         };
+        let graph_children = GraphChildrenHolder(home.clone());
         let registry = FileChildRegistry { home };
         let observer = CensusGateObserver;
         let disk = std::env::var_os("PROVENANT_STATE_DIR")
@@ -3071,9 +3076,12 @@ fn main() -> Result<()> {
             GuardianHooks {
                 holder: refusal
                     .as_ref()
-                    .map(|holder| holder as &dyn provenant_supervisor::Holder),
+                    .map(|holder| holder as &dyn provenant_supervisor::Holder)
+                    .or_else(|| {
+                        production_shape
+                            .then_some(&graph_children as &dyn provenant_supervisor::Holder)
+                    }),
                 children: (!production_shape).then_some(&registry as &dyn ChildRegistry),
-                nested_children: production_shape.then_some(&store as &dyn NestedChildStore),
                 observer: Some(&observer),
                 wall_clock: jump
                     .is_some()

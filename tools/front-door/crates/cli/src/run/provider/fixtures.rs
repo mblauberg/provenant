@@ -76,6 +76,7 @@ pub fn prepare_fixture(
 /// The attempt determines the actor, regardless of request or environment labels.
 pub(crate) fn start_fabric_relay(
     context: &run::HolderContext,
+    graph_wake: Option<std::sync::Arc<super::super::holder::GraphWake>>,
 ) -> Result<provenant_fabric_mcp::lane::HostRelay, String> {
     use provenant_core::CancelToken;
     use provenant_fabric_runtime::{coordination::CoordinationService, identity::Address};
@@ -117,7 +118,12 @@ pub(crate) fn start_fabric_relay(
         )
         .map_err(|e| e.to_string())?,
     );
-    provenant_fabric_mcp::lane::HostRelay::start(
+    let ctx = std::sync::Arc::new(ctx);
+    let graph_ctx = std::sync::Arc::clone(&ctx);
+    let attempt = context.attempt_id.to_string();
+    let graph_clock = provenant_os::clock::SystemClock::new();
+    let graph_holder = context.clone();
+    provenant_fabric_mcp::lane::HostRelay::start_with_graph(
         LaneRuntime::fabric_socket(context.attempt_id),
         provenant_records::Limits {
             max_bytes: ctx.config.limits.input_frame_bytes,
@@ -139,6 +145,87 @@ pub(crate) fn start_fabric_relay(
             )?;
             call.execute_lane_coordination(&coordination, &ctx.config.limits, budget, cancel)
         },
+        move |arguments, cancel: &CancelToken, within| {
+            let budget = provenant_fabric_mcp::lane::host_budget(&graph_clock, within)?;
+            serve_graph_frame(
+                || {
+                    crate::fabric::graph_relay::serve(
+                        &graph_ctx,
+                        &attempt,
+                        arguments,
+                        budget,
+                        cancel,
+                        &graph_clock,
+                    )
+                },
+                |id| {
+                    if let Some(wake) = &graph_wake {
+                        wake(&graph_holder, id)
+                    } else {
+                        Ok(())
+                    }
+                },
+            )
+        },
     )
     .map_err(|e| e.to_string())
+}
+
+/// Finish admission before waking; this also covers an idempotent replay.
+fn serve_graph_frame(
+    serve: impl FnOnce() -> Result<serde_json::Value, provenant_fabric_mcp::tools::ServiceError>,
+    wake: impl FnOnce(&str) -> Result<(), String>,
+) -> Result<serde_json::Value, provenant_fabric_mcp::tools::ServiceError> {
+    let receipt = serve()?;
+    if let Some(id) = receipt["graph_id"].as_str() {
+        wake(id).map_err(|message| provenant_fabric_mcp::tools::ServiceError::Cli {
+            code: "graph_wake_failed".into(),
+            message,
+            data: receipt.clone(),
+        })?;
+    }
+    Ok(receipt)
+}
+
+#[cfg(test)]
+mod graph_wake_tests {
+    use super::*;
+
+    #[test]
+    fn relay_wakes_after_admission_releases_custody_and_on_replay() {
+        let custody = std::sync::Mutex::new(0);
+        for replayed in [false, true] {
+            let receipt = serve_graph_frame(
+                || {
+                    let mut revision = custody.lock().unwrap();
+                    if !replayed {
+                        *revision += 1;
+                    }
+                    Ok(serde_json::json!({"graph_id":"children", "replayed":replayed}))
+                },
+                |id| {
+                    assert_eq!(id, "children");
+                    // The owner can take custody and sees the durable revision.
+                    assert_eq!(*custody.try_lock().unwrap(), 1);
+                    Ok(())
+                },
+            )
+            .unwrap();
+            assert_eq!(receipt["replayed"], replayed);
+        }
+        let failed = serve_graph_frame(
+            || {
+                Err(provenant_fabric_mcp::tools::ServiceError::Facade(
+                    provenant_fabric_mcp::tools::FacadeError::StateCorrupt,
+                ))
+            },
+            |_| panic!("a refused admission must not wake the owner"),
+        );
+        assert!(matches!(
+            failed,
+            Err(provenant_fabric_mcp::tools::ServiceError::Facade(
+                provenant_fabric_mcp::tools::FacadeError::StateCorrupt,
+            ))
+        ));
+    }
 }

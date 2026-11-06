@@ -10,19 +10,23 @@ an existing host lock directory read-write to writers, and `exec_roots` can
 expose a repo-managed toolchain read-only. Both are empty by default. See
 [project paths](providers.md#project-paths-and-host-checkout-identity).
 
-Create a writer checkout, submit and wait with one command:
+Start an approved writer with the `implement` template, or use `deliver` for
+the composite through CI, review and landing:
 
 ```sh
-provenant run --prompt-file brief.md --route senior \
-  --branch fix/issue --base main --deliver push
+provenant run --use implement --file brief.md --explain
 ```
 
-`run` waits up to 240 seconds, then prints the state and a result tail. Use
-`--wait 30m` or `--wait 3600s` for a longer background wait. A wait that ends
-before the run settles returns status `waiting` with exit 0 and prints the
-exact command to keep waiting; follow it rather than submitting again. `provenant status` shows active lanes and the twenty newest settled
-lanes, newest first. `--json` returns full records for the same selection.
-Use `--all` with `--limit N` and the returned `--cursor N` to page all history.
+Check the work binding, literal write scope, acceptance and authority in the
+explanation, then submit without `--explain`. One writer owns each worktree;
+parallel slices integrate into one branch before full review. See
+[templates](presets.md) for composition and the default choices.
+
+Use `provenant status` for graph, node and attempt rows, `output TARGET` for
+results and `output TARGET --trace` for the timeline. Use `steer` for a message,
+`stop` for a subtree, `retry` to continue or redo work and `edit` for patches to
+unstarted nodes. Inside a worker, `run --use TEMPLATE` adds a child sharing the
+graph's budget and trace. A wait expiry leaves work running.
 
 New stdout/stderr captures and settled `result.md` files mask known credential
 shapes before storage. Settlement also masks them in the attempt's Codex and
@@ -45,7 +49,7 @@ sharing. See
 for the full list.
 
 A valid final handoff declaring `stopped_early` or `blocked` makes an otherwise
-successful lane settle as `review_required`. `run --wait` and `lanes` show the
+successful lane settle as `review_required`. `run --wait` and `status` show the
 state, so the unfinished work is visible without inspecting partial signals.
 
 On macOS, the host selects a nice value for the lane, and the guardian applies
@@ -63,7 +67,7 @@ build-heavy = 15
 Values range from 0 to 19, with higher values yielding more CPU time to other
 work. These are the defaults. A worktree-write lane uses `writer`; other lanes
 use `read-only`. Set `--build-heavy` to use `build-heavy` for either mode.
-Fabric tasks and manifests accept `"build_heavy": true`. `lanes --json` reports
+Fabric tasks and manifests accept `"build_heavy": true`. `status --json` reports
 the applied value as `priority`, and `requested_priority` when it differs. The
 value is null before it is known and for older records without this evidence.
 If the guardian already has a higher nice value, the provider inherits that
@@ -154,7 +158,7 @@ Git pin. Status and wait queue recovery. To retry directly, run
 `provenant reconcile --id <run>` after resolving any reported cause.
 
 Overlapping origin refresh requests share one fetch. The repository setup lock
-serialises only upstream configuration writes; origin refresh,
+waits up to 60 seconds and serialises only upstream configuration writes; origin refresh,
 repository verification, branch creation and provider launch run outside it.
 The lock is released before provider launch and custody confirmation.
 
@@ -233,94 +237,46 @@ intent before removal, then pruning or the retention reason. Failed and
 cancelled lanes retain their worktrees. Explicitly supplied worktrees retain
 their existing GC policy.
 
-`provenant resume ATTEMPT --prompt-file followup.md` generates and prints an
-operation ID; supply `--operation-id ID` for a planned retry. It pins the prior
-attempt's applied provider, model and account, including when dispatch selected
-a named route pool. A model capacity failure appears as `model_unavailable`
-with its reason in lanes; resume can continue its provider session when supported.
-Targets accept unique hex prefixes of at least eight
-characters and `RUN/ATTEMPT`; an ambiguous prefix lists candidates. Resume
-starts fresh by default when continuation state is unavailable, preserving authority with
-original context and the previous result attached. Ownership must match the
-lane lineage for a previously lane-owned tree. Explicit checkouts resume in
-place unless a lane owner now names another lineage.
-Attempts recorded before #1855 have no launch evidence of running under an
-owned tree, so continuation resumes them in place (fail open).
-A missing or reassigned checkout uses a fresh owned worktree when fallback is
-allowed. Its receipt records `continuation: fresh`. Add `--no-fallback` to require
-provider resume.
-Custody, policy or launch refusals still need their named cause addressed.
-An accepted continuation that is rejected during launch remains listed by
-`provenant lanes --all`, with the reason on its attempt. Its result is empty
-when no provider ran; `provenant output ATTEMPT` can still address it.
-`provenant cancel ATTEMPT` generates and prints its operation ID. Cancel and
-`provenant reconcile --id RUN` infer project scope from the run record.
+## Recovery
 
-Put graph documents and briefs in `.provenant/scratch/`. A legacy `.agent-run/`
-is never used for new documents; Provenant does not migrate it. Graph setup
-creates `graphs/` and excludes the scratch root through `.git/info/exclude`.
-Every lane can read it: read-only lanes through their working directory, writers
-through a read grant on the primary checkout's scratch, since their linked
-worktree lacks untracked files. Scratch read grants use canonical paths and must
-remain under the canonical primary checkout. `--read-root DIR` grants any other
-directory; `--prompt-file` grants its file. A bare `--document plan.json`
-resolves there when no current-directory file exists. Explicit project-local
-paths also work. A graph can use node `delivery: "integrate:integration"`
-with top-level `integration_branch: "integration"` and `delivery: "pr"` for one
-final PR. Delivery failures block dependants or retain the graph advance error;
-`fabric graph resume --document PATH` retries final delivery. Loop rounds
-integrate fast-forward only. If a loop round's delivery fails at the Integrate
-stage, the integration branch moved after the round launched; rerun the graph
-from the new head rather than resuming it.
+Inspect `status TARGET`, `output TARGET` and `output TARGET --trace` before
+replacing work. `retry TARGET` continues or redoes the target, optionally with
+a new brief or an authorised budget increase. Address the recorded cause
+first. Recovery reconciles uncertain launches, reuses finished outputs and
+continues only unfinished work; never launch a second writer while custody
+is uncertain. Do not reset a worktree containing edits.
 
-For recovery, use the existing operation that matches the situation:
+Use `edit` for a patch to unstarted nodes, with the expected graph revision
+and an idempotency key. Started attempts stay immutable. `stop TARGET` stops
+its subtree unless a child is explicitly detached. Put repository templates
+in `.provenant/templates/` and temporary briefs in `.provenant/scratch/`.
+Delivery failure blocks dependent work; retry only after checking the
+integration head and retained evidence. Review remains bound to its subject.
 
-- **Unconfirmed launch:** `LAUNCH_UNKNOWN` means the handoff was not confirmed;
-  the guardian may still have started. Run `provenant reconcile --id RUN` and
-  inspect the attempt and custody evidence before considering another launch.
-- **Blocked custody:** a `launch blocked` notice includes the cause. The
-  reservation remains in place; address the reported cause and inspect the
-  attempt's custody evidence. Do not remove
-  the reservation to force another launch.
-  A retained slot-root reservation is carried to its named attempt during
-  locked recovery. If reconciliation reports unreadable or conflicting
-  evidence, retain it for host investigation; it continues to fence writers.
-- **Resume a graph:** `provenant fabric graph resume` continues its recorded
-  checkpoint. A plain rerun of the same preset inputs reattaches to that graph.
-- **Retry a lane:** `provenant resume ATTEMPT` continues from the recorded
-  attempt. Address the refusal or other recorded cause before retrying.
-- **Fallback:** an eligible route fallback is selected by the graph's routing
-  policy; resuming the graph does not authorise an unsafe second launch.
-- **Repair:** correct the reported condition, then resume the affected graph or
-  lane with its existing command. Do not reset a worktree containing edits.
-- **Fresh start:** cancel the old graph when appropriate, then rerun a preset
-  with `--fresh` to create a new graph ID.
+Finish or stop pending graphs and drain writers on every host before
+[upgrading](install.md#bootstrap-and-upgrade). Install on all hosts before new
+launches. Preserve unreadable records and report them.
 
-Drain in-flight graphs and writer lanes before upgrading, as described in the
-[upgrade procedure](install.md#bootstrap-and-upgrade). Finish or cancel each
-graph before upgrading: checkpoint meanings for graph lineage and lifecycle
-change together in this release. Upgrading does not
-force-cancel running lanes. An older interrupted settlement with its private
-objects can resume through the new Git receive import. Without those objects,
-recover its commits on the host and start a fresh run; the refusal names this
-recovery path.
+A retained slot-root reservation is carried to its named attempt during locked
+recovery. Unreadable or conflicting evidence continues to fence writers; retain
+it for host investigation.
 
 Cancelling a lane that has not launched a provider settles it as cancelled
 with nothing to import, and frees its queue place and its worktree's writer
-before `cancel` returns, so a new `provenant run` there succeeds straight away.
+before `stop` returns, so a new `provenant run` there succeeds straight away.
 A launcher still preparing the writer (for example waiting on
 `provenant-lane-setup.lock`) sees the request within a fraction of a second,
 stops waiting and never advances towards launch. If it has not let go within
-about four seconds, `cancel` reports the request as pending and the launcher
+about four seconds, `stop` reports the request as pending and the launcher
 settles the attempt as it unwinds. A launcher that dies before the provider
-launches leaves an attempt that `status`, `lanes` and `wait` settle by
+launches leaves an attempt that status observations settle by
 themselves once its writer lock is free; it no longer shows as `starting`.
 
 `provenant reconcile --id RUN` queues settlement in the background and returns
 without waiting for Git import. The supervisor resumes its durable phase after
 a crash, with at most three attempts that reach import and backoff between
 claims. Concurrent reconcile requests share one settlement worker;
-queued or terminal-only runs do not spawn one. `provenant cancel ATTEMPT` records
+queued or terminal-only runs do not spawn one. `provenant stop ATTEMPT` records
 a durable request that can stop an active import. Provider exit releases host
 build capacity and live custody before settlement completes; a settling
 reservation still prevents another writer from editing that worktree. A terminal
@@ -391,7 +347,7 @@ The default `--until any` returns on the first observed semantic transition,
 or immediately for a terminal target.
 An initially running lane selection does not count its older settled attempts.
 `--until all` waits for every target to become terminal. A lane selection is
-terminal when all its attempts, including policy successors, have settled;
+terminal when all its attempts have settled;
 a graph when complete or cancelled; a PR when merged or closed. A ready or
 failing open PR is notable but remains nonterminal. `--follow` streams initial
 snapshots and each observed transition, and always waits for all targets to
@@ -423,5 +379,5 @@ pr_read_timeout_seconds = 60
 Source intervals accept 10 to 60000 milliseconds. `max_targets` caps the target
 count (default 64, 1 to 1024). `pr_read_timeout_seconds` bounds individual
 GitHub PR read operations (default 60 seconds, 1 to 600). Waiting observes graph
-checkpoints; use the graph's returned resume command when continuation needs
+checkpoints; use `retry` on the graph when continuation needs
 an explicit decision. Repeated status calls or shell sleep loops are unnecessary.

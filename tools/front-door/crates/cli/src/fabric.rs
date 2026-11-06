@@ -1,6 +1,8 @@
 //! Fabric's clap subtree and edge composition. Runtime owns coordination policy.
 use crate::metadata::CatalogueArg;
 mod context;
+pub mod graph_cloud;
+pub mod graph_relay;
 
 pub(crate) use context::private_dir;
 /// Shared identity/config setup for CLI leaves and the binary MCP transport.
@@ -50,9 +52,6 @@ pub enum Fabric {
     /// Serve peer requests from the login session (macOS LaunchAgent)
     #[command(hide = true)]
     PeerAgent,
-    /// Run and track task graphs
-    #[command(subcommand)]
-    Graph(Graph),
     /// Send and read inbox messages
     #[command(subcommand)]
     Mail(Mail),
@@ -69,46 +68,6 @@ pub enum Fabric {
     #[command(subcommand)]
     Landing(Landing),
 }
-#[derive(Debug, Subcommand)]
-pub enum Graph {
-    /// Run a task graph document
-    Run {
-        /// Project-local graph file; bare names default to .provenant/scratch/graphs
-        #[arg(long)]
-        document: PathBuf,
-    },
-    /// Show a task graph's status
-    Status {
-        /// Graph ID, project-local document path or document SHA-256 hash
-        id: String,
-    },
-    /// Wait for a task graph to settle without advancing it
-    Wait {
-        /// Graph ID, project-local document path or document SHA-256 hash
-        id: String,
-        /// Wait limit (seconds or a duration such as 30m)
-        #[arg(long, catalog_duration())]
-        wait: u64,
-    },
-    /// Cancel a task graph
-    Cancel {
-        /// Graph ID, project-local document path or document SHA-256 hash
-        id: String,
-        /// Why the graph was cancelled (up to 256 bytes)
-        #[arg(long, value_parser = crate::grammar::reason, catalog_bounds = (0, 256))]
-        reason: Option<String>,
-    },
-    /// Resume a task graph from its document
-    Resume {
-        /// Graph ID, project-local graph document or document SHA-256 hash
-        #[arg(long)]
-        document: PathBuf,
-        /// Raise a limit, budget or loop allowance, or decide a paused loop (KEY=VALUE); may be repeated
-        #[arg(long, value_name = "KEY=VALUE")]
-        extend: Vec<String>,
-    },
-}
-
 #[derive(Debug, Args)]
 pub struct Operation {
     /// Caller-chosen ID that makes retries idempotent
@@ -600,11 +559,6 @@ impl Fabric {
             Self::Identity => return "fabric identity".into(),
             Self::Peer { .. } => return "fabric peer".into(),
             Self::PeerAgent => return "fabric peer-agent".into(),
-            Self::Graph(Graph::Run { .. }) => return "fabric graph run".into(),
-            Self::Graph(Graph::Cancel { .. }) => return "fabric graph cancel".into(),
-            Self::Graph(Graph::Resume { .. }) => return "fabric graph resume".into(),
-            Self::Graph(Graph::Status { .. }) => return "fabric graph status".into(),
-            Self::Graph(Graph::Wait { .. }) => return "fabric graph wait".into(),
             Self::Mail(v) => (
                 "mail",
                 match v {
@@ -793,7 +747,6 @@ fn execute(
     let value = match cmd {
         Fabric::Identity
         | Fabric::Mcp { .. }
-        | Fabric::Graph(_)
         | Fabric::Peer { .. }
         | Fabric::PeerAgent
         | Fabric::Landing(Landing::Push { .. } | Landing::Reconcile { .. }) => {
@@ -1143,7 +1096,8 @@ pub fn coordination_outcome(
     use provenant_fabric_runtime::coordination::facade::FacadeError;
     match error {
         FacadeError::InvalidInput { .. } | FacadeError::NotFound => Outcome::Invalid,
-        FacadeError::StaleFence
+        FacadeError::GraphRelayRefused { .. }
+        | FacadeError::StaleFence
         | FacadeError::GenerationConflict { .. }
         | FacadeError::Conflict
         | FacadeError::LaneCoordinationRefused

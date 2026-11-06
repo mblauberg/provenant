@@ -6,7 +6,7 @@ import sys
 
 REQUIRED = frozenset({"macos-scope", "generated-reference", "rust-lint", "rust", "rust-macos-tests", "rust-macos-release", "rust-dependencies", "generic-checks"})
 MACOS = frozenset({"rust-macos-tests", "rust-macos-release"})
-# Skipped only for docs-only changes (scripts/select-macos-checks run_rust=false).
+# Skipped only for prose-only changes (scripts/select-macos-checks run_rust=false).
 RUST = frozenset({"rust-lint", "rust", "rust-dependencies"})
 
 

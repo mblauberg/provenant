@@ -227,46 +227,7 @@ where
     Ok(job)
 }
 
-/// Submit using the installed provider CLI. Provider details stay at this edge.
-pub(super) fn submit_installed(
-    store: &provenant_run::RunStore,
-    id: AttemptId,
-    job: RemoteJob,
-    task: &str,
-    call: &provenant_run::Request<'_>,
-    cwd: &std::path::Path,
-) -> Result<RemoteJob, String> {
-    use provenant_providers::cloud_cli::{ClaudeCloud, CodexCloud, InstalledCloudCli};
-    let executor = provenant_os::exec::SystemExecutor::new(1).map_err(|error| error.to_string())?;
-    let cli = InstalledCloudCli {
-        executor: &executor,
-        cwd: cwd.to_owned(),
-        timeout: std::time::Duration::from_secs(120),
-    };
-    match provenant_records::AdapterSpec::get(&job.provider).and_then(|spec| spec.cloud_transport) {
-        Some(provenant_records::CloudTransport::Claude) => submit(
-            &mut ClaudeCloud {
-                cli,
-                pending_cleanup: None,
-            },
-            store,
-            id,
-            job,
-            task,
-            call,
-        ),
-        Some(provenant_records::CloudTransport::Codex) => {
-            submit(&mut CodexCloud { cli }, store, id, job, task, call)
-        }
-        _ => Err(format!(
-            "cloud target {} has unsupported provider {}",
-            job.target, job.provider
-        )),
-    }
-}
-
-/// Read a cloud record, if submission has written one.
-pub(super) fn load(
+pub fn load(
     store: &provenant_run::RunStore,
     id: AttemptId,
     call: &provenant_run::Request<'_>,
@@ -291,7 +252,7 @@ pub(super) fn load(
 }
 
 /// Find a cloud attempt's sealed target without inferring it from local state.
-pub(super) fn placement(
+pub fn placement(
     store: &provenant_run::RunStore,
     record: &provenant_run::AttemptRecord,
     call: &provenant_run::Request<'_>,
@@ -422,7 +383,7 @@ fn observe_for_view(
 }
 
 /// User-facing advisory result and model comparison for a durable job.
-pub(super) fn view(job: &RemoteJob) -> serde_json::Value {
+pub fn view(job: &RemoteJob) -> serde_json::Value {
     let mut value = serde_json::json!({
         "target": job.target, "environment": job.environment, "provider": job.provider,
         "remote_id": job.remote_id, "commit": job.commit,

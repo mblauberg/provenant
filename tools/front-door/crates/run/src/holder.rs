@@ -1321,6 +1321,7 @@ impl RunStore {
         // whether its work could be committed.
         if decoded.outcome == Outcome::TimedOut && exit.stop_reason == Some(StopReason::TokenBudget)
         {
+            decoded.terminal_cause = Some(TerminalCause::TokenBudget);
             let budget = crate::launch::token_budget(
                 task,
                 self.context.state_root.as_path(),
@@ -1766,7 +1767,7 @@ impl RunStore {
                 });
             }
         }
-        let mut terminal_note = if exit.never_spawned && !cancelled {
+        let terminal_note = if exit.never_spawned && !cancelled {
             exit.launch_refusal.map(|fact| {
                 let diagnostic = fact.project(provenant_records::diagnostic::Diagnostic::new(
                     ErrorKind::Refused.code(),
@@ -1781,76 +1782,6 @@ impl RunStore {
         } else {
             None
         };
-        let frozen_policy = self.staged_policy_retry(&record)?;
-        let frozen_policy_retry = frozen_policy
-            .as_ref()
-            .is_some_and(|decision| decision.action != crate::PolicyAction::Stop);
-        let frozen_refusal = frozen_policy_retry
-            || frozen_policy.as_ref().is_some_and(|decision| {
-                decision.cause == crate::PolicyCause::Unfinished
-                    || (decision.cause == crate::PolicyCause::ResultCheck
-                        && decoded.outcome == Outcome::Succeeded)
-            });
-        if frozen_refusal && matches!(decoded.outcome, Outcome::Succeeded | Outcome::Uncommitted) {
-            decoded.outcome = if cancelled {
-                Outcome::Cancelled
-            } else {
-                Outcome::Failed
-            };
-            decoded.reason = Some(
-                frozen_policy
-                    .as_ref()
-                    .filter(|decision| {
-                        decision.action == crate::PolicyAction::Stop
-                            && !decision.instruction.is_empty()
-                    })
-                    .map(|decision| decision.instruction.clone())
-                    .unwrap_or_else(|| {
-                        "result-policy recovery decision retained from interrupted settlement"
-                            .into()
-                    }),
-            );
-        }
-        if frozen_policy.is_none()
-            && !cancelled
-            && exit.stop_reason.is_none()
-            && !exit.never_spawned
-            && !exit.unresolved_cleanup
-        {
-            let assessment = providers
-                .assess_result(
-                    task,
-                    &record,
-                    &decoded,
-                    handoff.as_ref(),
-                    completion.holder_context(),
-                    self.policy_attempt_number(&record, call)?,
-                )
-                .map_err(RunError::ProviderEvidence)?;
-            if let Some(reason) = assessment.refusal {
-                decoded.outcome = Outcome::Failed;
-                decoded.reason = Some(reason);
-            }
-            let staged = if let Some(retry) = assessment.retry {
-                self.stage_policy_retry(&record, &retry, call)?
-            } else {
-                false
-            };
-            if staged {
-                if let Some(note) = assessment.note {
-                    terminal_note = Some(note.clone());
-                    decoded.reason = Some(match decoded.reason.take() {
-                        Some(reason) => format!("{reason}; {note}"),
-                        None => note,
-                    });
-                }
-            } else if let Some(cause) = assessment.cause {
-                self.stage_policy_stop(&record, cause, decoded.reason.as_deref())?;
-            }
-        }
-        // Assess a complete, verified successful response before rejecting an
-        // empty result: the configured result-quality policy may recover it.
-        // Without such a policy an empty response still cannot succeed.
         if decoded.result.is_empty()
             && matches!(decoded.outcome, Outcome::Succeeded | Outcome::Uncommitted)
         {
@@ -2021,7 +1952,6 @@ impl RunStore {
             Outcome::Cancelled | Outcome::Lost | Outcome::Unsettled
         ) {
             decoded.terminal_cause = None;
-            terminal_note = None;
         }
         let decoded_reason = decoded.reason.take().map(bounded_reason);
         let publication = TerminalPublication {
@@ -3192,12 +3122,19 @@ mod writer_recovery_tests {
             crate::dispatch_tests::Fake::with_observed(Some(route()), Some(Outcome::TimedOut));
         let finished = store.finish(id, &attempt, &observed, &fake, &call)?;
         let AttemptState::Terminal {
-            outcome, reason, ..
+            extra,
+            outcome,
+            reason,
+            ..
         } = finished.state
         else {
             panic!("attempt must be terminal");
         };
         assert_eq!(outcome, Outcome::TimedOut, "reason: {reason:?}");
+        assert_eq!(
+            extra.get("terminal_cause"),
+            Some(&serde_json::json!(TerminalCause::TokenBudget))
+        );
         let reason_text = reason.expect("terminal attempt has reason");
         assert!(
             reason_text.contains("token budget reached: provider stopped after passing"),

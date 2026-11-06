@@ -36,7 +36,7 @@ path = "junit.xml"
 # retained_state_copy_skips_entries_swapped_after_their_check: binds a socket.
 # forward_falls_back_only_when_no_agent_accepts: binds a socket.
 # listen_replaces_a_stale_socket_but_not_a_live_agent: binds a socket.
-# lane_mcp_refuses_coordination_but_allows_reads_and_child_submission: binds a socket.
+# lane_run_submits_child_through_parent_relay: binds a host relay socket.
 default-filter = '''
 not (
     (package(=provenant-confinement) & (
@@ -63,7 +63,7 @@ not (
         test(=peer_agent::tests::forward_falls_back_only_when_no_agent_accepts) |
         test(=peer_agent::tests::listen_replaces_a_stale_socket_but_not_a_live_agent)
     )) |
-    (package(=provenant) & binary(=fabric_transport) & test(=lane_mcp_refuses_coordination_but_allows_reads_and_child_submission)) |
+    (package(=provenant) & binary(=fabric_lane) & test(=lane_run_submits_child_through_parent_relay)) |
     (package(=provenant) & binary(=worktrees) & (
         test(=lane_prepare_isolates_nested_claude_state) |
         test(=lane_builds_and_tests_swift_in_a_registered_worktree)
@@ -108,20 +108,6 @@ slow-timeout = { period = "30s", terminate-after = 4 }
 filter = 'test(=run::tests::wait_handles_a_stale_default_cursor)'
 slow-timeout = { period = "60s", terminate-after = 5 }
 
-# Runs a whole review several times through real launches.
-[[profile.default.overrides]]
-filter = 'test(=review_fans_out_and_collects_fake_provider) | test(=review_resolves_identity_only_dispositions)'
-slow-timeout = { period = "30s", terminate-after = 2 }
-
-# These tests perform several dispatches, including writer worktree preparation.
-[[profile.default.overrides]]
-filter = 'test(=opus_writer_dispatch_advises_a_cheaper_route) | test(=cancel_live_preparation_releases_writer_for_the_next_run)'
-slow-timeout = { period = "30s", terminate-after = 4 }
-
-[[profile.ci.overrides]]
-filter = 'test(=opus_writer_dispatch_advises_a_cheaper_route) | test(=cancel_live_preparation_releases_writer_for_the_next_run)'
-slow-timeout = { period = "30s", terminate-after = 4 }
-
 [[profile.ci.overrides]]
 filter = 'test(=run::tests::wait_handles_a_stale_default_cursor)'
 slow-timeout = { period = "60s", terminate-after = 5 }
@@ -140,20 +126,28 @@ slow-timeout = { period = "30s", terminate-after = 4 }
 filter = 'test(gc_does_not_inspect_status_of_out_of_scope_worktrees)'
 slow-timeout = { period = "30s", terminate-after = 4 }
 
-# Runs a whole review several times through real launches.
-[[profile.ci.overrides]]
-filter = 'test(=review_fans_out_and_collects_fake_provider) | test(=review_resolves_identity_only_dispositions)'
-slow-timeout = { period = "30s", terminate-after = 2 }
-
-# This real-Git fixture creates several worktrees and follows the CLI remedy.
+# This functional paging fixture seals 102 runs and repeatedly verifies their
+# observations and cursor snapshots. Preserve its assertions on slower hosts.
 [[profile.default.overrides]]
-filter = 'test(=run::tests::dispatch_reuses_only_free_lane_or_unowned_worktree)'
+filter = 'package(=provenant-cli) & test(=console::board::tests::board_paging_end_to_end)'
 slow-timeout = { period = "30s", terminate-after = 4 }
 
 [[profile.ci.overrides]]
-filter = 'test(=run::tests::dispatch_reuses_only_free_lane_or_unowned_worktree)'
+filter = 'package(=provenant-cli) & test(=console::board::tests::board_paging_end_to_end)'
+slow-timeout = { period = "30s", terminate-after = 4 }
+
+# Catalogue coverage starts two CLI processes per bundled template. Keep every
+# template assertion while allowing for process-start contention in a full run.
+# The oversized peer-frame refusal also reads its boundary-sized frame before
+# contact and exceeds 30 seconds on this host even when run on its own.
+[[profile.default.overrides]]
+filter = 'package(=provenant) & ((binary(=graph_cli) & test(=every_bundled_template_is_listed_shown_and_explained)) | (binary(=fabric_transport) & test(=peer_dispatch_refuses_an_oversized_frame_before_contact)))'
+slow-timeout = { period = "30s", terminate-after = 4 }
+
+[[profile.ci.overrides]]
+filter = 'package(=provenant) & ((binary(=graph_cli) & test(=every_bundled_template_is_listed_shown_and_explained)) | (binary(=fabric_transport) & test(=peer_dispatch_refuses_an_oversized_frame_before_contact)))'
 slow-timeout = { period = "30s", terminate-after = 4 }
 
 [[profile.lane.overrides]]
-filter = 'test(=run::tests::dispatch_reuses_only_free_lane_or_unowned_worktree)'
+filter = 'package(=provenant) & ((binary(=graph_cli) & test(=every_bundled_template_is_listed_shown_and_explained)) | (binary(=fabric_transport) & test(=peer_dispatch_refuses_an_oversized_frame_before_contact)))'
 slow-timeout = { period = "30s", terminate-after = 4 }

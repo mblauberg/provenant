@@ -640,8 +640,11 @@ pub(super) fn publishing_requested(
 pub(super) fn publishing_executable(
     home: &Path,
     locate: &impl Fn(&str) -> Result<PathBuf, String>,
+    host_token: Option<&std::ffi::OsStr>,
 ) -> Option<PathBuf> {
-    if !home.join(".config/gh").is_dir() {
+    if !host_token.is_some_and(super::gh_auth::valid_host_token)
+        && !home.join(".config/gh").is_dir()
+    {
         return None;
     }
     // Resolve links before adding exact executable grants or writing wrappers.
@@ -836,6 +839,52 @@ pub(super) fn setup_directory(
         }
         Err(error) => Err(error.to_string()),
     }
+}
+
+/// Verify the pinned writer source and describe retained predecessor edits.
+/// A continuation keeps dirty work in place; unreadable status and mismatched
+/// source evidence still refuse preparation.
+pub(super) fn writer_source_context(
+    writer: &run::WriterLaunch,
+    task: &run::TaskRequest,
+    git: &Path,
+) -> Result<Option<String>, PrepareError> {
+    let Some(source_head) = task.source_head.as_deref() else {
+        if let Some(head) = task.head.as_deref() {
+            writer.require_source(head.parse().map_err(|_| "invalid pinned writer source")?)?;
+        }
+        return Ok(None);
+    };
+    let uncommitted = writer
+        .uncommitted_paths(git)
+        .map_err(|error| format!("cannot inspect uncommitted predecessor edits: {error}"))?;
+    let predecessor = task
+        .head
+        .as_deref()
+        .ok_or("missing predecessor head for writer continuation")?
+        .parse()
+        .map_err(|_| "invalid pinned writer predecessor head")?;
+    let source = source_head
+        .parse()
+        .map_err(|_| "invalid pinned writer source")?;
+    if let Err(error) = writer.require_continuation_source(git, source, predecessor) {
+        return Err(PrepareError::WriterContinuation(
+            if uncommitted.is_empty() {
+                error.to_string()
+            } else {
+                format!(
+                    "{error}; uncommitted predecessor edits: {}",
+                    uncommitted.join(", ")
+                )
+            },
+        ));
+    }
+    Ok((!uncommitted.is_empty()).then(|| {
+        format!(
+            "Uncommitted predecessor edits retained: {}. Inspect these files and continue the work without discarding them.",
+            uncommitted.join(", ")
+        )
+    }))
 }
 
 #[cfg(test)]

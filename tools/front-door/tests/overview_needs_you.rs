@@ -232,6 +232,7 @@ fn overview_needs_you() -> Result {
                 prompt: "PRIVATE PROMPT MARKER".into(),
                 base: None,
                 pinned_base: None,
+                source_head: None,
                 head: None,
                 route: RequestedRoute::Named {
                     extra: Default::default(),
@@ -239,7 +240,6 @@ fn overview_needs_you() -> Result {
                     effort: None,
                 },
                 account: None,
-                fallback: vec![],
                 profile: HarnessProfile::default(),
                 timeout_seconds: 60,
                 delivery_id: None,

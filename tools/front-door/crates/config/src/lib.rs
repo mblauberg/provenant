@@ -8,7 +8,6 @@
 mod account_sync;
 mod domains;
 mod edit;
-pub mod experiment;
 mod gc;
 mod github_policy;
 mod history;
@@ -274,3 +273,5 @@ fn retired_repair(source: &SectionError) -> &'static str {
 pub(crate) fn is_retired_key_code(code: &str) -> bool {
     code.starts_with("moved_to_schedule.") || code.starts_with("retired.")
 }
+
+pub use knobs::documented_field;

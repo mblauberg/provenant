@@ -61,7 +61,18 @@ const LAYERS: &[(&str, &[&str])] = &[
     ("fabric-store", &["core", "records", "os", "sqlite"]),
     (
         "fabric-runtime",
-        &["core", "records", "config", "os", "fabric-store", "routing"],
+        // Graph patches use confinement scanners; cutover reads legacy run stores
+        // through the shared read-only SQLite boundary.
+        &[
+            "core",
+            "records",
+            "config",
+            "os",
+            "confinement",
+            "fabric-store",
+            "routing",
+            "sqlite",
+        ],
     ),
     // The relay validates its socket directory against the effective UID.
     ("fabric-mcp", &["core", "records", "os", "fabric-runtime"]),
@@ -729,7 +740,7 @@ fn executor_git_policy_flags_only_inherited_env() {
         "crates/run/src/tests.rs",
         "crates/cli/src/run/provider/confinement_test.rs",
         "crates/x/src/foo_tests.rs",
-        "tools/front-door/tests/preset_cli.rs",
+        "tools/front-door/tests/graph_cli.rs",
     ] {
         assert!(is_test_source(name), "{name}");
         assert!(executor_git_violation(offending, is_test_source(name)));

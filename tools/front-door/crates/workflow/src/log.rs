@@ -568,7 +568,7 @@ mod tests {
         let tmp = crate::test_support::tempdir().unwrap();
         let base = tmp.path().canonicalize().unwrap();
         let state = base.join("state");
-        std::fs::create_dir(&state).unwrap();
+        provenant_os::fixture::private_state_dir(&state).unwrap();
         let mut inputs = RootInputs::new(base.join("home"), base.join("checkout"));
         inputs.state_dir = Some(state);
         let root = StateRoot::resolve(&inputs, &Resolver).unwrap();

@@ -220,7 +220,7 @@ in `extension.json`:
 ```sh
 provenant answer REQUEST_ID --action reply --text-file extension.json \
   --expect-revision 1 --channel cli --operation-id loop-extension-1 --json
-provenant fabric graph resume --document graph.json
+provenant retry GRAPH
 ```
 
 Resume reads the immutable answer, acknowledges it for its original target,
@@ -356,7 +356,7 @@ deadline has elapsed. Requests without deadlines behave as before.
 `provenant help --all --json` publishes `provider_controls`: one row per adapter
 and launch kind (`lane` or `chair`) with `support` (`live_injection`,
 `mail_only`, `continuation_only` or `unsupported`), the `transport` and a
-`reason`. Each row also lists `cancel`, `resume` and `land` with `supported` and
+`reason`. Each row also lists wire actions `cancel`, `resume` and `land` with `supported` and
 a `reason`, so a console can disable what a provider cannot take. The table is
 declared per adapter in `LaunchCapabilities::control`.
 
@@ -385,7 +385,7 @@ does not inject these messages.
 `state: unsupported`, outcome `refused` and error code `control_unsupported`
 when the lane row does not deliver. Over MCP the same refusal is an error
 response with that code and the receipt as its data, not a successful reply. No lane adapter delivers today (live steering
-is a gap; `resume` is terminal continuation), so `steer` records nothing and its
+is a gap; `retry` is terminal continuation), so `steer` records nothing and its
 receipt names the reason. Nothing is recorded for a refusal, so its operation ID
 stays free.
 

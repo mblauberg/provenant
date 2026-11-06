@@ -23,6 +23,8 @@ use std::{
 };
 
 pub struct Context {
+    /// An in-memory context for observation; mutation services must refuse it.
+    pub inspection_only: bool,
     pub roots: Roots,
     pub identity: Identity,
     pub config: FabricConfig,
@@ -37,6 +39,20 @@ pub struct Context {
 pub(super) fn canonical(path: &Path) -> Result<PathBuf, EdgeError> {
     Ok(provenant_os::fs::canonicalize(path)?)
 }
+/// The provider launch binds TMPDIR to this attempt's private scratch. Require
+/// it explicitly: a lane must never fall back to the host's shared temp area.
+fn lane_temporary() -> Result<PathBuf, EdgeError> {
+    let path = std::env::var_os("TMPDIR")
+        .map(PathBuf::from)
+        .ok_or(EdgeError::Invalid)?;
+    if !path.is_absolute() {
+        return Err(EdgeError::Invalid);
+    }
+    let path = canonical(&path)?;
+    private_dir(&path, &path)?;
+    Ok(path)
+}
+
 pub(crate) fn private_dir(root: &Path, path: &Path) -> Result<Directory, EdgeError> {
     let mut dir = match Directory::open_anchor(root) {
         Ok(dir) => dir,
@@ -97,7 +113,8 @@ pub(crate) fn private_dir(root: &Path, path: &Path) -> Result<Directory, EdgeErr
 /// Whether the host launched this process inside a lane. Every Fabric entry
 /// point that can act as an agent checks it before opening the store.
 pub fn in_lane() -> bool {
-    std::env::var_os(provenant_core::RUN_STATE_DIRECTORY_ENV).is_some()
+    std::env::var_os(provenant_run::PARENT_ATTEMPT_ENV).is_some()
+        || std::env::var_os(provenant_core::RUN_STATE_DIRECTORY_ENV).is_some()
         || std::env::var_os(provenant_run::LANE_DEPTH_ENV).is_some_and(|depth| depth != "0")
 }
 
@@ -127,11 +144,18 @@ impl Context {
         let graph_prompt_limit_source = prompt_limit_source(&resolved.origins);
         let config = resolved.domains.fabric;
         private_dir(roots.state.as_path(), roots.state.as_path())?;
-        let utility_root = std::env::var_os(provenant_core::RUN_STATE_DIRECTORY_ENV)
-            .map(PathBuf::from)
-            .unwrap_or_else(|| roots.state.as_path().to_owned());
-        let utility_home = utility_root.join("tmp/git-home");
-        private_dir(roots.state.as_path(), &utility_home)?;
+        let utility_root = if in_lane() {
+            lane_temporary()?
+        } else {
+            roots.state.as_path().join("tmp")
+        };
+        let utility_home = utility_root.join("git-home");
+        let utility_anchor = if in_lane() {
+            utility_root.as_path()
+        } else {
+            roots.state.as_path()
+        };
+        private_dir(utility_anchor, &utility_home)?;
         let lane = in_lane();
         let git = provenant_os::git::git_executable().ok_or(EdgeError::GitUnavailable)?;
         let runtime = provenant_confinement::UtilityRuntime::new(&git, &utility_home)?
@@ -168,6 +192,7 @@ impl Context {
             key,
         )?;
         Ok(Self {
+            inspection_only: false,
             roots,
             identity,
             config,
@@ -210,6 +235,65 @@ impl Context {
             key,
         )?;
         Ok(Self {
+            inspection_only: false,
+            roots,
+            identity,
+            config,
+            graph_prompt_limit_source,
+            in_lane: in_lane(),
+            executor,
+            home: home.to_path_buf(),
+            cwd: cwd.to_path_buf(),
+        })
+    }
+    /// Inspect templates and compile explanations before this host has an identity.
+    /// The placeholder identity is never persisted or used to launch work.
+    pub fn open_inspection(roots: Roots, home: &Path, cwd: &Path) -> Result<Self, EdgeError> {
+        let resolved = provenant_config::read_with_domains(&roots, &crate::domains::SECTIONS)?;
+        let graph_prompt_limit_source = prompt_limit_source(&resolved.origins);
+        let config = resolved.domains.fabric;
+        let git = provenant_os::git::git_executable().ok_or(EdgeError::GitUnavailable)?;
+        let runtime = provenant_confinement::UtilityRuntime::read_only(git)?;
+        let executor = SystemExecutor::new(1)?;
+        let budget = provenant_confinement::UtilityBudget::bounded(Duration::from_secs(5))?;
+        let discovered = runtime.project_location(&executor, cwd, budget, &CancelToken::new())?;
+        let state_present = roots.state.as_path().try_exists()?;
+        let binding = if state_present {
+            provenant_config::lookup_project(&roots, &discovered.location)?
+        } else {
+            None
+        };
+        let host = if state_present {
+            provenant_config::lookup_host(&roots)?
+        } else {
+            None
+        }
+        .unwrap_or_else(|| HostId::from_bytes([0; 16]));
+        let common_dir = discovered.location.common_dir();
+        let digest =
+            provenant_records::CanonicalV1::file_digest(common_dir.as_os_str().as_encoded_bytes());
+        let mut bytes = [0; 16];
+        bytes.copy_from_slice(&digest.bytes()[..16]);
+        let project = binding.map_or_else(
+            || provenant_core::ProjectId::from_bytes(bytes),
+            |binding| binding.project_id(),
+        );
+        let identity = Identity {
+            project,
+            host,
+            inbox: provenant_fabric_runtime::identity::inbox_address(
+                host,
+                &config,
+                std::env::var_os("PROVENANT_AGENT_LABEL").as_deref(),
+                None,
+            )?,
+            client: config.client_label.clone(),
+            cwd: AbsolutePath::new(cwd).map_err(|_| EdgeError::Invalid)?,
+            common_dir: AbsolutePath::new(common_dir).map_err(|_| EdgeError::Invalid)?,
+            federation: None,
+        };
+        Ok(Self {
+            inspection_only: true,
             roots,
             identity,
             config,
@@ -248,6 +332,7 @@ impl Context {
             key,
         )?;
         Ok(Self {
+            inspection_only: false,
             roots,
             identity,
             config,
@@ -383,13 +468,30 @@ impl Context {
             })?;
         let project = ProjectLocator::new(&self.identity, &self.home)
             .map_err(|_| PeerFailure::from(FacadeError::ConfinementRefused { resource: None }))?;
-        let request = PeerRequest::new(
-            host,
-            self.identity.host,
-            self.identity.inbox.agent.clone(),
-            project,
-            action,
-        );
+        // Graph operation replay is scoped to the actor that first launched
+        // the attempt, even when another agent later resumes its graph.
+        // Keep that namespace under the authenticated sending host rather
+        // than adopting a caller-supplied actor ID on the receiving host.
+        let agent = if let PeerAction::Submit { extra, .. }
+        | PeerAction::Receipt { extra, .. }
+        | PeerAction::CancelSubmission { extra, .. } = &action
+        {
+            match extra.get("graph_launch_actor") {
+                Some(value) => {
+                    let actor = value
+                        .as_str()
+                        .and_then(|value| value.parse::<provenant_core::ActorId>().ok())
+                        .ok_or_else(|| {
+                            PeerFailure::from(FacadeError::InvalidInput { detail: None })
+                        })?;
+                    format!("graph-{actor}")
+                }
+                None => self.identity.inbox.agent.clone(),
+            }
+        } else {
+            self.identity.inbox.agent.clone()
+        };
+        let request = PeerRequest::new(host, self.identity.host, agent, project, action);
         let executable =
             discover_ssh_executable(self.config.ssh_executable.as_deref()).map_err(|_| {
                 PeerFailure::new(FacadeError::HomeUnavailable, "no usable ssh executable")
@@ -427,7 +529,7 @@ impl Context {
             let probe = PeerRequest::new(
                 host,
                 self.identity.host,
-                self.identity.inbox.agent.clone(),
+                request.agent.clone(),
                 request.project.clone(),
                 PeerAction::Health {
                     extra: Default::default(),
@@ -625,6 +727,8 @@ pub fn facade_outcome(error: &FacadeError) -> (Outcome, provenant_run::ErrorKind
             (Outcome::Refused, ErrorKind::PeerVersion)
         }
         FacadeError::InvalidInput { .. } => (Outcome::Invalid, ErrorKind::Invalid),
+        FacadeError::UnknownHost => (Outcome::Invalid, ErrorKind::UnknownHost),
+        FacadeError::WorktreeNotApplicable => (Outcome::Invalid, ErrorKind::WorktreeNotApplicable),
         FacadeError::NotFound => (Outcome::Invalid, ErrorKind::NotFound),
         FacadeError::Conflict | FacadeError::GenerationConflict { .. } => {
             (Outcome::Refused, ErrorKind::Conflict)
@@ -632,7 +736,9 @@ pub fn facade_outcome(error: &FacadeError) -> (Outcome, provenant_run::ErrorKind
         FacadeError::NotTerminal => (Outcome::Refused, ErrorKind::Nonterminal),
         FacadeError::OperationConflict => (Outcome::Refused, ErrorKind::OperationConflict),
         FacadeError::Busy => (Outcome::Refused, ErrorKind::QueueFull),
-        FacadeError::ConfinementRefused { .. } => (Outcome::Refused, ErrorKind::Refused),
+        FacadeError::ConfinementRefused { .. } | FacadeError::GraphRelayRefused { .. } => {
+            (Outcome::Refused, ErrorKind::Refused)
+        }
         FacadeError::WriterBusy { .. } => (Outcome::Refused, ErrorKind::WriterBusy),
         FacadeError::WriterLockBusy => (Outcome::Refused, ErrorKind::WriterLockBusy),
         FacadeError::WriterUnknown => (Outcome::Refused, ErrorKind::WriterUnknown),
@@ -685,11 +791,18 @@ pub fn publish<T: Serialize>(value: &CommandResult<T>, roots: &Roots) -> io::Res
         value: &CommandResult<T>,
         roots: &Roots,
     ) -> Result<AbsolutePath, EdgeError> {
-        let base = std::env::var_os(provenant_core::RUN_STATE_DIRECTORY_ENV)
-            .map(PathBuf::from)
-            .unwrap_or_else(|| roots.state.as_path().to_owned());
-        let path = base.join("tmp/results");
-        let dir = private_dir(roots.state.as_path(), &path)?;
+        let base = if in_lane() {
+            lane_temporary()?
+        } else {
+            roots.state.as_path().join("tmp")
+        };
+        let path = base.join("results");
+        let anchor = if in_lane() {
+            base.as_path()
+        } else {
+            roots.state.as_path()
+        };
+        let dir = private_dir(anchor, &path)?;
         let name = provenant_os::fs::temporary_name()?;
         let bytes = serde_json::to_vec(value)?;
         dir.atomic_write(&name, ".result-", &bytes, PublishMode::NoReplace)?
@@ -701,6 +814,63 @@ pub fn publish<T: Serialize>(value: &CommandResult<T>, roots: &Roots) -> io::Res
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Dedicated fixture subprocess isolates lane-only environment variables.
+    fn lane_publication_uses_private_scratch() -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_core::RootInputs;
+        const FIXTURE: &str = "PROVENANT_TEST_LANE_PUBLICATION";
+        if let Some(base) = std::env::var_os(FIXTURE) {
+            let base = std::path::PathBuf::from(base);
+            let mut inputs = RootInputs::new(base.join("home"), base.join("assets"));
+            inputs.state_dir = Some(base.join("state"));
+            let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+            let result = provenant_records::CommandResult::new(
+                "fixture",
+                provenant_records::Outcome::Ok,
+                "result",
+            );
+            let path = super::publish(&result, &roots)?;
+            assert!(
+                path.to_path_buf()?
+                    .starts_with(base.join("scratch/results"))
+            );
+            let bytes = std::fs::read(path.to_path_buf()?)?;
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&bytes)?["data"],
+                "result"
+            );
+            assert!(!base.join("state").exists());
+            return Ok(());
+        }
+        let temp = tempfile::tempdir()?;
+        let base = temp.path().canonicalize()?;
+        for name in ["home", "assets", "scratch"] {
+            std::fs::create_dir(base.join(name))?;
+            std::fs::set_permissions(
+                base.join(name),
+                std::os::unix::fs::PermissionsExt::from_mode(0o700),
+            )?;
+        }
+        let output = std::process::Command::new(std::env::current_exe()?)
+            .args([
+                "--exact",
+                "fabric::context::tests::lane_publication_uses_private_scratch",
+                "--nocapture",
+            ])
+            .env(FIXTURE, &base)
+            .env(provenant_core::RUN_STATE_DIRECTORY_ENV, base.join("state"))
+            .env("TMPDIR", base.join("scratch"))
+            .output()?;
+        assert!(
+            output.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(!base.join("state").exists());
+        Ok(())
+    }
+
     #[test]
     fn submit_preflight_refuses_old_or_incapable_stub_before_launch()
     -> Result<(), Box<dyn std::error::Error>> {

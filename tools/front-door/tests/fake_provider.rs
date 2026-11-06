@@ -282,7 +282,6 @@ fn account_placement() -> Result {
                     provenant_os::git::git_executable().ok_or("Git unavailable")?,
                 )?,
                 state: &rig.state,
-                child_state: &rig.state.join(format!("children/{key}")),
                 home: &rig.home,
                 depth: 1,
                 attempt: provenant_core::AttemptId::from_bytes([1; 16]),
