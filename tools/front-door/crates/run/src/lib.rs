@@ -515,7 +515,10 @@ impl RunError {
             Self::Plan(provenant_confinement::PlanError::Permission(error)) => {
                 error.boundary_class()
             }
-            Self::Plan(provenant_confinement::PlanError::UnconfinedExtensions) => B::Authority,
+            Self::Plan(
+                provenant_confinement::PlanError::UnconfinedExtensions
+                | provenant_confinement::PlanError::InvalidRoots,
+            ) => B::Authority,
             Self::Plan(_) => B::None,
             _ => ErrorKind::from(self).boundary_class(),
         }
@@ -898,6 +901,8 @@ mod diagnostic_projection_tests {
             guard.get("code").and_then(|value| value.as_str()) == Some(code)
                 && guard.get("boundary").and_then(|value| value.as_str()) == Some("authority")
         }));
+        let invalid_roots = RunError::Plan(provenant_confinement::PlanError::InvalidRoots);
+        assert_eq!(invalid_roots.boundary_class(), BoundaryClass::Authority);
     }
 
     #[test]
