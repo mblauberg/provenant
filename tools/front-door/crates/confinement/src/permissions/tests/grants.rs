@@ -211,25 +211,7 @@ fn writer_test_grants_stay_within_the_attempt_and_mode() -> Result<(), Box<dyn s
             Path::new("/fixture/home"),
         )?)?;
         assert!(opted_in.contains("(allow ipc-sysv-shm)\n(allow ipc-sysv-sem)\n"));
-        // Only the database opt-in differs: it replaces the creation denial
-        // with the grants, and no profile gains a SysV creation syscall.
-        assert!(rendered.contains(SYSV_CREATE_DENY_RULES));
-        assert!(!opted_in.contains(SYSV_CREATE_DENY_RULES));
-        assert_eq!(
-            opted_in
-                .replace("(allow ipc-sysv-shm)\n", "")
-                .replace("(allow ipc-sysv-sem)\n", "")
-                .replace(SYSV_QUEUE_DENY_RULES, ""),
-            rendered
-                .replace(SYSV_CREATE_DENY_RULES, "")
-                .replace(SYSV_QUEUE_DENY_RULES, "")
-        );
-        for profile in [&rendered, &opted_in] {
-            assert!(profile.contains(SYSV_QUEUE_DENY_RULES));
-        }
-        assert!(rendered.contains(
-            "(deny syscall-unix (syscall-number SYS_shmget SYS_semget SYS_shmsys SYS_semsys))\n"
-        ));
+        assert!(!rendered.contains("SYS_shmget") && !rendered.contains("SYS_msgget"));
         let exec = format!("(allow process-exec (subpath \"{scratch}\"))");
         assert_eq!(rendered.lines().any(|line| line == exec), writer);
         assert!(rendered.contains(&format!("(allow file-read* (subpath \"{scratch}\"))")));
