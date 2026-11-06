@@ -495,6 +495,7 @@ dependencies = [
 name = "provenant"
 version = "1.6.7"
 dependencies = [
+ "clap",
  "jiff",
  "provenant-cli",
  "provenant-config",

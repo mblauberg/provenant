@@ -141,6 +141,17 @@ impl ChairInput {
 }
 
 pub trait McpFacade: F3Facade {
+    /// Shared graph interface. Documents and patches cross this boundary as JSON,
+    /// never as paths resolved on behalf of an MCP caller.
+    fn graph_document(
+        &mut self,
+        _input: Value,
+        _budget: WaitBudget,
+        _cancel: &CancelToken,
+    ) -> Result<Value, ServiceError> {
+        Err(FacadeError::OwnerUnavailable.into())
+    }
+
     /// A lane launch is a graph mutation owned by its host. Production composition
     /// forwards this to the CLI's `graph_relay::from_lane`.
     fn add_from_lane(
@@ -215,7 +226,8 @@ pub enum ToolCall {
     Run(RunInput),
     Output(OutputInput),
     Hosts(HostsInput),
-    Graph(GraphInput),
+    GraphDocument(Value),
+    GraphTrace(Value),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -247,7 +259,8 @@ impl ToolCall {
             Self::Run(_) => schema::ToolKind::Run,
             Self::Output(_) => schema::ToolKind::Output,
             Self::Hosts(_) => schema::ToolKind::Identity,
-            Self::Graph(_) => schema::ToolKind::Graph,
+            Self::GraphDocument(_) => schema::ToolKind::Run,
+            Self::GraphTrace(_) => schema::ToolKind::Output,
         }
     }
     // Never persist arbitrary caller-supplied tool names.
@@ -347,6 +360,9 @@ impl ToolCall {
             }
             Self::Run(RunInput::List { limit, .. })
             | Self::RunDetailed(RunInput::List { limit, .. }) => page(u64::from(*limit)),
+            Self::GraphDocument(input) | Self::GraphTrace(input) => {
+                body(&input.to_string(), "document")
+            }
             Self::Run(RunInput::Resume { prompt, .. })
             | Self::RunDetailed(RunInput::Resume { prompt, .. }) => body(prompt, "prompt"),
             Self::Output(OutputInput::Read { max_bytes, .. })
@@ -359,6 +375,12 @@ impl ToolCall {
     fn is_mutation(&self) -> bool {
         if let Self::Inbox(input, _) = self {
             return input.is_mutation();
+        }
+        if let Self::GraphDocument(input) = self {
+            return matches!(
+                input["op"].as_str(),
+                Some("run" | "edit" | "stop" | "retry")
+            ) && input["explain"] != true;
         }
         matches!(
             self,
@@ -385,9 +407,6 @@ impl ToolCall {
                     _
                 )
                 | Self::Chair(ChairInput::SummaryUpdate { .. } | ChairInput::LogAppend { .. })
-                | Self::Graph(
-                    GraphInput::Run { .. } | GraphInput::Cancel { .. } | GraphInput::Resume { .. }
-                )
                 | Self::Submit(_)
                 | Self::SubmitWait(..)
                 | Self::Run(RunInput::Cancel { .. } | RunInput::Resume { .. })
@@ -725,13 +744,26 @@ impl ToolCall {
                 parse!(LandingInput, Landing, operation_id.clone())
             }
             Some(schema::ToolKind::Claim) => parse!(ClaimInput, Claim, operation_id.clone()),
+            Some(schema::ToolKind::Run)
+                if matches!(
+                    operation,
+                    "run" | "edit" | "templates" | "stop" | "retry" | "output"
+                ) || operation == "status" && arguments.get("target").is_none() =>
+            {
+                Ok(Self::GraphDocument(arguments.clone()))
+            }
+            Some(schema::ToolKind::Output) if operation == "trace" => {
+                let mut input = arguments.clone();
+                input["op"] = serde_json::json!("output");
+                input["trace"] = serde_json::json!(true);
+                Ok(Self::GraphTrace(input))
+            }
             Some(schema::ToolKind::Run) if operation == "submit" => {
                 parse!(SubmitInput, SubmitWait, submit_wait, detail)
             }
             Some(schema::ToolKind::Run) if detail => parse!(RunInput, RunDetailed),
             Some(schema::ToolKind::Run) => parse!(RunInput, Run),
             Some(schema::ToolKind::Output) => parse!(OutputInput, Output),
-            Some(schema::ToolKind::Graph) => parse!(GraphInput, Graph),
             None => Err(InvalidInput::UnknownTool),
         }?;
         let validation = match &call {
@@ -860,7 +892,15 @@ impl ToolCall {
             Self::Run(input) | Self::RunDetailed(input) => input.validate_input(WaitTransport::Mcp),
             Self::Output(input) => input.validate_input(WaitTransport::Mcp),
             Self::Hosts(input) => input.validate_input(WaitTransport::Mcp),
-            Self::Graph(input) => input.validate_input(WaitTransport::Mcp),
+            Self::GraphDocument(input) | Self::GraphTrace(input) => {
+                if schema::invalid_path("fabric_run", input).is_some() {
+                    Err(InputError {
+                        path: "document".into(),
+                    })
+                } else {
+                    Ok(())
+                }
+            }
         }
         .map_err(ServiceError::Invalid)?;
         if let Some(limits) = &service.limits {
@@ -926,7 +966,6 @@ impl ToolCall {
                     | Self::Events(..)
                     | Self::Claim(..)
                     | Self::Landing(..)
-                    | Self::Graph(..)
                     | Self::Submit(SubmitInput::Submit { host: Some(_), .. })
                     | Self::SubmitWait(SubmitInput::Submit { host: Some(_), .. }, ..)
             )
@@ -1366,7 +1405,9 @@ impl ToolCall {
                     },
                 )
             }
-            Self::Graph(input) => call!(facade, graph, input),
+            Self::GraphDocument(input) | Self::GraphTrace(input) => {
+                call!(facade, graph_document, input)
+            }
         };
         service.limit_response(result, mutation, output)
     }

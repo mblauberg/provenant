@@ -133,17 +133,44 @@ fn with_edge<T>(
     }))
 }
 
+#[derive(clap::Parser)]
+struct DispatchFixture {
+    #[command(flatten)]
+    request: Dispatch,
+}
+
+fn parsed_dispatch(
+    args: impl IntoIterator<Item = std::ffi::OsString>,
+) -> Result<Dispatch, Box<dyn std::error::Error>> {
+    use clap::Parser;
+    Ok(DispatchFixture::try_parse_from(args)?.request)
+}
+
 fn parsed_run(args: &[&str]) -> Result<Dispatch, Box<dyn std::error::Error>> {
-    let argv = std::iter::once("run")
+    let argv = std::iter::once("fixture")
         .chain(args.iter().copied())
         .map(std::ffi::OsString::from);
-    let crate::ParseOutcome::Invocation(invocation) = crate::parse(argv) else {
-        return Err("parse failed".into());
-    };
-    let crate::Command::Run(command) = invocation.command else {
-        return Err("not run".into());
-    };
-    Ok(*command)
+    use crate::metadata::CatalogueArg;
+    use clap::{CommandFactory, FromArgMatches};
+    let model = DispatchFixture::command()
+        .mut_arg("branch", |arg| arg.catalog_clear_requires())
+        .mut_arg("model", |arg| arg.required(false));
+    let matches = model.try_get_matches_from(argv)?;
+    let mut request = DispatchFixture::from_arg_matches(&matches)?.request;
+    if request.host.is_none()
+        && let Some(branch) = request.branch.take()
+    {
+        request.worktree_branch = Some(branch);
+    }
+    if request.preset.is_none()
+        && request.access.mode.is_none()
+        && (request.access.worktree.is_some()
+            || request.branch.is_some()
+            || request.worktree_branch.is_some())
+    {
+        request.access.mode = Some(Mode::WorktreeWrite);
+    }
+    Ok(request)
 }
 
 #[test]
@@ -2075,12 +2102,7 @@ fn dispatch_reuses_only_free_lane_or_unowned_worktree() -> Result<(), Box<dyn st
                 prompt.as_os_str().to_owned(),
             ]);
         }
-        let crate::ParseOutcome::Invocation(invocation) = crate::parse(args) else {
-            return Err("parse".into());
-        };
-        let crate::Command::Dispatch(command) = invocation.command else {
-            return Err("dispatch".into());
-        };
+        let command = Box::new(parsed_dispatch(args)?);
         let reply = dispatch_with_workers(*command, &edge, &Free);
         assert!(
             _session
@@ -2212,12 +2234,7 @@ fn dispatch_reuses_only_free_lane_or_unowned_worktree() -> Result<(), Box<dyn st
         .into_iter()
         .map(OsString::from)
         .collect();
-        let crate::ParseOutcome::Invocation(invocation) = crate::parse(args) else {
-            return Err("parse".into());
-        };
-        let crate::Command::Dispatch(command) = invocation.command else {
-            return Err("dispatch".into());
-        };
+        let command = Box::new(parsed_dispatch(args)?);
         let reply = dispatch_with_workers(*command, &edge, &Free);
         assert_ne!(reply.result.status, Status::Ok);
         let load = || {
@@ -2851,12 +2868,7 @@ fn failed_preflight_creates_no_worktree() -> Result<(), Box<dyn std::error::Erro
         .map(OsString::from)
         .collect();
         args.extend(extra.into_iter().map(OsString::from));
-        let crate::ParseOutcome::Invocation(invocation) = crate::parse(args) else {
-            return Err("parse".into());
-        };
-        let crate::Command::Dispatch(mut command) = invocation.command else {
-            return Err("dispatch".into());
-        };
+        let mut command = Box::new(parsed_dispatch(args)?);
         match invalid {
             Some("title") => command.title = Some("invalid\ntitle".into()),
             Some("fallback") => {
@@ -3651,7 +3663,9 @@ fn graph_cloud_ticks_recover_one_submission_and_settle_remote_evidence()
             self.observations += 1;
             Ok(match self.state {
                 0 => RemoteState::Running,
-                1 => RemoteState::Unknown { detail: "temporarily unavailable".into() },
+                1 => RemoteState::Unknown {
+                    detail: "temporarily unavailable".into(),
+                },
                 _ => RemoteState::Finished {
                     result: CloudResult {
                         job_id: job.job_id.clone(),
@@ -3659,7 +3673,11 @@ fn graph_cloud_ticks_recover_one_submission_and_settle_remote_evidence()
                         commit: job.commit.clone(),
                         exit_status: if self.passed { 0 } else { 1 },
                         tests_run: vec!["targeted".into()],
-                        tests_failed: if self.passed { vec![] } else { vec!["targeted".into()] },
+                        tests_failed: if self.passed {
+                            vec![]
+                        } else {
+                            vec!["targeted".into()]
+                        },
                         log_location: "log".into(),
                         tracked_files_changed: false,
                         observed_model: Some(job.requested_model.clone()),
@@ -3673,8 +3691,11 @@ fn graph_cloud_ticks_recover_one_submission_and_settle_remote_evidence()
         }
     }
     for (expected_pass, finishes_after_cancel, uncertain_submission) in [
-        (Some(false), false, false), (Some(true), false, false),
-        (None, false, false), (None, true, false), (None, false, true),
+        (Some(false), false, false),
+        (Some(true), false, false),
+        (None, false, false),
+        (None, true, false),
+        (None, false, true),
     ] {
         let temp = tempfile::tempdir()?;
         let clock = SystemClock::new();
@@ -3699,43 +3720,77 @@ fn graph_cloud_ticks_recover_one_submission_and_settle_remote_evidence()
         let reference = format!("host/{id}");
         let passed = expected_pass.unwrap_or(false);
         let mut provider = Fake {
-            submissions: 0, observations: 0, recoveries: 0, uncertain_submission,
-            state: 0, passed, cancel_confirmed: uncertain_submission,
+            submissions: 0,
+            observations: 0,
+            recoveries: 0,
+            uncertain_submission,
+            state: 0,
+            passed,
+            cancel_confirmed: uncertain_submission,
         };
-        let observation = graph_cloud::advance(&mut provider, &store, id, "p", &reference, &call, false);
+        let observation =
+            graph_cloud::advance(&mut provider, &store, id, "p", &reference, &call, false);
         if uncertain_submission {
             assert!(observation.is_err());
             let saved = cloud_owner::load(&store, id, &call)?.ok_or("missing submission intent")?;
             assert_eq!(saved.state, RemoteState::Submitting);
             drop(store);
             let store = trace_store(&temp, &call)?;
-            let recovered = graph_cloud::advance(&mut provider, &store, id, "p", &reference, &call, true)?;
-            assert!(matches!(recovered, Some(AttemptObservation::Terminal { outcome: AttemptOutcome::OtherFailure, launched: true, .. })));
+            let recovered =
+                graph_cloud::advance(&mut provider, &store, id, "p", &reference, &call, true)?;
+            assert!(matches!(
+                recovered,
+                Some(AttemptObservation::Terminal {
+                    outcome: AttemptOutcome::OtherFailure,
+                    launched: true,
+                    ..
+                })
+            ));
             assert_eq!(provider.submissions, 1);
             assert_eq!(provider.recoveries, 1);
             assert_eq!(provider.observations, 1);
             continue;
         }
         let observation = observation?;
-        assert!(matches!(observation, Some(AttemptObservation::Pending { attempt_ref: Some(ref id) }) if id == &reference));
+        assert!(
+            matches!(observation, Some(AttemptObservation::Pending { attempt_ref: Some(ref id) }) if id == &reference)
+        );
         assert_eq!(provider.submissions, 1);
         assert_eq!(provider.observations, 0);
         drop(store);
         if expected_pass.is_none() {
             let store = trace_store(&temp, &call)?;
-            let unconfirmed = graph_cloud::advance(&mut provider, &store, id, "p", &reference, &call, true)?;
-            assert!(matches!(unconfirmed, Some(AttemptObservation::Unknown { .. })));
+            let unconfirmed =
+                graph_cloud::advance(&mut provider, &store, id, "p", &reference, &call, true)?;
+            assert!(matches!(
+                unconfirmed,
+                Some(AttemptObservation::Unknown { .. })
+            ));
             drop(store);
             provider.cancel_confirmed = !finishes_after_cancel;
             provider.state = if finishes_after_cancel { 2 } else { 0 };
             let store = trace_store(&temp, &call)?;
-            let confirmed = graph_cloud::advance(&mut provider, &store, id, "p", &reference, &call, true)?;
-            let Some(AttemptObservation::Terminal { outcome, launched, .. }) = confirmed else {
+            let confirmed =
+                graph_cloud::advance(&mut provider, &store, id, "p", &reference, &call, true)?;
+            let Some(AttemptObservation::Terminal {
+                outcome, launched, ..
+            }) = confirmed
+            else {
                 panic!("confirmed cancellation or observed completion must settle the node");
             };
-            assert_eq!(outcome, if finishes_after_cancel { AttemptOutcome::TaskFailed } else { AttemptOutcome::OtherFailure });
+            assert_eq!(
+                outcome,
+                if finishes_after_cancel {
+                    AttemptOutcome::TaskFailed
+                } else {
+                    AttemptOutcome::OtherFailure
+                }
+            );
             assert!(launched);
-            assert!(provider.observations > 0, "unconfirmed cancellation must observe the remote job");
+            assert!(
+                provider.observations > 0,
+                "unconfirmed cancellation must observe the remote job"
+            );
             assert_eq!(provider.submissions, 1);
             continue;
         }
@@ -3743,16 +3798,37 @@ fn graph_cloud_ticks_recover_one_submission_and_settle_remote_evidence()
         for state in [0, 1, 2, 2] {
             let store = trace_store(&temp, &call)?;
             provider.state = state;
-            let observation = graph_cloud::advance(&mut provider, &store, id, "p", &reference, &call, false)?;
+            let observation =
+                graph_cloud::advance(&mut provider, &store, id, "p", &reference, &call, false)?;
             match state {
-                0 => assert!(matches!(observation, Some(AttemptObservation::Pending { .. }))),
-                1 => assert!(matches!(observation, Some(AttemptObservation::Unknown { .. }))),
+                0 => assert!(matches!(
+                    observation,
+                    Some(AttemptObservation::Pending { .. })
+                )),
+                1 => assert!(matches!(
+                    observation,
+                    Some(AttemptObservation::Unknown { .. })
+                )),
                 _ => {
-                    let Some(AttemptObservation::Terminal { attempt_ref, outcome, launched, result, .. }) = observation else {
+                    let Some(AttemptObservation::Terminal {
+                        attempt_ref,
+                        outcome,
+                        launched,
+                        result,
+                        ..
+                    }) = observation
+                    else {
                         panic!("finished remote evidence must settle the graph node");
                     };
                     assert_eq!(attempt_ref.as_deref(), Some(reference.as_str()));
-                    assert_eq!(outcome, if passed { AttemptOutcome::Succeeded } else { AttemptOutcome::TaskFailed });
+                    assert_eq!(
+                        outcome,
+                        if passed {
+                            AttemptOutcome::Succeeded
+                        } else {
+                            AttemptOutcome::TaskFailed
+                        }
+                    );
                     assert!(launched);
                     assert!(result.is_some());
                 }
@@ -5132,13 +5208,7 @@ fn explicit_write_root_is_checked_at_preflight_and_routing()
             flag,
             route,
         ];
-        match crate::parse(args.into_iter().map(std::ffi::OsString::from)) {
-            crate::ParseOutcome::Invocation(inv) => match inv.command {
-                crate::Command::Run(request) => request,
-                _ => panic!("expected run"),
-            },
-            other => panic!("{other:?}"),
-        }
+        Box::new(parsed_dispatch(args.into_iter().map(std::ffi::OsString::from)).unwrap())
     };
     let command = parse("--route", "command/fmt");
     let access = lane_access(

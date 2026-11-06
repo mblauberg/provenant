@@ -1,3 +1,4 @@
+mod graph_interface;
 // The process edge composes typed owners and owns ordinary result delivery.
 // `main.rs` parses and calls `dispatch`; the worktree driver includes this
 // file and dispatches with its fixture seams. Plain comments only: `include!`
@@ -51,7 +52,6 @@ mod preset_tests;
 mod process_tree;
 mod provider_retention;
 mod release_smoke;
-mod review;
 mod roots;
 mod settlement;
 mod status_wait;
@@ -641,7 +641,7 @@ fn supervise(descriptors: &[u64], globals: &provenant_cli::Globals, process: &dy
 }
 fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
     let globals = &inv.globals;
-    let mut command = match inv.command {
+    let command = match inv.command {
         Command::Hook(hook) => return hooks::run(hook, globals),
         Command::ProcessTree { root } => return process_tree::run(root, globals),
         command => command,
@@ -665,28 +665,6 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
             error.code()
         };
         return fail(&inv.leaf, status, code, &error.to_string(), globals);
-    }
-    if let Command::Run(ref mut cmd) = command
-        && cmd.placement.is_none()
-        && cmd.preset.is_none()
-        && cmd.host.is_none()
-        && !matches!(cmd.access.mode(), provenant_cli::Mode::WorktreeWrite)
-        && cmd.access.worktree.is_none()
-        && cmd.branch.is_none()
-        && cmd.worktree_branch.is_none()
-        && let Ok(resolved) = roots::resolve(globals, Workspace::Project, Product::Required)
-        && let Some(project) =
-            provenant_cli::run::preview_project_id(&resolved.roots, &resolved.project)
-        && let Ok(config) =
-            provenant_config::read_with_domains(&resolved.roots, &provenant_cli::domains::SECTIONS)
-        && let Some(target) = config
-            .domains
-            .lanes
-            .projects
-            .get(&project.to_string())
-            .and_then(|project| project.cloud_target.as_ref())
-    {
-        cmd.placement = Some(format!("cloud:{target}"));
     }
     match command {
         Command::ProcessTree { .. } => unreachable!("process-tree returned before root validation"),
@@ -975,9 +953,6 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
             page,
             wait,
         })) => fabric::events(page, wait, globals, process.workers()),
-        Command::Fabric(provenant_cli::Fabric::Graph(graph)) => {
-            fabric::graph(graph, globals, process.workers())
-        }
         Command::Fabric(provenant_cli::Fabric::Landing(
             landing @ (provenant_cli::fabric::Landing::Push { .. }
             | provenant_cli::fabric::Landing::Reconcile { .. }),
@@ -1019,17 +994,12 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
                 ),
             }
         }
-        Command::Preset(cmd) => preset::command(cmd, globals),
-        Command::Run(cmd) | Command::Dispatch(cmd) => {
-            if std::env::var_os("PROVENANT_PARENT_ATTEMPT_ID").is_some() {
-                run_edge(&inv.leaf, globals, |edge| {
-                    provenant_cli::run::run(*cmd, edge)
-                })
-            } else {
-                preset::run(*cmd, globals, process.workers())
-            }
+        Command::Run(cmd) => graph_interface::run(*cmd, globals, process.workers()),
+        Command::Edit(cmd) => graph_interface::edit(cmd, globals, process.workers()),
+        Command::Templates(cmd) => graph_interface::templates(cmd, globals, process.workers()),
+        Command::Status(cmd) if cmd.stats => {
+            graph_interface::stats(cmd, globals, process.workers())
         }
-        Command::Review(cmd) => review::run(cmd, globals, process.workers()),
         Command::Status(cmd) if cmd.wait.is_some() => status_wait::run(cmd, globals),
         Command::Status(cmd) => {
             if let Some(id) = &cmd.id
@@ -1074,19 +1044,6 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
             globals,
             process.workers(),
         ),
-        Command::Lanes(cmd) if cmd.watch.is_some() || cmd.session_stream => {
-            run_edge(&inv.leaf, globals, |edge| {
-                provenant_cli::run::lanes_streaming(
-                    cmd,
-                    edge,
-                    globals.json,
-                    &mut provenant_cli::run::write_line,
-                )
-            })
-        }
-        Command::Lanes(cmd) => run_edge(&inv.leaf, globals, |edge| {
-            provenant_cli::run::lanes(cmd, edge)
-        }),
         Command::Output(cmd) => run_edge(&inv.leaf, globals, |edge| {
             if let Some(reply) =
                 fabric::unified_graph_output(&cmd, edge, globals, process.workers())
@@ -1095,7 +1052,7 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
             }
             provenant_cli::run::output(cmd, edge)
         }),
-        Command::Cancel(cmd) => {
+        Command::Stop(cmd) => {
             if let Some(code) = fabric::unified_graph_command(
                 &fabric::target_text(&cmd.target),
                 fabric::GraphCommand::Stop {
@@ -1111,7 +1068,7 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
                 provenant_cli::run::cancel(cmd, edge)
             })
         }
-        Command::Resume(cmd) => {
+        Command::Retry(cmd) => {
             if let Some(code) = fabric::unified_graph_command(
                 &fabric::target_text(&cmd.attempt.0),
                 fabric::GraphCommand::Retry {
@@ -1466,19 +1423,27 @@ pub fn dispatch(parsed: ParseOutcome, process: &dyn Process) -> u8 {
     }) {
         provenant_sqlite::set_busy_timeout(timeout);
     }
-    let usage_roots = if matches!(
-        verb.as_str(),
-        "workflow session show"
-            | "workflow session diff"
-            | "chair summary show"
-            | "chair summary diff"
-            | "console changes"
-            | "console projects"
-            | "console sessions"
-            | "console overview"
-            | "console board"
-            | "console tree"
-    ) {
+    let read_only_graph = match &parsed {
+        ParseOutcome::Invocation(inv) => {
+            matches!(&inv.command, Command::Run(args) if args.explain)
+                || matches!(&inv.command, Command::Templates(_) | Command::Status(_))
+        }
+        _ => false,
+    };
+    let usage_roots = if read_only_graph
+        || matches!(
+            verb.as_str(),
+            "workflow session show"
+                | "workflow session diff"
+                | "chair summary show"
+                | "chair summary diff"
+                | "console changes"
+                | "console projects"
+                | "console sessions"
+                | "console overview"
+                | "console board"
+                | "console tree"
+        ) {
         None
     } else {
         resolved
