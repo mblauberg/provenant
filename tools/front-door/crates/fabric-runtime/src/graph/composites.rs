@@ -178,6 +178,26 @@ fn children(
                 .or_else(|| visible_names.get(writer.as_str()).cloned())
                 .unwrap_or_else(|| scoped(prefix, writer));
         }
+        if let Some(plan) = &mut node.plan {
+            // A host catalogue may continue an enclosing delivery writer. Bind
+            // that literal authority before a future fragment gains its own
+            // namespace, just as for a static continuing node above.
+            for template in &mut plan.templates {
+                if let Some(writer) = template.node.get_mut("continues")
+                    && let Some(bound) = writer.as_str().and_then(|name| visible_names.get(name))
+                {
+                    *writer = serde_json::Value::String(bound.clone());
+                }
+                for member in &mut template.nodes {
+                    if let Some(writer) = member.get_mut("continues")
+                        && let Some(bound) =
+                            writer.as_str().and_then(|name| visible_names.get(name))
+                    {
+                        *writer = serde_json::Value::String(bound.clone());
+                    }
+                }
+            }
+        }
         if original
             .depends_on
             .iter()
