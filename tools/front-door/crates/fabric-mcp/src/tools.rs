@@ -172,13 +172,19 @@ pub trait McpFacade: F3Facade {
             return Ok(serde_json::to_value(operation)?);
         }
         let receipt = self.add_from_lane(
-            &operation, cancel, std::time::Duration::from_secs(crate::MAX_WAIT_SECONDS),
+            &operation,
+            cancel,
+            std::time::Duration::from_secs(crate::MAX_WAIT_SECONDS),
         )?;
         if let Some(seconds) = input["wait_seconds"].as_u64() {
-            return Ok(match self.wait_for_children(cancel, std::time::Duration::from_secs(seconds)) {
-                Ok(children) => serde_json::json!({"receipt":receipt,"children":children}),
-                Err(error) => serde_json::json!({"receipt":receipt,"observation_error":error.to_string()}),
-            });
+            return Ok(
+                match self.wait_for_children(cancel, std::time::Duration::from_secs(seconds)) {
+                    Ok(children) => serde_json::json!({"receipt":receipt,"children":children}),
+                    Err(error) => {
+                        serde_json::json!({"receipt":receipt,"observation_error":error.to_string()})
+                    }
+                },
+            );
         }
         Ok(receipt)
     }
@@ -884,7 +890,11 @@ impl ToolCall {
             }
             let budget = service.budget(crate::MAX_WAIT_SECONDS)?;
             let value = service.facade.relay_document(input, budget, cancel)?;
-            return service.limit_response(response(self.name(), value), input["explain"] != true, false);
+            return service.limit_response(
+                response(self.name(), value),
+                input["explain"] != true,
+                false,
+            );
         }
         if service.in_lane
             && service.lane_relay_reads
