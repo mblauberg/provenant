@@ -342,8 +342,9 @@ For a stored refused operation, use `provenant status operation:OPERATION_ID`
 to inspect its diagnostic. `provenant status operation:OPERATION_ID --wait`
 returns immediately with exit 1. Use `--target operation:OPERATION_ID` to
 include it in a mixed wait; a completed wait that observes a refusal exits 1.
-Top-level unsupported adapter capabilities and secret input refused by the run
-service have such a record; other pre-admission refusals may not yet have one.
+Unsupported adapter capabilities and secret input refused by the run service
+have such a record, including nested requests whose canonical child identity can
+be constructed. Other pre-admission refusals may not yet have one.
 
 The default `--until any` returns on the first observed semantic transition,
 or immediately for a terminal target.
