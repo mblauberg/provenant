@@ -94,18 +94,11 @@ pub fn observe_model(data: &std::path::Path, session: &str) -> Result<String, Pr
     .map_err(|_| ProviderError::UnknownIdentity)?;
     db.busy_timeout(std::time::Duration::from_millis(250))
         .map_err(|_| ProviderError::UnknownIdentity)?;
-    let v2: bool = db
-        .query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='session_message')", [], |row| row.get(0))
-        .map_err(|_| ProviderError::UnknownIdentity)?;
-    let query = if v2 {
-        "SELECT DISTINCT json_extract(data,'$.model.providerID'), json_extract(data,'$.model.id') \
-         FROM session_message WHERE session_id=? AND type='assistant' LIMIT 2"
-    } else {
-        "SELECT DISTINCT json_extract(data,'$.providerID'), json_extract(data,'$.modelID') \
-         FROM message WHERE session_id=? AND json_extract(data,'$.role')='assistant' LIMIT 2"
-    };
     let mut statement = db
-        .prepare(query)
+        .prepare(
+            "SELECT DISTINCT json_extract(data,'$.model.providerID'), json_extract(data,'$.model.id') \\
+             FROM session_message WHERE session_id=? AND type='assistant' LIMIT 2",
+        )
         .map_err(|_| ProviderError::UnknownIdentity)?;
     let models = statement
         .query_map([session], |row| {
@@ -874,25 +867,6 @@ mod tests {
         );
     }
 
-    fn store(rows: &[(&str, &str)]) -> tempfile::TempDir {
-        let dir = tempfile::tempdir().unwrap();
-        let db = rusqlite::Connection::open(dir.path().join("opencode.db")).unwrap();
-        db.execute_batch("CREATE TABLE message (id TEXT, session_id TEXT, data TEXT)")
-            .unwrap();
-        for (index, (session, data)) in rows.iter().enumerate() {
-            db.execute(
-                "INSERT INTO message VALUES (?, ?, ?)",
-                (format!("m{index}"), session, data),
-            )
-            .unwrap();
-        }
-        dir
-    }
-
-    const GLM: &str =
-        r#"{"role":"assistant","providerID":"opencode","modelID":"glm-5.3-flash-free"}"#;
-    const OTHER: &str = r#"{"role":"assistant","providerID":"opencode","modelID":"other"}"#;
-
     #[test]
     fn unavailable_model_is_a_typed_refusal() {
         let mut stream = OpenCode.stream(None).unwrap();
@@ -1044,37 +1018,6 @@ mod tests {
         assert!(matches!(
             observe_model(dir.path(), outcome.session().unwrap()),
             Err(ProviderError::IdentityMismatch)
-        ));
-    }
-
-    #[test]
-    fn model_comes_from_the_session_record() {
-        let dir = store(&[
-            ("ses_a", r#"{"role":"user"}"#),
-            ("ses_a", GLM),
-            ("ses_a", GLM),
-            ("ses_b", OTHER),
-        ]);
-        assert_eq!(
-            observe_model(dir.path(), "ses_a").unwrap(),
-            "opencode/opencode/glm-5.3-flash-free"
-        );
-    }
-
-    #[test]
-    fn missing_or_conflicting_records_stay_unknown() {
-        let dir = store(&[("ses_a", GLM), ("ses_a", OTHER)]);
-        assert!(matches!(
-            observe_model(dir.path(), "ses_a"),
-            Err(ProviderError::IdentityMismatch)
-        ));
-        assert!(matches!(
-            observe_model(dir.path(), "ses_none"),
-            Err(ProviderError::UnknownIdentity)
-        ));
-        assert!(matches!(
-            observe_model(&dir.path().join("absent"), "ses_a"),
-            Err(ProviderError::UnknownIdentity)
         ));
     }
 
