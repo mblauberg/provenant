@@ -79,6 +79,94 @@ fn grows_review(finding: &Finding) -> bool {
         .any(|field| finding.extra.get(*field) == Some(&serde_json::Value::Bool(true)))
 }
 
+/// Construct the host patch that reviews the repaired commit through a fresh
+/// resolver result. The patch is idempotent per repair round.
+pub(super) fn panel_patch(parent: &str, commit: &str, revision: u64, schema: u64) -> patch::Patch {
+    let mut panel = serde_json::json!({
+        "id": "panel", "use": "review", "over": "@review-panel",
+        "with": {"lens": "${item}"}, "after": [parent],
+        "inputs": [{"node": parent, "outputs": ["findings"]}],
+        "source": {"type": "commit", "commit": commit}, "require_findings": true,
+        "distinct_from": "dependencies", "distinct_strength": "prefer"
+    });
+    if schema >= 2 {
+        panel["family_group"] = "repair-panel".into();
+    }
+    patch::Patch {
+        schema_version: patch::PATCH_SCHEMA_VERSION,
+        expected_revision: Some(revision),
+        idempotency_key: Some(format!(
+            "repair-panel:{}",
+            CanonicalV1::file_digest(parent.as_bytes())
+        )),
+        reason: Some("repair expanded risk or scope".into()),
+        nodes: vec![panel],
+        ..Default::default()
+    }
+}
+
+pub(super) fn replan_source<'a>(
+    node: &PlannedNode,
+    checkpoint: &'a GraphCheckpoint,
+) -> Option<(&'a str, &'a str)> {
+    let round = node.round.as_ref()?;
+    let member = |name: &str| {
+        checkpoint.nodes.iter().find(|progress| {
+            progress.round.as_ref().is_some_and(|item| {
+                item.loop_id == round.loop_id && item.round == round.round && item.node_id == name
+            })
+        })
+    };
+    let parent = member("synthesis").or_else(|| member("check"))?;
+    let commit = member("fix")?.outputs.as_ref()?.commit.as_deref()?;
+    Some((&parent.id, commit))
+}
+
+pub(super) fn panel_expansion<'a>(
+    checkpoint: &'a GraphCheckpoint,
+    parent: &str,
+) -> Option<&'a Expansion> {
+    checkpoint.expansions.iter().find(|expansion| {
+        expansion.patch.as_ref().is_some_and(|record| {
+            record.parent.as_deref() == Some(parent)
+                && record.reason.as_deref() == Some("repair expanded risk or scope")
+        })
+    })
+}
+
+pub(super) fn panel_failure(checkpoint: &GraphCheckpoint, expansion: &Expansion) -> Option<String> {
+    let members: Vec<_> = expansion
+        .nodes
+        .iter()
+        .filter(|node| node.composite.is_none())
+        .collect();
+    if members.is_empty() {
+        return Some("replanned panel has no reviewers".into());
+    }
+    for member in members {
+        let Some(progress) = checkpoint.nodes.iter().find(|item| item.id == member.id) else {
+            return Some("replanned panel reviewer is missing".into());
+        };
+        let Some(outputs) = progress.outputs.as_ref() else {
+            return Some(format!(
+                "replanned panel reviewer {} has no output",
+                member.id
+            ));
+        };
+        if progress.state != NodeState::Succeeded
+            || outputs.findings_available != Some(true)
+            || outputs.verdict.as_deref() != Some("VERDICT: PASS")
+            || outputs.findings.iter().any(blocking)
+        {
+            return Some(format!(
+                "replanned panel reviewer {} did not pass",
+                member.id
+            ));
+        }
+    }
+    None
+}
+
 /// A repair cannot be accepted on the old panel after a reviewer reports
 /// expanded risk or scope. Preserve the evidence for the recovery path.
 pub(super) fn growth_in_round(
@@ -233,6 +321,14 @@ mod tests {
         assert!(design_defect(&item));
         item.extra.insert("evidence".into(), "".into());
         assert!(!design_defect(&item));
+    }
+
+    #[test]
+    fn replanned_panel_prefers_separate_families() {
+        let patch = panel_patch("review", &"a".repeat(40), 2, 2);
+        assert_eq!(patch.nodes[0]["over"], "@review-panel");
+        assert_eq!(patch.nodes[0]["family_group"], "repair-panel");
+        assert_eq!(patch.nodes[0]["distinct_strength"], "prefer");
     }
 }
 

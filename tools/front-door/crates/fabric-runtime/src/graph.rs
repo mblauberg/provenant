@@ -288,6 +288,15 @@ pub trait AttemptOwner {
         Err(ReviewResolveError::Unsupported)
     }
 
+    /// Resolve a fresh panel for a repair whose risk or scope has grown.
+    fn resolve_repair_panel(
+        &mut self,
+        _document: &GraphDocument,
+        _subject: &str,
+    ) -> Result<Vec<String>, String> {
+        Err("host cannot resolve @review-panel for the repaired head".into())
+    }
+
     /// Resolve a node-specific review base in its bound execution context.
     /// A host without Git may only accept an already pinned object ID.
     fn resolve_review_base(
@@ -1714,8 +1723,88 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                 if structural_pause.is_some() || checkpoint.pause_reason.is_some() {
                     continue;
                 }
-                let reason = if repair::growth_in_round(node, &plan, &checkpoint, &positions) {
-                    Some("repair expanded risk or scope; full panel replan required".into())
+                let growth = repair::growth_in_round(node, &plan, &checkpoint, &positions);
+                let mut replan_error = None;
+                if growth {
+                    if let Some((parent, commit)) = repair::replan_source(node, &checkpoint)
+                        .map(|(parent, commit)| (parent.to_owned(), commit.to_owned()))
+                    {
+                        if repair::panel_expansion(&checkpoint, &parent).is_none() {
+                            let result = (|| -> Result<_, String> {
+                                commit
+                                    .parse::<provenant_core::GitOid>()
+                                    .map_err(|e| e.to_string())?;
+                                let lenses = owner.resolve_repair_panel(document, &commit)?;
+                                let resolvers = std::collections::BTreeMap::from([(
+                                    "review-panel".into(),
+                                    lenses,
+                                )]);
+                                let library = template::TemplateLibrary::bundled();
+                                let context = patch::PatchContext {
+                                    library: &library,
+                                    resolvers: &resolvers,
+                                    scan: &patch::scan_for_secrets,
+                                    journal: None,
+                                    limits,
+                                };
+                                let mut prospective = checkpoint.clone();
+                                let change = repair::panel_patch(
+                                    &parent,
+                                    &commit,
+                                    patch::revision(&prospective),
+                                    document.schema_version,
+                                );
+                                patch::admit_patch(
+                                    &mut patch::LiveGraph {
+                                        document,
+                                        checkpoint: &mut prospective,
+                                    },
+                                    Some(&parent),
+                                    &change,
+                                    &context,
+                                )
+                                .map_err(|error| error.message)?;
+                                let preview = plans::expand(
+                                    document,
+                                    &prospective.extensions,
+                                    &prospective.expansions,
+                                    limits,
+                                )
+                                .map_err(|error| error.to_string())?;
+                                let (new_plan, new_positions) =
+                                    validate_flat_plan(&preview, &plans::generous())
+                                        .map_err(str::to_owned)?;
+                                owner
+                                    .validate_expansion(&preview, &prospective)
+                                    .map_err(|error| error.to_string())?;
+                                Ok((prospective, preview, new_plan, new_positions))
+                            })();
+                            match result {
+                                Ok((prospective, preview, new_plan, new_positions)) => {
+                                    journal.save(&prospective).map_err(GraphError::Journal)?;
+                                    checkpoint = prospective;
+                                    (expanded, plan, positions) =
+                                        (preview, new_plan, new_positions);
+                                    continue 'schedule;
+                                }
+                                Err(error) => {
+                                    replan_error =
+                                        Some(format!("full panel replan required: {error}"))
+                                }
+                            }
+                        } else {
+                            replan_error = repair::panel_failure(
+                                &checkpoint,
+                                repair::panel_expansion(&checkpoint, &parent).unwrap(),
+                            );
+                        }
+                    } else {
+                        replan_error =
+                            Some("full panel replan required: repaired commit unavailable".into());
+                    }
+                }
+                let reason = if growth {
+                    replan_error
                 } else if matches!(condition, GateCondition::Ci { .. }) {
                     if observed_ci.contains(&node.id) {
                         continue;
