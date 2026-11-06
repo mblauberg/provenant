@@ -98,6 +98,7 @@ struct FakeOwner {
     now: Option<provenant_core::WallTime>,
     asked: Vec<String>,
     closed_asks: Vec<String>,
+    owner_notifications: Vec<String>,
     file_requests: Vec<Vec<InputRequest>>,
     file_caps: Vec<usize>,
     materialise: Option<fn(&[InputRequest]) -> MaterialisedInputs>,
@@ -263,6 +264,10 @@ impl AttemptOwner for FakeOwner {
     fn node_ask(&mut self, scope: AskScope<'_>) -> Result<Option<AskReply>, Self::Error> {
         self.asked.push(scope.ask.ask_id.clone());
         Ok(self.answers.get(&scope.ask.ask_id).cloned())
+    }
+    fn notify_owner(&mut self, scope: AskScope<'_>) -> Result<bool, Self::Error> {
+        self.owner_notifications.push(scope.ask.ask_id.clone());
+        Ok(true)
     }
     fn close_node_ask(&mut self, scope: AskScope<'_>) -> Result<(), Self::Error> {
         self.closed_asks.push(scope.ask.ask_id.clone());

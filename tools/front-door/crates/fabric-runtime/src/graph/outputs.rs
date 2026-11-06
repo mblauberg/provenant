@@ -174,6 +174,14 @@ pub(super) fn make_outputs_with_upstream(
                 "routine" | "substantial" | "crucial" | "terminal"
             )
         });
+    let repair_design = result
+        .filter(|capture| !capture.source_truncated && findings_available == Some(true))
+        .and_then(|capture| findings_block(capture).ok())
+        .and_then(|block| serde_json::from_str::<serde_json::Value>(block).ok())
+        .and_then(|block| block.get("repair_design").cloned())
+        .filter(|design| design.get("within_scope").is_some_and(serde_json::Value::is_boolean)
+            && design.get("one_way_door").is_some_and(serde_json::Value::is_boolean))
+        .map(|design| serde_json::json!({"within_scope":design["within_scope"],"one_way_door":design["one_way_door"]}));
     let result = result.map(|capture| {
         let excerpt = bounded(&capture.excerpt, RESULT_EXCERPT_BYTES);
         ResultOutput {
@@ -191,6 +199,7 @@ pub(super) fn make_outputs_with_upstream(
         extra: assessed_risk
             .map(|tier| ("risk_tier".into(), tier.into()))
             .into_iter()
+            .chain(repair_design.map(|design| ("repair_design".into(), design)))
             .collect(),
         verdict_error,
         schema_version: 2,
@@ -695,6 +704,9 @@ pub(super) fn materialised_findings(
     checkpoint: &GraphCheckpoint,
     positions: &std::collections::BTreeMap<String, usize>,
 ) -> Vec<Finding> {
+    if let Some(outputs) = repair::panel_outputs(checkpoint, &checkpoint.nodes[index].id) {
+        return outputs.findings.clone();
+    }
     let Some(outputs) = checkpoint.nodes[index].outputs.as_ref() else {
         return Vec::new();
     };

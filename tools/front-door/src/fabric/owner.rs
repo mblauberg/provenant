@@ -78,6 +78,22 @@ pub(crate) fn graph_ask_input(
     })
 }
 
+/// A notification uses its own immutable inbox operation and never asks for an
+/// answer. Replaying it after a checkpoint failure returns the same receipt.
+pub(crate) fn graph_notification_input(
+    scope: &provenant_fabric_runtime::graph::AskScope<'_>,
+) -> Result<provenant_fabric_runtime::inbox::InboxInput, FacadeError> {
+    use provenant_fabric_runtime::inbox::InboxInput;
+    let mut input = graph_ask_input(scope)?;
+    if let InboxInput::Ask { request, .. } = &mut input {
+        request.kind = provenant_records::inbox::RequestKind::Question;
+        request.blocking = false;
+        request.options.clear();
+        request.recommended_option_id = None;
+    }
+    Ok(input)
+}
+
 pub(crate) fn graph_ask_poll(
     service: &provenant_fabric_runtime::inbox::InboxService<'_>,
     scope: &provenant_fabric_runtime::graph::AskScope<'_>,
@@ -634,6 +650,16 @@ fn repair_scope_grew(
         || rank(new_floor.tier.as_deref()) > rank(old_floor.tier.as_deref())
 }
 
+/// Re-touching a protected surface can grow semantic risk even when the path
+/// set and its tier are unchanged. This deliberately loose signal only replans.
+fn repair_touches_risk(review: &provenant_routing::ReviewConfig, touched: &[String]) -> bool {
+    review
+        .path_floors(touched)
+        .classes
+        .iter()
+        .any(|class| !matches!(class.as_str(), "routine" | "unknown"))
+}
+
 impl BoundGraphOwner<'_> {
     fn repair_git(&self, directory: &Path, args: &[&str]) -> Result<String, String> {
         use provenant_os::exec::{ExecOptions, Executor, Termination};
@@ -690,7 +716,25 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                 .map_err(
                     |_| "repair review configuration is unavailable; correct routing settings",
                 )?;
-        Ok(repair_scope_grew(&routing.review, &old, &new))
+        let delta = self.repair_git(
+            &self.factory.cwd,
+            &[
+                "diff",
+                "--no-renames",
+                "--name-only",
+                "-z",
+                &before.to_string(),
+                &after.to_string(),
+                "--",
+            ],
+        )?;
+        let touched: Vec<String> = delta
+            .split('\0')
+            .filter(|path| !path.is_empty())
+            .map(str::to_owned)
+            .collect();
+        Ok(repair_scope_grew(&routing.review, &old, &new)
+            || repair_touches_risk(&routing.review, &touched))
     }
 
     fn resolve_repair_panel(
@@ -1226,6 +1270,39 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
         scope: provenant_fabric_runtime::graph::AskScope<'_>,
     ) -> Result<Option<provenant_fabric_runtime::graph::AskReply>, Self::Error> {
         graph_ask_edge(self.factory, self.cancel, scope, false)
+    }
+    fn notify_owner(
+        &mut self,
+        scope: provenant_fabric_runtime::graph::AskScope<'_>,
+    ) -> Result<bool, Self::Error> {
+        use provenant_fabric_runtime::inbox::{InboxResult, InboxService};
+        let context = &self.factory.context;
+        let mut identity = context.identity.clone();
+        identity.inbox.actor = scope.actor.parse().map_err(|_| FacadeError::StateCorrupt)?;
+        let input = graph_notification_input(&scope)?;
+        let refused = |error: &dyn std::fmt::Display| FacadeError::DispatchRefused {
+            fact: None,
+            disk: None,
+            reason: format!("graph owner notification {}: {error}", scope.ask.ask_id),
+        };
+        provenant_fabric_runtime::inbox::validate_request(
+            &identity,
+            &context.config,
+            context.in_lane,
+            &input,
+        )
+        .map_err(|error| refused(&error))?;
+        let service = InboxService::open(
+            &context.roots.state,
+            &identity,
+            &self.factory.clock,
+            self.cancel,
+        )
+        .map_err(|error| refused(&error))?;
+        let result = service
+            .execute(input, self.cancel)
+            .map_err(|error| refused(&error))?;
+        Ok(matches!(result, InboxResult::Saved { .. }))
     }
     fn close_node_ask(
         &mut self,
@@ -2657,6 +2734,16 @@ mod journal_error_tests {
             &["src/b.rs".into()]
         ));
         assert!(!super::repair_scope_grew(&review, &original, &[]));
+    }
+
+    #[test]
+    fn repair_detects_risk_inside_already_reviewed_paths() {
+        let review = provenant_routing::ReviewConfig::default();
+        let paths = vec!["src/credentials.rs".to_owned()];
+        assert!(!super::repair_scope_grew(&review, &paths, &paths));
+        assert!(super::repair_touches_risk(&review, &paths));
+        assert!(!super::repair_touches_risk(&review, &[]));
+        assert!(!super::repair_touches_risk(&review, &["README.md".into()]));
     }
 
     #[test]

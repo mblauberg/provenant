@@ -159,8 +159,9 @@ fn filled_asks(plan: &PlannedGraph) -> Vec<NodeAsk> {
             )));
         }
         if let Some(spec) = &node.decide {
-            let session = asks::decide_session(spec, plan.decision_session.as_deref()).unwrap();
-            asks.push(filled_ask(asks::decide_ask(
+            let scope = node.extra.get("repair_scope_gate") == Some(&json!(true));
+            let session = asks::decide_session(spec, plan.decision_session.as_deref()).unwrap_or(&plan.graph_id);
+            let mut ask = asks::decide_ask(
                 &plan.graph_id,
                 node,
                 spec,
@@ -168,7 +169,9 @@ fn filled_asks(plan: &PlannedGraph) -> Vec<NodeAsk> {
                 u64::MAX,
                 None,
                 Some(&worst(MAX_ADVANCE_ERROR_BYTES)),
-            )));
+            );
+            if scope { ask.body = worst(provenant_records::inbox::REQUEST_BODY_BYTES); }
+            asks.push(filled_ask(ask));
         }
     }
     if let Some(session) = &plan.decision_session {
@@ -487,8 +490,17 @@ fn assert_fits_with_repair_metadata(document: GraphDocument, tier: &str, grew: b
                 json!({"before":"1".repeat(64),"after":"2".repeat(64),"grew":grew}),
             );
         }
+        if planned.extra.get("repair_scope_gate") == Some(&json!(true)) {
+            node.extra.insert("owner_notified".into(), true.into());
+        }
         if let Some(outputs) = &mut node.outputs {
             outputs.extra.insert("risk_tier".into(), tier.into());
+            if plan.nodes.iter().any(|consumer| {
+                consumer.extra.get("repair_scope_gate") == Some(&json!(true))
+                    && consumer.depends_on.contains(&planned.id)
+            }) {
+                outputs.extra.insert("repair_design".into(), json!({"within_scope":false,"one_way_door":false}));
+            }
         }
     }
     let execution = GraphExecution {
@@ -1047,4 +1059,18 @@ fn routing_stratum_flows_from_graph_to_nodes() {
     let context = node_context(&plan, node);
     assert_eq!(context.risk_tier.as_deref(), Some("substantial"));
     assert_eq!(context.task_kind.as_deref(), Some("review"));
+}
+
+
+#[test]
+fn principal_scope_report_notification_and_assessment_fit_checkpoint_bound() {
+    let document: GraphDocument = serde_json::from_value(json!({
+        "schema_version":1,"graph_id":"principal-envelope","nodes":[
+            {"id":"design","access":"read_only","prompt":"design","route":{"alias":"principal"}},
+            {"id":"scope","kind":"decide","access":"read_only","depends_on":["design"],
+             "repair_scope_gate":true,"decide":{"question":"Approve changed scope?",
+             "options":[{"id":"approve","label":"Approve"},{"id":"hold","label":"Hold"}]}}
+        ]
+    })).unwrap();
+    assert_fits_with_repair_metadata(document, "substantial", false);
 }

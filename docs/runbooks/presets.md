@@ -53,17 +53,26 @@ after the first review and is separate from CI's `max_iterations`. Each repair
 starts a fresh writer attempt. Prefer a route outside the reviewers' families;
 when none is available, continue on the available route and retain the separation
 warning. The raising lenses review the delta and relevant tests. Risk or scope
-growth requires a full panel re-plan through `@review-panel`. Continuation
-fragments currently retain the launch-time resolver snapshot; selecting a new
-panel from a raised risk tier still needs host resolver support.
+growth requires a full panel re-plan through `@review-panel`. The host also
+checks repair diffs for newly touched paths and changes to risk-tagged paths
+already reviewed; this is a loose escalation guardrail rather than a refusal.
+Blocking findings from a replanned panel feed the next repair round within the
+same cycle cap. Later repair commits re-resolve that broader panel, so newly
+selected lenses also review closure.
 
 An evidenced `design_defect` or a recurring blocking finding escalates early.
 Exhausting the repair limit takes the same read-only principal `design` path,
 returning the root constraint, two or three options, the smallest viable slice
-and acceptance evidence. A continuation planner uses the bound `repair-slice`
-template within the original write authority and records owner notification in
-the graph outcome. Changed scope or a one-way door requires a `decide` node
-before further writing. Review repair loops cannot be extended or accepted as
+and acceptance evidence. Its findings block includes `repair_design` with
+boolean `within_scope` and `one_way_door` fields. The host sends an idempotent,
+non-blocking owner notification to the graph decision session (or the graph ID
+when no session was supplied). A host `decide` node permits the continuation
+without waiting only when the principal explicitly reports approved scope and
+no one-way door. Changed scope, a one-way door or a missing assessment waits for
+the owner; choosing hold prevents further writing. The decision request includes
+the principal report. A continuation planner uses the bound `repair-slice`
+template within the original literal write authority; approval alone does not
+expand those paths. Review repair loops cannot be extended or accepted as
 is to bypass the cap. The final CI, review, acceptance and exact-head landing
 checks still apply to the delivered head.
 
