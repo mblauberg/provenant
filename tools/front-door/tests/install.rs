@@ -1997,6 +1997,11 @@ esac
     let db = rusqlite::Connection::open(&db_path)?;
     db.execute_batch("CREATE TABLE attempts (project TEXT, run TEXT, id TEXT, terminal INTEGER); INSERT INTO attempts VALUES ('project-one','run-one','lane-one',0);")?;
     drop(db);
+    let child_store = rig.state.join("children/child-one");
+    fs::create_dir_all(&child_store)?;
+    let child_db = rusqlite::Connection::open(child_store.join("run.sqlite3"))?;
+    child_db.execute_batch("CREATE TABLE attempts (project TEXT, run TEXT, id TEXT, terminal INTEGER); INSERT INTO attempts VALUES ('project-two','run-two','child-lane',0);")?;
+    drop(child_db);
     let preset = rig.root.join("config/provenant/presets/custom.toml");
     fs::create_dir_all(preset.parent().ok_or("preset parent")?)?;
     fs::write(&preset, "name = 'custom'\n")?;
@@ -2015,7 +2020,7 @@ esac
     )?;
     assert_ne!(code(&direct), 0);
     let output = String::from_utf8(direct.stdout.bytes)?;
-    for expected in ["waiting", "lane-one", "custom.toml"] {
+    for expected in ["waiting", "lane-one", "child-lane", "custom.toml"] {
         assert!(output.contains(expected), "{output}");
     }
     let stopped = rig.command(&["upgrade", "--json"])?;
@@ -2025,7 +2030,7 @@ esac
         "{stopped_value}"
     );
     assert_eq!(stopped_value["data"].as_array().unwrap().len(), 1);
-    for expected in ["waiting", "lane-one", "custom.toml"] {
+    for expected in ["waiting", "lane-one", "child-lane", "custom.toml"] {
         assert!(
             stopped_value.to_string().contains(expected),
             "{stopped_value}"
@@ -2052,6 +2057,7 @@ esac
     rig.env
         .retain(|(key, _)| key != "PROVENANT_TEST_MISSING_APPS");
     fs::remove_dir_all(rig.state.join("fabric/graphs"))?;
+    fs::remove_dir_all(rig.state.join("children"))?;
     fs::remove_file(db_path)?;
     fs::remove_file(preset)?;
     fs::write(&curl_log, "")?;
