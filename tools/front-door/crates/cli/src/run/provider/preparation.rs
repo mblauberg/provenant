@@ -598,9 +598,13 @@ impl PrepareError {
                 refusal.boundary_class = boundary_class;
                 refusal
             }
-            Self::Prompt(error @ LaunchPromptError::NestedArgvTooLarge { .. }) => {
+            Self::Prompt(error) => {
                 let mut refusal = run::PrepareRefusal::from(error.to_string());
-                refusal.boundary_class = provenant_records::diagnostic::BoundaryClass::Authority;
+                if matches!(error, LaunchPromptError::NestedArgvTooLarge { .. }) {
+                    refusal.boundary_class =
+                        provenant_records::diagnostic::BoundaryClass::Authority;
+                }
+                refusal.resource = error.resource_fact();
                 refusal
             }
             error @ (Self::HostIndexOverlap | Self::TargetSeedOverlap) => {
@@ -1305,6 +1309,11 @@ pub(super) fn prepare_candidates(
 ) -> Result<run::PreparedLaunch, PrepareError> {
     if let run::RequestedRoute::Adapter { provider, name, .. } = &task.route {
         return prepare_command(registry, task, paths, resume, locate, provider, name);
+    }
+    // This is the raw, recorded prompt. It must fit the same bound as the
+    // validated prompt artifact, before any host preamble is added.
+    if prompt_text.len() as u64 > super::PROMPT_LIMIT {
+        return Err(PrepareError::Prompt(LaunchPromptError::TooLarge));
     }
     let default_limit = provenant_confinement::run_config::DEFAULT_ARGV_PROMPT_LIMIT_BYTES;
     check_launch_prompt(
@@ -2375,6 +2384,7 @@ pub(super) fn prepare_candidates(
                 &route,
                 &task.authority_digest.to_string(),
                 state_root,
+                roots.state.as_path(),
                 &private_state,
             ) {
                 Ok(continuation) => Some(continuation),
@@ -2449,6 +2459,9 @@ pub(super) fn prepare_candidates(
                         reasons.len(),
                         provenant_records::diagnostic::BoundaryClass::Authority,
                     );
+                }
+                if let Some(fact) = error.resource_fact() {
+                    reason_resources.insert(reasons.len(), fact);
                 }
                 reasons.push(skip(&label, SkipKind::Refused, error.to_string()));
                 continue;
@@ -3619,4 +3632,52 @@ mod refusal_cause_tests {
                 .contains("PROVIDER_SECRET_SENTINEL")
         );
     }
+}
+
+#[test]
+fn argv_spill_refusal_preserves_setting_and_source() -> Result<(), Box<dyn std::error::Error>> {
+    use provenant_records::diagnostic::{Diagnostic, ResourceFact, SettingSource};
+    let temp = tempfile::tempdir()?;
+    let root = std::fs::canonicalize(temp.path())?;
+    let paths = run::LaunchPaths {
+        attempt_id: provenant_core::AttemptId::from_bytes([1; 16]),
+        operation_id: provenant_core::OperationId::parse("spill-limit")?,
+        task_index: 0,
+        lane_depth: 1,
+        run_id: provenant_core::RunId::from_bytes([2; 16]),
+        deadline_unix_ms: u64::MAX,
+        scratch: root.join("scratch"),
+        provider_state: root.join("provider-state"),
+        temporary: root.join("tmp"),
+        temporary_alias: None,
+    };
+    let error = launch_prompt(
+        "PROMPT_SECRET_SENTINEL",
+        &paths,
+        &root,
+        "cursor",
+        1,
+        SettingSource::Configuration,
+    )
+    .err()
+    .ok_or("spill instruction exceeded configured argv budget")?;
+    let refusal = PrepareError::Prompt(error).into_refusal();
+    assert_eq!(
+        refusal.resource,
+        Some(ResourceFact::ArgvPromptLimit {
+            limit: 1,
+            origin: SettingSource::Configuration
+        })
+    );
+    let diagnostic = refusal
+        .resource
+        .unwrap()
+        .project(Diagnostic::new("INVALID"));
+    let encoded = serde_json::to_string(&diagnostic)?;
+    assert!(encoded.contains("domains.run.argv_prompt_limit_bytes"));
+    assert!(encoded.contains("host configuration"));
+    assert!(diagnostic.next.is_some());
+    assert!(!encoded.contains("PROMPT_SECRET_SENTINEL"));
+    assert!(!encoded.contains(root.to_str().unwrap()));
+    Ok(())
 }

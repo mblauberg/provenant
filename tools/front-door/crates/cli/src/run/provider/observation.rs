@@ -404,16 +404,24 @@ pub(super) fn credential_authority(
 
 #[derive(Debug, thiserror::Error)]
 pub(super) enum LaunchPromptError {
-    #[error(
-        "invalid input: launch prompt including the preamble exceeds 1 MiB; shorten the prompt"
-    )]
+    #[error("invalid input: recorded prompt exceeds 1 MiB; shorten the prompt")]
     TooLarge,
     #[error(
         "invalid input: nested argv launch prompt exceeds domains.run.argv_prompt_limit_bytes ({limit} bytes, {origin}); route the child to a stdin adapter or shorten the prompt"
     )]
     NestedArgvTooLarge { limit: usize, origin: &'static str },
+    #[error(transparent)]
+    Provider(#[from] provenant_providers::ProviderError),
     #[error("{0}")]
     Other(String),
+}
+impl LaunchPromptError {
+    pub(super) fn resource_fact(&self) -> Option<provenant_records::diagnostic::ResourceFact> {
+        match self {
+            Self::Provider(error) => error.resource_fact(),
+            _ => None,
+        }
+    }
 }
 impl From<String> for LaunchPromptError {
     fn from(message: String) -> Self {
@@ -433,9 +441,6 @@ pub(super) fn check_launch_prompt(
     argv_limit: usize,
     argv_origin: provenant_records::diagnostic::SettingSource,
 ) -> Result<(), LaunchPromptError> {
-    if text.len() as u64 > super::PROMPT_LIMIT {
-        return Err(LaunchPromptError::TooLarge);
-    }
     if paths.lane_depth > 1
         && adapter
             .and_then(AdapterSpec::get)
@@ -464,6 +469,14 @@ pub(super) fn launch_prompt(
     argv_limit: usize,
     argv_origin: provenant_records::diagnostic::SettingSource,
 ) -> Result<Prompt, LaunchPromptError> {
+    if text.len() as u64 > super::PROMPT_LIMIT {
+        // Admission bounds the caller's raw prompt, not host additions.
+        use std::io::Write;
+        let _ = writeln!(
+            std::io::stderr().lock(),
+            "warning: INVALID: launch prompt including the preamble exceeds 1 MiB; shorten the prompt"
+        );
+    }
     check_launch_prompt(text, paths, Some(adapter), argv_limit, argv_origin)?;
     let prompt = Prompt::new(text.to_owned()).with_argv_limit(argv_limit, argv_origin);
     if !AdapterSpec::get(adapter).is_some_and(|spec| spec.argv_prompt)
@@ -509,6 +522,6 @@ pub(super) fn launch_prompt(
         Err(error) => return Err(error.to_string().into()),
     }
     let prompt = Prompt::from_file(attempt.join(name)).with_argv_limit(argv_limit, argv_origin);
-    prompt.check_argv().map_err(|error| error.to_string())?;
+    prompt.check_argv()?;
     Ok(prompt)
 }

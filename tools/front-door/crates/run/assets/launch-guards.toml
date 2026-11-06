@@ -795,3 +795,33 @@ reason = "Retained-state copy and search budgets report the effective host setti
 site = "cli/src/run/provider/continuation.rs#StateCopyPolicy::read"
 boundary = "warning"
 reason = "Unavailable or invalid copy budget settings warn and use compiled defaults."
+
+[[guard]]
+site = "cli/src/run/provider/observation.rs#launch_prompt"
+boundary = "warning"
+code = "INVALID"
+reason = "Host-added preambles and graph inputs exceeding 1 MiB warn with the safe shortening action; raw caller prompts retain their admission bound."
+
+[[guard]]
+site = "cli/src/run/provider/continuation.rs#find_session_state_within"
+boundary = "configurable_default"
+code = "REFUSED"
+setting = "domains.run.continuation_copy_entries"
+reason = "An unfinished session search reports its exhausted configurable budget and host source rather than claiming the session is missing."
+
+[[guard]]
+site = "cli/src/run/provider/continuation.rs#find_session_state_within"
+boundary = "configurable_default"
+code = "REFUSED"
+setting = "domains.run.continuation_copy_depth"
+reason = "An unfinished session search reports its exhausted configurable budget and host source rather than claiming the session is missing."
+
+[[guard]]
+site = "cli/src/run/provider/continuation.rs#copy_state_classified"
+boundary = "authority"
+reason = "The retained state root must remain an anchored directory; symlinks, non-directories and changed roots remain refused at every copy budget."
+
+[[guard]]
+site = "cli/src/run/provider/preparation.rs#prepare_candidates"
+boundary = "object_integrity"
+reason = "The raw prompt must fit RECORD_LIMIT, the same bound reader::validate_attempt applies to its recorded prompt artifact, before host preambles are added."

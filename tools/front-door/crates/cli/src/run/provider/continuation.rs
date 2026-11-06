@@ -49,7 +49,7 @@ pub(super) fn continuation_request(
 }
 
 #[derive(Debug, thiserror::Error)]
-pub(super) enum ContinuationError {
+pub(crate) enum ContinuationError {
     #[error("route differs from the prior attempt's provider, model or account")]
     RouteMismatch,
     #[error("the prior attempt recorded no provider session")]
@@ -65,7 +65,7 @@ pub(super) enum ContinuationError {
 }
 
 impl ContinuationError {
-    pub(super) fn resource_fact(&self) -> Option<provenant_records::diagnostic::ResourceFact> {
+    pub(crate) fn resource_fact(&self) -> Option<provenant_records::diagnostic::ResourceFact> {
         match self {
             Self::StateCopy(error) => error.resource,
             _ => None,
@@ -127,6 +127,7 @@ pub(super) fn continuation_for(
     route: &ResolvedRoute,
     grant_digest: &str,
     state_root: &Path,
+    config_root: &Path,
     private_state: &Path,
 ) -> Result<provenant_providers::Continuation, ContinuationError> {
     let session = prior
@@ -151,7 +152,7 @@ pub(super) fn continuation_for(
         .join("attempts")
         .join(prior.attempt_id.to_string())
         .join("provider-state");
-    let policy = StateCopyPolicy::read(state_root);
+    let policy = StateCopyPolicy::read(config_root);
     match find_session_state_within(&prior_state, session, policy.limits) {
         // Codex's SQLite index holds absolute rollout paths. Rebuild it from
         // the copied sessions instead of resolving back into settled history.
@@ -288,7 +289,8 @@ pub(super) fn open_local_directory(
 pub(crate) fn continuation_available(
     prior: &run::AttemptRecord,
     state_root: &Path,
-) -> Result<(), String> {
+    config_root: &Path,
+) -> Result<(), ContinuationError> {
     let provider = prior
         .applied_route
         .as_ref()
@@ -307,12 +309,12 @@ pub(crate) fn continuation_available(
         .join("attempts")
         .join(prior.attempt_id.to_string())
         .join("provider-state");
-    let policy = StateCopyPolicy::read(state_root);
+    let policy = StateCopyPolicy::read(config_root);
     match find_session_state_within(&state, session, policy.limits) {
         Ok(Some(_)) => Ok(()),
         Ok(None) => Err("retained provider continuation is missing or expired".into()),
         Err(exhausted) => {
-            Err(StateCopyError::resource(policy.fact(exhausted.limit(), None)).to_string())
+            Err(StateCopyError::resource(policy.fact(exhausted.limit(), None)).into())
         }
     }
 }
@@ -357,18 +359,29 @@ pub(super) fn find_session_state_within(
             Ok(None) => return Err(SearchExhausted::Entries),
             Err(_) => return Ok(false),
         };
+        let mut depth_exhausted = false;
         for name in names {
             if name.to_string_lossy().contains(session) {
                 return Ok(true);
             }
             if let Some(child) = open_local_directory(dir, &name, device) {
-                let remaining = depth.checked_sub(1).ok_or(SearchExhausted::Depth)?;
-                if holds(&child, session, remaining, device, budget)? {
-                    return Ok(true);
+                if let Some(remaining) = depth.checked_sub(1) {
+                    match holds(&child, session, remaining, device, budget) {
+                        Ok(true) => return Ok(true),
+                        Ok(false) => {}
+                        Err(SearchExhausted::Depth) => depth_exhausted = true,
+                        Err(error) => return Err(error),
+                    }
+                } else {
+                    depth_exhausted = true;
                 }
             }
         }
-        Ok(false)
+        if depth_exhausted {
+            Err(SearchExhausted::Depth)
+        } else {
+            Ok(false)
+        }
     }
     let opened = provenant_os::fs::canonicalize(provider_state)
         .ok()
@@ -384,15 +397,24 @@ pub(super) fn find_session_state_within(
         Ok(None) => return Err(SearchExhausted::Entries),
         Err(_) => return Ok(None),
     };
+    let mut depth_exhausted = false;
     for name in names {
         if name.to_string_lossy().starts_with("candidate-")
             && let Some(candidate) = open_local_directory(&root, &name, device)
-            && holds(&candidate, session, limits.depth, device, &mut budget)?
         {
-            return Ok(Some(provider_state.join(name)));
+            match holds(&candidate, session, limits.depth, device, &mut budget) {
+                Ok(true) => return Ok(Some(provider_state.join(name))),
+                Ok(false) => {}
+                Err(SearchExhausted::Depth) => depth_exhausted = true,
+                Err(error) => return Err(error),
+            }
         }
     }
-    Ok(None)
+    if depth_exhausted {
+        Err(SearchExhausted::Depth)
+    } else {
+        Ok(None)
+    }
 }
 
 /// Copy regular files and directories within the selected budgets. GC tombstones,
@@ -403,12 +425,19 @@ pub(super) fn find_session_state_within(
 /// checked and copied.
 #[derive(Debug, thiserror::Error)]
 #[error("{message}")]
-pub(super) struct StateCopyError {
+pub(crate) struct StateCopyError {
     message: String,
     class: provenant_records::diagnostic::BoundaryClass,
     resource: Option<provenant_records::diagnostic::ResourceFact>,
 }
 impl StateCopyError {
+    fn authority(message: &str) -> Self {
+        Self {
+            message: message.into(),
+            class: provenant_records::diagnostic::BoundaryClass::Authority,
+            resource: None,
+        }
+    }
     fn resource(fact: provenant_records::diagnostic::ResourceFact) -> Self {
         let diagnostic = fact.project(provenant_records::diagnostic::Diagnostic::new("REFUSED"));
         Self {
@@ -468,9 +497,20 @@ fn copy_state_classified(
         .map_err(|error| failed(&error))?
         .is_dir()
     {
-        return Err("retained provider state is not a directory".into());
+        return Err(StateCopyError::authority(
+            "retained provider state is not an anchored directory",
+        ));
     }
-    let source = Directory::open_anchor(from).map_err(|error| failed(&error))?;
+    let source = Directory::open_anchor(from).map_err(|error| {
+        if error.is_symlink()
+            || error.raw_os_error() == Some(libc::ENOTDIR)
+            || matches!(error, FsError::RaceRefused { .. })
+        {
+            StateCopyError::authority("retained provider state is not an anchored directory")
+        } else {
+            failed(&error).into()
+        }
+    })?;
     let (Some(parent), Some(name)) = (to.parent(), to.file_name()) else {
         return Err(failed(&"the destination has no parent directory").into());
     };
@@ -562,7 +602,10 @@ fn retained_state_hard_link_is_an_integrity_refusal() -> Result<(), Box<dyn std:
 /// so it may dispose of lock-named entries the copy wrote there.
 pub(super) fn remove_staged(parent: &Directory, name: &std::ffi::OsStr) -> Result<(), FsError> {
     fn remove_contents(tree: &PayloadTree) -> Result<(), FsError> {
-        for entry in tree.entries()?.collect::<Result<Vec<_>, _>>()? {
+        for entry in tree
+            .entries()?
+            .collect::<std::result::Result<Vec<_>, _>>()?
+        {
             if tree.metadata_at(&entry)?.kind == FileKind::Directory {
                 remove_contents(&tree.child(&entry)?)?;
                 tree.rmdir(&entry)?;
@@ -859,6 +902,20 @@ fn retained_state_copy_refusals_require_inventoried_settings_and_followable_reme
                 assert!(
                     matches!(search_error.resource, Some(ResourceFact::ContinuationCopy { setting, .. }) if setting == expected_setting)
                 );
+                assert!(
+                    guards.iter().any(|row| {
+                        row.get("site").and_then(|v| v.as_str())
+                            == Some(
+                                "cli/src/run/provider/continuation.rs#find_session_state_within",
+                            )
+                            && row.get("setting").and_then(|v| v.as_str())
+                                == Some(expected_setting.setting())
+                            && row.get("boundary").and_then(|v| v.as_str())
+                                == Some("configurable_default")
+                            && row.get("code").and_then(|v| v.as_str()) == Some("REFUSED")
+                    }),
+                    "search refusal is missing from inventory"
+                );
             }
             // Follow the printed setting remedy against the very same tree.
             std::fs::write(
@@ -876,6 +933,81 @@ fn retained_state_copy_refusals_require_inventoried_settings_and_followable_reme
                 Ok(Some(source.clone()))
             );
         }
+    }
+    Ok(())
+}
+
+#[test]
+fn retained_state_copy_refuses_redirected_roots_as_authority()
+-> Result<(), Box<dyn std::error::Error>> {
+    use provenant_records::diagnostic::BoundaryClass;
+    let temp = tempfile::tempdir()?;
+    let source = temp.path().join("source");
+    std::fs::create_dir(&source)?;
+    std::fs::write(source.join("session"), "state")?;
+    let alias = temp.path().join("alias");
+    std::os::unix::fs::symlink(&source, &alias)?;
+    let file = temp.path().join("file");
+    std::fs::write(&file, "state")?;
+    for from in [alias, file] {
+        let target = temp.path().join("copy");
+        let error = copy_state_classified(
+            &from,
+            &target,
+            StateCopyPolicy::shipped(RETAINED_STATE),
+            false,
+        )
+        .unwrap_err();
+        assert_eq!(error.class, BoundaryClass::Authority);
+        assert!(error.resource.is_none());
+        assert!(!target.exists());
+    }
+    Ok(())
+}
+
+#[test]
+fn session_search_continues_after_unrelated_depth_exhaustion()
+-> Result<(), Box<dyn std::error::Error>> {
+    for separate_candidates in [false, true] {
+        let temp = tempfile::tempdir()?;
+        let state = std::fs::canonicalize(temp.path())?;
+        let parent = if separate_candidates {
+            state.clone()
+        } else {
+            state.join("candidate-0")
+        };
+        std::fs::create_dir_all(&parent)?;
+        // Use the filesystem's actual directory order to put the exhausted
+        // subtree first, without relying on alphabetical or creation order.
+        for name in ["candidate-first", "candidate-second"] {
+            std::fs::create_dir(parent.join(name))?;
+        }
+        let names = Directory::open_anchor(&parent)?
+            .entries()?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        assert_eq!(names.len(), 2);
+        let deep = parent.join(&names[0]);
+        let reachable = parent.join(&names[1]);
+        std::fs::create_dir_all(deep.join("a/b/c"))?;
+        std::fs::write(reachable.join("fixture-session"), "state")?;
+        let limits = StateLimits {
+            depth: 1,
+            ..RETAINED_STATE
+        };
+        let expected = if separate_candidates {
+            reachable.clone()
+        } else {
+            parent.clone()
+        };
+        assert_eq!(
+            find_session_state_within(&state, "fixture-session", limits),
+            Ok(Some(expected))
+        );
+        std::fs::remove_file(reachable.join("fixture-session"))?;
+        assert_eq!(
+            find_session_state_within(&state, "fixture-session", limits),
+            Err(SearchExhausted::Depth)
+        );
     }
     Ok(())
 }

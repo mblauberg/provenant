@@ -222,22 +222,27 @@ pub fn continue_attempt_mode(
         .ok()
         .and_then(|owner| owner.as_ref())
         .map(|owner| owner.base.clone());
+    let mut unavailable_resource = None;
     let unavailable = ownership.err().map(|error| error.to_string()).or_else(|| {
         Registry::default()
             .check_continuable(&record)
             .err()
             .map(|fail| fail.message)
             .or_else(|| {
-                provider::continuation_available(&record, session.context.state_root.as_path())
-                    .err()
+                provider::continuation_available(
+                    &record,
+                    session.context.state_root.as_path(),
+                    edge.roots.state.as_path(),
+                )
+                .err()
+                .map(|error| {
+                    unavailable_resource = error.resource_fact();
+                    error.to_string()
+                })
             })
     });
     if !fallback && let Some(reason) = &unavailable {
-        return Err(Fail::new(
-            Status::Refused,
-            ErrorKind::ContinuationUnsupported,
-            format!("continuation unavailable; fresh fallback disabled by --no-fallback: {reason}"),
-        ));
+        return Err(no_fallback_refusal(reason, unavailable_resource));
     }
     if let Some(reason) = &unavailable {
         let task = session
@@ -672,4 +677,28 @@ mod resume_delivery_tests {
         assert!(!pickup("batch/graph", Some(&plain)).fast_forward_only);
         assert!(!pickup("batch/graph", None).fast_forward_only);
     }
+}
+
+/// Keep the configured continuation budget visible through the command edge.
+/// Operational source text remains outside the safe diagnostic projection.
+pub(super) fn no_fallback_refusal(
+    reason: &str,
+    resource: Option<provenant_records::diagnostic::ResourceFact>,
+) -> Fail {
+    let mut fail = Fail::new(
+        Status::Refused,
+        ErrorKind::ContinuationUnsupported,
+        format!("continuation unavailable; fresh fallback disabled by --no-fallback: {reason}"),
+    );
+    if let Some(fact) = resource {
+        fail.projection = Some(Box::new(
+            fact.project(provenant_records::diagnostic::Diagnostic::new(
+                fail.kind.code(),
+            ))
+            .fact(provenant_records::diagnostic::DiagnosticFact::Resource(
+                fact,
+            )),
+        ));
+    }
+    fail
 }

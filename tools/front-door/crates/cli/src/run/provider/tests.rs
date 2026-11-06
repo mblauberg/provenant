@@ -998,7 +998,7 @@ fn prompt_paths(attempt: &Path) -> Result<run::LaunchPaths, Box<dyn std::error::
 }
 
 #[test]
-fn launch_prompt_preserves_small_text_and_refuses_more_than_one_mib()
+fn launch_prompt_preserves_admitted_text_when_host_additions_exceed_one_mib()
 -> Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
     let attempt = canonical(temp.path())?;
@@ -1018,22 +1018,24 @@ fn launch_prompt_preserves_small_text_and_refuses_more_than_one_mib()
             assert!(prompt.file().is_none());
         }
         let text = format!("Durable output instructions\n\n{}", "a".repeat(1024 * 1024));
-        let error = launch_prompt(
+        let prompt = launch_prompt(
             &text,
             &paths,
             &attempt,
             adapter,
             65_536,
             provenant_records::diagnostic::SettingSource::Configuration,
-        )
-        .err()
-        .ok_or("oversized launch accepted")?;
-        assert!(
-            matches!(error, LaunchPromptError::TooLarge),
-            "{adapter}: {error}"
-        );
+        )?;
+        if AdapterSpec::get(adapter).is_some_and(|spec| spec.argv_prompt) {
+            assert_eq!(
+                std::fs::read_to_string(prompt.file().ok_or("expected spill file")?)?,
+                text
+            );
+        } else {
+            assert_eq!(prompt.text(), text);
+            assert!(prompt.file().is_none());
+        }
     }
-    assert!(!attempt.join("prompt.md").exists());
     Ok(())
 }
 
@@ -4101,7 +4103,7 @@ fn user_sessions_and_pruned_codex_state_remain_resumable() -> Result<(), Box<dyn
             "prompt": {"path": {"encoding": "utf8", "path": "prompt.txt"}, "digest": FileDigest::from_bytes([0; 32]), "bytes": 0, "complete": true, "redacted": false}
         }))?;
         let state = Path::new("/fixture/missing-state");
-        let result = continuation_for(&prior, &route, "fixture", state, state);
+        let result = continuation_for(&prior, &route, "fixture", state, state, state);
         if adapter == "codex" {
             assert!(result.is_err(), "Codex still requires its retained state");
             let session = "01234567-89ab-cdef-0123-456789abcdef";
@@ -4210,6 +4212,7 @@ fn user_sessions_and_pruned_codex_state_remain_resumable() -> Result<(), Box<dyn
                 &prior,
                 &route,
                 "fixture",
+                context.state_root.as_path(),
                 context.state_root.as_path(),
                 &copied,
             )?;
@@ -4342,10 +4345,83 @@ fn user_sessions_and_pruned_codex_state_remain_resumable() -> Result<(), Box<dyn
                     .status(),
                 provenant_providers::OutcomeStatus::Success
             );
+            // A nested execution has its own run files, but only the host
+            // config controls copy/search budgets. A child cannot override it.
+            let host = context.state_root.as_path();
+            let nested = host.join("children/fixture-parent");
+            std::fs::create_dir_all(&nested)?;
+            std::fs::rename(host.join("runs"), nested.join("runs"))?;
+            std::fs::write(
+                host.join("config.toml"),
+                "schema_version=1\n[domains.run]\ncontinuation_copy_entries=1\n",
+            )?;
+            std::fs::write(
+                nested.join("config.toml"),
+                "schema_version=1\n[domains.run]\ncontinuation_copy_entries=100000\n",
+            )?;
+            let nested_copy = base.join("nested-copy");
+            let error = continuation_for(&prior, &route, "fixture", &nested, host, &nested_copy)
+                .unwrap_err();
+            assert!(matches!(
+                error.resource_fact(),
+                Some(
+                    provenant_records::diagnostic::ResourceFact::ContinuationCopy {
+                        limit: 1,
+                        origin: provenant_records::diagnostic::SettingSource::Configuration,
+                        setting: provenant_records::diagnostic::ContinuationCopyLimit::Entries,
+                        ..
+                    }
+                )
+            ));
+            let error = continuation_available(&prior, &nested, host).unwrap_err();
+            assert!(error.to_string().contains("continuation_copy_entries is 1"));
+            let fail =
+                crate::run::resume::no_fallback_refusal(&error.to_string(), error.resource_fact());
+            assert_eq!(fail.status, provenant_records::Outcome::Refused);
+            let projected = crate::run::command_error(&fail);
+            assert_eq!(
+                projected.code,
+                crate::run::ErrorKind::ContinuationUnsupported.code()
+            );
+            assert!(
+                projected
+                    .cause
+                    .as_deref()
+                    .unwrap()
+                    .contains("continuation_copy_entries is 1")
+            );
+            assert!(
+                projected
+                    .cause
+                    .as_deref()
+                    .unwrap()
+                    .contains("host configuration")
+            );
+            assert!(
+                projected
+                    .repair
+                    .as_deref()
+                    .unwrap()
+                    .contains("continuation_copy_entries")
+            );
+            std::fs::write(
+                host.join("config.toml"),
+                "schema_version=1\n[domains.run]\ncontinuation_copy_entries=100000\n",
+            )?;
+            std::fs::write(
+                nested.join("config.toml"),
+                "schema_version=1\n[domains.run]\ncontinuation_copy_entries=1\n",
+            )?;
+            continuation_available(&prior, &nested, host)?;
+            continuation_for(&prior, &route, "fixture", &nested, host, &nested_copy)?;
+            assert_eq!(
+                std::fs::read_to_string(nested_copy.join(&rollout))?,
+                transcript
+            );
         } else {
             assert_eq!(result?.session(), "fixture-session");
             prior.session = None;
-            assert!(continuation_for(&prior, &route, "fixture", state, state).is_err());
+            assert!(continuation_for(&prior, &route, "fixture", state, state, state).is_err());
         }
     }
     Ok(())
