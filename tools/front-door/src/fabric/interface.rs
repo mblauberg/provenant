@@ -1389,18 +1389,18 @@ mod tests {
         let directory = rig.project.join(".provenant/templates");
         std::fs::create_dir_all(&directory)?;
         let path = directory.join("review.typo.toml");
-        std::fs::write(&path, "acess = \"read_only\"\n")?;
+        std::fs::write(&path, "accesz = \"read_only\"\n")?;
         let error = factory.template_library(None).unwrap_err();
         let diagnostic = error.diagnostic();
         let text = diagnostic.detail.ok_or("agent diagnostic")?;
         assert!(text.contains("review.typo.toml"), "{text}");
-        assert!(text.contains("acess"), "{text}");
+        assert!(text.contains("accesz"), "{text}");
         let wire = serde_json::to_value(&error)?;
         assert!(
             wire["detail"]
                 .as_str()
                 .ok_or("wire detail")?
-                .contains("acess")
+                .contains("accesz")
         );
         std::fs::remove_file(path)?;
         let cancel = CancelToken::new();

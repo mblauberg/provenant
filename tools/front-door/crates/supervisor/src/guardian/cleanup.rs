@@ -361,7 +361,10 @@ impl Driver<'_> {
         self.protected
             .retain(|identity| identity_still_possible(&census, identity));
         self.descendant_stop_allowed = !registry_unknown;
-        self.escapee_stop_allowed = registry_listed || self.registry.is_none();
+        self.escapee_stop_allowed = (registry_listed || self.registry.is_none())
+            && self.holder.is_none_or(|holder| {
+                matches!(holder.has_live_children(&self.holder_context), Ok(false))
+            });
         if full {
             self.reservation.census_incomplete = !census.is_complete();
         }
