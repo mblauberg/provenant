@@ -51,10 +51,49 @@ impl Factory {
             .review
             .resolve_panel(&request, None, &[], false)
             .map_err(FacadeError::invalid)?;
-        Ok(BTreeMap::from([(
-            "review-panel".into(),
-            panel.slots.into_iter().map(|slot| slot.lens).collect(),
-        )]))
+        let mut resolvers = BTreeMap::new();
+        let single = panel.slots.len() == 1;
+        let frame = !single && panel.frame;
+        let verifiers = if single { 0 } else { panel.verifiers };
+        let synthesis = !single && panel.synthesis == provenant_routing::ReviewSynthesis::Model;
+        resolvers.insert(
+            "review-topology".into(),
+            vec![format!(
+                "f{}-v{}-s{}",
+                u8::from(frame),
+                u8::from(verifiers > 0),
+                u8::from(synthesis)
+            )],
+        );
+        // The explicit shape variants containing a verifier also explain on
+        // their own when the selected shape happens to need none.
+        resolvers.insert(
+            "review-verifiers".into(),
+            (1..=verifiers.max(1))
+                .map(|number| number.to_string())
+                .collect(),
+        );
+        let mut lenses = Vec::new();
+        for lens in panel.slots.iter().map(|slot| slot.lens.as_str()).chain([
+            "correctness",
+            "security",
+            "tests",
+            "contract",
+            "design",
+            "adversarial",
+        ]) {
+            let advice = if lens == "tests"
+                && matches!(request.risk_tier.as_deref(), Some("crucial" | "terminal"))
+            {
+                include_str!("../../assets/review-tests-advice.txt")
+            } else {
+                ""
+            };
+            resolvers.insert(format!("review-advice-{lens}"), vec![advice.into()]);
+        }
+        lenses.extend(panel.slots.into_iter().map(|slot| slot.lens));
+        resolvers.insert("review-panel".into(), lenses);
+        Ok(resolvers)
     }
 
     fn relay_document(
@@ -344,8 +383,9 @@ impl Factory {
                         .map_err(|error| FacadeError::invalid(error.to_string()))?,
                     ..Default::default()
                 };
-                let mut document = patch::submit(id, &patch, &context)
-                    .map_err(|error| FacadeError::invalid(error.to_string()))?;
+                let mut document =
+                    patch::submit(id, &patch, &context, raw["integration_branch"].as_str())
+                        .map_err(|error| FacadeError::invalid(error.to_string()))?;
                 // Graph-wide settings belong to the document rather than a node.
                 let mut compiled = encode(&document)?;
                 for key in [
@@ -409,6 +449,18 @@ impl Factory {
                 node.as_object_mut().unwrap().remove("brief");
                 node.as_object_mut().unwrap().remove("tier");
             }
+            let integration_branch = (node["use"] == "batch"
+                && library.layer("batch") == Some(Layer::Bundled))
+            .then(|| {
+                parameters.get("integration_branch").cloned().or_else(|| {
+                    template
+                        .parameters
+                        .get("integration_branch")?
+                        .default
+                        .clone()
+                })
+            })
+            .flatten();
             node["with"] = parameters;
             patch::submit(
                 id,
@@ -418,6 +470,7 @@ impl Factory {
                     ..Default::default()
                 },
                 &context,
+                integration_branch.as_ref().and_then(Value::as_str),
             )
             .map_err(|error| FacadeError::invalid(error.to_string()))?
         };

@@ -414,7 +414,6 @@ pub fn expand_composite(
         roles: BTreeMap::new(),
         substitutions: Vec::new(),
         warnings: Vec::new(),
-        plan: None,
     })
 }
 

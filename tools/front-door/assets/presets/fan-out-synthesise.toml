@@ -7,23 +7,6 @@ cost = "width + 1 attempts"
 select_when = "Several views must be reconciled into one answer."
 tags = ["primitive"]
 
-[plan]
-# With --plan on, a principal planner replaces the static branch stage with
-# workers it chooses. It instantiates only this pattern.
-replaces = "branch"
-explicit = ["width", "branches"]
-guidance = """Choose how many workers to run and give each one distinct question to answer, on a route that suits its difficulty. Prefer the default width unless the brief clearly needs fewer or more, and never repeat a question."""
-
-[[plan.patterns]]
-name = "worker"
-exports = [{ node = "worker", outputs = ["result"] }]
-nodes = [
-  { id = "worker", brief = "Your question: ${question}", tier = "${route}", acceptance_checks = ["Answer the question from the repository and cite the evidence"] },
-]
-
-[plan.patterns.parameters]
-question = { type = "string", doc = "The one question this worker answers." }
-route = { type = "string", default = "${route}", enum = "${plan_route_names}", doc = "Route alias for the worker." }
 
 [parameters]
 route = { type = "string", default = "senior", doc = "Default routing pool for branches and synthesis." }

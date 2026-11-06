@@ -217,6 +217,216 @@ fn template_show_resolves_user_repository_and_inline_layers() -> Result {
 }
 
 #[test]
+fn every_bundled_template_is_listed_shown_and_explained() -> Result {
+    let rig = GraphProject::new()?;
+    let (output, value) = rig.run(&["templates"])?;
+    assert!(output.status.success(), "{value}");
+    let listed = value["data"]["templates"].as_array().ok_or("templates")?;
+    let names: Vec<_> = listed
+        .iter()
+        .filter_map(|entry| entry["name"].as_str())
+        .collect();
+    let library = provenant_fabric_runtime::graph::TemplateLibrary::bundled();
+    assert_eq!(names, library.names().collect::<Vec<_>>());
+    let directory =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("crates/fabric-runtime/assets/templates");
+    let mut expected = std::collections::BTreeSet::new();
+    for entry in std::fs::read_dir(&directory)? {
+        let path = entry?.path();
+        if path.extension().and_then(|extension| extension.to_str()) != Some("toml") {
+            continue;
+        }
+        let name = path
+            .file_stem()
+            .and_then(|name| name.to_str())
+            .ok_or("template filename")?;
+        if name == "composites" {
+            let composites: std::collections::BTreeMap<String, Value> =
+                toml_edit::de::from_str(&std::fs::read_to_string(path)?)?;
+            expected.extend(composites.into_keys());
+        } else {
+            expected.insert(name.to_owned());
+        }
+    }
+    assert_eq!(
+        names
+            .iter()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>(),
+        expected.iter().map(String::as_str).collect()
+    );
+    for entry in listed {
+        let name = entry["name"].as_str().ok_or("template name")?;
+        let (output, shown) = rig.run(&["templates", name])?;
+        assert!(output.status.success(), "{name}: {shown}");
+        assert_eq!(shown["data"]["templates"][0], *entry, "{name}");
+        let template = &entry["template"];
+        let mut node = json!({"id":"exercise", "use":name});
+        if name == "repair" {
+            node["repeat"] = json!({"until":"accepted", "max_rounds":1, "review_repair":true});
+        }
+        let mut parameters = json!({});
+        if template["parameters"].get("worktree").is_some() {
+            parameters["worktree"] = json!(rig.project);
+        } else if template["access"] == "worktree_write" {
+            node["worktree"] = json!(rig.project);
+            node["write_scope"] = json!(["."]);
+        }
+        if template["parameters"].get("write_scope").is_some() {
+            parameters["write_scope"] = json!(["."]);
+        }
+        node["with"] = parameters;
+        let mut nodes = Vec::new();
+        if name == "synthesise" {
+            nodes.push(json!({"id":"source", "use":"task"}));
+            node["after"] = json!(["source"]);
+            node["inputs"] = json!([{"node":"source", "outputs":["result"]}]);
+        }
+        nodes.push(node);
+        let path =
+            rig.document(&json!({"nodes":nodes, "integration_branch":"batch/integration"}))?;
+        let output = rig
+            .command()
+            .args(["run", "--file"])
+            .arg(path)
+            .arg("--explain")
+            .output()?;
+        let explained: Value = serde_json::from_slice(&output.stdout)?;
+        assert!(output.status.success(), "{name}: {explained}");
+    }
+    let worktree = format!("worktree='{}'", rig.project.display());
+    let (output, explained) = rig.run(&[
+        "run",
+        "--use",
+        "batch",
+        "--set",
+        &worktree,
+        "--set",
+        "write_scope=['.']",
+        "--set",
+        "integration_branch='batch/example'",
+        "--explain",
+    ])?;
+    assert!(output.status.success(), "{explained}");
+    assert_eq!(
+        explained["data"]["document"]["integration_branch"],
+        "batch/example"
+    );
+    Ok(())
+}
+
+#[test]
+fn review_shape_selects_the_expected_template_nodes() -> Result {
+    fn ids(value: &Value, out: &mut Vec<String>) {
+        match value {
+            Value::Object(map) => {
+                if let Some(id) = map.get("id").and_then(Value::as_str) {
+                    out.push(id.to_owned());
+                }
+                for child in map.values() {
+                    ids(child, out);
+                }
+            }
+            Value::Array(items) => {
+                for item in items {
+                    ids(item, out);
+                }
+            }
+            _ => {}
+        }
+    }
+    let rig = GraphProject::new()?;
+    for (risk, expected) in [("routine", false), ("substantial", true), ("crucial", true)] {
+        let path = rig.document(&json!({
+            "context": {"risk_tier": risk},
+            "nodes": [{"id":"review", "use":"review-panel"}]
+        }))?;
+        let output = rig
+            .command()
+            .args(["run", "--file"])
+            .arg(path)
+            .arg("--explain")
+            .output()?;
+        let result: Value = serde_json::from_slice(&output.stdout)?;
+        assert!(output.status.success(), "{risk}: {result}");
+        let mut found = Vec::new();
+        ids(&result["data"]["document"], &mut found);
+        for stage in ["frame", "verify", "synthesis"] {
+            assert_eq!(
+                found.iter().any(|id| id == stage),
+                expected,
+                "{risk}: {stage}"
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn review_test_lens_receives_risk_selected_mutation_guidance() -> Result {
+    fn collect<'a>(value: &'a Value, found: &mut Vec<&'a Value>) {
+        match value {
+            Value::Object(map) => {
+                if map.contains_key("review_lens") {
+                    found.push(value);
+                }
+                for child in map.values() {
+                    collect(child, found);
+                }
+            }
+            Value::Array(items) => {
+                for child in items {
+                    collect(child, found);
+                }
+            }
+            _ => {}
+        }
+    }
+    let rig = GraphProject::new()?;
+    for (risk, expected) in [
+        ("substantial", false),
+        ("crucial", true),
+        ("terminal", true),
+    ] {
+        let path = rig.document(&json!({
+            "context": {"risk_tier": risk},
+            "nodes": [{"id":"review", "use":"review-panel"}]
+        }))?;
+        let output = rig
+            .command()
+            .args(["run", "--file"])
+            .arg(path)
+            .arg("--explain")
+            .output()?;
+        let result: Value = serde_json::from_slice(&output.stdout)?;
+        assert!(output.status.success(), "{risk}: {result}");
+        let mut reviews = Vec::new();
+        collect(&result["data"]["document"], &mut reviews);
+        let tests = reviews
+            .iter()
+            .find(|node| node["review_lens"] == "tests")
+            .ok_or("tests lens")?;
+        assert_eq!(
+            tests["prompt"]
+                .as_str()
+                .ok_or("prompt")?
+                .contains("Diff-scoped mutation evidence"),
+            expected,
+            "{risk}"
+        );
+        for other in reviews.iter().filter(|node| node["review_lens"] != "tests") {
+            assert!(
+                !other["prompt"]
+                    .as_str()
+                    .unwrap_or("")
+                    .contains("Diff-scoped mutation evidence")
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn invalid_template_documents_are_refused_by_list_and_show() -> Result {
     let rig = GraphProject::new()?;
     let repo = rig.project.join(".provenant/templates");

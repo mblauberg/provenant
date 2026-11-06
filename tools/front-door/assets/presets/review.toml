@@ -17,27 +17,6 @@ cost = "1 framing attempt + one attempt per selected lens + verifiers + 1 synthe
 select_when = "A change needs review before it lands; depth follows the routing review shape."
 tags = ["review"]
 
-[plan]
-# With --plan on, a principal planner replaces the static lens stage. The
-# routing review panel decides which lenses are allowed for the subject; the
-# planner picks among them and sets each lens's tier. Verification and the
-# synthesis still run.
-replaces = "lenses"
-explicit = ["lenses"]
-by_size = true
-subject_types = ["commit"]
-guidance = """Each catalogue pattern is one lens the review panel allows for this subject. Instantiate the lenses the change needs, at most once each, and choose a tier for each: a lower tier for mechanical checks, a higher one where a miss would be costly. Always include the correctness lens. You cannot add a lens the catalogue does not list."""
-
-[[plan.patterns]]
-for_each = "lenses"
-name = "lens-${item.name}"
-exports = [{ node = "lens", outputs = ["result", "findings", "verdict", "commit"] }]
-nodes = [
-  { id = "lens", role = "lens.${item.name}", source = "${subject}", tier = "${tier}", require_findings = true, acceptance_checks = ["Review the pinned commit through this lens only", "End with one exact VERDICT line"] },
-]
-
-[plan.patterns.parameters]
-tier = { type = "string", default = "${item.tier}", enum = ["junior", "senior", "principal"], doc = "Route alias for the lens." }
 
 [parameters]
 local_check_policy = { type = "string", inherit = true, default = "", doc = "Local check policy inherited by nested presets; empty uses the layered roles library." }
