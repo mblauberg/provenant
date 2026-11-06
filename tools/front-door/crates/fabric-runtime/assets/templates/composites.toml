@@ -45,6 +45,10 @@ worktree = { type = "string", default = "" }
 write_scope = { type = "list", default = [] }
 
 [deliver]
+exports = [
+  { node = "implement", outputs = ["branch", "commit"] },
+  { node = "review", outputs = ["result", "findings", "verdict"] },
+]
 doc = "Implement an approved brief through CI, review and landing."
 nodes = [
   { id = "implement", use = "implement", brief = "${brief}", delivery = "pr", worktree = "${worktree}", write_scope = "${write_scope}" },
@@ -78,6 +82,7 @@ nodes = [
 brief = { type = "string", default = "Do the brief." }
 
 [task-fan-out]
+exports = [{ node = "tasks", outputs = ["result"] }]
 nodes = [{ id = "tasks", use = "task", over = "${items}", min_ok = "${min_ok}", brief = "${brief}: ${item}" }]
 [task-fan-out.parameters]
 brief = { type = "string", default = "Answer with cited evidence" }
