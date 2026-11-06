@@ -980,12 +980,14 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
         Command::Run(cmd) => graph_interface::run(*cmd, globals, process.workers()),
         Command::Edit(cmd) => graph_interface::edit(cmd, globals, process.workers()),
         Command::Templates(cmd) => graph_interface::templates(cmd, globals, process.workers()),
-        Command::Stats(cmd) => graph_interface::graph_stats(cmd, globals, process.workers()),
+        Command::Stats(cmd) => {
+            graph_interface::stats("stats", cmd.id, cmd.by, globals, process.workers())
+        }
         Command::Status(cmd) if cmd.session_stream => run_edge(&inv.leaf, globals, |edge| {
             provenant_cli::run::status_session_stream(cmd, edge, &mut io::stdout().lock())
         }),
         Command::Status(cmd) if cmd.stats => {
-            graph_interface::stats(cmd, globals, process.workers())
+            graph_interface::stats("status", cmd.id, cmd.by, globals, process.workers())
         }
         Command::Status(cmd) if cmd.wait.is_some() => status_wait::run(cmd, globals),
         Command::Status(cmd) => {

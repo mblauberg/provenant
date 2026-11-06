@@ -570,7 +570,11 @@ pub(crate) fn unified_graph_steer(
     workers: &'static dyn WorkerObserver,
 ) -> Option<u8> {
     use provenant_fabric_mcp::tools::McpFacade;
-    let result = (|| -> Result<Option<Value>, Box<dyn std::error::Error>> {
+    enum SteerResult {
+        Delivered(Value),
+        Refused(&'static str),
+    }
+    let result = (|| -> Result<Option<SteerResult>, Box<dyn std::error::Error>> {
         let factory = factory(globals, workers)?;
         let Some(target) = factory.graph_target(&args.attempt)? else {
             return Ok(None);
@@ -581,56 +585,57 @@ pub(crate) fn unified_graph_steer(
             &target.graph,
         )?
         .ok_or(FacadeError::NotFound)?;
-        let references = checkpoint
-            .nodes
-            .iter()
-            .filter(|node| target.node.as_ref().is_none_or(|id| id == &node.id))
-            .flat_map(|node| &node.attempts)
-            .filter(|attempt| attempt.state != AttemptState::Terminal)
-            .filter_map(|attempt| attempt.attempt_ref.as_ref())
-            .filter(|reference| target.attempt.as_ref().is_none_or(|id| id == *reference))
-            .collect::<Vec<_>>();
-        if references.is_empty() {
-            return Err(FacadeError::invalid(InvalidInputDetail::Field("target".into())).into());
-        }
+        let reference = match provenant_cli::inbox::live_steer_reference(
+            &checkpoint,
+            target.node.as_deref(),
+            target.attempt.as_deref(),
+        ) {
+            Ok(reference) => reference,
+            Err(message) => return Ok(Some(SteerResult::Refused(message))),
+        };
         let text = read_steering_stdin()?;
         let text = String::from_utf8(text)?;
         let cancel = CancelToken::new();
         let budget = WaitBudget::cli(factory.clock.mono_now(), 55)?;
         let mut facade = BoundFacade { factory: &factory };
-        let mut receipts = Vec::new();
-        for reference in references {
-            let (host, id) = reference.split_once('/').ok_or(FacadeError::StateCorrupt)?;
-            let operation_id = args
-                .operation_id
-                .as_ref()
-                .map(|operation| {
-                    let digest = provenant_records::CanonicalV1::record_digest(
-                        "graph-steer",
-                        1,
-                        &(operation, reference),
-                    )
-                    .map_err(|_| FacadeError::StateCorrupt)?;
-                    provenant_core::OperationId::parse(&format!(
-                        "steer-{}",
-                        provenant_core::hex(digest.as_bytes())
-                    ))
-                    .map_err(|_| FacadeError::StateCorrupt)
-                })
-                .transpose()?;
-            let input = provenant_fabric_runtime::inbox::InboxInput::Steer {
-                extra: Default::default(),
-                attempt: id.parse()?,
-                text: text.clone(),
-                operation_id,
-            };
-            receipts.push(facade.inbox_owner(input, Some(host.into()), budget, &cancel)?);
-        }
-        Ok(Some(json!({"receipts":receipts})))
+
+        let (host, id) = reference.split_once('/').ok_or(FacadeError::StateCorrupt)?;
+        let operation_id = args
+            .operation_id
+            .as_ref()
+            .map(|operation| {
+                let digest = provenant_records::CanonicalV1::record_digest(
+                    "graph-steer",
+                    1,
+                    &(operation, reference),
+                )
+                .map_err(|_| FacadeError::StateCorrupt)?;
+                provenant_core::OperationId::parse(&format!(
+                    "steer-{}",
+                    provenant_core::hex(digest.as_bytes())
+                ))
+                .map_err(|_| FacadeError::StateCorrupt)
+            })
+            .transpose()?;
+        let input = provenant_fabric_runtime::inbox::InboxInput::Steer {
+            extra: Default::default(),
+            attempt: id.parse()?,
+            text,
+            operation_id,
+        };
+        let receipt = facade.inbox_owner(input, Some(host.into()), budget, &cancel)?;
+        Ok(Some(SteerResult::Delivered(json!({"receipts":[receipt]}))))
     })();
     match result {
         Ok(None) => None,
-        Ok(Some(data)) => Some(crate::emit(
+        Ok(Some(SteerResult::Refused(message))) => Some(crate::fail(
+            "steer",
+            provenant_records::Outcome::Refused,
+            "steer_target_refused",
+            message,
+            globals,
+        )),
+        Ok(Some(SteerResult::Delivered(data))) => Some(crate::emit(
             &provenant_records::CommandResult::new("steer", provenant_records::Outcome::Ok, data),
             globals,
             "steering queued\n",

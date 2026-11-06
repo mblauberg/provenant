@@ -2344,7 +2344,8 @@ mod provisioned_writer_submission_tests {
             "schema_version":2, "graph_id":"provision-and-seal", "nodes":[{
                 "id":"writer", "access":"worktree_write", "worktree":".worktrees/topic-fix",
                 "attempt":{"new_worktree":{"branch":"topic/fix","base":"HEAD"}},
-                "prompt":"repair the parser", "route":{"adapter":"fixture","model":"fixture/model"}
+                "prompt":"repair the parser", "route":{"alias":"senior"},
+                "template":"implement.fix", "parent_node":"planner"
             }]
         }))?;
         let cancel = CancelToken::new();
@@ -2405,6 +2406,69 @@ mod provisioned_writer_submission_tests {
             Some("provision-and-seal")
         );
         assert_eq!(task.head.as_deref(), Some(head.as_str()));
+
+        // Complete the admitted attempt through the real RunStore publication
+        // owner. No AttemptRecord or AttemptFact is assembled by this test.
+        let started = provenant_core::WallTime::from_micros(record.queued_at.as_micros() + 1_500_000)?;
+        let finished = provenant_core::WallTime::from_micros(started.as_micros() + 3_000_000)?;
+        use provenant_supervisor::custody::{ExitObservation, PublicationState, Scope, SettlementEvidence};
+        let exit = ExitObservation {
+            publication: PublicationState::Durable,
+            scope: Scope { run: record.run_id, attempt: record.attempt_id, generation: record.generation },
+            termination: Some(provenant_os::exec::Termination::Exit(0)), never_spawned: false, stop_reason: None,
+            delivered_signals: Vec::new(), reaped: Vec::new(), omitted_reaped: 0, spared: Vec::new(),
+            cancel_delivered_before_exit: None, omitted_spared: 0, warnings: Vec::new(), omitted_warnings: 0,
+            terminal_observed: false, unresolved_cleanup: false, unresolved_pids: Vec::new(),
+            settlement_evidence: SettlementEvidence::DarwinCensusAndCustodyLease,
+            stdout: Default::default(), stderr: Default::default(),
+        };
+        let directory = provenant_os::fs::Directory::open_anchor(&rig.state.join("runs")
+            .join(record.run_id.to_string()).join("attempts").join(id))?;
+        let mut sealed_exit = serde_json::to_value(&exit)?;
+        let object = sealed_exit.as_object_mut().ok_or("exit object")?;
+        object.remove("publication");
+        object.insert("schema_version".into(), 1.into());
+        for (name, value) in [
+            ("process-exit.json", sealed_exit),
+            ("writer-terminal.json", serde_json::json!({"schema_version":1,"head":head,"protected_paths":[]})),
+        ] {
+            directory.atomic_write(std::ffi::OsStr::new(name), ".fixture-", &serde_json::to_vec(&value)?,
+                provenant_os::fs::PublishMode::NoReplace)?.require_durable()?;
+        }
+        let route = provenant_run::RouteRecord {
+            provider: Some("fixture".into()), model: Some("fixture/model".into()), ..Default::default()
+        };
+        store.publish_terminal(record.attempt_id, record.revision, &provenant_run::TerminalPublication {
+            terminal_cause: None, terminal_note: None,
+            outcome: provenant_records::run::Outcome::Succeeded,
+            started_at: Some(started), finished_at: finished, provider_ms: Some(1000),
+            reason: None, result: "OK", complete: true, redacted: false,
+            resolved_route: Some(route.clone()), applied_route: Some(route.clone()), observed_route: Some(route),
+            usage: provenant_records::run::UsageRecord {
+                uncached_input: Some(20), cache_read: Some(60), cache_write: Some(0),
+                output_excluding_reasoning: Some(20), ..Default::default()
+            }, session: None, partial_signals: Vec::new(),
+        }, &exit, &call)?;
+        use provenant_run::AttemptReader as _;
+        let fact = store.attempt(record.attempt_id, &call)?;
+        assert_eq!(fact.tier.as_deref(), Some("senior"));
+        assert_eq!(fact.template.as_deref(), Some("implement.fix"));
+        assert_eq!(fact.parent_node.as_deref(), Some("planner"));
+        assert_eq!(fact.usage.cache_read, Some(60));
+        assert_eq!(fact.usage.uncached_input, Some(20));
+        assert_eq!(fact.usage.output_excluding_reasoning, Some(20));
+        assert_eq!(fact.slot_wait_ms, Some(1500));
+        assert_eq!(fact.finished_at.as_micros() - fact.started_at.ok_or("start")?.as_micros(), 3_000_000);
+        assert_eq!(fact.terminal_state, provenant_records::AttemptOutcome::Succeeded);
+        use graph::AttemptOwner as _;
+        let usage = owner.usage(reference)?;
+        assert_eq!(usage.tokens, Some(100));
+        assert_eq!(usage.wall_time_seconds, Some(3));
+        assert_eq!(usage.extra["queue_time_ms"], 1500);
+        assert_eq!(usage.extra["cache_read_tokens"], 60);
+        assert_eq!(usage.extra["tier"], "senior");
+        assert_eq!(usage.extra["template"], "implement.fix");
+        assert_eq!(usage.extra["outcome"], "succeeded");
         Ok(())
     }
 }
