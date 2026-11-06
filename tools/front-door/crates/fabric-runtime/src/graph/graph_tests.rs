@@ -1792,8 +1792,13 @@ fn large_synthesis_compacts_immutable_fields_and_replays_with_finding_identities
         .concat()
         .join(",");
         let verifier_text = findings_text(&if verifying {
-            entries.replace("\"status\":\"open\"", "\"status\":\"open\",\"verification\":\"upheld\"")
-        } else { entries });
+            entries.replace(
+                "\"status\":\"open\"",
+                "\"status\":\"open\",\"verification\":\"upheld\"",
+            )
+        } else {
+            entries
+        });
         for i in 0..20 {
             let mut verifier = node(&format!("verifier{i}"), route("first"));
             verifier.depends_on = vec!["seed".into()];
@@ -1880,7 +1885,11 @@ fn large_synthesis_compacts_immutable_fields_and_replays_with_finding_identities
         );
         assert_eq!(reconstructed.len(), 20 * MAX_FINDINGS);
         if verifying {
-            assert!(reconstructed.iter().all(|finding| finding.extra["verification"] == "falsified"));
+            assert!(
+                reconstructed
+                    .iter()
+                    .all(|finding| finding.extra["verification"] == "falsified")
+            );
         }
         assert!(reconstructed.iter().all(|finding| {
             (finding.id == "F1" || finding.id == "F2")
