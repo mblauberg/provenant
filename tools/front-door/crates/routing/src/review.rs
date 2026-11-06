@@ -1134,16 +1134,10 @@ impl ReviewPathExclusions {
 
 /// Match a repository-relative path against a review policy glob.
 pub fn path_matches(pattern: &str, path: &str) -> bool {
-    fn go(
-        p: &[u8],
-        s: &[u8],
-        memo: &mut BTreeMap<(usize, usize), bool>,
-        plen: usize,
-        slen: usize,
-    ) -> bool {
-        let key = (plen - p.len(), slen - s.len());
-        if let Some(result) = memo.get(&key) {
-            return *result;
+    fn go(p: &[u8], s: &[u8], memo: &mut [Option<bool>], plen: usize, slen: usize) -> bool {
+        let key = (plen - p.len()) * (slen + 1) + slen - s.len();
+        if let Some(result) = memo[key] {
+            return result;
         }
         let result = match p.first() {
             None => s.is_empty(),
@@ -1161,13 +1155,25 @@ pub fn path_matches(pattern: &str, path: &str) -> bool {
             Some(b'?') => !s.is_empty() && s[0] != b'/' && go(&p[1..], &s[1..], memo, plen, slen),
             Some(c) => s.first() == Some(c) && go(&p[1..], &s[1..], memo, plen, slen),
         };
-        memo.insert(key, result);
+        memo[key] = Some(result);
         result
     }
+    // Most policy globs have a literal prefix. Reject unrelated paths before
+    // allocating the memo table, and avoid memoising literal-only matches.
+    let prefix = pattern.find(['*', '?']).unwrap_or(pattern.len());
+    let Some(path) = path.strip_prefix(&pattern[..prefix]) else {
+        return false;
+    };
+    let pattern = &pattern[prefix..];
+    if pattern.is_empty() {
+        return path.is_empty();
+    }
+    // Dense offsets avoid a tree lookup and allocation for every visited byte.
+    let mut memo = vec![None; (pattern.len() + 1) * (path.len() + 1)];
     go(
         pattern.as_bytes(),
         path.as_bytes(),
-        &mut BTreeMap::new(),
+        &mut memo,
         pattern.len(),
         path.len(),
     )
@@ -1836,6 +1842,32 @@ mod tests {
                 "risk tier {tier}"
             );
             assert_eq!(selected.source, "by_risk", "risk tier {tier}");
+        }
+    }
+
+    #[test]
+    fn review_path_globs_preserve_literal_and_component_boundaries() {
+        for (pattern, path, expected) in [
+            ("", "", true),
+            ("", "src", false),
+            ("docs/run.md", "docs/run.md", true),
+            ("docs/run.md", "docs/run.md.bak", false),
+            ("docs/run.md", "docs/run", false),
+            ("src/*.rs", "docs/lib.rs", false),
+            ("src/*.rs", "src/lib.rs", true),
+            ("src/*.rs", "src/nested/lib.rs", false),
+            ("src/**/test?.rs", "src/test1.rs", true),
+            ("src/**/test?.rs", "src/a/b/test1.rs", true),
+            ("src/**/test?.rs", "src/test12.rs", false),
+            ("src/?/lib.rs", "src/a/lib.rs", true),
+            ("src/?/lib.rs", "src/a/b/lib.rs", false),
+            ("**/*.md", "README.md", true),
+            ("**/*.md", "docs/specs/run.md", true),
+            ("docs/é*.md", "docs/été.md", true),
+            ("**", "", true),
+            ("**", "src/a/b.rs", true),
+        ] {
+            assert_eq!(path_matches(pattern, path), expected, "{pattern}: {path}");
         }
     }
 
