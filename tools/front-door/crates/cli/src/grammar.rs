@@ -1728,7 +1728,7 @@ pub struct GraphStats {
     pub by: String,
 }
 
-#[derive(Debug, Args)]
+#[derive(Clone, Debug, Args)]
 pub struct Status {
     /// Stream a bounded attempt inventory page for the session collector.
     #[arg(long, hide = true, conflicts_with_all = ["stats", "wait", "id", "target", "follow"])]

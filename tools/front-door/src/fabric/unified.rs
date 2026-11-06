@@ -225,12 +225,15 @@ pub(crate) fn enrich_status_rows(
         };
         let host = host.parse().map_err(|_| FacadeError::StateCorrupt)?;
         let attempt = attempt.parse().map_err(|_| FacadeError::StateCorrupt)?;
-        let record = if host == context.identity.host {
+        let (record, waits) = if host == context.identity.host {
             let Some(store) = &store else {
                 continue;
             };
             match store.record(attempt, &call) {
-                Ok(record) => record,
+                Ok(record) => {
+                    let waits = store.lane_waits(std::slice::from_ref(&record), &call);
+                    (record, waits)
+                },
                 // A collected run leaves the retained graph's own row readable.
                 Err(provenant_run::RunError::NotFound) => continue,
                 Err(error) => return Err(run_error(error)),
@@ -266,8 +269,14 @@ pub(crate) fn enrich_status_rows(
             match response {
                 PeerResult::Run { data, .. } => match *data {
                     RunResult::Status {
-                        attempt: record, ..
-                    } if record.attempt_id == attempt => record,
+                        attempt: record, extra
+                    } if record.attempt_id == attempt => {
+                        let waits = extra.get("lane_waits").cloned()
+                            .map(serde_json::from_value)
+                            .transpose().map_err(|_| FacadeError::StateCorrupt)?
+                            .unwrap_or_default();
+                        (record, waits)
+                    },
                     _ => return Err(FacadeError::StateCorrupt),
                 },
                 _ => return Err(FacadeError::StateCorrupt),
@@ -281,7 +290,7 @@ pub(crate) fn enrich_status_rows(
         }
         let projected = provenant_cli::run::project_lane(
             &record,
-            &[],
+            &waits,
             context.roots.state.as_path(),
             &Default::default(),
             clock.wall_now().ok(),
@@ -899,6 +908,48 @@ mod tests {
             {"id":"parent--keep","access":"read_only","prompt":"keep","route":{"alias":"senior"},"detached":true},
             {"id":"other","access":"read_only","prompt":"other","route":{"alias":"senior"}}
         ]})).unwrap()
+    }
+
+    #[test]
+    fn graph_peer_status_wait_preserves_disk_sample_and_remedy()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let id = "11111111111111111111111111111111";
+        let digest = format!("sha256:{}", "ab".repeat(32));
+        let attempt: provenant_records::run::AttemptRecord = serde_json::from_value(json!({
+            "schema_version":1,"attempt_id":id,"run_id":id,"project_id":id,
+            "task_id":id,"operation_id":"operation","attempt_number":1,"revision":1,"generation":1,
+            "requested_route":{"kind":"named","name":"senior"},
+            "authority_digest":digest,"queued_at":"2026-10-29T00:00:00.000000Z",
+            "state":{"state":"starting"},"usage":{},
+            "prompt":{"path":{"encoding":"utf8","path":"prompt.md"},
+                "digest":digest,"bytes":0,"complete":true,"redacted":false}
+        }))?;
+        let sample = "host capacity: disk space: 123 bytes available; gc.free_floor is 456 bytes (source: explicit)";
+        let waits = vec![provenant_records::run::LaneWait {
+            extra: Default::default(), attempt_id: attempt.attempt_id,
+            lane_class: provenant_records::run::LaneClass::Writer,
+            waiting_for: sample.into(),
+        }];
+        let mut extra = provenant_records::ExtraFields::default();
+        extra.insert("lane_waits".into(), serde_json::to_value(&waits)?);
+        let response = RunResult::Status { extra, attempt: attempt.clone() };
+        let decoded: RunResult = serde_json::from_value(serde_json::to_value(response)?)?;
+        let RunResult::Status { attempt: peer_attempt, extra } = decoded else {
+            return Err("status response changed kind".into());
+        };
+        let peer_waits: Vec<provenant_records::run::LaneWait> = serde_json::from_value(
+            extra.get("lane_waits").ok_or("peer disk waits missing")?.clone()
+        )?;
+        for (record, waits) in [(&attempt, &waits), (&peer_attempt, &peer_waits)] {
+            let projected = provenant_cli::run::project_lane(
+                record, waits, Path::new("/unused"), &Default::default(), None, false
+            );
+            assert_eq!(projected.waiting_for.as_deref(), Some(sample));
+            let reason = projected.reason.ok_or("disk remedy missing")?;
+            assert!(reason.contains(sample));
+            assert!(reason.contains("provenant gc --apply"));
+        }
+        Ok(())
     }
 
     #[test]

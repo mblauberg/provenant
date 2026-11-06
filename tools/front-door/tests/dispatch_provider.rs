@@ -402,7 +402,10 @@ fn fixture() -> Result {
     }
     let home = PathBuf::from(std::env::var_os("CODEX_HOME").ok_or("CODEX_HOME")?);
     let auth: Value = serde_json::from_slice(&fs::read(home.join("auth.json"))?)?;
-    if !prompt.contains("fixture handoff recovery") && !prompt.contains("fixture graph redraw") {
+    if !prompt.contains("fixture handoff recovery")
+        && !prompt.contains("fixture graph redraw")
+        && !prompt.contains("fixture partial quota redraw")
+    {
         assert_eq!(auth["tokens"]["account_id"], "fixture-one");
     }
     let session = "01234567-89ab-cdef-0123-456789abcdef";
@@ -430,13 +433,52 @@ fn fixture() -> Result {
             format!(
                 "{}\n{}\n{}\n",
                 json!({"type":"session_meta","payload":{"id":recorded_session}}),
-                json!({"type":"turn_context","payload":{"model": if prompt.contains("fixture policy result") || prompt.contains("fixture policy continuation") || prompt.contains("fixture graph redraw") { policy_model.unwrap_or("gpt-6-luna") } else if prompt.contains("fixture pool result") { "gpt-6.1-sol" } else { "gpt-6-luna" },"effort":"low"}}),
+                json!({"type":"turn_context","payload":{"model": if prompt.contains("fixture policy result") || prompt.contains("fixture policy continuation") || prompt.contains("fixture graph redraw") || prompt.contains("fixture partial quota redraw") { policy_model.unwrap_or("gpt-6-luna") } else if prompt.contains("fixture pool result") { "gpt-6.1-sol" } else { "gpt-6-luna" },"effort":"low"}}),
                 json!({"type":"response_item","payload":{"content":recorded}})
             ),
         )?;
     }
     if prompt.contains("fixture handoff recovery") {
         return handoff_recovery_provider(&prompt, &args, &auth);
+    }
+    if prompt.contains("fixture partial quota redraw") {
+        let writer = prompt.contains("writer partial quota");
+        if policy_model == Some("gpt-6-luna") {
+            if writer {
+                fs::write("quota-partial.txt", "existing implementation survives")?;
+                fs::write(
+                    "quota-worktree.txt",
+                    std::env::current_dir()?.as_os_str().as_encoded_bytes(),
+                )?;
+            }
+            for frame in [
+                json!({"type":"thread.started","thread_id":session}),
+                json!({"type":"item.completed","item":{"type":"agent_message","text":"Partial implementation and verification notes"}}),
+                json!({"type":"turn.completed","usage":{"input_tokens":38000,"output_tokens":2280}}),
+                json!({"type":"turn.failed","error":{"message":"usage limit reached","codex_error_info":"usage_limit_exceeded"}}),
+            ] {
+                writeln!(io::stdout(), "{frame}")?;
+            }
+            return Ok(());
+        }
+        assert_eq!(policy_model, Some("gpt-6.1-terra"));
+        assert!(!args.iter().any(|arg| arg == "resume"));
+        assert!(prompt.contains("The previous member stopped on quota."));
+        if writer {
+            assert!(prompt.contains("Inspect the retained worktree and any commits"));
+            assert!(prompt.contains("rather than restart"));
+            assert_eq!(
+                fs::read_to_string("quota-partial.txt")?,
+                "existing implementation survives"
+            );
+            assert_eq!(
+                fs::read("quota-worktree.txt")?,
+                std::env::current_dir()?.as_os_str().as_encoded_bytes()
+            );
+            fs::write("quota-successor.txt", "continued existing implementation")?;
+        } else {
+            assert!(!prompt.contains("Inspect the retained worktree"));
+        }
     }
     if prompt.contains("fixture graph redraw") && policy_model == Some("gpt-6-luna") {
         writeln!(
@@ -1282,6 +1324,100 @@ fn graph_read_only_alias_retries_another_member_after_empty_launch_quota() -> Re
     cleanup.disarm();
     Ok(())
 }
+
+/// A quota stop after output redraws the alias for either lane class. Writers
+/// must retain the first member's files and receive continuation instructions.
+fn partial_quota_alias_fixture(writer: bool) -> Result {
+    if !graph_fixture_available()? {
+        return Ok(());
+    }
+    let rig = policy_codex_fixture()?;
+    let cleanup = rig.process_cleanup();
+    fs::write(
+        rig.state.join("config.toml"),
+        "schema_version=1\n[gc]\nfree_floor='1B'\n[domains.routing]\nsettlement_retries=1\n[domains.routing.pools]\npartial-quota=[{model='codex/gpt-6-luna',weight=1,effort='low'},{model='codex/gpt-6.1-terra',weight=0,effort='low'}]\n",
+    )?;
+    for (label, account) in [("one", "fixture-one"), ("two", "fixture-two")] {
+        let directory = rig.root.join(format!("codex-{label}"));
+        fs::create_dir_all(&directory)?;
+        let auth = serde_json::to_vec(&json!({"tokens":{"account_id":account}}))?;
+        fs::write(directory.join("auth.json"), &auth)?;
+        let key = provenant_providers::identity::codex_account(&auth).ok_or("account key")?;
+        support::register_account(&rig, "codex", label, &key, &directory)?;
+    }
+    if writer {
+        let git = provenant_os::git::git_executable().ok_or("git")?;
+        assert_eq!(
+            code(&rig.execute(&git, &["commit", "--allow-empty", "-qm", "base"], None)?),
+            0
+        );
+    }
+    if writer {
+        let created = rig.command(&["worktree", "create", "partial-quota", "--base", "HEAD", "--json"])?;
+        assert_eq!(code(&created), 0, "{created:?}");
+    }
+    let mut node = json!({
+        "id":"work", "prompt": if writer {
+            "fixture partial quota redraw: writer partial quota"
+        } else {
+            "fixture partial quota redraw: read-only partial quota"
+        },
+        "access": if writer { "worktree_write" } else { "read_only" },
+        "route":{"alias":"partial-quota"}
+    });
+    if writer {
+        node["worktree"] = json!(".worktrees/partial-quota");
+        node["delivery"] = json!("none");
+    }
+    fs::write(rig.project.join("graph.json"), serde_json::to_vec(&json!({
+        "schema_version":2,"graph_id":"partial-quota","nodes":[node]
+    }))?)?;
+    let output = rig.command(&["run", "--file", "graph.json", "--wait=30s", "--json"])?;
+    assert_eq!(code(&output), if writer { 1 } else { 0 }, "{output:?}");
+    let result: Value = serde_json::from_slice(&output.stdout.bytes)?;
+    let node = &result["data"]["checkpoint"]["nodes"][0];
+    let previous = node["previous_attempts"].as_array().ok_or("previous attempts")?;
+    let current = node["attempts"].as_array().ok_or("current attempts")?;
+    assert_eq!(previous.len(), 1, "{result}");
+    assert_eq!(current.len(), 1, "{result}");
+    assert_eq!(previous[0]["outcome"], "usage_limited", "{result}");
+    assert_eq!(current[0]["key"]["retry_generation"], 1, "{result}");
+    assert_eq!(current[0]["key"]["previous_attempt_ref"], previous[0]["attempt_ref"], "{result}");
+    let attempt_id = |attempt: &Value| -> Result<String> {
+        Ok(attempt["attempt_ref"].as_str().ok_or("attempt reference")?
+            .rsplit_once('/').ok_or("qualified reference")?.1.to_owned())
+    };
+    let first_id = attempt_id(&previous[0])?;
+    let second_id = attempt_id(&current[0])?;
+    let status = rig.command(&["status", "--all", "--json"])?;
+    assert_eq!(code(&status), 0, "{status:?}");
+    let lanes: Value = serde_json::from_slice(&status.stdout.bytes)?;
+    let rows = lanes["data"]["rows"].as_array().ok_or("rows")?;
+    assert_eq!(rows.len(), 2, "{lanes}");
+    let first = rows.iter().find(|row| row["attempt_id"] == first_id).ok_or("first")?;
+    let second = rows.iter().find(|row| row["attempt_id"] == second_id).ok_or("second")?;
+    assert_eq!(first["state"], "quota_limited", "{lanes}");
+    assert_eq!(first["usage"]["output_excluding_reasoning"], 2280, "{lanes}");
+    assert_eq!(first["applied_route"]["model"], "codex/gpt-6-luna", "{lanes}");
+    assert_eq!(second["applied_route"]["model"], "codex/gpt-6.1-terra",
+        "spent member must be excluded: {lanes}");
+    // The graph owns retry lineage; each provider launch is a separate run.
+    assert_ne!(first["run_id"], second["run_id"], "{lanes}");
+    assert!(first["superseded_by"].is_null(), "{lanes}");
+    assert!(second["retry_of"].is_null(), "{lanes}");
+    assert_eq!(second["state"], if writer { "uncommitted" } else { "succeeded" }, "{lanes}");
+    cleanup.disarm();
+    Ok(())
+}
+
+fn named_route_writer_retries_quota_with_partial_work() -> Result {
+    partial_quota_alias_fixture(true)
+}
+
+fn named_route_read_only_retries_quota_with_partial_output() -> Result {
+    partial_quota_alias_fixture(false)
+}
+
 
 fn codex_capacity_settles_without_quota_refusal() -> Result {
     let message = "Selected model is at capacity. Please try a different model.";
@@ -3144,6 +3280,9 @@ fn main() -> ExitCode {
                 "host_native_preparation_uses_the_provider_contract",
                 "graph_read_only_alias_retries_another_member_after_empty_launch_quota",
                 "opencode_dispatch_observes_v2_wal_session",
+                "named_route_writer_retries_quota_with_partial_work",
+                "named_route_read_only_retries_quota_with_partial_output",
+
                 "opencode_free_pool_cools_second_model",
                 "opencode_free_reset_cools_pool_until_reset_and_restores",
                 "agy_individual_quota_cools_model_until_reset",
@@ -3187,6 +3326,9 @@ fn main() -> ExitCode {
 
                     "graph_read_only_alias_retries_another_member_after_empty_launch_quota" => graph_read_only_alias_retries_another_member_after_empty_launch_quota(),
                     "opencode_dispatch_observes_v2_wal_session" => opencode_dispatch_observes_v2_wal_session(),
+                    "named_route_writer_retries_quota_with_partial_work" => named_route_writer_retries_quota_with_partial_work(),
+                    "named_route_read_only_retries_quota_with_partial_output" => named_route_read_only_retries_quota_with_partial_output(),
+
                     "opencode_free_pool_cools_second_model" => {
                         opencode_free_pool_cools_second_model()
                     }

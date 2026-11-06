@@ -59,6 +59,34 @@ pub use telemetry::*;
 pub use wait::*;
 pub use worktree::*;
 
+/// Project the host disk precheck from its typed facts, never its I/O text.
+fn writer_disk_policy_refusal(check: DiskCheck) -> run::PrepareRefusal {
+    use provenant_records::run::TerminalCause;
+    let (cause, note) = match &check {
+        DiskCheck::Low {
+            available,
+            floor,
+            reclaimed,
+            origin,
+            ..
+        } => (
+            TerminalCause::DiskFloor,
+            Some(format!(
+                "{available} bytes available; gc.free_floor is {floor} bytes (source: {}); bounded GC reported {reclaimed} bytes reclaimed",
+                origin.description()
+            )),
+        ),
+        DiskCheck::Unobserved(_) => (TerminalCause::DiskObservationUnavailable, None),
+    };
+    run::PrepareRefusal {
+        terminal_cause: Some(cause),
+        terminal_note: note,
+        message: String::from(check),
+        skipped_routes: Vec::new(),
+        fallback_outcome: None,
+    }
+}
+
 /// Catalogue family of a provider-qualified model, for family-distinct routing.
 pub fn model_family(model: &str) -> Option<String> {
     let catalogue = provenant_routing::Catalogue::bundled().ok()?;
@@ -352,9 +380,12 @@ impl run::Providers for Registry<'_> {
             .fabric
             .lanes
             .priority;
-        Ok(priority.for_lane(task.writer.is_some(), task.build_heavy))
+        Ok(priority.for_lane(
+            run::Service::has_writes(task.writer.is_some(), &task.access.write_roots),
+            task.build_heavy,
+        ))
     }
-    fn check_policy(&self, task: &run::TaskRequest) -> Result<(), String> {
+    fn check_policy(&self, task: &run::TaskRequest) -> Result<(), run::PrepareRefusal> {
         let Some(writer) = &task.writer else {
             return Ok(());
         };
@@ -374,7 +405,7 @@ impl run::Providers for Registry<'_> {
             &writer.project,
             home,
         )
-        .map_err(String::from)
+        .map_err(writer_disk_policy_refusal)
     }
 
     fn failure_diagnostic(&self, route: &run::RouteRecord, stderr: &[u8]) -> Option<String> {

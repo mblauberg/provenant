@@ -13,6 +13,30 @@ impl Service<'_> {
         writer || !write_roots.is_empty()
     }
 
+    /// Admission treats declared writes and prepared tool/project exceptions
+    /// alike. Provider bookkeeping and private scratch remain advisory.
+    pub(crate) fn lane_class(
+        writer: bool,
+        write_roots: &[std::path::PathBuf],
+        grants: &[WriteGrantRecord],
+    ) -> LaneClass {
+        use provenant_records::run::WriteSource;
+        let explicit_writes = grants.iter().any(|grant| {
+            matches!(
+                grant.source,
+                WriteSource::WriteRoot
+                    | WriteSource::ToolWrite
+                    | WriteSource::ReadOnlyException
+                    | WriteSource::LaneCache
+            )
+        });
+        if Self::has_writes(writer || explicit_writes, write_roots) {
+            LaneClass::Writer
+        } else {
+            LaneClass::ReadOnly
+        }
+    }
+
     /// Resolve a bare ID, accepting runs only where the operation allows them.
     /// Run and attempt IDs share a wire format, so a collision is ambiguous.
     pub fn resolve_target(

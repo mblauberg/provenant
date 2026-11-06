@@ -2635,7 +2635,7 @@ impl run::Providers for PreparedProvider<'_> {
     fn priority(&self, task: &run::TaskRequest) -> Result<u8, String> {
         self.fallback.priority(task)
     }
-    fn check_policy(&self, task: &run::TaskRequest) -> Result<(), String> {
+    fn check_policy(&self, task: &run::TaskRequest) -> Result<(), run::PrepareRefusal> {
         if let Some(ready) = self.ready {
             if ready.task != *task {
                 return Err("prepared continuation task changed".into());

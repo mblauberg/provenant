@@ -69,7 +69,7 @@
 (allow file-read* file-write-data (literal "/dev/null"))
 (allow file-read-metadata file-write-data (literal "/private/var/tmp"))
 (allow file-read* file-write* (regex #"^/private/var/tmp/sh-thd[^/]*$"))
-(allow file-read* (literal "/dev/urandom") (literal "/dev/random"))
+(allow file-read* (literal "/dev/urandom") (literal "/dev/random") (literal "/dev/zero"))
 (allow file-read* (literal "/dev/fd"))
 (allow file-read* (subpath "/usr/share") (subpath "/private/var/db/timezone") (literal "/private/etc/localtime"))
 (allow file-read* (subpath "/fixture/state/fabric/graph-inputs/project/0123abcd"))

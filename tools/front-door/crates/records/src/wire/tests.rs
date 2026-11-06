@@ -37,7 +37,7 @@ fn row() -> LaneRow {
         partial_signals: json!([]),
         usage: json!({}),
         delivery_id: None,
-        write_grants: json!([]),
+        write_grants: Some(json!([])),
         read_only_writable: json!([]),
         git_grants_digest: None,
         head: None,
@@ -85,10 +85,16 @@ fn rejected(schema: &Value, value: Value) {
 #[test]
 fn lane_rows_validate_with_and_without_optional_members() {
     let schema = lane::lane_row_schema();
-    let plain = row();
+    let mut plain = row();
+    plain.write_grants = None;
     accepted(&schema, &plain);
     let value = serde_json::to_value(&plain).unwrap();
-    for omitted in ["title", "requested_priority", "provider_seconds"] {
+    for omitted in [
+        "title",
+        "requested_priority",
+        "provider_seconds",
+        "write_grants",
+    ] {
         assert!(
             value.get(omitted).is_none(),
             "{omitted} must be omitted when absent"
