@@ -111,10 +111,24 @@ impl Snapshot {
                     })
                     .collect();
                 lanes.sort_by_key(|v| v["attempt_id"].to_string());
+                let detail = provenant_cli::run::status_wait_details(target, &rows, edge).map_err(
+                    |error| ReadFailure {
+                        retry: matches!(
+                            error.kind,
+                            provenant_run::ErrorKind::Contention
+                                | provenant_run::ErrorKind::PeerUnavailable
+                        ),
+                        message: error.message,
+                    },
+                )?;
+                let mut data = json!({"rows": lanes});
+                if let Some(detail) = detail {
+                    data["detail"] = json!(detail);
+                }
                 Ok(Self {
                     terminal,
                     notable,
-                    data: json!({"rows": lanes}),
+                    data,
                 })
             }
             Target::Graph(id) | Target::Auto(id) => {

@@ -120,7 +120,7 @@ pub fn status(command: crate::Status, _json_output: bool, edge: &Edge<'_>) -> Re
                 .map_err(|error| Fail::new(Status::Error, ErrorKind::Io, error))?;
             let waits = session.store.lane_waits(&rows, &call);
             let now = now(&clock)?;
-            let human = if command.all {
+            let mut human = if command.all {
                 let cooldowns = read_lane_cooldowns(session.context.state_root.as_path());
                 render_lanes(
                     &rows,
@@ -133,6 +133,16 @@ pub fn status(command: crate::Status, _json_output: bool, edge: &Edge<'_>) -> Re
             } else {
                 compact_status(&rows, &waits, now)
             };
+            let successors = Default::default();
+            let (mut data, _) = render_lanes_with_lineage(
+                &rows,
+                &waits,
+                next,
+                session.context.state_root.as_path(),
+                None,
+                &successors,
+            );
+            append_provider_errors(&session, &rows, &mut data, &mut human);
             let continuation = next.map(|cursor| {
                 let target = targets
                     .first()
@@ -150,44 +160,11 @@ pub fn status(command: crate::Status, _json_output: bool, edge: &Edge<'_>) -> Re
                     .unwrap_or_default();
                 format!("provenant status {target} --all --cursor {cursor}")
             });
-            let lines: Vec<LaneLine> = rows
-                .iter()
-                .map(|lane| {
-                    let (_, reason) = state_and_reason(&lane.state);
-                    let state = lane_display_state(lane);
-                    let reason = reason.or_else(|| {
-                        waits
-                            .iter()
-                            .find(|wait| wait.attempt_id == lane.attempt_id)
-                            .map(|wait| wait.waiting_for.clone())
-                    });
-                    LaneLine {
-                        id: lane.attempt_id.to_string(),
-                        state,
-                        model: lane
-                            .applied_route
-                            .as_ref()
-                            .and_then(|route| route.model.clone())
-                            .unwrap_or_else(|| "unresolved".into()),
-                        reason: reason.unwrap_or_default(),
-                        provider_error: None,
-                        result_path: None,
-                    }
-                })
-                .collect();
+            let lines = lane_lines(&data);
             let mut compact = lane_summary(&lines, continuation);
             // The compact view keeps the paths a writer may change unreviewed.
             compact.lines.push(exempt_line.trim_end().to_owned());
             let mut human = format!("{human}{exempt_line}");
-            let successors = Default::default();
-            let (mut data, _) = render_lanes_with_lineage(
-                &rows,
-                &waits,
-                next,
-                session.context.state_root.as_path(),
-                None,
-                &successors,
-            );
             if let Some(object) = data.as_object_mut() {
                 object.remove("capacity_cooldowns");
             }
@@ -222,6 +199,43 @@ pub fn status(command: crate::Status, _json_output: bool, edge: &Edge<'_>) -> Re
     out.summary = summary;
     out.read_only = true;
     out
+}
+
+/// Bounded failed-attempt diagnostics accompanying a status-wait snapshot.
+/// Common status rows stay stable; details retain provider errors and result
+/// locations that a caller needs after an attempt fails.
+pub fn status_wait_details(
+    target: &Target,
+    rows: &[run::AttemptRecord],
+    edge: &Edge<'_>,
+) -> Result<Option<String>, Fail> {
+    if !rows.iter().any(|row| {
+        matches!(
+            row.state,
+            run::AttemptState::Terminal {
+                outcome: run::Outcome::Failed,
+                ..
+            }
+        )
+    }) {
+        return Ok(None);
+    }
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let call = request(&clock, &cancel)?;
+    let resolved = targets::resolve(edge, target, true)?;
+    let (session, _) = targets::read_resolved(edge, resolved, &call)?;
+    let (mut data, mut human) = render_lanes_with_lineage(
+        rows,
+        &[],
+        None,
+        session.context.state_root.as_path(),
+        None,
+        &Default::default(),
+    );
+    append_provider_errors(&session, rows, &mut data, &mut human);
+    let summary = lane_summary(&lane_lines(&data), None);
+    Ok(Some(summary.lines.join("\n")))
 }
 
 /// Stable status projection shared by graph, node and attempt selections.
