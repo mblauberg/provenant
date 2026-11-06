@@ -183,12 +183,11 @@ pub(super) fn confinement_request(
     host_writes: &provenant_confinement::run_config::RunConfig,
     adapter: &str,
     publishing: bool,
-) -> Result<PlanRequest, String> {
+) -> Result<PlanRequest, provenant_confinement::permissions::PermissionError> {
     let mode = match writer {
         Some(writer) => {
             let mut authority =
-                WorktreeWriteAuthority::for_worktree(&writer.worktree, &writer.branch, roots.home)
-                    .map_err(|error| error.to_string())?;
+                WorktreeWriteAuthority::for_worktree(&writer.worktree, &writer.branch, roots.home)?;
             authority.set_publishing(publishing);
             AccessMode::WorktreeWrite(Box::new(authority))
         }

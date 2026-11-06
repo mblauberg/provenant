@@ -417,6 +417,8 @@ pub(super) enum PrepareError {
     #[error(transparent)]
     Unsupported(#[from] provenant_records::UnsupportedLaunch),
     #[error(transparent)]
+    Permission(#[from] provenant_confinement::permissions::PermissionError),
+    #[error(transparent)]
     Run(#[from] run::RunError),
     #[error(transparent)]
     ReadOnly(#[from] ReadOnlyPlanError),
@@ -509,6 +511,12 @@ impl PrepareError {
                     fallback_outcome,
                 }
             }
+            Self::Permission(error) => {
+                let mut refusal = run::PrepareRefusal::from(error.to_string());
+                refusal.boundary_class = error.boundary_class();
+                refusal.resource = error.resource_fact();
+                refusal
+            }
             Self::Unsupported(error) => {
                 let mut refusal = run::PrepareRefusal::from(error.to_string());
                 refusal.boundary_class = provenant_records::diagnostic::BoundaryClass::Authority;
@@ -579,6 +587,11 @@ fn preparation_preserves_typed_boundaries_without_classifying_other_errors() {
     );
     let refusal = PrepareError::Run(error).into_refusal();
     assert_eq!(refusal.boundary_class, BoundaryClass::Credentials);
+    let permission = PrepareError::Permission(
+        provenant_confinement::permissions::PermissionError::GitWriteAuthorityMissing,
+    )
+    .into_refusal();
+    assert_eq!(permission.boundary_class, BoundaryClass::LaneGit);
     let prompt = PrepareError::Prompt(LaunchPromptError::NestedArgvTooLarge {
         limit: 32,
         origin: "shipped default",
@@ -742,8 +755,8 @@ fn mixed_candidate_guard_facts_survive_fallback_without_source_text()
 pub(super) enum PlanCheckError {
     #[error(transparent)]
     Plan(#[from] provenant_confinement::PlanError),
-    #[error("{0}")]
-    Other(String),
+    #[error(transparent)]
+    Permission(#[from] provenant_confinement::permissions::PermissionError),
     #[error(transparent)]
     ReadOnly(#[from] ReadOnlyPlanError),
     #[error(transparent)]
@@ -1662,7 +1675,7 @@ pub(super) fn prepare_candidates(
             adapter,
             publishing_gh.is_some(),
         )
-        .map_err(PlanCheckError::Other)
+        .map_err(PlanCheckError::from)
         .and_then(|request| ConfinedPlan::new(request).map_err(PlanCheckError::from))
         {
             Ok(_) => access.push(provenant_routing::AccessContext {
@@ -2178,9 +2191,16 @@ pub(super) fn prepare_candidates(
             if matches!(
                 reason,
                 provenant_records::RouteExclusionReason::DisclosureDenied
-            ) && let Some(PlanCheckError::Plan(error)) = plan_errors.get(route.adapter.as_str())
+            ) && let Some(error) = plan_errors.get(route.adapter.as_str())
             {
-                let class = error.boundary_class();
+                let class = match error {
+                    PlanCheckError::Plan(error) => error.boundary_class(),
+                    PlanCheckError::Permission(error) => error.boundary_class(),
+                    PlanCheckError::ReadOnly(error) => error.boundary_class(),
+                    PlanCheckError::SourceHead(_) => {
+                        provenant_records::diagnostic::BoundaryClass::Authority
+                    }
+                };
                 if class != provenant_records::diagnostic::BoundaryClass::None {
                     reason_boundaries.insert(reasons.len(), class);
                 }
@@ -2362,7 +2382,7 @@ pub(super) fn prepare_candidates(
             adapter.id(),
             publishing_gh.is_some(),
         )
-        .map_err(PlanCheckError::Other)
+        .map_err(PlanCheckError::from)
         .and_then(|request| match writer.as_ref() {
             Some(writer) => ConfinedPlan::new(request)
                 .map(|plan| {
@@ -2401,11 +2421,11 @@ pub(super) fn prepare_candidates(
             Err(error) => {
                 let class = match &error {
                     PlanCheckError::Plan(cause) => cause.boundary_class(),
+                    PlanCheckError::Permission(cause) => cause.boundary_class(),
                     PlanCheckError::ReadOnly(cause) => cause.boundary_class(),
                     PlanCheckError::SourceHead(_) => {
                         provenant_records::diagnostic::BoundaryClass::Authority
                     }
-                    PlanCheckError::Other(_) => provenant_records::diagnostic::BoundaryClass::None,
                 };
                 {
                     if class != provenant_records::diagnostic::BoundaryClass::None {
@@ -2898,7 +2918,7 @@ pub(super) fn prepare_candidates(
             .filter(|(adapter, _)| reported_plan_errors.contains(*adapter))
             .filter_map(|(_, error)| match error {
                 PlanCheckError::Plan(error) => Some(error),
-                PlanCheckError::Other(_)
+                PlanCheckError::Permission(_)
                 | PlanCheckError::ReadOnly(_)
                 | PlanCheckError::SourceHead(_) => None,
             })
