@@ -2920,38 +2920,40 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         _ => None,
                     };
                 // Synthesis retains qualified evidence even without a disposition contract.
-                let upstream_findings: Vec<Finding> =
-                    if node.dispositions.is_empty() && node.kind != Some(NodeKind::Synthesise)
-                        && !template::review_verifier(node) {
-                        Default::default()
-                    } else {
-                        selected_findings(node, &plan, &checkpoint, &positions)
-                            .into_iter()
-                            .map(|(source, mut finding)| {
-                                if template::review_behaviour(node) == Some(template::ReviewBehaviour::Verify) {
-                                    // A delta verifier replaces the previous verification, while
-                                    // synthesis continues to inherit it as immutable evidence.
-                                    finding.extra.remove("verification");
-                                }
-                                finding.extra.insert(
-                                    "propagates".into(),
-                                    format!("{source}:{}", finding.id).into(),
-                                );
-                                finding
-                            })
-                            .collect()
-                    };
-                let proof_dispositions = if node.dispositions.is_empty()
-                    && template::review_verifier(node)
+                let upstream_findings: Vec<Finding> = if node.dispositions.is_empty()
+                    && node.kind != Some(NodeKind::Synthesise)
+                    && !template::review_verifier(node)
                 {
-                    vec![
-                        "upheld".to_owned(),
-                        "falsified".to_owned(),
-                        "unverifiable".to_owned(),
-                    ]
+                    Default::default()
                 } else {
-                    node.dispositions.clone()
+                    selected_findings(node, &plan, &checkpoint, &positions)
+                        .into_iter()
+                        .map(|(source, mut finding)| {
+                            if template::review_behaviour(node)
+                                == Some(template::ReviewBehaviour::Verify)
+                            {
+                                // A delta verifier replaces the previous verification, while
+                                // synthesis continues to inherit it as immutable evidence.
+                                finding.extra.remove("verification");
+                            }
+                            finding.extra.insert(
+                                "propagates".into(),
+                                format!("{source}:{}", finding.id).into(),
+                            );
+                            finding
+                        })
+                        .collect()
                 };
+                let proof_dispositions =
+                    if node.dispositions.is_empty() && template::review_verifier(node) {
+                        vec![
+                            "upheld".to_owned(),
+                            "falsified".to_owned(),
+                            "unverifiable".to_owned(),
+                        ]
+                    } else {
+                        node.dispositions.clone()
+                    };
                 let overflow_ids = if proof_dispositions.is_empty() {
                     Vec::new()
                 } else {
@@ -3075,7 +3077,12 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                                 if outputs.findings_available != Some(true) {
                                     outputs.verdict = Some("VERDICT: INCONCLUSIVE".into());
                                 } else if outputs.findings.iter().any(|finding| {
-                                    (repair::blocking(finding) && finding.extra.get("verification").and_then(serde_json::Value::as_str) != Some("falsified"))
+                                    (repair::blocking(finding)
+                                        && finding
+                                            .extra
+                                            .get("verification")
+                                            .and_then(serde_json::Value::as_str)
+                                            != Some("falsified"))
                                         || finding.disposition.as_deref() == Some("accepted")
                                 }) {
                                     outputs.verdict = Some("VERDICT: FAIL".into());
