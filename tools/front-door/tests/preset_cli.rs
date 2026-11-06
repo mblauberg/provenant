@@ -3480,7 +3480,7 @@ fn preset_missing_spec_warns_in_explain_and_launch() -> Result<(), Box<dyn std::
     }
     let writer = temp.path().join("writer");
     let batch = temp.path().join("batch");
-    for (branch, worktree) in [("writer", &writer), ("batch", &batch)] {
+    for (branch, worktree) in [("writer", &writer), ("batch-worktree", &batch)] {
         assert!(
             provenant_os::fixture::git_command()
                 .current_dir(&project)

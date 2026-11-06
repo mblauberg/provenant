@@ -940,7 +940,7 @@ mod result_tests {
             super::graph_display(&run, "fabric graph run", &globals),
             ordinary
         );
-        assert!(ordinary.contains("  ordinary: Failed outcome=TaskFailed\n"));
+        assert!(ordinary.lines().any(|row| row.starts_with("  ordinary: Failed outcome=TaskFailed ") && row.contains("wait=none disposition=terminal")));
         assert!(ordinary.contains("  composite: Running (1 members) wait=none disposition=running"));
         assert!(ordinary.contains("  member: Running CI waiting"));
         assert!(!ordinary.contains("loop-member"));

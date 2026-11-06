@@ -390,6 +390,11 @@ pub(crate) fn graph_journal_error(
         JournalError::Filesystem(_)
         | JournalError::Io(_)
         | JournalError::DurabilityUnconfirmed(_) => FacadeError::io("access graph journal"),
+        e if e.is_unreadable() => FacadeError::DispatchRefused {
+            fact: None,
+            disk: None,
+            reason: e.to_string(),
+        },
         _ => FacadeError::StateCorrupt,
     }
 }
@@ -2853,5 +2858,34 @@ pub(crate) fn restore_scratch_source(
             }
         }
         Err(_) => Err(FacadeError::io("access graph scratch")),
+    }
+}
+
+#[cfg(test)]
+mod journal_error_tests {
+    #[test]
+    fn unreadable_graph_journal_preserves_the_cause() {
+        use super::{FacadeError, graph_journal_error};
+        use provenant_fabric_runtime::graph::JournalError;
+        for error in [
+            JournalError::BadEnvelope,
+            JournalError::BadDigest,
+            JournalError::RetiredLoopCheckpoint,
+            JournalError::InvalidTopology,
+        ] {
+            let reason = error.to_string();
+            assert_eq!(
+                graph_journal_error(error),
+                FacadeError::DispatchRefused {
+                    fact: None,
+                    disk: None,
+                    reason
+                },
+            );
+        }
+        assert_eq!(
+            graph_journal_error(JournalError::GraphMismatch),
+            FacadeError::StateCorrupt
+        );
     }
 }
