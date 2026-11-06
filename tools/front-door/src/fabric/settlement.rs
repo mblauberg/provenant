@@ -85,7 +85,7 @@ pub(crate) fn advance_graphs_after_settlement(
     settled: &provenant_run::HolderContext,
     workers: &'static dyn WorkerObserver,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    use provenant_fabric_runtime::graph::{FileJournal, GraphJournal, advance_with_budget};
+    use provenant_fabric_runtime::graph::FileJournal;
 
     let Some(host) = &settled.launch else {
         return Ok(());
@@ -116,72 +116,7 @@ pub(crate) fn advance_graphs_after_settlement(
     let store = provenant_run::RunStore::open(&context, &call)?;
     let record = store.record(settled.attempt_id, &call)?;
     if let Some(id) = matching_graph_hint(&roots.state, settled.project_id, &record) {
-        let result = (|| -> Result<(), Box<dyn std::error::Error>> {
-            let budget = WaitBudget::cli(clock.mono_now(), 55)?;
-            let mut journal = FileJournal::open(
-                &roots.state,
-                settled.project_id,
-                &id,
-                budget,
-                &cancel,
-                &clock,
-            )?;
-            let Some(checkpoint) = journal.load(&id)? else {
-                return Ok(());
-            };
-            if !checkpoint_matches_attempt(&checkpoint, &record) {
-                return Ok(());
-            }
-            let Some(execution) =
-                FileJournal::pending_execution(&roots.state, settled.project_id, &id)?
-            else {
-                return Ok(());
-            };
-            let context = Context::open(roots.clone(), &settled.roots.home, &execution.directory)?;
-            if context.identity.project != settled.project_id {
-                return Err(EdgeError::Invalid.into());
-            }
-            // The settled attempt's launch inputs serve the graph, whatever that attempt was.
-            let mut host = host.clone();
-            host.cwd = execution.directory.clone();
-            let factory = Factory {
-                project_attribution: crate::usage::attribution_enabled(&context.roots),
-                context,
-                clock: SystemClock::new(),
-                backoff: ThreadPause,
-                executor: SystemExecutor::new(4)?,
-                home: settled.roots.home.clone(),
-                cwd: execution.directory,
-                assets: settled.roots.checkout.clone(),
-                host_launch: Some(host),
-                mcp_project: None,
-                workers,
-            };
-            let mut owner = BoundGraphOwner {
-                factory: &factory,
-                integration_base: Some(BoundGraphBases {
-                    integration: execution.integration_base,
-                    review: execution.review_base,
-                }),
-                integration_branch: execution.document.integration_branch.clone(),
-                network: graph_network(&execution.document)?,
-                capability_overrides: graph_capability_overrides(&execution.document)?,
-                exclude: graph_exclude(&execution.document)?,
-                budget,
-                cancel: &cancel,
-                prices: None,
-                tick: false,
-            };
-            let graph_config = &factory.context.config.graph;
-            advance_with_budget(
-                &execution.document,
-                &mut owner,
-                &mut journal,
-                &graph_config.limits,
-                &graph_config.budget,
-            )?;
-            Ok(())
-        })();
+        let result = advance_attempt_graph(settled, &roots, &record, &id, workers);
         // If the attempt store itself refused the retention receipt, retain
         // the error on the graph containing this lane, without affecting
         // the status or advancement of any other graph.
@@ -202,6 +137,118 @@ pub(crate) fn advance_graphs_after_settlement(
         }
     }
     first_error.map_or(Ok(()), Err)
+}
+
+/// Wake only the graph owned by this host-custodied attempt, after admission.
+/// The relay has already committed and released the journal lock.
+pub(crate) fn advance_live_graph(
+    holder: &provenant_run::HolderContext,
+    id: &str,
+    workers: &'static dyn WorkerObserver,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let host = holder
+        .launch
+        .as_ref()
+        .ok_or("host launch context missing")?;
+    let roots = crate::roots::child(
+        &holder.roots.home,
+        &holder.roots.checkout,
+        host.configuration_root.clone(),
+    )?;
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let call = provenant_run::Request {
+        clock: &clock,
+        cancel: &cancel,
+    };
+    let execution = provenant_run::ExecutionContext {
+        state_root: roots.state.clone(),
+        project_id: holder.project_id,
+        actor_id: holder.actor_id,
+        read_prompts: false,
+    };
+    let store = provenant_run::RunStore::open(&execution, &call)?;
+    let record = store.record(holder.attempt_id, &call)?;
+    advance_attempt_graph(holder, &roots, &record, id, workers)
+}
+
+fn advance_attempt_graph(
+    settled: &provenant_run::HolderContext,
+    roots: &provenant_core::Roots,
+    record: &provenant_records::run::AttemptRecord,
+    id: &str,
+    workers: &'static dyn WorkerObserver,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use provenant_fabric_runtime::graph::{FileJournal, GraphJournal, advance_with_budget};
+    let host = settled
+        .launch
+        .as_ref()
+        .ok_or("host launch context missing")?;
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let budget = WaitBudget::cli(clock.mono_now(), 55)?;
+    let mut journal = FileJournal::open(
+        &roots.state,
+        settled.project_id,
+        id,
+        budget,
+        &cancel,
+        &clock,
+    )?;
+    let Some(checkpoint) = journal.load(id)? else {
+        return Ok(());
+    };
+    if !checkpoint_matches_attempt(&checkpoint, record) {
+        return Ok(());
+    }
+    let Some(execution) = FileJournal::pending_execution(&roots.state, settled.project_id, id)?
+    else {
+        return Ok(());
+    };
+    let context = Context::open(roots.clone(), &settled.roots.home, &execution.directory)?;
+    if context.identity.project != settled.project_id {
+        return Err(EdgeError::Invalid.into());
+    }
+    // The host-custodied attempt supplies launch inputs for the entire graph.
+    let mut host = host.clone();
+    host.cwd = execution.directory.clone();
+    let factory = Factory {
+        project_attribution: crate::usage::attribution_enabled(&context.roots),
+        context,
+        clock: SystemClock::new(),
+        backoff: ThreadPause,
+        executor: SystemExecutor::new(4)?,
+        home: settled.roots.home.clone(),
+        cwd: execution.directory,
+        assets: settled.roots.checkout.clone(),
+        host_launch: Some(host),
+        mcp_project: None,
+        workers,
+    };
+    let mut owner = BoundGraphOwner {
+        factory: &factory,
+        integration_base: Some(BoundGraphBases {
+            integration: execution.integration_base,
+            review: execution.review_base,
+        }),
+        integration_branch: execution.document.integration_branch.clone(),
+        network: graph_network(&execution.document)?,
+        capability_overrides: graph_capability_overrides(&execution.document)?,
+        exclude: graph_exclude(&execution.document)?,
+        budget,
+        cancel: &cancel,
+        prices: None,
+        tick: false,
+    };
+    let graph_config = &factory.context.config.graph;
+    advance_with_budget(
+        &execution.document,
+        &mut owner,
+        &mut journal,
+        &graph_config.limits,
+        &graph_config.budget,
+    )?;
+    Ok(())
 }
 
 pub(crate) fn checkpoint_matches_attempt(
