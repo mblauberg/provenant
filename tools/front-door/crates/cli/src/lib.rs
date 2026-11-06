@@ -1196,6 +1196,7 @@ mod tests {
             "--set",
             "limit=3",
             "--explain",
+            "--detached",
             "--wait=30m",
         ])
         .command
@@ -1208,6 +1209,7 @@ mod tests {
         assert_eq!(request.over, ["cli", "runtime"]);
         assert_eq!(request.set, ["limit=3"]);
         assert!(request.explain);
+        assert!(request.detached);
         assert_eq!(request.wait, Some(1800));
         valid(&["run", "--file", "work.toml", "--explain"]);
         invalid(&["run", "--preset", "task"]);

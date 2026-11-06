@@ -670,6 +670,9 @@ Source: `tools/front-door/crates/fabric-mcp/tests/fixtures/all-tool-schemas.json
             "maxLength": 65536,
             "type": "string"
           },
+          "detached": {
+            "type": "boolean"
+          },
           "document": {
             "type": "object"
           },

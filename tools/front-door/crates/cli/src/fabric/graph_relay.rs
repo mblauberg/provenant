@@ -228,6 +228,19 @@ pub fn serve(
             .map_err(|error| refused(error.code, error.message))?;
             json!({"graph_id":graph_id,"revision":admitted.revision,"replayed":admitted.replayed,"added":admitted.added})
         }
+        RelayOp::Stop { node } => {
+            let selected = stop_target(&graph_id, &parent, &node)?;
+            let subtree = provenant_fabric_runtime::graph::cancel_node_subtree(
+                &document,
+                &mut checkpoint,
+                selected,
+                Some("stopped by parent lane"),
+            )
+            .map_err(|error| refused("invalid_input", error))?;
+            // The graph owner observes this durable fence and stops attempts.
+            json!({"graph_id":graph_id,"node":selected,"requested":true,
+                "running":subtree.running,"skipped":subtree.skipped,"detached":subtree.detached})
+        }
         RelayOp::Children => {
             return Ok(relay::child_states(&checkpoint, &parent));
         }
@@ -261,6 +274,17 @@ pub fn serve(
     };
     journal.save(&checkpoint).map_err(journal_error)?;
     Ok(value)
+}
+
+fn stop_target<'a>(graph: &str, parent: &str, target: &'a str) -> Result<&'a str, ServiceError> {
+    let selected = target.strip_prefix(&format!("{graph}/")).unwrap_or(target);
+    if selected != parent && !selected.starts_with(&format!("{parent}--")) {
+        return Err(refused(
+            "confinement_refused",
+            "a lane may stop only its own subtree",
+        ));
+    }
+    Ok(selected)
 }
 
 /// Redo every fenced provisioning, then save the cleared fences.
@@ -597,6 +621,22 @@ fn with_waiting<T>(
 #[cfg(test)]
 mod wait_tests {
     use super::*;
+
+    #[test]
+    fn lane_stop_is_confined_to_its_own_subtree() {
+        for target in ["parent", "parent--child", "graph/parent--child--grandchild"] {
+            assert!(stop_target("graph", "parent", target).is_ok());
+        }
+        for target in [
+            "graph",
+            "other",
+            "parental",
+            "other/parent--child",
+            "parent--sibling",
+        ] {
+            assert!(stop_target("graph", "parent--child", target).is_err());
+        }
+    }
 
     #[test]
     fn pending_reclaims_retain_the_completed_child_wait_result() {

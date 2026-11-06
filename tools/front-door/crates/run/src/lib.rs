@@ -325,6 +325,14 @@ pub enum RunError {
     )]
     IntegrationHeadMoved,
     #[error(
+        "host writer delivery deferred at Integrate (parent_busy): the target branch is checked out; commit or preserve the parent's edits and explicitly merge child commit {child_head}, or detach the target checkout and retry delivery; the child commit is retained"
+    )]
+    IntegrationParentBusy { child_head: provenant_core::GitOid },
+    #[error(
+        "host writer delivery failed at Integrate (integration_conflict): merge preparation failed; inspect Git failures or resolve the target's conflict with retained child commit {child_head} in a separate checkout, then retry delivery"
+    )]
+    IntegrationConflict { child_head: provenant_core::GitOid },
+    #[error(
         "host writer delivery failed at Prepare (origin refresh): default branch collides with another branch name"
     )]
     OriginDefaultCollision,

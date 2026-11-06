@@ -1333,6 +1333,9 @@
               "maxLength": 65536,
               "type": "string"
             },
+            "detached": {
+              "type": "boolean"
+            },
             "document": {
               "type": "object"
             },

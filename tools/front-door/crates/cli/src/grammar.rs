@@ -674,6 +674,9 @@ pub struct GraphRunArgs {
     /// Read a graph document (JSON or TOML), or a plain text brief
     #[arg(long)]
     pub file: Option<PathBuf>,
+    /// Let this child outlive parent and graph cancellation (inside a lane only)
+    #[arg(long)]
+    pub detached: bool,
     /// Explain the compiled graph without starting work
     #[arg(long)]
     pub explain: bool,

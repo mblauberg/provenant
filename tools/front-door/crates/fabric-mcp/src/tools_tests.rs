@@ -740,11 +740,12 @@ fn submit_is_removed_and_graph_run_is_the_only_launch_operation() {
 #[test]
 fn lane_runs_keep_explicit_retry_identity_and_new_calls_have_new_identity() {
     let request =
-        json!({"op":"run", "brief":"fix X", "access":"worktree_write", "write_scope":["src"]});
+        json!({"op":"run", "brief":"fix X", "access":"worktree_write", "write_scope":["src"], "detached":true});
     let first = serde_json::to_value(lane_run_request(&request).unwrap()).unwrap();
     let second = serde_json::to_value(lane_run_request(&request).unwrap()).unwrap();
     assert_ne!(first["idempotency_key"], second["idempotency_key"]);
     assert_eq!(first["writer"], true);
+    assert_eq!(first["detached"], true);
     assert_eq!(first["write_scope"], json!(["src"]));
     let explicit = json!({"idempotency_key":"retry-child", "op":"run", "brief":"fix X"});
     assert_eq!(

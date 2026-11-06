@@ -10,6 +10,34 @@ pub fn cancel(command: Cancel, edge: &Edge<'_>) -> Reply {
 }
 
 pub(super) fn cancel_inner(mut command: Cancel, edge: &Edge<'_>) -> Reply {
+    if crate::fabric::in_lane() {
+        let node = command.target.selection.clone().unwrap_or_else(|| {
+            [
+                command.target.run.map(|id| id.to_string()),
+                command.target.task.map(|id| id.to_string()),
+                command.target.attempt.map(|id| id.to_string()),
+            ]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join("/")
+        });
+        let cancel = CancelToken::new();
+        let result = crate::fabric::graph_relay::from_lane(
+            &provenant_fabric_runtime::graph::relay::RelayOp::Stop { node },
+            &cancel,
+            Duration::from_secs(55),
+        )
+        .map(|value| (value, "Subtree stop requested\n".into()))
+        .map_err(|error| {
+            Fail::new(
+                Status::Refused,
+                ErrorKind::LaneCoordinationRefused,
+                error.to_string(),
+            )
+        });
+        return reply("stop", result);
+    }
     let candidate = match targets::resolve(edge, &command.target, true) {
         Ok(candidate) => candidate,
         Err(fail) => return reply("stop", Err(fail)),
