@@ -62,6 +62,15 @@ report unreadable records; never drop them. Check `provenant status`, collect
 `provenant output TARGET` and inspect `provenant output TARGET --trace` before
 using `retry` for unfinished work.
 
+For the graph cutover, finish or cancel every pending graph and drain all live
+lanes before upgrading: there is no state converter. Port user presets by hand
+to templates before using them with the new release. Old child-store directories
+are no longer written; retain them for telemetry ingestion before garbage
+collection decides what can be removed. Upgrade every host together, then test
+a real launch on each host. Report terminal checkpoints that cannot be read;
+keep their records for inspection and use the unreadable-record retirement path
+when appropriate.
+
 The core commands are `run`, `status`, `output`, `steer`, `stop`, `retry`,
 `edit`, `templates`, `land`, `quota` and `trace`. Use `run --use task` for a
 bounded assignment or `run --use deliver` for implementation through landing;
