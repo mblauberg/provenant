@@ -512,6 +512,7 @@ fn gc_does_not_inspect_status_of_out_of_scope_worktrees() -> Result<(), Box<dyn 
     struct CountingGit<'a> {
         inner: &'a dyn Executor,
         calls: AtomicUsize,
+        listings: AtomicUsize,
     }
     impl Executor for CountingGit<'_> {
         fn execute(
@@ -519,22 +520,32 @@ fn gc_does_not_inspect_status_of_out_of_scope_worktrees() -> Result<(), Box<dyn 
             options: provenant_os::exec::ExecOptions<'_>,
         ) -> Result<ExecOutcome, provenant_os::exec::ExecError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
+            if options
+                .argv
+                .windows(2)
+                .any(|pair| pair[0] == "worktree" && pair[1] == "list")
+            {
+                self.listings.fetch_add(1, Ordering::SeqCst);
+            }
             self.inner.execute(options)
         }
     }
     let fixture = Fixture::new()?;
     let test = TestContext::new(&fixture)?;
     let mut context = test.context();
-    for index in 0..100 {
+    // The primary plus 99 linked checkouts form a 100-worktree command.
+    for index in 0..99 {
         let path = fixture.root.join(format!("foreign-{index}"));
         fixture.run(&["worktree", "add", "--detach", path.to_str().ok_or("path")?])?;
     }
     let git = CountingGit {
         inner: context.executor,
         calls: AtomicUsize::new(0),
+        listings: AtomicUsize::new(0),
     };
     context.executor = &git;
     let lanes = list_for_gc(&context, &cancel())?;
+    assert_eq!(lanes.len(), 100);
     let report = collect_lazy(
         &context,
         &lanes,
@@ -553,6 +564,7 @@ fn gc_does_not_inspect_status_of_out_of_scope_worktrees() -> Result<(), Box<dyn 
     assert!(report.worktrees.removed.is_empty());
     // A single command-scoped inventory serves both phases of a preview.
     assert_eq!(git.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(git.listings.load(Ordering::SeqCst), 1);
     let lanes = list_for_gc(&context, &cancel())?;
     collect_lazy(
         &context,

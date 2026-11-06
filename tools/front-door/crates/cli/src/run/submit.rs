@@ -827,12 +827,13 @@ fn submit_with_launcher(
         let pending = session.store.pending_attempts(record.run_id, call)?;
         for task in &canonical.tasks {
             if let Some(writer) = &task.writer {
-                provenant_confinement::worktrees::with_context(
+                provenant_confinement::worktrees::with_context_using_facts(
                     edge.roots,
                     edge.home,
                     &writer.project,
                     call.clock,
                     call.cancel,
+                    session.store.repo_facts(),
                     |context| {
                         use provenant_confinement::worktrees;
                         let tree =

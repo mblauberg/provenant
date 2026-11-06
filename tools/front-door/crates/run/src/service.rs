@@ -157,10 +157,11 @@ impl<'a> Service<'a> {
             if input.parent_attempt.is_none() {
                 let branch = match &writer {
                     Some(writer) => Some(
-                        prepare_writer(
+                        prepare_writer_with_facts(
                             writer,
                             self.store.writer_registry(),
                             self.store.context.project_id,
+                            self.store.repo_facts(),
                         )?
                         .branch,
                     ),
@@ -172,6 +173,7 @@ impl<'a> Service<'a> {
                             .as_deref()
                             .filter(|_| task.access.source_live)
                             .unwrap_or(cwd),
+                        self.store.repo_facts(),
                     )?,
                 };
                 if let Some(branch) = branch {

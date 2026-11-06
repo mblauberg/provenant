@@ -606,6 +606,15 @@ pub(super) fn primary_head(
     Ok((bytes, commit))
 }
 
+/// Pin an admission base using the command's fact caps and remote provenance.
+pub fn resolve_base(
+    context: &WorktreeContext<'_>,
+    revision: &str,
+    cancel: &CancelToken,
+) -> Result<GitOid, WorktreeError> {
+    pin_revision(context, context.facts, revision, cancel)
+}
+
 pub(super) fn pin_revision(
     context: &WorktreeContext<'_>,
     facts: &RepoFacts,

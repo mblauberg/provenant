@@ -187,6 +187,7 @@ pub(super) fn reconcile_inner(
             project_id: Some(session.context.project_id),
             host: None,
             cancel: Some(&cancel),
+            repo_facts: session.store.repo_facts().clone(),
         };
         // Each step gets a fresh budget; recovery waits on custody locks.
         let mut found = match request(&clock, &cancel)
