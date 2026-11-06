@@ -1506,6 +1506,7 @@ fn fragment(
         library: bundled_templates(),
         resolvers: &resolvers,
         scan: &super::patch::scan_for_secrets,
+        journal: None,
         limits,
     };
     match super::patch::prepare(source, document, checkpoint, Some(node), &patch, &context)

@@ -128,6 +128,22 @@ fn reviewer_fact(
         model: observed.and_then(|r| r.model.clone()),
     })
 }
+/// The graph labels of an attempt's work context: requested tier, template and
+/// parent node. Only a graph node's attempt sets them.
+fn graph_labels(
+    context: Option<&provenant_records::run::WorkContext>,
+) -> (Option<String>, Option<String>, Option<String>) {
+    let context = context.cloned().unwrap_or_default();
+    (context.tier, context.template, context.parent_node)
+}
+
+/// Milliseconds from queueing to the start of the provider process: the launch
+/// slot wait. `None` until the attempt starts, or if the clocks disagree.
+fn slot_wait_ms(queued_at: WallTime, started_at: Option<WallTime>) -> Option<u64> {
+    let waited = started_at?.as_micros().checked_sub(queued_at.as_micros())?;
+    u64::try_from(waited / 1_000).ok()
+}
+
 /// The published fact for a terminal record. A record read from a peer takes the
 /// same path as one read here.
 pub fn fact(r: AttemptRecord) -> Result<AttemptFact> {
@@ -157,6 +173,8 @@ pub fn fact(r: AttemptRecord) -> Result<AttemptFact> {
         .and_then(|route| route.provider.clone())
         .zip(r.session.clone())
         .map(|(adapter, session)| provenant_records::TranscriptRef { adapter, session });
+    let (tier, template, parent_node) = graph_labels(r.context.as_ref());
+    let slot_wait_ms = slot_wait_ms(r.queued_at, r.started_at);
     Ok(AttemptFact {
         context: r.context,
         attempt_id: r.attempt_id,
@@ -182,10 +200,10 @@ pub fn fact(r: AttemptRecord) -> Result<AttemptFact> {
         observed_route: r.observed_route.map(Into::into),
         verified_owner: r.verified_owner,
         lineage: r.retry_of.into_iter().collect(),
-        tier: None,
-        template: None,
-        parent_node: None,
-        slot_wait_ms: None,
+        tier,
+        template,
+        parent_node,
+        slot_wait_ms,
         reason,
         trace: r.trace,
         transcript,
@@ -1221,5 +1239,38 @@ pub(crate) fn verified_route(
                     .is_none_or(|effort| Some(effort) == o.effort.as_ref())
         }
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn slot_wait_is_queue_to_start_and_absent_until_started() {
+        let queued = WallTime::from_micros(1_000_000).unwrap();
+        let started = WallTime::from_micros(2_500_000).unwrap();
+        assert_eq!(slot_wait_ms(queued, Some(started)), Some(1_500));
+        assert_eq!(slot_wait_ms(queued, None), None);
+        assert_eq!(slot_wait_ms(started, Some(queued)), None);
+    }
+
+    #[test]
+    fn graph_labels_come_from_the_work_context() {
+        let context = provenant_records::run::WorkContext {
+            tier: Some("senior".into()),
+            template: Some("review.security".into()),
+            parent_node: Some("map".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            graph_labels(Some(&context)),
+            (
+                Some("senior".into()),
+                Some("review.security".into()),
+                Some("map".into())
+            )
+        );
+        assert_eq!(graph_labels(None), (None, None, None));
     }
 }

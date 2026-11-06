@@ -152,13 +152,20 @@ pub struct PatchRecord {
     pub skipped: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub replaced: Vec<GraphNode>,
+    /// Whether `admit_patch` already wrote this admission to the journal. An
+    /// unjournaled record (a planner fragment) is journaled at save instead.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub journaled: bool,
 }
+
+/// The node field naming the parent node whose patch added a node.
+pub const PARENT_NODE_FIELD: &str = "parent_node";
 
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 #[error("{message}")]
 pub struct PatchError {
     /// Stable cause: `stale_revision`, `idempotency_conflict`, `cycle`,
-    /// `conflict`, `started`, `secret` or `invalid`.
+    /// `conflict`, `started`, `secret`, `journal` or `invalid`.
     pub code: &'static str,
     pub message: String,
 }
@@ -187,6 +194,9 @@ pub struct PatchContext<'a> {
     pub resolvers: &'a BTreeMap<String, Vec<String>>,
     /// Refuses text that matches a secret pattern.
     pub scan: &'a dyn Fn(&str) -> Result<(), String>,
+    /// Writes an admitted patch to the graph's journal. `admit_patch` calls it
+    /// before the admission is committed, so a failed write admits nothing.
+    pub journal: Option<&'a dyn Fn(&PatchRecord) -> Result<(), String>>,
     pub limits: &'a crate::config::GraphLimits,
 }
 
@@ -254,18 +264,23 @@ pub fn admit_patch(
             added: Vec::new(),
         }),
         Prepared::Ready(admission) => {
-            let added = admission
-                .expansion
-                .nodes
-                .iter()
-                .map(|node| node.id.clone())
-                .collect();
             let Admission {
-                expansion,
+                mut expansion,
                 preview,
                 plan,
                 ..
             } = *admission;
+            if let Some(parent) = parent {
+                for node in &mut expansion.nodes {
+                    node.extra
+                        .insert(PARENT_NODE_FIELD.into(), Value::String(parent.id.clone()));
+                }
+            }
+            if let (Some(journal), Some(record)) = (context.journal, expansion.patch.as_mut()) {
+                journal(record).map_err(|reason| PatchError::new("journal", reason))?;
+                record.journaled = true;
+            }
+            let added = expansion.nodes.iter().map(|node| node.id.clone()).collect();
             let revision = commit(graph.checkpoint, expansion, &preview, &plan, context.limits);
             Ok(Admitted {
                 revision,
@@ -607,6 +622,7 @@ pub(super) fn prepare(
             reason: patch.reason.clone(),
             skipped: patch.skip.clone(),
             replaced,
+            journaled: false,
         }),
     };
     let mut preview = expanded.clone();
