@@ -313,11 +313,16 @@ fn node_redo_retains_spent_budget_and_unknown_usage_across_attempt_generations()
 }
 
 #[test]
-fn subtree_stop_clears_a_launch_retry_wake_without_an_attempt() {
-    let (document, mut checkpoint, _) = settled();
+fn subtree_stop_clears_a_launch_retry_wake_when_no_process_was_accepted() {
+    let document = graph(vec![node("work", route("first"))]);
+    let mut owner = FakeOwner {
+        observations: [AttemptObservation::Pending { attempt_ref: None }].into(),
+        ..Default::default()
+    };
+    let mut checkpoint = advance(&document, &mut owner, &mut MemoryJournal::default())
+        .unwrap()
+        .checkpoint;
     let now = provenant_core::WallTime::from_micros(1_800_000_000_000_000).unwrap();
-    checkpoint.nodes[0].state = NodeState::Running;
-    checkpoint.nodes[0].attempts.clear();
     apply_launch_disposition(
         &mut checkpoint,
         0,
@@ -331,13 +336,15 @@ fn subtree_stop_clears_a_launch_retry_wake_without_an_attempt() {
     assert!(checkpoint.wake_at.is_some());
     let effect =
         cancel_node_subtree(&document, &mut checkpoint, "work", Some("chair stop")).unwrap();
-    assert_eq!(effect.skipped, vec!["work"]);
-    assert!(effect.running.is_empty());
-    assert_eq!(checkpoint.nodes[0].state, NodeState::Skipped);
-    assert_eq!(checkpoint.wake_at, None);
-    let mut owner = FakeOwner::default();
+    assert_eq!(effect.running, vec!["work"]);
+    let mut owner = FakeOwner {
+        cancelled_attempt_settled: true,
+        ..Default::default()
+    };
     let mut journal = MemoryJournal(Some(checkpoint.clone()));
     settle_stopped_subtrees(&document, &mut checkpoint, &mut owner, &mut journal).unwrap();
+    assert_eq!(checkpoint.nodes[0].state, NodeState::Skipped);
+    assert_eq!(checkpoint.wake_at, None);
     let replay = advance(&document, &mut owner, &mut MemoryJournal(Some(checkpoint))).unwrap();
     assert_eq!(replay.checkpoint.nodes[0].state, NodeState::Skipped);
     assert!(owner.calls.is_empty());
@@ -541,4 +548,119 @@ fn node_redo_can_launch_a_leaf_from_an_inactive_loop_round() {
     );
     assert_eq!(owner.calls.len(), 1);
     assert_eq!(owner.calls[0].0.node_id, id);
+}
+
+#[test]
+fn node_redo_repeated_planner_fallbacks_have_distinct_nodes_and_replay_without_relaunching() {
+    let document: GraphDocument = serde_json::from_value(json!({
+        "schema_version":1,"graph_id":"redo-fallback","nodes":[{
+            "id":"work","kind":"plan","access":"read_only","prompt":"Plan work",
+            "route":{"alias":"senior"},"plan":{"kinds":["task"],"max_nodes":4,
+                "fallback":{"nodes":[{"id":"static","access":"read_only","prompt":"Fallback work","route":{"alias":"junior"}}],
+                    "exports":[{"node":"static","outputs":["result"]}]}
+            }
+        }]
+    })).unwrap();
+    let mut journal = MemoryJournal::default();
+    let mut fallback_ids = std::collections::BTreeSet::new();
+    for generation in 0..3 {
+        if generation > 0 {
+            let checkpoint = journal.0.as_mut().unwrap();
+            retry(
+                &document,
+                checkpoint,
+                Some("Try planning again"),
+                &|_| Ok(()),
+                None,
+            )
+            .unwrap();
+        }
+        let mut owner = FakeOwner {
+            observations: [
+                terminal_from("not a fragment", &format!("planner-{generation}")),
+                terminal_from("fallback result", &format!("fallback-{generation}")),
+            ]
+            .into(),
+            ..Default::default()
+        };
+        let run = advance(&document, &mut owner, &mut journal).unwrap();
+        assert_eq!(
+            run.status,
+            GraphStatus::Complete,
+            "{:?}",
+            run.checkpoint.pause_reason
+        );
+        assert_eq!(owner.calls.len(), 2);
+        assert!(fallback_ids.insert(owner.calls[1].0.node_id.clone()));
+        let checkpoint: GraphCheckpoint =
+            serde_json::from_value(serde_json::to_value(run.checkpoint).unwrap()).unwrap();
+        journal.0 = Some(checkpoint.clone());
+        let mut replay_owner = FakeOwner::default();
+        let replay = advance(&document, &mut replay_owner, &mut journal).unwrap();
+        assert_eq!(replay.checkpoint, checkpoint);
+        assert!(replay_owner.calls.is_empty());
+    }
+}
+
+#[test]
+fn node_redo_can_launch_a_leaf_of_a_settled_composite() {
+    let document: GraphDocument = serde_json::from_value(json!({
+        "schema_version":1,"graph_id":"redo-composite-leaf","nodes":[{
+            "id":"work","kind":"composite","access":"read_only","composite":{
+                "nodes":[{"id":"leaf","access":"read_only","prompt":"Do the work","route":{"alias":"senior"}}],
+                "exports":[{"node":"leaf","outputs":["result"]}]
+            }
+        }]
+    })).unwrap();
+    let mut owner = FakeOwner {
+        observations: [terminal_from("first result", "first-attempt")].into(),
+        ..Default::default()
+    };
+    let mut checkpoint = advance(&document, &mut owner, &mut MemoryJournal::default())
+        .unwrap()
+        .checkpoint;
+    assert_eq!(
+        checkpoint
+            .nodes
+            .iter()
+            .find(|n| n.id == "work")
+            .unwrap()
+            .state,
+        NodeState::Succeeded
+    );
+    retry_id(
+        &document,
+        &mut checkpoint,
+        "work--leaf",
+        Some("Redo the leaf"),
+        &|_| Ok(()),
+        None,
+    )
+    .unwrap();
+    let mut owner = FakeOwner {
+        observations: [terminal_from("replacement result", "replacement-attempt")].into(),
+        ..Default::default()
+    };
+    let mut journal = MemoryJournal(Some(checkpoint));
+    let run = advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(run.status, GraphStatus::Complete);
+    assert_eq!(
+        run.checkpoint
+            .nodes
+            .iter()
+            .find(|n| n.id == "work--leaf")
+            .unwrap()
+            .state,
+        NodeState::Succeeded
+    );
+    assert_eq!(owner.calls.len(), 1);
+    assert_eq!(owner.calls[0].0.node_id, "work--leaf");
+    let mut replay_owner = FakeOwner::default();
+    assert_eq!(
+        advance(&document, &mut replay_owner, &mut journal)
+            .unwrap()
+            .checkpoint,
+        run.checkpoint
+    );
+    assert!(replay_owner.calls.is_empty());
 }
