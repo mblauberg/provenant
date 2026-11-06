@@ -3466,7 +3466,7 @@ fn lane_prepare_with(cases: &[(&str, bool, bool, u8)], probe: Probe) -> Result {
         let frames = concat!(
             "{\"jsonrpc\":\"2.0\",\"id\":999,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-11-25\",\"capabilities\":{},\"clientInfo\":{\"name\":\"fixture\",\"version\":\"1\"}}}\n",
             "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n",
-            "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"fabric_run\",\"arguments\":{\"op\":\"submit\",\"operation_id\":\"nested-depth\",\"tasks\":[{\"prompt\":\"read only\",\"route\":{\"kind\":\"model\",\"provider\":\"codex\",\"model\":\"gpt-6-luna\"},\"timeout_seconds\":1}],\"concurrency\":1,\"wait_seconds\":1}}}\n"
+            "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"fabric_run\",\"arguments\":{\"op\":\"run\",\"use\":\"task\",\"brief\":\"read only\",\"explain\":true}}}\n"
         );
         let mut options = provenant_os::exec::ExecOptions::new(
             &launch.argv,
@@ -3495,7 +3495,7 @@ fn lane_prepare_with(cases: &[(&str, bool, bool, u8)], probe: Probe) -> Result {
             .iter()
             .find(|reply| reply["id"] == 1)
             .ok_or("MCP reply")?["result"];
-        assert_eq!(mcp_error_code(result), "lane_depth", "{result}");
+        assert_lane_child_preview(result)?;
         assert!(!roots.state.as_path().join("tmp/results").exists());
         assert!(permissions.scratch.path.join("results").is_dir());
         assert!(!rig.state.join("children").exists());
@@ -3672,7 +3672,11 @@ pub(crate) fn lane_provider() -> Result {
         .collect::<Vec<_>>();
     let mut options = ExecOptions::new(&argv, &cwd, Duration::from_secs(8));
     options.env = Some(&stripped);
-    options.stdin = Some(&input);
+    // Explanation is side-effect free. An actual child request still needs
+    // the parent relay identity even if a provider drops its lane variables.
+    let stripped_input = String::from_utf8(input.clone())?
+        .replace("\"explain\":true", "\"explain\":false");
+    options.stdin = Some(stripped_input.as_bytes());
     let stripped_output = SystemExecutor::new(1)?.execute(options)?;
     assert_eq!(
         code(&stripped_output),
@@ -3693,7 +3697,7 @@ pub(crate) fn lane_provider() -> Result {
             .find(|reply| reply["id"] == 1)
             .map(|reply| mcp_error_code(&reply["result"]))
             .ok_or("stripped MCP reply")?,
-        "invalid_input"
+        "graph_relay_unavailable"
     );
     // Exercise the same publisher used by CLI overflow under confinement.
     let home = PathBuf::from(std::env::var_os("HOME").ok_or("HOME")?);
@@ -4219,14 +4223,11 @@ if (process.argv[2] === 'child') {
         .filter(|line| !line.is_empty())
         .map(serde_json::from_slice::<Value>)
         .collect::<std::result::Result<Vec<_>, _>>()?;
-    assert_eq!(
-        replies
-            .iter()
-            .find(|reply| reply["id"] == 1)
-            .map(|reply| mcp_error_code(&reply["result"]))
-            .ok_or("confined MCP reply")?,
-        "lane_depth"
-    );
+    let result = &replies
+        .iter()
+        .find(|reply| reply["id"] == 1)
+        .ok_or("confined MCP reply")?["result"];
+    assert_lane_child_preview(result)?;
     // The child-store submission/scanner has been deleted. Graph child
     // admission is covered through the host relay fixtures.
     host.provider_exited(&parent.encode()?, None)?;
@@ -4299,7 +4300,22 @@ impl Executor for FixtureCredential {
     }
 }
 
-/// Identity and submit report errors in text; other tools keep structured codes.
+// Confinement startup exercises the shared graph child request without a
+// launch. The host relay tests own admission, depth limits and cancellation.
+fn assert_lane_child_preview(result: &Value) -> Result {
+    assert!(result.get("isError").is_none_or(|value| value == false), "{result}");
+    let operation: provenant_fabric_runtime::graph::relay::RelayOp =
+        serde_json::from_value(result["structuredContent"].clone())?;
+    let provenant_fabric_runtime::graph::relay::RelayOp::Add(request) = operation else {
+        return Err(format!("expected a graph child request: {result}").into());
+    };
+    assert_eq!(request.template, "task", "{result}");
+    assert_eq!(request.brief, "read only", "{result}");
+    assert!(!request.writer, "{result}");
+    Ok(())
+}
+
+/// Identity reports errors in text; other tools keep structured codes.
 fn mcp_error_code(result: &Value) -> &str {
     result["structuredContent"]["code"]
         .as_str()

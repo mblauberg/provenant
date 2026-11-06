@@ -358,7 +358,9 @@ pub(crate) fn pr_contribution_roundtrip() -> Result {
         &landing.rig,
         &["output", fixture_id, "--part", "prompt", "--json"],
     )?)?;
-    let stop_view = json(&command(
+    // This fixture imports retained non-graph attempts directly. They remain
+    // readable after the one-engine cutover, but cannot launch or mutate work.
+    let stop_output = command(
         &landing.rig,
         &[
             "stop",
@@ -367,7 +369,11 @@ pub(crate) fn pr_contribution_roundtrip() -> Result {
             "land-fixture-cancel",
             "--json",
         ],
-    )?)?;
+    )?;
+    assert_eq!(code(&stop_output), 1);
+    let stop_view = json(&stop_output)?;
+    assert_eq!(stop_view["status"], "refused");
+    assert_eq!(stop_view["error"]["code"], "GRAPH_REQUIRED");
     for field in [
         "run_id",
         "task_id",
@@ -380,10 +386,6 @@ pub(crate) fn pr_contribution_roundtrip() -> Result {
         assert_eq!(
             output_view["data"][field], land_lane[field],
             "output {field}"
-        );
-        assert_eq!(
-            stop_view["data"]["lanes"][0][field], land_lane[field],
-            "stop {field}"
         );
     }
     let row = &status_view["data"]["rows"][0];
