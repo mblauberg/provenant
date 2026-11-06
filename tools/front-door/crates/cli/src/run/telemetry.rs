@@ -401,6 +401,72 @@ pub(super) fn stats_inner(
     ));
     let mut data = serde_json::to_value(&report)
         .map_err(|error| Fail::new(Status::Error, ErrorKind::Io, error.to_string()))?;
+    // Native rows are a host-wide breakdown of chair usage already included
+    // above; expose the attribution without adding it to totals a second time.
+    if selected_run.is_none() {
+        let native = provenant_telemetry::native_attempts::read(edge.roots);
+        let rows = provenant_telemetry::ingest::read_rows(
+            edge.roots,
+            &provenant_telemetry::ingest::RowFilter::default(),
+        );
+        match (native, rows) {
+            (Ok(attempts), Ok(mut rows)) => {
+                rows.retain(|row| {
+                    row.timestamp
+                        .parse::<jiff::Timestamp>()
+                        .ok()
+                        .is_some_and(|at| {
+                            command.since.is_none_or(|since| at >= since)
+                                && command.until.is_none_or(|until| at < until)
+                        })
+                });
+                let native = provenant_telemetry::native_attempts::report(attempts, &rows);
+                if !native.attempts.is_empty() || !native.unlinked.is_empty() {
+                    human.push_str("native sub-agent usage (host; may overlap chair usage):\n");
+                    for item in &native.attempts {
+                        if item.models.is_empty() {
+                            human.push_str(&format!(
+                                "  {} {}: no linked messages\n",
+                                item.attempt.alias, item.attempt.model
+                            ));
+                        }
+                        for (model, buckets) in &item.models {
+                            human.push_str(&format!(
+                                "  {} {}: input={} output={}\n",
+                                item.attempt.alias,
+                                model,
+                                buckets[..4].iter().copied().fold(0u64, u64::saturating_add),
+                                buckets[4]
+                            ));
+                        }
+                    }
+                    for item in &native.unlinked {
+                        human.push_str(&format!(
+                            "  unlinked {}: {} messages, input={} output={}\n",
+                            item.model,
+                            item.messages,
+                            item.buckets[..4]
+                                .iter()
+                                .copied()
+                                .fold(0u64, u64::saturating_add),
+                            item.buckets[4]
+                        ));
+                    }
+                    data["native_subagents"] = json!(native);
+                }
+            }
+            (Err(error), _) => {
+                human.push_str(&format!(
+                    "native attempt attribution unavailable: {error}\n"
+                ));
+                data["native_subagents_error"] = json!(error.to_string());
+            }
+            (_, Err(error)) => {
+                human.push_str(&format!("native usage unavailable: {error}\n"));
+                data["native_subagents_error"] = json!(error.to_string());
+            }
+        }
+    }
     if let Some(ids) = decision_ids {
         let mut decisions = Vec::new();
         if let Some(store) = store.as_ref() {

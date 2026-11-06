@@ -514,6 +514,9 @@ mod tests {
             session: "s1".into(),
             message: format!("m{at}"),
             source: ingest::Source::Lane,
+            agent_id: None,
+            native_config: None,
+            native_attempt: None,
         }
     }
 

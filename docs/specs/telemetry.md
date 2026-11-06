@@ -163,17 +163,41 @@ torn line, is kept byte for byte when the store is rewritten.
 `--since` skips files last written before it and messages stamped before it;
 `--provider` other than `claude` ingests nothing.
 
+A caller can track a native Claude tool call with `provenant native start
+--id TOOL_USE_ID --session SESSION --alias ALIAS --model MODEL [--effort EFFORT]`,
+then settle it with `provenant native end --id TOOL_USE_ID --session SESSION
+[--agent AGENT_ID] --settlement succeeded|failed|cancelled`. The agent ID, when
+available, is the
+portion between `agent-` and `.jsonl`. The record contains those identifiers,
+a digest of the serving config directory, start and end times and settlement;
+it never contains a prompt or reply. The ID is scoped to its config directory
+and chair session. Ingest joins a subagent row on that directory digest,
+session and agent ID. A later settlement links already ingested rows without
+rereading the transcript. Unmatched rows remain visible. `status` lists tracked
+native attempts, and `telemetry stats` shows a host-wide native breakdown by
+attempt and model, plus unlinked usage. This breakdown can overlap the chair
+section and is not added to its totals a second time. Settling an attempt
+also requests a best-effort ingest.
+
 Attribution uses directories only, never credentials. Each registered account's
 `directory` and its extra `directories` attribute to its label; a directory
 claimed twice is visited once. Every other `~/.claude*` directory with a
 `projects` child, including the default `~/.claude`, is stored under
 `unattributed` and never dropped. A session recorded by the chair's
 SessionStart hook is a `chair`, a file under a session's `subagents` directory
-is a `subagent`, and every other session is a `lane`. The chair's SessionStart
-hook also runs the last day of ingest, best effort, so the interactive session
-is captured without a manual command. That run stops at a three-second wall
+is a `subagent`, and every other session is a `lane`. The chair's SessionStart and Stop
+hooks also ingest transcripts modified in the last day, best effort, so the
+interactive session is captured without a manual command. Once a file qualifies,
+the hook reads all its messages, including older messages in a long session. That run stops at a three-second wall
 deadline, inside the hook's five-second timeout, and writes the rows it has
-read. A `telemetry ingest` run has no deadline, and its report sets
+read. Hook ingests resume each transcript after the last complete line stored;
+they retain only a path digest, file identity, offset and a digest of preceding
+bytes. A replaced or truncated file, or a changed usage store, invalidates its
+cursor and is read again. Incomplete lines are retried and streamed updates
+merge with existing messages. Cursors are published only after the usage store,
+so an interruption can cause a reread but cannot skip committed input. A manual
+`telemetry ingest` scans the selected range independently. A `telemetry ingest`
+run has no deadline, and its report sets
 `deadline_reached` only when one stopped it.
 Reads are bounded (1 GiB a transcript, 128 MiB a store, 8 MiB a line, 100,000
 sessions, 2,000 subagent files a session) and never follow links. A message
@@ -186,9 +210,14 @@ its cap, ingest stops adding rows and the report says the store is full.
   `::lines_this_build_cannot_read_survive_a_rewrite`;
   `::a_lane_row_is_upgraded_to_chair_when_the_hook_records_it`;
   `::an_expired_deadline_reads_nothing_and_keeps_the_store`;
+  `::incremental_ingest_resumes_complete_lines_and_recovers_replacements`;
+  `::incremental_ingest_upgrades_existing_chair_without_rereading`;
+  `::native_attempt_links_only_its_matching_subagent_and_updates_after_settlement`;
   `::one_message_in_two_session_files_counts_twice`;
   `tests/telemetry_ingest.rs::ingest_is_idempotent_and_attributes_by_directory`;
-  `::chair_session_start_ingests_the_session_as_chair`
+  `::chair_session_start_ingests_the_session_as_chair`;
+  `::chair_stop_ingests_new_usage`;
+  `::native_attempt_is_visible_in_status_and_linked_usage`
 - Owner: `crates/telemetry/src/ingest.rs`, `src/usage.rs`, `src/hooks.rs`
 
 ## Mileage and effective rates

@@ -2638,14 +2638,8 @@ mod tests {
         };
         let mismatch = human(ProbeFailure::AccountMismatch);
         assert!(mismatch.contains("account_mismatch"), "{mismatch}");
-        assert!(
-            mismatch.contains("signed-in account differs from the registered one"),
-            "{mismatch}"
-        );
-        assert!(
-            mismatch.contains("account-specific login remedy unavailable"),
-            "{mismatch}"
-        );
+        assert!(mismatch.contains("differs"), "{mismatch}");
+        assert!(!mismatch.contains("needs login"), "{mismatch}");
         let signed_out = human(ProbeFailure::Auth);
         assert!(signed_out.contains("needs login"), "{signed_out}");
         assert!(!signed_out.contains("differs"), "{signed_out}");

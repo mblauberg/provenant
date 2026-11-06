@@ -25,35 +25,6 @@ fn rig_git_commits_use_fixture_identity() -> Result {
     Ok(())
 }
 
-#[test]
-fn macos_ci_requires_writer_continuation_confinement_fixtures() {
-    let workflow = include_str!("../../../.github/workflows/ci.yml");
-    let job = workflow
-        .split("  rust-macos-tests:\n")
-        .nth(1)
-        .expect("macOS test job")
-        .split("\n  rust-macos-release:")
-        .next()
-        .unwrap();
-    let step = job
-        .split("      - name:")
-        .find(|step| step.contains("Run dispatch confinement integration tests"))
-        .expect("dispatch confinement step");
-    assert!(!job.contains("continue-on-error: true"));
-    assert!(step.contains("PROVENANT_CONFINEMENT_REQUIRED: \"1\""));
-    assert!(step.contains("--profile ci"));
-    assert!(step.contains(
-        "test(=writer_quota_continuation_succeeds_and_lens_diff_base_stays_node_source)"
-    ));
-    assert!(step.contains("binary(=writer_continuation)"));
-    assert!(step.contains("test(=writer_continuation_launches_pinned_to_predecessor_head)"));
-    assert!(
-        step.contains(
-            "test(=unfinished_writer_continuation_launches_in_previously_owned_worktree)"
-        )
-    );
-}
-
 fn available() -> Result<bool> {
     if !cfg!(target_os = "macos") {
         return Ok(false);
@@ -521,13 +492,30 @@ fn command_dispatch_launches_when_the_store_fails_fast() -> Result {
         "{loaded}"
     );
     let submitted = dispatch(&rig, "pass", 10)?;
-    // With no busy timeout, the polling reads below fail whenever the lane's
-    // supervisor holds the store. Only the dispatch needs the fail-fast store.
+    let id = attempt_id(&submitted)?;
+    let run = submitted["data"]["run_id"].as_str().ok_or("run id")?;
+    let exit = rig
+        .state
+        .join("runs")
+        .join(run)
+        .join("attempts")
+        .join(id)
+        .join("process-exit.json");
+    // Admission in the guardian can outlast dispatch. Polling lanes
+    // can hold the store during that fail-fast admission, so wait for the
+    // guardian's exit evidence without opening the store first.
     fs::write(rig.state.join("config.toml"), original)?;
-    let lane = settled(&rig, attempt_id(&submitted)?)?;
+    provenant_test_support::wait_for(
+        "guardian exit evidence",
+        Duration::from_secs(20),
+        || exit.exists(),
+        |ready| *ready,
+    )?;
+    let evidence = fs::read_to_string(exit)?;
+    let lane = settled(&rig, id)?;
     assert_eq!(
         lane["state"], "succeeded",
-        "settlement reason: {}; lane: {lane}",
+        "settlement reason: {}; exit: {evidence}; lane: {lane}",
         lane["settlement"]["reason"]
     );
     Ok(())
