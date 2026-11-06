@@ -141,7 +141,7 @@ fn row(
     reason: Option<&str>,
 ) -> Value {
     let reason = reason.map(|text| provenant_fabric_runtime::hosts::plain_text(text, 1024));
-    json!({"id":id,"kind":kind,"graph_id":target.graph,"node_id":node,"attempt_id":attempt,"state":state,"reason":reason,"waiting_for":null,"cause_code":null,"outcome":null,"next":null})
+    json!({"id":id,"kind":kind,"graph_id":target.graph,"node_id":node,"attempt_id":attempt,"state":state,"reason":reason,"waiting_for":null,"cause_code":null,"outcome":null,"next":null,"latest_attempt":null})
 }
 
 pub(crate) fn status_rows(run: &GraphRun, target: &GraphTarget) -> Vec<Value> {
@@ -576,6 +576,7 @@ fn project_node_waits(rows: &mut [Value]) {
         .iter()
         .filter(|row| {
             row["kind"] == "attempt"
+                && row["latest_attempt"] == true
                 && row["state"] == "running"
                 && row["graph_state"] == "running"
                 && row["waiting_for"].is_string()
@@ -1474,6 +1475,15 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0]["kind"], "attempt");
         assert_eq!(rows[0]["node_id"], "parent");
+
+        let mut checkpoint = checkpoint("g");
+        let old = checkpoint.nodes[0].attempts[0].clone();
+        let mut latest = old.clone();
+        latest.attempt_ref = None;
+        checkpoint.nodes[0].attempts.push(latest);
+        let rows = status_rows(&graph_snapshot(checkpoint), &graph);
+        let old = rows.iter().find(|row| row["kind"] == "attempt").unwrap();
+        assert_eq!(old["latest_attempt"], false);
     }
 
     #[test]

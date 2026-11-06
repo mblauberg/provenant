@@ -1312,6 +1312,25 @@ impl ServiceError {
         }
     }
 
+    /// Project MCP-owned failures at their typed owner. Delegated failures
+    /// retain their owner's projection; raw source messages never become facts.
+    pub fn diagnostic(&self) -> provenant_records::diagnostic::Diagnostic {
+        use provenant_records::diagnostic::Diagnostic;
+        match self {
+            Self::Mutation { source, .. } => source.diagnostic(),
+            Self::Invalid(error) => error.diagnostic(),
+            Self::Coordination(error) => error.diagnostic(),
+            Self::Facade(error) => error.diagnostic(),
+            Self::Time(_) => Diagnostic::new(self.code())
+                .next("Check the argument path and tool schema, then retry."),
+            Self::ResultTooLarge => {
+                Diagnostic::new(self.code()).next("Request a smaller page or output chunk.")
+            }
+            _ => Diagnostic::new(self.code())
+                .next("Inspect the current state and retry when the cause is resolved."),
+        }
+    }
+
     /// Stable structured error data. Uncertain mutations carry their
     /// idempotency key; prompts, tokens and raw source errors are omitted.
     pub fn structured_error(&self) -> Value {
@@ -1424,19 +1443,9 @@ impl ServiceError {
             detail["retryable"] = Value::Bool(true);
         }
         detail["message"] = Value::String(self.code().to_owned());
-        detail["hint"] = Value::String(
-            match self {
-                Self::Invalid(_) | Self::Time(_) => {
-                    "Check the argument path and tool schema, then retry."
-                }
-                Self::Facade(FacadeError::LaunchUnknown { .. }) => {
-                    "Check status before retrying with the same operation ID."
-                }
-                Self::ResultTooLarge => "Request a smaller page or output chunk.",
-                _ => "Inspect the current state and retry when the cause is resolved.",
-            }
-            .into(),
-        );
+        let projection = self.diagnostic();
+        detail["next"] = serde_json::json!(projection.next);
+        detail["hint"] = detail["next"].clone();
         detail
     }
 }

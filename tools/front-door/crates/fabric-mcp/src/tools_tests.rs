@@ -701,6 +701,26 @@ fn coordination_envelope_uses_owner_projection() {
 }
 
 #[test]
+fn mcp_owned_failures_use_their_diagnostic_projection() {
+    for error in [
+        ServiceError::ResultTooLarge,
+        ServiceError::FabricOwnerUnavailable,
+        ServiceError::Cli {
+            code: "conflict".into(),
+            message: "TOKEN_SENTINEL\u{1b}".into(),
+            data: json!({}),
+        },
+    ] {
+        let projection = error.diagnostic();
+        let wire = error.structured_error();
+        assert_eq!(wire["code"], projection.code);
+        assert_eq!(wire["next"], projection.next.unwrap());
+        assert_eq!(wire["hint"], wire["next"]);
+        assert!(!wire.to_string().contains("TOKEN_SENTINEL"));
+    }
+}
+
+#[test]
 fn continuation_conflict_includes_current_generation() {
     let error = ServiceError::Facade(FacadeError::GenerationConflict {
         current_generation: 1,
