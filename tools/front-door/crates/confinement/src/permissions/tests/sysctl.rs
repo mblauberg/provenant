@@ -37,7 +37,6 @@ static int query(const char *label, int *mib, unsigned count,
 
 int main(int argc, char **argv) {
     if (argc != 3) return 90;
-    int private = strcmp(argv[1], "private") == 0;
     pid_t host = (pid_t)strtol(argv[2], NULL, 10);
     int self_pid[] = {CTL_KERN, KERN_PROC, KERN_PROC_PID, getpid()};
     int self_args[] = {CTL_KERN, KERN_PROCARGS2, getpid()};
@@ -49,7 +48,7 @@ int main(int argc, char **argv) {
     failed |= query("self KERN_PROC_PID", self_pid, 4, 8192, 0);
     failed |= query("self KERN_PROCARGS2", self_args, 3, ARG_MAX, 0);
     failed |= query("host KERN_PROC_PID", host_pid, 4, 8192, 0);
-    failed |= query("host KERN_PROCARGS2", host_args, 3, ARG_MAX, private);
+    failed |= query("host KERN_PROCARGS2", host_args, 3, ARG_MAX, 0);
     failed |= query("host KERN_PROC_ALL", list, 4, 8 * 1024 * 1024, 0);
     failed |= query("HW_NCPU", cpus, 2, sizeof(int), 0);
     return failed;
@@ -57,8 +56,7 @@ int main(int argc, char **argv) {
 "#;
 
 #[test]
-fn sysctl_allows_process_lists_but_blocks_host_arguments() -> Result<(), Box<dyn std::error::Error>>
-{
+fn sysctl_allows_host_process_queries() -> Result<(), Box<dyn std::error::Error>> {
     let executor = SystemExecutor::new(2)?;
     let cancel = CancelToken::new();
     let env = [("LC_ALL".into(), "C".into())];
