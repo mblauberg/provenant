@@ -2496,8 +2496,8 @@ fn dispatch_reuses_only_free_lane_or_unowned_worktree() -> Result<(), Box<dyn st
                 .collect()
         }
     }
-    struct Unknown;
-    impl WorkerObserver for Unknown {
+    struct UnknownCustody;
+    impl WorkerObserver for UnknownCustody {
         fn observe_roots(
             &self,
             roots: &[PathBuf],
@@ -2508,7 +2508,7 @@ fn dispatch_reuses_only_free_lane_or_unowned_worktree() -> Result<(), Box<dyn st
                 .map(|root| {
                     (
                         root.clone(),
-                        Occupancy::census_unknown(root, "fixture census unavailable"),
+                        Occupancy::custody_unknown(root, "fixture custody unavailable"),
                     )
                 })
                 .collect()
@@ -2687,7 +2687,7 @@ fn dispatch_reuses_only_free_lane_or_unowned_worktree() -> Result<(), Box<dyn st
         Some("HEAD"),
         &OperationId::parse("native-branch-refusal")?,
         &edge,
-        &Unknown,
+        &UnknownCustody,
         |_| false,
         &mut None,
         &clock,
@@ -2952,7 +2952,7 @@ fn dispatch_reuses_only_free_lane_or_unowned_worktree() -> Result<(), Box<dyn st
         Some(&base_b),
         &OperationId::parse("terminal-replacement")?,
         &edge,
-        &Unknown,
+        &UnknownCustody,
         |attempt| attempt == prior_attempt,
         &mut None,
         &clock,
