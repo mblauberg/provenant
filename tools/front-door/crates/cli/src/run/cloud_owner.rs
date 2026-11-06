@@ -266,7 +266,7 @@ pub(super) fn submit_installed(
 }
 
 /// Read a cloud record, if submission has written one.
-pub(super) fn load(
+pub fn load(
     store: &provenant_run::RunStore,
     id: AttemptId,
     call: &provenant_run::Request<'_>,
@@ -291,7 +291,7 @@ pub(super) fn load(
 }
 
 /// Find a cloud attempt's sealed target without inferring it from local state.
-pub(super) fn placement(
+pub fn placement(
     store: &provenant_run::RunStore,
     record: &provenant_run::AttemptRecord,
     call: &provenant_run::Request<'_>,
@@ -422,7 +422,7 @@ fn observe_for_view(
 }
 
 /// User-facing advisory result and model comparison for a durable job.
-pub(super) fn view(job: &RemoteJob) -> serde_json::Value {
+pub fn view(job: &RemoteJob) -> serde_json::Value {
     let mut value = serde_json::json!({
         "target": job.target, "environment": job.environment, "provider": job.provider,
         "remote_id": job.remote_id, "commit": job.commit,
