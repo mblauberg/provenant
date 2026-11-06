@@ -2238,8 +2238,16 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                             .count()
                             >= cap
                     }) {
+                        if checkpoint.nodes[node_index]
+                            .extra
+                            .insert("slot_wait".into(), serde_json::Value::Bool(true))
+                            .is_none()
+                        {
+                            journal.save(&checkpoint).map_err(GraphError::Journal)?;
+                        }
                         break;
                     }
+                    checkpoint.nodes[node_index].extra.remove("slot_wait");
                     update_usage_warnings(&mut checkpoint);
                     if let Some(reason) = checkpoint
                         .pause_reason

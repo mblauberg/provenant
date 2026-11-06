@@ -1214,11 +1214,11 @@ mod tests {
         valid(&["run", "--file", "work.toml", "--explain"]);
         invalid(&["run", "--preset", "task"]);
         valid(&["stats", "--by", "tier"]);
-        invalid(&["stats", "--by", "node"]);
+        valid(&["stats", "--by", "node"]);
         valid(&["status", "--stats", "--by", "tier"]);
         valid(&["status", "--stats", "--by", "template"]);
         invalid(&["status", "--by", "tier"]);
-        invalid(&["status", "--stats", "--by", "node"]);
+        valid(&["status", "--stats", "--by", "node"]);
         valid(&["config", "schema", "--all"]);
         valid(&["run", "--tier", "junior"]);
         invalid(&["run", "--tier", "senior", "--route", "junior"]);

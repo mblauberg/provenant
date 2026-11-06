@@ -302,7 +302,7 @@ fn build_strict() -> Vec<Value> {
             if *kind == ToolKind::Run {
                 let graph = tagged_variants("op", json!({
                     "run":{"detached?":{"type":"boolean"},"access?":choices(&["read_only","worktree_write"]),"worktree?":text(MAX_ARTIFACT_PATH_BYTES),"branch?":text(1024),"base?":text(1024),"write_scope?":array(text(MAX_ARTIFACT_PATH_BYTES),0,32),"idempotency_key?":text(200),"document?":{"type":"object"},"brief?":text(MAX_TEXT_BYTES),"use?":text(128),"tier?":text(128),"over?":{"anyOf":[{"type":"array","items":text(1024)},text(128)]},"set?":{"type":"object"},"explain?":{"type":"boolean"},"wait_seconds?":integer(1,crate::MAX_WAIT_SECONDS)},
-                    "status":{"id?":text(200),"stats?":{"type":"boolean"},"by?":choices(&["tier","template"]),"wait_seconds?":integer(1,crate::MAX_WAIT_SECONDS)},
+                    "status":{"id?":text(200),"stats?":{"type":"boolean"},"by?":choices(&["tier","template","node"]),"wait_seconds?":integer(1,crate::MAX_WAIT_SECONDS)},
                     "stop":{"id":text(200),"reason?":text_allowing_empty(provenant_fabric_runtime::graph::MAX_CANCEL_REASON_BYTES),"wait_seconds?":integer(1,crate::MAX_WAIT_SECONDS)},
                     "retry":{"id":text(200),"node?":text(200),"brief?":text(MAX_TEXT_BYTES),"extend?":array(text(256),0,64),"wait_seconds?":integer(1,crate::MAX_WAIT_SECONDS)},
                     "edit":{"id":text(200),"patch":{"type":"object"}},

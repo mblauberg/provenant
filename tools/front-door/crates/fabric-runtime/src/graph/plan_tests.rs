@@ -3833,3 +3833,16 @@ fn planner_admits_bundled_batch_and_deliver_through_the_patch_path() {
         assert!(nodes.iter().any(|node| node.delivery.is_some()));
     }
 }
+
+#[test]
+fn raw_submission_preserves_raw_reporting_label() {
+    let mut document: GraphDocument = serde_json::from_value(json!({
+        "schema_version": 1, "graph_id": "raw-reporting", "nodes": [{
+            "id": "custom", "kind": "task", "access":"read_only", "prompt": "Work",
+            "route": {"alias": "junior"}
+        }]
+    })).unwrap();
+    patch::submission(&mut document, "raw-reporting", &plans::generous()).unwrap();
+    assert_eq!(document.nodes[0].extra["template"], "raw");
+    assert_eq!(document.extra["submission_patch"]["nodes"][0]["use"], "raw");
+}
