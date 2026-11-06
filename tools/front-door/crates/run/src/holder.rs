@@ -1337,7 +1337,7 @@ impl RunStore {
                 && !crate::token_budget::enforces(p)
             {
                 let note = format!(
-                    "token budget is not enforced for provider {p}: live usage is not reported while running"
+                    "token budget is not enforced for provider {p}: mid-turn usage is not reported"
                 );
                 decoded.reason = Some(match decoded.reason.take() {
                     Some(existing) => format!("{existing}; {note}"),

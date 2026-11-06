@@ -698,7 +698,7 @@ pub(crate) fn settle_many(
             push.extend(chunk.iter().map(Into::into));
             execute_bounded(
                 git,
-                &path,
+                path,
                 repo.root_path(),
                 &push,
                 cancel,
