@@ -701,6 +701,70 @@ fn preflight_refusal_replays_and_rejects_changed_inputs() -> TestResult {
 }
 
 #[test]
+fn nested_preflight_refusal_replays_and_rejects_changed_inputs() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let make = |prompt| {
+        let mut input = submission(prompt);
+        input.parent_attempt = Some(provenant_core::AttemptId::from_bytes([9; 16]));
+        input.lane_depth = 2;
+        input.tasks[0].route = RequestedRoute::Model {
+            extra: Default::default(),
+            provider: "cursor".into(),
+            model: "cursor/m".into(),
+            effort: Some("high".into()),
+        };
+        input
+    };
+    let operation = make("first").operation_id;
+    let first = Service::new(&store)
+        .dispatch(make("first"), temp.path(), &call)
+        .unwrap_err();
+    let saved = store
+        .operation(&operation, &call)?
+        .ok_or("missing refusal")?;
+    assert!(matches!(first, RunError::RecordedRefusal(_)));
+    assert!(matches!(
+        Service::new(&store).dispatch(make("first"), temp.path(), &call),
+        Err(RunError::RecordedRefusal(_))
+    ));
+    assert_eq!(
+        store.operation(&operation, &call)?.unwrap().run_id,
+        saved.run_id
+    );
+    assert!(matches!(
+        Service::new(&store).dispatch(make("changed"), temp.path(), &call),
+        Err(RunError::OperationConflict)
+    ));
+    Ok(())
+}
+
+#[test]
+fn nested_secret_refusal_does_not_store_prompt() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let secret = concat!("sk-", "abcdefghijklmnopqrstuvwxyz123456");
+    let mut input = submission(secret);
+    input.parent_attempt = Some(provenant_core::AttemptId::from_bytes([9; 16]));
+    input.lane_depth = 2;
+    let operation = input.operation_id.clone();
+    let result = Service::new(&store).dispatch(input, temp.path(), &call);
+    assert!(
+        matches!(result, Err(RunError::RecordedRefusal(_))),
+        "{result:?}"
+    );
+    let saved = store
+        .operation(&operation, &call)?
+        .ok_or("missing refusal")?;
+    assert!(!serde_json::to_string(&saved)?.contains(secret));
+    Ok(())
+}
+
+#[test]
 fn explicit_skill_location_is_rechecked_before_dispatch() -> TestResult {
     for (provider, required, accepted) in [
         ("command", false, true),

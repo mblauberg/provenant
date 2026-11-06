@@ -92,18 +92,25 @@ impl<'a> Service<'a> {
         let mut requests = Vec::new();
         let mut attempts = Vec::new();
         let mut contribution_branches = std::collections::BTreeMap::new();
+        let mut nested_refusal = None;
         // Refuse every task's unsupported launch before any task prepares a writer.
         for task in &input.tasks {
             let route = Self::route(task.route.clone())?;
             if let Err(error) = check_launch_capabilities(task, &route) {
-                return self.preflight_refusal(&input, task, cwd, error, call);
+                if input.parent_attempt.is_none() {
+                    return self.preflight_refusal(&input, task, cwd, error, call);
+                }
+                nested_refusal.get_or_insert((error, task.worktree.clone()));
             }
         }
         // Scan every prompt before preparing any writer. A later task must not
         // leave an earlier task's writer behind when its input is refused.
         for task in &input.tasks {
             if let Err(error) = Self::scan(&task.prompt) {
-                return self.preflight_refusal(&input, task, cwd, error, call);
+                if input.parent_attempt.is_none() {
+                    return self.preflight_refusal(&input, task, cwd, error, call);
+                }
+                nested_refusal.get_or_insert((error, task.worktree.clone()));
             }
         }
         for mut task in input.tasks {
@@ -363,6 +370,27 @@ impl<'a> Service<'a> {
                 attempt.attempt_id = id;
             }
         }
+        if let Some((error, worktree)) = nested_refusal {
+            let diagnostic = ErrorKind::from(&error)
+                .diagnostic()
+                .detail(error.to_string());
+            let worktree = worktree
+                .as_deref()
+                .and_then(Path::file_name)
+                .and_then(|name| name.to_str())
+                .map(str::to_owned);
+            let saved = self
+                .store
+                .record_refusal(&prepared, diagnostic, worktree, call)?;
+            if saved.state != OperationState::Refused {
+                return Err(RunError::OperationConflict);
+            }
+            return Err(RunError::RecordedRefusal(
+                saved
+                    .refusal
+                    .ok_or(RunError::Validation("refusal diagnostic missing"))?,
+            ));
+        }
         let record = self.store.create(&prepared, call)?;
         if !contribution_branches.is_empty() {
             let captured = (|| {
@@ -388,11 +416,6 @@ impl<'a> Service<'a> {
         error: RunError,
         call: &Request<'_>,
     ) -> Result<RunRecord> {
-        // A nested run's ID is derived from its canonical request,
-        // which is not available until parent validation completes.
-        if input.parent_attempt.is_some() {
-            return Err(error);
-        }
         let mut extra = provenant_records::ExtraFields::default();
         extra.insert("preflight_digest_version".into(), serde_json::json!(1));
         if let Some(notice) = task.profile.knobs.get("chair.refusal_notice") {
