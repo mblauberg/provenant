@@ -98,6 +98,7 @@ pub(super) fn validate(pattern: &PatternSpec) -> Result<(), &'static str> {
             "role",
             "source",
             "read_roots",
+            "attachments",
             "route",
             "routes",
         ] {

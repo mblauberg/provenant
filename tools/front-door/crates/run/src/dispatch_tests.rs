@@ -461,6 +461,7 @@ fn host_refuses_child_access_beyond_its_parent_task() -> TestResult {
         network,
         database_ipc: false,
         read_roots: reads.iter().map(|path| base.join(path)).collect(),
+        attachments: Vec::new(),
         write_roots: writes.iter().map(|path| base.join(path)).collect(),
         inputs_root: None,
         source_root: None,

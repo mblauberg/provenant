@@ -451,6 +451,9 @@ inside text insert scalar values. Unknown parameters and unresolved bindings
 are rejected. Stage IDs form local dependency and export names; expansion
 namespaces nested children. Child presets have their own parameters and roles;
 an entry's `parameters` and `roles` tables override that child's defaults.
+Typed parameters may declare `bind = "risk_tier"` or `bind = "kind"` to
+receive the corresponding request flag. An unbound request flag warns and is
+dropped; parameter files and dispatch overrides retain their precedence.
 
 Composite nodes retain their children, expose declared outputs and report
 one grouped status. Their internal attempts and evidence remain available in
@@ -463,6 +466,11 @@ output kinds. Composites use no provider attempt of their own. An entry can
 declare `loop = { stages = [...], until = "accept", max_rounds = 2 }` to reuse
 roles and presets inside bounded repair. Existing `loop.body` configuration
 also remains available. Planner fragments do not resolve named presets.
+Parallel groups may declare `min_successful`, `zero_minimum`, `reduce_verdict`
+and `export_first` on the group; the [preset runbook](../runbooks/presets.md#composition-rules)
+describes their accepted values.
+Preset compilation uses the runtime's composite expansion and loop count when
+it checks the host depth and node bounds, so admission checks the same graph.
 
 Bundled `scout-swarm`, `generator-evaluator`, `review`, `big-batch`,
 `scope-then-run` and `deliver` express scouting, implementation with
@@ -599,6 +607,12 @@ canonicalise each root and accept only the project, its linked worktrees and
 the host's `[domains.fabric.graph] allowed_read_roots` list. A planner
 fragment may not add `read_roots`, change `source` or change `role` relative
 to its planner node.
+
+Agent nodes may also declare `attachments`, a list of image file paths. Paths
+are canonicalised and granted read-only as individual files. Claude receives
+paths in its prompt and Codex receives image arguments. Other adapters warn
+about `image_input` and retain the read grant. A planner fragment cannot add
+attachments beyond its planner node's list.
 
 A graph document may set a top-level `network` of `"on"` or `"off"`. Every
 node lane the graph launches receives that network reach; without it, lanes

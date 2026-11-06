@@ -631,6 +631,9 @@ pub struct Access {
     /// Extra directory the lane may read (repeatable)
     #[arg(long, catalog_bounds = (0, 32))]
     pub read_root: Vec<PathBuf>,
+    /// Image file to attach to the lane (repeatable)
+    #[arg(long, catalog_bounds = (0, 32))]
+    pub attach: Vec<PathBuf>,
     /// Extra directory the lane may write, outside Git metadata (repeatable)
     #[arg(long, catalog_bounds = (0, 32))]
     pub write_root: Vec<PathBuf>,

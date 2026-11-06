@@ -291,7 +291,9 @@ impl Admission<'_> {
         let snapshot = self.fresh_snapshot(&route.adapter, record);
         if let Some(snapshot) = snapshot {
             if snapshot.status == QuotaStatus::AuthRequired {
-                return Err(QuotaError::Refused("authentication required"));
+                return Err(QuotaError::Refused(
+                    "authentication required; sign in to the selected account",
+                ));
             }
             match partial_headroom(
                 snapshot,
@@ -594,6 +596,41 @@ mod admission_tests {
             }],
         });
         record
+    }
+    #[test]
+    fn stale_availability_warning_does_not_bypass_exhaustion() {
+        let mut route = route();
+        route.readiness = RouteReadiness::Ready {
+            extra: [("availability_warning".into(), serde_json::json!("stale"))]
+                .into_iter()
+                .collect(),
+            availability_ref: "fixture".into(),
+            expires_unix_seconds: 1050,
+        };
+        let pools = vec!["pool-a".into()];
+        let admission = |records| Admission {
+            policies: crate::source::TEST_POLICIES,
+            now_unix_seconds: 1000,
+            records,
+            pools: &pools,
+        };
+        assert!(admission(&[]).check(&route).is_ok());
+        let exhausted = [record(QuotaStatus::Available)];
+        assert!(admission(&exhausted).check(&route).is_err());
+        let auth = [record(QuotaStatus::AuthRequired)];
+        assert!(admission(&auth).check(&route).is_err());
+        let mut stale_auth = record(QuotaStatus::AuthRequired);
+        stale_auth.snapshot.as_mut().unwrap().observed_unix_seconds = 0;
+        let stale_auth = [stale_auth];
+        assert!(admission(&stale_auth).check(&route).is_ok());
+        route.readiness = RouteReadiness::Ready {
+            extra: [("availability_warning".into(), serde_json::json!("stale"))]
+                .into_iter()
+                .collect(),
+            availability_ref: "fixture".into(),
+            expires_unix_seconds: 950,
+        };
+        assert!(admission(&[]).check(&route).is_err());
     }
     #[test]
     fn account_mismatch_blocks_until_identity_verifies_again() {

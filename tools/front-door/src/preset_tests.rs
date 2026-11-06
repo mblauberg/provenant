@@ -1057,8 +1057,16 @@ fn explain_pending_checks_follow_the_document() {
             json!({"nodes":[{"id":"plan","kind":"plan","access":"read_only","prompt":"x"}]}),
             vec!["planner_authority", "route_readiness"],
         ),
+        (
+            json!({"nodes":[{"id":"group","kind":"composite","access":"read_only","composite":{"nodes":[{"id":"writer","access":"worktree_write","worktree":"/repo/w","source":{"type":"node","node":"upstream"}}],"exports":[]}}]}),
+            vec!["route_readiness", "source", "worktree"],
+        ),
     ];
-    for (document, expected) in cases {
+    for (mut document, expected) in cases {
+        document["schema_version"] = json!(1);
+        document["graph_id"] = json!("pending");
+        let document: provenant_fabric_runtime::graph::GraphDocument =
+            serde_json::from_value(document).unwrap();
         let checks = super::preset::pending_checks(&document);
         let ids: Vec<_> = checks
             .iter()
@@ -2777,6 +2785,186 @@ message = 'explicit'
 }
 
 #[test]
+fn leaf_fields_follow_graph_node_type_and_report_unknown_fields() {
+    let mut layers = Layers::empty();
+    layers
+        .insert(
+            "test",
+            "typed-field",
+            "stages = [{ id = 'check', skip_without_findings = true, route = { alias = 'senior' }, goal = 'Check it' }]\n",
+        )
+        .unwrap();
+    let expansion = expand(&layers, "typed-field", "brief", &[]).unwrap();
+    assert_eq!(
+        expansion.document["nodes"][0]["skip_without_findings"],
+        true
+    );
+    assert_eq!(expansion.document["nodes"][0]["route"]["alias"], "senior");
+    assert_eq!(expansion.document["nodes"][0]["prompt"], "Check it");
+    assert!(expansion.document["nodes"][0].get("routes").is_none());
+
+    layers
+        .insert(
+            "test",
+            "unknown-field",
+            "stages = [{ id = 'check', distinct_from = 'bad', misspelled_field = true }]\n",
+        )
+        .unwrap();
+    let error = expand(&layers, "unknown-field", "brief", &[]).unwrap_err();
+    assert!(
+        error.contains("check") && error.contains("misspelled_field"),
+        "{error}"
+    );
+}
+
+#[test]
+fn embedded_graph_nodes_reject_unknown_fields() {
+    for (name, body) in [
+        (
+            "raw-composite",
+            "kind = 'composite', composite = { nodes = [{ id = 'member', access = 'read_only', prompt = 'work', unexpected_field = true }], exports = [] }",
+        ),
+        (
+            "raw-loop",
+            "kind = 'loop', loop = { max_rounds = 1, until = 'member', body = [{ id = 'member', access = 'read_only', prompt = 'work', unexpected_field = true }] }",
+        ),
+        (
+            "raw-plan-fallback",
+            "kind = 'plan', plan = { kinds = ['task'], max_nodes = 1, fallback = { nodes = [{ id = 'member', access = 'read_only', prompt = 'work', unexpected_field = true }], exports = [] } }",
+        ),
+        (
+            "invalid-raw-composite",
+            "kind = 'composite', composite = { nodes = [{ id = 'member', access = 'read_only', prompt = 'work', deadline_seconds = 'bad', unexpected_field = true }], exports = [] }",
+        ),
+        (
+            "invalid-raw-loop",
+            "kind = 'loop', loop = { max_rounds = 1, until = 'member', body = [{ id = 'member', access = 'read_only', prompt = 'work', deadline_seconds = 'bad', unexpected_field = true }] }",
+        ),
+        (
+            "invalid-raw-plan-fallback",
+            "kind = 'plan', plan = { kinds = ['task'], max_nodes = 1, fallback = { nodes = [{ id = 'member', access = 'read_only', prompt = 'work', deadline_seconds = 'bad', unexpected_field = true }], exports = [] } }",
+        ),
+    ] {
+        let mut layers = Layers::empty();
+        layers
+            .insert(
+                "test",
+                name,
+                &format!("stages = [{{ id = 'group', {body} }}]\n"),
+            )
+            .unwrap();
+        let error = expand(&layers, name, "brief", &[]).unwrap_err();
+        assert!(
+            error.contains("member") && error.contains("unexpected_field"),
+            "{error}"
+        );
+    }
+}
+
+#[test]
+fn graph_wire_preserves_empty_leaf_fields_and_absent_composite_prompt() {
+    let mut layers = Layers::empty();
+    layers
+        .insert(
+            "test",
+            "wire-presence",
+            r#"stages = [
+  { id = "task", prompt = "work", inputs = [], read_roots = [] },
+  { id = "group", parallel = [{ id = "member", prompt = "review" }] }
+]
+"#,
+        )
+        .unwrap();
+    let expansion = expand(&layers, "wire-presence", "brief", &[]).unwrap();
+    let task = node(&expansion.document, "task");
+    assert_eq!(task.get("inputs"), Some(&json!([])));
+    assert_eq!(task.get("read_roots"), Some(&json!([])));
+    let group = node(&expansion.document, "group");
+    assert!(group.get("prompt").is_none());
+}
+
+#[test]
+fn graph_settings_and_provenance_survive_typed_assembly() {
+    let mut layers = Layers::empty();
+    layers
+        .insert(
+            "test",
+            "graph-settings",
+            r#"
+integration_branch = "batch/work"
+delivery = "integrate:batch/work"
+decision_session = "session"
+limits = { nodes = 10 }
+retry = { attempts = 2 }
+stages = [{ id = "task" }]
+"#,
+        )
+        .unwrap();
+    let expansion = expand(&layers, "graph-settings", "brief", &[]).unwrap();
+    assert_eq!(expansion.document["integration_branch"], "batch/work");
+    assert_eq!(expansion.document["delivery"], "integrate:batch/work");
+    assert_eq!(expansion.document["decision_session"], "session");
+    assert_eq!(expansion.document["limits"], json!({"nodes": 10}));
+    assert_eq!(expansion.document["retry"], json!({"attempts": 2}));
+    assert_eq!(expansion.document["provenance"]["preset"], "graph-settings");
+}
+
+#[test]
+fn malformed_graph_settings_name_the_field() {
+    for key in ["integration_branch", "delivery", "decision_session"] {
+        let mut layers = Layers::empty();
+        layers
+            .insert(
+                "test",
+                "bad-setting",
+                &format!("{key} = 5\nstages = [{{ id = 'task' }}]\n"),
+            )
+            .unwrap();
+        let error = expand(&layers, "bad-setting", "brief", &[]).unwrap_err();
+        assert!(error.contains(key), "{key}: {error}");
+    }
+}
+
+#[test]
+fn malformed_node_settings_name_the_stage_and_field() {
+    for (field, value) in [
+        ("deadline_seconds", "'not-a-number'"),
+        ("skip_without_findings", "'not-a-boolean'"),
+        ("source", "{ type = 'node', node = 5 }"),
+    ] {
+        let mut layers = Layers::empty();
+        layers
+            .insert(
+                "test",
+                "bad-node-setting",
+                &format!("stages = [{{ id = 'check', {field} = {value} }}]\n"),
+            )
+            .unwrap();
+        let error = expand(&layers, "bad-node-setting", "brief", &[]).unwrap_err();
+        assert!(error.contains("check") && error.contains(field), "{error}");
+    }
+    let mut layers = Layers::empty();
+    layers
+        .insert(
+            "test",
+            "bad-member",
+            "stages = [{ id = 'group', stages = [{ id = 'member', deadline_seconds = 'bad' }] }]\n",
+        )
+        .unwrap();
+    let error = expand(&layers, "bad-member", "brief", &[]).unwrap_err();
+    assert!(
+        error.contains("member") && error.contains("deadline_seconds"),
+        "{error}"
+    );
+    layers.insert("test", "bad-fallback", "stages = [{ id = 'plan', kind = 'plan', plan = { kinds = ['task'], max_nodes = 1, fallback = { nodes = [{ id = 'member', access = 'read_only', deadline_seconds = 'bad' }], exports = [] } } }]\n").unwrap();
+    let error = expand(&layers, "bad-fallback", "brief", &[]).unwrap_err();
+    assert!(
+        error.contains("member") && error.contains("deadline_seconds"),
+        "{error}"
+    );
+}
+
+#[test]
 fn composite_exports_are_checked_when_a_preset_is_compiled() {
     let mut layers = Layers::empty();
     layers.insert("test", "invalid-export", "stages = [{ id = 'group', stages = [{ id = 'member', prompt = 'work' }], exports = [{ node = 'missing', outputs = ['result'] }] }]\n").unwrap();
@@ -2790,6 +2978,77 @@ fn composite_exports_are_checked_when_a_preset_is_compiled() {
     let document: provenant_fabric_runtime::graph::GraphDocument =
         serde_json::from_value(document).unwrap();
     assert_eq!(error, document.admit(&Default::default()).unwrap_err());
+}
+
+#[test]
+fn loop_safety_bound_is_shared_by_preset_compile_and_admission() {
+    let stages = (0..17)
+        .map(|index| {
+            format!("{{ id = 'gate-{index}', kind = 'gate', condition = {{ type = 'budget' }} }}")
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    let preset = |rounds| {
+        format!(
+            "stages = [{{ id = 'repair', loop = {{ max_rounds = {rounds}, until = 'gate-16', stages = [{stages}] }} }}]\n"
+        )
+    };
+    let mut layers = Layers::empty();
+    layers.graph_limits.nodes = 20_000;
+    layers.insert("test", "large-loop", &preset(1024)).unwrap();
+    layers
+        .insert("test", "too-many-rounds", &preset(1025))
+        .unwrap();
+    layers.insert("test", "small-loop", &preset(1)).unwrap();
+    let error = expand(&layers, "large-loop", "brief", &[]).unwrap_err();
+    assert!(
+        error.contains("limits.loop_expansion_nodes=16384"),
+        "{error}"
+    );
+    assert!(error.contains("internal loop expansion safety"), "{error}");
+    let mut document = expand(&layers, "small-loop", "brief", &[])
+        .unwrap()
+        .document;
+    document["nodes"][0]["loop"]["max_rounds"] = json!(1024);
+    let document: provenant_fabric_runtime::graph::GraphDocument =
+        serde_json::from_value(document).unwrap();
+    assert_eq!(document.admit(&layers.graph_limits).unwrap_err(), error);
+    let error = expand(&layers, "too-many-rounds", "brief", &[]).unwrap_err();
+    assert!(
+        error.contains("limits.loop_expansion_rounds=1024"),
+        "{error}"
+    );
+    assert!(error.contains("internal loop expansion safety"), "{error}");
+}
+
+#[test]
+fn invalid_loop_round_settings_fail_at_compile_and_admission() {
+    let preset = |rounds, extension| {
+        format!(
+            "stages = [{{ id = 'repair', loop = {{ max_rounds = {rounds}, max_extension_rounds = {extension}, until = 'check', stages = [{{ id = 'check', kind = 'gate', condition = {{ type = 'budget' }} }}] }} }}]\n"
+        )
+    };
+    let mut layers = Layers::empty();
+    layers.insert("test", "valid-loop", &preset(1, 1)).unwrap();
+    let valid = expand(&layers, "valid-loop", "brief", &[])
+        .unwrap()
+        .document;
+    for (name, field, rounds, extension, invalid) in [
+        ("zero-rounds", "max_rounds", 0, 1, 0),
+        ("zero-extension", "max_extension_rounds", 1, 0, 0),
+        ("large-extension", "max_extension_rounds", 1, 1025, 1025),
+    ] {
+        layers
+            .insert("test", name, &preset(rounds, extension))
+            .unwrap();
+        let error = expand(&layers, name, "brief", &[]).unwrap_err();
+        assert!(error.contains("repair") && error.contains(field), "{error}");
+        let mut document = valid.clone();
+        document["nodes"][0]["loop"][field] = json!(invalid);
+        let document: provenant_fabric_runtime::graph::GraphDocument =
+            serde_json::from_value(document).unwrap();
+        assert_eq!(document.admit(&layers.graph_limits).unwrap_err(), error);
+    }
 }
 
 #[test]
@@ -2821,6 +3080,9 @@ fn preset_node_limit_uses_the_host_admission_bound() {
     )
     .unwrap();
     assert_eq!(error, document.admit(&layers.graph_limits).unwrap_err());
+    layers.graph_limits.nodes = 3;
+    assert!(expand(&layers, "counted-loop", "brief", &[]).is_ok());
+    assert!(document.admit(&layers.graph_limits).is_ok());
 }
 
 #[test]
@@ -7114,6 +7376,38 @@ fn a_generator_review_defers_its_size_until_the_writer_has_run() {
 }
 
 #[test]
+fn deferred_review_rebinds_stored_template_fields() {
+    use provenant_fabric_runtime::graph::{GraphNode, SourceBinding};
+
+    let expansion = expand(
+        &real_selector("/nonexistent"),
+        "deliver",
+        "brief",
+        &["parameters.worktree='/repo/w'".into()],
+    )
+    .unwrap();
+    let mut node: GraphNode =
+        serde_json::from_value(expansion.document["nodes"][2]["composite"]["nodes"][0].clone())
+            .unwrap();
+    let frame = &mut node.extra.get_mut("panel_templates").unwrap()["frame"];
+    for field in ["id", "source", "read_roots", "depends_on", "inputs"] {
+        frame[field] = json!(false);
+    }
+
+    let subject = "0123456789abcdef0123456789abcdef01234567";
+    let expanded = crate::fabric::fixture_review_expansion(&node, subject, "standard").unwrap();
+    let frame = expanded
+        .nodes
+        .iter()
+        .find(|n| n.id.ends_with("--f"))
+        .unwrap();
+    assert!(matches!(&frame.source, Some(SourceBinding::Commit { commit }) if commit == subject));
+    assert_eq!(frame.read_roots, node.read_roots);
+    assert_eq!(frame.depends_on, node.depends_on);
+    assert_eq!(frame.inputs, node.inputs);
+}
+
+#[test]
 fn deliver_deferred_review_runs_the_resolved_shape_on_the_writer_commit() {
     use provenant_fabric_runtime::graph::{GraphDocument, advance_with_budget};
     let layers = real_selector("/nonexistent");
@@ -7570,6 +7864,28 @@ fn request_bindings_follow_declarations_and_warn_when_missing() {
 }
 
 #[test]
+fn dispatch_parameters_apply_each_layer_once_in_order() {
+    let mut layers = Layers::empty();
+    layers.insert("test", "binding-order", "stages = [{ id = 'task', prompt = '${priority}' }]\n[parameters]\npriority = { type = 'string', bind = 'risk_tier' }\n").unwrap();
+    let selected = vec![("priority".into(), json!("selected"))];
+    let file = vec![("priority".into(), json!("file"))];
+    let (parameters, warnings) = super::preset::dispatch_parameters(
+        &layers,
+        "binding-order",
+        selected,
+        Some("routine"),
+        None,
+        &file,
+    )
+    .unwrap();
+    assert!(warnings.is_empty());
+    assert_eq!(parameters, file);
+    let expansion =
+        super::preset::expand_with(&layers, "binding-order", "brief", &parameters, &[]).unwrap();
+    assert_eq!(expansion.document["nodes"][0]["prompt"], "file");
+}
+
+#[test]
 fn copied_generator_evaluator_receives_the_same_request_and_nodes() {
     let mut layers = Layers::empty();
     layers.review = Some(shapes());
@@ -7595,7 +7911,14 @@ fn copied_generator_evaluator_receives_the_same_request_and_nodes() {
             &["parameters.worktree='/repo/lane'".into()],
         )
         .unwrap();
-        documents.push(expansion.document["nodes"].clone());
+        let mut document = expansion.document;
+        // Names and layer origins are intentionally recorded as provenance;
+        // compare the entire executable document independently of that record.
+        document.as_object_mut().unwrap().remove("provenance");
+        let context = document["context"].as_object_mut().unwrap();
+        context.remove("preset");
+        context.remove("pattern");
+        documents.push(document);
     }
     assert_eq!(documents[0], documents[1]);
 }
@@ -7705,16 +8028,17 @@ fn writer_tier_override_and_advisory_mix() {
     .unwrap();
     assert_eq!(explicit.document["nodes"][0]["route"]["alias"], "junior");
 
-    assert_eq!(
-        writer_tier_mix(expanded.document["nodes"].as_array().unwrap()),
-        [1, 0, 0]
-    );
+    let document: provenant_fabric_runtime::graph::GraphDocument =
+        serde_json::from_value(expanded.document.clone()).unwrap();
+    assert_eq!(writer_tier_mix(&document.nodes), [1, 0, 0]);
     let nodes = json!([
-        {"access":"worktree_write","route":{"alias":"senior"}},
-        {"access":"worktree_write","route":{"model":"provider/model"}},
-        {"composite":{"nodes":[{"access":"worktree_write","route":{"alias":"principal"}}]}}
+        {"id":"senior","access":"worktree_write","route":{"alias":"senior"}},
+        {"id":"exact","access":"worktree_write","route":{"model":"provider/model"}},
+        {"id":"group","access":"read_only","kind":"composite","composite":{"nodes":[{"id":"principal","access":"worktree_write","route":{"alias":"principal"}}],"exports":[]}}
     ]);
-    assert_eq!(writer_tier_mix(nodes.as_array().unwrap()), [0, 1, 1]);
+    let nodes: Vec<provenant_fabric_runtime::graph::GraphNode> =
+        serde_json::from_value(nodes).unwrap();
+    assert_eq!(writer_tier_mix(&nodes), [0, 1, 1]);
 }
 
 #[test]

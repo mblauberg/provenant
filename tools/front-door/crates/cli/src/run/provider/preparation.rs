@@ -3,6 +3,16 @@ use super::*;
 const DEPENDENCY_INSTALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
 const DEPENDENCY_STDERR_TAIL: usize = 4096;
 
+pub(super) fn image_input_warning(adapter: &str, attachments: &[PathBuf]) -> Option<String> {
+    (!attachments.is_empty()
+        && !AdapterSpec::get(adapter).is_some_and(|spec| spec.launch.image_input))
+    .then(|| {
+        format!(
+            "warning: adapter {adapter} does not support image_input; attachments remain readable"
+        )
+    })
+}
+
 pub(super) fn violates_account_pin(
     selected_key: Option<&str>,
     selected_adapter: Option<&str>,
@@ -1258,7 +1268,20 @@ pub(super) fn prepare_candidates(
                     )
                 })
                 .map_or_else(
-                    || provenant_routing::exclusion_detail(reason),
+                    || {
+                        route
+                            .extra
+                            .get("account_exclusions")
+                            .and_then(|v| v.as_array())
+                            .map(|items| {
+                                items
+                                    .iter()
+                                    .filter_map(|v| v.as_str())
+                                    .collect::<Vec<_>>()
+                                    .join("; ")
+                            })
+                            .unwrap_or_else(|| provenant_routing::exclusion_detail(reason))
+                    },
                     |error| {
                         reported_plan_errors.insert(route.adapter.clone());
                         format!("confinement plan: {error}")
@@ -1373,6 +1396,20 @@ pub(super) fn prepare_candidates(
                 format!("{location}\n{prompt_text}")
             }
             None => prompt_text.to_owned(),
+        };
+        let text = if !task.access.attachments.is_empty()
+            && !AdapterSpec::get(adapter.id()).is_some_and(|spec| spec.launch.image_input)
+        {
+            let paths = task
+                .access
+                .attachments
+                .iter()
+                .map(|path| format!("- {}", path.display()))
+                .collect::<Vec<_>>()
+                .join("\n");
+            format!("{text}\n\nAttached images (open these files if supported):\n{paths}")
+        } else {
+            text
         };
         let text = format!(
             "{}\n{text}",
@@ -1537,6 +1574,7 @@ pub(super) fn prepare_candidates(
         let grant_digest = task.authority_digest.to_string();
         let prepare = |provider_route: &provenant_records::ResolvedRoute| {
             adapter.prepare(PrepareInput {
+                images: &task.access.attachments,
                 command: None,
                 route: provider_route,
                 confined: &plan,
@@ -1746,6 +1784,9 @@ pub(super) fn prepare_candidates(
                 "warning: OpenCode login status is unverified; the selected launch will check authentication"
             );
         }
+        if let Some(warning) = image_input_warning(&route.adapter, &task.access.attachments) {
+            let _ = writeln!(std::io::stderr().lock(), "{warning}");
+        }
         for warning in config.domains.routing.pool_effort_warnings(&catalogue) {
             let _ = writeln!(std::io::stderr().lock(), "{warning}");
         }
@@ -1792,6 +1833,13 @@ pub(super) fn prepare_candidates(
             resume.is_some(),
             redirected || current_candidate > 0,
         );
+        if let Some(warning) = provider
+            .extra
+            .get("availability_warning")
+            .and_then(|v| v.as_str())
+        {
+            let _ = writeln!(std::io::stderr().lock(), "warning: {warning}");
+        }
         provider.extra.insert(
             "account_source".into(),
             account_source(resume.is_some(), task.account.is_some()).into(),
@@ -1941,7 +1989,21 @@ fn launch_route_record(
     } else {
         "named_route"
     };
-    RouteRecord::from_resolved(route, account_label, source)
+    let mut record = RouteRecord::from_resolved(route, account_label, source);
+    if let provenant_records::RouteReadiness::Ready { extra, .. } = &route.readiness
+        && let Some(state) = extra.get("availability_warning").and_then(|v| v.as_str())
+    {
+        let warning = format!(
+            "account {} availability is {state}; the provider will check it",
+            account_label
+                .or(route.account_key.as_deref())
+                .unwrap_or("unknown")
+        );
+        record
+            .extra
+            .insert("availability_warning".into(), warning.into());
+    }
+    record
 }
 
 #[cfg(test)]
@@ -2001,6 +2063,20 @@ mod receipt_tests {
         assert_eq!(wire["effort"], "high");
         assert_eq!(wire["account_label"], "work");
         assert_eq!(wire["source"], "named_route");
+        let mut uncertain = resolved.clone();
+        uncertain.readiness = provenant_records::RouteReadiness::Ready {
+            extra: [("availability_warning".into(), serde_json::json!("Stale"))]
+                .into_iter()
+                .collect(),
+            availability_ref: "fixture".into(),
+            expires_unix_seconds: 99,
+        };
+        let warned = launch_route_record(&uncertain, Some("work"), &requested, false, false);
+        assert!(
+            warned.extra["availability_warning"]
+                .as_str()
+                .is_some_and(|warning| warning.contains("work") && warning.contains("Stale"))
+        );
         let pinned = run::RequestedRoute::Model {
             extra: Default::default(),
             provider: "codex".into(),
@@ -2141,5 +2217,18 @@ mod user_skills_tests {
         assert_eq!(record["exposed"], false);
         assert_eq!(record["staged_file_count"], 0);
         assert_eq!(record["source"], origin);
+    }
+}
+
+#[cfg(test)]
+mod attachment_tests {
+    use super::*;
+    #[test]
+    fn unsupported_image_input_warns_without_refusing() {
+        let images = vec![PathBuf::from("/outside/image.png")];
+        let warning = image_input_warning("cursor", &images).unwrap();
+        assert!(warning.contains("cursor") && warning.contains("image_input"));
+        assert!(image_input_warning("claude", &images).is_none());
+        assert!(image_input_warning("cursor", &[]).is_none());
     }
 }

@@ -13,10 +13,12 @@ struct Identity {
 fn usable(identity: &Identity, at: i64) -> bool {
     identity.token.is_some() && identity.expires.is_some_and(|e| e > at.saturating_add(60))
 }
-// An expired access token alone does not prove that refresh was rejected.
-fn no_usable_identity(fixed: &Identity) -> ProbeFailure {
+// An expired token is evidence of expiry, not proof that refresh was rejected.
+fn no_usable_identity(fixed: &Identity, now: i64) -> ProbeFailure {
     if fixed.missing {
         ProbeFailure::Auth
+    } else if fixed.expires.is_some_and(|expiry| expiry <= now) {
+        ProbeFailure::LoginExpired
     } else {
         ProbeFailure::Network
     }
@@ -74,7 +76,7 @@ fn status_fingerprint(result: Result<ExecOutcome, ProbeFailure>) -> Result<Strin
         return Err(ProbeFailure::Network);
     }
     let state: Value =
-        serde_json::from_slice(&out.stdout.bytes).map_err(|_| ProbeFailure::Network)?;
+        serde_json::from_slice(&out.stdout.bytes).map_err(|_| ProbeFailure::Malformed)?;
     if state.get("loggedIn").and_then(Value::as_bool) == Some(false) {
         return Err(ProbeFailure::Auth);
     }
@@ -101,7 +103,7 @@ fn parse_credentials(raw: &[u8]) -> Result<Value, ProbeFailure> {
     if raw.is_empty() {
         return Err(ProbeFailure::Auth);
     }
-    let value: Value = serde_json::from_slice(raw).map_err(|_| ProbeFailure::Network)?;
+    let value: Value = serde_json::from_slice(raw).map_err(|_| ProbeFailure::Malformed)?;
     if value.get("claudeAiOauth").is_none() {
         return Err(ProbeFailure::Auth);
     }
@@ -176,12 +178,7 @@ fn refresh(
         Err(ProbeFailure::ProbeDirectory)
     } else {
         result.map(|_| ()).map_err(|error| match error {
-            // An unchanged expired token alone does not prove rejection: the CLI
-            // may have been offline. Retry on the network schedule.
-            crate::ProviderError::CredentialExpired if watched.rejected.load(Ordering::Relaxed) => {
-                ProbeFailure::LoginExpired
-            }
-            crate::ProviderError::CredentialExpired => ProbeFailure::Network,
+            crate::ProviderError::CredentialExpired => ProbeFailure::LoginExpired,
             crate::ProviderError::CredentialNotFound => ProbeFailure::Auth,
             _ => ProbeFailure::Network,
         })
@@ -407,11 +404,11 @@ impl LiveQuota {
                 *self.login_expiry.borrow_mut() = fixed.expires;
             }
             if !usable(&fixed, self.now()) {
-                return Err(refresh_error.unwrap_or_else(|| no_usable_identity(&fixed)));
+                return Err(refresh_error.unwrap_or_else(|| no_usable_identity(&fixed, self.now())));
             }
         }
         if !usable(&fixed, self.now()) {
-            return Err(no_usable_identity(&fixed));
+            return Err(no_usable_identity(&fixed, self.now()));
         }
         details.fingerprint = Some(expected);
         self.http(
@@ -441,12 +438,15 @@ mod tests {
             missing: false,
             fingerprint: "fake".into(),
         };
-        assert_eq!(no_usable_identity(&identity), ProbeFailure::Network);
-        assert_eq!(no_usable_identity(&identity), ProbeFailure::Network);
+        assert_eq!(
+            no_usable_identity(&identity, 1000),
+            ProbeFailure::LoginExpired
+        );
+        assert_eq!(no_usable_identity(&identity, 999), ProbeFailure::Network);
         identity.expires = None;
-        assert_eq!(no_usable_identity(&identity), ProbeFailure::Network);
+        assert_eq!(no_usable_identity(&identity, 1000), ProbeFailure::Network);
         identity.missing = true;
-        assert_eq!(no_usable_identity(&identity), ProbeFailure::Auth);
+        assert_eq!(no_usable_identity(&identity, 1000), ProbeFailure::Auth);
     }
 
     #[test]
@@ -508,12 +508,31 @@ mod tests {
     }
 
     #[test]
-    fn absent_credentials_are_auth_and_invalid_json_is_transient() {
+    fn absent_credentials_are_auth_and_invalid_json_is_malformed() {
         use super::*;
         assert_eq!(parse_credentials(b""), Err(ProbeFailure::Auth));
         assert_eq!(parse_credentials(b"{}"), Err(ProbeFailure::Auth));
-        assert_eq!(parse_credentials(b"invalid"), Err(ProbeFailure::Network));
+        assert_eq!(parse_credentials(b"invalid"), Err(ProbeFailure::Malformed));
         assert!(parse_credentials(br#"{"claudeAiOauth":{}}"#).is_ok());
+    }
+
+    #[test]
+    fn malformed_status_output_is_not_a_network_failure() {
+        use super::*;
+        let out = ExecOutcome {
+            termination: Termination::Exit(0),
+            stdout: provenant_os::exec::CapturedStream {
+                bytes: b"invalid".to_vec(),
+                ..Default::default()
+            },
+            stderr: Default::default(),
+            timed_out: false,
+            drain_truncated: false,
+            overflow_stopped: false,
+            cancelled: false,
+            elapsed_micros: 0,
+        };
+        assert_eq!(status_fingerprint(Ok(out)), Err(ProbeFailure::Malformed));
     }
 
     #[test]
@@ -544,7 +563,7 @@ mod tests {
         );
         assert_eq!(
             status_fingerprint(Ok(outcome(b"invalid", 1, false))),
-            Err(ProbeFailure::Network)
+            Err(ProbeFailure::Malformed)
         );
         assert_eq!(
             status_fingerprint(Ok(outcome(br#"{"loggedIn":false}"#, 1, true))),
@@ -725,6 +744,42 @@ mod tests {
         };
         assert_eq!(
             refresh(&Reject, &login, &|| 1000, 100000),
+            Err(ProbeFailure::LoginExpired)
+        );
+    }
+
+    #[test]
+    fn unchanged_expired_credential_after_probe_is_reported() {
+        use super::*;
+        struct Completed;
+        impl Executor for Completed {
+            fn execute(&self, _: ExecOptions<'_>) -> Result<ExecOutcome, ExecError> {
+                Ok(ExecOutcome {
+                    termination: Termination::Exit(0),
+                    stdout: Default::default(),
+                    stderr: Default::default(),
+                    timed_out: false,
+                    drain_truncated: false,
+                    overflow_stopped: false,
+                    cancelled: false,
+                    elapsed_micros: 0,
+                })
+            }
+        }
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            temp.path().join(".credentials.json"),
+            br#"{"claudeAiOauth":{"accessToken":"fake","expiresAt":1000}}"#,
+        )
+        .unwrap();
+        let login = crate::claude::Login {
+            executable: Path::new("/fake/claude"),
+            home: temp.path(),
+            user: OsStr::new("fake"),
+            config_dir: temp.path(),
+        };
+        assert_eq!(
+            refresh(&Completed, &login, &|| 1000, 100000),
             Err(ProbeFailure::LoginExpired)
         );
     }

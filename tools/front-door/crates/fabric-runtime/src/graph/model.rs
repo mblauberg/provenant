@@ -220,7 +220,7 @@ impl PartialEq for TopologyPresence {
 }
 impl Eq for TopologyPresence {}
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GraphNode {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review: Option<ReviewSpec>,
@@ -250,6 +250,8 @@ pub struct GraphNode {
     pub dispositions: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub read_roots: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<String>,
     /// Explicit node capability set; absent inherits the writer project default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capabilities: Option<Vec<String>>,
@@ -322,6 +324,18 @@ pub struct GraphNode {
 }
 
 impl GraphNode {
+    /// Construct a composite boundary with the same defaults as a decoded node.
+    pub fn composite(id: String, depends_on: Vec<String>, spec: CompositeSpec) -> Self {
+        Self {
+            id,
+            kind: Some(NodeKind::Composite),
+            access: AccessMode::ReadOnly,
+            depends_on,
+            composite: Some(spec),
+            ..Self::default()
+        }
+    }
+
     pub(super) fn dependencies(&self) -> impl Iterator<Item = &String> {
         self.depends_on.iter().chain(
             self.after_expansion
@@ -345,7 +359,9 @@ pub(super) fn expansion_safety_limits(
 ) -> crate::config::GraphLimits {
     crate::config::GraphLimits {
         nodes: limits.composite_expansion_safety_nodes(),
-        expansion_depth: limits.composite_expansion_safety_depth(),
+        // Composite nesting is itself governed by the host's configured
+        // expansion depth. Only the construction guard uses a safety floor.
+        expansion_depth: limits.expansion_depth,
         edges: usize::MAX,
         routes_per_node: u16::MAX as usize,
         node_prompt_bytes: usize::MAX,
@@ -360,7 +376,12 @@ impl GraphDocument {
     pub fn check_composites(&self, limits: &crate::config::GraphLimits) -> Result<(), String> {
         let expansion_limits = expansion_safety_limits(limits);
         let expanded = composites::expand(self, &expansion_limits)?;
-        loops::check_expanded_ids(&expanded, &[])
+        loops::check_expanded_ids(&expanded, &[])?;
+        let count = loops::expanded_node_count(&expanded, &[])?;
+        if let Some(reason) = limits.nodes_bound().refusal(count) {
+            return Err(reason);
+        }
+        Ok(())
     }
 
     /// Host preflight sees the same bounded static composite/loop expansion as
@@ -1216,6 +1237,7 @@ pub struct NodeInput<'a> {
     pub family_peers: &'a [String],
     pub context: provenant_records::run::WorkContext,
     pub read_roots: &'a [String],
+    pub attachments: &'a [String],
     pub capabilities: Option<&'a [String]>,
     pub capability_sources: Option<&'a serde_json::Value>,
     /// Attempts of the source writer whose model families must be avoided.

@@ -1,5 +1,6 @@
 use crate::preset_roles::{RoleLibrary, prompt_file_reference};
 use provenant_fabric_runtime::read_roots::ReadRoots;
+use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -91,6 +92,115 @@ pub struct Expansion {
     pub warnings: Vec<String>,
     /// The planner decision, for a preset that declares planner patterns.
     pub plan: Option<planner::Decision>,
+}
+
+/// Decode a lowered node and attach its stage and field to a type error.
+/// The individual-field probes run only on an error, so valid expansions keep
+/// the normal single decode per node.
+fn decode_lowered_node(
+    value: &Value,
+) -> Result<provenant_fabric_runtime::graph::GraphNode, String> {
+    provenant_fabric_runtime::graph::GraphNode::deserialize(value).map_err(|error| {
+        for children in [
+            value.get("composite").and_then(|group| group.get("nodes")),
+            value.get("loop").and_then(|body| body.get("body")),
+            value.pointer("/plan/fallback/nodes"),
+        ]
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_array)
+        {
+            for child in children {
+                if let Err(error) = decode_lowered_node(child) {
+                    return error;
+                }
+            }
+        }
+        let id = value
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or("<unknown>");
+        let field = value.as_object().and_then(|fields| {
+            fields.iter().find_map(|(key, value)| {
+                let mut probe = json!({"id": "probe", "access": "read_only"});
+                probe[key] = value.clone();
+                serde_json::from_value::<provenant_fabric_runtime::graph::GraphNode>(probe)
+                    .is_err()
+                    .then_some(key.as_str())
+            })
+        });
+        match field {
+            Some(field) => format!("node {id}: {field}: {error}"),
+            None => format!("node {id}: {error}"),
+        }
+    })
+}
+
+/// Raw graph nodes embedded in a leaf are not passed through `lower_leaf`;
+/// reject their undeclared fields at the same boundary.
+fn unknown_embedded_node_field(
+    node: &provenant_fabric_runtime::graph::GraphNode,
+) -> Option<String> {
+    let children = node
+        .composite
+        .iter()
+        .flat_map(|spec| &spec.nodes)
+        .chain(node.loop_body.iter().flat_map(|spec| &spec.body))
+        .chain(
+            node.plan
+                .iter()
+                .filter_map(|spec| spec.fallback.as_ref())
+                .flat_map(|spec| &spec.nodes),
+        );
+    for child in children {
+        if let Some(field) = child.extra.keys().next() {
+            return Some(format!("node {}: unknown leaf field: {field}", child.id));
+        }
+        if let Some(error) = unknown_embedded_node_field(child) {
+            return Some(error);
+        }
+    }
+    None
+}
+
+/// When a known field has the wrong type, typed decoding cannot reach nested
+/// extras. Inspect each embedded node independently on that error path.
+fn unknown_embedded_node_in_invalid_value(value: &Value) -> Option<String> {
+    for path in ["/composite/nodes", "/loop/body", "/plan/fallback/nodes"] {
+        let Some(children) = value.pointer(path).and_then(Value::as_array) else {
+            continue;
+        };
+        for child in children {
+            let id = child
+                .get("id")
+                .and_then(Value::as_str)
+                .unwrap_or("<unknown>");
+            if let Ok(node) = provenant_fabric_runtime::graph::GraphNode::deserialize(child) {
+                if let Some(field) = node.extra.keys().next() {
+                    return Some(format!("node {id}: unknown leaf field: {field}"));
+                }
+                if let Some(error) = unknown_embedded_node_field(&node) {
+                    return Some(error);
+                }
+            } else if let Some(fields) = child.as_object() {
+                for (key, value) in fields {
+                    if key == "id" || key == "access" {
+                        continue;
+                    }
+                    let probe = json!({"id": "probe", "access": "read_only", (key): value});
+                    if serde_json::from_value::<provenant_fabric_runtime::graph::GraphNode>(probe)
+                        .is_ok_and(|node| node.extra.contains_key(key))
+                    {
+                        return Some(format!("node {id}: unknown leaf field: {key}"));
+                    }
+                }
+            }
+            if let Some(error) = unknown_embedded_node_in_invalid_value(child) {
+                return Some(error);
+            }
+        }
+    }
+    None
 }
 
 impl Layers {
@@ -584,6 +694,28 @@ pub(super) fn request_bindings(
         }
     }
     Ok((bindings, warnings))
+}
+
+/// Resolve request and parameter-file values in dispatch order for both
+/// experiment eligibility and the graph that will actually run.
+pub(super) fn dispatch_parameters(
+    layers: &Layers,
+    name: &str,
+    selected: impl IntoIterator<Item = (String, Value)>,
+    risk: Option<&str>,
+    kind: Option<&str>,
+    file_params: &[(String, Value)],
+) -> Result<RequestBindings, String> {
+    let (bindings, warnings) = request_bindings(layers, name, risk, kind)?;
+    let mut values = selected.into_iter().collect::<Vec<_>>();
+    for (key, value) in bindings.into_iter().chain(file_params.iter().cloned()) {
+        if let Some(existing) = values.iter_mut().find(|(name, _)| name == &key) {
+            existing.1 = value;
+        } else {
+            values.push((key, value));
+        }
+    }
+    Ok((values, warnings))
 }
 
 pub(super) fn tracker_advice_parameter(config: &Value) -> Option<&str> {
@@ -1165,13 +1297,27 @@ pub fn expand_with(
             bases.into_iter().collect::<Vec<_>>().join(", ")
         ));
     }
-    // A graph that states a review field, including the document-level review
-    // base, is schema 2: the runtime refuses a v1 document that carries one.
-    // Every other preset keeps its v1 document and digest.
-    let mut document = json!({"schema_version":1,"graph_id":id,"context":{"preset":name,"pattern":name},"nodes":nodes});
-    if let Some(base) = bases.into_iter().next() {
-        document["review_base"] = json!(base);
-    }
+    // The structural and schema checks operate on the typed graph, without
+    // decoding a second copy of the fully assembled document.
+    let mut typed = provenant_fabric_runtime::graph::GraphDocument {
+        review_base: bases.into_iter().next(),
+        context: Some(provenant_records::run::WorkContext {
+            preset: Some(name.into()),
+            pattern: Some(name.into()),
+            ..Default::default()
+        }),
+        extra: Default::default(),
+        limits: None,
+        integration_branch: None,
+        delivery: None,
+        decision_session: None,
+        schema_version: 1,
+        graph_id: id,
+        nodes: nodes
+            .iter()
+            .map(decode_lowered_node)
+            .collect::<Result<_, _>>()?,
+    };
     let parameters = flatten_parameters(
         name,
         config.get("parameters").unwrap_or(&json!({})),
@@ -1189,10 +1335,31 @@ pub fn expand_with(
             let value = interpolate(value, &parameters, prompt, 1)?;
             // An empty knob, such as an unset decision session, means unset.
             if value != "" {
-                document[key] = value;
+                match key {
+                    "limits" => typed.limits = Some(value),
+                    "integration_branch" => {
+                        typed.integration_branch = serde_json::from_value(value)
+                            .map_err(|error| format!("{key}: {error}"))?
+                    }
+                    "delivery" => {
+                        typed.delivery = serde_json::from_value(value)
+                            .map_err(|error| format!("{key}: {error}"))?
+                    }
+                    "decision_session" => {
+                        typed.decision_session = serde_json::from_value(value)
+                            .map_err(|error| format!("{key}: {error}"))?
+                    }
+                    _ => {
+                        typed.extra.insert(key.into(), value);
+                    }
+                }
             }
         }
     }
+    typed.check_composites(&layers.graph_limits)?;
+    typed.schema_version = u64::from(provenant_fabric_runtime::graph::minimum_schema_version(
+        &typed,
+    ));
     let roles: BTreeMap<String, Value> = layers.used_roles.take().into_iter().collect();
     let substitutions = layers.substitutions.take();
     let mut warnings = layers.warnings.take();
@@ -1216,7 +1383,7 @@ pub fn expand_with(
     // Provenance rides in the graph document so it is hashed into the graph
     // identity and retained with the run: where each value came from, which
     // roles (with digests) were used and any route substituted.
-    document["provenance"] = json!({
+    let mut provenance = json!({
         "preset": name,
         "origins": origins,
         "roles": roles,
@@ -1224,24 +1391,23 @@ pub fn expand_with(
         "warnings": warnings,
     });
     if let Some(decision) = &plan {
-        document["provenance"]["plan"] = decision.to_json();
+        provenance["plan"] = decision.to_json();
     }
-    let typed: provenant_fabric_runtime::graph::GraphDocument =
-        serde_json::from_value(document.clone()).map_err(|error| error.to_string())?;
-    typed.check_composites(&layers.graph_limits)?;
-    let count = expanded_node_count(&typed.nodes);
-    if let Some(reason) = layers.graph_limits.nodes_bound().refusal(count) {
-        return Err(reason);
-    }
-    document["schema_version"] = json!(provenant_fabric_runtime::graph::minimum_schema_version(
-        &typed
-    ));
-    if serde_json::to_vec(&document)
+    typed.extra.insert("provenance".into(), provenance);
+    let mut document = serde_json::to_value(&typed).map_err(|error| error.to_string())?;
+    let map = document.as_object_mut().ok_or("graph must be a table")?;
+    // Retain explicit empty fields until node lowering itself is typed. The
+    // graph's schema and document fields come from the typed value above.
+    map.insert("nodes".into(), Value::Array(nodes));
+    let document_bytes = serde_json::to_vec(&document)
         .map_err(|e| e.to_string())?
-        .len()
-        > 8_388_608
-    {
-        return Err("expanded graph exceeds the 8 MiB graph document limit".into());
+        .len();
+    let document_bound = provenant_fabric_runtime::config::GraphLimits::document_bytes_bound();
+    if let Some(reason) = document_bound.refusal(document_bytes) {
+        return Err(format!(
+            "expanded graph exceeds the {} MiB graph document limit: {reason}",
+            document_bound.maximum / (1024 * 1024)
+        ));
     }
     Ok(Expansion {
         review_shape: Some(
@@ -1740,52 +1906,64 @@ fn lower_leaf(
     }
     let mut node = interpolate(&profile, &effective_parameters, prompt, index)?;
     let map = node.as_object_mut().ok_or("leaf must be a table")?;
-    for key in map.keys() {
-        if ![
-            "id",
-            "role",
-            "tier",
-            "effort",
-            "outputs",
-            "access",
-            "worktree",
-            "deadline_seconds",
-            "title",
-            "prompt",
-            "kind",
-            "plan",
-            "loop",
-            "composite",
-            "condition",
-            "on_fail",
-            "delivery",
-            "write_scope",
-            "acceptance_checks",
-            "inputs",
-            "depends_on",
-            "routes",
-            "read_roots",
-            "capabilities",
-            "source",
-            "prompt_file",
-            "distinct_from",
-            "card",
-            "references",
-            "family",
-            "family_strength",
-            "fallback_tier",
-            "purpose",
-            "dispositions",
-            "require_findings",
-            "advisory",
-            "continues",
-            "land",
-            "retry",
-            "family_group",
-        ]
-        .contains(&key.as_str())
-        {
-            return Err(format!("node {id}: unknown leaf field: {key}"));
+    // Compiler-only fields are consumed below; GraphNode owns the remaining
+    // field vocabulary. Its flattened extras are retained for graph records,
+    // but a preset must not introduce an unknown node field through them.
+    let mut probe = map.clone();
+    for key in [
+        "tier",
+        "effort",
+        "outputs",
+        "prompt_file",
+        "card",
+        "references",
+        "family",
+        "family_strength",
+        "fallback_tier",
+        "purpose",
+        "retry",
+    ] {
+        probe.remove(key);
+    }
+    probe.insert("id".into(), json!(id));
+    probe.entry("access").or_insert_with(|| json!("read_only"));
+    let unknown = match serde_json::from_value::<provenant_fabric_runtime::graph::GraphNode>(
+        Value::Object(probe.clone()),
+    ) {
+        Ok(node) => {
+            if let Some(error) = unknown_embedded_node_field(&node) {
+                return Err(error);
+            }
+            node.extra.keys().next().cloned()
+        }
+        Err(_) => {
+            if let Some(error) =
+                unknown_embedded_node_in_invalid_value(&Value::Object(probe.clone()))
+            {
+                return Err(error);
+            }
+            probe.iter().find_map(|(key, value)| {
+                if key == "id" || key == "access" {
+                    return None;
+                }
+                let candidate = json!({"id": id, "access": "read_only", (key): value});
+                serde_json::from_value::<provenant_fabric_runtime::graph::GraphNode>(candidate)
+                    .ok()
+                    .and_then(|node| node.extra.contains_key(key).then(|| key.clone()))
+            })
+        }
+    };
+    if let Some(key) = unknown {
+        return Err(format!("node {id}: unknown leaf field: {key}"));
+    }
+    for alias in ["goal", "brief"] {
+        if let Some(value) = map.remove(alias) {
+            if map.contains_key("prompt") {
+                return Err(format!(
+                    "node {id}: prompt and {alias} are mutually exclusive"
+                ));
+            }
+            map.insert("prompt".into(), value);
         }
     }
     map.insert("id".into(), json!(id));
@@ -2029,10 +2207,15 @@ fn lower_leaf(
         map.entry("prompt").or_insert_with(|| json!(prompt));
         let tier = map.remove("tier");
         let effort = map.remove("effort");
-        if tier.is_some() && map.contains_key("routes") {
+        if tier.is_some() && (map.contains_key("route") || map.contains_key("routes")) {
             return Err(format!("node {id}: tier and routes are mutually exclusive"));
         }
-        if map.contains_key("routes") {
+        if map.contains_key("route") && map.contains_key("routes") {
+            return Err(format!(
+                "node {id}: route and routes are mutually exclusive"
+            ));
+        }
+        if map.contains_key("route") || map.contains_key("routes") {
             if effort.is_some() {
                 return Err(format!("node {id}: routes cannot be combined with effort"));
             }
@@ -3177,6 +3360,7 @@ impl StageBuilder<'_> {
                         "prompt",
                         "source",
                         "read_roots",
+                        "attachments",
                         "inputs",
                         "depends_on",
                         "advisory",
@@ -3193,7 +3377,7 @@ impl StageBuilder<'_> {
                     node["title"] =
                         interpolate(title, &self.parameters, self.prompt, index as usize)?;
                 }
-                for key in ["source", "read_roots", "inputs", "advisory"] {
+                for key in ["source", "read_roots", "attachments", "inputs", "advisory"] {
                     if let Some(value) = object.get(key) {
                         node[key] =
                             interpolate(value, &self.parameters, self.prompt, index as usize)?;
@@ -3337,22 +3521,6 @@ fn composite(
         node["inputs"] = selected_inputs(deps, outputs);
     }
     node
-}
-
-fn expanded_node_count(nodes: &[provenant_fabric_runtime::graph::GraphNode]) -> usize {
-    nodes.iter().fold(0usize, |total, node| {
-        let children = node
-            .composite
-            .as_ref()
-            .map_or(0, |spec| expanded_node_count(&spec.nodes));
-        let rounds = node.loop_body.as_ref().map_or(0, |spec| {
-            expanded_node_count(&spec.body).saturating_mul(spec.max_rounds)
-        });
-        total
-            .saturating_add(1)
-            .saturating_add(children)
-            .saturating_add(rounds)
-    })
 }
 
 fn configured(globals: &provenant_cli::Globals) -> Result<Layers, String> {
@@ -3696,13 +3864,13 @@ pub(crate) fn bind_run_context(
                             .collect()
                     },
                 );
-                sources.retain(|(name, origin)| {
-                    if name == "postgres" {
+                sources.retain(|(capability, origin)| {
+                    if capability == "postgres" {
                         true
                     } else {
                         capability_warnings.push(format!(
                             "ignored unknown {origin} capability {}",
-                            provenant_fabric_runtime::hosts::plain_text(name, 128)
+                            provenant_fabric_runtime::hosts::plain_text(capability, 128)
                         ));
                         false
                     }
@@ -3767,6 +3935,26 @@ pub(crate) fn bind_run_context(
                 } else {
                     directory.join(worktree)
                 });
+            }
+            if !request.access.attach.is_empty() {
+                let attachments = node
+                    .as_object_mut()
+                    .ok_or("node must be a table")?
+                    .entry("attachments")
+                    .or_insert_with(|| json!([]))
+                    .as_array_mut()
+                    .ok_or("attachments must be an array")?;
+                for path in &request.access.attach {
+                    let path = if path.is_absolute() {
+                        path.clone()
+                    } else {
+                        directory.join(path)
+                    };
+                    let value = json!(path);
+                    if !attachments.contains(&value) {
+                        attachments.push(value);
+                    }
+                }
             }
             let mut roots = node
                 .get("read_roots")
@@ -4118,63 +4306,66 @@ fn family(node: &Value) -> String {
     }
 }
 
-pub(super) fn pending_checks(document: &Value) -> Vec<Value> {
+pub(super) fn pending_checks(
+    document: &provenant_fabric_runtime::graph::GraphDocument,
+) -> Vec<Value> {
+    use provenant_fabric_runtime::graph::{AccessMode, GraphNode, NodeKind, SourceBinding};
+    use provenant_records::run::DeliveryMode;
     let mut ids = BTreeSet::new();
-    fn walk(nodes: &[Value], ids: &mut BTreeSet<String>) {
+    fn walk(nodes: &[GraphNode], ids: &mut BTreeSet<&'static str>) {
         for node in nodes {
             if node
-                .get("source")
-                .and_then(Value::as_object)
-                .is_some_and(|source| source.get("type").and_then(Value::as_str) != Some("commit"))
+                .source
+                .as_ref()
+                .is_some_and(|source| !matches!(source, SourceBinding::Commit { .. }))
             {
-                ids.insert("source".into());
+                ids.insert("source");
             }
-            if node["access"] == "worktree_write" {
-                ids.insert("worktree".into());
+            if node.access == AccessMode::WorktreeWrite {
+                ids.insert("worktree");
             }
-            if node["kind"] == "plan" {
-                ids.insert("planner_authority".into());
+            if node.kind == Some(NodeKind::Plan) {
+                ids.insert("planner_authority");
             }
-            let kind = node["kind"].as_str();
             let agent = !matches!(
-                kind,
-                Some("composite" | "loop" | "land" | "gate" | "decide")
+                node.kind,
+                Some(
+                    NodeKind::Composite
+                        | NodeKind::Loop
+                        | NodeKind::Land
+                        | NodeKind::Gate
+                        | NodeKind::Decide
+                )
             );
             if agent {
-                ids.insert("route_readiness".into());
+                ids.insert("route_readiness");
             }
-            for key in ["composite", "loop"] {
-                if let Some(children) = node
-                    .pointer(&format!("/{key}/nodes"))
-                    .or_else(|| node.pointer(&format!("/{key}/body")))
-                    .and_then(Value::as_array)
-                {
-                    walk(children, ids);
-                }
+            if let Some(group) = &node.composite {
+                walk(&group.nodes, ids);
+            }
+            if let Some(body) = &node.loop_body {
+                walk(&body.body, ids);
             }
         }
     }
-    walk(
-        document["nodes"]
-            .as_array()
-            .map(Vec::as_slice)
-            .unwrap_or_default(),
-        &mut ids,
-    );
-    if document["delivery"]
-        .as_str()
-        .is_some_and(|d| d == "pr" || d.starts_with("integrate:"))
-        || document["nodes"].as_array().into_iter().flatten().any(|n| {
-            n["delivery"]
-                .as_str()
-                .is_some_and(|d| d == "pr" || d.starts_with("integrate:"))
-        })
+    walk(&document.nodes, &mut ids);
+    let delivery_needs_target = |delivery: &Option<DeliveryMode>| {
+        matches!(
+            delivery,
+            Some(DeliveryMode::Pr | DeliveryMode::Integrate(_))
+        )
+    };
+    if delivery_needs_target(&document.delivery)
+        || document
+            .nodes
+            .iter()
+            .any(|node| delivery_needs_target(&node.delivery))
     {
-        ids.insert("delivery_target".into());
+        ids.insert("delivery_target");
     }
     ids.into_iter()
         .map(|id| {
-            let reason = match id.as_str() {
+            let reason = match id {
                 "source" => "Source binding must be resolved and verified at execution.",
                 "worktree" => "Writer worktree ownership is checked at execution.",
                 "delivery_target" => "Delivery target is checked before delivery.",
@@ -4223,6 +4414,7 @@ pub(super) fn explain_tree(nodes: &[Value], indent: usize, text: &mut String) {
         for key in [
             "write_scope",
             "read_roots",
+            "attachments",
             "capability_sources",
             "source",
             "inputs",
@@ -4262,14 +4454,21 @@ pub(super) fn explain_tree(nodes: &[Value], indent: usize, text: &mut String) {
 
 /// Count concrete writer nodes by their requested alias, retaining unknown and
 /// exact-model routes outside the advisory mix.
-pub(super) fn writer_tier_mix(nodes: &[Value]) -> [usize; 3] {
+pub(super) fn writer_tier_mix(nodes: &[provenant_fabric_runtime::graph::GraphNode]) -> [usize; 3] {
+    use provenant_fabric_runtime::graph::AccessMode;
     let mut counts = [0; 3];
     for node in nodes {
-        if node["access"] == "worktree_write" {
+        if node.access == AccessMode::WorktreeWrite {
             let tier = node
-                .pointer("/route/alias")
-                .or_else(|| node.pointer("/routes/0/alias"))
-                .and_then(Value::as_str);
+                .route
+                .as_ref()
+                .and_then(|route| route.alias.as_deref())
+                .or_else(|| {
+                    node.routes
+                        .as_ref()
+                        .and_then(|routes| routes.first())
+                        .and_then(|route| route.alias.as_deref())
+                });
             if let Some(index) = ["junior", "senior", "principal"]
                 .iter()
                 .position(|name| Some(*name) == tier)
@@ -4277,12 +4476,15 @@ pub(super) fn writer_tier_mix(nodes: &[Value]) -> [usize; 3] {
                 counts[index] += 1;
             }
         }
-        for pointer in ["/composite/nodes", "/loop/body"] {
-            if let Some(children) = node.pointer(pointer).and_then(Value::as_array) {
-                let nested = writer_tier_mix(children);
-                for (count, increment) in counts.iter_mut().zip(nested) {
-                    *count += increment;
-                }
+        for children in node
+            .composite
+            .iter()
+            .map(|group| group.nodes.as_slice())
+            .chain(node.loop_body.iter().map(|body| body.body.as_slice()))
+        {
+            let nested = writer_tier_mix(children);
+            for (count, increment) in counts.iter_mut().zip(nested) {
+                *count += increment;
             }
         }
     }
@@ -4297,6 +4499,8 @@ fn explain(
     globals: &provenant_cli::Globals,
 ) -> u8 {
     use std::io::Write;
+    let document: Result<provenant_fabric_runtime::graph::GraphDocument, String> =
+        serde_json::from_value(expansion.document.clone()).map_err(|error| error.to_string());
     let inspection = (|| -> Result<_, String> {
         let roots = crate::roots::resolve(
             globals,
@@ -4307,8 +4511,7 @@ fn explain(
         let config =
             provenant_config::read_with_domains(&roots.roots, &provenant_cli::domains::SECTIONS)
                 .map_err(|e| e.to_string())?;
-        let document: provenant_fabric_runtime::graph::GraphDocument =
-            serde_json::from_value(expansion.document.clone()).map_err(|e| e.to_string())?;
+        let document = document.as_ref().map_err(Clone::clone)?;
         let limits = config.domains.fabric.graph.limits.clone();
         let admission = document.admit(&limits);
         let inspection = document.inspect(&limits);
@@ -4334,27 +4537,26 @@ fn explain(
             Value::Null,
         ),
     };
-    let pending = pending_checks(&expansion.document);
+    let pending = document
+        .as_ref()
+        .map_or_else(|_| Vec::new(), pending_checks);
     let mut human = format!(
         "Graph {}\nLimits: {}\nAdmission: {}\nInspection: {}\n",
         expansion.document["graph_id"], limits, admission, metrics
     );
-    let tier_mix = writer_tier_mix(
-        expansion.document["nodes"]
-            .as_array()
-            .map(Vec::as_slice)
-            .unwrap_or_default(),
-    );
+    let tier_mix = document
+        .as_ref()
+        .map_or([0; 3], |document| writer_tier_mix(&document.nodes));
     let inverted = tier_mix[2] > tier_mix[1] || tier_mix[1] > tier_mix[0];
     let tier_mix_line = format!(
         "tier mix: junior {} / senior {} / principal {}",
         tier_mix[0], tier_mix[1], tier_mix[2]
     );
     human.push_str(&format!("{tier_mix_line}\n"));
-    if inverted {
-        human.push_str(
-            "Warning: writer tier mix is inverted; consider whether lower tiers fit the work.\n",
-        );
+    let tier_mix_warning = inverted
+        .then_some("writer tier mix is inverted; consider whether lower tiers fit the work.");
+    if let Some(warning) = tier_mix_warning {
+        human.push_str(&format!("Warning: {warning}\n"));
     }
     if let Some(context) = expansion.document.get("context") {
         human.push_str(&format!(
@@ -4401,7 +4603,7 @@ fn explain(
         human.push_str(&format!("Warning: {warning}\n"));
     }
     let mut data = json!({"roles": expansion.roles, "substitutions": expansion.substitutions, "graph": expansion.document, "origins": expansion.origins, "limits":limits,"admission":admission,"inspection":metrics,"pending":pending,"review_shape":expansion.review_shape,"plan":expansion.plan.as_ref().map(planner::Decision::to_json)});
-    data["tier_mix"] = json!({"junior":tier_mix[0], "senior":tier_mix[1], "principal":tier_mix[2], "inverted":inverted, "line":tier_mix_line});
+    data["tier_mix"] = json!({"junior":tier_mix[0], "senior":tier_mix[1], "principal":tier_mix[2], "inverted":inverted, "line":tier_mix_line, "warning":tier_mix_warning});
     if !brief_warnings.is_empty() {
         data["warnings"] = json!(brief_warnings);
     }
@@ -4564,6 +4766,7 @@ fn scan_preset_graph(document: &Value) -> Result<(), PresetInputError> {
             if let Some(object) = node.as_object_mut() {
                 object.remove("worktree");
                 object.remove("read_roots");
+                object.remove("attachments");
                 if let Some(review) = object.get_mut("review").and_then(Value::as_object_mut) {
                     review.remove("worktree");
                 }
@@ -4814,13 +5017,20 @@ pub(crate) fn run_with_review(
                 let preset_check = |preset: &str| layers.resolve(preset).map(|_| ());
                 // An arm is accepted only when the normal selection and expansion accept it.
                 let arm_check = |preset: &str| {
-                    let chosen =
-                        crate::preset_select::select(Some(&rules_path), &context, Some(preset))?;
+                    let chosen = selection.choice.clone().for_preset(preset);
+                    let (params, _) = dispatch_parameters(
+                        &layers,
+                        &chosen.preset,
+                        chosen.parameters,
+                        request.risk_tier.as_deref(),
+                        request.task_kind.as_deref(),
+                        &file_params,
+                    )?;
                     expand_with(
                         &layers,
-                        &chosen.choice.preset,
+                        &chosen.preset,
                         prompt,
-                        &file_params,
+                        &params,
                         &request.preset_set,
                     )
                     .map(|_| ())
@@ -4872,21 +5082,14 @@ pub(crate) fn run_with_review(
             selection.source = crate::preset_select::PresetSelectionSource::Experiment;
         }
         let name = selection.choice.preset.as_str();
-        let mut params = selection.choice.parameters.into_iter().collect::<Vec<_>>();
-        let (bindings, binding_warnings) = request_bindings(
+        let (params, binding_warnings) = dispatch_parameters(
             &layers,
             name,
+            selection.choice.parameters,
             request.risk_tier.as_deref(),
             request.task_kind.as_deref(),
+            &file_params,
         )?;
-        params.extend(bindings);
-        file_params.into_iter().for_each(|(key, value)| {
-            if let Some(existing) = params.iter_mut().find(|(name, _)| name == &key) {
-                existing.1 = value;
-            } else {
-                params.push((key, value));
-            }
-        });
         let explicit_subject = params.iter().any(|(key, _)| key == "subject")
             || request.preset_set.iter().any(|item| {
                 item.split_once('=').is_some_and(|(path, _)| {
