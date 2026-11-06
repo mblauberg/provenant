@@ -1,6 +1,15 @@
 use super::*;
 use serde_json::json;
 
+/// Measure the actual journal representation after durable text externalisation.
+fn persisted_len(stored: &StoredCheckpoint) -> usize {
+    let temp = tempfile::tempdir().unwrap();
+    let directory = Directory::open_anchor(temp.path()).unwrap();
+    let mut value = serde_json::to_value(stored).unwrap();
+    prompt_store::externalise(&directory, "envelope", &mut value).unwrap();
+    canonical_len(&value)
+}
+
 /// Control characters take six canonical bytes each, the worst case.
 fn worst(max: usize) -> String {
     bounded(&"\u{1}".repeat(max), max)
@@ -502,7 +511,7 @@ fn assert_fits_with_repair_metadata(document: GraphDocument, tier: &str, grew: b
         checkpoint,
         execution,
     };
-    let size = canonical_len(&stored);
+    let size = persisted_len(&stored);
     let bound = envelope::checkpoint_bound(&document, &[], &stored.checkpoint.extensions, &plan);
     assert!(
         size <= bound,
@@ -953,7 +962,7 @@ fn ci_failed_checks_and_findings_fit_the_configured_envelope() {
             };
             let bound =
                 envelope::checkpoint_bound(&document, &[], &stored.checkpoint.extensions, &plan);
-            assert!(canonical_len(&stored) <= bound, "cap={cap} count={count}");
+            assert!(persisted_len(&stored) <= bound, "cap={cap} count={count}");
         }
     }
 }
@@ -1003,7 +1012,7 @@ fn disposition_checkpoint_fits_its_reduced_bound() {
         document: document.clone(),
     };
     let size = |checkpoint: &GraphCheckpoint| {
-        canonical_len(&StoredCheckpoint {
+        persisted_len(&StoredCheckpoint {
             extra: Default::default(),
             schema_version: 1,
             digest: "d".repeat(80),
