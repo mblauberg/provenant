@@ -854,6 +854,10 @@ mod diagnostic_projection_tests {
 
     #[test]
     fn resource_refusals_name_limits_and_corrective_actions() {
+        let inventory = include_str!("../assets/launch-guards.toml")
+            .parse::<toml_edit::DocumentMut>()
+            .expect("launch guard inventory must be valid TOML");
+        let guards = inventory["guard"].as_array_of_tables().unwrap();
         let cases = [
             (
                 AdmissionError::Disk {
@@ -890,11 +894,31 @@ mod diagnostic_projection_tests {
             ),
         ];
         for (cause, limit, corrective) in cases {
-            let diagnostic = RunError::Admission(cause).diagnostic(Destination::Remote {
+            let error = RunError::Admission(cause);
+            let code = ErrorKind::from(&error).code();
+            let guard = guards
+                .iter()
+                .find(|row| row.get("code").and_then(|v| v.as_str()) == Some(code))
+                .expect("resource refusal must be inventoried");
+            assert_eq!(guard["boundary"].as_str(), Some("configurable_default"));
+            let setting = guard["setting"].as_str().unwrap();
+            let diagnostic = error.diagnostic(Destination::Remote {
                 repository: None,
                 home: None,
             });
             assert!(diagnostic.detail.as_deref().unwrap().contains(limit));
+            assert!(diagnostic.detail.as_deref().unwrap().contains(setting));
+            assert!(
+                diagnostic
+                    .detail
+                    .as_deref()
+                    .unwrap()
+                    .contains(if code == "HOST_PROCESSES" {
+                        "shipped"
+                    } else {
+                        "source:"
+                    })
+            );
             assert!(diagnostic.next.as_deref().unwrap().contains(corrective));
             assert!(
                 !serde_json::to_string(&diagnostic)

@@ -513,3 +513,31 @@ reason = "Child attempts must be host-derived members of the validated request."
 site = "run/src/launch.rs#RunStore::validate_child"
 boundary = "authority"
 reason = "Child parent, depth, attempts and permitted delegation must match host authority."
+
+[[guard]]
+site = "run/src/admission.rs#RunStore::admit"
+boundary = "configurable_default"
+code = "DISK_FLOOR"
+setting = "gc.free_floor"
+reason = "The effective disk floor is configured or shipped; its source and value accompany the refusal."
+
+[[guard]]
+site = "run/src/admission.rs#RunStore::admit"
+boundary = "configurable_default"
+code = "MEMORY_PRESSURE"
+setting = "domains.fabric.lanes.memory_pressure_threshold"
+reason = "The effective pressure threshold is configured or shipped; its source and value accompany the refusal."
+
+[[guard]]
+site = "run/src/admission.rs#RunStore::admit"
+boundary = "configurable_default"
+code = "LANE_CAP"
+setting = "domains.fabric.lanes.max_project_writer_lanes"
+reason = "The applicable host or project cap is configured or shipped; the refusal names its setting, source and value."
+
+[[guard]]
+site = "run/src/admission.rs#RunStore::admit"
+boundary = "configurable_default"
+code = "HOST_PROCESSES"
+setting = "operating system RLIMIT_NPROC"
+reason = "The operating system's per-user soft process limit is adjustable; the refusal identifies the limit and shipped reserved headroom."
