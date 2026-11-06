@@ -2043,7 +2043,7 @@ fn later_repair_round_uses_latest_raising_lenses() {
         "composite":{"min_successful":1,"reduce_verdict":true,"nodes":[
             {"id":"correctness","repair_lens":"correctness","access":"read_only","prompt":"correctness delta","route":{"alias":"senior"},"require_findings":true},
             {"id":"security","repair_lens":"security","access":"read_only","prompt":"security delta","route":{"alias":"senior"},"require_findings":true}
-        ],"exports":[{"node":"correctness","outputs":["findings","verdict"]},{"node":"security","outputs":["findings","verdict"]}]}
+        ],"exports":[{"node":"correctness","outputs":["findings","result"]},{"node":"security","outputs":["findings","result"]}]}
     })).unwrap();
     document.nodes[1].loop_body.as_mut().unwrap().body[1] = check;
     let initial = repair_finding(false);
