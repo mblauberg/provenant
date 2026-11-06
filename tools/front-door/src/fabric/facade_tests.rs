@@ -573,7 +573,7 @@ pub(crate) mod peer_tests {
         let cancel = CancelToken::new();
         let budget = WaitBudget::cli(clock.mono_now(), 30)?;
         let document: graph::GraphDocument = serde_json::from_value(serde_json::json!({
-            "schema_version":1,"graph_id":"waiter","nodes":[{"id":"one","prompt":"reply OK",
+            "schema_version":1,"graph_id":"waiter", "template_library":{},"nodes":[{"id":"one","prompt":"reply OK",
             "access":"read_only","route":{"adapter":"fixture","model":"fixture/model"}}]
         }))?;
         let mut journal = graph::FileJournal::open(&roots.state, project, "waiter", budget, &cancel, &clock)?;
@@ -619,7 +619,7 @@ pub(crate) mod peer_tests {
         let cancel = CancelToken::new();
         let budget = WaitBudget::cli(clock.mono_now(), 30)?;
         let document: graph::GraphDocument = serde_json::from_value(serde_json::json!({
-            "schema_version":1,"graph_id":"waiter","decision_session":"chair-session","nodes":[
+            "schema_version":1,"graph_id":"waiter", "template_library":{},"decision_session":"chair-session","nodes":[
             {"id":"choose","kind":"decide","access":"read_only","decide":{"question":"Ship?",
             "options":[{"id":"ship","label":"Ship"},{"id":"hold","label":"Hold"}],"default":"hold","timeout_seconds":3600}},
             {"id":"one","prompt":"reply OK","access":"read_only","route":{"adapter":"fixture","model":"fixture/model"}}]
@@ -3097,7 +3097,7 @@ esac
         let call = provenant_run::Request { clock: &factory.clock, cancel: &cancel };
         let head = fixture.store.record(fixture.settled.attempt_id, &call)?.head.ok_or("head")?;
         let document: graph::GraphDocument = serde_json::from_value(serde_json::json!({
-            "schema_version":2, "graph_id":"production-panel", "nodes":[
+            "schema_version":2, "graph_id":"production-panel", "template_library":{}, "nodes":[
                 {"id":"writer", "prompt":"write", "access":"worktree_write", "worktree":fixture.worktree,
                     "route":{"adapter":"codex","model":"gpt-6-luna"}},
                 {"id":"one", "prompt":"review", "access":"read_only", "depends_on":["writer"],
@@ -3597,7 +3597,7 @@ esac
         std::fs::write(
             &document,
             serde_json::to_vec(&serde_json::json!({
-                "schema_version":1, "graph_id":"replay-push",
+                "schema_version":1, "graph_id":"replay-push", "template_library":{},
                 "nodes":[{"id":"one","prompt":"reply OK","access":"worktree_write",
                     "worktree":fixture.worktree,"delivery":"push",
                     "route":{"adapter":"fixture","model":"fixture/model"}}]
@@ -3696,7 +3696,7 @@ esac
         std::fs::write(
             &document,
             serde_json::to_vec(&serde_json::json!({
-                "schema_version":2, "graph_id":"pinned-base", "integration_branch":"integration", "review_base":"origin/main", "delivery":"pr",
+                "schema_version":2, "graph_id":"pinned-base", "template_library":{}, "integration_branch":"integration", "review_base":"origin/main", "delivery":"pr",
                 "nodes":[{"id":"one","prompt":"reply OK","access":"read_only","route":{"adapter":"fixture","model":"fixture/model"}}]
             }))?,
         )?;
@@ -3888,7 +3888,7 @@ esac
         assert_eq!(crate::worktree_tests::support::code(&output), 0);
         let factory = Factory { context: Context::open(fixture.roots.clone(), &fixture.rig.home, &fixture.rig.project)?, project_attribution: false, clock: SystemClock, backoff: ThreadPause, executor: SystemExecutor::new(1)?, home: fixture.rig.home.clone(), cwd: fixture.rig.project.clone(), assets: fixture.rig.project.clone(), host_launch: None, mcp_project: None, workers: &FreeWorkers };
         let document = fixture.rig.project.join("detached-writer.json");
-        std::fs::write(&document, serde_json::to_vec(&serde_json::json!({"schema_version":1,"graph_id":"detached-writer","nodes":[{"id":"writer","prompt":"write","access":"worktree_write","worktree":fixture.worktree,"route":{"adapter":"fixture","model":"fixture/model"}}]}))?)?;
+        std::fs::write(&document, serde_json::to_vec(&serde_json::json!({"schema_version":1,"graph_id":"detached-writer", "template_library":{},"nodes":[{"id":"writer","prompt":"write","access":"worktree_write","worktree":fixture.worktree,"route":{"adapter":"fixture","model":"fixture/model"}}]}))?)?;
         let cancel = CancelToken::new();
         let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
         let run = factory.graph(GraphInput::Run { extra: Default::default(), document }, budget, &cancel)?;
@@ -3898,7 +3898,7 @@ esac
         let head = fixture.rig.execute(&git, &["-C", fixture.worktree.to_str().ok_or("path")?, "rev-parse", "HEAD"], None)?;
         let head = String::from_utf8(head.stdout.bytes)?.trim().to_owned();
         let document = fixture.worktree.join("detached-review.json");
-        std::fs::write(&document, serde_json::to_vec(&serde_json::json!({"schema_version":1,"graph_id":"detached-review","nodes":[{"id":"review","prompt":"review","access":"read_only","source":{"type":"commit","commit":head},"route":{"adapter":"fixture","model":"fixture/model"}}]}))?)?;
+        std::fs::write(&document, serde_json::to_vec(&serde_json::json!({"schema_version":1,"graph_id":"detached-review", "template_library":{},"nodes":[{"id":"review","prompt":"review","access":"read_only","source":{"type":"commit","commit":head},"route":{"adapter":"fixture","model":"fixture/model"}}]}))?)?;
         let budget = WaitBudget::cli(detached_factory.clock.mono_now(), 30)?;
         let run = detached_factory.graph(GraphInput::Run { extra: Default::default(), document }, budget, &cancel)?;
         let node = &run.checkpoint.nodes[0];
