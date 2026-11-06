@@ -1063,6 +1063,20 @@ mod tests {
     }
 
     #[test]
+    fn detached_run_is_a_lane_child_control() -> Result {
+        let rig = TestRig::new()?;
+        let mut factory = factory(&rig)?;
+        let cancel = CancelToken::new();
+        let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
+        let input = json!({"op":"run","brief":"Inspect","detached":true,"explain":true});
+        assert!(factory.graph_document(input.clone(), budget, &cancel).is_err());
+        factory.context.in_lane = true;
+        let preview = factory.graph_document(input, budget, &cancel)?;
+        assert_eq!(preview["detached"], true);
+        Ok(())
+    }
+
+    #[test]
     fn graph_run_explanation_compiles_brief_tier_over_and_parameters() -> Result {
         let rig = TestRig::new()?;
         let factory = factory(&rig)?;
