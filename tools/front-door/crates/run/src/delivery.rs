@@ -1159,7 +1159,9 @@ impl HostDeliveryContext {
         stage: Stage,
         input: &[u8],
     ) -> Result<String> {
-        if tool == "git" && git_subcommand(args) == "worktree list" {
+        // Delivery may run after another worktree checks out the destination.
+        // Reuse listings only for preparation; mutation checks need fresh facts.
+        if stage == Stage::Prepare && tool == "git" && git_subcommand(args) == "worktree list" {
             let bytes = self.facts.cached_worktree_listing(cwd, || {
                 self.command_with_input_uncached(cwd, tool, args, stage, input)
                     .map(String::into_bytes)
