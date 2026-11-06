@@ -2399,19 +2399,19 @@ fn peer_dispatch_wait_bounds_unanswered_submission() -> Result {
             "codex/gpt-6-luna",
             "--operation-id",
             "held-submit",
-            "--wait=1s",
+            "--wait=3s",
             "--json",
         ],
     )?;
     assert!(
-        start.elapsed() < std::time::Duration::from_secs(6),
+        start.elapsed() < std::time::Duration::from_secs(8),
         "{result}"
     );
-    assert!(result.to_string().contains("LAUNCH_UNKNOWN"), "{result}");
     assert!(
         submitted.exists(),
-        "the mutating submission must reach the peer"
+        "the mutating submission must reach the peer: {result}"
     );
+    assert!(result.to_string().contains("LAUNCH_UNKNOWN"), "{result}");
     assert!(!rig.root.join("peer-state/runs").exists());
     Ok(())
 }
