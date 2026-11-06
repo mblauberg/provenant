@@ -771,7 +771,11 @@ pub fn submission(
         // Snapshot compiled nodes without inheriting dotted template behaviour
         // a second time. The raw `template` field retains their provenance.
         let original = raw.get("template").and_then(Value::as_str).unwrap_or("raw");
-        let name = if original.contains('.') { format!("submission-node-{index}") } else { original.to_owned() };
+        let name = if original.contains('.') {
+            format!("submission-node-{index}")
+        } else {
+            original.to_owned()
+        };
         let mut template = Template::default();
         let mut supplied = Map::new();
         for (name, value) in &parameters {

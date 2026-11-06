@@ -287,7 +287,6 @@ fn success() -> Result {
     Ok(())
 }
 
-
 /// The same brief is a new task after either terminal outcome, unless the
 /// caller explicitly replays an operation. Keep both runs in one journal store
 /// so an accidentally reused graph ID would return the earlier checkpoint.

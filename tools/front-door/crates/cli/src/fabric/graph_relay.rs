@@ -1149,8 +1149,8 @@ mod provisioning_tests {
     }
 
     #[test]
-    fn lost_child_receipt_replays_after_graph_settlement()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn lost_child_receipt_replays_after_graph_settlement() -> Result<(), Box<dyn std::error::Error>>
+    {
         use provenant_fabric_runtime::graph::{
             AttemptState, GraphCheckpoint, GraphExecution, NodeState,
         };
@@ -1185,10 +1185,16 @@ mod provisioning_tests {
                     "outcome":null,"launch_actor":"fixture"
                 }]}]
             }))?;
-            let open = || FileJournal::open(
-                &context.roots.state, context.identity.project, "g-lost-receipt",
-                budget, &cancel, &clock,
-            );
+            let open = || {
+                FileJournal::open(
+                    &context.roots.state,
+                    context.identity.project,
+                    "g-lost-receipt",
+                    budget,
+                    &cancel,
+                    &clock,
+                )
+            };
             {
                 let mut journal = open()?;
                 journal.bind(GraphExecution {
@@ -1218,7 +1224,10 @@ mod provisioning_tests {
                 journal.save(&checkpoint)?;
                 checkpoint
             };
-            assert!(FileJournal::pending_graph_ids(&context.roots.state, context.identity.project)?.is_empty());
+            assert!(
+                FileJournal::pending_graph_ids(&context.roots.state, context.identity.project)?
+                    .is_empty()
+            );
             let replay = serve(&context, "caller", request.clone(), budget, &cancel, &clock)?;
             assert_eq!(replay["node"], receipt["node"]);
             assert_eq!(replay["revision"], receipt["revision"]);
@@ -1226,12 +1235,16 @@ mod provisioning_tests {
             assert_eq!(open()?.load("g-lost-receipt")?, Some(settled));
             let mut changed = request.clone();
             changed["brief"] = json!("Different");
-            assert!(matches!(serve(&context, "caller", changed, budget, &cancel, &clock),
-                Err(ServiceError::Cli { code, .. }) if code == "idempotency_conflict"));
+            assert!(
+                matches!(serve(&context, "caller", changed, budget, &cancel, &clock),
+                Err(ServiceError::Cli { code, .. }) if code == "idempotency_conflict")
+            );
             let mut fresh = request;
             fresh["idempotency_key"] = json!("new-request");
-            assert!(matches!(serve(&context, "caller", fresh, budget, &cancel, &clock),
-                Err(ServiceError::Cli { code, .. }) if code == "graph_relay_unavailable"));
+            assert!(
+                matches!(serve(&context, "caller", fresh, budget, &cancel, &clock),
+                Err(ServiceError::Cli { code, .. }) if code == "graph_relay_unavailable")
+            );
         }
         Ok(())
     }

@@ -92,9 +92,13 @@ impl SubmissionIdentity {
                 Self::Content => serde_json::json!({"content":content}),
             }
         };
-        let digest = provenant_records::CanonicalV1::record_digest("graph-submission", 1, &identity)
-            .map_err(|error| error.to_string())?;
-        Ok(format!("g-{}", &provenant_core::hex(digest.as_bytes())[..30]))
+        let digest =
+            provenant_records::CanonicalV1::record_digest("graph-submission", 1, &identity)
+                .map_err(|error| error.to_string())?;
+        Ok(format!(
+            "g-{}",
+            &provenant_core::hex(digest.as_bytes())[..30]
+        ))
     }
 }
 

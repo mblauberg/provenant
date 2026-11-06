@@ -25,14 +25,21 @@ fn required<'a>(input: &'a Value, field: &str) -> Result<&'a str, FacadeError> {
 /// Run-file operation IDs belong to the envelope, not the template schema.
 fn run_envelope(input: &Value) -> Result<Value, FacadeError> {
     let mut input = input.clone();
-    let nested = input.get_mut("document").and_then(Value::as_object_mut)
+    let nested = input
+        .get_mut("document")
+        .and_then(Value::as_object_mut)
         .and_then(|fields| fields.remove("operation_id"));
-    if input.get("operation_id").is_none() && let Some(operation) = nested {
+    if input.get("operation_id").is_none()
+        && let Some(operation) = nested
+    {
         input["operation_id"] = operation;
     }
     if let Some(operation) = input.get("operation_id").filter(|value| !value.is_null()) {
-        let id = operation.as_str().ok_or_else(|| graph_input_reason("invalid operation_id"))?;
-        provenant_core::OperationId::parse(id).map_err(|_| graph_input_reason("invalid operation_id"))?;
+        let id = operation
+            .as_str()
+            .ok_or_else(|| graph_input_reason("invalid operation_id"))?;
+        provenant_core::OperationId::parse(id)
+            .map_err(|_| graph_input_reason("invalid operation_id"))?;
     }
     Ok(input)
 }
@@ -40,11 +47,17 @@ fn run_envelope(input: &Value) -> Result<Value, FacadeError> {
 fn bind_submission_subject(node: &mut provenant_fabric_runtime::graph::GraphNode, head: &str) {
     // An explicit composite source is inherited by its members. Loops resolve
     // their own subjects as writers advance, rather than freezing every round.
-    if node.source.is_some() || node.loop_body.is_some() { return; }
+    if node.source.is_some() || node.loop_body.is_some() {
+        return;
+    }
     if let Some(composite) = &mut node.composite {
-        for child in &mut composite.nodes { bind_submission_subject(child, head); }
+        for child in &mut composite.nodes {
+            bind_submission_subject(child, head);
+        }
     } else if node.extra.contains_key("review_behaviour") {
-        node.source = Some(provenant_fabric_runtime::graph::SourceBinding::Commit { commit: head.into() });
+        node.source = Some(provenant_fabric_runtime::graph::SourceBinding::Commit {
+            commit: head.into(),
+        });
     }
 }
 
@@ -186,7 +199,8 @@ impl Factory {
         }
         // Distinct calls create distinct children; callers opt into replay with a key.
         let idempotency_key = match input
-            .get("operation_id").filter(|value| !value.is_null())
+            .get("operation_id")
+            .filter(|value| !value.is_null())
             .or_else(|| input.get("idempotency_key"))
             .or_else(|| raw.and_then(|document| document.get("idempotency_key")))
         {
@@ -525,12 +539,23 @@ impl Factory {
             && input.pointer("/document/graph_id").is_none()
         {
             let id = provenant_fabric_runtime::graph::template::SubmissionIdentity::Fresh
-                .graph_id(&Value::Null, "", Some(operation)).map_err(graph_input_reason)?;
-            if FileJournal::read_checkpoint(&self.context.roots.state, self.context.identity.project, &id)
-                .map_err(graph_journal_error)?.is_some()
+                .graph_id(&Value::Null, "", Some(operation))
+                .map_err(graph_input_reason)?;
+            if FileJournal::read_checkpoint(
+                &self.context.roots.state,
+                self.context.identity.project,
+                &id,
+            )
+            .map_err(graph_journal_error)?
+            .is_some()
             {
-                let execution = FileJournal::execution(&self.context.roots.state, self.context.identity.project, &id)
-                    .map_err(graph_journal_error)?.ok_or(FacadeError::StateCorrupt)?;
+                let execution = FileJournal::execution(
+                    &self.context.roots.state,
+                    self.context.identity.project,
+                    &id,
+                )
+                .map_err(graph_journal_error)?
+                .ok_or(FacadeError::StateCorrupt)?;
                 return self.launch_submission(execution.document, input, budget, cancel);
             }
         }
@@ -604,11 +629,19 @@ impl Factory {
             journal: None,
             limits: &self.context.config.graph.limits,
         };
-        let template_name = input["use"].as_str()
+        let template_name = input["use"]
+            .as_str()
             .or_else(|| lane_document.and_then(|document| document["use"].as_str()))
-            .unwrap_or(if lane_document.is_some() { "lane-document" } else { "task" });
-        let policy = library.resolve(template_name).map_err(graph_input_reason)?
-            .identity.unwrap_or_default();
+            .unwrap_or(if lane_document.is_some() {
+                "lane-document"
+            } else {
+                "task"
+            });
+        let policy = library
+            .resolve(template_name)
+            .map_err(graph_input_reason)?
+            .identity
+            .unwrap_or_default();
         let mut submission = input.clone();
         if let Some(fields) = submission.as_object_mut() {
             fields.remove("explain");
@@ -626,13 +659,15 @@ impl Factory {
         {
             let git = provenant_os::git::git_executable()
                 .ok_or(FacadeError::InvalidInput { detail: None })?;
-            let head = provenant_run::resolve_git_base(&git, &self.cwd, "HEAD").map_err(run_error)?;
+            let head =
+                provenant_run::resolve_git_base(&git, &self.cwd, "HEAD").map_err(run_error)?;
             identity["head"] = json!(head);
             resolved_head = Some(head);
         }
         let nonce = provenant_fabric_runtime::coordination::generated_operation_id("graph")
             .map_err(|_| FacadeError::StateCorrupt)?;
-        let generated_id = policy.graph_id(&identity, &nonce, operation)
+        let generated_id = policy
+            .graph_id(&identity, &nonce, operation)
             .map_err(graph_input_reason)?;
         let id = raw
             .and_then(|document| document.get("graph_id"))
@@ -813,7 +848,9 @@ impl Factory {
             }
         }
         if let Some(head) = &resolved_head {
-            for node in &mut document.nodes { bind_submission_subject(node, head); }
+            for node in &mut document.nodes {
+                bind_submission_subject(node, head);
+            }
             document.schema_version = document.schema_version.max(u64::from(
                 provenant_fabric_runtime::graph::minimum_schema_version(&document),
             ));
@@ -1405,36 +1442,64 @@ mod tests {
         let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
         let explain = |factory: &Factory, input: Value| -> Result<String> {
             let label = input.to_string();
-            let response = factory.graph_document(input, budget, &cancel)
+            let response = factory
+                .graph_document(input, budget, &cancel)
                 .map_err(|error| format!("{label}: {error:?}"))?;
-            Ok(response["document"]["graph_id"].as_str().ok_or("graph id")?.to_owned())
+            Ok(response["document"]["graph_id"]
+                .as_str()
+                .ok_or("graph id")?
+                .to_owned())
         };
         let task = json!({"op":"run","brief":"same brief","explain":true});
-        assert_ne!(explain(&factory, task.clone())?, explain(&factory, task.clone())?);
+        assert_ne!(
+            explain(&factory, task.clone())?,
+            explain(&factory, task.clone())?
+        );
         let inline = json!({"op":"run","document":{"identity":"content","brief":"inline task","tier":"senior"},"explain":true});
-        assert_eq!(explain(&factory, inline.clone())?, explain(&factory, inline)?);
-        let review = factory.graph_document(json!({"op":"run","use":"review","brief":"Review","explain":true}), budget, &cancel)?;
-        assert_eq!(review["document"]["nodes"][0]["source"], json!({
-            "type":"commit", "commit":crate::worktree_tests::git(&rig, &["rev-parse", "HEAD"])?
-        }));
+        assert_eq!(
+            explain(&factory, inline.clone())?,
+            explain(&factory, inline)?
+        );
+        let review = factory.graph_document(
+            json!({"op":"run","use":"review","brief":"Review","explain":true}),
+            budget,
+            &cancel,
+        )?;
+        assert_eq!(
+            review["document"]["nodes"][0]["source"],
+            json!({
+                "type":"commit", "commit":crate::worktree_tests::git(&rig, &["rev-parse", "HEAD"])?
+            })
+        );
         for name in ["review", "review.security", "deliver"] {
             let mut input = json!({"op":"run","use":name,"brief":"same brief","explain":true});
-            if name == "deliver" { input["set"] = json!({"worktree":rig.project,"write_scope":["src"]}); }
+            if name == "deliver" {
+                input["set"] = json!({"worktree":rig.project,"write_scope":["src"]});
+            }
             let first = explain(&factory, input.clone())?;
             assert_eq!(first, explain(&factory, input.clone())?);
             crate::worktree_tests::git(&rig, &["commit", "--allow-empty", "-m", "new subject"])?;
             assert_ne!(first, explain(&factory, input.clone())?);
             let mut changed = input.clone();
             changed["brief"] = json!("changed brief");
-            assert_ne!(explain(&factory, input.clone())?, explain(&factory, changed)?);
+            assert_ne!(
+                explain(&factory, input.clone())?,
+                explain(&factory, changed)?
+            );
             let mut elsewhere = factory.for_graph_directory(&rig.project)?;
             let nested = rig.project.join("nested");
             std::fs::create_dir_all(&nested)?;
             elsewhere.cwd = nested;
-            assert_ne!(explain(&factory, input.clone())?, explain(&elsewhere, input)?);
+            assert_ne!(
+                explain(&factory, input.clone())?,
+                explain(&elsewhere, input)?
+            );
         }
         let nested = json!({"op":"run","document":{"use":"task","brief":"nested","operation_id":"nested-replay"},"explain":true});
-        assert_eq!(explain(&factory, nested.clone())?, explain(&factory, nested)?);
+        assert_eq!(
+            explain(&factory, nested.clone())?,
+            explain(&factory, nested)?
+        );
         let mut replay = task;
         replay["operation_id"] = json!("repeat-task");
         let first = explain(&factory, replay.clone())?;
@@ -1451,15 +1516,27 @@ mod tests {
         struct Owner;
         impl AttemptOwner for Owner {
             type Error = std::convert::Infallible;
-            fn actor(&self) -> String { "rerun-fixture".into() }
+            fn actor(&self) -> String {
+                "rerun-fixture".into()
+            }
             fn observe_or_start(
-                &mut self, _: &graph::AttemptKey, _: graph::NodeInput<'_>,
-                _: &graph::GraphRoute, _: graph::AccessMode, _: Option<&str>, _: graph::Replay<'_>,
+                &mut self,
+                _: &graph::AttemptKey,
+                _: graph::NodeInput<'_>,
+                _: &graph::GraphRoute,
+                _: graph::AccessMode,
+                _: Option<&str>,
+                _: graph::Replay<'_>,
             ) -> std::result::Result<graph::AttemptObservation, Self::Error> {
                 Ok(graph::AttemptObservation::Terminal {
-                    attempt_ref: Some("fixture/first".into()), outcome: graph::AttemptOutcome::Succeeded,
-                    launched: true, result: None, result_warning: None, result_path: None,
-                    branch: None, commit: None,
+                    attempt_ref: Some("fixture/first".into()),
+                    outcome: graph::AttemptOutcome::Succeeded,
+                    launched: true,
+                    result: None,
+                    result_warning: None,
+                    result_path: None,
+                    branch: None,
+                    commit: None,
                 })
             }
         }
@@ -1467,15 +1544,34 @@ mod tests {
         let factory = factory(&rig)?;
         let cancel = CancelToken::new();
         let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
-        let mut input = json!({"op":"run","brief":"Original task","operation_id":"recover-run","explain":true});
-        let document: GraphDocument = serde_json::from_value(factory.graph_document(input.clone(), budget, &cancel)?["document"].clone())?;
+        let mut input =
+            json!({"op":"run","brief":"Original task","operation_id":"recover-run","explain":true});
+        let document: GraphDocument = serde_json::from_value(
+            factory.graph_document(input.clone(), budget, &cancel)?["document"].clone(),
+        )?;
         let id = document.graph_id.clone();
-        let mut journal = FileJournal::open(&factory.context.roots.state, factory.context.identity.project, &id, budget, &cancel, &factory.clock)?;
+        let mut journal = FileJournal::open(
+            &factory.context.roots.state,
+            factory.context.identity.project,
+            &id,
+            budget,
+            &cancel,
+            &factory.clock,
+        )?;
         journal.bind(GraphExecution {
-            extra: Default::default(), directory: factory.cwd.clone(), document: document.clone(),
-            review_base: None, integration_base: None,
+            extra: Default::default(),
+            directory: factory.cwd.clone(),
+            document: document.clone(),
+            review_base: None,
+            integration_base: None,
         })?;
-        let first = graph::advance_with_budget(&document, &mut Owner, &mut journal, &factory.context.config.graph.limits, &factory.context.config.graph.budget)?;
+        let first = graph::advance_with_budget(
+            &document,
+            &mut Owner,
+            &mut journal,
+            &factory.context.config.graph.limits,
+            &factory.context.config.graph.budget,
+        )?;
         assert_eq!(first.status, GraphStatus::Complete);
         drop(journal);
         crate::worktree_tests::git(&rig, &["commit", "--allow-empty", "-m", "move head"])?;
@@ -1486,9 +1582,17 @@ mod tests {
         let replay = factory.graph_document(input, budget, &cancel)?;
         assert_eq!(replay["checkpoint"]["graph_id"], id);
         assert_eq!(replay["status"], "complete");
-        let saved = FileJournal::read_checkpoint(&factory.context.roots.state, factory.context.identity.project, &id)?.ok_or("checkpoint")?;
+        let saved = FileJournal::read_checkpoint(
+            &factory.context.roots.state,
+            factory.context.identity.project,
+            &id,
+        )?
+        .ok_or("checkpoint")?;
         assert_eq!(saved.nodes[0].attempts.len(), 1);
-        assert_eq!(saved.nodes[0].attempts[0].attempt_ref.as_deref(), Some("fixture/first"));
+        assert_eq!(
+            saved.nodes[0].attempts[0].attempt_ref.as_deref(),
+            Some("fixture/first")
+        );
         Ok(())
     }
 
@@ -1716,9 +1820,19 @@ mod tests {
             factory.child_request(&unkeyed)?.id
         );
         let operation = json!({"op":"run","document":{"use":"task","brief":"Nested operation","operation_id":"child-replay"}});
-        assert_eq!(factory.child_request(&operation)?, factory.child_request(&operation)?);
-        assert_eq!(factory.child_request(&operation)?.idempotency_key, "child-replay");
-        assert!(factory.child_request(&json!({"op":"run","operation_id":"bad id"})).is_err());
+        assert_eq!(
+            factory.child_request(&operation)?,
+            factory.child_request(&operation)?
+        );
+        assert_eq!(
+            factory.child_request(&operation)?.idempotency_key,
+            "child-replay"
+        );
+        assert!(
+            factory
+                .child_request(&json!({"op":"run","operation_id":"bad id"}))
+                .is_err()
+        );
         assert!(first.writer);
         assert_eq!(
             first.launch.as_ref().unwrap().node["access"],
