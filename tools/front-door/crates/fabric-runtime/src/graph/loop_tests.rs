@@ -2036,6 +2036,27 @@ fn delta_review_runs_only_the_lens_that_raised_findings() {
 }
 
 #[test]
+fn later_repair_round_uses_latest_raising_lenses() {
+    let mut document = review_repair_document();
+    let check = serde_json::from_value(serde_json::json!({
+        "id":"check","kind":"composite","access":"read_only","depends_on":["fix"],
+        "composite":{"min_successful":1,"reduce_verdict":true,"nodes":[
+            {"id":"correctness","repair_lens":"correctness","access":"read_only","prompt":"correctness delta","route":{"alias":"senior"},"require_findings":true},
+            {"id":"security","repair_lens":"security","access":"read_only","prompt":"security delta","route":{"alias":"senior"},"require_findings":true}
+        ],"exports":[{"node":"correctness","outputs":["findings","verdict"]},{"node":"security","outputs":["findings","verdict"]}]}
+    })).unwrap();
+    document.nodes[1].loop_body.as_mut().unwrap().body[1] = check;
+    let initial = repair_finding(false);
+    let next = initial.replace("F1", "F2").replace("correctness", "security");
+    let pass = "```findings\n{\"schema_version\":1,\"findings\":[]}\n```\nVERDICT: PASS";
+    let mut owner = reviews(&[&initial, "fix one", &next, "fix two", pass]);
+    let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
+    assert!(run.checkpoint.successful());
+    let calls: Vec<_> = owner.calls.iter().map(|call| call.0.node_id.as_str()).collect();
+    assert_eq!(calls, ["initial", "repair--r1--fix", "repair--r1--check--correctness", "repair--r2--fix", "repair--r2--check--security"]);
+}
+
+#[test]
 fn review_repair_exhaustion_runs_principal_instead_of_owner_wait() {
     let document = review_repair_document();
     let initial = repair_finding(false);
