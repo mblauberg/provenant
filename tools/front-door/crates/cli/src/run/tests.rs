@@ -1782,22 +1782,6 @@ fn unsafe_store_path_reason_survives_cli_conversion() {
 }
 
 #[test]
-fn setup_lock_timeout_has_its_own_refusal_and_remedy() {
-    let failure = super::Fail::from(provenant_run::RunError::SetupLockTimeout { seconds: 42 });
-    assert_eq!(failure.kind.code(), "SETUP_LOCK_TIMEOUT");
-    assert_eq!(failure.status, Status::Refused);
-    assert!(failure.message.contains("provenant-lane-setup.lock"));
-    assert!(failure.message.contains("42s"));
-    let projection = failure.projection.expect("typed detail");
-    assert!(
-        projection
-            .next
-            .iter()
-            .any(|next| next.contains("setup_lock_wait_seconds"))
-    );
-}
-
-#[test]
 fn host_delivery_limit_keeps_its_text_as_typed_io_detail() {
     for (tool, command, text) in [
         (

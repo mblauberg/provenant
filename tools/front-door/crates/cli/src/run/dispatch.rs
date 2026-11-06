@@ -3102,15 +3102,6 @@ pub(super) fn check_launch_policy(started: &[run::Started]) -> Result<(), Fail> 
     {
         return Ok(());
     }
-    if let Some(seconds) = started.iter().find_map(|started| match started {
-        run::Started::Refused {
-            kind: run::RefusalKind::SetupLockTimeout { seconds },
-            ..
-        } => Some(*seconds),
-        _ => None,
-    }) {
-        return Err(run::RunError::SetupLockTimeout { seconds }.into());
-    }
     if let Some((run, attempt, worktree)) = started.iter().find_map(|started| match started {
         run::Started::Refused {
             kind:

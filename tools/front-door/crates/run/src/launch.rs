@@ -456,7 +456,6 @@ enum HandOff {
     Busy,
     /// No guardian was contacted, but custody remains protected.
     Protected(String),
-    SetupLockTimeout(u64),
     RetainedImport {
         run: RunId,
         attempt: AttemptId,
@@ -497,9 +496,6 @@ pub enum RefusalKind {
     InvalidWriteGrantPath,
     WriteGrantsLimit,
     Handoff,
-    SetupLockTimeout {
-        seconds: u64,
-    },
     RetainedImport {
         run: RunId,
         attempt: AttemptId,
@@ -1791,20 +1787,14 @@ impl RunStore {
                     Ok(()) => Started::Launched(id),
                     // Nothing reached a guardian: the attempt ends here.
                     Err(
-                        error @ (HandOff::Local(_)
-                        | HandOff::Busy
-                        | HandOff::SetupLockTimeout(_)
-                        | HandOff::RetainedImport { .. }),
+                        error
+                        @ (HandOff::Local(_) | HandOff::Busy | HandOff::RetainedImport { .. }),
                     ) => {
                         let (reason, kind) = match error {
                             HandOff::Busy => ("worktree is busy".into(), RefusalKind::WorktreeBusy),
                             HandOff::Local(error) => (
                                 format!("launch preparation failed: {error}"),
                                 RefusalKind::Handoff,
-                            ),
-                            HandOff::SetupLockTimeout(seconds) => (
-                                RunError::SetupLockTimeout { seconds }.to_string(),
-                                RefusalKind::SetupLockTimeout { seconds },
                             ),
                             HandOff::RetainedImport {
                                 run,
