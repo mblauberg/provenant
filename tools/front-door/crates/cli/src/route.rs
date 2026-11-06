@@ -70,9 +70,15 @@ pub enum RouteOverrideCommand {
     /// Record a pacing override for one scope and echo the recorded rule.
     Set(OverrideSet),
     /// List recorded schedules, their current activity and remaining time.
-    List,
+    List(OverrideList),
     /// Remove pacing overrides: one scope's, or every one without a selector.
     Clear(OverrideClear),
+}
+#[derive(Debug, Args)]
+pub struct OverrideList {
+    /// Include expired overrides.
+    #[arg(long)]
+    pub all: bool,
 }
 #[derive(Debug, Args)]
 #[command(group(clap::ArgGroup::new("scope").args(["account", "provider", "all"])))]
@@ -876,6 +882,9 @@ pub struct RoutePreview {
     pub login_diagnostic: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub quota: Option<provenant_quota::QuotaSnapshot>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub admission_refusal: Option<String>,
+    pub provider_refusals: Vec<String>,
 }
 #[derive(Serialize)]
 pub struct RecordedReadiness {
@@ -2578,7 +2587,7 @@ fn execute(command: &Route, roots: &Roots, now: WallTime) -> Result<Data, EdgeEr
             "local-preview",
             &[],
             false,
-            |context, records, _, accounts| {
+            |context, records, policies, accounts| {
                 let context = &RoutingContext {
                     policy_account_hint: query.account.as_deref(),
                     ..*context
@@ -2645,7 +2654,7 @@ fn execute(command: &Route, roots: &Roots, now: WallTime) -> Result<Data, EdgeEr
                     accounts,
                     &model,
                     &context.catalogue.admission_pools(&model),
-                    route.account_key.as_deref(),
+                    None,
                     query.account.as_deref(),
                     |scope| {
                         crate::quota::read_readiness(
@@ -2655,6 +2664,39 @@ fn execute(command: &Route, roots: &Roots, now: WallTime) -> Result<Data, EdgeEr
                         )
                     },
                 );
+                let pools = context.catalogue.admission_pools(&model);
+                let admission_refusal = provenant_quota::Admission {
+                    policies,
+                    now_unix_seconds: now.unix_seconds(),
+                    records,
+                    pools: &pools,
+                }
+                .check_with_partial_headroom(&route, context.config.allow_unknown_partial_headroom)
+                .err()
+                .map(|error| error.to_string());
+                let admission = provenant_quota::Admission {
+                    policies,
+                    now_unix_seconds: now.unix_seconds(),
+                    records,
+                    pools: &pools,
+                };
+                let mut provider_refusals = Vec::new();
+                for record in records
+                    .iter()
+                    .filter(|record| record.account.adapter == route.adapter)
+                {
+                    if let Some(block) = admission.account_block(
+                        &route.adapter,
+                        &record.account.account_key,
+                        &route.model,
+                    )? {
+                        provider_refusals.push(format!(
+                            "{}: {}",
+                            record.account.account_key,
+                            block.repair()
+                        ));
+                    }
+                }
                 let entry = context.catalogue.model(&model);
                 let allow_unknown_partial_headroom = context
                     .config
@@ -2677,6 +2719,8 @@ fn execute(command: &Route, roots: &Roots, now: WallTime) -> Result<Data, EdgeEr
                     recorded_readiness,
                     login_diagnostic,
                     quota,
+                    admission_refusal,
+                    provider_refusals,
                 })))
             },
         ),
@@ -2730,11 +2774,16 @@ fn execute(command: &Route, roots: &Roots, now: WallTime) -> Result<Data, EdgeEr
         }
         Route::Override(request) => match &request.command {
             RouteOverrideCommand::Set(set) => set_override(roots, set, now),
-            RouteOverrideCommand::List => Ok(Data::Overrides(Box::new(OverrideReport {
+            RouteOverrideCommand::List(query) => Ok(Data::Overrides(Box::new(OverrideReport {
                 notes: exclusion_notes(roots)?,
                 recorded: None,
                 cleared: Vec::new(),
-                overrides: list_overrides(roots, now)?,
+                overrides: list_overrides(roots, now)?
+                    .into_iter()
+                    .filter(|row| {
+                        query.all || row.schedule.expires.is_none_or(|expiry| expiry > now)
+                    })
+                    .collect(),
             }))),
             RouteOverrideCommand::Clear(clear) => clear_override(roots, clear, now),
         },
@@ -2981,6 +3030,12 @@ pub(crate) fn resolved_text(preview: &RoutePreview) -> String {
             crate::quota::readiness_words(&record.observation)
         ));
     }
+    for refusal in &preview.provider_refusals {
+        text.push_str(&format!("provider refusal: {refusal}\n"));
+    }
+    if let Some(refusal) = &preview.admission_refusal {
+        text.push_str(&format!("admission: {refusal}\n"));
+    }
     if let Some(diagnostic) = &preview.login_diagnostic {
         text.push_str(&format!("login: {diagnostic}\n"));
     }
@@ -3036,7 +3091,7 @@ pub fn run(
         },
         Route::Override(request) => match request.command {
             RouteOverrideCommand::Set(_) => "route override set",
-            RouteOverrideCommand::List => "route override list",
+            RouteOverrideCommand::List(_) => "route override list",
             RouteOverrideCommand::Clear(_) => "route override clear",
         },
     };
@@ -3323,7 +3378,7 @@ pub fn run(
     let listing = matches!(
         command,
         Route::Override(RouteOverride {
-            command: RouteOverrideCommand::List
+            command: RouteOverrideCommand::List(_)
         })
     );
     let mode = globals.render_mode(
@@ -4808,6 +4863,25 @@ mod route_tests {
             now,
             Some(now + 3_600),
         )?;
+        let preview = super::Route::Resolve(super::RouteResolve {
+            writes: false,
+            account: None,
+            name: Some("codex/gpt-6-luna".into()),
+            request: super::RouteRequest {
+                read_heavy: false,
+                model: None,
+                route: None,
+                effort: None,
+                confidential: false,
+                fallback: vec![],
+                exclude: vec![],
+            },
+        });
+        let now_wall = provenant_core::WallTime::from_micros(now * 1_000_000)?;
+        let super::Data::Resolved(preview) = super::execute(&preview, &roots, now_wall)? else {
+            return Err("expected route preview".into());
+        };
+        assert!(preview.provider_refusals.iter().any(|reason| reason.contains(&spent) && reason.contains("scoped provider refusal")), "{:?}", preview.provider_refusals);
         // A refusal written after resolution still stops the launch.
         let error = super::check_dispatch_candidate(&roots, &drawn, super::REGISTRY).unwrap_err();
         assert!(error.contains("scoped provider refusal"), "{error}");

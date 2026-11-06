@@ -1518,6 +1518,52 @@ impl Reconciled {
     }
 }
 
+// A lock timeout can race a terminal commit by another settlement owner.
+fn reconcile_failure(error: RunError, terminal: impl FnOnce() -> bool) -> Option<Reconciled> {
+    let timed_out = match &error {
+        RunError::Filesystem(provenant_os::fs::FsError::LockTimeout { .. }) => true,
+        // Custody wraps some filesystem errors as I/O errors at its boundary.
+        RunError::Io(error) => error.to_string().starts_with("lock acquisition timed out"),
+        _ => false,
+    };
+    Some(if timed_out && terminal() {
+        Reconciled::Finished
+    } else {
+        Reconciled::uncertain(UncertainReason::ReconcileFailed {
+            error: error.to_string(),
+        })
+    })
+}
+
+#[test]
+fn lock_timeout_reports_a_concurrently_settled_attempt() {
+    let timeout = || {
+        RunError::Filesystem(provenant_os::fs::FsError::LockTimeout {
+            path: "writer.lock".into(),
+            timeout: std::time::Duration::from_secs(1),
+        })
+    };
+    assert_eq!(
+        reconcile_failure(timeout(), || true),
+        Some(Reconciled::Finished)
+    );
+    let wrapped = RunError::Io(std::io::Error::other(
+        "lock acquisition timed out for writer.lock",
+    ));
+    assert_eq!(
+        reconcile_failure(wrapped, || true),
+        Some(Reconciled::Finished)
+    );
+    assert!(matches!(
+        reconcile_failure(timeout(), || false),
+        Some(Reconciled::Uncertain { .. })
+    ));
+    assert!(matches!(
+        reconcile_failure(RunError::Validation("other failure"), || true),
+        Some(Reconciled::Uncertain { .. })
+    ));
+}
+
 impl RunStore {
     /// A previous boot ended every member of this attempt's process tree.
     /// Keep both exclusions until the canonical commit precedes fence release.
@@ -2748,13 +2794,13 @@ impl RunStore {
         let mut found = Vec::new();
         for id in ids {
             let id = AttemptId::parse(&id).map_err(|_| RunError::Validation("attempt index ID"))?;
-            let mut state = self
-                .reconcile_attempt(id, providers, call, observer)
-                .unwrap_or_else(|error| {
-                    Some(Reconciled::uncertain(UncertainReason::ReconcileFailed {
-                        error: error.to_string(),
-                    }))
-                });
+            let mut state = match self.reconcile_attempt(id, providers, call, observer) {
+                Ok(state) => state,
+                Err(error) => reconcile_failure(error, || {
+                    self.record(id, call)
+                        .is_ok_and(|record| matches!(record.state, AttemptState::Terminal { .. }))
+                }),
+            };
             if let Some(error) = &listing_error
                 && let Some(
                     uncertain @ (Reconciled::Uncertain { .. }
@@ -3365,6 +3411,14 @@ impl RunStore {
                             Reconciled::uncertain(UncertainReason::GuardianNotObservable)
                         }))
                     }
+                    Err(CustodyError::Filesystem(
+                        error @ provenant_os::fs::FsError::LockTimeout { .. },
+                    )) => Ok(reconcile_failure(RunError::Filesystem(error), || {
+                        self.record(id, call).is_ok_and(|current| {
+                            matches!(current.state, AttemptState::Terminal { .. })
+                        })
+                    })
+                    .expect("reconciliation failure always returns a state")),
                     Err(error) => Ok(Reconciled::custody_unavailable(&error)),
                 }
             }
