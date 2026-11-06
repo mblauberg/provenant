@@ -2735,21 +2735,36 @@ fn dispatch_reuses_only_free_lane_or_unowned_worktree() -> Result<(), Box<dyn st
     assert_eq!(output.termination, Termination::Exit(0), "{remedy}");
     let selected = String::from_utf8(output.stdout.bytes)?;
     assert_eq!(std::path::Path::new(&selected), native_path);
+    let remedy_command = || -> Result<_, Box<dyn std::error::Error>> {
+        let mut command = parsed_run(&[
+            "--worktree",
+            &selected,
+            "--model",
+            "codex/gpt-6-luna",
+            "--prompt-file",
+            prompt.to_str().ok_or("prompt")?,
+        ])?;
+        command.wait = None;
+        Ok(command)
+    };
+    // Selecting the printed path cannot bypass custody: the first part of
+    // the remedy says to inspect custody, and Git still marks this tree locked.
+    assert!(remedy.contains("inspect custody"), "{remedy}");
+    let locked_command = remedy_command()?;
+    let still_locked = super::submit::with_deferred_provider_launch(|| {
+        dispatch_with_workers(locked_command, &edge, &Free)
+    });
+    assert_eq!(still_locked.result.status, Status::Refused);
+    assert!(still_locked.result.data.get("run_id").is_none());
     run_git(
         &project,
         &["worktree", "unlock", native_path.to_str().ok_or("path")?],
     )?;
-    let mut worktree_command = parsed_run(&[
-        "--worktree",
-        &selected,
-        "--model",
-        "codex/gpt-6-luna",
-        "--prompt-file",
-        prompt.to_str().ok_or("prompt")?,
-    ])?;
-    worktree_command.wait = None;
+    // Repeat the same printed selection after repairing the observed custody
+    // condition; no additional target or authority is supplied.
+    let repaired_command = remedy_command()?;
     let accepted = super::submit::with_deferred_provider_launch(|| {
-        dispatch_with_workers(worktree_command, &edge, &Free)
+        dispatch_with_workers(repaired_command, &edge, &Free)
     });
     assert_eq!(
         accepted.result.status,
@@ -9196,6 +9211,8 @@ fn lane_detail_and_output_retain_safe_refusal_remedies() -> Result<(), Box<dyn s
             _: Option<&run::AttemptRecord>,
         ) -> Result<run::PreparedLaunch, run::PrepareRefusal> {
             Err(run::PrepareRefusal {
+                boundary_class: provenant_records::diagnostic::BoundaryClass::None,
+                resource: None,
                 terminal_cause: Some(provenant_records::run::TerminalCause::AccessPolicyRefused),
                 terminal_note: Some(self.note.clone()),
                 message: "PROVIDER_SENTINEL must not become a public diagnostic".into(),
