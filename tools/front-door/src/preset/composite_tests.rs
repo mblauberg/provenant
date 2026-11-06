@@ -8,7 +8,10 @@ fn resolvers() -> BTreeMap<String, Vec<String>> {
     BTreeMap::from([
         ("review-topology".into(), vec!["f0-v0-s0".into()]),
         ("review-verifiers".into(), vec!["1".into()]),
-        ("review-panel".into(), vec!["correctness".into(), "tests".into()]),
+        (
+            "review-panel".into(),
+            vec!["correctness".into(), "tests".into()],
+        ),
         ("review-advice-correctness".into(), vec![String::new()]),
         ("review-advice-tests".into(), vec![String::new()]),
         ("review-advice-security".into(), vec![String::new()]),
@@ -18,11 +21,14 @@ fn resolvers() -> BTreeMap<String, Vec<String>> {
     ])
 }
 
-
 fn review_leaves(value: &Value) -> Vec<&Value> {
     match value {
-        Value::Object(fields) if fields.get("review_lens").is_some_and(Value::is_string)
-            && !fields.contains_key("composite") => vec![value],
+        Value::Object(fields)
+            if fields.get("review_lens").is_some_and(Value::is_string)
+                && !fields.contains_key("composite") =>
+        {
+            vec![value]
+        }
         Value::Object(fields) => fields.values().flat_map(review_leaves).collect(),
         Value::Array(values) => values.iter().flat_map(review_leaves).collect(),
         _ => Vec::new(),
@@ -221,7 +227,8 @@ fn composite_review_of_one_is_one_attempt_and_multi_panel_requires_every_lens() 
     assert_eq!(nodes[0]["kind"], Value::Null);
     assert_eq!(nodes[0]["required_verdict"], "VERDICT: PASS");
     let multi = expand_composite(&layers, "review", &json!({}), &[], &resolvers()).unwrap();
-    let lenses = &multi.document["nodes"][0]["composite"]["nodes"][0]["composite"]["nodes"][0]["composite"]["nodes"][0];
+    let lenses = &multi.document["nodes"][0]["composite"]["nodes"][0]["composite"]["nodes"][0]["composite"]
+        ["nodes"][0];
     assert_eq!(lenses["id"], "lenses");
     assert!(lenses["composite"].get("min_successful").is_none());
     assert_eq!(review_leaves(&multi.document).len(), 2);

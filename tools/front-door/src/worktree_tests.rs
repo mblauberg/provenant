@@ -4859,8 +4859,14 @@ fn graph_run_refuses_low_disk_writers() -> Result {
     assert_eq!(reader_value["status"], "failed", "{reader_value}");
     let reader_node = &reader_value["data"]["checkpoint"]["nodes"][0];
     assert_eq!(reader_node["state"], "failed", "{reader_value}");
-    assert_eq!(reader_node["attempts"][0]["outcome"], "adapter_unavailable", "{reader_value}");
-    assert!(reader_node["attempts"][0]["attempt_ref"].as_str().is_some(), "{reader_value}");
+    assert_eq!(
+        reader_node["attempts"][0]["outcome"], "adapter_unavailable",
+        "{reader_value}"
+    );
+    assert!(
+        reader_node["attempts"][0]["attempt_ref"].as_str().is_some(),
+        "{reader_value}"
+    );
     assert!(rig.state.join("runs").exists());
     Ok(())
 }

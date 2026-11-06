@@ -1600,8 +1600,7 @@ fn fragment(
     .map_err(|error| {
         *safe_reason = error.cause.unwrap_or(PlanFailureFact::InvalidFragment);
         error.message
-    })?
-    {
+    })? {
         super::patch::Prepared::Ready(admission) => {
             let mut expansion = admission.expansion;
             if !admission.warnings.is_empty() {
@@ -2241,7 +2240,15 @@ pub(super) fn settle(
         };
         json.and_then(|json| {
             safe_reason = PlanFailureFact::InvalidFragment;
-            fragment(node, source, document, checkpoint, &json, limits, &mut safe_reason)
+            fragment(
+                node,
+                source,
+                document,
+                checkpoint,
+                &json,
+                limits,
+                &mut safe_reason,
+            )
         })
     } else if writer(node) {
         let handoff = capture

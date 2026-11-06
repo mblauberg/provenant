@@ -1150,7 +1150,8 @@ pub(super) fn prepare(
     validate_output_kinds(&preview).map_err(|error| PatchError::invalid(error.to_string()))?;
     if let Some(limit) = structural_limit(&preview, &plan, context.limits) {
         return Err(PatchError {
-            code: "invalid", message: limit.to_string(),
+            code: "invalid",
+            message: limit.to_string(),
             cause: Some(PlanFailureFact::Structural(limit)),
         });
     }
@@ -1160,7 +1161,8 @@ pub(super) fn prepare(
     if bound > MAX_CHECKPOINT_BYTES as usize {
         let limit = GraphEnvelopeLimit { bound };
         return Err(PatchError {
-            code: "invalid", message: limit.to_string(),
+            code: "invalid",
+            message: limit.to_string(),
             cause: Some(PlanFailureFact::Envelope(limit)),
         });
     }
