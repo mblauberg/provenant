@@ -650,7 +650,10 @@ pub(super) fn upstream_finding(node: &PlannedNode, source: &str, mut finding: Fi
         // A delta verifier replaces prior verification; synthesis inherits it.
         finding.extra.remove("verification");
     }
-    finding.extra.insert("propagates".into(), format!("{source}:{}", finding.id).into());
+    finding.extra.insert(
+        "propagates".into(),
+        format!("{source}:{}", finding.id).into(),
+    );
     finding
 }
 
