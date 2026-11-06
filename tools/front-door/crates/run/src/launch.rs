@@ -248,7 +248,7 @@ impl From<String> for PrepareRefusal {
     fn from(message: String) -> Self {
         Self {
             message,
-            terminal_cause: None,
+            terminal_cause: Some(TerminalCause::PreparationRefused),
             terminal_note: None,
             skipped_routes: Vec::new(),
             fallback_outcome: None,
@@ -425,9 +425,12 @@ impl RunStore {
         let prompt = output_prompt(&base, &attempt.prompt);
         let plan = providers
             .check_policy(task)
-            .map_err(|message| RunError::Input {
-                kind: ErrorKind::ContinuationUnsupported,
-                message,
+            .map_err(|error| match error.terminal_cause {
+                Some(cause) => RunError::ContinuationRefused { cause },
+                None => RunError::Input {
+                    kind: ErrorKind::ContinuationUnsupported,
+                    message: error.to_string(),
+                },
             })
             .and_then(|()| {
                 providers
@@ -523,7 +526,7 @@ pub trait Providers {
     }
     /// Host policy checks before provider preparation. A refusal is task-local;
     /// no provider is prepared and siblings remain eligible to launch.
-    fn check_policy(&self, _task: &TaskRequest) -> std::result::Result<(), String> {
+    fn check_policy(&self, _task: &TaskRequest) -> std::result::Result<(), PrepareRefusal> {
         Ok(())
     }
     /// Prepare one task, trying its fallback routes in order. An error is a
@@ -1563,14 +1566,19 @@ impl RunStore {
                 None
             };
             if let Some(reason) = child_reason {
-                match self.withdraw(
+                match self.withdraw_with_preparation_failure(
                     id,
-                    AttemptState::Queued {
-                        extra: Default::default(),
+                    crate::store::Withdrawal {
+                        expected: AttemptState::Queued {
+                            extra: Default::default(),
+                        },
+                        outcome: Outcome::Rejected,
+                        reason,
+                        finished_at: now()?,
+                        failure: None,
+                        terminal_cause: Some(TerminalCause::AccessPolicyRefused),
+                        terminal_note: None,
                     },
-                    Outcome::Rejected,
-                    reason,
-                    now()?,
                     call,
                 ) {
                     Ok(Some(_)) => {}
@@ -1698,14 +1706,19 @@ impl RunStore {
                     // leaving it Queued would meet the same unreadable input on
                     // every later start.
                     let reason = format!("stored prompt unreadable: {error}");
-                    match self.withdraw(
+                    match self.withdraw_with_preparation_failure(
                         id,
-                        AttemptState::Queued {
-                            extra: Default::default(),
+                        crate::store::Withdrawal {
+                            expected: AttemptState::Queued {
+                                extra: Default::default(),
+                            },
+                            outcome: Outcome::Rejected,
+                            reason: &reason,
+                            finished_at: now()?,
+                            failure: None,
+                            terminal_cause: Some(TerminalCause::StoredPromptUnreadable),
+                            terminal_note: None,
                         },
-                        Outcome::Rejected,
-                        &reason,
-                        now()?,
                         call,
                     ) {
                         Ok(Some(_)) => {}
@@ -1762,7 +1775,7 @@ impl RunStore {
             let prepared = providers
                 .check_policy(task)
                 .map(|()| priority)
-                .map_err(|reason| (RefusalKind::Policy, Box::new(PrepareRefusal::from(reason))))
+                .map_err(|refusal| (RefusalKind::Policy, Box::new(refusal)))
                 .and_then(|priority| {
                     providers
                         .prepare(
@@ -1789,6 +1802,24 @@ impl RunStore {
                     } else {
                         Outcome::Rejected
                     };
+                    let terminal_cause =
+                        refusal
+                            .terminal_cause
+                            .or(Some(if outcome == Outcome::AuthRequired {
+                                TerminalCause::AccountLoginRequired
+                            } else {
+                                TerminalCause::PreparationRefused
+                            }));
+                    let terminal_note = refusal.terminal_note.or_else(|| {
+                        refusal.skipped_routes.first().map(|route| {
+                            let diagnostic = route.diagnostic();
+                            format!(
+                                "first candidate: {}; {}",
+                                diagnostic.detail.unwrap_or_default(),
+                                diagnostic.next.unwrap_or_default()
+                            )
+                        })
+                    });
                     let reason = refusal.message;
                     match self.withdraw_with_preparation_failure(
                         id,
@@ -1800,8 +1831,8 @@ impl RunStore {
                             reason: &reason,
                             finished_at: now()?,
                             failure: refusal.fallback_outcome,
-                            terminal_cause: refusal.terminal_cause,
-                            terminal_note: refusal.terminal_note,
+                            terminal_cause,
+                            terminal_note,
                         },
                         call,
                     ) {
@@ -1845,14 +1876,19 @@ impl RunStore {
                         WriteGrantError::Limit { .. } => RefusalKind::WriteGrantsLimit,
                     };
                     let reason = error.to_string();
-                    match self.withdraw(
+                    match self.withdraw_with_preparation_failure(
                         id,
-                        AttemptState::Queued {
-                            extra: Default::default(),
+                        crate::store::Withdrawal {
+                            expected: AttemptState::Queued {
+                                extra: Default::default(),
+                            },
+                            outcome: Outcome::Rejected,
+                            reason: &reason,
+                            finished_at: now()?,
+                            failure: None,
+                            terminal_cause: Some(TerminalCause::WriteGrantsRefused),
+                            terminal_note: None,
                         },
-                        Outcome::Rejected,
-                        &reason,
-                        now()?,
                         call,
                     ) {
                         Ok(Some(_)) => crate::writer::settle_launch_staging(&attempt)?,
@@ -1917,7 +1953,11 @@ impl RunStore {
                     ) => {
                         let terminal_cause = match &error {
                             HandOff::TypedLocal { cause, .. } => Some(*cause),
-                            _ => None,
+                            HandOff::Busy => Some(TerminalCause::WorktreeBusy),
+                            HandOff::RetainedImport { .. } => {
+                                Some(TerminalCause::RetainedWriterImport)
+                            }
+                            _ => Some(TerminalCause::HandoffRefused),
                         };
                         let (reason, kind) = match error {
                             HandOff::Busy => ("worktree is busy".into(), RefusalKind::WorktreeBusy),

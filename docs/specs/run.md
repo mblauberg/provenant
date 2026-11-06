@@ -376,7 +376,10 @@ On macOS, Critical kernel memory pressure defers both classes by default.
 `domains.fabric.lanes.memory_pressure_threshold` accepts `critical`, `warning`
 (Warning or Critical) or `never`. An unavailable or unknown pressure sample is
 logged. Low available memory warns on both classes without holding admission.
-The disk floor applies to both classes. Build slots do not gate
+The disk floor holds lanes with write authority, including declared write roots
+and prepared tool or project write grants. Lanes limited to provider bookkeeping
+and private scratch warn once below it with free space, the floor and its source,
+then proceed. Build slots do not gate
 admission: a host-wide build throttle (not a hard cap), by default
 max(1, min(cores / cargo_build_jobs, GiB of RAM / 6)) slots, gates each
 compiling cargo command a lane runs (`provenant_os::build_slots`, reached
@@ -386,7 +389,7 @@ count. Writer lanes are capped separately by `max_writer_lanes` (host, default
 cap queues to the admission deadline and is then refused with a reason naming
 the cap, its scope and the key to raise. All lanes also count against the
 configured total caps. At expiry, disk floor, known pressure and the applicable
-lane cap have distinct refusal reasons with their setting and source. Disk-floor
+lane cap have distinct refusal reasons with their setting and source. For writers, disk-floor
 refusal takes precedence when disk and pressure are both insufficient. A failed
 memory sample or a floor-only memory shortage does not by itself refuse admission.
 The ledger associates new leases
@@ -402,8 +405,10 @@ reported as a typed refusal.
 Both identity fields are required on every lease. Earlier lease schemas were
 never installed; upgrades retain spacing but discard their lease rows.
 
-Each ticket and host ledger lease records a lane class: `writer` for a
-`worktree-write` lane, `read_only` for every other. Startup spacing is per
+Each ticket and host ledger lease records a lane class: `writer` for a lane
+with write authority (`worktree-write`, declared write roots, or prepared tool or
+project write grants), `read_only` for lanes limited to provider bookkeeping and
+private scratch. Preparation promotes a ticket when it adds write authority. Startup spacing is per
 class and defaults to zero for both classes. `[domains.fabric.lanes] start_spacing_ms`
 sets the spacing in milliseconds for both classes, measured against the last
 start of the same class. A read-only lane never waits behind a writer.
@@ -426,7 +431,8 @@ judged: host clock or boot identity unreadable`), which the guardian publishes
 as the lane's never-spawned reason, rather than judged on the wall clock;
 `lanes` then names no spacing wait. The wall clock is kept only as the `started_at` a lane displays. The
 memory floor (5 %) warns for both classes; the live `gc.free_floor` disk floor
-can refuse both classes.
+can refuse any lane with write authority; lanes limited to provider bookkeeping
+and private scratch warn once below it and proceed.
 The disk default is 10 % of the state volume, with a 50 GiB minimum. A ticket with no class is a writer; opening a version 1 ledger upgrades it in
 place, in one transaction, carrying any wall-time start across as a start of now under the current boot
 for each class, whatever its age and without reading the wall clock, so the
@@ -735,16 +741,19 @@ record, including a refusal before launch, carries a `settlement_reason`
 (`RunStore::commit_terminal`, or `commit_lost` for an attempt whose record was
 lost). Lane rows expose that settlement classification as `cause`. When a
 specific typed terminal cause was recorded, `terminal_cause` identifies it and
-`reason` uses fixed text from that cause. Pre-launch causes distinguish an
+structured `reason` fields retain the full safe cause, remedy and note in every
+lane response. Only human `status` and `lanes` rows use short labels pointing to
+`provenant output ID`. Pre-launch causes distinguish an
 unsupported platform, an unknown pacing account, an unregistered selected
 account, a credential-helper failure at delivery Prepare, a configured command
 that cannot be resolved, an unconfigured host-native route and a provider
 identity that was not observed. A terminal record may also carry a
 `terminal_note`, a bounded sentence Provenant composes from fixed text and typed
 values: the configured executable of an unresolved command, or a policy retry
-decision such as "retrying this session (attempt 2 of 2)". The lane `reason`
-appends it to the fixed text. These projections never copy raw preparation
-errors or provider output. A refused resume retains
+decision such as "retrying this session (attempt 2 of 2)". Structured listings,
+launch replies and output retain that note and the full remedy. Human row labels
+omit them. Disk-wait observations remain available before a result exists.
+These projections never copy raw preparation errors or provider output. A refused resume retains
 the specific preparation reason without consuming a continuation or creating a
 new run.
 
@@ -1464,6 +1473,8 @@ Named route pools skip members with fresh, unreset exhaustion. Stale spent
 observations rank a member behind other ready members, but never refuse a launch.
 When every member has fresh exhaustion, refusal identifies the members
 and their earliest known resets. An exact model request keeps its model.
-A quota refusal before any generated work may retry the same alias;
-the successor attempt retains the spent members in its routing exclusions and
-links to the prior attempt. Generated output prevents this redraw. A writer with a session also needs explicit zero output usage.
+A quota stop may retry the same alias even after generated work, within
+`settlement_retries` and the attempt limit. The successor attempt retains spent
+members in its routing exclusions and links to the prior attempt. Writers keep
+the same worktree; the successor is instructed to inspect its files and commits
+and continue the work rather than restart. Read-only lanes retry the original task.

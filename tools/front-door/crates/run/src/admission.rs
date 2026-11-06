@@ -508,6 +508,8 @@ impl RunStore {
                             hit.active,
                             hit.limit
                         )
+                    } else if let Some(reason) = self.admission_disk_wait(lane, class, resources) {
+                        reason
                     } else {
                         match resources.pressure() {
                             Ok(Some(pressure)) if pressure_threshold.defers(pressure) => {
@@ -657,6 +659,35 @@ impl RunStore {
             ),
         }
     }
+    /// Only writers wait on the live disk floor; readers warn in `admit`.
+    fn admission_disk_wait(
+        &self,
+        lane: &AttemptRecord,
+        class: LaneClass,
+        resources: &dyn Resources,
+    ) -> Option<String> {
+        if class != LaneClass::Writer {
+            return None;
+        }
+        let attempt = self.attempt_dir(lane.run_id, lane.attempt_id, false).ok()?;
+        // The guardian samples sealed state, cwd and cache volumes. A listing
+        // cannot reconstruct those private launch inputs from the attempt path.
+        let observed =
+            crate::artifacts::read_sealed_observed(&attempt, "admission-disk.json", 1024)
+                .ok()
+                .flatten()
+                .and_then(|raw| serde_json::from_slice::<AdmissionDiskSample>(&raw).ok())
+                .filter(|sample| sample.generation == lane.generation);
+        let free = observed
+            .map(|sample| sample.free)
+            .or_else(|| resources.disk(&attempt).ok())?;
+        let (floor, origin) = disk_floor(&self.writer_registry).ok()?;
+        (free < floor).then(|| format!(
+            "host capacity: disk space: {free} bytes available; gc.free_floor is {floor} bytes (source: {})",
+            origin.description()
+        ))
+    }
+
     /// The running guardian publishes this lane's pause in its checkpoint.
     fn disk_pause_wait(&self, lane: &AttemptRecord, resources: &dyn Resources) -> Option<String> {
         let attempt = self.attempt_dir(lane.run_id, lane.attempt_id, false).ok()?;
@@ -791,6 +822,21 @@ impl RunStore {
                 return Err(RunError::Conflict);
             }
             let mut ticket = self.ticket(tx, id)?;
+            let class = Service::lane_class(
+                ticket.lane_class == LaneClass::Writer,
+                &[],
+                &write_grants.grants,
+            );
+            if class != ticket.lane_class {
+                // Preparation may reveal tool grants or project exceptions
+                // absent from the submitted task. Promote before any claim.
+                ticket.lane_class = class;
+                ticket.startup_spacing_ms =
+                    provenant_config::LaneBuildSettings::read(&self.writer_registry)
+                        .unwrap_or_default()
+                        .start_spacing_ms
+                        .unwrap_or_else(|| self.policy.spacing_ms(class));
+            }
             let mut next = old.clone();
             next.revision = next.revision.checked_add(1).ok_or(RunError::Conflict)?;
             next.generation = next.generation.checked_add(1).ok_or(RunError::Conflict)?;
@@ -853,6 +899,8 @@ impl RunStore {
         let mut refusal = None;
         let mut below_floor = 0_u32;
         let mut warned_memory_floor = false;
+        let mut warned_disk_floor = false;
+        let mut last_disk_sample = None;
         loop {
             let call = Request { clock, cancel };
             let ticket = self.ticket(&self.db, id)?;
@@ -869,19 +917,7 @@ impl RunStore {
             // Disk policy is live configuration, shared with the guardian and
             // settlement. An unreadable current floor queues rather than
             // admitting with the ticket's submission-time observation.
-            let disk_floor_bytes = provenant_config::GcSettings::read(&self.writer_registry)
-                .and_then(|settings| {
-                    settings
-                        .free_floor_bytes(&self.writer_registry)
-                        .map(|floor| {
-                            let origin = if settings.free_floor.is_some() {
-                                provenant_records::diagnostic::SettingSource::Configuration
-                            } else {
-                                provenant_records::diagnostic::SettingSource::ShippedDefault
-                            };
-                            (floor, origin)
-                        })
-                });
+            let disk_floor_bytes = disk_floor(&self.writer_registry);
             let pressure = resources.pressure().unwrap_or_else(|error| {
                 eprintln!(
                     "admission: memory pressure probe failed: {}",
@@ -936,7 +972,19 @@ impl RunStore {
                     let threshold = settings.memory_pressure_threshold();
                     let pressure = pressure.filter(|level| threshold.defers(*level));
                     let mut disk = disk;
-                    if disk < floor {
+                    let writer = ticket.lane_class == LaneClass::Writer;
+                    if !writer
+                        && let Some(warning) =
+                            read_only_disk_warning(&mut warned_disk_floor, disk, floor, origin)
+                    {
+                        eprintln!(
+                            "admission warning [{}]: {}; next: {}",
+                            warning.code,
+                            warning.detail.as_deref().unwrap_or("disk space is low"),
+                            warning.next.as_deref().unwrap_or("free disk space")
+                        );
+                    }
+                    if writer && disk < floor {
                         if below_floor.is_multiple_of(RECLAIM_EVERY)
                             && resources.reclaim_disk(attempt)
                         {
@@ -944,7 +992,26 @@ impl RunStore {
                         }
                         below_floor = below_floor.saturating_add(1);
                     }
-                    refusal = if disk < floor {
+                    if writer {
+                        let sample = AdmissionDiskSample {
+                            generation: ticket.generation,
+                            free: disk,
+                        };
+                        if last_disk_sample != Some(sample) {
+                            // Status evidence only: publication failure must not
+                            // alter admission. No paths or private context escape.
+                            if let Ok(raw) = serde_json::to_vec(&sample) {
+                                let _ = attempt.atomic_write(
+                                    "admission-disk.json".as_ref(),
+                                    ".admission-disk-",
+                                    &raw,
+                                    provenant_os::fs::PublishMode::Replace,
+                                );
+                            }
+                            last_disk_sample = Some(sample);
+                        }
+                    }
+                    refusal = if writer && disk < floor {
                         Some(RunError::Admission(AdmissionError::Disk {
                             free: disk,
                             floor,
@@ -974,7 +1041,7 @@ impl RunStore {
                             })
                         })
                     };
-                    pressure.is_none() && processes.is_none() && disk >= floor
+                    pressure.is_none() && processes.is_none() && (!writer || disk >= floor)
                 }
                 _ => {
                     refusal = None;
@@ -1230,6 +1297,49 @@ fn deadline(from: WallTime, seconds: u64) -> Result<WallTime> {
         .map_err(|_| RunError::Validation("admission deadline"))
 }
 
+/// Bounded status evidence from the guardian's sealed multi-volume probe.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct AdmissionDiskSample {
+    generation: u64,
+    free: u64,
+}
+
+/// Resolve the live host disk floor and its source for admission and status.
+fn disk_floor(
+    registry: &std::path::Path,
+) -> std::io::Result<(u64, provenant_records::diagnostic::SettingSource)> {
+    use provenant_records::diagnostic::SettingSource;
+    let settings = provenant_config::GcSettings::read(registry)?;
+    let floor = settings.free_floor_bytes(registry)?;
+    let origin = if settings.free_floor.is_some() {
+        SettingSource::Configuration
+    } else {
+        SettingSource::ShippedDefault
+    };
+    Ok((floor, origin))
+}
+
+/// A read-only lane writes little enough to proceed, warning once per admission.
+fn read_only_disk_warning(
+    warned: &mut bool,
+    free: u64,
+    floor: u64,
+    origin: provenant_records::diagnostic::SettingSource,
+) -> Option<provenant_records::diagnostic::Diagnostic> {
+    if *warned || free >= floor {
+        return None;
+    }
+    *warned = true;
+    Some(
+        ErrorKind::DiskFloor.diagnostic().category("warning")
+            .detail(format!(
+                "disk space: {free} bytes available; gc.free_floor is {floor} bytes (source: {}); read-only lane is proceeding",
+                origin.description()
+            ))
+            .next("free disk space or run `provenant gc --apply`"),
+    )
+}
+
 /// The shipped memory floor has no host setting, so it can only warn.
 fn memory_floor_warning(
     sample: std::io::Result<MemorySample>,
@@ -1311,6 +1421,30 @@ mod process_wait_tests {
             !serde_json::to_string(&warning)
                 .unwrap()
                 .contains("TOKEN_SENTINEL")
+        );
+    }
+
+    #[test]
+    fn read_only_disk_floor_warns_once_with_setting_and_source() {
+        use provenant_records::diagnostic::SettingSource;
+        let mut warned = false;
+        assert!(
+            read_only_disk_warning(&mut warned, 100, 100, SettingSource::Configuration).is_none()
+        );
+        assert!(!warned);
+        let warning =
+            read_only_disk_warning(&mut warned, 99, 100, SettingSource::Configuration).unwrap();
+        assert_eq!(warning.code, "DISK_FLOOR");
+        assert_eq!(warning.category.as_deref(), Some("warning"));
+        assert_eq!(
+            warning.detail.as_deref(),
+            Some(
+                "disk space: 99 bytes available; gc.free_floor is 100 bytes (source: host configuration); read-only lane is proceeding"
+            )
+        );
+        assert!(warning.next.is_some());
+        assert!(
+            read_only_disk_warning(&mut warned, 0, 100, SettingSource::Configuration).is_none()
         );
     }
 

@@ -222,30 +222,32 @@ pub(super) fn assess_settlement_retry(
             ..Default::default()
         };
     }
-    // A quota refusal before any generated output has no work to retain.
-    // Redraw the alias with the spent member excluded by the successor record.
-    let no_work = decoded.result.trim().is_empty()
-        && decoded.usage.output_excluding_reasoning.unwrap_or(0) == 0
-        && decoded.usage.reasoning.unwrap_or(0) == 0
-        && (task.writer.is_none()
-            || decoded.usage.output_excluding_reasoning == Some(0)
-            || decoded.session.as_deref().is_none_or(str::is_empty));
-    if quota && no_work && matches!(record.requested_route, run::RequestedRoute::Named { .. }) {
+    // Redraw a named route after quota, retaining any writer worktree. The
+    // successor record excludes spent members without changing write authority.
+    if quota && matches!(record.requested_route, run::RequestedRoute::Named { .. }) {
+        let instruction = if task.writer.is_some() {
+            "The previous member stopped on quota. Inspect the retained worktree and any commits, then continue the original task from that work rather than restart. Use another eligible member of the same alias."
+        } else {
+            "The previous member stopped on quota. Complete the original task on another eligible member of the same alias."
+        };
         return run::ResultAssessment {
             cause: Some(typed_cause),
-            note: Some("quota limit before work; retrying another member of the alias".into()),
+            note: Some("quota limit; retrying another member of the alias".into()),
             retry: Some(run::PolicyRetry {
-                schema_version: 2, cause: typed_cause, action: run::PolicyAction::Retry,
-                route: record.requested_route.clone(), resume: false, max_attempts,
-                instruction: "The previous member reached its quota before doing work. Complete the original task on another eligible member of the same alias.".into(),
+                schema_version: 2,
+                cause: typed_cause,
+                action: run::PolicyAction::Retry,
+                route: record.requested_route.clone(),
+                resume: false,
+                max_attempts,
+                instruction: instruction.into(),
                 not_before_unix_seconds: None,
             }),
             ..Default::default()
         };
     }
-    // A settled provider has left local preparation. Route or account
-    // switching is denied by the shared policy. Verified handoff recovery and
-    // same-session continuation use the existing model and retained work.
+    // Exact model requests retain their applied model. Verified handoff
+    // recovery and same-session continuation keep the existing retained work.
     let session = decoded.session.as_deref().is_some_and(|s| !s.is_empty())
         && route
             .provider
@@ -393,7 +395,43 @@ mod tests {
                 .retry
                 .is_some()
         );
-        decoded.usage.output_excluding_reasoning = Some(1);
+        decoded.usage.output_excluding_reasoning = Some(2_280);
+        decoded.result = "Partial implementation and verification notes".into();
+        assert!(
+            assess_settlement_retry(&config, &alias_task, &record, &decoded, 1, 100, false)
+                .retry
+                .is_some()
+        );
+        alias_task.writer = Some(run::WriterRequest {
+            extra: Default::default(),
+            project: "/fixture/project".into(),
+            worktree: "/fixture/project/.worktrees/lane".into(),
+        });
+        let retry = assess_settlement_retry(&config, &alias_task, &record, &decoded, 1, 100, false)
+            .retry
+            .ok_or("partial writer quota retry")?;
+        assert_eq!(retry.route, alias_task.route);
+        assert!(!retry.resume);
+        assert!(
+            retry
+                .instruction
+                .contains("Inspect the retained worktree and any commits")
+        );
+        assert!(retry.instruction.contains("rather than restart"));
+        assert!(
+            assess_settlement_retry(
+                &config,
+                &alias_task,
+                &record,
+                &decoded,
+                retry.max_attempts,
+                100,
+                false
+            )
+            .retry
+            .is_none()
+        );
+        alias_task.profile.settlement_retry_limit = Some(0);
         assert!(
             assess_settlement_retry(&config, &alias_task, &record, &decoded, 1, 100, false)
                 .retry
@@ -401,6 +439,7 @@ mod tests {
         );
         decoded.session = None;
         decoded.usage.output_excluding_reasoning = None;
+        decoded.result.clear();
         record.requested_route = task.route.clone();
         assert!(
             assess_settlement_retry(&config, task, &record, &decoded, 1, 100, false)
