@@ -436,6 +436,44 @@ pub fn resolve_git_base(git: &Path, cwd: &Path, base: &str) -> Result<String> {
     resolve_fetching(&executor, git, cwd, base, &env)
 }
 
+/// Create the local branch `branch` at `start` (default `HEAD`) when it does
+/// not exist. Returns whether it was created. An existing branch is left
+/// untouched, and the create is atomic against a concurrent creator.
+pub fn ensure_local_branch(
+    git: &Path,
+    cwd: &Path,
+    branch: &str,
+    start: Option<&str>,
+) -> Result<bool> {
+    let reference = format!("refs/heads/{branch}");
+    if resolve_git_base(git, cwd, &reference).is_ok() {
+        return Ok(false);
+    }
+    let executor = SystemExecutor::new(1).map_err(execution_error)?;
+    let env = repository_environment(&executor, git, cwd)
+        .map_err(|_| RunError::InvalidBase(branch.to_owned()))?;
+    read_git_with_env(
+        &executor,
+        git,
+        cwd,
+        &["check-ref-format", &reference],
+        256,
+        &env,
+    )
+    .map_err(|_| RunError::InvalidBase(branch.to_owned()))?;
+    let oid = resolve_git_base(git, cwd, start.unwrap_or("HEAD"))?;
+    // An empty old value asserts the ref does not exist yet.
+    read_git_with_env(
+        &executor,
+        git,
+        cwd,
+        &["update-ref", "--end-of-options", &reference, &oid, ""],
+        256,
+        &env,
+    )?;
+    Ok(true)
+}
+
 /// A fetch moves objects, so it gets longer than the metadata reads.
 const FETCH_TIMEOUT: Duration = Duration::from_secs(120);
 
@@ -1183,6 +1221,28 @@ mod tests {
             std::fs::read(held_parent.join("candidate-0/git-log.txt"))?,
             b"context"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn missing_local_branch_is_created_once_at_the_start() -> TestResult {
+        let HistoryFixture {
+            _temp,
+            root,
+            binary,
+            ..
+        } = small_history()?;
+        assert!(ensure_local_branch(&binary, &root, "batch/graph", None)?);
+        let head = resolve_git_base(&binary, &root, "HEAD")?;
+        assert_eq!(
+            resolve_git_base(&binary, &root, "refs/heads/batch/graph")?,
+            head
+        );
+        assert!(!ensure_local_branch(&binary, &root, "batch/graph", None)?);
+        assert!(matches!(
+            ensure_local_branch(&binary, &root, "bad..name", None),
+            Err(RunError::InvalidBase(_))
+        ));
         Ok(())
     }
 

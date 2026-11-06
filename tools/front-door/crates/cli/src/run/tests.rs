@@ -2148,17 +2148,8 @@ fn submit_names_the_fix_for_a_bare_word_model_and_unsupported_effort()
         "{}",
         bare.message
     );
-    let Err(unknown) = super::catalogued("codex/gpt-6-lunaa", None) else {
-        panic!("uncatalogued model accepted");
-    };
-    assert_eq!(unknown.status, Status::Invalid);
-    assert!(
-        unknown
-            .message
-            .starts_with("model codex/gpt-6-lunaa is not in the catalogue"),
-        "{}",
-        unknown.message
-    );
+    // An uncatalogued exact model warns and is tried; the provider decides.
+    assert!(super::catalogued("codex/gpt-6-lunaa", None).is_ok());
     let Err(effort) = super::catalogued("claude/claude-sonnet-5-5", Some("low")) else {
         panic!("unsupported effort accepted");
     };
@@ -2654,14 +2645,14 @@ fn dispatch_reuses_only_free_lane_or_unowned_worktree() -> Result<(), Box<dyn st
             "HEAD",
         ],
     )?;
-    let refused = super::own_worktree(
+    let claimed = super::own_worktree(
         &super::OwnedWorktree {
             branch: "native-branch".into(),
             host,
             created_at: WallTime::from_micros(2)?,
         },
         Some("HEAD"),
-        &OperationId::parse("native-branch-refusal")?,
+        &OperationId::parse("native-branch-claim")?,
         &edge,
         &Unknown,
         |_| false,
@@ -2669,17 +2660,21 @@ fn dispatch_reuses_only_free_lane_or_unowned_worktree() -> Result<(), Box<dyn st
         &clock,
         &cancel,
         None,
-    )
-    .unwrap_err();
-    let failure: super::Fail = refused.into();
-    let action = failure
-        .projection
-        .as_ref()
-        .and_then(|value| value.next.as_deref())
-        .ok_or("missing next action")?;
-    assert!(
-        action.contains(&format!("--worktree '{}'", native_path.display())),
-        "{action}"
+    )?;
+    // A native checkout without an owner can be claimed under writer custody,
+    // even when the process census is unavailable.
+    assert_eq!(claimed.0.path, native_path);
+    let owner = worktrees::with_context(&roots, &home, &project, &clock, &cancel, |context| {
+        worktrees::load_owner(&provenant_confinement::verify_worktree(
+            context.repo,
+            &native_path,
+        )?)
+    })?
+    .ok_or("native owner")?;
+    assert_eq!(owner.origin, WorktreeOrigin::Lane);
+    assert_eq!(
+        owner.operation_id,
+        Some(OperationId::parse("native-branch-claim")?)
     );
     let writer = run::resolve_writer(roots.state.as_path(), &project, &native_path)?;
     assert_eq!(writer.worktree, native_path);

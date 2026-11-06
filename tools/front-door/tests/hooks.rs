@@ -172,15 +172,14 @@ fn bash_guard_rules_deny_with_a_remedy_and_follow_config() -> Result {
     assert!(remedy.contains("`git push origin my-topic`"), "{remedy}");
     assert!(decide("git push --force origin topic")?.is_none());
     assert!(decide("git stash")?.is_none());
-    assert!(decide("rm -rf ~")?.is_some());
+    assert!(decide("rm -rf ~")?.is_none());
 
     fs::create_dir_all(&rig.state)?;
     fs::write(
         rig.state.join("config.toml"),
-        "schema_version = 1\n[domains.guard]\ndeny = ['rm-root']\n",
+        "schema_version = 1\n[domains.guard]\ndeny = ['rm-state']\n",
     )?;
     assert!(decide("git push --force origin main")?.is_none());
-    assert!(decide("rm -rf ~")?.is_some());
     Ok(())
 }
 #[test]

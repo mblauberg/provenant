@@ -1,7 +1,7 @@
 # Confinement
 
 provenant-confinement owns permission policy, disclosure/redaction, verified Git
-evidence, output custody, instruction quarantine, and registered worktree management. Filesystem
+evidence, output custody, and registered worktree management. Filesystem
 and process effects use supervisor; callers use supervisor locks/publication
 directly rather than a second confinement filesystem API.
 
@@ -31,7 +31,7 @@ directory stay read-only throughout their subtrees, including refs, config,
 hooks and info. The host refuses symlinked object stores and foreign alternates,
 then imports through Git receive quarantine before publishing the real branch.
 The published tip must descend from its launch base or the current origin
-default branch. Restored index flags cannot hide uncommitted edits. The
+default branch. The
 [lane Git spec](../../../../docs/specs/run.md#lane-git-and-import) owns import
 limits and terminal ref cleanup. Existing cache and lane-parent directories
 must belong to the effective user with mode 0700; setup refuses mismatches
@@ -48,13 +48,6 @@ tracked attributes with the format-specific empty tree and refuses configured
 filters, includes, and repository `info/attributes`. Reads never create objects.
 Git probes run once when opening a verified repository. Status and diffs ignore
 submodules, and gitlinks require review.
-
-Instruction snapshots bind a private quarantine directory on the repository's
-device **before launch**. Restoration moves the observed inode there with atomic
-no-replace semantics, verifies it, then publishes the baseline only into a vacant
-name. Concurrent open-writer bytes remain on the retained inode. Cross-device
-archives refuse prelaunch; there is no copy/unlink fallback. Run still owns the
-terminal/quarantine attestations and settlement decision.
 
 CLI owns command bindings and cleanup routing.
 Project identity is a persisted random host-local config binding, shared by

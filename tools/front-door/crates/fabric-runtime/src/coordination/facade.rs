@@ -545,6 +545,24 @@ fn safe_invalid_detail(detail: &str) -> Option<String> {
     if detail == "landing lock required" {
         return Some(detail.to_owned());
     }
+    // A missing base or integration ref is the caller's own input and the
+    // remedy, so it is named. Only plain ref characters pass, which keeps
+    // control characters and quotes out of terminal output.
+    if let Some(name) = detail
+        .strip_prefix("unresolvable base `")
+        .and_then(|rest| rest.strip_suffix('`'))
+        && !name.is_empty()
+        && name.len() <= 256
+        && name.bytes().all(|b| {
+            b.is_ascii_alphanumeric()
+                || matches!(
+                    b,
+                    b'/' | b'.' | b'_' | b'-' | b'~' | b'^' | b'@' | b'{' | b'}'
+                )
+        })
+    {
+        return Some(detail.to_owned());
+    }
     let field = detail
         .strip_prefix("invalid input field `")?
         .split('`')
@@ -823,6 +841,17 @@ mod diagnostic_tests {
             current
         );
         Ok(())
+    }
+
+    #[test]
+    fn an_unresolvable_base_is_named_but_unsafe_text_is_not() {
+        let named = FacadeError::invalid("unresolvable base `refs/heads/batch/graph`");
+        assert_eq!(
+            named.diagnostic().detail.as_deref(),
+            Some("unresolvable base `refs/heads/batch/graph`")
+        );
+        let forged = FacadeError::invalid("unresolvable base `x\u{1b}[31m`");
+        assert_eq!(forged.diagnostic().detail, None);
     }
 
     #[test]

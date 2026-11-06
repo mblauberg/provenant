@@ -481,24 +481,24 @@ pub(super) fn catalogued(model: &str, effort: Option<&str>) -> Result<(), Fail> 
     let catalogue = provenant_routing::Catalogue::bundled()
         .map_err(|error| Fail::new(Status::Error, ErrorKind::Config, error.to_string()))?;
     let Some(entry) = catalogue.model(&id) else {
-        // Adapters can accept model names without a bundled catalogue entry.
-        // Routing still checks that the adapter is registered.
-        if provenant_records::AdapterSpec::get(id.adapter())
-            .is_none_or(|spec| !spec.require_catalogue_for_launch)
-        {
-            return Ok(());
+        // The bundled catalogue lags what a provider offers, and only the
+        // provider can say whether it serves an exact model. Warn and launch;
+        // a refusal from the provider surfaces as a typed model-unavailable
+        // cause. Routing still checks that the adapter is registered.
+        if provenant_records::AdapterSpec::get(id.adapter()).is_some() {
+            let nearest = catalogue.nearest_models(&id);
+            let hint = if nearest.is_empty() {
+                String::new()
+            } else {
+                format!("; nearest catalogued IDs: {}", nearest.join(", "))
+            };
+            use std::io::Write;
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "warning: model {model} is not in the catalogue; trying it as named{hint}"
+            );
         }
-        let nearest = catalogue.nearest_models(&id);
-        let hint = if nearest.is_empty() {
-            String::new()
-        } else {
-            format!("; nearest catalogued IDs: {}", nearest.join(", "))
-        };
-        return Err(Fail::new(
-            Status::Invalid,
-            ErrorKind::Invalid,
-            format!("model {model} is not in the catalogue{hint}"),
-        ));
+        return Ok(());
     };
     match effort {
         Some(effort) if !entry.efforts.iter().any(|supported| supported == effort) => {

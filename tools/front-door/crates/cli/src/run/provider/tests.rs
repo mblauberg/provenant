@@ -3081,6 +3081,13 @@ fn writer_plan_stages_scratch_in_private_temporary_directory()
         "cursor",
         false,
     )?;
+    assert!(
+        !request
+            .permissions
+            .protected_roots
+            .iter()
+            .any(|grant| grant.path == project.join("AGENTS.md"))
+    );
     assert_eq!(
         request.permissions.write_roots,
         vec![PathGrant {

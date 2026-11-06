@@ -1209,13 +1209,13 @@ fn loop_rejects_nested_routing_worktree_prefix_and_identifier_ambiguities() {
                 spec.body.push(writer);
             }
             3 => spec.body[0].id = "previous.reserved".into(),
-            _ => document.nodes[0].id = "x".repeat(60),
+            _ => document.nodes[0].id = "x".repeat(198),
         }
         let expected = match case {
             0 | 1 => "loop body cannot nest loops or route on_fail, and may only deliver by integrate:",
             2 => "loop writers must share one worktree",
             3 => "previous. is reserved for prior round inputs",
-            _ => "expanded loop node id exceeds 64 bytes",
+            _ => "expanded loop node id exceeds 200 bytes",
         };
         assert_eq!(
             validate_plan(&document).unwrap_err(),
