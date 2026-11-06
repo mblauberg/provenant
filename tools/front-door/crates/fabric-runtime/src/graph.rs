@@ -710,6 +710,7 @@ fn node_context(plan: &PlannedGraph, node: &PlannedNode) -> provenant_records::r
     let context = node.context.as_ref().unwrap_or(&defaults);
     provenant_records::run::WorkContext {
         graph_template_launch: false,
+        writer_predecessor: None,
         extra: Default::default(),
         risk_tier: context
             .risk_tier

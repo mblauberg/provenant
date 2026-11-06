@@ -1308,6 +1308,17 @@ fn candidate_leases_skip_busy_providers_and_share_one_deadline()
         provenant_core::WallTime::from_micros(0)?,
         provenant_core::MonoTime::from_micros(0),
     );
+    let immediate = available_provider_leases(
+        temp.path(),
+        &["codex", "cursor"],
+        Some(0),
+        &clock,
+        &provenant_core::CancelToken::new(),
+    )?;
+    assert!(immediate.contains_key("cursor"));
+    assert!(!immediate.contains_key("codex"));
+    assert_eq!(clock.mono_now().as_micros(), 0);
+    drop(immediate);
     let leases = available_provider_leases(
         temp.path(),
         &["codex", "cursor"],
@@ -1320,6 +1331,15 @@ fn candidate_leases_skip_busy_providers_and_share_one_deadline()
     assert_eq!(clock.mono_now().as_micros(), 0);
     drop(leases);
     let _b = provenant_os::provider_fence::acquire(temp.path(), "cursor", LockMode::Exclusive)?;
+    let immediate = available_provider_leases(
+        temp.path(),
+        &["codex", "cursor"],
+        Some(0),
+        &clock,
+        &provenant_core::CancelToken::new(),
+    )?;
+    assert!(immediate.is_empty());
+    assert_eq!(clock.mono_now().as_micros(), 0);
     let leases = available_provider_leases(
         temp.path(),
         &["codex", "cursor"],
@@ -3568,7 +3588,7 @@ printf 'agy 1.0.0\n'
 }
 
 #[test]
-fn writer_continuation_refuses_and_preserves_uncommitted_edits()
+fn writer_continuation_preserves_and_reports_uncommitted_edits()
 -> Result<(), Box<dyn std::error::Error>> {
     writer_continuation_dirty_brief(true)
 }
@@ -3581,9 +3601,7 @@ fn writer_continuation_with_unchanged_head_reports_dirty_paths()
 
 fn writer_continuation_dirty_brief(committed: bool) -> Result<(), Box<dyn std::error::Error>> {
     use provenant_confinement::{UtilityBudget, UtilityRuntime, worktrees};
-    use provenant_core::{
-        AttemptId, CancelToken, Clock, Digest, OperationId, RunId, TaskId, WaitBudget,
-    };
+    use provenant_core::{CancelToken, Clock, Digest, TaskId, WaitBudget};
     use provenant_os::clock::SystemClock;
     use provenant_os::exec::{ExecOptions, Executor, SystemExecutor, Termination};
     use std::{
@@ -3596,9 +3614,8 @@ fn writer_continuation_dirty_brief(committed: bool) -> Result<(), Box<dyn std::e
     let home = base.join("home");
     let state = base.join("state");
     let project = base.join("repo");
-    let assets = base.join("release");
     let git_home = base.join("git-home");
-    for path in [&home, &state, &project, &assets, &git_home] {
+    for path in [&home, &state, &project, &git_home] {
         std::fs::DirBuilder::new().mode(0o700).create(path)?;
     }
     let executor = SystemExecutor::new(1)?;
@@ -3646,11 +3663,6 @@ fn writer_continuation_dirty_brief(committed: bool) -> Result<(), Box<dyn std::e
         },
         &cancel,
     )?;
-    let executable = assets.join("cursor/bin/agent");
-    std::fs::create_dir_all(executable.parent().ok_or("provider bin")?)?;
-    std::fs::write(&executable, b"#!/bin/sh\nprintf 'fixture-cursor 1.0\\n'\n")?;
-    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700))?;
-
     let worktree = project.join(".worktrees/writer");
     let source_head = run::resolve_git_base(&git, &project, "HEAD")?;
 
@@ -3680,28 +3692,6 @@ fn writer_continuation_dirty_brief(committed: bool) -> Result<(), Box<dyn std::e
         worktree.join("uncommitted_leftover.txt"),
         "uncommitted dirty edit",
     )?;
-
-    let run_id = RunId::from_bytes([20; 16]);
-    let attempt_id = AttemptId::from_bytes([21; 16]);
-    let attempt = state.join(format!("runs/{run_id}/attempts/{attempt_id}"));
-    let paths = run::LaunchPaths {
-        attempt_id,
-        operation_id: OperationId::parse("writer-continuation-dirty")?,
-        task_index: 0,
-        lane_depth: 1,
-        run_id,
-        deadline_unix_ms: u64::MAX,
-        scratch: attempt.join("scratch"),
-        provider_state: attempt.join("provider-state"),
-        temporary: attempt.join("tmp"),
-        temporary_alias: None,
-    };
-    for path in [&paths.scratch, &paths.provider_state, &paths.temporary] {
-        std::fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(path)?;
-    }
 
     let prompt = "Fix remaining issues in continuation";
     let task = run::TaskRequest {
@@ -3736,60 +3726,35 @@ fn writer_continuation_dirty_brief(committed: bool) -> Result<(), Box<dyn std::e
         access: Default::default(),
     };
 
-    let registry = Registry {
-        roots: Some(&roots),
-        home: Some(&home),
-        assets: Some(&assets),
-        cwd: Some(&project),
-        state_root: Some(&state),
-        project_id: Some(binding.project_id()),
-        cancel: Some(&cancel),
-        host: None,
-        repo_facts: Default::default(),
-    };
-
-    let reason = prepare_with(
-        &registry,
-        &task,
-        prompt,
-        &paths,
-        None,
-        |_| Ok(executable.clone()),
-        None,
-    )
-    .err()
-    .ok_or("dirty predecessor accepted")?
-    .to_string();
-    assert!(
-        reason.contains("uncommitted predecessor edits: uncommitted_leftover.txt"),
-        "{reason}"
-    );
-    assert!(reason.contains(&source_head), "{reason}");
-    assert!(reason.contains(&predecessor_head), "{reason}");
+    let writer = run::prepare_writer_with_facts(
+        task.writer.as_ref().ok_or("writer request")?,
+        &state,
+        binding.project_id(),
+        &Default::default(),
+    )?;
+    let context = writer_source_context(&writer, &task, &git)?.ok_or("retained paths missing")?;
+    assert!(context.contains("uncommitted_leftover.txt"), "{context}");
     assert_eq!(
         std::fs::read_to_string(worktree.join("uncommitted_leftover.txt"))?,
         "uncommitted dirty edit"
     );
 
-    // If continuation check refuses, uncommitted edits are named in the refusal message
+    // A source mismatch still refuses and names both commits and retained edits.
     let mut bad_task = task.clone();
     bad_task.source_head = Some("0".repeat(40));
-    let error = prepare_with(
-        &registry,
-        &bad_task,
-        prompt,
-        &paths,
-        None,
-        |_| Ok(executable.clone()),
-        None,
-    )
-    .err()
-    .ok_or("mismatched continuation should refuse")?;
+    let error = writer_source_context(&writer, &bad_task, &git)
+        .err()
+        .ok_or("mismatched continuation should refuse")?;
     let error_text = error.to_string();
+    assert!(error_text.contains(&"0".repeat(40)), "{error_text}");
+    assert!(error_text.contains(&predecessor_head), "{error_text}");
     assert!(
         error_text.contains("uncommitted predecessor edits: uncommitted_leftover.txt"),
         "refusal must list uncommitted predecessor edits: {error_text}"
     );
+    let mut moved_task = task.clone();
+    moved_task.head = Some("1".repeat(40));
+    assert!(writer_source_context(&writer, &moved_task, &git).is_err());
 
     // Inject a Git that works for ancestry but refuses status. Exercise both
     // the brief path and the mismatch path: neither may hide missing evidence.
@@ -3802,23 +3767,10 @@ fn writer_continuation_dirty_brief(committed: bool) -> Result<(), Box<dyn std::e
         ),
     )?;
     std::fs::set_permissions(&status_git, std::fs::Permissions::from_mode(0o700))?;
-    let host = run::HostLaunchContext::from_environment(&state, &project, status_git);
-    let failing_registry = Registry {
-        host: Some(&host),
-        ..registry
-    };
     for candidate in [&task, &bad_task] {
-        let error = prepare_with(
-            &failing_registry,
-            candidate,
-            prompt,
-            &paths,
-            None,
-            |_| Ok(executable.clone()),
-            None,
-        )
-        .err()
-        .ok_or("status failure must refuse preparation")?;
+        let error = writer_source_context(&writer, candidate, &status_git)
+            .err()
+            .ok_or("status failure must refuse preparation")?;
         assert!(
             error
                 .to_string()

@@ -892,6 +892,7 @@ impl BinaryRunOwner<'_> {
         if retained { Ok(()) } else { Err(refusal) }
     }
 
+    #[allow(clippy::disallowed_methods)] // Translate the caller's remaining wait to the launcher's deadline.
     fn launch_graph_attempt(
         &mut self,
         input: SubmitInput,
@@ -1049,7 +1050,7 @@ impl BinaryRunOwner<'_> {
         let session = self.session_with_facts(cancel, facts)?;
         let call = self.call(cancel);
         let submission = self.with_edge(|edge| {
-            let submitted = provenant_cli::run::submit_with_host(
+            let submitted = provenant_cli::run::submit_with_host_and_wait(
                 &session,
                 edge,
                 Submission {
@@ -1061,6 +1062,12 @@ impl BinaryRunOwner<'_> {
                 },
                 &call,
                 self.factory.host_launch.as_ref(),
+                Some(
+                    std::time::Instant::now()
+                        + std::time::Duration::from_micros(
+                            budget.remaining(self.factory.clock.mono_now()).as_micros(),
+                        ),
+                ),
             );
             recover_accepted_launch(&session, &operation_id, &call, submitted)
         });

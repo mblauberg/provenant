@@ -616,8 +616,10 @@ pub fn submit_with_host(
     submit_with_host_and_wait(session, edge, submission, call, host, None)
 }
 
+/// Submit with the caller's observation deadline, including the bounded wait
+/// for provider preparation. A detached launcher retains custody after expiry.
 #[allow(clippy::disallowed_methods)] // The caller's wait is a real deadline.
-pub(super) fn submit_with_host_and_wait(
+pub fn submit_with_host_and_wait(
     session: &Session,
     edge: &Edge<'_>,
     submission: Submission,

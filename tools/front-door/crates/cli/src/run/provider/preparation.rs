@@ -396,8 +396,10 @@ pub(super) fn available_provider_leases(
     clock: &dyn provenant_core::Clock,
     cancel: &provenant_core::CancelToken,
 ) -> Result<std::collections::BTreeMap<String, provenant_os::fs::LockGuard>, ProviderLeaseError> {
-    let budget = provenant_core::WaitBudget::cli(clock.mono_now(), wait.unwrap_or(30).min(30))
-        .map_err(|error| ProviderLeaseError::Other(error.to_string()))?;
+    let budget = provenant_core::WaitBudget::up_to(
+        clock.mono_now(),
+        provenant_core::DurationMicros::from_micros(wait.unwrap_or(30).min(30) * 1_000_000),
+    );
     loop {
         if cancel.is_cancelled() {
             return Err(ProviderLeaseError::Cancelled);
@@ -466,7 +468,7 @@ pub(super) enum PrepareError {
     #[error("{0}")]
     SourceAuthority(String),
     #[error("{0}")]
-    DirtyWriter(String),
+    WriterContinuation(String),
     #[error(transparent)]
     SourceHead(#[from] SourceHeadError),
     #[error(transparent)]
@@ -617,7 +619,7 @@ impl PrepareError {
             }
             error @ (Self::GraphInputsAuthority(_)
             | Self::SourceAuthority(_)
-            | Self::DirtyWriter(_)) => {
+            | Self::WriterContinuation(_)) => {
                 let mut refusal = run::PrepareRefusal::from(error.to_string());
                 refusal.boundary_class = provenant_records::diagnostic::BoundaryClass::Authority;
                 refusal
@@ -689,7 +691,7 @@ fn preparation_preserves_typed_boundaries_without_classifying_other_errors() {
     for error in [
         PrepareError::GraphInputsAuthority("invalid graph inputs root".into()),
         PrepareError::SourceAuthority("source grant overlaps".into()),
-        PrepareError::DirtyWriter("uncommitted predecessor edits".into()),
+        PrepareError::WriterContinuation("uncommitted predecessor edits".into()),
     ] {
         assert_eq!(
             error.into_refusal().boundary_class,
@@ -1421,42 +1423,11 @@ pub(super) fn prepare_candidates(
     } else {
         source.clone()
     };
-    // Status is evidence for both the brief and a source refusal. Failure to
-    // collect it must never masquerade as a clean predecessor worktree.
-    let uncommitted = if let (Some(writer), Some(_)) = (&writer, &task.source_head) {
-        writer
-            .uncommitted_paths(&git)
-            .map_err(|error| format!("cannot inspect uncommitted predecessor edits: {error}"))?
-    } else {
-        Vec::new()
-    };
-    if let Some(writer) = &writer {
-        if let Some(source_head) = task.source_head.as_deref() {
-            let predecessor = task
-                .head
-                .as_deref()
-                .ok_or("missing predecessor head for writer continuation")?
-                .parse()
-                .map_err(|_| "invalid pinned writer predecessor head")?;
-            let source = source_head
-                .parse()
-                .map_err(|_| "invalid pinned writer source")?;
-            let lineage = writer.require_continuation_source(&git, source, predecessor);
-            if !uncommitted.is_empty() {
-                let detail = lineage.err().map_or_else(
-                    || format!("writer continuation from {source} to {predecessor}"),
-                    |error| error.to_string(),
-                );
-                return Err(PrepareError::DirtyWriter(format!(
-                    "{detail}; uncommitted predecessor edits: {}",
-                    uncommitted.join(", ")
-                )));
-            }
-            lineage?;
-        } else if let Some(head) = task.head.as_deref() {
-            writer.require_source(head.parse().map_err(|_| "invalid pinned writer source")?)?;
-        }
-    }
+    let writer_context = writer
+        .as_ref()
+        .map(|writer| writer_source_context(writer, task, &git))
+        .transpose()?
+        .flatten();
     // Publishing is opt-in (`lanes.publish`): it hands the lane the GitHub
     // credential. Missing gh tools, or both configuration and a host token, leave the
     // writer able to do local work without publishing credential access.
@@ -2390,6 +2361,10 @@ pub(super) fn prepare_candidates(
                 format!("{location}\n{prompt_text}")
             }
             None => prompt_text.to_owned(),
+        };
+        let text = match &writer_context {
+            Some(context) => format!("{context}\n\n{text}"),
+            None => text,
         };
         let text = if !task.access.attachments.is_empty()
             && !AdapterSpec::get(adapter.id()).is_some_and(|spec| spec.launch.image_input)

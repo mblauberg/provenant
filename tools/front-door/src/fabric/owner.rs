@@ -1870,6 +1870,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             // original source pin and terminal writer head. Mark continuations
             // even when both heads agree so preparation checks dirty remnants.
             let mut submission_prompt = node.prompt.to_owned();
+            let mut writer_predecessor = None;
             let (mut source_head, mut successor_head) = if !accepted
                 && access == provenant_fabric_runtime::graph::AccessMode::WorktreeWrite
                 && let Some(previous) = key
@@ -1917,6 +1918,19 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                     .iter()
                     .find(|task| task.task_id == previous.task_id)
                     .ok_or(FacadeError::StateCorrupt)?;
+                let writer = provenant_run::resolve_writer(
+                    self.factory.context.roots.state.as_path(),
+                    &self.factory.cwd,
+                    Path::new(worktree.ok_or(FacadeError::StateCorrupt)?),
+                )
+                .map_err(run_error)?;
+                if previous_task.writer.as_ref() != Some(&writer) {
+                    return Err(FacadeError::Conflict);
+                }
+                store
+                    .check_continuation_writer(previous.attempt_id, &call)
+                    .map_err(run_error)?;
+                writer_predecessor = Some(previous.attempt_id);
                 let original = previous_task
                     .source_head
                     .as_ref()
@@ -1940,7 +1954,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             let mut accepted_access = None;
             let mut accepted_skill_location = None;
             let mut accepted_attempt = None;
-            let context = match &operation {
+            let mut context = match &operation {
                 Some(operation) => match store.request(operation.run_id, &call) {
                     Ok(request) => {
                         let task = request.tasks.first().ok_or(FacadeError::StateCorrupt)?;
@@ -2034,6 +2048,9 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                 },
                 None => Some(node.context),
             };
+            if !accepted && let Some(context) = &mut context {
+                context.writer_predecessor = writer_predecessor;
+            }
             let source_commit = successor_head.as_deref().or(node.source_commit);
             let excluded_families = self.writer_families(node.distinct_from_attempts)?;
             // An exact route cannot be substituted, so required separation is
@@ -2137,6 +2154,10 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             }
             if !accepted
                 && access == provenant_fabric_runtime::graph::AccessMode::WorktreeWrite
+                // A continuation already owns its predecessor's checkout.
+                // Preparation verifies its exact head and ancestry; advancing
+                // it here would refuse the uncommitted work it must retain.
+                && source_head.is_none()
                 && let (Some(path), Some(commit)) = (worktree, source_commit)
             {
                 let head = commit

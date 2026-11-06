@@ -1060,6 +1060,12 @@ mod lineage_tests {
                 worktree: info.path.clone(),
             };
             original.request.tasks[0].writer = Some(writer.clone());
+            original.request.tasks[0].head = Some(info.head.to_string());
+            original.request.tasks[0].context = Some(provenant_records::run::WorkContext {
+                graph_id: Some("graph-writer-lineage".into()),
+                node_id: Some(format!("writer-{index}")),
+                ..Default::default()
+            });
             store.create(&original, &call)?;
             let record = store.record(prior, &call)?;
             crate::prepare_writer(&writer, &store.writer_registry, project_id)?.snapshot(
@@ -1156,6 +1162,68 @@ mod lineage_tests {
                 clock.wall_now()?,
                 &call,
             )?;
+            // A graph retry has a fresh run and no run-policy retry_of. Its
+            // sealed predecessor still protects it against ownership changes
+            // between admission and the launch-custody check below.
+            let mut graph = crate::tests::input();
+            graph.run_id = RunId::from_bytes([180 + index as u8; 16]);
+            graph.operation_id = format!("graph-retry-{index}").parse()?;
+            graph.attempts[0].attempt_id = AttemptId::from_bytes([190 + index as u8; 16]);
+            graph.request.tasks[0] = original.request.tasks[0].clone();
+            let graph_task = &mut graph.request.tasks[0];
+            graph_task.source_head = graph_task.head.clone();
+            graph_task
+                .context
+                .as_mut()
+                .ok_or("graph context")?
+                .writer_predecessor = Some(prior);
+            store.create(&graph, &call)?;
+            let graph_record = store.record(graph.attempts[0].attempt_id, &call)?;
+            assert!(graph_record.retry_of.is_none());
+            let tree = crate::prepare_writer(&writer, &store.writer_registry, project_id)?;
+            store.check_launch_writer_lineage(
+                &graph_record,
+                &graph.request.tasks[0],
+                &tree.worktree,
+                &call,
+            )?;
+            let mut other_node = graph.request.tasks[0].clone();
+            other_node.context.as_mut().ok_or("graph context")?.node_id = Some("unrelated".into());
+            assert!(matches!(
+                store.check_launch_writer_lineage(
+                    &graph_record,
+                    &other_node,
+                    &tree.worktree,
+                    &call
+                ),
+                Err(RunError::WriterLineage("graph predecessor context"))
+            ));
+            for field in ["writer", "source", "head"] {
+                let mut mismatch = graph.request.tasks[0].clone();
+                match field {
+                    "writer" => {
+                        mismatch.writer.as_mut().ok_or("writer")?.worktree =
+                            project.join(".worktrees/other");
+                    }
+                    "source" => mismatch.source_head = Some("0".repeat(40)),
+                    "head" => mismatch.head = Some("1".repeat(40)),
+                    _ => unreachable!(),
+                }
+                assert!(
+                    matches!(
+                        store.check_launch_writer_lineage(
+                            &graph_record,
+                            &mismatch,
+                            &tree.worktree,
+                            &call
+                        ),
+                        Err(RunError::WriterLineage(
+                            "graph predecessor writer or source"
+                        ))
+                    ),
+                    "graph predecessor accepted mismatched {field}"
+                );
+            }
             let next = Resume {
                 prior,
                 expected_generation: 0,
@@ -1195,6 +1263,17 @@ mod lineage_tests {
                     label: None,
                 },
             )?;
+            assert!(matches!(
+                store.check_launch_writer_lineage(
+                    &graph_record,
+                    &graph.request.tasks[0],
+                    &tree.worktree,
+                    &call
+                ),
+                Err(RunError::WriterLineage(
+                    "continuation worktree belongs to another lane"
+                ))
+            ));
             assert!(matches!(
                 store.check_continuation_writer(next.attempt_id, &call),
                 Err(RunError::WriterLineage(
@@ -2192,6 +2271,68 @@ impl RunStore {
             &self.repo_facts,
         )?;
         self.check_writer_lineage(&prior, &launch.worktree, call)
+    }
+    /// Called after writer custody is acquired. Graph retries are separate runs,
+    /// so their sealed predecessor must be checked independently of `retry_of`.
+    pub(crate) fn check_launch_writer_lineage(
+        &self,
+        record: &AttemptRecord,
+        task: &TaskRequest,
+        tree: &provenant_confinement::VerifiedWorktree,
+        call: &Request<'_>,
+    ) -> Result<()> {
+        if record.retry_of.is_some() {
+            // A manual continuation follows its immediate run predecessor,
+            // whose launch already checked any older graph predecessor.
+            return self.check_writer_lineage(record, tree, call).map(|_| ());
+        }
+        let Some(context) = task.context.as_ref() else {
+            return Ok(());
+        };
+        let Some(prior) = context.writer_predecessor else {
+            return Ok(());
+        };
+        let previous = self.record(prior, call)?;
+        if !matches!(previous.state, AttemptState::Terminal { .. })
+            || !self.custody_released(&previous, call)?
+        {
+            return Err(RunError::Nonterminal);
+        }
+        if context.graph_id.is_none()
+            || context.node_id.is_none()
+            || previous.context.as_ref().is_none_or(|previous| {
+                previous.graph_id != context.graph_id || previous.node_id != context.node_id
+            })
+        {
+            return Err(RunError::WriterLineage("graph predecessor context"));
+        }
+        let request = self.request(previous.run_id, call)?;
+        let previous_task = request
+            .tasks
+            .iter()
+            .find(|task| task.task_id == previous.task_id)
+            .ok_or(RunError::WriterLineage("graph predecessor task"))?;
+        let source = previous_task
+            .source_head
+            .as_ref()
+            .or(previous_task.head.as_ref());
+        let head = previous
+            .head
+            .map(|head| head.to_string())
+            .or_else(|| previous_task.head.clone());
+        if task.writer.is_none()
+            || task.writer != previous_task.writer
+            || task.source_head.is_none()
+            || task.source_head.as_ref() != source
+            || task.head.is_none()
+            || task.head != head
+        {
+            return Err(RunError::WriterLineage(
+                "graph predecessor writer or source",
+            ));
+        }
+        self.check_writer_lineage(&previous, tree, call)?;
+        Ok(())
     }
     pub(crate) fn check_writer_lineage(
         &self,
