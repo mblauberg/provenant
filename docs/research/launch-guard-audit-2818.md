@@ -1,6 +1,9 @@
 # Launch-preparation refusal audit for #2818
 
-This inventory classifies launch refusals by their cause. Resource bounds are implementation limits, not claims about intrinsic operating-system limits.
+This inventory classifies launch refusals by their cause. `operational` marks
+setup failures that stop preparation without asserting an ADR 0035 security
+boundary. Resource bounds are implementation limits, not claims about intrinsic
+operating-system limits.
 The relevant owners are `confinement` (plan, permission validation, rendering,
 anchors, Git and cache), `providers` (adapter admission, credential reads,
 provider launch builders, lane setup and tool discovery), and `run/src/launch.rs`
@@ -22,4 +25,6 @@ classes below are those of ADR 0035.
 | Cache traversal depth and sweep failures, `confinement::cache` | Outside scope | Cache GC reports these after a sweep; they are not launch preparation. |
 | Backend unavailable, probe cancelled, process execution and setup I/O, `confinement::{permissions,plan}` and `run::launch` | Classified | `PermissionError::{BackendUnavailable, BackendNotAvailable, NestedConfinementUnsupported}` are enforcement/authority refusals. `PermissionError::Cancelled` and uncertain process handoff preserve custody and object integrity; `PermissionError::{Execution, Filesystem}` and required setup I/O fail preparation rather than claiming a launch. Optional skill staging I/O is handled by the warning and retry described above. |
 
-The unchanged guard and native escape tests remain mandatory.
+The unchanged guard and native escape tests remain mandatory. The inventory is
+complete for the current launch preparation and handoff paths; operational
+setup refusals are distinct from security boundaries and configurable defaults.
