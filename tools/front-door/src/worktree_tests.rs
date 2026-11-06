@@ -183,6 +183,12 @@ pub fn main() -> std::process::ExitCode {
                 Err(error) => exit("land race", Err(error)),
             }
         }
+        Some("--admission-only") => {
+            let args = args.into_iter().skip(1);
+            ExitCode::from(provenant_cli::run::with_deferred_provider_launch(|| {
+                crate::dispatch(provenant_cli::parse(args), &Fixture)
+            }))
+        }
         Some("--state-dir" | "internal") => {
             let code = crate::dispatch(provenant_cli::parse(args), &Fixture);
             // A fixture-only observation after the real command has rendered.
@@ -5249,7 +5255,7 @@ fn gc_reports_terminal_tmp_paths_and_bytes_in_json_and_text() -> Result {
 }
 
 fn dispatch_refuses_low_disk_writers() -> Result {
-    let mut rig = repository()?;
+    let rig = repository()?;
     ok(&rig, &["worktree", "create", "low-disk", "--json"])?;
     let (roots, _) = writer_context(&rig)?;
     let settings = provenant_config::read(&roots)?;
@@ -5292,58 +5298,38 @@ fn dispatch_refuses_low_disk_writers() -> Result {
         "{value}"
     );
     assert!(!rig.state.join("runs").exists());
-    // The reader must reach admission, rather than an unrelated unprobed
-    // account refusal now that every all-refused batch exits nonzero.
-    use std::os::unix::fs::PermissionsExt;
-    let account = rig.root.join("codex");
-    let auth = br#"{"tokens":{"account_id":"low-disk-reader"}}"#;
-    fs::write(account.join("auth.json"), auth)?;
-    fs::set_permissions(account.join("auth.json"), fs::Permissions::from_mode(0o600))?;
-    let key = provenant_providers::identity::codex_account(auth).ok_or("fixture account")?;
-    support::register_account(&rig, "codex", "default", &key, &account)?;
-    let now = provenant_os::clock::SystemClock::new().unix_seconds();
-    let readiness = rig.state.join("readiness");
-    let directory = readiness.join(&key);
-    fs::create_dir_all(&directory)?;
-    for path in [&readiness, &directory] {
-        fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
-    }
-    let path = directory.join("codex.json");
-    fs::write(
-        &path,
-        serde_json::to_vec(&serde_json::json!({
-            "schema_version":1,"login":null,"records":[{
-                "schema_version":1,
-                "scope":{"host":provenant_quota::LOCAL_HOST,"adapter":"codex","account_key":key,"route":provenant_quota::ACCOUNT_ROUTE},
-                "state":"ready","reason":null,"observed_unix_seconds":now,
-                "expires_unix_seconds":now+300,"reset_unix_seconds":null,"evidence_ref":"low-disk-fixture"
-            }]
-        }))?,
-    )?;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
-    let bin = rig.root.join("provider/bin");
-    fs::create_dir_all(&bin)?;
-    rig.copy_executable(&std::env::current_exe()?, &bin.join("codex"))?;
-    rig.env.retain(|(name, _)| name != "PATH");
-    rig.env.push((
-        "PATH".into(),
-        format!("{}:/usr/bin:/bin", bin.display()).into(),
-    ));
-    let reader = ok(
-        &rig,
-        &[
-            "dispatch",
-            "--prompt-file",
-            prompt.to_str().ok_or("prompt")?,
-            "--model",
-            "codex/gpt-6-luna",
-            "--operation-id",
-            "low-disk-reader",
-            "--json",
-        ],
-    )?;
+    // Exercise read-only admission with the real command edge, stopping before
+    // provider preparation: neither native sandboxing nor account readiness is
+    // the disk-floor subject of this test.
+    let args: Vec<OsString> = ["--admission-only", "--state-dir"]
+        .into_iter()
+        .map(OsString::from)
+        .chain(std::iter::once(rig.state.as_os_str().to_owned()))
+        .chain(
+            [
+                "dispatch",
+                "--prompt-file",
+                prompt.to_str().ok_or("prompt")?,
+                "--model",
+                "codex/gpt-6-luna",
+                "--operation-id",
+                "low-disk-reader",
+                "--json",
+            ]
+            .into_iter()
+            .map(OsString::from),
+        )
+        .collect();
+    let output = rig.execute_os(&std::env::current_exe()?, &args, None)?;
+    assert_eq!(code(&output), 0, "{output:?}");
+    let reader = json(&output)?;
     assert_eq!(reader["status"], "ok", "{reader}");
     assert!(rig.state.join("runs").exists());
+    let run = reader["data"]["run_id"].as_str().ok_or("reader run")?;
+    let request: Value = serde_json::from_slice(&fs::read(
+        rig.state.join("runs").join(run).join("request.json"),
+    )?)?;
+    assert!(request["tasks"][0]["writer"].is_null(), "{request}");
     Ok(())
 }
 

@@ -1887,11 +1887,12 @@ pub(super) fn dispatch_inner(
                 if let Some(p) = provider
                     && !enforced.contains(&p)
                 {
-                    brief_warnings.push(if p == "codex" {
-                        "token budget does not stop Codex writers: codex exec reports usage only at its final turn.completed frame; there is no further turn to stop".into()
-                    } else {
-                        format!("token budget is not enforced for provider {p}: usage is not reported while it runs")
-                    });
+                    brief_warnings.push(
+                        provenant_records::AdapterSpec::get(p)
+                            .and_then(|spec| spec.token_budget_notice)
+                            .map(str::to_owned)
+                            .unwrap_or_else(|| format!("token budget is not enforced for provider {p}: usage is not reported while it runs")),
+                    );
                 }
             }
         }

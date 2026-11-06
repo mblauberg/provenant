@@ -1,20 +1,40 @@
 use super::*;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "fixture"))]
 thread_local! {
     static TEST_DEFER_PROVIDER_LAUNCH: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-/// Keep a test submission queued after admission, before provider preparation.
 #[cfg(test)]
-pub(super) fn with_deferred_provider_launch<T>(action: impl FnOnce() -> T) -> T {
+thread_local! {
+    static TEST_CANCEL_AFTER_ADMISSION: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Keep a test submission queued after admission, before provider preparation.
+#[cfg(any(test, feature = "fixture"))]
+pub fn with_deferred_provider_launch<T>(action: impl FnOnce() -> T) -> T {
+    struct Reset(bool);
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            TEST_DEFER_PROVIDER_LAUNCH.with(|flag| flag.set(self.0));
+        }
+    }
+    let previous = TEST_DEFER_PROVIDER_LAUNCH.with(|flag| flag.replace(true));
+    let _reset = Reset(previous);
+    action()
+}
+
+/// Complete admission without requiring a provider or native sandbox. The
+/// persisted cancellation makes a caller's observation wait terminal.
+#[cfg(test)]
+pub(super) fn with_cancelled_provider_launch<T>(action: impl FnOnce() -> T) -> T {
     struct Reset;
     impl Drop for Reset {
         fn drop(&mut self) {
-            TEST_DEFER_PROVIDER_LAUNCH.with(|flag| flag.set(false));
+            TEST_CANCEL_AFTER_ADMISSION.with(|flag| flag.set(false));
         }
     }
-    TEST_DEFER_PROVIDER_LAUNCH.with(|flag| flag.set(true));
+    TEST_CANCEL_AFTER_ADMISSION.with(|flag| flag.set(true));
     let _reset = Reset;
     action()
 }
@@ -863,6 +883,15 @@ fn submit_with_launcher(
         }
     }
     #[cfg(test)]
+    if TEST_CANCEL_AFTER_ADMISSION.with(std::cell::Cell::get) {
+        for attempt in session.store.pending_attempts(record.run_id, call)? {
+            session
+                .service()
+                .cancel(attempt.attempt_id, "admission fixture complete", call)?;
+        }
+        return Ok((record, Vec::new()));
+    }
+    #[cfg(any(test, feature = "fixture"))]
     if TEST_DEFER_PROVIDER_LAUNCH.with(std::cell::Cell::get) {
         return Ok((record, Vec::new()));
     }
