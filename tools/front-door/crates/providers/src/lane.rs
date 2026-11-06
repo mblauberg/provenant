@@ -213,7 +213,25 @@ impl crate::LaunchSpec {
 /// `/usr/bin/git` is a shim that finds it through the active developer
 /// directory, which a confined lane cannot consult, so the launcher pins it.
 /// `None` when Git cannot say, in which case Git resolves it as before.
+///
+/// The path is returned canonical: confinement anchors grants at real
+/// directories and refuses a spelling that crosses a symlink (Homebrew's
+/// `/opt/homebrew/opt/git` is one), while the sandbox resolves links before
+/// matching. The wrapper pins this same spelling, so what Git is told to run
+/// is exactly what the profile grants. `None` when the path cannot be
+/// resolved or represented in the profile.
 pub(crate) fn host_exec_path(git: &Path) -> Option<PathBuf> {
+    resolve_exec_path(&probe_exec_path(git)?)
+}
+
+/// Canonical, profile-representable form of a probed exec path.
+pub(crate) fn resolve_exec_path(raw: &Path) -> Option<PathBuf> {
+    let canonical = std::fs::canonicalize(raw).ok()?;
+    provenant_confinement::permissions::profile_path_representable(&canonical).then_some(canonical)
+}
+
+/// The exec path as Git reports it, before any resolution.
+pub(crate) fn probe_exec_path(git: &Path) -> Option<PathBuf> {
     let executor = provenant_os::exec::SystemExecutor::new(1).ok()?;
     let cwd = std::env::current_dir().ok()?;
     let env: Vec<_> = std::env::vars_os().collect();
@@ -891,7 +909,14 @@ mod tests {
         std::fs::write(&git, format!("#!/bin/sh\necho '{}'\n", core.display())).unwrap();
         std::fs::set_permissions(&git, std::fs::Permissions::from_mode(0o755)).unwrap();
         let text = String::from_utf8(git_wrapper(&git, &GitWrapper::default()).unwrap()).unwrap();
-        assert!(text.contains(&format!("GIT_EXEC_PATH='{}'", core.display())));
+        let canonical = std::fs::canonicalize(&core).unwrap();
+        assert!(text.contains(&format!("GIT_EXEC_PATH='{}'", canonical.display())));
+        // A path crossing a symlink (Homebrew's `opt/git`) is pinned resolved.
+        let link = dir.path().join("opt");
+        std::os::unix::fs::symlink(dir.path().join("dev"), &link).unwrap();
+        let linked = link.join("libexec/git-core");
+        assert_eq!(resolve_exec_path(&linked), Some(canonical));
+        assert_eq!(resolve_exec_path(&dir.path().join("absent")), None);
         assert!(text.contains(" -c 'credential.https://github.com.helper="));
         assert!(!text.contains("secret"));
         let missing = git_wrapper(Path::new("/fixture/git"), &GitWrapper::default()).unwrap();

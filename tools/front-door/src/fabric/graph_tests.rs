@@ -384,15 +384,39 @@ mod graph_writer_admission_tests {
         launched_failure.settlement_reason = Some(provenant_records::run::SettlementReason::Failed);
         assert!(durable_launch_refusal(&[launched_failure.clone()]).is_none());
         assert!(durable_launch_refusal(&[lanes[0].clone(), launched_failure]).is_none());
-        let attempt = provenant_core::AttemptId::from_bytes([7;16]);
+        let attempt = lanes[0].attempt_id;
+        let sealed = |cause: provenant_records::run::TerminalCause| -> Result<provenant_run::AttemptRecord, Box<dyn std::error::Error>> {
+            let mut lane = lanes[0].clone();
+            if let provenant_records::run::AttemptState::Terminal { extra, .. } = &mut lane.state {
+                extra.insert("terminal_cause".into(), serde_json::to_value(cause)?);
+            }
+            Ok(lane)
+        };
+        // First call and replay agree: typed refusal causes refuse with typed
+        // text only; a Policy-kind refusal that settled as an ordinary
+        // preparation failure is accepted in both.
         for kind in [
             provenant_run::RefusalKind::Policy,
             provenant_run::RefusalKind::PacingReserve,
             provenant_run::RefusalKind::RetainedImport { run:run.run_id, attempt, worktree:rig.project.clone() },
         ] {
-            let started = [provenant_run::Started::Refused { attempt, reason:"typed refusal".into(), kind }];
-            assert!(matches!(binary.receipt(&session, operation_id.clone(), &run, &started, &call), Err(FacadeError::DispatchRefused { reason, .. }) if reason.contains("typed refusal") || reason.contains("retained")));
+            let started = [provenant_run::Started::Refused { attempt, reason:"HOST_DISK_ERROR_SENTINEL".into(), kind }];
+            let lane = sealed(provenant_records::run::TerminalCause::DiskFloor)?;
+            let first = launch_refusal(&started, std::slice::from_ref(&lane));
+            let replay = launch_refusal(&[], &[lane]);
+            let Some(FacadeError::DispatchRefused { reason, .. }) = first else { return Err("first call must refuse".into()) };
+            assert!(!reason.contains("HOST_DISK_ERROR_SENTINEL"), "{reason}");
+            assert!(matches!(replay, Some(FacadeError::DispatchRefused { .. })));
+            let ordinary = sealed(provenant_records::run::TerminalCause::PreparationRefused)?;
+            assert!(launch_refusal(&started, std::slice::from_ref(&ordinary)).is_none());
+            assert!(launch_refusal(&[], &[ordinary]).is_none());
         }
+        // Retained custody refuses a mixed Blocked and Preparation batch too.
+        let mixed_blocked = [
+            provenant_run::Started::Blocked { attempt, error:"custody retained".into() },
+            provenant_run::Started::Refused { attempt:provenant_core::AttemptId::from_bytes([9;16]), reason:"x".into(), kind:provenant_run::RefusalKind::Preparation },
+        ];
+        assert!(matches!(launch_refusal(&mixed_blocked, &lanes), Some(FacadeError::DispatchRefused { .. })));
         let blocked = [provenant_run::Started::Blocked { attempt, error:"custody retained".into() }];
         assert!(matches!(binary.receipt(&session, operation_id.clone(), &run, &blocked, &call), Err(FacadeError::DispatchRefused { .. })));
         let mixed = [

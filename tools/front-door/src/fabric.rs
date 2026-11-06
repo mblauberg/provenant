@@ -2047,6 +2047,85 @@ fn durable_launch_refusal(
     .then(|| lanes[0].attempt_id)
 }
 
+/// Whether a launch batch is refused, judged identically on first call and
+/// replay. Preparation failures are accepted terminal attempts: graph routing
+/// observes their typed outcome and may advance to a fallback route. Only
+/// retained custody, or sealed pre-launch evidence whose typed cause names the
+/// refusal, refuses. Reasons carry typed text, never a refusal's source text.
+fn launch_refusal(
+    started: &[provenant_run::Started],
+    lanes: &[provenant_run::AttemptRecord],
+) -> Option<FacadeError> {
+    let blocked = started
+        .iter()
+        .filter_map(|item| match item {
+            provenant_run::Started::Blocked { attempt, .. } => Some(*attempt),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if !blocked.is_empty()
+        && started.iter().all(|item| {
+            matches!(
+                item,
+                provenant_run::Started::Blocked { .. } | provenant_run::Started::Refused { .. }
+            )
+        })
+    {
+        return Some(FacadeError::DispatchRefused {
+            fact: None,
+            disk: None,
+            reason: blocked
+                .iter()
+                .map(|attempt| format!("{attempt}: launch blocked by retained custody"))
+                .collect::<Vec<_>>()
+                .join("; "),
+        });
+    }
+    let sealed: Vec<provenant_run::AttemptRecord> = if started.is_empty() {
+        lanes.to_vec()
+    } else if started.iter().all(|item| {
+        matches!(
+            item,
+            provenant_run::Started::Refused {
+                kind: provenant_run::RefusalKind::Policy
+                    | provenant_run::RefusalKind::PacingReserve
+                    | provenant_run::RefusalKind::RetainedImport { .. },
+                ..
+            }
+        )
+    }) {
+        lanes
+            .iter()
+            .filter(|lane| {
+                started.iter().any(|item| {
+                    matches!(item, provenant_run::Started::Refused { attempt, .. } if *attempt == lane.attempt_id)
+                })
+            })
+            .cloned()
+            .collect()
+    } else {
+        Vec::new()
+    };
+    durable_launch_refusal(&sealed)?;
+    Some(FacadeError::DispatchRefused {
+        fact: None,
+        disk: None,
+        reason: sealed
+            .iter()
+            .map(|lane| {
+                format!(
+                    "{}: {}",
+                    lane.attempt_id,
+                    terminal_cause(lane)
+                        .map(|cause| cause.detail())
+                        .unwrap_or("pacing reserve refused")
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("; "),
+    })
+}
+
 impl BinaryRunOwner<'_> {
     fn call<'a>(&'a self, cancel: &'a CancelToken) -> provenant_run::Request<'a> {
         provenant_run::Request {
@@ -2122,42 +2201,6 @@ impl BinaryRunOwner<'_> {
         {
             return Err(FacadeError::LaunchUnknown { operation_id });
         }
-        // Preparation failures are accepted terminal attempts: graph routing
-        // observes their typed outcome and may advance to a fallback route.
-        if !started.is_empty()
-            && started.iter().all(|item| {
-                matches!(
-                    item,
-                    provenant_run::Started::Blocked { .. }
-                        | provenant_run::Started::Refused {
-                            kind: provenant_run::RefusalKind::Policy
-                                | provenant_run::RefusalKind::PacingReserve
-                                | provenant_run::RefusalKind::RetainedImport { .. },
-                            ..
-                        }
-                )
-            })
-        {
-            provenant_cli::run::check_launch_policy(started).map_err(|_| {
-                FacadeError::DispatchRefused {
-                    fact: None,
-                    disk: None,
-                    reason: started
-                        .iter()
-                        .filter_map(|item| match item {
-                            provenant_run::Started::Refused {
-                                attempt, reason, ..
-                            } => Some(format!("{attempt}: {reason}")),
-                            provenant_run::Started::Blocked { attempt, error } => {
-                                Some(format!("{attempt}: launch blocked: {error}"))
-                            }
-                            _ => None,
-                        })
-                        .collect::<Vec<_>>()
-                        .join("; "),
-                }
-            })?;
-        }
         let mut lanes = Vec::new();
         let mut after = 0;
         loop {
@@ -2186,6 +2229,9 @@ impl BinaryRunOwner<'_> {
                 None => break,
             }
         }
+        if let Some(refusal) = launch_refusal(started, &lanes) {
+            return Err(refusal);
+        }
         if started.is_empty()
             && session
                 .store
@@ -2198,28 +2244,6 @@ impl BinaryRunOwner<'_> {
                 disk: None,
                 reason: "dispatch remains blocked by retained custody; reconcile before retrying"
                     .into(),
-            });
-        }
-        // A replay has no new queued attempt to start. Its sealed pre-launch
-        // evidence must still refuse; a provider's ordinary terminal failure
-        // remains an accepted launch and is observed by its existing target.
-        if started.is_empty() && durable_launch_refusal(&lanes).is_some() {
-            return Err(FacadeError::DispatchRefused {
-                fact: None,
-                disk: None,
-                reason: lanes
-                    .iter()
-                    .map(|lane| {
-                        format!(
-                            "{}: {}",
-                            lane.attempt_id,
-                            terminal_cause(lane)
-                                .map(|cause| cause.detail())
-                                .unwrap_or("pacing reserve refused")
-                        )
-                    })
-                    .collect::<Vec<_>>()
-                    .join("; "),
             });
         }
         Ok(SubmissionReceipt {

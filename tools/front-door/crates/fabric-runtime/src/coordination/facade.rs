@@ -431,11 +431,14 @@ fn serialise_grant_access<S: serde::Serializer>(
     })
 }
 
+const DISPATCH_REFUSED_WIRE_REASON: &str =
+    "dispatch was refused; inspect the request and access policy";
+
 fn serialise_dispatch_reason<S: serde::Serializer>(
     _: &str,
     serializer: S,
 ) -> Result<S::Ok, S::Error> {
-    serializer.serialize_str("dispatch was refused; inspect the request and access policy")
+    serializer.serialize_str(DISPATCH_REFUSED_WIRE_REASON)
 }
 
 fn serialise_unobserved_reason<S: serde::Serializer>(
@@ -596,10 +599,13 @@ impl FacadeError {
                 projected = projected.detail(format!("insufficient disk space on the limiting volume: {} bytes available, floor {} bytes; gc.free_floor from {}; bounded GC reported {} bytes reclaimed", disk.available, disk.floor, disk.origin.description(), disk.reclaimed))
                     .next(format!("run `provenant gc --free-floor {}B` before dispatching a writer", disk.floor));
             }
-            Self::DispatchRefused { reason, .. } => {
-                projected = projected.detail(provenant_records::diagnostic::safe_text(
-                    &crate::hosts::plain_text(reason, 4096),
-                ));
+            // `reason` can carry a preparation refusal's source text, which the
+            // lane layer deliberately withholds. Project the same fixed text the
+            // wire carries; the attempt's typed cause is on its lane receipt.
+            Self::DispatchRefused { .. } => {
+                projected = projected
+                    .detail(DISPATCH_REFUSED_WIRE_REASON)
+                    .next("inspect the lane receipt for the typed refusal cause");
             }
             Self::HostDeliveryLimit { fact } | Self::Io { delivery_limit: Some(fact), .. } => projected = projected.detail(fact.detail()).next("inspect host delivery before retrying"),
             Self::HostDeliveryStage { stage } | Self::Io { delivery_stage: Some(stage), .. } => projected = projected.detail(format!("host writer delivery failed at {stage:?}")).next("inspect host delivery before retrying"),
@@ -1252,16 +1258,18 @@ mod diagnostic_tests {
     }
 
     #[test]
-    fn dispatch_refusal_projects_per_attempt_detail_safely() {
+    fn dispatch_refusal_projection_withholds_source_text() {
         let error = FacadeError::DispatchRefused {
             fact: None,
             disk: None,
-            reason: "attempt-7: policy refused\u{1b}".into(),
+            reason: "attempt-7: HOST_DISK_ERROR_SENTINEL /private/host\u{1b}".into(),
         };
-        assert_eq!(
-            error.diagnostic().detail.as_deref(),
-            Some("attempt-7: policy refused")
-        );
+        let projected = error.diagnostic();
+        let text = serde_json::to_string(&projected).unwrap();
+        assert!(!text.contains("HOST_DISK_ERROR_SENTINEL"), "{text}");
+        assert!(!text.contains("/private/host"), "{text}");
+        assert_eq!(projected.code, "dispatch_refused");
+        assert!(projected.detail.is_some());
     }
 
     #[test]

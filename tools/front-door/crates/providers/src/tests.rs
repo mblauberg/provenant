@@ -2949,7 +2949,14 @@ fn prepare_all_adapters_and_pin_launch_controls() -> Result<(), ProviderError> {
                     .collect();
                 assert_eq!(
                     roots,
-                    ["/bin", "/usr/bin", "/usr/libexec", "/fixture/scratch/bin"].map(Path::new)
+                    [
+                        "/bin",
+                        "/usr/bin",
+                        "/usr/libexec",
+                        "/fixture/scratch/bin",
+                        "/fixture/scratch/read-only-git"
+                    ]
+                    .map(Path::new)
                 );
                 assert!(spec.setup.iter().any(|step| matches!(
                     step, crate::launch::SetupStep::WriteExecutable { path, bytes }
@@ -3245,10 +3252,7 @@ fn agy_writers_exec_what_codex_writers_exec() -> Result<(), ProviderError> {
                 .iter()
                 .any(|(key, value)| key == "SHELL" && value == "/bin/zsh")
         );
-        assert_eq!(
-            spec.profile.spec.process_executables.len(),
-            if access == Access::ReadOnly { 3 } else { 4 }
-        );
+        assert_eq!(spec.profile.spec.process_executables.len(), 4);
         let exec = &spec.profile.spec.tool_exec_roots;
         if access == Access::ReadOnly {
             assert_eq!(
@@ -3256,7 +3260,8 @@ fn agy_writers_exec_what_codex_writers_exec() -> Result<(), ProviderError> {
                 &vec![
                     crate::launch::subtree("/bin"),
                     crate::launch::subtree("/usr/bin"),
-                    crate::launch::subtree("/usr/libexec")
+                    crate::launch::subtree("/usr/libexec"),
+                    crate::launch::subtree("/fixture/scratch/read-only-git")
                 ]
             );
             assert!(spec.profile.spec.tool_writes.is_empty());
@@ -3390,9 +3395,7 @@ fn cursor_reads_and_execs_only_its_resolved_version_payload() -> Result<(), Prov
         input.executable = &launcher;
         let spec = cursor::Cursor.prepare(input)?.profile.spec;
         let mut executables = vec![crate::launch::exact(&launcher)];
-        if access == Access::WorktreeWrite {
-            executables.push(crate::launch::exact("/bin/sh"));
-        }
+        executables.push(crate::launch::exact("/bin/sh"));
         executables.push(crate::launch::exact("/fixture/git/bin/git"));
         assert_eq!(spec.process_executables, executables);
         assert!(
@@ -3405,10 +3408,11 @@ fn cursor_reads_and_execs_only_its_resolved_version_payload() -> Result<(), Prov
                 .map(crate::launch::subtree)
                 .into_iter()
                 .chain([crate::launch::subtree(payload)])
-                .chain(
-                    (access == Access::WorktreeWrite)
-                        .then(|| crate::launch::subtree("/fixture/scratch/bin"))
-                )
+                .chain([crate::launch::subtree(if access == Access::WorktreeWrite {
+                    "/fixture/scratch/bin"
+                } else {
+                    "/fixture/scratch/read-only-git"
+                })])
                 .collect::<Vec<_>>()
         );
     }
@@ -3564,6 +3568,8 @@ fn opencode_writer_gets_the_rust_toolchain_in_its_lane_cache()
                     .join("cache/opencode/bin/rg")
             ),
             crate::launch::exact("/usr/bin/grep"),
+            // The read-only Git launcher the lane puts first on PATH.
+            crate::launch::subtree(plan.permissions().scratch.path.join("read-only-git")),
         ]
     );
     assert!(spec.env.iter().all(|(name, _)| name != "CARGO_HOME"));

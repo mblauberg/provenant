@@ -486,7 +486,13 @@ fn agy_read_only_compiled_profile_denies_read_root_write() -> Result<(), Box<dyn
 
     let temp = tempfile::tempdir()?;
     let root = temp.path().canonicalize()?;
-    for name in ["repo", "scratch", "state", "Library/Keychains", "bin"] {
+    for name in [
+        "repo",
+        "scratch/read-only-git",
+        "state",
+        "Library/Keychains",
+        "bin",
+    ] {
         std::fs::create_dir_all(root.join(name))?;
     }
     for name in ["scratch", "state"] {
@@ -666,11 +672,6 @@ fn agy_read_only_linked_worktree_git_directories_are_not_writable()
             {
                 std::fs::write(path, bytes)?;
                 std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
-            }
-            SetupStep::Symlink { link, target }
-                if link == &root.join("scratch/read-only-git/git") =>
-            {
-                std::os::unix::fs::symlink(target, link)?;
             }
             _ => {}
         }

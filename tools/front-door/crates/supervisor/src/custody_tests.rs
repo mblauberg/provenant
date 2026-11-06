@@ -1105,7 +1105,9 @@ fn failed_ownership_publication_reports_retained_reservation() -> TestResult {
 #[test]
 fn writer_exclusion_gate_contention_honours_the_caller_deadline() -> TestResult {
     let root = tempfile::tempdir()?;
-    let directory = Directory::open_anchor(root.path())?;
+    // The directory reports its canonical path (`/private/var/...` on macOS).
+    let base = std::fs::canonicalize(root.path())?;
+    let directory = Directory::open_anchor(&base)?;
     let _observer = directory.try_lock(OsStr::new("writer-probe.lock"), LockMode::Exclusive)?;
     let clock = provenant_core::TestClock::new(
         provenant_core::WallTime::from_micros(0)?,
@@ -1124,7 +1126,7 @@ fn writer_exclusion_gate_contention_honours_the_caller_deadline() -> TestResult 
     .expect_err("the observer remains locked through the writer deadline");
     assert!(
         matches!(error, CustodyError::Filesystem(FsError::LockTimeout { path, timeout: actual })
-        if path == root.path().join("writer.lock") && actual == timeout)
+        if path == base.join("writer.lock") && actual == timeout)
     );
 
     let cancel = CancelToken::new();
