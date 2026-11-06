@@ -128,7 +128,7 @@ pub(super) fn validate_node(node: &GraphNode) -> Result<(), &'static str> {
             || !node.inputs.is_empty()
             || node.on_fail.is_some()
             || node.continues.is_some()
-            || !valid_identifier(&spec.node)
+            || !valid_node_identifier(&spec.node)
             || spec
                 .session
                 .as_ref()

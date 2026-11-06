@@ -100,7 +100,7 @@ pub(super) fn validate_target(
                     pending.extend(parent.dependencies());
                 }
             }
-            if !valid_identifier(target)
+            if !valid_node_identifier(target)
                 || target == &node.id
                 || !seen.contains(target)
                 || !document.nodes.iter().any(|node| &node.id == target)

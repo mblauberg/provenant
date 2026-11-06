@@ -268,8 +268,8 @@ pub(super) fn check_expanded_ids(
             continue;
         }
         for child in &spec.body {
-            if !valid_identifier(&id(&node.id, rounds, &child.id)) {
-                return Err("expanded loop node id exceeds 64 bytes".into());
+            if !valid_node_identifier(&id(&node.id, rounds, &child.id)) {
+                return Err("expanded loop node id exceeds 200 bytes".into());
             }
         }
     }
