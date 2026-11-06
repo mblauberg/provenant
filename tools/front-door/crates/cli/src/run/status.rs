@@ -518,8 +518,8 @@ pub(super) fn lane_lines(data: &Value) -> Vec<LaneLine> {
         .unwrap_or_default()
 }
 
-/// The paths a writer may change without review in this project, as JSON and
-/// as the line `status` ends with, so the chair sees what will not stop a lane.
+/// Configured review exemptions in this project, as JSON and as the line
+/// `status` ends with. Protected paths do not gate writer settlement.
 pub(super) fn review_exempt_view(context: &run::ExecutionContext) -> (serde_json::Value, String) {
     use provenant_confinement::run_config::RunConfig;
     match RunConfig::read(context.state_root.as_path()) {
@@ -534,8 +534,7 @@ pub(super) fn review_exempt_view(context: &run::ExecutionContext) -> (serde_json
         }
         Err(_) => (
             json!([]),
-            "review-exempt paths: none (config unreadable; every protected change needs review)\n"
-                .to_owned(),
+            "review-exempt paths: none (config unreadable)\n".to_owned(),
         ),
     }
 }
