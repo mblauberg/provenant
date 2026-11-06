@@ -86,7 +86,7 @@ def main():
         "tools/front-door/src/compose_tests.rs": "worktrees",
         "tools/front-door/src/pr_land_tests.rs": "worktrees",
         "tools/front-door/tests/worktree_driver.rs": "worktrees",
-        "tools/front-door/tests/dispatch_provider.rs": "dispatch_provider",
+        "tools/front-door/tests/graph_provider.rs": "graph_provider",
         "tools/front-door/tests/pr.rs": "pr",
         "tools/front-door/tests/fake_provider.rs": "fake_provider",
         "tools/front-door/crates/supervisor/tests/process.rs": "process",

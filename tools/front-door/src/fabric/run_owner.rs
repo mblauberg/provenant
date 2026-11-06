@@ -1221,6 +1221,7 @@ fn require_graph_context(
 }
 
 #[cfg(test)]
+#[allow(unused_imports, reason = "the custom worktree driver omits libtest functions")]
 mod graph_control_tests {
     use super::*;
     #[test]

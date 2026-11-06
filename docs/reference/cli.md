@@ -2180,7 +2180,12 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 |---|---|
 | `brief` | `{"description": "Brief for the selected template", "name": "brief", "positional": true}` |
 | `--use` | `{"description": "Select a layered template [default: task]", "name": "template"}` |
-| `--tier` | `{"description": "Override the template's route tier", "name": "tier"}` |
+| `--tier` | `{"description": "Override the template's named route tier", "name": "tier"}` |
+| `--mode` | `{"description": "Access for a plain task; writer targets imply worktree-write", "name": "mode", "values": ["read-only", "worktree-write"]}` |
+| `--worktree` | `{"conflicts": ["branch"], "description": "Existing writer worktree", "name": "worktree"}` |
+| `--branch` | `{"description": "Create an owned writer worktree on this branch", "name": "branch"}` |
+| `--base` | `{"description": "Git base for a new writer branch", "name": "base"}` |
+| `--write-scope` | `{"description": "Paths the writer may change, relative to its worktree; repeatable", "name": "write_scope", "repeatable": true}` |
 | `--over` | `{"description": "Copy the node over named items, or a resolver such as @review-panel", "name": "over", "repeatable": true}` |
 | `--set` | `{"description": "Bind a template parameter (NAME=TOML_VALUE); repeatable", "name": "set", "repeatable": true}` |
 | `--file` | `{"description": "Read a graph document (JSON or TOML), or a plain text brief", "name": "file"}` |
@@ -2204,6 +2209,11 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
         "brief",
         "template",
         "tier",
+        "mode",
+        "worktree",
+        "branch",
+        "base",
+        "write_scope",
         "over",
         "set",
         "file",
