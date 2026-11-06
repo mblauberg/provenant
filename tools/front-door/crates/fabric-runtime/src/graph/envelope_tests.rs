@@ -445,8 +445,19 @@ fn repair_growth_and_risk_metadata_fit_the_checkpoint_bound() {
         ]
     })).unwrap();
     let plan = planned(&document);
-    let positions = plan.nodes.iter().enumerate().map(|(index,node)| (node.id.clone(),index)).collect();
-    assert_eq!(plan.nodes.iter().filter(|node| repair::is_repair_gate(node,&plan,&positions)).count(), 3);
+    let positions = plan
+        .nodes
+        .iter()
+        .enumerate()
+        .map(|(index, node)| (node.id.clone(), index))
+        .collect();
+    assert_eq!(
+        plan.nodes
+            .iter()
+            .filter(|node| repair::is_repair_gate(node, &plan, &positions))
+            .count(),
+        3
+    );
     assert_fits_with_repair_metadata(document.clone(), "terminal", true);
     assert_fits_with_repair_metadata(document, "substantial", false);
 }
@@ -454,10 +465,18 @@ fn repair_growth_and_risk_metadata_fit_the_checkpoint_bound() {
 fn assert_fits_with_repair_metadata(document: GraphDocument, tier: &str, grew: bool) {
     let plan = planned(&document);
     let mut checkpoint = filled_checkpoint(&document, &plan);
-    let positions = plan.nodes.iter().enumerate().map(|(index,node)| (node.id.clone(),index)).collect();
+    let positions = plan
+        .nodes
+        .iter()
+        .enumerate()
+        .map(|(index, node)| (node.id.clone(), index))
+        .collect();
     for (node, planned) in checkpoint.nodes.iter_mut().zip(&plan.nodes) {
         if repair::is_repair_gate(planned, &plan, &positions) {
-            node.extra.insert("repair_growth".into(), json!({"before":"1".repeat(64),"after":"2".repeat(64),"grew":grew}));
+            node.extra.insert(
+                "repair_growth".into(),
+                json!({"before":"1".repeat(64),"after":"2".repeat(64),"grew":grew}),
+            );
         }
         if let Some(outputs) = &mut node.outputs {
             outputs.extra.insert("risk_tier".into(), tier.into());

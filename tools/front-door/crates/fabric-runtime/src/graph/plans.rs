@@ -308,12 +308,19 @@ fn block<'a>(
         let indent = line.len() - trimmed.len();
         let delimiter = trimmed.as_bytes().first().copied().unwrap_or_default();
         let ticks = if matches!(delimiter, b'`' | b'~') {
-            trimmed.bytes().take_while(|byte| *byte == delimiter).count()
-        } else { 0 };
+            trimmed
+                .bytes()
+                .take_while(|byte| *byte == delimiter)
+                .count()
+        } else {
+            0
+        };
         if indent <= 3 && ticks >= 3 {
             let suffix = trimmed[ticks..].trim();
             match fence {
-                Some((kind, opening, selected, begin)) if delimiter == kind && ticks >= opening && suffix.is_empty() => {
+                Some((kind, opening, selected, begin))
+                    if delimiter == kind && ticks >= opening && suffix.is_empty() =>
+                {
                     if selected {
                         if found.is_some() {
                             return Err(format!("{tag} block repeated"));
@@ -331,7 +338,9 @@ fn block<'a>(
     if fence.is_some_and(|(_, _, selected, _)| selected) {
         return Err(format!("{tag} block incomplete"));
     }
-    let Some(json) = found else { return Ok(None); };
+    let Some(json) = found else {
+        return Ok(None);
+    };
     if json.len() > BLOCK_BYTES {
         return Err(format!("{tag} block exceeds {BLOCK_BYTES} bytes"));
     }
@@ -362,7 +371,10 @@ pub(super) fn handoff(
 }
 
 pub(super) fn agent(node: &PlannedNode) -> bool {
-    matches!(node.kind, None | Some(NodeKind::Task | NodeKind::Synthesise))
+    matches!(
+        node.kind,
+        None | Some(NodeKind::Task | NodeKind::Synthesise)
+    )
 }
 
 pub(super) fn writer(node: &PlannedNode) -> bool {
@@ -1122,10 +1134,18 @@ fn fragment(
     safe_reason: &mut PlanFailureFact,
 ) -> Result<Expansion, String> {
     let default_spec = PlanSpec {
-        extra: Default::default(), kinds: Vec::new(), max_nodes: limits.nodes,
-        templates: Vec::new(), disjoint_waves: false, wire_exports: false,
-        fallback: None, fallback_depends_on: Vec::new(), fallback_inputs: Vec::new(),
-        fallback_source: None, fallback_read_roots: Vec::new(), fallback_title: None,
+        extra: Default::default(),
+        kinds: Vec::new(),
+        max_nodes: limits.nodes,
+        templates: Vec::new(),
+        disjoint_waves: false,
+        wire_exports: false,
+        fallback: None,
+        fallback_depends_on: Vec::new(),
+        fallback_inputs: Vec::new(),
+        fallback_source: None,
+        fallback_read_roots: Vec::new(),
+        fallback_title: None,
     };
     let spec = node.plan.as_ref().unwrap_or(&default_spec);
     let patch = super::patch::Patch::from_fragment(json)?;
@@ -1141,22 +1161,49 @@ fn fragment(
             "fragment requires 1..{model_limit} nodes and schema_version 1"
         ));
     }
-    let snapshots: BTreeMap<String, Template> = source.extra.get("template_library")
-        .cloned().map(serde_json::from_value).transpose()
-        .map_err(|error| format!("invalid template snapshot: {error}"))?.unwrap_or_default();
-    let layers: BTreeMap<String, super::template::Layer> = source.extra.get("template_layers")
-        .cloned().map(serde_json::from_value).transpose()
-        .map_err(|error| format!("invalid template layers: {error}"))?.unwrap_or_default();
+    let snapshots: BTreeMap<String, Template> = source
+        .extra
+        .get("template_library")
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|error| format!("invalid template snapshot: {error}"))?
+        .unwrap_or_default();
+    let layers: BTreeMap<String, super::template::Layer> = source
+        .extra
+        .get("template_layers")
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|error| format!("invalid template layers: {error}"))?
+        .unwrap_or_default();
     let mut library = bundled_templates().clone();
     for (name, template) in snapshots {
-        library.insert(layers.get(&name).copied().unwrap_or(super::template::Layer::Inline), &name, template)?;
+        library.insert(
+            layers
+                .get(&name)
+                .copied()
+                .unwrap_or(super::template::Layer::Inline),
+            &name,
+            template,
+        )?;
     }
-    let mut resolvers: BTreeMap<String, Vec<String>> = source.extra.get("template_resolvers")
-        .cloned().map(serde_json::from_value).transpose()
-        .map_err(|error| format!("invalid submission resolvers: {error}"))?.unwrap_or_default();
-    let overrides: BTreeMap<String, Vec<String>> = spec.extra.get("resolvers")
-        .cloned().map(serde_json::from_value).transpose()
-        .map_err(|error| format!("invalid planner resolvers: {error}"))?.unwrap_or_default();
+    let mut resolvers: BTreeMap<String, Vec<String>> = source
+        .extra
+        .get("template_resolvers")
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|error| format!("invalid submission resolvers: {error}"))?
+        .unwrap_or_default();
+    let overrides: BTreeMap<String, Vec<String>> = spec
+        .extra
+        .get("resolvers")
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|error| format!("invalid planner resolvers: {error}"))?
+        .unwrap_or_default();
     resolvers.extend(overrides);
     let context = super::patch::PatchContext {
         library: &library,
@@ -1344,13 +1391,23 @@ pub(super) fn flatten_fragment(
     // limits see every member and round.
     let mut local = loops::expand(&local, &[], &generous()).map_err(|error| error.to_string())?;
     for child in &mut local.nodes {
-        if child.composite.is_none() && child.loop_body.is_none()
-            && matches!(child.kind, None | Some(NodeKind::Task | NodeKind::Synthesise))
-            && child.route.is_none() && child.routes.is_none()
+        if child.composite.is_none()
+            && child.loop_body.is_none()
+            && matches!(
+                child.kind,
+                None | Some(NodeKind::Task | NodeKind::Synthesise)
+            )
+            && child.route.is_none()
+            && child.routes.is_none()
         {
             child.route = Some(GraphRoute {
-                extra: Default::default(), alias: Some("senior".into()),
-                adapter: None, name: None, model: None, effort: None, account: None,
+                extra: Default::default(),
+                alias: Some("senior".into()),
+                adapter: None,
+                name: None,
+                model: None,
+                effort: None,
+                account: None,
             });
         }
     }
@@ -1697,13 +1754,12 @@ pub(super) fn settle(
         .find(|n| n.id == node.id)
         .and_then(|n| n.extra.get("retry_generation"))
         .cloned();
-    if checkpoint
-        .expansions
-        .iter()
-        .any(|e| e.source == node.id
-            && (e.patch.is_none() || e.extra.get("final_result") == Some(&serde_json::Value::Bool(true)))
-            && e.extra.get("retry_generation") == generation.as_ref())
-    {
+    if checkpoint.expansions.iter().any(|e| {
+        e.source == node.id
+            && (e.patch.is_none()
+                || e.extra.get("final_result") == Some(&serde_json::Value::Bool(true)))
+            && e.extra.get("retry_generation") == generation.as_ref()
+    }) {
         return None;
     }
     if node
@@ -1787,8 +1843,10 @@ pub(super) fn settle(
         .nodes
         .iter()
         .position(|n| n.id == node.id && n.state == NodeState::Succeeded)?;
-    if node.plan.is_none() && !writer(node)
-        && capture.is_none() && checkpoint.nodes[index].expansion_pause.is_some()
+    if node.plan.is_none()
+        && !writer(node)
+        && capture.is_none()
+        && checkpoint.nodes[index].expansion_pause.is_some()
         && checkpoint.nodes[index].fragment.is_none()
     {
         return None;
@@ -1797,22 +1855,25 @@ pub(super) fn settle(
     // Retain a closed, safe explanation for status and fallback diagnostics.
     let mut safe_reason = PlanFailureFact::InvalidGraph;
     let final_patch = capture.map(|capture| {
-        block(capture, "patch").and_then(|patch| match patch {
-            Some(patch) => Ok(Some(patch)),
-            None => block(capture, "fragment"),
-        }).map(|patch| patch.map(str::to_owned))
+        block(capture, "patch")
+            .and_then(|patch| match patch {
+                Some(patch) => Ok(Some(patch)),
+                None => block(capture, "fragment"),
+            })
+            .map(|patch| patch.map(str::to_owned))
     });
-    let has_patch = final_patch.as_ref().is_some_and(|result| !matches!(result, Ok(None)));
-    let addition = if node.plan.is_some() || has_patch || checkpoint.nodes[index].fragment.is_some() {
+    let has_patch = final_patch
+        .as_ref()
+        .is_some_and(|result| !matches!(result, Ok(None)));
+    let addition = if node.plan.is_some() || has_patch || checkpoint.nodes[index].fragment.is_some()
+    {
         let json = if let Some(capture) = capture {
             let _ = capture;
             match final_patch.unwrap_or(Ok(None)) {
-                Ok(Some(json)) => {
-                    super::patch::scan_for_secrets(&json).map(|()| {
-                        checkpoint.nodes[index].fragment = Some(json.clone());
-                        json
-                    })
-                }
+                Ok(Some(json)) => super::patch::scan_for_secrets(&json).map(|()| {
+                    checkpoint.nodes[index].fragment = Some(json.clone());
+                    json
+                }),
                 Ok(None) => {
                     safe_reason = PlanFailureFact::MissingBlock;
                     Err("fragment block missing".into())
@@ -1865,7 +1926,9 @@ pub(super) fn settle(
         return None;
     };
     let result = addition.and_then(|mut addition| {
-        addition.extra.insert("final_result".into(), serde_json::Value::Bool(true));
+        addition
+            .extra
+            .insert("final_result".into(), serde_json::Value::Bool(true));
         if let Some(generation) = &generation {
             addition
                 .extra
@@ -1936,10 +1999,17 @@ pub(super) fn settle(
             let reason = if super::patch::scan_for_secrets(&reason).is_err() {
                 "patch diagnostic contains a secret; inspect the captured result".to_owned()
             } else {
-                reason.chars().flat_map(|character| {
-                    if character.is_control() { character.escape_default().collect::<Vec<_>>() }
-                    else { vec![character] }
-                }).take(MAX_ADVANCE_ERROR_BYTES).collect()
+                reason
+                    .chars()
+                    .flat_map(|character| {
+                        if character.is_control() {
+                            character.escape_default().collect::<Vec<_>>()
+                        } else {
+                            vec![character]
+                        }
+                    })
+                    .take(MAX_ADVANCE_ERROR_BYTES)
+                    .collect()
             };
             if let Some(outputs) = &mut checkpoint.nodes[index].outputs {
                 let warning = bounded(&format!("patch refused: {reason}"), WARNING_BYTES);
