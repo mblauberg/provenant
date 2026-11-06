@@ -670,6 +670,46 @@ fn deterministic_graph_wait_status_trace_and_replay_share_one_journal() -> Resul
 }
 
 #[test]
+fn content_rerun_reattaches_and_fresh_run_after_cancel_has_a_new_identity() -> Result {
+    let rig = GraphProject::new()?;
+    let templates = rig.project.join(".provenant/templates");
+    std::fs::create_dir_all(&templates)?;
+    for identity in ["content", "fresh"] {
+        std::fs::write(
+            templates.join(format!("{identity}.toml")),
+            format!("identity='{identity}'\nkind='gate'\n[node.condition]\ntype='budget'\n"),
+        )?;
+    }
+    let run = |template: &str| -> Result<Value> {
+        let (output, result) = rig.run(&["run", "--use", template, "--wait=10s"])?;
+        assert!(output.status.success(), "{result}");
+        Ok(result["data"].clone())
+    };
+    let first = run("content")?;
+    let id = first["checkpoint"]["graph_id"].as_str().ok_or("graph ID")?;
+    assert_eq!(first["status"], "complete");
+    assert_eq!(run("content")?["checkpoint"], first["checkpoint"]);
+    let (output, stopped) = rig.run(&["stop", id])?;
+    assert!(output.status.success(), "{stopped}");
+    let (output, replay) = rig.run(&["run", "--use", "content", "--wait=10s"])?;
+    assert!(!output.status.success(), "{replay}");
+    let replay = &replay["data"];
+    assert_eq!(replay["checkpoint"]["graph_id"], id);
+    assert_eq!(replay["checkpoint"]["cancelled"], true);
+
+    let fresh = run("fresh")?;
+    let fresh_id = fresh["checkpoint"]["graph_id"].as_str().ok_or("fresh ID")?;
+    assert_ne!(fresh_id, id);
+    let (output, stopped) = rig.run(&["stop", fresh_id])?;
+    assert!(output.status.success(), "{stopped}");
+    let rerun = run("fresh")?;
+    assert_ne!(rerun["checkpoint"]["graph_id"], fresh_id);
+    assert_eq!(rerun["checkpoint"]["cancelled"], false);
+    assert_eq!(rerun["status"], "complete");
+    Ok(())
+}
+
+#[test]
 fn explain_refuses_document_read_roots_outside_the_project() -> Result {
     let rig = GraphProject::new()?;
     let outside = rig.temp.path().join("outside");

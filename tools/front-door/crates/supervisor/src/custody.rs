@@ -591,6 +591,17 @@ pub fn attempt_evidence(
 /// Publish the attempt record durably before removing the slot fence. A crash
 /// between those writes is replayed only when the two records agree exactly.
 fn carry_forward_slot_reservation(directory: &Directory) -> Result<()> {
+    carry_forward_slot_reservation_with(directory, |child| {
+        child.open_read(OsStr::new("reservation.json"))?.sync()?;
+        child.sync()?;
+        Ok(())
+    })
+}
+
+fn carry_forward_slot_reservation_with(
+    directory: &Directory,
+    sync_evidence: impl FnOnce(&Directory) -> Result<()>,
+) -> Result<()> {
     match directory.metadata_at(OsStr::new("reservation.json"), false) {
         Ok(_) => {}
         Err(error) if error.is_not_found() => return Ok(()),
@@ -649,6 +660,12 @@ fn carry_forward_slot_reservation(directory: &Directory) -> Result<()> {
         }
         Err(error) => return Err(error.into()),
     }
+    // An identical record can be left by a publication whose final directory
+    // sync failed. Reconfirm durability on replay before removing its source.
+    sync_evidence(&child)?;
+    // The attempt directory itself may also be a visible, unsynced creation
+    // from an earlier failed cutover.
+    directory.sync()?;
     directory.unlink(OsStr::new("reservation.json"))?;
     directory.sync()?;
     Ok(())
@@ -661,6 +678,7 @@ pub fn cutover_writer_reservations(
     cancel: &CancelToken,
     clock: &dyn Clock,
 ) -> Result<()> {
+    let mut storage_error = None;
     for (index, name) in directory.entries()?.enumerate() {
         if index >= 10_000 {
             return Err(CustodyError::InvalidRecord);
@@ -684,14 +702,26 @@ pub fn cutover_writer_reservations(
             )?;
             carry_forward_slot_reservation(&slot)
         };
-        // Do not let one retained or busy slot hide other reservations.
-        // The read-only listing reports the slot that could not be carried.
-        let _ = migrate();
+        // Malformed and busy slots remain visible in the read-only listing.
+        // A failed write must reach the caller, after carrying any other slots.
+        match migrate() {
+            Ok(())
+            | Err(CustodyError::Fenced | CustodyError::Busy)
+            | Err(CustodyError::Filesystem(FsError::LockTimeout { .. })) => {}
+            Err(error) => {
+                if storage_error.is_none() {
+                    storage_error = Some(error);
+                }
+            }
+        }
         if cancel.is_cancelled() {
             return Err(CustodyError::Cancelled);
         }
     }
-    Ok(())
+    match storage_error {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
 }
 
 /// A carried fence remains exclusive until its owner settles and clears it.
@@ -1821,15 +1851,9 @@ pub fn acquire_recovery(
     let directory = recovery_evidence(&lock_directory, scope)?;
     let reservation: Reservation = read_record(&directory, "reservation.json", RECORD_LIMIT)?;
     validate_anchor(&directory, &reservation)?;
-    // Per-attempt callers may inspect a retained generation before deciding
-    // whether to settle it. A shared legacy record must match the full scope.
-    if reservation.scope.run != scope.run
-        || reservation.scope.attempt != scope.attempt
-        || (directory
-            .metadata()?
-            .same_identity(&lock_directory.metadata()?)
-            && reservation.scope != scope)
-    {
+    // Callers may inspect a retained generation before deciding whether to
+    // settle it; recovery evidence belongs to this run and attempt.
+    if reservation.scope.run != scope.run || reservation.scope.attempt != scope.attempt {
         return Err(CustodyError::Fenced);
     }
     Ok(Recovery {
@@ -1962,14 +1986,13 @@ pub struct WriterReservation {
     pub reservation: PathBuf,
 }
 impl WriterReservation {
-    /// The stable lock slot, for both historical and per-attempt journals.
+    /// The stable lock slot containing this attempt's journal.
     pub fn custody_directory(&self) -> Option<&std::path::Path> {
         let parent = self.reservation.parent()?;
-        if parent.file_name() == Some(OsStr::new(&self.scope.attempt.to_string())) {
-            parent.parent()
-        } else {
-            Some(parent)
+        if parent.file_name() != Some(OsStr::new(&self.scope.attempt.to_string())) {
+            return None;
         }
+        parent.parent()
     }
 }
 #[derive(Debug, Serialize)]

@@ -2665,8 +2665,13 @@ impl RunStore {
     /// this project. Nonterminal work takes priority over temporary cleanup.
     pub fn open_runs(&self, limit: u64, call: &Request<'_>) -> Result<Vec<RunId>> {
         call.check()?;
-        // Listing below reports unreadable evidence without hiding known runs.
-        let _ = self.cutover_writer_reservations(call);
+        self.cutover_writer_reservations(call)?;
+        self.open_runs_readonly(limit, call)
+    }
+
+    /// Inspect pending recovery independently of a failed custody cutover.
+    /// Callers report reservation issues alongside these known runs.
+    pub fn open_runs_readonly(&self, limit: u64, call: &Request<'_>) -> Result<Vec<RunId>> {
         call.check()?;
         let limit = crate::db::sql_int(limit)?;
         let ids: Vec<String> = {
@@ -2683,7 +2688,12 @@ impl RunStore {
             .iter()
             .map(|id| RunId::parse(id).map_err(|_| RunError::Validation("run index ID")))
             .collect::<Result<Vec<_>>>()?;
-        for fence in self.writer_fences()? {
+        let fences = match self.writer_fence_listing() {
+            Ok(listing) => listing.reservations,
+            Err(_) if !runs.is_empty() => Vec::new(),
+            Err(error) => return Err(error),
+        };
+        for fence in fences {
             if !runs.contains(&fence.scope.run) && runs.len() < limit as usize {
                 runs.push(fence.scope.run);
             }
@@ -2894,8 +2904,9 @@ impl RunStore {
         observer: &dyn ProcessObserver,
     ) -> Result<Vec<(AttemptId, Reconciled)>> {
         call.check()?;
-        // The listing path retains its per-run error reporting if cutover fails.
-        let _ = self.cutover_writer_reservations(call);
+        // Judge known attempts even when another slot's cutover failed. The
+        // storage error is returned after those independent decisions are saved.
+        let cutover_error = self.cutover_writer_reservations(call).err();
         call.check()?;
         let mut ids: Vec<String> = {
             let mut query = self
@@ -2907,8 +2918,8 @@ impl RunStore {
             )?;
             rows.collect::<std::result::Result<_, _>>()?
         };
-        let (fences, listing_error) = match self.writer_fences() {
-            Ok(fences) => (fences, None),
+        let (fences, listing_error) = match self.writer_fence_listing() {
+            Ok(listing) => (listing.reservations, None),
             Err(error) => {
                 for id in self.pending_reactions(run, call)? {
                     let id = id.to_string();
@@ -2956,7 +2967,10 @@ impl RunStore {
                 found.push((id, self.track_reconcile_progress(run, id, state, call)));
             }
         }
-        Ok(found)
+        match cutover_error {
+            Some(error) => Err(error),
+            None => Ok(found),
+        }
     }
     /// Progress is advisory: a broken attempt must not hide its peers' results.
     fn track_reconcile_progress(
@@ -3843,6 +3857,94 @@ mod tests {
         assert!(!slot.join("reservation.json").exists());
         assert!(child.exists());
         assert_eq!(store.writer_fences()?[0].scope.attempt, orphan);
+        Ok(())
+    }
+
+    #[test]
+    fn cutover_write_failure_reaches_recovery_callers_after_known_work_is_judged()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir()?;
+        let clock = crate::tests::clock();
+        let cancel = provenant_core::CancelToken::new();
+        let call = crate::tests::call(&clock, &cancel);
+        let context = crate::tests::context(temp.path())?;
+        let store = RunStore::open(&context, &call)?;
+        let run = crate::tests::input();
+        store.create(&run, &call)?;
+        let id = run.attempts[0].attempt_id;
+        store.mark_starting(
+            &store.record(id, &call)?,
+            &crate::tests::route(),
+            &[],
+            &Default::default(),
+            None,
+            &call,
+        )?;
+        let orphan = AttemptId::from_bytes([7; 16]);
+        let slot = context
+            .state_root
+            .as_path()
+            .join("worktrees")
+            .join(context.project_id.to_string())
+            .join("orphan");
+        std::fs::create_dir_all(&slot)?;
+        let directory = provenant_os::fs::Directory::open_anchor(&slot)?;
+        drop(custody::acquire_reader(
+            directory.try_clone()?,
+            Scope {
+                run: run.run_id,
+                attempt: orphan,
+                generation: 1,
+            },
+            call.lock_budget(),
+            &cancel,
+            &clock,
+        )?);
+        let child_path = slot.join(orphan.to_string());
+        let child = child_path.join("reservation.json");
+        let mut retained: serde_json::Value = serde_json::from_slice(&std::fs::read(&child)?)?;
+        let metadata = directory.metadata()?;
+        retained["reservation_device"] = metadata.device.into();
+        retained["reservation_inode"] = metadata.inode.into();
+        let source = slot.join("reservation.json");
+        std::fs::write(&source, serde_json::to_vec(&retained)?)?;
+        std::fs::remove_file(&child)?;
+        std::fs::set_permissions(&child_path, std::fs::Permissions::from_mode(0o500))?;
+        let scan = store.open_runs(10, &call);
+        let reconcile = store.reconcile_with_observer(
+            run.run_id,
+            &crate::dispatch_tests::Fake::default(),
+            &call,
+            &SystemProcessObserver,
+        );
+        std::fs::set_permissions(&child_path, std::fs::Permissions::from_mode(0o700))?;
+        assert!(matches!(
+            scan,
+            Err(RunError::OperationIo {
+                operation: "cut over writer reservations",
+                ..
+            })
+        ));
+        assert!(matches!(
+            reconcile,
+            Err(RunError::OperationIo {
+                operation: "cut over writer reservations",
+                ..
+            })
+        ));
+        assert!(matches!(
+            store.record(id, &call)?.state,
+            AttemptState::Terminal {
+                outcome: Outcome::Rejected,
+                ..
+            }
+        ));
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&std::fs::read(&source)?)?,
+            retained
+        );
+        assert!(!child.exists());
         Ok(())
     }
 

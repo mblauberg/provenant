@@ -1281,14 +1281,23 @@ briefs.
 
 ### Checkpoint before launch
 
+Node and attempt transitions consume explicit facts in pure reducers. Host
+observations, clocks, launch and delivery stay in the scheduler; reducers cannot
+read an owner or journal. The scheduler applies a transition and saves its
+checkpoint before acknowledging progress or launching from the saved intent.
+This keeps transition tests independent of process and storage fakes while the
+graph recovery tests cover effect ordering and failed writes.
+
 The owner writes a checkpoint under a stable graph, node and route key
 before calling run, so replay returns the existing attempt. A checkpoint
 missing launch evidence or the submitting actor is refused, and digests
 detect tampering. Cancelling a graph persists the admission fence first.
 - Why: a restart must never launch a node twice.
 - Test: `crates/fabric-runtime/src/graph.rs::checkpoint_attempts_require_launch_evidence_and_actor`;
-  `::cancelled_graph_admits_no_work_and_resume_reuses_the_attempt_key`
-- Owner: `crates/fabric-runtime/src/graph.rs`
+  `::cancelled_graph_admits_no_work_and_resume_reuses_the_attempt_key`;
+  `crates/fabric-runtime/src/graph/transitions.rs::complete_attempt_transition_needs_no_owner_or_journal`;
+  `::preparation_transitions_enforce_pinned_sources_and_input_capacity_without_io`
+- Owner: `crates/fabric-runtime/src/graph.rs`, `crates/fabric-runtime/src/graph/transitions.rs`
 
 ### Checkpoint envelope
 

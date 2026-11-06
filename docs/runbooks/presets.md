@@ -98,6 +98,9 @@ submissions, including the template library, resolved panel, working directory
 and resolved Git HEAD. A new commit therefore starts a new review. An explicit
 `operation_id` on a run document replays that operation; an explicit `graph_id`
 continues to select that graph. Use a new operation ID for new work.
+Reattaching a cancelled graph preserves its cancellation; `retry GRAPH` resumes
+it. A fresh template invocation starts a separate graph, including after a
+cancelled invocation. Neither action bypasses writer custody.
 
 A template is TOML with parameters and either a leaf brief, tier, access and
 outputs, or `nodes`. A composite is a template with nodes; a dotted name such

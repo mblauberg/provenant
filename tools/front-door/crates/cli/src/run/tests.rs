@@ -1733,6 +1733,235 @@ fn check_continuable_refuses_nonterminal_before_session() -> Result<(), Box<dyn 
 }
 
 #[test]
+fn reconcile_lists_reservation_issues_from_a_selected_project()
+-> Result<(), Box<dyn std::error::Error>> {
+    if reexec_test_in_lane(
+        "run::tests::reconcile_lists_reservation_issues_from_a_selected_project",
+    )? {
+        return Ok(());
+    }
+    let fixture = linked_fixture()?;
+    let other = fixture.root.join("other-project");
+    std::fs::create_dir(&other)?;
+    provenant_os::fixture::run_git(&other, &["init", "-q", "-b", "fixture-base"])?;
+    provenant_os::fixture::run_git(&other, &["commit", "--allow-empty", "-qm", "base"])?;
+    with_edge(
+        &fixture.root,
+        &fixture.project,
+        |edge| -> Result<(), Box<dyn std::error::Error>> {
+            let clock = SystemClock::new();
+            let cancel = CancelToken::new();
+            let call = run::Request {
+                clock: &clock,
+                cancel: &cancel,
+            };
+            let current = open(edge, &call).map_err(|fail| fail.message)?;
+            let other_edge = Edge {
+                cwd: &other,
+                ..*edge
+            };
+            let selected = open(&other_edge, &call).map_err(|fail| fail.message)?;
+            assert_ne!(current.context.project_id, selected.context.project_id);
+            let mut input = trace_run(61, AttemptId::from_bytes([60; 16]), clock.wall_now()?)?;
+            input.request.parent_attempt = None;
+            input.request.lane_depth = None;
+            selected.store.create(&input, &call)?;
+            let id = input.attempts[0].attempt_id;
+            selected.store.cancel(id, "fixture settled", &call)?;
+            // This read-only task never launched a provider. Seed completed
+            // no-effect receipts so only the unrelated orphan needs recovery.
+            let generation = selected.store.record(id, &call)?.generation;
+            for effect in [
+                run::SettlementEffect::GitImport,
+                run::SettlementEffect::ManifestConflict,
+                run::SettlementEffect::CleanupCustodyRelease,
+                run::SettlementEffect::Delivery,
+            ] {
+                selected.store.record_effect(
+                    id,
+                    generation,
+                    effect,
+                    run::EffectDisposition::Done,
+                    &call,
+                )?;
+            }
+            selected
+                .store
+                .drain_reactions(input.run_id, &clock, &cancel, &mut |reaction, _| {
+                    reaction.graph_done = true;
+                    reaction.notice_done = true;
+                    reaction.log_done = true;
+                    Ok(())
+                })?;
+            let baseline = selected
+                .store
+                .reconcile(input.run_id, &Registry::default(), &call);
+            assert!(baseline.is_ok(), "{baseline:?}");
+            let slot = selected
+                .context
+                .state_root
+                .as_path()
+                .join("worktrees")
+                .join(selected.context.project_id.to_string())
+                .join("orphan");
+            std::fs::create_dir_all(&slot)?;
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&slot, std::fs::Permissions::from_mode(0o700))?;
+            let path = slot.join("reservation.json");
+            std::fs::write(&path, b"malformed other-project reservation")?;
+            let target = || Target {
+                selection: None,
+                run: Some(input.run_id),
+                task: None,
+                attempt: None,
+            };
+            let reply = reconcile(
+                Reconcile {
+                    id: vec![target(), target()],
+                    abandon: None,
+                    reason: None,
+                },
+                edge,
+            );
+            assert_eq!(reply.result.status, Status::Failed, "{}", reply.human);
+            assert_eq!(
+                reply.result.error.as_ref().ok_or("missing error")?.code,
+                "RECONCILE_INCOMPLETE"
+            );
+            let rows = reply.result.data["runs"].as_array().ok_or("runs")?;
+            assert!(!rows.is_empty());
+            assert!(
+                rows.iter()
+                    .all(|row| row["run_id"] == json!(input.run_id) && row.get("error").is_none()),
+                "{}",
+                reply.result.data
+            );
+            let issues = reply.result.data["writer_reservation_errors"]
+                .as_array()
+                .ok_or("issues")?;
+            assert_eq!(issues.len(), 1);
+            assert_eq!(issues[0]["reservation"], json!(path));
+            assert_eq!(
+                std::fs::read(&path)?,
+                b"malformed other-project reservation"
+            );
+            assert!(matches!(
+                selected.store.record(id, &call)?.state,
+                run::AttemptState::Terminal {
+                    outcome: run::Outcome::Cancelled,
+                    ..
+                }
+            ));
+            Ok(())
+        },
+    )??;
+    Ok(())
+}
+
+#[test]
+fn reconcile_reports_orphan_reservation_issues() -> Result<(), Box<dyn std::error::Error>> {
+    if reexec_test_in_lane("run::tests::reconcile_reports_orphan_reservation_issues")? {
+        return Ok(());
+    }
+    let fixture = linked_fixture()?;
+    with_edge(
+        &fixture.root,
+        &fixture.project,
+        |edge| -> Result<(), Box<dyn std::error::Error>> {
+            let clock = SystemClock::new();
+            let cancel = CancelToken::new();
+            let call = run::Request {
+                clock: &clock,
+                cancel: &cancel,
+            };
+            let session = open(edge, &call).map_err(|fail| fail.message)?;
+            let slot = session
+                .context
+                .state_root
+                .as_path()
+                .join("worktrees")
+                .join(session.context.project_id.to_string())
+                .join("orphan");
+            std::fs::create_dir_all(&slot)?;
+            let path = slot.join("reservation.json");
+            std::fs::write(&path, b"malformed retained reservation")?;
+            let reply = reconcile(
+                Reconcile {
+                    id: Vec::new(),
+                    abandon: None,
+                    reason: None,
+                },
+                edge,
+            );
+            assert_eq!(reply.result.status, Status::Failed, "{}", reply.human);
+            assert_eq!(
+                reply.result.error.as_ref().ok_or("missing error")?.code,
+                "RECONCILE_INCOMPLETE"
+            );
+            assert_eq!(reply.result.data["runs"], json!([]));
+            assert_eq!(
+                reply.result.data["writer_reservation_errors"][0]["reservation"],
+                json!(path)
+            );
+            assert_eq!(std::fs::read(&path)?, b"malformed retained reservation");
+            // A valid orphan whose destination cannot be published reports the
+            // storage failure too, rather than only a generic retained fence.
+            use provenant_supervisor::custody::{self, Scope};
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::remove_file(&path)?;
+            let directory = provenant_os::fs::Directory::open_anchor(&slot)?;
+            let scope = Scope {
+                run: RunId::from_bytes([6; 16]),
+                attempt: AttemptId::from_bytes([7; 16]),
+                generation: 1,
+            };
+            drop(custody::acquire_reader(
+                directory.try_clone()?,
+                scope,
+                provenant_core::WaitBudget::nonblocking(clock.mono_now()),
+                &cancel,
+                &clock,
+            )?);
+            let child_path = slot.join(scope.attempt.to_string());
+            let child = child_path.join("reservation.json");
+            let mut retained: Value = serde_json::from_slice(&std::fs::read(&child)?)?;
+            let anchor = directory.metadata()?;
+            retained["reservation_device"] = anchor.device.into();
+            retained["reservation_inode"] = anchor.inode.into();
+            std::fs::write(&path, serde_json::to_vec(&retained)?)?;
+            std::fs::remove_file(&child)?;
+            std::fs::set_permissions(&child_path, std::fs::Permissions::from_mode(0o500))?;
+            let reply = reconcile(
+                Reconcile {
+                    id: Vec::new(),
+                    abandon: None,
+                    reason: None,
+                },
+                edge,
+            );
+            std::fs::set_permissions(&child_path, std::fs::Permissions::from_mode(0o700))?;
+            assert_eq!(reply.result.status, Status::Failed, "{}", reply.human);
+            assert!(
+                reply.result.data["writer_reservation_errors"]
+                    .as_array()
+                    .ok_or("issues")?
+                    .iter()
+                    .any(|issue| issue["reason"]
+                        .as_str()
+                        .is_some_and(|reason| reason.contains("cut over writer reservations")))
+            );
+            assert_eq!(
+                serde_json::from_slice::<Value>(&std::fs::read(&path)?)?,
+                retained
+            );
+            assert!(!child.exists());
+            Ok(())
+        },
+    )??;
+    Ok(())
+}
+
+#[test]
 fn cancel_and_reconcile_report_leftover_paths_and_reasons_without_terminal_controls() {
     let state = run::Reconciled::TemporaryRetained {
         path: PathBuf::from("/state/runs/run/attempts/attempt/tmp"),

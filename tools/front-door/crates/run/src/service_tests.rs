@@ -724,6 +724,89 @@ fn preflight_refusal_replays_and_rejects_changed_inputs() -> TestResult {
 }
 
 #[test]
+fn refusal_only_chair_leaves_accepted_identity_and_settlement_unbound() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let chair = ChairBinding {
+        extra: Default::default(),
+        host: provenant_core::HostId::from_bytes([7; 16]),
+        actor: provenant_core::ActorId::from_bytes([8; 16]),
+        session: Some("chair-session".into()),
+    };
+    let first = Service::new(&store).dispatch(submission("accepted"), temp.path(), &call)?;
+    let original = store.request(first.run_id, &call)?;
+    let repeated = Service::new(&store)
+        .with_refusal_context(RefusalContext {
+            chair: Some(chair.clone()),
+            intent_digest: Some(provenant_core::Digest::from_bytes([6; 32])),
+        })
+        .dispatch(submission("accepted"), temp.path(), &call)?;
+    assert_eq!(repeated, first);
+    assert_eq!(store.request(first.run_id, &call)?, original);
+    assert!(original.chair.is_none());
+    // A fresh accepted operation keeps the same canonical request even when
+    // the host supplies a destination reserved for a possible refusal.
+    let mut input = submission("accepted");
+    input.operation_id = OperationId::parse("accepted-with-refusal-chair")?;
+    let accepted = Service::new(&store)
+        .with_refusal_context(RefusalContext {
+            chair: Some(chair.clone()),
+            intent_digest: Some(provenant_core::Digest::from_bytes([6; 32])),
+        })
+        .dispatch(input, temp.path(), &call)?;
+    assert_eq!(accepted.request_digest, first.request_digest);
+    assert!(store.request(accepted.run_id, &call)?.chair.is_none());
+    assert!(
+        !store
+            .operation(&accepted.operation_id, &call)?
+            .ok_or("accepted operation")?
+            .extra
+            .contains_key("origin_intent_digest")
+    );
+    for nested in [false, true] {
+        let make = || {
+            let mut input = submission("refused");
+            input.operation_id = OperationId::parse(if nested {
+                "nested-refusal-chair"
+            } else {
+                "refusal-chair"
+            })
+            .unwrap();
+            input.parent_attempt = nested.then_some(provenant_core::AttemptId::from_bytes([9; 16]));
+            input.tasks[0].route = RequestedRoute::Model {
+                extra: Default::default(),
+                provider: "cursor".into(),
+                model: "cursor/m".into(),
+                effort: Some("high".into()),
+            };
+            input
+        };
+        let input = make();
+        let operation = input.operation_id.clone();
+        for _ in 0..2 {
+            assert!(matches!(
+                Service::new(&store)
+                    .with_refusal_context(RefusalContext {
+                        chair: Some(chair.clone()),
+                        intent_digest: Some(provenant_core::Digest::from_bytes([6; 32]))
+                    })
+                    .dispatch(make(), temp.path(), &call),
+                Err(RunError::RecordedRefusal(_))
+            ));
+        }
+        let saved = store.operation(&operation, &call)?.ok_or("refusal")?;
+        assert_eq!(saved.refusal_chair, Some(chair.clone()));
+        assert_eq!(
+            saved.extra["origin_intent_digest"],
+            serde_json::json!(provenant_core::Digest::from_bytes([6; 32]))
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn nested_preflight_refusal_replays_and_rejects_changed_inputs() -> TestResult {
     let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());

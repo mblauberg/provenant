@@ -616,6 +616,20 @@ pub fn submit_with_host(
     submit_with_host_and_wait(session, edge, submission, call, host, None)
 }
 
+/// Supply a verified destination used only if submission is refused before
+/// admission. Accepted requests retain their ordinary chair and digest.
+pub fn submit_with_host_for_refusal(
+    session: &Session,
+    edge: &Edge<'_>,
+    submission: Submission,
+    call: &run::Request<'_>,
+    host: Option<&run::HostLaunchContext>,
+    deadline: Option<Instant>,
+    refusal: run::RefusalContext,
+) -> Result<(run::RunRecord, Vec<run::Started>), Fail> {
+    submit_with_host_context(session, edge, submission, call, host, deadline, refusal)
+}
+
 /// Submit with the caller's observation deadline, including the bounded wait
 /// for provider preparation. A detached launcher retains custody after expiry.
 #[allow(clippy::disallowed_methods)] // The caller's wait is a real deadline.
@@ -627,31 +641,59 @@ pub fn submit_with_host_and_wait(
     host: Option<&run::HostLaunchContext>,
     deadline: Option<Instant>,
 ) -> Result<(run::RunRecord, Vec<run::Started>), Fail> {
-    submit_with_launcher(session, edge, submission, call, |record, parent_attempt| {
-        if parent_attempt {
-            Ok(Vec::new())
-        } else if let Some(host) = host {
-            launch_on_host_with_wait(
-                session,
-                record.run_id,
-                edge,
-                call,
-                Some(host),
-                None,
-                deadline.map(|end| end.saturating_duration_since(Instant::now()).as_secs()),
-            )
-        } else if let Some(deadline) = deadline {
-            launch_with_deadline(
-                session,
-                record,
-                edge,
-                call,
-                deadline.saturating_duration_since(Instant::now()),
-            )
-        } else {
-            launch_prepared_with_wait(session, record.run_id, edge, call, None, None)
-        }
-    })
+    submit_with_host_context(
+        session,
+        edge,
+        submission,
+        call,
+        host,
+        deadline,
+        run::RefusalContext::default(),
+    )
+}
+
+#[allow(clippy::disallowed_methods)] // The caller's wait is a real deadline.
+fn submit_with_host_context(
+    session: &Session,
+    edge: &Edge<'_>,
+    submission: Submission,
+    call: &run::Request<'_>,
+    host: Option<&run::HostLaunchContext>,
+    deadline: Option<Instant>,
+    refusal: run::RefusalContext,
+) -> Result<(run::RunRecord, Vec<run::Started>), Fail> {
+    submit_with_launcher(
+        session,
+        edge,
+        submission,
+        call,
+        refusal,
+        |record, parent_attempt| {
+            if parent_attempt {
+                Ok(Vec::new())
+            } else if let Some(host) = host {
+                launch_on_host_with_wait(
+                    session,
+                    record.run_id,
+                    edge,
+                    call,
+                    Some(host),
+                    None,
+                    deadline.map(|end| end.saturating_duration_since(Instant::now()).as_secs()),
+                )
+            } else if let Some(deadline) = deadline {
+                launch_with_deadline(
+                    session,
+                    record,
+                    edge,
+                    call,
+                    deadline.saturating_duration_since(Instant::now()),
+                )
+            } else {
+                launch_prepared_with_wait(session, record.run_id, edge, call, None, None)
+            }
+        },
+    )
 }
 
 /// Admit and seal a submission before giving the launcher its durable run ID.
@@ -661,6 +703,7 @@ fn submit_with_launcher(
     edge: &Edge<'_>,
     submission: Submission,
     call: &run::Request<'_>,
+    refusal: run::RefusalContext,
     launch: impl FnOnce(&run::RunRecord, bool) -> Result<Vec<run::Started>, Fail>,
 ) -> Result<(run::RunRecord, Vec<run::Started>), Fail> {
     let (lane_depth, parent_attempt) = nested_dispatch_context(edge.roots)?;
@@ -761,18 +804,20 @@ fn submit_with_launcher(
         .is_none()
         .then_some(submission.chair)
         .flatten();
-    let record = run::Service::new(&session.store).dispatch(
-        run::DispatchRequest {
-            chair,
-            operation_id: submission.operation_id,
-            tasks,
-            concurrency,
-            lane_depth,
-            parent_attempt,
-        },
-        edge.cwd,
-        call,
-    )?;
+    let record = run::Service::new(&session.store)
+        .with_refusal_context(refusal)
+        .dispatch(
+            run::DispatchRequest {
+                chair,
+                operation_id: submission.operation_id,
+                tasks,
+                concurrency,
+                lane_depth,
+                parent_attempt,
+            },
+            edge.cwd,
+            call,
+        )?;
     if parent_attempt.is_none() {
         let canonical = session.store.request(record.run_id, call)?;
         with_chair_index(edge.roots, call, |index, call| {

@@ -332,6 +332,9 @@ fn render_refused_operation(record: run::OperationRecord) -> Result<(Value, Stri
     if let Some(detail) = &diagnostic.detail {
         human.push_str(&format!("{}\n", plain_text(detail, 1024)));
     }
+    if let Some(next) = &diagnostic.next {
+        human.push_str(&format!("next: {}\n", plain_text(next, 1024)));
+    }
     Ok((json!({"operation": record}), human))
 }
 
@@ -350,7 +353,7 @@ mod refused_operation_tests {
             "request_digest":format!("sha256:{}", "ab".repeat(32)),
             "run_id":"33333333333333333333333333333333",
             "state":"refused",
-            "refusal":{"code":"UNSUPPORTED","detail":"not supported"},
+            "refusal":{"code":"UNSUPPORTED","detail":"not supported","next":"try again"},
             "refused_at":"2026-10-29T00:00:00.000000Z"
         }))
         .unwrap();
@@ -358,6 +361,7 @@ mod refused_operation_tests {
         assert_eq!(data["operation"]["refusal"]["code"], "UNSUPPORTED");
         assert!(human.contains("fixture-op"));
         assert!(human.contains("not supported"));
+        assert!(human.contains("next: try again"));
     }
 }
 
@@ -386,6 +390,13 @@ pub(super) fn append_refused_operations(
             record.operation_id,
             plain_text(code, 1024)
         ));
+        if let Some(next) = record
+            .refusal
+            .as_ref()
+            .and_then(|value| value.next.as_ref())
+        {
+            human.push_str(&format!("    next: {}\n", plain_text(next, 1024)));
+        }
     }
     data["refused_operations"] = json!(refusals);
     Ok(true)

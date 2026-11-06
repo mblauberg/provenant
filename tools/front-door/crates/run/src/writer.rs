@@ -1977,14 +1977,21 @@ impl crate::RunStore {
         Ok(self.writer_fence_listing()?.reservations)
     }
     /// Perform the one-way custody cutover before a recovery scan.
-    pub(crate) fn cutover_writer_reservations(&self, call: &crate::Request<'_>) -> Result<()> {
+    pub fn cutover_writer_reservations(&self, call: &crate::Request<'_>) -> Result<()> {
         let path = self
             .writer_registry
             .join("worktrees")
             .join(self.context.project_id.to_string());
         let directory = match Directory::open_anchor(&path) {
             Ok(directory) => directory,
-            Err(error) if error.is_not_found() => return Ok(()),
+            // A malformed registry ancestor contains no slot to cut over.
+            // The independent listing reports it while judging known attempts.
+            Err(error)
+                if error.is_not_found()
+                    || error.raw_os_error() == Some(provenant_os::sys::errno::ENOTDIR) =>
+            {
+                return Ok(());
+            }
             Err(error) => return Err(error.into()),
         };
         provenant_supervisor::custody::cutover_writer_reservations(

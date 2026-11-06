@@ -6,6 +6,7 @@ struct SubmissionPolicy<'a> {
     access: provenant_records::run::LaneAccess,
     settlement_retry_limit: Option<u8>,
     attempt: Option<provenant_fabric_runtime::graph::AttemptSpec>,
+    refusal: provenant_run::RefusalContext,
 }
 
 pub(crate) struct BinaryRunOwner<'a> {
@@ -782,6 +783,7 @@ impl BinaryRunOwner<'_> {
         settlement_retry_limit: Option<u8>,
         attempt: Option<provenant_fabric_runtime::graph::AttemptSpec>,
         facts: &provenant_confinement::worktrees::RepoFacts,
+        refusal: provenant_run::RefusalContext,
     ) -> Result<SubmissionReceipt, FacadeError> {
         self.launch_graph_attempt(
             input,
@@ -792,6 +794,7 @@ impl BinaryRunOwner<'_> {
                 access,
                 settlement_retry_limit,
                 attempt,
+                refusal,
             },
         )
         .map_err(|error| scope_io(error, "submit"))
@@ -829,7 +832,13 @@ impl BinaryRunOwner<'_> {
             .store
             .operation(operation_id, &call)
             .map_err(run_error)?
-            .filter(|operation| operation.state != provenant_run::OperationState::Prepared)
+            .filter(|operation| {
+                !matches!(
+                    operation.state,
+                    provenant_run::OperationState::Prepared
+                        | provenant_run::OperationState::Refused
+                )
+            })
         else {
             return Ok(None);
         };
@@ -930,6 +939,7 @@ impl BinaryRunOwner<'_> {
             access,
             settlement_retry_limit,
             attempt,
+            refusal,
         } = policy;
         let SubmitInput::Submit {
             operation_id,
@@ -1074,7 +1084,7 @@ impl BinaryRunOwner<'_> {
         let session = self.session_with_facts(cancel, facts)?;
         let call = self.call(cancel);
         let submission = self.with_edge(|edge| {
-            let submitted = provenant_cli::run::submit_with_host_and_wait(
+            let submitted = provenant_cli::run::submit_with_host_for_refusal(
                 &session,
                 edge,
                 Submission {
@@ -1092,6 +1102,7 @@ impl BinaryRunOwner<'_> {
                             budget.remaining(self.factory.clock.mono_now()).as_micros(),
                         ),
                 ),
+                refusal,
             );
             recover_accepted_launch(&session, &operation_id, &call, submitted)
         });

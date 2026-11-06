@@ -584,7 +584,7 @@ mod graph_writer_admission_tests {
             }}], "concurrency":1
         }))?;
         let mut queued_owner = BinaryRunOwner {factory:&factory,allow_remote:true,actor:None,chair:None};
-        let queued_receipt = provenant_cli::run::with_deferred_provider_launch(|| queued_owner.submit_with_access(input, budget, &cancel, Default::default(), None, None, &Default::default()))?;
+        let queued_receipt = provenant_cli::run::with_deferred_provider_launch(|| queued_owner.submit_with_access(input, budget, &cancel, Default::default(), None, None, &Default::default(), Default::default()))?;
         assert!(!queued_receipt.targets.is_empty());
         let mut saved = session.store.operation(&blocked_operation, &call)?.ok_or("queued operation")?;
         let queued_run = session.store.run(saved.run_id, &call)?;
