@@ -1944,13 +1944,23 @@ impl RunStore {
                             ),
                             _ => unreachable!(),
                         };
-                        self.withdraw_with_preparation_failure(
+                        // A refusal that follows a cancel request is the
+                        // cancel taking effect, not a launch failure.
+                        let cancelled = self.attempt_dir(run, id, false).is_ok_and(|attempt| {
+                            crate::store::cancel_requested(&attempt, Self::scope(&record))
+                        });
+                        let (outcome, reason) = if cancelled {
+                            (Outcome::Cancelled, "cancelled before launch".to_owned())
+                        } else {
+                            (Outcome::Rejected, reason.clone())
+                        };
+                        match self.withdraw_with_preparation_failure(
                             id,
                             crate::store::Withdrawal {
                                 expected: AttemptState::Starting {
                                     extra: Default::default(),
                                 },
-                                outcome: Outcome::Rejected,
+                                outcome,
                                 reason: &reason,
                                 finished_at: now()?,
                                 failure: None,
@@ -1958,7 +1968,12 @@ impl RunStore {
                                 terminal_note: None,
                             },
                             call,
-                        )?;
+                        ) {
+                            // Cancel already settled it from the other side.
+                            Ok(_) | Err(RunError::Conflict) if cancelled => {}
+                            Ok(_) => {}
+                            Err(error) => return Err(error),
+                        }
                         Started::Refused {
                             attempt: id,
                             reason,

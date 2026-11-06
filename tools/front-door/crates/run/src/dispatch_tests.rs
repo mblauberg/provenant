@@ -6285,7 +6285,7 @@ fn fresh_resume_preserves_lineage_and_authority_without_provider_state() -> Test
 }
 
 #[test]
-fn cancel_requests_then_reconcile_settles_a_prepared_attempt_nobody_holds() -> TestResult {
+fn cancel_settles_a_prepared_attempt_nobody_holds() -> TestResult {
     let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());
     let call = call(&clock, &cancel);
@@ -6318,38 +6318,14 @@ fn cancel_requests_then_reconcile_settles_a_prepared_attempt_nobody_holds() -> T
         clock: &system,
         cancel: &cancel,
     };
+    // Nobody holds the reservation, so cancel settles it before returning
+    // and the writer is free for the next run.
     assert_eq!(
         store.cancel(orphan, "stop", &spent)?,
-        CancelReceipt::Requested
-    );
-    let attempt = store.attempt_dir(batch.run_id, orphan, false)?;
-    let request: serde_json::Value = serde_json::from_slice(
-        &artifacts::read_sealed(&attempt, "cancel.json", RECORD_LIMIT)?
-            .ok_or("cancel request missing")?,
-    )?;
-    assert_eq!(request["scope"], serde_json::to_value(scope)?);
-    assert_eq!(
-        store.record(orphan, &call)?.state,
-        AttemptState::Starting {
-            extra: Default::default()
-        }
-    );
-    assert!(
-        provenant_supervisor::custody::attempt_evidence(&attempt, scope)?
-            .metadata_at(std::ffi::OsStr::new("reservation.json"), false)
-            .is_ok()
-    );
-    assert!(
-        store
-            .reconcile_with_observer(
-                batch.run_id,
-                &Fake::default(),
-                &call,
-                &provenant_supervisor::census::SystemProcessObserver,
-            )?
-            .contains(&(orphan, Reconciled::Withdrawn))
+        CancelReceipt::Cancelled
     );
     assert_eq!(terminal(&store, orphan, &call)?, Outcome::Cancelled);
+    assert!(store.writer_fences()?.is_empty());
     assert_eq!(
         store.cancel(orphan, "stop", &spent)?,
         CancelReceipt::AlreadyTerminal
@@ -7903,6 +7879,55 @@ fn reconcile_withdraws_a_start_that_died_before_reserving() -> TestResult {
     )?;
     assert_eq!(found, vec![(id, Reconciled::Withdrawn)]);
     assert_eq!(terminal(&store, id, &call)?, Outcome::Rejected);
+    Ok(())
+}
+
+#[test]
+fn cancelling_a_start_that_holds_only_a_writer_fence_frees_the_writer() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let context = context(temp.path())?;
+    let store = RunStore::open(&context, &call)?;
+    let run = input();
+    let id = run.attempts[0].attempt_id;
+    store.create(&run, &call)?;
+    store.mark_starting(
+        &store.record(id, &call)?,
+        &route(),
+        &[],
+        &Default::default(),
+        None,
+        &call,
+    )?;
+    let custody = context
+        .state_root
+        .as_path()
+        .join("worktrees")
+        .join(context.project_id.to_string())
+        .join("lane");
+    std::fs::create_dir_all(&custody)?;
+    let held = provenant_supervisor::fixture::acquire_writer(
+        Directory::open_anchor(&custody)?,
+        RunStore::scope(&store.record(id, &call)?),
+        call.lock_budget(),
+        &cancel,
+        &clock,
+    )?;
+    assert_eq!(store.writer_fences()?.len(), 1);
+    // The launcher is the holder: cancel asks it to stop and cannot yet settle.
+    assert!(!matches!(
+        store.cancel(id, "stop", &call)?,
+        crate::CancelReceipt::Cancelled
+    ));
+    // Once the launcher has let go, a repeat cancel settles and frees the writer.
+    drop(held);
+    assert_eq!(
+        store.cancel(id, "stop", &call)?,
+        crate::CancelReceipt::Cancelled
+    );
+    assert_eq!(terminal(&store, id, &call)?, Outcome::Cancelled);
+    assert!(store.writer_fences()?.is_empty());
     Ok(())
 }
 

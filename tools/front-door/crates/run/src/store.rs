@@ -22,6 +22,19 @@ pub(crate) struct TerminalEffects {
     pub effects: Vec<(SettlementEffect, EffectDisposition)>,
 }
 
+/// Whether an explicit stop was requested for exactly this attempt scope.
+/// Unreadable evidence counts as no request.
+pub(crate) fn cancel_requested(
+    attempt: &provenant_os::fs::Directory,
+    scope: provenant_supervisor::custody::Scope,
+) -> bool {
+    read_sealed(attempt, "cancel.json", RECORD_LIMIT)
+        .ok()
+        .flatten()
+        .and_then(|raw| serde_json::from_slice::<serde_json::Value>(&raw).ok())
+        .is_some_and(|request| request.get("scope") == serde_json::to_value(scope).ok().as_ref())
+}
+
 pub(crate) fn import_cancelled(
     attempt: &provenant_os::fs::Directory,
     scope: provenant_supervisor::custody::Scope,
