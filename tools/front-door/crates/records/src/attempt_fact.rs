@@ -115,6 +115,18 @@ pub struct AttemptFact {
     pub observed_route: Option<RouteFact>,
     pub verified_owner: Option<ActorId>,
     pub lineage: Vec<AttemptId>,
+    /// Requested capability tier (for example `senior`), when a graph node set one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tier: Option<String>,
+    /// Template the attempt's node came from.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub template: Option<String>,
+    /// Node that added this attempt's node through a patch.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_node: Option<String>,
+    /// Milliseconds the attempt waited for a launch slot.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub slot_wait_ms: Option<u64>,
     pub reason: Option<String>,
     pub trace: Trace,
     #[serde(skip_serializing_if = "Option::is_none")]

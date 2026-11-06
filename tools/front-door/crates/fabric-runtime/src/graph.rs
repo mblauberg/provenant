@@ -38,6 +38,7 @@ mod observation;
 mod outputs;
 pub mod patch;
 mod plans;
+mod prompt_store;
 pub mod template;
 #[cfg(test)]
 mod template_tests;

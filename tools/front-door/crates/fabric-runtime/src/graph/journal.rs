@@ -404,6 +404,7 @@ impl FileJournal {
             }
             collect_scratch_documents(&stored.execution)?;
             journal.directory.unlink(&name)?;
+            prompt_store::collect(&journal.directory, &id)?;
             for sidecar in [unreadable_marker_name(&id), advance_error_name(&id)] {
                 match journal.directory.unlink(&sidecar) {
                     Ok(()) => {}
@@ -596,7 +597,7 @@ impl FileJournal {
                 return Ok(None);
             }
         };
-        match decode_checkpoint(&bytes, graph_id) {
+        match decode_checkpoint_in(&directory, &bytes, graph_id) {
             Ok(stored) => {
                 let _ = directory.unlink(&unreadable_marker_name(graph_id));
                 Ok(Some(stored.checkpoint))
@@ -652,9 +653,10 @@ impl FileJournal {
         match load_checkpoint(&directory, graph_id) {
             Err(error) if error.is_unreadable() => {
                 let bytes = read_checkpoint_bytes(&directory, graph_id)?;
-                let recovered = bytes
-                    .as_deref()
-                    .and_then(|bytes| decode_verified_checkpoint(bytes, graph_id).ok());
+                let recovered = bytes.as_deref().and_then(|bytes| {
+                    let bytes = prompt_store::rehydrate(&directory, graph_id, bytes).ok()?;
+                    decode_verified_checkpoint(&bytes, graph_id, bytes.len() as u64).ok()
+                });
                 cleanup(recovered.as_ref().map(|stored| &stored.checkpoint))?;
                 directory.unlink(OsStr::new(&format!("graph-{graph_id}.json")))?;
                 directory
@@ -757,11 +759,20 @@ impl GraphJournal for FileJournal {
             checkpoint: checkpoint.clone(),
             execution: execution.clone(),
         };
-        let bytes = CanonicalV1::bytes(&stored)?;
+        let inline = CanonicalV1::bytes(&stored)?;
+        decode_checkpoint_limited(
+            inline.as_bytes(),
+            &self.graph_id,
+            inline.as_bytes().len() as u64,
+        )?;
+        // Prompts live in the store, so the limit applies to the digest form.
+        let mut compact = serde_json::to_value(&stored)
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+        prompt_store::externalise(&self.directory, &self.graph_id, &mut compact)?;
+        let bytes = CanonicalV1::bytes(&compact)?;
         if bytes.as_bytes().len() as u64 > MAX_CHECKPOINT_BYTES {
             return Err(JournalError::TooLarge);
         }
-        decode_checkpoint(bytes.as_bytes(), &self.graph_id)?;
         let previous = load_checkpoint(&self.directory, &self.graph_id)?;
         events::append_changes(
             &self.directory,
@@ -920,8 +931,18 @@ pub(super) fn load_checkpoint(
     graph_id: &str,
 ) -> Result<Option<StoredCheckpoint>, JournalError> {
     read_checkpoint_bytes(directory, graph_id)?
-        .map(|bytes| decode_checkpoint(&bytes, graph_id))
+        .map(|bytes| decode_checkpoint_in(directory, &bytes, graph_id))
         .transpose()
+}
+
+/// Decode a checkpoint whose prompts may be held in the prompt store.
+pub(super) fn decode_checkpoint_in(
+    directory: &Directory,
+    bytes: &[u8],
+    graph_id: &str,
+) -> Result<StoredCheckpoint, JournalError> {
+    let bytes = prompt_store::rehydrate(directory, graph_id, bytes)?;
+    decode_checkpoint_limited(&bytes, graph_id, bytes.len() as u64)
 }
 
 pub(super) fn read_checkpoint_bytes(
@@ -950,7 +971,15 @@ pub(super) fn decode_checkpoint(
     bytes: &[u8],
     graph_id: &str,
 ) -> Result<StoredCheckpoint, JournalError> {
-    let stored = decode_verified_checkpoint(bytes, graph_id)?;
+    decode_checkpoint_limited(bytes, graph_id, MAX_CHECKPOINT_BYTES)
+}
+
+fn decode_checkpoint_limited(
+    bytes: &[u8],
+    graph_id: &str,
+    max_bytes: u64,
+) -> Result<StoredCheckpoint, JournalError> {
+    let stored = decode_verified_checkpoint(bytes, graph_id, max_bytes.max(MAX_CHECKPOINT_BYTES))?;
     if stored.checkpoint.nodes.iter().any(|node| {
         ["loop_asks", "loop_inbox_error", "loop_decision_actor"]
             .iter()
@@ -1002,11 +1031,12 @@ pub(super) fn decode_checkpoint(
 fn decode_verified_checkpoint(
     bytes: &[u8],
     graph_id: &str,
+    max_bytes: u64,
 ) -> Result<StoredCheckpoint, JournalError> {
     let stored: StoredCheckpoint = decode_v1(
         bytes,
         Limits {
-            max_bytes: MAX_CHECKPOINT_BYTES,
+            max_bytes,
             max_depth: 64,
             max_members: MAX_CHECKPOINT_MEMBERS,
         },

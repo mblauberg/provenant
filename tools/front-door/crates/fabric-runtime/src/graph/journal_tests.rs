@@ -1325,3 +1325,82 @@ fn retired_checkpoint_cleanup_is_verified_and_failure_keeps_record() {
     );
     assert!(!path.exists());
 }
+
+#[test]
+fn prompts_are_stored_by_digest_and_collected_with_the_graph() {
+    let temp = crate::test_support::tempdir().unwrap();
+    std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let base = std::fs::canonicalize(temp.path()).unwrap();
+    let mut inputs = provenant_core::RootInputs::new(base.join("home"), base.join("checkout"));
+    inputs.state_dir = Some(base.clone());
+    let root = StateRoot::resolve(&inputs, &SystemPathResolver).unwrap();
+    let project = ProjectId::from_bytes([1; 16]);
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let budget = WaitBudget::cli(clock.mono_now(), 5).unwrap();
+    let mut fixture: StoredCheckpoint =
+        serde_json::from_str(include_str!("../fixtures/legacy-graph-checkpoint.json")).unwrap();
+    fixture.execution.directory = base.clone();
+    let node = fixture.execution.document.nodes[0].clone();
+    let state = fixture.checkpoint.nodes[0].clone();
+    fixture.execution.document.nodes.clear();
+    fixture.checkpoint.nodes.clear();
+    for index in 0..8 {
+        let mut node = node.clone();
+        node.id = format!("n{index}");
+        node.depends_on.clear();
+        node.prompt = format!("{index}{}", "x".repeat(16 * 1024));
+        fixture.execution.document.nodes.push(node);
+        let mut state = state.clone();
+        state.id = format!("n{index}");
+        fixture.checkpoint.nodes.push(state);
+    }
+    let inline = CanonicalV1::bytes(&fixture).unwrap().as_bytes().len();
+    let mut journal = FileJournal::open(&root, project, "g-test", budget, &cancel, &clock).unwrap();
+    journal.bind(fixture.execution.clone()).unwrap();
+    journal.save(&fixture.checkpoint).unwrap();
+    drop(journal);
+
+    let directory = graph_directory(&root, project).unwrap();
+    let stored = read_checkpoint_bytes(&directory, "g-test")
+        .unwrap()
+        .unwrap();
+    assert!(stored.len() < inline / 4, "{} vs {inline}", stored.len());
+    assert!(!String::from_utf8(stored).unwrap().contains("xxxx"));
+    let loaded = FileJournal::read_checkpoint(&root, project, "g-test")
+        .unwrap()
+        .unwrap();
+    assert_eq!(loaded, fixture.checkpoint);
+    let execution = FileJournal::execution(&root, project, "g-test")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        execution.document.nodes[3].prompt,
+        fixture.execution.document.nodes[3].prompt
+    );
+
+    // A missing blob makes the checkpoint unreadable rather than silently empty.
+    let blobs = |directory: &Directory| {
+        directory
+            .entries()
+            .unwrap()
+            .map(|name| name.unwrap().to_string_lossy().into_owned())
+            .filter(|name| name.contains(".prompt-"))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(blobs(&directory).len(), 8);
+    assert!(prompt_store::collect(&directory, "g-test").unwrap());
+    assert!(blobs(&directory).is_empty());
+    assert!(load_checkpoint(&directory, "g-test").is_err());
+}
+
+#[test]
+fn inline_prompt_checkpoints_still_decode() {
+    let fixture: StoredCheckpoint =
+        serde_json::from_str(include_str!("../fixtures/legacy-graph-checkpoint.json")).unwrap();
+    let temp = crate::test_support::tempdir().unwrap();
+    let directory = Directory::open_anchor(temp.path()).unwrap();
+    let bytes = CanonicalV1::bytes(&fixture).unwrap();
+    let stored = decode_checkpoint_in(&directory, bytes.as_bytes(), "g-test").unwrap();
+    assert_eq!(stored.checkpoint, fixture.checkpoint);
+}

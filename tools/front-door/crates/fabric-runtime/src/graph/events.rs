@@ -15,6 +15,8 @@ pub enum GraphEventKind {
     Budget,
     Effect,
     Expansion,
+    /// An admitted graph patch: revision, digests and node identifiers only.
+    Patch,
 }
 
 /// Values that may contain free text are represented by their digest.
@@ -216,6 +218,42 @@ pub(super) fn append_changes(
             &current.expansions,
         )?);
     }
+    let known = previous.map_or(0, |old| old.expansions.len());
+    for record in current
+        .expansions
+        .iter()
+        .skip(known)
+        .filter_map(|expansion| expansion.patch.as_ref())
+    {
+        // Free text (the reason, replaced briefs) is kept as digests.
+        let reason = record
+            .reason
+            .as_ref()
+            .map(|reason| digest(reason))
+            .transpose()?;
+        let replaced = record
+            .replaced
+            .iter()
+            .map(|node| digest(&node.id))
+            .collect::<Result<Vec<_>, _>>()?;
+        events.push(event(
+            GraphEventKind::Patch,
+            record.parent.as_deref().unwrap_or("host"),
+            "admitted",
+            &(
+                record.revision,
+                &record.digest,
+                record.key.as_ref().map(digest).transpose()?,
+                reason,
+                record
+                    .skipped
+                    .iter()
+                    .map(digest)
+                    .collect::<Result<Vec<_>, _>>()?,
+                replaced,
+            ),
+        )?);
+    }
     if previous.is_none_or(|old| old.asks != current.asks) && !current.asks.is_empty() {
         events.push(event(GraphEventKind::Wait, id, "ask", &current.asks)?);
     }
@@ -342,5 +380,43 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[test]
+    fn admitted_patches_are_recorded_as_digests() {
+        let temp = tempfile::tempdir().unwrap();
+        let directory = Directory::open_anchor(temp.path()).unwrap();
+        let before: GraphCheckpoint = serde_json::from_value(serde_json::json!({
+            "schema_version": 1, "graph_id": "g", "plan_digest": "digest", "nodes": []
+        }))
+        .unwrap();
+        let mut after = before.clone();
+        after.expansions.push(Expansion {
+            review: None,
+            extra: Default::default(),
+            source: "planner".into(),
+            continuation: false,
+            nodes: Vec::new(),
+            uses: Vec::new(),
+            patch: Some(super::super::patch::PatchRecord {
+                extra: Default::default(),
+                revision: 2,
+                digest: "sha256:abc".into(),
+                key: Some("secret-key".into()),
+                parent: Some("planner".into()),
+                reason: Some("secret reason".into()),
+                skipped: Vec::new(),
+                replaced: Vec::new(),
+            }),
+        });
+        append_changes(&directory, "g", Some(&before), &after).unwrap();
+        let records = read(&directory, "g").unwrap();
+        assert!(
+            records.iter().any(|record| {
+                record.kind == GraphEventKind::Patch && record.code == "admitted"
+            })
+        );
+        let text = String::from_utf8(bytes(&directory, "g").unwrap()).unwrap();
+        assert!(!text.contains("secret") && !text.contains("planner"));
     }
 }
