@@ -1159,6 +1159,51 @@ pub(crate) fn writer_source_identity_matches(
 }
 
 impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
+    fn resolve_repair_panel(
+        &mut self,
+        document: &provenant_fabric_runtime::graph::GraphDocument,
+        subject: &str,
+    ) -> Result<Vec<String>, String> {
+        let subject = provenant_core::GitOid::parse(subject).map_err(|error| error.to_string())?;
+        let base = self
+            .integration_base
+            .and_then(|bases| bases.review.or(bases.integration))
+            .ok_or("cannot replan review without a pinned base")?;
+        let range = format!("{base}...{subject}");
+        let names = self.review_git(
+            &self.factory.cwd,
+            &["diff", "--no-renames", "--name-only", "-z", &range, "--"],
+        )?;
+        let paths: Vec<String> = names
+            .split('\0')
+            .filter(|name| !name.is_empty())
+            .map(str::to_owned)
+            .collect();
+        let routing: provenant_routing::RoutingConfig =
+            provenant_config::read_domain(self.factory.context.roots.state.as_path(), "routing")
+                .map_err(|error| error.to_string())?;
+        let raw = serde_json::to_value(document).map_err(|error| error.to_string())?;
+        let mut request: provenant_routing::ReviewRequest = raw
+            .get("review")
+            .cloned()
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(|error| format!("invalid review request: {error}"))?
+            .unwrap_or_default();
+        if request.kind.is_none() {
+            request.kind = raw["context"]["task_kind"].as_str().map(str::to_owned);
+        }
+        // A growth signal does not carry a new tier. Resolve at the highest
+        // tier until the graph carries a measured replacement risk record.
+        request.risk_tier = Some("terminal".into());
+        request.shape = None;
+        request.lenses.clear();
+        let panel = routing
+            .review
+            .resolve_panel(&request, None, &paths, false)?;
+        Ok(panel.slots.into_iter().map(|slot| slot.lens).collect())
+    }
+
     fn input_cap_source(&self) -> provenant_fabric_runtime::graph::InputCapSource {
         self.factory.context.graph_prompt_limit_source
     }

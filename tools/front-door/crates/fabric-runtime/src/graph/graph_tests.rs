@@ -84,6 +84,8 @@ struct FakeOwner {
     models: std::collections::BTreeMap<String, String>,
     review_expansion: Option<Expansion>,
     review_calls: usize,
+    repair_panel: Option<Vec<String>>,
+    repair_panel_calls: usize,
     simple_review: bool,
     review_requested_bases: Vec<Option<String>>,
     require_distinct: Vec<bool>,
@@ -115,6 +117,12 @@ fn reply(option: Option<&str>, text: Option<&str>) -> AskReply {
 
 impl AttemptOwner for FakeOwner {
     type Error = NoObservation;
+    fn resolve_repair_panel(&mut self, _: &GraphDocument, _: &str) -> Result<Vec<String>, String> {
+        self.repair_panel_calls += 1;
+        self.repair_panel
+            .clone()
+            .ok_or_else(|| "fixture has no panel".into())
+    }
     fn input_cap_source(&self) -> InputCapSource {
         self.input_cap_source
             .unwrap_or(InputCapSource::EffectiveGraphLimits)
