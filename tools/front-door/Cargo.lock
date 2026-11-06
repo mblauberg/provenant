@@ -628,6 +628,7 @@ dependencies = [
  "provenant-os",
  "provenant-records",
  "provenant-routing",
+ "provenant-sqlite",
  "provenant-test-support",
  "rusqlite",
  "serde",

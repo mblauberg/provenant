@@ -1425,25 +1425,13 @@ pub fn dispatch(parsed: ParseOutcome, process: &dyn Process) -> u8 {
     }) {
         provenant_sqlite::set_busy_timeout(timeout);
     }
-    let needs_cutover_guard = match &parsed {
-        ParseOutcome::Invocation(inv) => match &inv.command {
-            Command::Run(args) => !args.explain,
-            Command::Edit(_)
-            | Command::Retry(_)
-            | Command::Steer(_)
-            | Command::Stop(_)
-            | Command::Lane(_)
-            | Command::Reconcile(_)
-            | Command::Native(_)
-            | Command::Gc(_)
-            | Command::Tick
-            | Command::Fabric(_)
-            | Command::Hook(_)
-            | Command::Internal(_) => true,
-            _ => false,
-        },
-        _ => false,
-    };
+    // Protocol servers frame their own admission refusals. Observation,
+    // settlement and cancellation must remain available to drain old work.
+    let needs_cutover_guard = matches!(
+        &parsed,
+        ParseOutcome::Invocation(inv)
+            if matches!(&inv.command, Command::Native(provenant_cli::Native::Start { .. }))
+    );
     if needs_cutover_guard
         && let Some(resolved) = &resolved
         && let Err(error) = install::cutover_pending_guard(&resolved.roots.state)

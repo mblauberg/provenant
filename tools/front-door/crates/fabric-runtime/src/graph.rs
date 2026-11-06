@@ -40,6 +40,7 @@ pub mod patch;
 mod plans;
 mod prompt_store;
 pub mod relay;
+pub mod cutover;
 mod repair;
 mod retire;
 pub mod template;
@@ -689,6 +690,7 @@ fn node_context(plan: &PlannedGraph, node: &PlannedNode) -> provenant_records::r
     let graph = plan.context.as_ref().unwrap_or(&defaults);
     let context = node.context.as_ref().unwrap_or(&defaults);
     provenant_records::run::WorkContext {
+        graph_template_launch: false,
         extra: Default::default(),
         risk_tier: context
             .risk_tier

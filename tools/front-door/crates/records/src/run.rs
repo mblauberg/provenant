@@ -151,7 +151,7 @@ impl HarnessProfile {
         self.knobs.get(name).and_then(serde_json::Value::as_u64)
     }
 }
-/// Descriptive labels only. They do not grant authority. Each value is at most 256 UTF-8 bytes.
+/// Work labels and host-stamped graph provenance. Labels are at most 256 UTF-8 bytes.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkContext {
     #[serde(flatten)]
@@ -166,6 +166,9 @@ pub struct WorkContext {
     pub graph_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub node_id: Option<String>,
+    /// Stamped by trusted graph launch admission, never inferred from labels.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub graph_template_launch: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preset: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -194,7 +197,9 @@ pub struct WorkContext {
 impl WorkContext {
     /// A new request names only the fixed fields; stored records keep unknown ones for forward compatibility.
     pub fn accepted(&self) -> bool {
-        self.extra.is_empty() && self.valid()
+        self.extra.is_empty()
+            && self.valid()
+            && (!self.graph_template_launch || (self.graph_id.is_some() && self.node_id.is_some()))
     }
     pub fn valid(&self) -> bool {
         [
@@ -1518,6 +1523,39 @@ pub struct RunEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn graph_launch_provenance_is_typed_bound_and_canonical()
+    -> Result<(), Box<dyn std::error::Error>> {
+        assert!(!WorkContext { graph_template_launch: true, ..Default::default() }.accepted());
+        let labels = serde_json::json!({"graph_id":"graph-one", "node_id":"node-one"});
+        let mut context: WorkContext = serde_json::from_value(labels.clone())?;
+        assert!(context.accepted());
+        assert!(!context.graph_template_launch);
+        assert_eq!(serde_json::to_value(&context)?, labels);
+        let before = CanonicalV1::record_digest("run-request-context", 1, &context)?;
+        context.graph_template_launch = true;
+        assert!(context.accepted());
+        assert_eq!(serde_json::to_value(&context)?["graph_template_launch"], true);
+        assert_ne!(CanonicalV1::record_digest("run-request-context", 1, &context)?, before);
+        assert_eq!(serde_json::from_value::<WorkContext>(serde_json::to_value(&context)?)?, context);
+        for missing in ["graph_id", "node_id"] {
+            let mut value = serde_json::to_value(&context)?;
+            value.as_object_mut().ok_or("context fields")?.remove(missing);
+            assert!(!serde_json::from_value::<WorkContext>(value)?.accepted());
+            let mut empty = serde_json::to_value(&context)?;
+            empty[missing] = serde_json::json!("");
+            assert!(!serde_json::from_value::<WorkContext>(empty)?.accepted());
+        }
+        let mut unknown = serde_json::to_value(&context)?;
+        unknown["unknown_provenance"] = true.into();
+        assert!(!serde_json::from_value::<WorkContext>(unknown)?.accepted());
+        let explicit_false: WorkContext = serde_json::from_value(serde_json::json!({
+            "graph_id":"graph-one", "node_id":"node-one", "graph_template_launch":false
+        }))?;
+        assert_eq!(serde_json::to_value(explicit_false)?, labels);
+        Ok(())
+    }
 
     #[test]
     fn request_without_lane_metadata_retains_its_sealed_digest()

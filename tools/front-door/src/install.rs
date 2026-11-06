@@ -1380,130 +1380,33 @@ struct UpgradeRunner {
     cwd: PathBuf,
 }
 
-/// Read-only drain check, shared by staged preflight and the first new launch.
-/// New interface runs persist their resolved template library in the execution.
-/// A legacy lane cannot become current merely by upgrading its executable.
 fn pending_upgrade_findings(
     state: &provenant_core::StateRoot,
     legacy_only: bool,
 ) -> Result<Vec<String>, String> {
-    let mut findings = Vec::new();
-    let mut current = std::collections::BTreeSet::new();
-    let projects = state.as_path().join("fabric/graphs");
-    let entries = match std::fs::read_dir(&projects) {
-        Ok(entries) => Some(entries),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
-        Err(error) => return Err(format!("{}: {error}", projects.display())),
-    };
-    if let Some(entries) = entries {
-        for entry in entries {
-            let entry = entry.map_err(|e| e.to_string())?;
-            let Some(project) = entry
-                .file_name()
-                .to_str()
-                .and_then(|s| provenant_core::ProjectId::parse(s).ok())
-            else {
-                continue;
-            };
-            let ids = provenant_fabric_runtime::graph::FileJournal::graph_ids(state, project)
-                .map_err(|e| e.to_string())?;
-            for id in ids {
-                if legacy_only
-                    && provenant_fabric_runtime::graph::FileJournal::execution(state, project, &id)
-                        .ok()
-                        .flatten()
-                        .is_some_and(|execution| {
-                            execution.document.extra.contains_key("template_library")
-                        })
-                {
-                    current.insert((project.to_string(), id));
-                    continue;
-                }
-                match provenant_fabric_runtime::graph::FileJournal::pending_execution(
-                    state, project, &id,
-                ) {
-                    Ok(None) => continue,
-                    Ok(Some(_)) => {}
-                    Err(error) if error.is_unreadable() => {}
-                    Err(error) => return Err(error.to_string()),
-                }
-                findings.push(format!(
-                    "Pending graph {project}/{id}: finish or cancel it with the previous release before upgrading"
-                ));
-            }
-        }
-    }
-    let mut stores = vec![state.as_path().to_path_buf()];
-    while let Some(store) = stores.pop() {
-        let children = store.join("children");
-        match std::fs::read_dir(&children) {
-            Ok(entries) => {
-                for entry in entries {
-                    let entry = entry.map_err(|e| e.to_string())?;
-                    if entry.file_type().map_err(|e| e.to_string())?.is_dir() {
-                        stores.push(entry.path());
-                    }
-                }
-            }
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => return Err(format!("{}: {error}", children.display())),
-        }
-        let database = store.join("run.sqlite3");
-        if !database
-            .try_exists()
-            .map_err(|e| format!("{}: {e}", database.display()))?
-        {
-            continue;
-        }
-        let db = provenant_sqlite::open_read_only_connection(&database)
-            .map_err(|e| format!("{}: {e}", database.display()))?;
-        let mut query = db
-            .prepare(
-                "SELECT project, run, id, record FROM attempts WHERE terminal=0 ORDER BY project, run, id",
-            )
-            .map_err(|e| e.to_string())?;
-        let rows = query
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, Vec<u8>>(3)?,
-                ))
-            })
-            .map_err(|e| e.to_string())?;
-        for row in rows {
-            let (project, run, attempt, record) = row.map_err(|e| e.to_string())?;
-            if legacy_only && store == state.as_path() {
-                let record: serde_json::Value =
-                    serde_json::from_slice(&record).map_err(|e| e.to_string())?;
-                if record
-                    .pointer("/context/graph_id")
-                    .and_then(serde_json::Value::as_str)
-                    .is_some_and(|id| current.contains(&(project.clone(), id.to_owned())))
-                {
-                    continue;
-                }
-            }
-            findings.push(format!(
-                "Live lane {project}/{run}/{attempt} ({})",
-                store.display()
-            ));
-        }
-    }
-    findings.sort();
-    Ok(findings)
+    provenant_fabric_runtime::graph::cutover::pending_findings(state, legacy_only)
+}
+
+/// Keep protocol diagnostics independent of private state paths and row contents.
+pub(crate) fn cutover_admission_guard(
+    state: &provenant_core::StateRoot,
+) -> Result<(), provenant_fabric_runtime::coordination::facade::FacadeError> {
+    use provenant_fabric_runtime::coordination::facade::{FacadeError, InvalidInputDetail};
+    cutover_pending_guard(state).map_err(|_| FacadeError::GraphRelayRefused {
+        refusal_code: "UPGRADE_DRAIN_REQUIRED".into(),
+        detail: Some(InvalidInputDetail::graph_reason(
+            "Finish or cancel old pending graphs and drain live lanes with the previous release before admitting new work.",
+        )),
+    })
+}
+
+#[cfg(test)]
+fn cutover_read_connection(path: &Path) -> rusqlite::Result<rusqlite::Connection> {
+    provenant_fabric_runtime::graph::cutover::read_connection(path)
 }
 
 pub(crate) fn cutover_pending_guard(state: &provenant_core::StateRoot) -> Result<(), String> {
-    let findings = pending_upgrade_findings(state, true)?;
-    if findings.is_empty() {
-        return Ok(());
-    }
-    Err(format!(
-        "Graph-template cutover refused: old pending state remains. Run the previous release against this state directory, finish or cancel its pending graphs and drain its live lanes, then launch this release again. --yes cannot bypass this check. No child stores have been deleted.\n{}",
-        findings.join("\n")
-    ))
+    provenant_fabric_runtime::graph::cutover::pending_guard(state)
 }
 
 /// Inspect the old state with the staged release before it replaces the binary.
@@ -1886,6 +1789,73 @@ mod tests {
         let roots = cutover_roots(temp.path())?;
         super::cutover_pending_guard(&roots.state)?;
         assert!(!roots.state.as_path().exists());
+        Ok(())
+    }
+
+    #[test]
+    fn cutover_reads_wal_and_closed_databases_without_mutation() -> Result<(), Box<dyn std::error::Error>> {
+        const CHILD: &str = "PROVENANT_TEST_CUTOVER_READ";
+        if let Some(path) = std::env::var_os(CHILD) {
+            let reader = super::cutover_read_connection(Path::new(&path))?;
+            assert_eq!(reader.query_row("SELECT COUNT(*) FROM attempts WHERE terminal=0", [], |row| row.get::<_, i64>(0))?, 1);
+            return Ok(());
+        }
+        let observe = |path: &Path| -> Result<(), Box<dyn std::error::Error>> {
+            use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination};
+            let argv = [std::env::current_exe()?.into_os_string(), "--exact".into(), "install::tests::cutover_reads_wal_and_closed_databases_without_mutation".into()];
+            let mut environment: Vec<_> = std::env::vars_os().filter(|(key, _)| key != CHILD).collect();
+            environment.push((CHILD.into(), path.as_os_str().to_owned()));
+            let cwd = std::env::current_dir()?;
+            let mut options = ExecOptions::new(&argv, &cwd, std::time::Duration::from_secs(30));
+            options.env = Some(&environment);
+            options.stdout = StreamPolicy::Capture { limit: 65536 };
+            options.stderr = StreamPolicy::Capture { limit: 65536 };
+            let output = SystemExecutor::new(1)?.execute(options)?;
+            assert_eq!(output.termination, Termination::Exit(0), "{}", String::from_utf8_lossy(&output.stderr.bytes));
+            assert!(!output.timed_out && !output.cancelled);
+            Ok(())
+        };
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("run.sqlite3");
+        let writer = rusqlite::Connection::open(&path)?;
+        writer.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE attempts (project TEXT, run TEXT, id TEXT, record BLOB, terminal INTEGER); INSERT INTO attempts VALUES ('project','run','attempt',X'7b7d',0);")?;
+        let snapshot = || -> Result<std::collections::BTreeMap<std::ffi::OsString, Vec<u8>>, std::io::Error> {
+            std::fs::read_dir(temp.path())?.map(|entry| {
+                let entry = entry?;
+                Ok((entry.file_name(), std::fs::read(entry.path())?))
+            }).collect()
+        };
+        let before = snapshot()?;
+        observe(&path)?;
+        assert_eq!(snapshot()?, before);
+        drop(writer);
+        assert!(!path.with_extension("sqlite3-wal").exists());
+        assert!(!path.with_extension("sqlite3-shm").exists());
+        let before = snapshot()?;
+        observe(&path)?;
+        assert_eq!(snapshot()?, before);
+        std::fs::write(&path, b"not a database")?;
+        assert!(super::cutover_read_connection(&path).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn cutover_remote_template_provenance_is_current_but_upgrade_still_drains() -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let roots = cutover_roots(temp.path())?;
+        std::fs::create_dir_all(roots.state.as_path())?;
+        let db = rusqlite::Connection::open(roots.state.as_path().join("run.sqlite3"))?;
+        db.execute_batch("CREATE TABLE attempts (project TEXT, run TEXT, id TEXT, record BLOB, terminal INTEGER);")?;
+        let record = serde_json::json!({"context":{"graph_id":"remote", "node_id":"task", "graph_template_launch":true}});
+        db.execute("INSERT INTO attempts VALUES ('project','run','attempt',?1,0)", [serde_json::to_vec(&record)?])?;
+        super::cutover_pending_guard(&roots.state)?;
+        assert_eq!(super::pending_upgrade_findings(&roots.state, false)?.len(), 1);
+        let legacy = serde_json::json!({"context":{"graph_id":"remote", "node_id":"task"}});
+        db.execute("UPDATE attempts SET record=?1", [serde_json::to_vec(&legacy)?])?;
+        let error = super::cutover_admission_guard(&roots.state).expect_err("legacy admission must refuse");
+        assert_eq!(error.code(), "UPGRADE_DRAIN_REQUIRED");
+        assert!(!format!("{error:?}").contains(temp.path().to_str().ok_or("path")?));
+        assert_eq!(super::pending_upgrade_findings(&roots.state, true)?.len(), 1);
         Ok(())
     }
 

@@ -2067,12 +2067,12 @@ esac
     fs::write(markers.join("old-pending-fixture.pending"), "")?;
     let db_path = rig.state.join("run.sqlite3");
     let db = rusqlite::Connection::open(&db_path)?;
-    db.execute_batch("CREATE TABLE attempts (project TEXT, run TEXT, id TEXT, terminal INTEGER); INSERT INTO attempts VALUES ('project-one','run-one','lane-one',0);")?;
+    db.execute_batch("CREATE TABLE attempts (project TEXT, run TEXT, id TEXT, record BLOB, terminal INTEGER); INSERT INTO attempts VALUES ('project-one','run-one','lane-one',X'7b7d',0);")?;
     drop(db);
     let child_store = rig.state.join("children/child-one");
     fs::create_dir_all(&child_store)?;
     let child_db = rusqlite::Connection::open(child_store.join("run.sqlite3"))?;
-    child_db.execute_batch("CREATE TABLE attempts (project TEXT, run TEXT, id TEXT, terminal INTEGER); INSERT INTO attempts VALUES ('project-two','run-two','child-lane',0);")?;
+    child_db.execute_batch("CREATE TABLE attempts (project TEXT, run TEXT, id TEXT, record BLOB, terminal INTEGER); INSERT INTO attempts VALUES ('project-two','run-two','child-lane',X'7b7d',0);")?;
     drop(child_db);
     let preset = rig.root.join("config/provenant/presets/custom.toml");
     fs::create_dir_all(preset.parent().ok_or("preset parent")?)?;
