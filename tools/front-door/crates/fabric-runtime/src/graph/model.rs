@@ -220,8 +220,47 @@ impl PartialEq for TopologyPresence {
 }
 impl Eq for TopologyPresence {}
 
+/// Execution specification for an attempt, carrying what a plain lane expresses.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttemptSpec {
+    #[serde(flatten)]
+    pub extra: provenant_records::ExtraFields,
+    /// Placement override for cloud execution.
+    #[serde(default, alias = "cloud", skip_serializing_if = "Option::is_none")]
+    pub placement: Option<provenant_records::run::CloudPlacement>,
+    /// A writer worktree branch created from base.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub new_worktree: Option<crate::coordination::facade::NewWorktree>,
+    /// Account label for routing and quota accounting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<String>,
+    /// Explicit capabilities granted to this attempt.
+    #[serde(default, alias = "capability", skip_serializing_if = "Vec::is_empty")]
+    pub capabilities: Vec<String>,
+    /// Use build-heavy scheduling priority.
+    #[serde(default, alias = "build_weight", skip_serializing_if = "is_false")]
+    pub build_heavy: bool,
+    /// Explicit write roots outside the worktree.
+    #[serde(default, alias = "write_root", skip_serializing_if = "Vec::is_empty")]
+    pub write_roots: Vec<String>,
+}
+
+impl AttemptSpec {
+    pub fn is_empty(&self) -> bool {
+        self.placement.is_none()
+            && self.new_worktree.is_none()
+            && self.account.is_none()
+            && self.capabilities.is_empty()
+            && !self.build_heavy
+            && self.write_roots.is_empty()
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GraphNode {
+    /// Attempt specification carrying placement, new worktree, account, capability, build weight and write roots.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt: Option<AttemptSpec>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review: Option<ReviewSpec>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

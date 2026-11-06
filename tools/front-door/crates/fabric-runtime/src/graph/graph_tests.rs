@@ -417,6 +417,7 @@ fn route(adapter: &str) -> GraphRoute {
 
 fn node(id: &str, route: GraphRoute) -> GraphNode {
     GraphNode {
+        attempt: None,
         attachments: Vec::new(),
         review: None,
         family_group: None,
@@ -7148,6 +7149,7 @@ fn tries_routes_in_order_and_persists_each_terminal_attempt() {
         route("fourth"),
     ];
     let document = graph(vec![GraphNode {
+        attempt: None,
         attachments: Vec::new(),
         review: None,
         family_group: None,
@@ -7425,6 +7427,7 @@ fn pending_and_unknown_keep_observing_the_same_route_without_fallback() {
     ] {
         let routes = vec![route("first"), route("second")];
         let document = graph(vec![GraphNode {
+            attempt: None,
             attachments: Vec::new(),
             review: None,
             family_group: None,
@@ -8051,6 +8054,7 @@ fn resume_after_a_crash_before_the_reference_save_replays_under_the_launch_actor
 #[test]
 fn terminal_task_failure_does_not_try_a_fallback_route() {
     let document = graph(vec![GraphNode {
+        attempt: None,
         attachments: Vec::new(),
         review: None,
         family_group: None,
