@@ -198,7 +198,10 @@ fn writer_children_get_their_own_worktree_and_depth_is_bounded() {
 #[test]
 fn a_waiting_parent_yields_its_slot_to_its_child() {
     let (document, mut checkpoint) = live(None);
-    add(&document, &mut checkpoint, "a", &child("fix", "y1")).unwrap();
+    let mut writer = child("fix", "y1");
+    writer.writer = true;
+    writer.write_scope = vec!["src/parser".into()];
+    add(&document, &mut checkpoint, "a", &writer).unwrap();
     let limits = crate::config::GraphLimits {
         concurrency: Some(1),
         ..Default::default()
@@ -225,6 +228,12 @@ fn a_waiting_parent_yields_its_slot_to_its_child() {
             &Default::default(),
         )
         .unwrap();
+        if progress(&run.checkpoint, "a--fix").state == NodeState::Running {
+            assert!(owner.permissions.contains(&(
+                AccessMode::WorktreeWrite,
+                Some(".worktrees/live-a--fix".into())
+            )));
+        }
         (run.checkpoint, owner.calls.len())
     };
     // The parent holds the only slot while it works.
@@ -524,28 +533,76 @@ fn writer_child_binds_parent_branch_and_replays_original_source() {
     let resolvers = Default::default();
     let limits = plans::generous();
     let context = patch::PatchContext {
-        library: &library, resolvers: &resolvers, limits: &limits,
-        scan: &|_| Ok(()), journal: None,
+        library: &library,
+        resolvers: &resolvers,
+        limits: &limits,
+        scan: &|_| Ok(()),
+        journal: None,
     };
     let mut request = child("writer", "bound-writer");
     request.writer = true;
     let base = "1111111111111111111111111111111111111111";
-    let receipt = relay::admit_child_bound(&mut patch::LiveGraph {
-        document: &document, checkpoint: &mut checkpoint,
-    }, "a", &request, &context, Some(("parent", base))).unwrap();
-    let expanded = plans::expand(&document, &checkpoint.extensions,
-        &checkpoint.expansions, &limits).unwrap();
-    let node = expanded.nodes.iter().find(|node| node.id == receipt.node).unwrap();
-    assert_eq!(node.delivery, Some(provenant_records::run::DeliveryMode::Integrate("parent".into())));
-    assert_eq!(node.source, Some(SourceBinding::Commit { commit: base.into() }));
-    let replay = relay::admit_child_bound(&mut patch::LiveGraph {
-        document: &document, checkpoint: &mut checkpoint,
-    }, "a", &request, &context,
-        Some(("parent", "2222222222222222222222222222222222222222"))).unwrap();
+    let receipt = relay::admit_child_bound(
+        &mut patch::LiveGraph {
+            document: &document,
+            checkpoint: &mut checkpoint,
+        },
+        "a",
+        &request,
+        &context,
+        Some(("parent", base)),
+    )
+    .unwrap();
+    let expanded = plans::expand(
+        &document,
+        &checkpoint.extensions,
+        &checkpoint.expansions,
+        &limits,
+    )
+    .unwrap();
+    let node = expanded
+        .nodes
+        .iter()
+        .find(|node| node.id == receipt.node)
+        .unwrap();
+    assert_eq!(
+        node.delivery,
+        Some(provenant_records::run::DeliveryMode::Integrate(
+            "parent".into()
+        ))
+    );
+    assert_eq!(
+        node.source,
+        Some(SourceBinding::Commit {
+            commit: base.into()
+        })
+    );
+    let replay = relay::admit_child_bound(
+        &mut patch::LiveGraph {
+            document: &document,
+            checkpoint: &mut checkpoint,
+        },
+        "a",
+        &request,
+        &context,
+        Some(("parent", "2222222222222222222222222222222222222222")),
+    )
+    .unwrap();
     assert!(replay.replayed);
-    assert_eq!(relay::child_states(&checkpoint, "a")["children"][0]["settled"], false);
-    checkpoint.nodes.iter_mut().find(|node| node.id == receipt.node).unwrap().state = NodeState::Succeeded;
-    assert_eq!(relay::child_states(&checkpoint, "a")["children"][0]["settled"], true);
+    assert_eq!(
+        relay::child_states(&checkpoint, "a")["children"][0]["settled"],
+        false
+    );
+    checkpoint
+        .nodes
+        .iter_mut()
+        .find(|node| node.id == receipt.node)
+        .unwrap()
+        .state = NodeState::Succeeded;
+    assert_eq!(
+        relay::child_states(&checkpoint, "a")["children"][0]["settled"],
+        true
+    );
 }
 
 #[test]
@@ -553,35 +610,131 @@ fn review_panel_child_resolves_host_lenses_preserves_subject_and_replays() {
     let (document, mut checkpoint) = live(None);
     let library = template::TemplateLibrary::bundled();
     let resolvers = std::collections::BTreeMap::from([(
-        "review-panel".into(), vec!["correctness".into(), "tests".into()],
+        "review-panel".into(),
+        vec!["correctness".into(), "tests".into()],
     )]);
     let limits = plans::generous();
     let context = patch::PatchContext {
-        library: &library, resolvers: &resolvers, limits: &limits,
-        scan: &|_| Ok(()), journal: None,
+        library: &library,
+        resolvers: &resolvers,
+        limits: &limits,
+        scan: &|_| Ok(()),
+        journal: None,
     };
     let mut request = child("panel", "resolved-panel");
     request.template = "review-panel".into();
     request.brief = "Review the parser at commit 1111111111111111111111111111111111111111".into();
-    let receipt = admit_child(&mut patch::LiveGraph {
-        document: &document, checkpoint: &mut checkpoint,
-    }, "a", &request, &context).unwrap();
-    let expanded = plans::expand(&document, &checkpoint.extensions,
-        &checkpoint.expansions, &limits).unwrap();
-    let leaves: Vec<_> = expanded.nodes.iter()
+    let receipt = admit_child(
+        &mut patch::LiveGraph {
+            document: &document,
+            checkpoint: &mut checkpoint,
+        },
+        "a",
+        &request,
+        &context,
+    )
+    .unwrap();
+    let expanded = plans::expand(
+        &document,
+        &checkpoint.extensions,
+        &checkpoint.expansions,
+        &limits,
+    )
+    .unwrap();
+    let leaves: Vec<_> = expanded
+        .nodes
+        .iter()
         .filter(|node| node.id.starts_with("a--panel--") && node.composite.is_none())
         .collect();
     for lens in ["correctness", "tests"] {
-        assert!(leaves.iter().any(|node|
-            node.prompt.contains(&format!("through the {lens} lens"))
-                && node.prompt.contains(&request.brief)), "missing lens {lens}");
+        assert!(
+            leaves.iter().any(
+                |node| node.prompt.contains(&format!("through the {lens} lens"))
+                    && node.prompt.contains(&request.brief)
+            ),
+            "missing lens {lens}"
+        );
     }
-    assert!(leaves.iter().all(|node| node.prompt.contains(&request.brief)));
+    assert!(
+        leaves
+            .iter()
+            .all(|node| node.prompt.contains(&request.brief))
+    );
     let before = checkpoint.clone();
-    let replay = admit_child(&mut patch::LiveGraph {
-        document: &document, checkpoint: &mut checkpoint,
-    }, "a", &request, &context).unwrap();
+    let replay = admit_child(
+        &mut patch::LiveGraph {
+            document: &document,
+            checkpoint: &mut checkpoint,
+        },
+        "a",
+        &request,
+        &context,
+    )
+    .unwrap();
     assert!(replay.replayed);
     assert_eq!(replay.node, receipt.node);
+    assert_eq!(checkpoint, before);
+}
+
+#[test]
+fn child_receipt_replay_uses_original_request_after_template_and_parent_changes() {
+    let (document, mut checkpoint) = live(None);
+    let request = child("chain", "stable-receipt");
+    let mut request = ChildRequest {
+        template: "task-chain".into(),
+        ..request
+    };
+    let receipt = add(&document, &mut checkpoint, "a", &request).unwrap();
+    let encoded = serde_json::to_vec(&checkpoint).unwrap();
+    let mut checkpoint: GraphCheckpoint = serde_json::from_slice(&encoded).unwrap();
+    checkpoint
+        .nodes
+        .iter_mut()
+        .find(|node| node.id == "a")
+        .unwrap()
+        .state = NodeState::Succeeded;
+    let before = checkpoint.clone();
+    // Neither the template nor the resolver is needed once admission is durable.
+    let library = template::TemplateLibrary::default();
+    let resolvers = Default::default();
+    let limits = plans::generous();
+    let context = patch::PatchContext {
+        library: &library,
+        resolvers: &resolvers,
+        limits: &limits,
+        scan: &|_| Ok(()),
+        journal: None,
+    };
+    let replay = admit_child(
+        &mut patch::LiveGraph {
+            document: &document,
+            checkpoint: &mut checkpoint,
+        },
+        "a",
+        &request,
+        &context,
+    )
+    .unwrap();
+    assert_eq!(
+        replay,
+        relay::ChildReceipt {
+            replayed: true,
+            ..receipt
+        }
+    );
+    assert_eq!(checkpoint, before);
+    assert_eq!(
+        add(&document, &mut checkpoint, "b", &request)
+            .unwrap_err()
+            .code,
+        "idempotency_conflict"
+    );
+    request.brief = "Different brief".into();
+    assert_eq!(
+        add(&document, &mut checkpoint, "a", &request)
+            .unwrap_err()
+            .code,
+        "idempotency_conflict"
+    );
     assert_eq!(checkpoint, before);
 }

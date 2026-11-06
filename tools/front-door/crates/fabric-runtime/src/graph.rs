@@ -1587,7 +1587,10 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
             if checkpoint.nodes[node_index]
                 .extra
                 .get("retry_generation")
-                .is_none()
+                .is_none_or(|_| {
+                    checkpoint.nodes[node_index].extra.get("container_retry")
+                        == Some(&serde_json::Value::Bool(true))
+                })
                 && (loops::inactive_round(node, &plan, &checkpoint, &positions)
                     || repair::inactive_lens(node, &plan, &checkpoint, &positions))
             {
