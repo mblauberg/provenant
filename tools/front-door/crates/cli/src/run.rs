@@ -625,8 +625,13 @@ impl Registry<'_> {
             Some(provenant_os::exec::Termination::Exit(code)) => Some(code),
             _ => None,
         };
-        let timed_out =
-            exit.stop_reason == Some(provenant_supervisor::machine::StopReason::WallDeadline);
+        let timed_out = matches!(
+            exit.stop_reason,
+            Some(
+                provenant_supervisor::machine::StopReason::WallDeadline
+                    | provenant_supervisor::machine::StopReason::TokenBudget
+            )
+        );
         let Ok(outcome) = adapter.finish(
             state,
             provenant_providers::ExitObservation { code, timed_out },

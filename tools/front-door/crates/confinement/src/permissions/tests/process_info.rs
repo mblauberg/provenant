@@ -73,7 +73,7 @@ int main(int argc, char **argv) {
 "#;
 
 #[test]
-fn process_info_is_same_sandbox_and_reports_own_rss() -> Result<(), Box<dyn std::error::Error>> {
+fn process_info_includes_host_and_reports_own_rss() -> Result<(), Box<dyn std::error::Error>> {
     let executor = SystemExecutor::new(2)?;
     let cancel = CancelToken::new();
     let env = [("LC_ALL".into(), "C".into())];
@@ -168,7 +168,7 @@ fn process_info_is_same_sandbox_and_reports_own_rss() -> Result<(), Box<dyn std:
         // Single-operation A/B identifies process-info-pidinfo, rather than
         // attributing a different syscall denial to this libproc operation.
         for (rule, expected) in [
-            ("", "baseline"),
+            ("(allow process-info*)", "baseline"),
             ("(deny process-info*)", "denied"),
             (
                 "(deny process-info*)\n(allow process-info-pidinfo (target same-sandbox))",
@@ -179,10 +179,7 @@ fn process_info_is_same_sandbox_and_reports_own_rss() -> Result<(), Box<dyn std:
                 "allowed",
             ),
         ] {
-            let variant = source.replace(
-                "(deny process-info*)\n(allow process-info* (target same-sandbox))",
-                rule,
-            );
+            let variant = source.replace("(allow process-info*)", rule);
             let args = [
                 helper.as_os_str().to_owned(),
                 expected.into(),

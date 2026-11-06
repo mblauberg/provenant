@@ -508,6 +508,19 @@ Set the cap in `[domains.quota]`; set prices per account as shown.
 | `trade_off` | `"Lower marks silence sooner; the process census and observation cadence stays unchanged."` |
 | `type` | `"int"` |
 
+## `lanes.slot_wait_seconds`
+
+| Field | Value |
+|---|---|
+| `default` | `7200` |
+| `effect` | `"Most time in total that a lane's build-slot waits keep off its wall-clock deadline. Beyond it the wall deadline runs while the lane waits, so a stuck lane cannot wait forever. 0 keeps no waiting off the deadline."` |
+| `max` | `86400` |
+| `min` | `0` |
+| `reader` | `"tools/front-door/crates/run/src/launch.rs, tools/front-door/crates/supervisor/src/guardian.rs"` |
+| `status` | `"wired"` |
+| `trade_off` | `"Higher tolerates longer queues for build slots; lower ends a stuck lane sooner."` |
+| `type` | `"int"` |
+
 ## `routing.allow_unknown_partial_headroom`
 
 | Field | Value |
@@ -647,6 +660,12 @@ Set the cap in `[domains.quota]`; set prices per account as shown.
         "effect": "Maximum rendered macOS sandbox profile size. Increase for lanes with many grants; profiles pass through argv and may still hit OS limits.",
         "type": "int"
       },
+      "projects.{project}.writer_token_budget": {
+        "allowed": "0 or more tokens",
+        "default": "host writer_token_budget",
+        "effect": "Replace the host writer token budget for this project.",
+        "type": "int"
+      },
       "projects.{project}.writer_writes": {
         "allowed": "up to 16 absolute, safe directory paths outside credential roots",
         "default": "host writer_writes",
@@ -657,6 +676,12 @@ Set the cap in `[domains.quota]`; set prices per account as shown.
         "allowed": "1 to 8388608 bytes",
         "default": "262144",
         "effect": "Maximum encoded bytes of applied write grants recorded for a lane. Increase when an otherwise valid grant ledger exceeds the default; terminal records retain bounded headroom.",
+        "type": "int"
+      },
+      "writer_token_budget": {
+        "allowed": "0 or more tokens",
+        "default": "500000",
+        "effect": "Tokens a writer attempt may use, from the fresh usage its provider reports, before it is ended with its work committed and pushed for a continuation. 0 turns the budget off. Cache reads do not count. Enforced for Claude from live usage. Codex exec reports usage only at turn.completed, so its budget is not enforced; other providers without live usage are also not enforced. Launch warnings or receipt notes say so. Current lane adapters cannot receive a live steer: the 90% warning records an unsupported control receipt. After custody is absent the host attempts a bounded commit; an in-progress merge is preserved for stopped-merge handling, and a commit failure is reported without replacing the budget outcome. Time queued for a build slot does not count towards the wall-clock deadline, up to lanes.slot_wait_seconds in total. The source (run, project, host or default) is shown with the budget.",
         "type": "int"
       }
     }

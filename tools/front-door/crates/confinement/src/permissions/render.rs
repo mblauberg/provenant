@@ -60,17 +60,16 @@ pub(super) const DYLD_BOOTSTRAP_RULES: &str = r#"
   (allow system-mac-syscall (mac-syscall-number 2)))
 "#;
 /// Fixed operating-system runtime every provider CLI needs under deny-default:
-/// kernel and preference reads, TLS trust, DNS, time zone data, and process
-/// information and signals within the same sandbox. It names no user path; explicit
+/// kernel and preference reads, TLS trust, DNS, time zone data, process
+/// information, and signals within the same sandbox. It names no user path; explicit
 /// secret-root denials still override the metadata grant.
 #[cfg(any(target_os = "macos", feature = "snapshot"))]
 pub(super) const RUNTIME_BASELINE_RULES: &str = r#"(allow sysctl-read)
-(deny sysctl-read (sysctl-name-prefix "kern.procargs") (sysctl-name-prefix "kern.proc."))
+(deny sysctl-read (sysctl-name-prefix "kern.procargs"))
 (allow file-read-metadata)
 (allow ipc-posix-shm-read* (ipc-posix-name-prefix "apple.cfprefs."))
 (allow signal (target same-sandbox))
-(deny process-info*)
-(allow process-info* (target same-sandbox))
+(allow process-info*)
 (allow mach-lookup
   (global-name "com.apple.cfprefsd.agent")
   (global-name "com.apple.cfprefsd.daemon")

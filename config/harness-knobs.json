@@ -38,6 +38,8 @@
     "path": "domains.run",
     "settings": {
       "profile_limit_bytes": {"type": "int", "allowed": "1 or more bytes", "default": "524288", "effect": "Maximum rendered macOS sandbox profile size. Increase for lanes with many grants; profiles pass through argv and may still hit OS limits."},
+      "writer_token_budget": {"type": "int", "allowed": "0 or more tokens", "default": "500000", "effect": "Tokens a writer attempt may use, from the fresh usage its provider reports, before it is ended with its work committed and pushed for a continuation. 0 turns the budget off. Cache reads do not count. Enforced for Claude from live usage. Codex exec reports usage only at turn.completed, so its budget is not enforced; other providers without live usage are also not enforced. Launch warnings or receipt notes say so. Current lane adapters cannot receive a live steer: the 90% warning records an unsupported control receipt. After custody is absent the host attempts a bounded commit; an in-progress merge is preserved for stopped-merge handling, and a commit failure is reported without replacing the budget outcome. Time queued for a build slot does not count towards the wall-clock deadline, up to lanes.slot_wait_seconds in total. The source (run, project, host or default) is shown with the budget."},
+      "projects.{project}.writer_token_budget": {"type": "int", "allowed": "0 or more tokens", "default": "host writer_token_budget", "effect": "Replace the host writer token budget for this project."},
       "grant_limit": {"type": "int", "allowed": "1 or more", "default": "128", "effect": "Maximum total plan roots and entries in each provider profile family; authentication and native-control families retain minimum caps of 16 and 64. Increase for lanes needing more roots."},
       "write_grant_limit_bytes": {"type": "int", "allowed": "1 to 8388608 bytes", "default": "262144", "effect": "Maximum encoded bytes of applied write grants recorded for a lane. Increase when an otherwise valid grant ledger exceeds the default; terminal records retain bounded headroom."},
       "argv_prompt_limit_bytes": {"type": "int", "allowed": "1 or more bytes", "default": "65536", "effect": "Maximum prompt bytes passed directly to argv adapters. Larger top-level prompts spill to an attempt-owned file; nested attempts refuse rather than use a parent-writable spill. The overall 1 MiB prompt bound and operating-system argument limits still apply."},
@@ -431,6 +433,12 @@
       "reader": "tools/front-door/crates/run/src/launch.rs, tools/front-door/crates/supervisor/src/custody.rs, tools/front-door/crates/supervisor/src/guardian.rs",
       "effect": "Mark a provider observation silent after this many seconds without output or CPU progress; never kill it for silence.",
       "trade_off": "Lower marks silence sooner; the process census and observation cadence stays unchanged."
+    },
+    "lanes.slot_wait_seconds": {
+      "type": "int", "min": 0, "max": 86400, "default": 7200, "status": "wired",
+      "reader": "tools/front-door/crates/run/src/launch.rs, tools/front-door/crates/supervisor/src/guardian.rs",
+      "effect": "Most time in total that a lane's build-slot waits keep off its wall-clock deadline. Beyond it the wall deadline runs while the lane waits, so a stuck lane cannot wait forever. 0 keeps no waiting off the deadline.",
+      "trade_off": "Higher tolerates longer queues for build slots; lower ends a stuck lane sooner."
     },
     "lanes.max_concurrency": {
       "type": "int", "min": 1, "max": 8, "default": 8, "status": "wired",

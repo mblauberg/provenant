@@ -43,6 +43,7 @@ mod service_tests;
 pub mod settlement;
 mod short_temporary;
 mod store;
+pub mod token_budget;
 mod transcript;
 pub use service::{DispatchRequest, DispatchTask, ErrorKind, Service};
 pub use transcript::locate as locate_transcript;

@@ -466,6 +466,7 @@ fn scan_queued(
             Some(
                 StopReason::ExplicitCancellation
                     | StopReason::WallDeadline
+                    | StopReason::TokenBudget
                     | StopReason::SupervisorSignal
             )
         ) {
@@ -551,6 +552,7 @@ fn finish_children(
         Some(
             StopReason::ExplicitCancellation
                 | StopReason::WallDeadline
+                | StopReason::TokenBudget
                 | StopReason::SupervisorSignal
         )
     ) {

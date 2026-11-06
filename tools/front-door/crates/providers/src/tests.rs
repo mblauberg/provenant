@@ -1934,7 +1934,10 @@ fn registry_has_unique_ids_and_matching_quota_sources() -> Result<(), Box<dyn st
     );
     for entry in REGISTRY {
         let opencode = entry.adapter.id() == "opencode";
-        assert_eq!(entry.stdout_decoder.is_some(), opencode);
+        assert_eq!(
+            entry.stdout_decoder.is_some(),
+            matches!(entry.adapter.id(), "codex" | "claude" | "opencode")
+        );
         assert_eq!(entry.stderr_decoder.is_some(), opencode);
         if let Some(source) = entry.quota_source {
             assert_eq!(source.adapter_id(), entry.adapter.id());
@@ -2840,6 +2843,7 @@ fn prepare_all_adapters_and_pin_launch_controls() -> Result<(), ProviderError> {
             "PROVENANT_AGENT_LABEL",
             "PROVENANT_ROOT",
             "PROVENANT_GIT",
+            "PROVENANT_STATE_DIR",
             "PROVENANT_LANE_DEPTH",
             "PROVENANT_PARENT_ATTEMPT_ID",
             "PROVENANT_RUN_STATE_DIR",

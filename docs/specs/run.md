@@ -695,12 +695,18 @@ or an existing settlement owner; the supervisor owns this work after return.
 
 Success needs a supervisor-observed exit 0, a matching provider identity and
 a complete, validated, non-empty result; capture bytes are never completion
-evidence. A dead owner is not a failed provider. A writer with only
-uncommitted edits ends `uncommitted` and does not deliver, unless those paths
-are review-exempt. Run reads no provider transcript except Codex's post-exit
-identity projection.
+evidence. A dead owner is not a failed provider. A writer with only uncommitted edits ends `uncommitted` and does not deliver,
+unless those paths are review-exempt. Paths in the project's
+`[domains.run] review_exempt` list (release-note fragments, specs, lock files
+and `.tracker-input` by default) never count toward either, and Git metadata,
+hooks and provider control roots can never be listed. Run reads no provider
+transcript except Codex's post-exit identity projection. A read-only lane (no
+`writer`) whose complete, validated, non-empty answer is present settles
+`succeeded` without a handoff; only a writer must also report one.
 - Why: a crash, truncation or impostor must never read as success.
 - Test: `crates/run/src/dispatch_tests.rs::holder_commits_decoded_success_only_with_exit_zero_and_observed_identity`;
+  `crates/run/src/dispatch_tests.rs::a_read_only_answer_without_handoff_settles_succeeded`;
+  `crates/run/src/tests.rs::protected_review_retains_candidate_and_paths_without_delivery`;
   `crates/confinement/src/git_evidence.rs::exempt_paths_left_uncommitted_do_not_count`
 - Owner: `crates/run/src/holder.rs`, `crates/run/src/writer.rs`, `crates/confinement/src/review_exempt.rs`
 
@@ -713,8 +719,9 @@ schema v2 block with status `stopped_early` or `blocked`, and nothing after it),
 `provider_stop` (the provider reported a stop reason other
 than a finished turn, such as Claude's `stop_reason` `max_tokens` or a
 `terminal_reason` other than `completed`), `uncommitted_work`, and
-`handoff_missing` (a model lane, meaning any route other than a model-less
-adapter such as `command`, settled without a valid final handoff). A failed
+`handoff_missing` (a writer on a model route, meaning any route other than a
+model-less adapter such as `command`, settled without a valid final handoff;
+a read-only lane never carries it). A failed
 lane never carries `handoff_missing`; a redaction failure flips the outcomes
 that would into `failed`. Prose is never read, and a quoted, repeated or
 trailing-text block is no flag. A declared stop (`stopped_early` or `blocked`)
@@ -774,6 +781,48 @@ The `Status:` line protocol is removed.
   `crates/run/src/completion.rs::tests`;
   `crates/providers/src/tests.rs::claude_success_that_stopped_for_another_reason_is_an_early_stop`
 - Owner: `crates/run/src/completion.rs`, `crates/run/src/holder.rs`
+
+## A writer stops on a token budget
+
+A writer lane is bounded by a token budget, not by the wall clock alone: the
+host `[domains.run] writer_token_budget` (default 500000, 0 for none), replaced
+per project under `[domains.run.projects."PROJECT_ID"]`. The guardian sums the
+fresh tokens the provider reports while the attempt runs, one figure per
+provider call; cache reads do not count. When the sum passes the budget it stops
+the provider with the typed stop `token_budget`, and the attempt settles
+`timed_out` with a reason naming the budget and its source (`project`, `host` or
+`default`); a host setting equal to the default still reports `host`. If the
+lane stopped with uncommitted work, the host attempts a bounded commit with
+message `stopped on budget`, after custody proves no provider process can still
+write, and before publishing the branch. An in-progress merge is left to the
+existing stopped-merge handling. Settlement reports a skipped or failed commit;
+a Git error does not replace the budget outcome. At 90% the host uses the
+existing steer capability matrix. All current lane adapters are
+`continuation_only` or `unsupported`: the warning records an unsupported
+control receipt, and is not delivered to the lane. `provenant run --explain`
+shows the budget, its source and the providers it is enforced for. Claude
+enforces the budget from live usage. Codex exec emits tool and message item
+events within a turn, but reports usage only at terminal `turn.completed`;
+it cannot be stopped mid-turn by this budget. The version-matched Codex
+[JSONL processor](https://github.com/openai/codex/blob/f2ed5dc90e514b59c2334f3bafb9b0250cc3e038/codex-rs/exec/src/event_processor_with_jsonl_output.rs)
+(`rust-v0.166.0-alpha.1`) stores `ThreadTokenUsageUpdated` internally without
+emitting a JSON frame, and emits usage at `TurnCompleted` before shutdown. This launch path has no further
+turn to stop, so Codex's budget is not enforced. Its completed-turn accounting
+still subtracts cached input per turn. Other providers without live usage are
+also not enforced, and launch warnings or receipt notes report this.
+Time a lane spends queued for
+a build slot stays off the wall deadline, up to `lanes.slot_wait_seconds`
+(default 7200) in total.
+- Why: a long writer should stop on what it spends, and a stuck lane must not
+  wait or run forever.
+- Test: `crates/supervisor/src/machine.rs::tests::a_token_budget_stop_is_a_typed_stop`;
+  `crates/providers/src/claude.rs::tests::live_usage_counts_each_call_once_with_fresh_input`;
+  `crates/providers/src/codex.rs::live_usage_tests::a_completed_turn_reports_its_fresh_input_and_output`;
+  `crates/run/src/token_budget.rs::tests::fresh_tokens_count_towards_the_budget_and_cache_reads_are_ignored`;
+  `crates/run/src/token_budget.rs::tests::a_fake_provider_passing_the_budget_ends_the_attempt_and_silence_only_warns`;
+  `crates/run/src/holder.rs::writer_recovery_tests::writer_token_budget_stop_commits_uncommitted_work_and_publishes_branch`;
+  `crates/confinement/src/run_config.rs::tests::a_host_setting_equal_to_the_default_still_reports_host`
+- Owner: `crates/supervisor/src/guardian.rs`, `crates/run/src/token_budget.rs`
 
 ## Host inputs fail before launch
 
@@ -1186,8 +1235,14 @@ Nested submission uses a dedicated store under the submitting attempt,
 selected by `PROVENANT_RUN_STATE_DIR`; identity and config stay on the
 original root. The host launches only accepted operations, under the rules
 in [nested lanes, MCP and hooks](routing.md#nested-lanes-mcp-and-hooks).
+Claude and Codex lanes expose the host-selected `provenant` on their private
+`PATH`. Its launcher pins the original home, configuration root, child Run
+store and parent attempt context even when a provider scrubs shell variables.
+A lane can submit `provenant run --mode read-only` and read its child's
+`provenant output` through the existing child-store grants.
 - Why: a lane must not reach the parent's database or other runs.
 - Test: `src/worktree_tests.rs::lane_prepare_isolates_nested_state`
+- Test: `crates/providers/src/lane.rs::tests::lane_path_pins_provenant_and_child_context_after_shell_scrubbing`
 - Owner: `crates/run/src/plan.rs`
 
 ## Not provided

@@ -811,6 +811,32 @@ pub(super) fn dispatch_inner(
                     "admission timeout: {}s ({})\n",
                     effective_admission.seconds, effective_admission.origin
                 ));
+                if matches!(command.access.mode(), Mode::WorktreeWrite) {
+                    let budget = run_config.writer_token_budget_for(
+                        &project.as_ref().map(ToString::to_string).unwrap_or_default(),
+                        None,
+                    );
+                    let enforced: Vec<&str> = provenant_providers::REGISTRY
+                        .iter()
+                        .filter(|entry| provenant_run::token_budget::enforces(entry.adapter.id()))
+                        .map(|entry| entry.adapter.id())
+                        .collect();
+                    data["token_budget"] = json!({
+                        "tokens": budget.tokens,
+                        "source": budget.source.as_str(),
+                        "enforced_for": enforced,
+                    });
+                    if budget.tokens == 0 {
+                        text.push_str("token budget: off\n");
+                    } else {
+                        text.push_str(&format!(
+                            "token budget: {} tokens ({}); enforced for {}, which report usage while running; not enforced for other providers\n",
+                            budget.tokens,
+                            budget.source.as_str(),
+                            enforced.join(", ")
+                        ));
+                    }
+                }
                 record_warnings(&mut data, warnings);
                 text.push_str(&warnings_text(&data));
                 (data, text, false)
@@ -1777,6 +1803,35 @@ pub(super) fn dispatch_inner(
         })
         .collect();
     brief_warnings.extend(capability_warnings);
+    if matches!(command.access.mode(), Mode::WorktreeWrite) {
+        let budget = config
+            .domains
+            .run
+            .writer_token_budget_for(&session.context.project_id.to_string(), None);
+        if budget.tokens > 0 {
+            let enforced: Vec<&str> = provenant_providers::REGISTRY
+                .iter()
+                .filter(|entry| provenant_run::token_budget::enforces(entry.adapter.id()))
+                .map(|entry| entry.adapter.id())
+                .collect();
+            for task in &tasks {
+                let provider = match &task.route {
+                    provenant_records::run::RequestedRoute::Adapter { provider, .. }
+                    | provenant_records::run::RequestedRoute::Model { provider, .. } => {
+                        Some(provider.as_str())
+                    }
+                    _ => None,
+                };
+                if let Some(p) = provider
+                    && !enforced.contains(&p)
+                {
+                    brief_warnings.push(format!(
+                        "token budget is not enforced for provider {p}: mid-turn usage is not reported"
+                    ));
+                }
+            }
+        }
+    }
     // Admission has its own budget. Start the launch and observation budget
     // only once the run is ready to submit.
     let deadline = command
