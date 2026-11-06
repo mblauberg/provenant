@@ -355,14 +355,14 @@ pub(super) fn render_settled(
         clock: &clock,
         cancel: &cancel,
     };
-    let successors = Default::default();
-    let (mut data, mut human) = render_lanes_with_lineage(
+
+    let (mut data, mut human) = render_lanes(
         lanes,
         &waits,
         None,
         session.context.state_root.as_path(),
         cooldowns,
-        &successors,
+
     );
     append_provider_errors(session, lanes, &mut data, &mut human);
     attach_handoffs(session, lanes, &mut data);

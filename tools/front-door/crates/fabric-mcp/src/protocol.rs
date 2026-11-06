@@ -279,11 +279,7 @@ impl Protocol {
                 if !params.is_empty() {
                     return refuse(-32602, "Unexpected catalogue cursor or parameters");
                 }
-                let tools = if modern {
-                    crate::tools::catalogue()
-                } else {
-                    crate::tools::legacy_catalogue()
-                };
+                let tools = crate::tools::catalogue();
                 let mut list = json!({"tools":tools});
                 if modern {
                     list["ttlMs"] = json!(TTL_MS);

@@ -64,7 +64,6 @@ pub fn status(command: crate::Status, _json_output: bool, edge: &Edge<'_>) -> Re
                 return Ok((data, human));
             };
             let session = Session { store, context };
-            let _ = session.store.reap(&call);
             let full = command.all || command.id.is_some();
             let mut query = lane_query(
                 &session,
@@ -133,14 +132,14 @@ pub fn status(command: crate::Status, _json_output: bool, edge: &Edge<'_>) -> Re
             } else {
                 compact_status(&rows, &waits, now)
             };
-            let successors = Default::default();
-            let (mut data, _) = render_lanes_with_lineage(
+
+            let (mut data, _) = render_lanes(
                 &rows,
                 &waits,
                 next,
                 session.context.state_root.as_path(),
                 None,
-                &successors,
+
             );
             append_provider_errors(&session, &rows, &mut data, &mut human);
             let continuation = next.map(|cursor| {
@@ -225,13 +224,12 @@ pub fn status_wait_details(
     let call = request(&clock, &cancel)?;
     let resolved = targets::resolve(edge, target, true)?;
     let (session, _) = targets::read_resolved(edge, resolved, &call)?;
-    let (mut data, mut human) = render_lanes_with_lineage(
+    let (mut data, mut human) = render_lanes(
         rows,
         &[],
         None,
         session.context.state_root.as_path(),
         None,
-        &Default::default(),
     );
     append_provider_errors(&session, rows, &mut data, &mut human);
     let summary = lane_summary(&lane_lines(&data), None);
@@ -832,16 +830,6 @@ pub(super) fn delivery_state_text(state: &provenant_records::run::WriterDelivery
     }
 }
 
-pub(super) fn render_lanes(
-    lanes: &[run::AttemptRecord],
-    waits: &[run::LaneWait],
-    next: Option<u64>,
-    root: &Path,
-    cooldowns: Option<(&[provenant_quota::AccountRecord], i64)>,
-) -> (Value, String) {
-    render_lanes_with_lineage(lanes, waits, next, root, cooldowns, &Default::default())
-}
-
 /// Read one retained attempt without reaping or changing its history.
 pub fn project_retained_attempt(
     target: &Target,
@@ -867,12 +855,12 @@ pub fn project_retained_attempt(
             "attempt is not in that run/task",
         ));
     }
-    let successors = Default::default();
+
     Ok(project_lane(
         &record,
         &[],
         session.context.state_root.as_path(),
-        &successors,
+
         clock.wall_now().ok(),
         false,
     ))
@@ -882,7 +870,6 @@ pub fn project_lane(
     lane: &run::AttemptRecord,
     waits: &[run::LaneWait],
     root: &Path,
-    successors: &std::collections::BTreeMap<AttemptId, AttemptId>,
     now_wall: Option<WallTime>,
     observe_host: bool,
 ) -> provenant_records::wire::LaneRow {
@@ -925,7 +912,7 @@ pub fn project_lane(
     provenant_records::wire::LaneRow::project(
         lane,
         provenant_records::wire::LaneProjectionFacts {
-            superseded_by: successors.get(&lane.attempt_id).copied(),
+            superseded_by: lane.superseded_by,
             waiting_for,
             lane_class: wait.map(|wait| wait.lane_class.as_str().to_owned()),
             overdue: now_wall.map(|now| run::overdue_at(lane, now)),
@@ -942,15 +929,14 @@ pub fn project_lane(
     )
 }
 
-pub(super) fn render_lanes_with_lineage(
+pub(super) fn render_lanes(
     lanes: &[run::AttemptRecord],
     waits: &[run::LaneWait],
     next: Option<u64>,
     root: &Path,
     cooldowns: Option<(&[provenant_quota::AccountRecord], i64)>,
-    successors: &std::collections::BTreeMap<AttemptId, AttemptId>,
 ) -> (Value, String) {
-    render_lanes_with_view(lanes, waits, next, root, cooldowns, successors, true)
+    render_lanes_with_view(lanes, waits, next, root, cooldowns, true)
 }
 
 pub(super) fn render_lanes_with_view(
@@ -959,7 +945,6 @@ pub(super) fn render_lanes_with_view(
     next: Option<u64>,
     root: &Path,
     cooldowns: Option<(&[provenant_quota::AccountRecord], i64)>,
-    successors: &std::collections::BTreeMap<AttemptId, AttemptId>,
     observe_host: bool,
 ) -> (Value, String) {
     let mut human = String::new();
@@ -967,7 +952,7 @@ pub(super) fn render_lanes_with_view(
     let rows: Vec<Value> = lanes
         .iter()
         .map(|lane| {
-            let projected = project_lane(lane, waits, root, successors, now_wall, observe_host);
+            let projected = project_lane(lane, waits, root, now_wall, observe_host);
             let state = projected.state.clone();
             let route = lane
                 .applied_route
@@ -1002,7 +987,7 @@ pub(super) fn render_lanes_with_view(
             } else {
                 format!("{state} (partial)")
             };
-            let state_text = match successors.get(&lane.attempt_id) {
+            let state_text = match lane.superseded_by {
                 Some(id) => format!("{state_text} → retrying ({id})"),
                 None => state_text,
             };
@@ -1324,7 +1309,6 @@ fn session_inventory_page(
     let session = Session { store, context };
     // Match the normal listing's recovery of a dead guardian before observing
     // the page; the hook reports only records this read actually completed.
-    let _ = session.store.reap(&call);
     let mut query = lane_query(&session, &[], all, limit, after, &call)?;
     query.newest_first = all;
     let mut failed = false;
@@ -1509,7 +1493,6 @@ pub(super) fn lanes_inner(
         None => 0,
     };
     // A lane whose guardian died is settled by the next read, not left running.
-    let _ = session.store.reap(&call);
     let mut query = lane_query(
         &session,
         &command.id,
@@ -1577,14 +1560,14 @@ pub(super) fn lanes_inner(
         .map_err(|error| Fail::new(Status::Error, ErrorKind::Io, error))?;
     let waits = session.store.lane_waits(&lanes, &call);
     let cooldowns = read_lane_cooldowns(session.context.state_root.as_path());
-    let successors = Default::default();
-    let (mut data, mut human) = render_lanes_with_lineage(
+
+    let (mut data, mut human) = render_lanes(
         &lanes,
         &waits,
         next,
         session.context.state_root.as_path(),
         lane_cooldown_view(&cooldowns),
-        &successors,
+
     );
     append_provider_errors(&session, &lanes, &mut data, &mut human);
     attach_handoffs(&session, &lanes, &mut data);
@@ -1722,7 +1705,6 @@ pub fn recorded_attempt_facts(record: &run::AttemptRecord) -> AttemptFacts {
         record,
         &[],
         Path::new("/"),
-        &Default::default(),
         None,
         false,
     );

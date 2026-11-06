@@ -243,13 +243,10 @@ fn build_strict() -> Vec<Value> {
             }),
         ),
         (
-            "Run template briefs or graph documents, edit graphs, inspect templates and report status or trace. Documents and patches are JSON objects, never file paths. Attempt submissions and observations use the run service.",
+            "Run template briefs or graph documents, edit graphs, inspect templates and report status or trace. Documents and patches are JSON objects, never file paths.",
             json!({
-                "submit":{"operation_id?":reference("OperationId"),"wait_seconds?":wait.clone(),"detail?":{"type":"boolean"},"tasks":array(object(json!({"context?":nullable(reference("WorkContext")),"build_heavy?":{"type":"boolean"},"prompt":text(MAX_TEXT_BYTES),"title?":nullable(text(256)),"base?":nullable(text(1024)),"head?":nullable(text(64)),"source_head?":nullable(text(64)),"account?":nullable(text(64)),"access?":choices(&["read_only","worktree_write"]),"capabilities?":nullable(array(text(64),0,16)),"worktree?":nullable(text(MAX_ARTIFACT_PATH_BYTES)),"route":reference("Route"),"timeout_seconds":integer(1,provenant_core::MAX_LANE_RUNTIME_SECONDS),"delivery_id?":nullable(reference("Id")),"deliver?":nullable(object(json!({"remote":text(64),"branch":text(1024),"open_pr?":{"type":"boolean"}})))})),1,64),"concurrency?":nullable(integer(1,16)),"knobs?":array(text(256),0,64),"host?":nullable(reference("Id"))},
                 "list":{"after?":nullable(reference("AttemptTarget")),"limit?":page},"status":{"target":reference("AttemptTarget"),"detail?":{"type":"boolean"}},
                 "wait":{"targets":array(reference("AttemptTarget"),1,100),"condition":choices(&["any","all"]),"wait_seconds":wait,"detail?":{"type":"boolean"}},
-                "cancel":{"target":reference("AttemptTarget"),"operation_id?":reference("OperationId"),"detail?":{"type":"boolean"}},
-                "resume":{"target":reference("AttemptTarget"),"operation_id?":reference("OperationId"),"prompt":text(MAX_TEXT_BYTES),"expected_generation":count.clone(),"no_fallback?":{"type":"boolean"}}
             }),
         ),
         (
@@ -304,7 +301,7 @@ fn build_strict() -> Vec<Value> {
             let mut variants = tagged_variants("op", operations);
             if *kind == ToolKind::Run {
                 let graph = tagged_variants("op", json!({
-                    "run":{"document?":{"type":"object"},"brief?":text(MAX_TEXT_BYTES),"use?":text(128),"tier?":text(128),"over?":{"anyOf":[{"type":"array","items":text(1024)},text(128)]},"set?":{"type":"object"},"explain?":{"type":"boolean"},"wait_seconds?":integer(1,crate::MAX_WAIT_SECONDS)},
+                    "run":{"access?":choices(&["read_only","worktree_write"]),"worktree?":text(MAX_ARTIFACT_PATH_BYTES),"branch?":text(1024),"base?":text(1024),"write_scope?":array(text(MAX_ARTIFACT_PATH_BYTES),0,32),"idempotency_key?":text(200),"document?":{"type":"object"},"brief?":text(MAX_TEXT_BYTES),"use?":text(128),"tier?":text(128),"over?":{"anyOf":[{"type":"array","items":text(1024)},text(128)]},"set?":{"type":"object"},"explain?":{"type":"boolean"},"wait_seconds?":integer(1,crate::MAX_WAIT_SECONDS)},
                     "status":{"id?":text(200),"stats?":{"type":"boolean"},"by?":choices(&["tier","template"]),"wait_seconds?":integer(1,crate::MAX_WAIT_SECONDS)},
                     "stop":{"id":text(200),"reason?":text_allowing_empty(provenant_fabric_runtime::graph::MAX_CANCEL_REASON_BYTES),"wait_seconds?":integer(1,crate::MAX_WAIT_SECONDS)},
                     "retry":{"id":text(200),"node?":text(200),"brief?":text(MAX_TEXT_BYTES),"extend?":array(text(256),0,64),"wait_seconds?":integer(1,crate::MAX_WAIT_SECONDS)},
@@ -550,22 +547,6 @@ pub(crate) fn advanced_catalogue() -> Vec<Value> {
         .filter(|tool| is_advanced(&tool["name"]))
         .cloned()
         .collect()
-}
-
-pub fn legacy_catalogue() -> &'static [Value] {
-    static CATALOGUE: OnceLock<Vec<Value>> = OnceLock::new();
-    CATALOGUE.get_or_init(|| {
-        catalogue()
-            .iter()
-            .map(|tool| {
-                let mut tool = tool.clone();
-                if let Some(fields) = tool.as_object_mut() {
-                    fields.remove("outputSchema");
-                }
-                tool
-            })
-            .collect()
-    })
 }
 
 /// Name the one valid argument an unknown key or action most likely meant. The

@@ -1679,7 +1679,6 @@ fn registry_provider_resolves_prepares_and_reports_quota(
         readiness_dir.join(format!("{adapter_name}.json")),
         serde_json::to_vec(&stale)?,
     )?;
-    assert!(super::super::catalogued(&model, None).is_ok());
     let task = run::TaskRequest {
         cloud: None,
         context: None,

@@ -49,9 +49,12 @@ fn invoke(
             let within = std::time::Duration::from_secs(input["wait_seconds"].as_u64().unwrap_or(55));
             let mut receipt = provenant_cli::fabric::graph_relay::from_lane(&request, &cancel, within)?;
             if let Some(seconds) = input["wait_seconds"].as_u64() {
-                receipt["children"] = provenant_cli::fabric::graph_relay::wait_for_children(
+                match provenant_cli::fabric::graph_relay::wait_for_children(
                     &cancel, std::time::Duration::from_secs(seconds),
-                )?;
+                ) {
+                    Ok(children) => receipt["children"] = children,
+                    Err(error) => receipt["observation_error"] = json!(error.to_string()),
+                }
             }
             return Ok(receipt);
         }

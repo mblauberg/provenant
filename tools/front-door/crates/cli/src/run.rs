@@ -1,12 +1,12 @@
-//! Run's composition edge: `dispatch`, `lanes`, `output`, `cancel`, `resume`,
+//! Attempt execution and retained lane observations: `status`, `output`,
 //! `reconcile` and `telemetry stats`, and the provider seam that the
 //! same-binary guardian holder shares.
 use crate::{
-    Cancel, Condition, Dispatch, Lanes, Mode, Output, Part, PricesRefresh, Reconcile, Resume,
+    Cancel, Condition, Lanes, Output, Part, PricesRefresh, Reconcile, Resume,
     Stats, Switch, Target, Trace, limits,
 };
 use provenant_core::{
-    ActorId, AttemptId, CancelToken, Clock, DeliveryId, DurationMicros, OperationId, Roots, RunId,
+    ActorId, AttemptId, CancelToken, Clock, DeliveryId, OperationId, Roots, RunId,
     TaskId, WallTime,
 };
 use provenant_fabric_runtime::hosts::plain_text;
@@ -17,7 +17,7 @@ use provenant_routing::{Fallback, ModelId, RouteChoice, RouteName};
 use provenant_run as run;
 use provenant_supervisor::custody::ExitObservation;
 use run::ErrorKind;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::{Value, json};
 use std::{
     collections::BTreeMap,
@@ -29,7 +29,7 @@ use std::{
 mod cancel;
 pub mod cloud_owner;
 pub mod cloud_store;
-mod dispatch;
+mod launch;
 mod holder;
 mod output;
 mod provider;
@@ -44,7 +44,7 @@ mod wait;
 mod watch;
 mod worktree;
 pub use cancel::*;
-pub use dispatch::*;
+pub use launch::*;
 pub use holder::HostHolder;
 pub use output::*;
 pub(crate) use provider::find_executable as provider_executable;

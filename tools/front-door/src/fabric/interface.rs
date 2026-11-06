@@ -115,12 +115,13 @@ impl Factory {
         )
         .map_err(|_| FacadeError::InvalidInput { detail: None })?;
         if let Some(seconds) = input.get("wait_seconds").and_then(Value::as_u64) {
-            let children = provenant_cli::fabric::graph_relay::wait_for_children(
+            return Ok(match provenant_cli::fabric::graph_relay::wait_for_children(
                 cancel,
                 std::time::Duration::from_secs(seconds),
-            )
-            .map_err(|_| FacadeError::InvalidInput { detail: None })?;
-            return Ok(json!({"receipt":receipt,"children":children}));
+            ) {
+                Ok(children) => json!({"receipt":receipt,"children":children}),
+                Err(error) => json!({"receipt":receipt,"observation_error":error.to_string()}),
+            });
         }
         Ok(receipt)
     }
