@@ -1,0 +1,105 @@
+# Composite nodes share the leaf template schema. This catalogue is separate
+# so leaf briefs and composite topology have independent owners.
+[review-panel]
+doc = "Review through the host-selected lenses, then reconcile findings."
+exports = [{ node = "synthesis", outputs = ["result", "findings", "verdict"] }]
+nodes = [
+  { id = "lenses", use = "review", over = "@review-panel", with = { lens = "${item}" }, required_verdict = "VERDICT: PASS" },
+  { id = "synthesis", use = "synthesise", after = ["lenses"], require_findings = true, required_verdict = "VERDICT: PASS", inputs = [{ node = "lenses", outputs = ["result", "findings"] }] },
+]
+
+[research-swarm]
+doc = "Research named questions and reconcile dated evidence."
+nodes = [
+  { id = "researchers", use = "research", over = "${items}", min_ok = "${min_ok}", brief = "${brief}: ${item}" },
+  { id = "synthesis", use = "synthesise", after = ["researchers"], inputs = [{ node = "researchers", outputs = ["result"] }] },
+]
+[research-swarm.parameters]
+brief = { type = "string", default = "Answer with cited evidence" }
+items = { type = "list", default = ["the question in the brief"], min = 1 }
+min_ok = { type = "integer", default = 1, min = 1 }
+
+[explore-swarm]
+doc = "Explore named areas and reconcile repository evidence."
+nodes = [
+  { id = "explorers", use = "explore", over = "${items}", min_ok = "${min_ok}", brief = "${brief}: ${item}" },
+  { id = "synthesis", use = "synthesise", after = ["explorers"], inputs = [{ node = "explorers", outputs = ["result"] }] },
+]
+[explore-swarm.parameters]
+brief = { type = "string", default = "Answer with cited evidence" }
+items = { type = "list", default = ["the repository"], min = 1 }
+min_ok = { type = "integer", default = 1, min = 1 }
+
+[batch]
+doc = "Implement named slices into one integration branch, then review it."
+nodes = [
+  { id = "slices", use = "implement", over = "${items}", min_ok = "${min_ok}", brief = "Implement slice ${item}: ${brief}", delivery = "integrate:${integration_branch}", worktree = "${worktree}", write_scope = "${write_scope}" },
+  { id = "review", use = "review-panel", after = ["slices"], source = { type = "integration" } },
+]
+[batch.parameters]
+items = { type = "list", default = ["implementation"], min = 1 }
+min_ok = { type = "integer", default = 1, min = 1 }
+brief = { type = "string", default = "Meet the acceptance checks." }
+integration_branch = { type = "string", default = "batch/integration" }
+worktree = { type = "string", default = "" }
+write_scope = { type = "list", default = [] }
+
+[deliver]
+doc = "Implement an approved brief through CI, review and landing."
+nodes = [
+  { id = "implement", use = "implement", brief = "${brief}", delivery = "pr", worktree = "${worktree}", write_scope = "${write_scope}" },
+  { id = "ci", kind = "gate", access = "read_only", after = ["implement"], condition = { type = "ci", target = { node = "implement" } } },
+  { id = "review", use = "review-panel", after = ["ci"], source = { type = "node", node = "implement" } },
+  { id = "accept", kind = "gate", access = "read_only", after = ["review"], condition = { type = "verdict", expected = "VERDICT: PASS", threshold = "all" }, inputs = [{ node = "review", outputs = ["verdict"] }] },
+  { id = "land", kind = "land", access = "read_only", after = ["accept"], land = { node = "implement", tier = "substantial" } },
+]
+[deliver.parameters]
+brief = { type = "string", default = "Meet the acceptance checks." }
+worktree = { type = "string", default = "" }
+write_scope = { type = "list", default = [] }
+
+[task-once]
+nodes = [{ id = "task", use = "task", brief = "${brief}" }]
+[task-once.parameters]
+brief = { type = "string", default = "Do the brief." }
+
+[plan-once]
+nodes = [{ id = "plan", use = "plan", brief = "Plan: ${brief}" }]
+[plan-once.parameters]
+brief = { type = "string", default = "Scope the task." }
+
+[task-chain]
+nodes = [
+  { id = "first", use = "task", brief = "${brief}" },
+  { id = "second", use = "task", brief = "${brief}", after = ["first"], inputs = [{ node = "first", outputs = ["result"] }] },
+]
+
+[task-chain.parameters]
+brief = { type = "string", default = "Do the brief." }
+
+[task-fan-out]
+nodes = [{ id = "tasks", use = "task", over = "${items}", min_ok = "${min_ok}", brief = "${brief}: ${item}" }]
+[task-fan-out.parameters]
+brief = { type = "string", default = "Answer with cited evidence" }
+items = { type = "list", default = ["first view", "second view"], min = 1 }
+min_ok = { type = "integer", default = 1, min = 1 }
+
+[task-fan-out-synthesise]
+nodes = [
+  { id = "tasks", use = "task-fan-out", with = { items = "${items}", min_ok = "${min_ok}", brief = "${brief}" } },
+  { id = "synthesis", use = "synthesise", after = ["tasks"], inputs = [{ node = "tasks", outputs = ["result"] }] },
+]
+[task-fan-out-synthesise.parameters]
+brief = { type = "string", default = "Answer with cited evidence" }
+items = { type = "list", default = ["first view", "second view"], min = 1 }
+min_ok = { type = "integer", default = 1, min = 1 }
+
+[plan-then-deliver]
+nodes = [
+  { id = "plan", use = "plan" },
+  { id = "deliver", use = "deliver", after = ["plan"], inputs = [{ node = "plan", outputs = ["result"] }], with = { brief = "${brief}", worktree = "${worktree}", write_scope = "${write_scope}" } },
+]
+[plan-then-deliver.parameters]
+brief = { type = "string", default = "Meet the acceptance checks." }
+worktree = { type = "string", default = "" }
+write_scope = { type = "list", default = [] }

@@ -25,6 +25,7 @@ pub(super) fn human_for_test(data: &Value, full: bool) -> String {
 #[path = "preset_plan.rs"]
 pub mod planner;
 
+pub mod composites;
 mod panel;
 #[cfg(test)]
 #[allow(unused_imports, reason = "preset tests construct a selector result")]
@@ -5308,6 +5309,20 @@ pub(crate) fn run_with_review(
                 expansion.repo_files.join(", ")
             );
         }
+        if let Some(branch) = expansion.document["integration_branch"].as_str() {
+            let prepared = crate::roots::selected_project(globals.project.as_deref(), false)
+                .map_err(|e| e.to_string())
+                .and_then(|directory| composites::ensure_integration_branch(&directory, branch));
+            if let Err(error) = prepared {
+                return crate::fail(
+                    "run",
+                    provenant_records::Outcome::Invalid,
+                    "preset",
+                    &error,
+                    globals,
+                );
+            }
+        }
         crate::fabric::run_preset_graph(
             expansion.document,
             request.wait.unwrap_or(240),
@@ -5392,8 +5407,8 @@ mod template_lowering_tests {
         )
         .unwrap();
         assert_eq!(raw.prompt, "as written");
-        let error =
-            super::decode_lowered_node(&json!({"id": "bad", "use": "no-such-template"})).unwrap_err();
+        let error = super::decode_lowered_node(&json!({"id": "bad", "use": "no-such-template"}))
+            .unwrap_err();
         assert!(error.contains("no-such-template"), "{error}");
     }
 }

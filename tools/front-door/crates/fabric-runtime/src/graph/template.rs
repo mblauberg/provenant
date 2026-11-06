@@ -17,6 +17,9 @@ pub const MAX_TEMPLATE_DEPTH: usize = 16;
 pub const MAX_OVER_ITEMS: usize = 256;
 const ITEM: &str = "item";
 
+#[path = "template_composites.rs"]
+mod composites;
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TemplateParameter {
     #[serde(flatten)]
@@ -402,6 +405,8 @@ impl TemplateLibrary {
                     .insert(Layer::Bundled, template);
             }
         }
+        // Invalid bundled assets are detected by the catalogue tests.
+        let _ = composites::install(&mut library);
         library
     }
 
@@ -774,7 +779,10 @@ impl<'a> Compiler<'a> {
             for member in &template.nodes {
                 children.push(self.lower_in(member, parameters, stack)?);
             }
-            let exports = if template.exports.is_empty() {
+            let single_review = name == "review-panel" && composites::single_review(&mut children);
+            let exports = if single_review {
+                vec![serde_json::json!({"node":"review", "outputs":["result", "findings", "verdict"]})]
+            } else if template.exports.is_empty() {
                 default_exports(&children)
             } else {
                 serde_json::to_value(&template.exports)
