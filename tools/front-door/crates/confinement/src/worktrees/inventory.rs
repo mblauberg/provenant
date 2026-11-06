@@ -9,6 +9,7 @@ pub struct RepoFacts {
     scalar_limit: usize,
     raw_inventories: std::sync::Arc<std::sync::Mutex<BTreeMap<PathBuf, RawInventorySnapshot>>>,
     inventories: std::sync::Arc<std::sync::Mutex<BTreeMap<PathBuf, InventorySnapshot>>>,
+    worktree_listings: std::sync::Arc<std::sync::Mutex<BTreeMap<PathBuf, Vec<u8>>>>,
 }
 
 #[derive(PartialEq, Eq)]
@@ -109,11 +110,17 @@ impl Default for RepoFacts {
             scalar_limit: provenant_os::git::REPO_FACT_SCALAR_LIMIT,
             raw_inventories: Default::default(),
             inventories: std::sync::Arc::new(std::sync::Mutex::new(BTreeMap::new())),
+            worktree_listings: Default::default(),
         }
     }
 }
 
 impl RepoFacts {
+    /// Effective stdout cap for repository worktree inventory facts.
+    pub fn inventory_limit(&self) -> usize {
+        self.inventory_limit
+    }
+
     /// Run a read-only Git resolver through this session's fact caps. Retain
     /// incomplete fact evidence even if the resolver maps its subprocess error.
     pub fn with_executor<T, E: From<WorktreeError>>(
@@ -157,6 +164,27 @@ impl RepoFacts {
             scalar_limit,
             ..Self::default()
         })
+    }
+
+    /// Reuse a successful worktree listing for the lifetime of this command's
+    /// repository facts session. Callers that mutate registrations must use
+    /// their guarded fresh-inventory path instead.
+    pub fn cached_worktree_listing<E>(
+        &self,
+        cwd: &Path,
+        read: impl FnOnce() -> Result<Vec<u8>, E>,
+    ) -> Result<Vec<u8>, E> {
+        let key = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
+        let mut listings = self
+            .worktree_listings
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        if let Some(listing) = listings.get(&key) {
+            return Ok(listing.clone());
+        }
+        let listing = read()?;
+        listings.insert(key, listing.clone());
+        Ok(listing)
     }
 
     /// Resolve a commit ref from fresh Git evidence. Ref values can move even

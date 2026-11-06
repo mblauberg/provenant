@@ -3869,23 +3869,72 @@ fn worktree_listing_over_the_capture_default_is_refused_at_every_stage()
                 stage,
             )
             .expect_err("an oversized listing must be refused");
-        assert!(
-            matches!(
-                error,
-                RunError::DeliveryFact {
-                    source: provenant_confinement::worktrees::WorktreeError::Utility(
-                        provenant_confinement::utility::UtilityError::Truncated {
-                            stream: "stdout"
-                        }
-                    ),
-                    ..
-                }
-            ),
-            "{stage:?}: {error:?}"
-        );
-        let message = error.to_string();
-        assert!(message.contains("stdout"), "{message}");
+        let RunError::DeliveryLimit {
+            stage: actual_stage,
+            tool,
+            command,
+            limit: actual_limit,
+        } = &error
+        else {
+            panic!("unexpected error: {error:?}");
+        };
+        assert_eq!(*actual_stage, stage);
+        assert_eq!(*tool, "git");
+        assert_eq!(command, "worktree list");
+        assert_eq!(*actual_limit, limit);
+        let projection = error.diagnostic(provenant_records::diagnostic::Destination::Local);
+        assert_eq!(projection.code, "IO");
+        assert!(projection.detail.as_deref().unwrap().contains("worktree list"));
+        assert!(projection.detail.as_deref().unwrap().contains(&limit.to_string()));
+        assert!(matches!(
+            projection.fact,
+            Some(provenant_records::diagnostic::DiagnosticFact::DeliveryLimit(_))
+        ));
     }
+    Ok(())
+}
+
+#[test]
+fn delivery_preflights_reuse_the_command_worktree_listing_with_many_worktrees()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let mut fixture = PrepareFixture::new()?;
+    let admin = fixture.writer.project.join(".git/worktrees");
+    let head = std::fs::read(admin.join("lane/HEAD"))?;
+    for index in 0..100 {
+        let path = fixture.root.join(format!("preflight-tree-{index}"));
+        let entry = admin.join(format!("preflight-{index}"));
+        std::fs::create_dir(&entry)?;
+        std::fs::write(entry.join("HEAD"), &head)?;
+        std::fs::write(entry.join("commondir"), b"../..\n")?;
+        std::fs::write(
+            entry.join("gitdir"),
+            format!("{}\n", path.join(".git").display()),
+        )?;
+    }
+
+    let git = provenant_os::git::git_executable().ok_or("git executable")?;
+    let wrapper = fixture.root.join("counting-git");
+    let count = fixture.root.join("worktree-list-count");
+    fixture.executable(
+        &wrapper,
+        &format!(
+            "#!/bin/sh\ncase \" $* \" in *\" worktree list --porcelain \"*) printf x >> '{}';; esac\nexec '{}' \"$@\"\n",
+            count.display(),
+            git.display()
+        ),
+    )?;
+    fixture.environment.push((
+        "PROVENANT_GIT".into(),
+        wrapper.into_os_string(),
+    ));
+    let facts = provenant_confinement::worktrees::RepoFacts::default();
+    let host = HostDeliveryContext::new(fixture.environment.clone()).with_repo_facts(&facts);
+
+    // The CLI's owned-worktree and task preflights share these command facts.
+    host.check_delivery_branch_with_facts(&fixture.writer.project, "unprotected")?;
+    host.check_delivery_branch_with_facts(&fixture.writer.project, "unprotected")?;
+
+    assert_eq!(std::fs::read(&count)?.len(), 1, "worktree list should run once");
     Ok(())
 }
 
@@ -5161,16 +5210,24 @@ fn host_delivery_repository_facts_use_command_caps()
             }
         )
     };
-    assert!(truncated(
-        host.clone()
-            .with_repo_facts(&inventory)
-            .command(
-                &fixture.writer.worktree,
-                "git",
-                &["worktree", "list", "--porcelain"],
-                WriterDeliveryStage::Integrate
-            )
-            .unwrap_err()
+    let listing_error = host
+        .clone()
+        .with_repo_facts(&inventory)
+        .command(
+            &fixture.writer.worktree,
+            "git",
+            &["worktree", "list", "--porcelain"],
+            WriterDeliveryStage::Integrate,
+        )
+        .unwrap_err();
+    assert!(matches!(
+        listing_error,
+        RunError::DeliveryLimit {
+            stage: WriterDeliveryStage::Integrate,
+            tool: "git",
+            command,
+            limit: 1,
+        } if command == "worktree list"
     ));
     for args in [
         &["rev-parse", "--absolute-git-dir"][..],
@@ -5189,20 +5246,32 @@ fn host_delivery_repository_facts_use_command_caps()
                 .unwrap_err()
         ));
     }
-    for facts in [&scalar, &inventory] {
-        assert!(truncated(
-            HostDeliveryContext::new(fixture.environment.clone())
-                .with_repo_facts(facts)
-                .prepare(&fixture.writer, &fixture.request)
-                .unwrap_err()
-        ));
-    }
     assert!(truncated(
+        HostDeliveryContext::new(fixture.environment.clone())
+            .with_repo_facts(&scalar)
+            .prepare(&fixture.writer, &fixture.request)
+            .unwrap_err()
+    ));
+    for error in [
+        HostDeliveryContext::new(fixture.environment.clone())
+            .with_repo_facts(&inventory)
+            .prepare(&fixture.writer, &fixture.request)
+            .unwrap_err(),
         HostDeliveryContext::new(fixture.environment.clone())
             .with_repo_facts(&inventory)
             .check_delivery_branch_with_facts(&fixture.writer.project, "unprotected")
-            .unwrap_err()
-    ));
+            .unwrap_err(),
+    ] {
+        assert!(matches!(
+            error,
+            RunError::DeliveryLimit {
+                tool: "git",
+                command,
+                limit: 1,
+                ..
+            } if command == "worktree list"
+        ));
+    }
     let head = host.head(&fixture.writer)?;
     let error = host
         .clone()
@@ -5210,18 +5279,25 @@ fn host_delivery_repository_facts_use_command_caps()
         .integrate(&fixture.writer, &fixture.request, head)
         .unwrap_err();
     assert!(matches!(
-        error,
-        RunError::DeliveryFact {
+        &error,
+        RunError::DeliveryLimit {
             stage: WriterDeliveryStage::Integrate,
-            ..
-        }
-    ));
-    assert!(truncated(error));
-    assert!(truncated(
+            tool: "git",
+            command,
+            limit: 1,
+        } if command == "worktree list"
+    ), "{error:?}");
+    assert!(matches!(
         HostDeliveryContext::new(fixture.environment.clone())
             .with_repo_facts(&inventory)
             .deliver_graph_pr(&fixture.writer.project, "unprotected", head, "body")
-            .unwrap_err()
+            .unwrap_err(),
+        RunError::DeliveryLimit {
+            tool: "git",
+            command,
+            limit: 1,
+            ..
+        } if command == "worktree list"
     ));
     assert!(truncated(
         host.with_repo_facts(&scalar)

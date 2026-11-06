@@ -10229,9 +10229,14 @@ fn host_delivery_limit_reaches_graph_status_without_exposing_io_sources() {
     let error = || {
         // Exercise the envelope consumed by a peer launch owner, including
         // source text that is not an approved diagnostic fact.
-        let mut wire = serde_json::to_value(
-            crate::coordination::facade::FacadeError::HostDeliveryLimit { fact: fact.clone() },
-        )
+        let mut wire = serde_json::to_value(crate::coordination::facade::FacadeError::Io {
+            operation: "host delivery".into(),
+            path: None,
+            delivery_limit: Some(fact.clone()),
+            delivery_stage: None,
+            resource: None,
+            input_failure: None,
+        })
         .unwrap();
         assert_eq!(wire["code"], "io");
         wire["operation"] = "TOKEN_SENTINEL\u{1b}".into();
