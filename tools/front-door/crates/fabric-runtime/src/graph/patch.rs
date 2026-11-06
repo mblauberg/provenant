@@ -825,9 +825,18 @@ pub fn submit(
         graph_id: graph_id.to_owned(),
         nodes,
     };
-    document.extra.insert("template_layers".into(), serde_json::json!(library.snapshot_layers()));
-    document.extra.insert("template_library".into(), serde_json::json!(library.snapshot()));
-    document.extra.insert("template_resolvers".into(), serde_json::json!(context.resolvers));
+    document.extra.insert(
+        "template_layers".into(),
+        serde_json::json!(library.snapshot_layers()),
+    );
+    document.extra.insert(
+        "template_library".into(),
+        serde_json::json!(library.snapshot()),
+    );
+    document.extra.insert(
+        "template_resolvers".into(),
+        serde_json::json!(context.resolvers),
+    );
     document.schema_version = u64::from(minimum_schema_version(&document));
     document
         .admit(context.limits)

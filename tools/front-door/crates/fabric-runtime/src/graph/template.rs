@@ -503,13 +503,22 @@ impl TemplateLibrary {
 
     /// Effective layers, retaining flavour overrides for deterministic replay.
     pub fn snapshot(&self) -> BTreeMap<String, Template> {
-        self.entries.iter().filter_map(|(name, layers)| {
-            layers.values().next_back().map(|template| (name.clone(), template.clone()))
-        }).collect()
+        self.entries
+            .iter()
+            .filter_map(|(name, layers)| {
+                layers
+                    .values()
+                    .next_back()
+                    .map(|template| (name.clone(), template.clone()))
+            })
+            .collect()
     }
 
     pub fn snapshot_layers(&self) -> BTreeMap<String, Layer> {
-        self.entries.keys().filter_map(|name| self.layer(name).map(|layer| (name.clone(), layer))).collect()
+        self.entries
+            .keys()
+            .filter_map(|name| self.layer(name).map(|layer| (name.clone(), layer)))
+            .collect()
     }
 
     pub fn names(&self) -> impl Iterator<Item = &str> {
@@ -532,7 +541,9 @@ impl TemplateLibrary {
     /// Resolve a name, applying each flavour over its base.
     pub fn resolve(&self, name: &str) -> Result<Template, String> {
         if !valid_template_name(name) {
-            return Err("invalid template name; use letters, digits, underscores, hyphens and dots".into());
+            return Err(
+                "invalid template name; use letters, digits, underscores, hyphens and dots".into(),
+            );
         }
         let own = self.own(name);
         match name.rsplit_once('.') {
@@ -776,10 +787,15 @@ impl<'a> Compiler<'a> {
             member.insert("id".into(), Value::String(item_id(item, &mut ids)));
             let mut child = self.lower_in(&Value::Object(member), &scoped, stack)?;
             if !Value::Object(copy.clone()).to_string().contains("${item}")
-                && copy.get("use").and_then(Value::as_str)
+                && copy
+                    .get("use")
+                    .and_then(Value::as_str)
                     .and_then(|name| self.library.resolve(name).ok())
                     .is_some_and(|template| !template.parameters.contains_key(ITEM))
-                && let Some(prompt) = child.get("prompt").and_then(Value::as_str).map(str::to_owned)
+                && let Some(prompt) = child
+                    .get("prompt")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
             {
                 child["prompt"] = Value::String(format!("{prompt}\n\nItem: {item}"));
             }
@@ -1058,7 +1074,8 @@ impl<'a> Compiler<'a> {
             leaf.remove("tier");
         }
         leaf.extend(overrides);
-        if template.brief.is_some() && !leaf.contains_key("acceptance_checks")
+        if template.brief.is_some()
+            && !leaf.contains_key("acceptance_checks")
             && let Some(brief) = leaf.get("prompt").cloned()
         {
             leaf.insert("acceptance_checks".into(), Value::Array(vec![brief]));

@@ -173,8 +173,8 @@ impl Factory {
             .load_dir(Layer::Repository, &self.cwd.join(".provenant/templates"))
             .map_err(graph_input_reason)?;
         if let Some(inline) = inline.filter(|value| !value.is_null()) {
-            let templates: BTreeMap<String, Template> = serde_json::from_value(inline.clone())
-                .map_err(graph_input_reason)?;
+            let templates: BTreeMap<String, Template> =
+                serde_json::from_value(inline.clone()).map_err(graph_input_reason)?;
             library = library
                 .with(Layer::Inline, &templates)
                 .map_err(graph_input_reason)?;
@@ -319,10 +319,23 @@ impl Factory {
         if let Some(document) = lane_document.filter(|document| document.get("use").is_none()) {
             let mut template = document.clone();
             if let Some(fields) = template.as_object_mut() {
-                for key in ["schema_version", "graph_id", "templates", "integration_branch",
-                    "limits", "delivery", "review_base", "context", "decision_session", "review",
-                    "retry", "exclude", "network", "capability", "no_capability"]
-                {
+                for key in [
+                    "schema_version",
+                    "graph_id",
+                    "templates",
+                    "integration_branch",
+                    "limits",
+                    "delivery",
+                    "review_base",
+                    "context",
+                    "decision_session",
+                    "review",
+                    "retry",
+                    "exclude",
+                    "network",
+                    "capability",
+                    "no_capability",
+                ] {
                     fields.remove(key);
                 }
             }
@@ -456,9 +469,15 @@ impl Factory {
             )
             .map_err(graph_input_reason)?
         };
-        document.extra.insert("template_layers".into(), json!(library.snapshot_layers()));
-        document.extra.insert("template_library".into(), json!(library.snapshot()));
-        document.extra.insert("template_resolvers".into(), json!(resolver));
+        document
+            .extra
+            .insert("template_layers".into(), json!(library.snapshot_layers()));
+        document
+            .extra
+            .insert("template_library".into(), json!(library.snapshot()));
+        document
+            .extra
+            .insert("template_resolvers".into(), json!(resolver));
         if let Some(raw) = raw {
             let mut compiled = encode(&document)?;
             for key in [
@@ -1077,17 +1096,46 @@ mod tests {
         assert!(text.contains("review.typo.toml"), "{text}");
         assert!(text.contains("acess"), "{text}");
         let wire = serde_json::to_value(&error)?;
-        assert!(wire["detail"].as_str().ok_or("wire detail")?.contains("acess"));
+        assert!(
+            wire["detail"]
+                .as_str()
+                .ok_or("wire detail")?
+                .contains("acess")
+        );
         std::fs::remove_file(path)?;
         let cancel = CancelToken::new();
         let budget = WaitBudget::cli(factory.clock.mono_now(), 10)?;
-        let error = factory.graph_document(json!({"op":"run", "use":"task.typo", "explain":true}), budget, &cancel).unwrap_err();
-        assert!(error.diagnostic().detail.ok_or("template refusal")?.contains("unknown template flavour task.typo"));
-        let error = factory.graph_document(json!({"op":"run", "document":{"graph_id":"cycle", "nodes":[
+        let error = factory
+            .graph_document(
+                json!({"op":"run", "use":"task.typo", "explain":true}),
+                budget,
+                &cancel,
+            )
+            .unwrap_err();
+        assert!(
+            error
+                .diagnostic()
+                .detail
+                .ok_or("template refusal")?
+                .contains("unknown template flavour task.typo")
+        );
+        let error = factory
+            .graph_document(
+                json!({"op":"run", "document":{"graph_id":"cycle", "nodes":[
             {"id":"a", "use":"task", "after":["b"]},
             {"id":"b", "use":"task", "after":["a"]}
-        ]}, "explain":true}), budget, &cancel).unwrap_err();
-        assert!(error.diagnostic().detail.ok_or("patch refusal")?.contains("cycle"));
+        ]}, "explain":true}),
+                budget,
+                &cancel,
+            )
+            .unwrap_err();
+        assert!(
+            error
+                .diagnostic()
+                .detail
+                .ok_or("patch refusal")?
+                .contains("cycle")
+        );
         Ok(())
     }
 
@@ -1097,15 +1145,34 @@ mod tests {
         let factory = factory(&rig)?;
         let directory = rig.project.join(".provenant/templates");
         std::fs::create_dir_all(&directory)?;
-        std::fs::write(directory.join("review.local.toml"), "brief = \"Review local invariants\"\n")?;
+        std::fs::write(
+            directory.join("review.local.toml"),
+            "brief = \"Review local invariants\"\n",
+        )?;
         let cancel = CancelToken::new();
         let budget = WaitBudget::cli(factory.clock.mono_now(), 10)?;
-        let response = factory.graph_document(json!({"op":"run", "use":"task", "over":["alpha","beta"], "explain":true}), budget, &cancel)?;
+        let response = factory.graph_document(
+            json!({"op":"run", "use":"task", "over":["alpha","beta"], "explain":true}),
+            budget,
+            &cancel,
+        )?;
         let document: GraphDocument = serde_json::from_value(response["document"].clone())?;
-        assert_eq!(document.extra["template_library"]["review.local"]["brief"], "Review local invariants");
-        assert!(document.extra["template_resolvers"].get("review-panel").is_some());
+        assert_eq!(
+            document.extra["template_library"]["review.local"]["brief"],
+            "Review local invariants"
+        );
+        assert!(
+            document.extra["template_resolvers"]
+                .get("review-panel")
+                .is_some()
+        );
         let expanded = document.expanded(&factory.context.config.graph.limits)?;
-        let prompts: Vec<_> = expanded.nodes.iter().filter(|node| node.composite.is_none()).map(|node| node.prompt.as_str()).collect();
+        let prompts: Vec<_> = expanded
+            .nodes
+            .iter()
+            .filter(|node| node.composite.is_none())
+            .map(|node| node.prompt.as_str())
+            .collect();
         assert_eq!(prompts.len(), 2);
         assert!(prompts[0].contains("alpha"));
         assert!(prompts[1].contains("beta"));
