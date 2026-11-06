@@ -155,17 +155,16 @@ pub(super) fn append_changes(
                         &attempt.outcome,
                     ),
                 )?;
-                let identity = match &attempt.attempt_ref {
-                    Some(reference) => digest(reference)?,
-                    None => digest(&(&attempt.key, attempt.settled))?,
-                };
+                // Reservations without a reference are trace events but not yet
+                // countable attempts; the reference may arrive on a later save.
+                let identity = attempt.attempt_ref.as_ref().map(digest).transpose()?;
                 let template = expanded
                     .as_ref()
                     .and_then(|graph| graph.nodes.iter().find(|candidate| candidate.id == node.id))
                     .and_then(|node| node.extra.get("template"))
                     .and_then(Value::as_str)
                     .unwrap_or("unknown");
-                observation.attempt = Some(AttemptEvent {
+                observation.attempt = identity.map(|identity| AttemptEvent {
                     identity,
                     tier: attempt
                         .route
