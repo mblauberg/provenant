@@ -69,19 +69,30 @@ pub struct ChildRequest {
 impl ChildRequest {
     /// An explicit worktree is an existing binding, not a request to create one.
     pub fn needs_worktree_provisioning(&self) -> bool {
-        self.writer && self.launch.as_ref().and_then(|launch| launch.node.get("worktree"))
-            .and_then(Value::as_str).is_none()
+        self.writer
+            && self
+                .launch
+                .as_ref()
+                .and_then(|launch| launch.node.get("worktree"))
+                .and_then(Value::as_str)
+                .is_none()
     }
 
     /// Whether this launch contains a writer, including below fan-out boundaries.
     pub fn has_writers(&self) -> bool {
         fn writes(node: &Value) -> bool {
-            node["access"] == "worktree_write" || ["/composite/nodes", "/loop/body"].iter().any(|pointer| {
-                node.pointer(pointer).and_then(Value::as_array)
-                    .is_some_and(|nodes| nodes.iter().any(writes))
-            })
+            node["access"] == "worktree_write"
+                || ["/composite/nodes", "/loop/body"].iter().any(|pointer| {
+                    node.pointer(pointer)
+                        .and_then(Value::as_array)
+                        .is_some_and(|nodes| nodes.iter().any(writes))
+                })
         }
-        self.writer || self.launch.as_ref().is_some_and(|launch| writes(&launch.node))
+        self.writer
+            || self
+                .launch
+                .as_ref()
+                .is_some_and(|launch| writes(&launch.node))
     }
 }
 
@@ -171,10 +182,15 @@ pub fn historical_parent_of_attempt<'a>(
 }
 
 fn writer_worktree(graph: &str, node: &str, request: &ChildRequest) -> Option<String> {
-    request.writer.then(|| request.launch.as_ref()
-        .and_then(|launch| launch.node.get("worktree"))
-        .and_then(Value::as_str).map(str::to_owned)
-        .unwrap_or_else(|| child_worktree(graph, node)))
+    request.writer.then(|| {
+        request
+            .launch
+            .as_ref()
+            .and_then(|launch| launch.node.get("worktree"))
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .unwrap_or_else(|| child_worktree(graph, node))
+    })
 }
 
 /// Honest-stop nodes continue their source's logical work. Follow recorded
@@ -192,14 +208,22 @@ fn logical_parent(checkpoint: &GraphCheckpoint, parent: &str) -> String {
     current.to_owned()
 }
 
-fn request_key(checkpoint: &GraphCheckpoint, parent: &str, request: &ChildRequest) -> Result<String, PatchError> {
-    CanonicalV1::record_digest("graph-child-key", 1, &(logical_parent(checkpoint, parent), &request.idempotency_key))
-        .map(|digest| format!("child:{}", digest))
-        .map_err(|error| PatchError {
-            cause: None,
-            code: "invalid",
-            message: error.to_string(),
-        })
+fn request_key(
+    checkpoint: &GraphCheckpoint,
+    parent: &str,
+    request: &ChildRequest,
+) -> Result<String, PatchError> {
+    CanonicalV1::record_digest(
+        "graph-child-key",
+        1,
+        &(logical_parent(checkpoint, parent), &request.idempotency_key),
+    )
+    .map(|digest| format!("child:{}", digest))
+    .map_err(|error| PatchError {
+        cause: None,
+        code: "invalid",
+        message: error.to_string(),
+    })
 }
 
 /// The earlier receipt for this request's idempotency key, if any. It compares
@@ -231,7 +255,8 @@ pub fn replay_child(
         return Ok(None);
     };
     let original_parent = record.parent.as_deref().unwrap_or_default();
-    let same_parent = logical_parent(checkpoint, original_parent) == logical_parent(checkpoint, parent);
+    let same_parent =
+        logical_parent(checkpoint, original_parent) == logical_parent(checkpoint, parent);
     if !same_parent
         || record.extra.get(REQUEST_DIGEST).and_then(Value::as_str) != Some(digest.as_str())
     {
@@ -355,20 +380,27 @@ pub fn admit_child_bound(
             for pointer in ["/composite/nodes", "/loop/body"] {
                 if let Some(children) = node.pointer_mut(pointer).and_then(Value::as_array_mut) {
                     boundary = true;
-                    for child in children { bind_writers(child, branch, commit, false); }
+                    for child in children {
+                        bind_writers(child, branch, commit, false);
+                    }
                 }
             }
             if !boundary && node["access"] == "worktree_write" {
                 if node.get("delivery").is_none_or(Value::is_null) {
-                    node["delivery"] = serde_json::json!(provenant_records::run::DeliveryMode::Integrate(branch.into()));
+                    node["delivery"] = serde_json::json!(
+                        provenant_records::run::DeliveryMode::Integrate(branch.into())
+                    );
                 }
                 if node.get("source").is_none_or(Value::is_null)
-                    && (provision_root || node.get("worktree").and_then(Value::as_str).is_none()) {
+                    && (provision_root || node.get("worktree").and_then(Value::as_str).is_none())
+                {
                     node["source"] = serde_json::json!({"type":"commit", "commit":commit});
                 }
             }
         }
-        for node in &mut patch.nodes { bind_writers(node, branch, commit, request.needs_worktree_provisioning()); }
+        for node in &mut patch.nodes {
+            bind_writers(node, branch, commit, request.needs_worktree_provisioning());
+        }
     }
     {
         let progress = graph
@@ -439,8 +471,14 @@ fn child_patch(
     context: &PatchContext<'_>,
 ) -> Result<Patch, PatchError> {
     if let Some(launch) = &request.launch {
-        let library = context.library.with(template::Layer::Inline, &launch.templates)
-            .map_err(|message| PatchError { cause: None, code: "invalid", message })?;
+        let library = context
+            .library
+            .with(template::Layer::Inline, &launch.templates)
+            .map_err(|message| PatchError {
+                cause: None,
+                code: "invalid",
+                message,
+            })?;
         let mut node = launch.node.clone();
         node["id"] = request.id.clone().into();
         if let Some(path) = worktree {
@@ -450,9 +488,16 @@ fn child_patch(
                 node["write_scope"] = serde_json::json!(request.write_scope);
             }
         }
-        let mut compiled = Compiler { library: &library, resolvers: context.resolvers }
-            .lower(&node)
-            .map_err(|message| PatchError { cause: None, code: "invalid", message })?;
+        let mut compiled = Compiler {
+            library: &library,
+            resolvers: context.resolvers,
+        }
+        .lower(&node)
+        .map_err(|message| PatchError {
+            cause: None,
+            code: "invalid",
+            message,
+        })?;
         inherit_child_controls(&mut compiled, request);
         return Ok(Patch {
             schema_version: PATCH_SCHEMA_VERSION,
@@ -768,16 +813,26 @@ pub(super) fn settle_subtrees<R: AttemptOwner, J: GraphJournal>(
 /// Child states visible to their parent, including terminal delivery outcomes.
 pub fn child_states(checkpoint: &GraphCheckpoint, parent: &str) -> Value {
     let logical = logical_parent(checkpoint, parent);
-    let roots: Vec<_> = checkpoint.expansions.iter().filter(|expansion| {
-        expansion.patch.as_ref().and_then(|record| record.parent.as_deref())
-            .is_some_and(|source| logical_parent(checkpoint, source) == logical)
-    }).flat_map(|expansion| expansion.nodes.iter().map(|node| &node.id)).collect();
+    let roots: Vec<_> = checkpoint
+        .expansions
+        .iter()
+        .filter(|expansion| {
+            expansion
+                .patch
+                .as_ref()
+                .and_then(|record| record.parent.as_deref())
+                .is_some_and(|source| logical_parent(checkpoint, source) == logical)
+        })
+        .flat_map(|expansion| expansion.nodes.iter().map(|node| &node.id))
+        .collect();
     let children: Vec<_> = checkpoint
         .nodes
         .iter()
-        .filter(|node| roots.iter().any(|root| {
-            node.id == **root || node.id.starts_with(&format!("{root}--"))
-        }))
+        .filter(|node| {
+            roots
+                .iter()
+                .any(|root| node.id == **root || node.id.starts_with(&format!("{root}--")))
+        })
         .map(|node| {
             serde_json::json!({"node":node.id, "state":node.state,
             "settled":node.state.settled()})

@@ -1273,7 +1273,11 @@ pub(super) fn flatten_fragment(
     let mut local_nodes = local_nodes;
     fn provision_paths(nodes: &mut [GraphNode], graph: &str, prefix: &str) {
         for child in nodes {
-            let id = if prefix.is_empty() { child.id.clone() } else { format!("{prefix}--{}", child.id) };
+            let id = if prefix.is_empty() {
+                child.id.clone()
+            } else {
+                format!("{prefix}--{}", child.id)
+            };
             if child.access == AccessMode::WorktreeWrite && child.worktree.is_none() {
                 child.worktree = Some(super::relay::child_worktree(graph, &id));
                 child.extra.insert("provision_worktree".into(), true.into());
@@ -1286,7 +1290,11 @@ pub(super) fn flatten_fragment(
             }
         }
     }
-    provision_paths(&mut local_nodes, &document.graph_id, parent.map_or("", |parent| parent.id.as_str()));
+    provision_paths(
+        &mut local_nodes,
+        &document.graph_id,
+        parent.map_or("", |parent| parent.id.as_str()),
+    );
     for existing in document
         .nodes
         .iter()

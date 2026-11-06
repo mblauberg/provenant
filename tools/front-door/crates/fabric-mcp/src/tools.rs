@@ -1675,7 +1675,7 @@ fn lane_children(
                 writer: task.access == AccessMode::WorktreeWrite,
                 write_scope: Vec::new(),
                 launch: None,
-        detached: false,
+                detached: false,
                 idempotency_key: format!("fabric-run-{}-{index}", &digest[7..]),
                 reason: Some("fabric_run".into()),
             }))
