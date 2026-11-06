@@ -212,12 +212,7 @@ impl BinaryRunOwner<'_> {
     ) -> Result<provenant_cli::run::Session, FacadeError> {
         let ctx = &self.factory.context;
         let context = provenant_run::ExecutionContext {
-            state_root: provenant_cli::run::execution_state(
-                &ctx.roots,
-                &self.factory.home,
-                &self.factory.assets,
-            )
-            .map_err(fail_error)?,
+            state_root: ctx.roots.state.clone(),
             project_id: ctx.identity.project,
             actor_id: self.actor.unwrap_or(ctx.identity.inbox.actor),
             read_prompts: true,
@@ -360,145 +355,6 @@ impl BinaryRunOwner<'_> {
             )
             .map_err(run_error)
     }
-    /// Read the current policy successor on its owning host without launching work.
-    pub(crate) fn graph_policy_tail(
-        &self,
-        target: AttemptTarget,
-        budget: WaitBudget,
-        cancel: &CancelToken,
-    ) -> Result<provenant_records::run::AttemptRecord, FacadeError> {
-        let host = target.host.unwrap_or(self.factory.context.identity.host);
-        if host != self.factory.context.identity.host {
-            if !self.allow_remote {
-                return Err(FacadeError::ConfinementRefused);
-            }
-            return self.graph_policy_tail_remote(target, budget, cancel);
-        }
-        let store = self.store(cancel)?;
-        let call = self.call(cancel);
-        let service = provenant_run::Service::new(&store);
-        let mut tail = store
-            .policy_tail(target.attempt, &call)
-            .map_err(run_error)?
-            .attempt_id;
-        // Settlement terminates an attempt and queues its successor in one
-        // transaction, so it can land between the tail lookup and the status
-        // read. Accept a status only while its attempt is still the tail; a
-        // terminal predecessor must never stand in for a live successor.
-        loop {
-            let record = service.status(tail, &call).map_err(run_error)?;
-            let current = store
-                .policy_tail(target.attempt, &call)
-                .map_err(run_error)?
-                .attempt_id;
-            if current == tail {
-                return Ok(record);
-            }
-            tail = current;
-        }
-    }
-
-    /// Peers expose the host-authored chain through list and status.
-    pub(crate) fn graph_policy_tail_remote(
-        &self,
-        target: AttemptTarget,
-        budget: WaitBudget,
-        cancel: &CancelToken,
-    ) -> Result<provenant_records::run::AttemptRecord, FacadeError> {
-        // One pass lists the run, then reads each candidate's state, so a
-        // successor queued after the list read is invisible to that pass. Settlement
-        // commits a terminal state and its successor together, so a later pass that
-        // lists after the earlier pass's read and finds the same tail proves the
-        // earlier record has no successor. Return that earlier record.
-        confirm_stable_tail(
-            || self.graph_policy_tail_remote_pass(target.clone(), budget, cancel),
-            |record| record.attempt_id,
-        )
-    }
-
-    pub(crate) fn graph_policy_tail_remote_pass(
-        &self,
-        target: AttemptTarget,
-        budget: WaitBudget,
-        cancel: &CancelToken,
-    ) -> Result<provenant_records::run::AttemptRecord, FacadeError> {
-        let host = target
-            .host
-            .ok_or(FacadeError::InvalidInput { detail: None })?;
-        let mut current = self.snapshot(target.clone(), budget, cancel)?;
-        let mut candidates = std::collections::BTreeMap::new();
-        let mut after = None;
-        let mut seen = std::collections::BTreeSet::new();
-        loop {
-            let result = self.peer(
-                host,
-                PeerAction::Run {
-                    extra: Default::default(),
-                    input: RunInput::List {
-                        extra: Default::default(),
-                        after: after.clone(),
-                        limit: 100,
-                    },
-                },
-                budget,
-                cancel,
-            )?;
-            let PeerResult::Run { data, .. } = result else {
-                return Err(FacadeError::StateCorrupt);
-            };
-            let RunResult::List { page, .. } = *data else {
-                return Err(FacadeError::StateCorrupt);
-            };
-            let mut reached = false;
-            for item in page.items {
-                if item.attempt_id == target.attempt {
-                    reached = true;
-                    break;
-                }
-                if item.run_id == current.run_id && item.task_id == current.task_id {
-                    let candidate = self.snapshot(
-                        AttemptTarget {
-                            extra: Default::default(),
-                            host: Some(host),
-                            attempt: item.attempt_id,
-                        },
-                        budget,
-                        cancel,
-                    )?;
-                    if candidates
-                        .insert(candidate.attempt_number, candidate)
-                        .is_some()
-                    {
-                        return Err(FacadeError::StateCorrupt);
-                    }
-                }
-            }
-            if reached {
-                break;
-            }
-            let next = page.next_after.ok_or(FacadeError::StateCorrupt)?;
-            if !seen.insert(next.attempt) {
-                return Err(FacadeError::StateCorrupt);
-            }
-            after = Some(next);
-        }
-        for _ in 0..provenant_run::POLICY_ATTEMPT_CEILING {
-            let Some(next) = candidates.remove(&current.attempt_number.saturating_add(1)) else {
-                return Ok(current);
-            };
-            if next.retry_of != Some(current.attempt_id)
-                || !matches!(
-                    next.continuation.as_deref(),
-                    Some("policy_continuation" | "policy_fallback")
-                )
-            {
-                return Ok(current);
-            }
-            current = next;
-        }
-        Err(FacadeError::StateCorrupt)
-    }
-
     pub(crate) fn snapshots_local(
         &self,
         targets: &[AttemptTarget],
@@ -516,16 +372,10 @@ impl BinaryRunOwner<'_> {
         targets
             .iter()
             .map(|target| {
-                let mut record = session
+                let record = session
                     .service()
                     .status_for_wait(target.attempt, &call)
                     .map_err(run_error)?;
-                let tail = session
-                    .store
-                    .policy_tail(target.attempt, &call)
-                    .map_err(run_error)?;
-                record.superseded_by =
-                    (tail.attempt_id != target.attempt).then_some(tail.attempt_id);
                 Ok(record)
             })
             .collect()
@@ -556,14 +406,7 @@ impl BinaryRunOwner<'_> {
                 &self.call(cancel),
             )
             .map_err(run_error)?;
-        let mut lanes = page.lanes;
-        for lane in &mut lanes {
-            let tail = store
-                .policy_tail(lane.attempt_id, &self.call(cancel))
-                .map_err(run_error)?;
-            lane.superseded_by = (tail.attempt_id != lane.attempt_id).then_some(tail.attempt_id);
-        }
-        Ok(lanes)
+        Ok(page.lanes)
     }
     /// The wait of each queued or starting lane among `targets`, for `PeerAction::LaneWaits`.
     pub(crate) fn waits_local(
@@ -947,14 +790,7 @@ impl BinaryRunOwner<'_> {
             .service()
             .status(target.attempt, &call)
             .map_err(run_error)?;
-        let tail = session
-            .store
-            .policy_tail(record.attempt_id, &call)
-            .map_err(run_error)?;
-        let successors = (tail.attempt_id != record.attempt_id)
-            .then_some((record.attempt_id, tail.attempt_id))
-            .into_iter()
-            .collect();
+        let successors = Default::default();
         let mut row = provenant_cli::run::project_lane(
             &record,
             &[],
@@ -1221,7 +1057,7 @@ impl BinaryRunOwner<'_> {
                             attempts[*index] = Some(
                                 session
                                     .store
-                                    .policy_tail(targets[*index].attempt, &local_call)
+                                    .record(targets[*index].attempt, &local_call)
                                     .map_err(run_error)?,
                             );
                         }

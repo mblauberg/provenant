@@ -26,7 +26,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-mod assess;
 mod cancel;
 mod children;
 pub mod cloud_owner;
@@ -44,7 +43,6 @@ mod telemetry;
 mod wait;
 mod watch;
 mod worktree;
-use assess::*;
 pub use cancel::*;
 pub use children::HostHolder;
 pub use dispatch::*;
@@ -277,6 +275,14 @@ impl Registry<'_> {
         Ok(())
     }
 }
+const CAPACITY: &str = "provider capacity";
+
+fn capacity_reason(reason: &str) -> bool {
+    reason
+        .strip_prefix(CAPACITY)
+        .is_some_and(|rest| rest.starts_with(": "))
+}
+
 impl run::Providers for Registry<'_> {
     fn runtime_cap(&self, provider: &str) -> Option<u64> {
         provenant_config::read_with_domains(self.roots?, &crate::domains::SECTIONS)
@@ -284,113 +290,6 @@ impl run::Providers for Registry<'_> {
             .providers
             .get(provider)?
             .runtime_deadline_seconds
-    }
-    fn assess_result(
-        &self,
-        task: &run::TaskRequest,
-        record: &run::AttemptRecord,
-        decoded: &run::Decoded,
-        handoff: Option<&provenant_records::handoff::Handoff>,
-        context: Option<&run::HolderContext>,
-        policy_attempt: u64,
-    ) -> Result<run::ResultAssessment, String> {
-        let Some(route) = record.applied_route.as_ref() else {
-            return Ok(Default::default());
-        };
-        let Some(model) = route.model.as_deref() else {
-            return Ok(Default::default());
-        };
-        let model = ModelId::parse(model).map_err(|error| error.to_string())?;
-        let context_roots = context
-            .map(|context| {
-                let mut inputs = provenant_core::RootInputs::new(
-                    context.roots.home.clone(),
-                    context.roots.checkout.clone(),
-                );
-                inputs.state_dir = Some(context.disk_roots().0.to_owned());
-                inputs
-                    .resolve(&provenant_os::fs::SystemPathResolver)
-                    .map_err(|error| error.to_string())
-            })
-            .transpose()?;
-        let routing = match context_roots.as_ref().or(self.roots) {
-            Some(roots) => {
-                provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)
-                    .map_err(|error| error.to_string())?
-                    .domains
-                    .routing
-            }
-            None => Default::default(),
-        };
-        let now = SystemClock::new()
-            .wall_now()
-            .map_err(|error| error.to_string())?;
-        let policy = routing
-            .model_policy
-            .effective(&model, route.account_key.as_deref(), now)
-            .policy;
-        let mut assessment =
-            assess_model_result(&policy, task, record, decoded, handoff, policy_attempt)?;
-        if route.extra.contains_key("host_native") {
-            // The host row is fresh-only. Provider-level policy retries would
-            // reconstruct a model route and lose its agent and provenance.
-            assessment.retry = None;
-            return Ok(assessment);
-        }
-        if assessment.refusal.is_some() || assessment.retry.is_some() {
-            return Ok(assessment);
-        }
-        // A quota-stopped writer with a recorded unfinished handoff may
-        // continue its retained worktree on another eligible account.
-        let quota_handoff_recovery =
-            if quota_handoff_recovery_eligible(decoded.outcome, task, handoff) {
-                if let (Some(roots), Some(adapter), Some(key)) = (
-                    context_roots.as_ref().or(self.roots),
-                    route.provider.as_deref(),
-                    route.account_key.as_deref(),
-                ) {
-                    let config =
-                        provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)
-                            .map_err(|error| error.to_string())?;
-                    let accounts = config.domains.accounts.with_derived_accounts();
-                    let quota =
-                        crate::quota::read_cache_at(roots.state.as_path()).unwrap_or_default();
-                    let (quota, policies) = crate::route::account_evidence(
-                        &config.domains.quota,
-                        quota,
-                        now.unix_seconds(),
-                        REGISTRY,
-                    );
-                    let catalogue = provenant_routing::Catalogue::bundled()
-                        .map_err(|error| error.to_string())?;
-                    unspent_alternative(
-                        accounts
-                            .entries
-                            .values()
-                            .filter(|entry| entry.adapter == adapter)
-                            .map(|entry| entry.key.as_str()),
-                        &quota,
-                        &policies,
-                        key,
-                        &model,
-                        &catalogue,
-                        now.unix_seconds(),
-                    )
-                } else {
-                    false
-                }
-            } else {
-                false
-            };
-        Ok(assess_settlement_retry(
-            &routing,
-            task,
-            record,
-            decoded,
-            policy_attempt,
-            now.unix_seconds(),
-            quota_handoff_recovery,
-        ))
     }
     fn priority(&self, task: &run::TaskRequest) -> Result<u8, String> {
         let roots = self.roots.ok_or("routing context is unavailable")?;
@@ -444,7 +343,7 @@ impl run::Providers for Registry<'_> {
         // identity lookup has no `.local/share` fallback and decodes capture
         // nothing when the launch environment unset `XDG_DATA_HOME`.
         let holder_home = Some(context.roots.home.as_path());
-        // A child store must never write host capacity evidence.
+        // Only the configured host store may write shared capacity evidence.
         if configuration_root != context.roots.state_root {
             return Registry {
                 home: holder_home,
@@ -842,8 +741,7 @@ impl Registry<'_> {
             }
             reason.truncate(end);
             // Routing reads the shared quota store, which a lane can neither
-            // read nor write: a nested refusal stays in the attempt reason
-            // rather than landing in a child store nothing routes from. A
+            // read nor write: a lane refusal stays in the attempt reason. A
             // refusal without a pool holds only this model on a known account.
             let lane = std::env::var_os(provenant_core::RUN_STATE_DIRECTORY_ENV).is_some();
             if !lane && (pool.is_some() || route.account_key.is_some()) {
@@ -1043,40 +941,12 @@ impl Session {
 fn request<'a>(clock: &'a SystemClock, cancel: &'a CancelToken) -> Result<run::Request<'a>, Fail> {
     Ok(run::Request { clock, cancel })
 }
-/// Shared Fabric identity/config, isolated Run custody for a lane's children.
-pub fn execution_state(
-    roots: &Roots,
-    home: &Path,
-    assets: &Path,
-) -> Result<provenant_core::StateRoot, Fail> {
-    let Some(path) = std::env::var_os(provenant_core::RUN_STATE_DIRECTORY_ENV) else {
-        return Ok(roots.state.clone());
-    };
-    let mut inputs = provenant_core::RootInputs::new(home.into(), assets.into());
-    inputs.state_dir = Some(path.into());
-    let state = inputs
-        .resolve(&provenant_os::fs::SystemPathResolver)
-        .map_err(|error| Fail::new(Status::Refused, ErrorKind::LaneContext, error.to_string()))?
-        .state;
-    if !state
-        .as_path()
-        .starts_with(roots.state.as_path().join("children"))
-    {
-        return Err(Fail::new(
-            Status::Refused,
-            ErrorKind::LaneContext,
-            "child Run store is outside the lane namespace",
-        ));
-    }
-    Ok(state)
-}
-
 fn execution_context(edge: &Edge<'_>) -> Result<run::ExecutionContext, Fail> {
     let (roots, project_id, actor_id) =
         crate::fabric::identity(edge.roots.clone(), edge.home, edge.cwd)
             .map_err(|error| Fail::new(Status::Error, ErrorKind::Identity, error.to_string()))?;
     Ok(run::ExecutionContext {
-        state_root: execution_state(&roots, edge.home, edge.assets)?,
+        state_root: roots.state.clone(),
         project_id,
         actor_id,
         read_prompts: true,

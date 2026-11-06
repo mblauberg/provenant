@@ -443,20 +443,6 @@ impl<'a> Service<'a> {
     pub fn status(&self, id: AttemptId, call: &Request<'_>) -> Result<AttemptRecord> {
         self.custody_state(self.store.record(id, call)?, call)
     }
-    /// Resolve a lineage's live attempt with custody-aware status. This is the
-    /// single way to combine status and policy-tail reads.
-    pub fn live_tail(&self, id: AttemptId, call: &Request<'_>) -> Result<AttemptRecord> {
-        let mut current = id;
-        for _ in 0..crate::POLICY_ATTEMPT_CEILING {
-            let status = self.status(current, call)?;
-            let tail = self.store.policy_tail(status.attempt_id, call)?;
-            if tail.attempt_id == status.attempt_id {
-                return Ok(status);
-            }
-            current = tail.attempt_id;
-        }
-        Err(RunError::Validation("policy successor chain limit"))
-    }
     /// Return the terminal decision and separately indicate custody retention.
     pub fn status_for_wait(&self, id: AttemptId, call: &Request<'_>) -> Result<AttemptRecord> {
         self.status(id, call)

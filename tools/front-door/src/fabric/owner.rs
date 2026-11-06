@@ -1248,28 +1248,6 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
         )))
     }
 
-    fn retry_successors(&mut self, reference: &str) -> Result<u64, FacadeError> {
-        let (host, attempt) = reference.split_once('/').ok_or(FacadeError::StateCorrupt)?;
-        if host != self.factory.context.identity.host.to_string() {
-            // Unknown remote lineage must never grant fresh retry allowance.
-            return Ok(u64::from(provenant_routing::MAX_SETTLEMENT_RETRIES));
-        }
-        let owner = BinaryRunOwner {
-            factory: self.factory,
-            allow_remote: true,
-            actor: None,
-            chair: None,
-        };
-        let store = owner.store(self.cancel)?;
-        let attempt = attempt.parse().map_err(|_| FacadeError::StateCorrupt)?;
-        let call = owner.call(self.cancel);
-        let record = store.record(attempt, &call).map_err(run_error)?;
-        Ok(store
-            .policy_attempt_number(&record, &call)
-            .map_err(run_error)?
-            .saturating_sub(1))
-    }
-
     fn preparation_fallback_evidence(
         &mut self,
         key: &provenant_fabric_runtime::graph::AttemptKey,
@@ -1889,7 +1867,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                     return Ok(matches!(observation, provenant_fabric_runtime::graph::AttemptObservation::Terminal { .. }));
                 }
             }
-            let record = owner.graph_policy_tail(target, self.budget, self.cancel)?;
+            let record = owner.snapshot(target, self.budget, self.cancel)?;
             return Ok(matches!(
                 record.state,
                 provenant_records::run::AttemptState::Terminal { .. }
@@ -2607,21 +2585,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                 return Ok(observation);
             }
         }
-        let mut attempt = owner.snapshot(target.clone(), self.budget, self.cancel)?;
-        let mut reference = reference;
-        if target
-            .host
-            .is_none_or(|host| host == self.factory.context.identity.host)
-        {
-            let store = owner.store(self.cancel)?;
-            attempt = store
-                .policy_tail(attempt.attempt_id, &owner.call(self.cancel))
-                .map_err(run_error)?;
-            reference = Some(format!(
-                "{}/{}",
-                self.factory.context.identity.host, attempt.attempt_id
-            ));
-        }
+        let attempt = owner.snapshot(target.clone(), self.budget, self.cancel)?;
         use provenant_records::run::{AttemptState, Outcome};
         match attempt.state {
             AttemptState::Terminal { outcome, .. } => {

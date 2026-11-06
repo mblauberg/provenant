@@ -179,7 +179,7 @@ pub fn status(command: crate::Status, _json_output: bool, edge: &Edge<'_>) -> Re
             // The compact view keeps the paths a writer may change unreviewed.
             compact.lines.push(exempt_line.trim_end().to_owned());
             let mut human = format!("{human}{exempt_line}");
-            let successors = policy_successors(&session, &rows, &call)?;
+            let successors = Default::default();
             let (mut data, _) = render_lanes_with_lineage(
                 &rows,
                 &waits,
@@ -685,12 +685,6 @@ pub(super) fn report(
     let canonical = session.store.request(record.run_id, call)?;
     if let Some(rows) = data["lanes"].as_array_mut() {
         for row in rows {
-            if let Some(id) = row["attempt_id"].as_str().and_then(|id| id.parse().ok()) {
-                let tail = session.store.policy_tail(id, call)?;
-                if tail.attempt_id != id {
-                    row["superseded_by"] = json!(tail.attempt_id);
-                }
-            }
             if let Some(task) = canonical
                 .tasks
                 .iter()
@@ -823,7 +817,7 @@ pub fn project_retained_attempt(
             "attempt is not in that run/task",
         ));
     }
-    let successors = policy_successors(&session, std::slice::from_ref(&record), &call)?;
+    let successors = Default::default();
     Ok(project_lane(
         &record,
         &[],
@@ -1366,7 +1360,7 @@ pub(super) fn lanes_inner(
         open_read_only(edge, &call)?
     };
     let Some(store) = store else {
-        let root = execution_state(edge.roots, edge.home, edge.assets)?;
+        let root = &edge.roots.state;
         let cooldowns = read_lane_cooldowns(root.as_path());
         let (mut data, human) = render_lanes(
             &[],
@@ -1483,7 +1477,7 @@ pub(super) fn lanes_inner(
         .map_err(|error| Fail::new(Status::Error, ErrorKind::Io, error))?;
     let waits = session.store.lane_waits(&lanes, &call);
     let cooldowns = read_lane_cooldowns(session.context.state_root.as_path());
-    let successors = policy_successors(&session, &lanes, &call)?;
+    let successors = Default::default();
     let (mut data, mut human) = render_lanes_with_lineage(
         &lanes,
         &waits,

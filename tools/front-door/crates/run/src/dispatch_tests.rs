@@ -3010,7 +3010,6 @@ pub(super) struct Fake {
     partial: Vec<PartialSignal>,
     /// Report `QuotaLimited` only when this exact sealed stderr arrives.
     quota_stderr: Option<&'static [u8]>,
-    assess_empty: bool,
 }
 
 #[test]
@@ -3042,38 +3041,6 @@ fn policy_refusal_skips_provider_preparation_and_preserves_sibling_progress() ->
 }
 
 impl Providers for Fake {
-    fn assess_result(
-        &self,
-        _: &TaskRequest,
-        record: &AttemptRecord,
-        decoded: &Decoded,
-        _: Option<&provenant_records::handoff::Handoff>,
-        _: Option<&crate::HolderContext>,
-        _: u64,
-    ) -> std::result::Result<crate::ResultAssessment, String> {
-        if self.assess_empty
-            && decoded.outcome == Outcome::Succeeded
-            && decoded.complete
-            && decoded.result.is_empty()
-        {
-            return Ok(crate::ResultAssessment {
-                cause: Some(crate::PolicyCause::ResultCheck),
-                refusal: Some("empty result rejected by policy".into()),
-                retry: Some(crate::PolicyRetry {
-                    schema_version: 2,
-                    cause: crate::PolicyCause::ResultCheck,
-                    action: crate::PolicyAction::Retry,
-                    route: record.requested_route.clone(),
-                    resume: false,
-                    max_attempts: 2,
-                    instruction: "Try again".into(),
-                    not_before_unix_seconds: None,
-                }),
-                note: None,
-            });
-        }
-        Ok(Default::default())
-    }
     fn check_policy(&self, task: &TaskRequest) -> std::result::Result<(), String> {
         if self.policy_task == Some(task.task_id) {
             return Err("insufficient disk space; run `provenant gc`".into());
@@ -3366,7 +3333,7 @@ fn settlement_scrubs_provider_session_history() -> TestResult {
 }
 
 #[test]
-fn empty_success_is_assessed_before_settlement_rejects_it() -> TestResult {
+fn empty_success_is_rejected_at_settlement() -> TestResult {
     let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());
     let call = call(&clock, &cancel);
@@ -3391,7 +3358,6 @@ fn empty_success_is_assessed_before_settlement_rejects_it() -> TestResult {
     let fake = Fake {
         observed: Some(route()),
         answer: Some(String::new()),
-        assess_empty: true,
         ..Fake::default()
     };
     let record = store.finish(id, &dir, &observed, &fake, &call)?;
@@ -3402,7 +3368,7 @@ fn empty_success_is_assessed_before_settlement_rejects_it() -> TestResult {
             ..
         }
     ));
-    assert!(store.staged_policy_retry(&record)?.is_some());
+    assert!(store.pending_attempts(run.run_id, &call)?.is_empty());
     Ok(())
 }
 
@@ -3559,7 +3525,6 @@ fn denial_evidence_does_not_turn_an_empty_answer_into_success() -> TestResult {
     let fake = Fake {
         observed: Some(route()),
         answer: Some(String::new()),
-        assess_empty: true,
         ..Fake::default()
     };
     let record = store.finish(id, &dir, &observed, &fake, &call)?;
@@ -3567,7 +3532,13 @@ fn denial_evidence_does_not_turn_an_empty_answer_into_success() -> TestResult {
     assert!(reason.contains("/fixture/missing-grant"), "{reason}");
     assert!(reason.contains("access grant"), "{reason}");
     assert_eq!(terminal(&store, id, &call)?, Outcome::Failed);
-    assert!(store.staged_policy_retry(&record)?.is_some());
+    assert!(matches!(
+        record.state,
+        AttemptState::Terminal {
+            outcome: Outcome::Failed,
+            ..
+        }
+    ));
     Ok(())
 }
 
@@ -8642,70 +8613,6 @@ fn reconcile_does_not_spawn_for_queued_or_terminal_attempts() -> TestResult {
     );
     Ok(())
 }
-
-#[test]
-fn a_policy_retry_launches_for_no_launcher_before_its_sealed_time() -> TestResult {
-    let temp = tempfile::tempdir()?;
-    let (mut clock, cancel) = (clock(), CancelToken::new());
-    let store = RunStore::open(&context(temp.path())?, &call(&clock, &cancel))?;
-    let run = input();
-    store.create(&run, &call(&clock, &cancel))?;
-    super::tests::seal_observation(&store, &run, &exit())?;
-    let id = run.attempts[0].attempt_id;
-    let old = store.record(id, &call(&clock, &cancel))?;
-    let retry = crate::PolicyRetry {
-        schema_version: 2,
-        cause: crate::PolicyCause::Capacity,
-        action: crate::PolicyAction::Retry,
-        route: old.requested_route.clone(),
-        resume: false,
-        max_attempts: 2,
-        instruction: "Complete the original task.".into(),
-        not_before_unix_seconds: Some(60),
-    };
-    assert!(store.stage_policy_retry(&old, &retry, &call(&clock, &cancel))?);
-    store
-        .db
-        .execute("DELETE FROM admission WHERE attempt=?1", [id.to_string()])?;
-    let mut publication = super::tests::publication();
-    publication.outcome = Outcome::Failed;
-    store.publish_terminal(id, 1, &publication, &exit(), &call(&clock, &cancel))?;
-    let next = store.pending_attempts(run.run_id, &call(&clock, &cancel))?[0].attempt_id;
-    let fake = Fake {
-        refuse: true,
-        ..Fake::default()
-    };
-    // Any launcher, such as reconciliation, finds it deferred until then.
-    let started = store.start(
-        run.run_id,
-        &fake,
-        &|_, _| unreachable!(),
-        &call(&clock, &cancel),
-    )?;
-    assert!(matches!(started.as_slice(), [Started::Deferred(attempt)] if *attempt == next));
-    assert_eq!(fake.prepared.get(), 0);
-    clock.advance(provenant_core::DurationMicros::from_seconds(60)?)?;
-    let later = Request {
-        clock: &clock,
-        cancel: &cancel,
-    };
-    // Even after the delay, a result-quality successor cannot start while
-    // the prior attempt's custody remains held or unverifiable.
-    let directory = store.attempt_dir(run.run_id, id, false)?;
-    let custody = directory.try_lock(
-        std::ffi::OsStr::new("custody.lock"),
-        provenant_os::fs::LockMode::Exclusive,
-    )?;
-    let started = store.start(run.run_id, &fake, &|_, _| unreachable!(), &later)?;
-    assert!(matches!(started.as_slice(), [Started::Deferred(attempt)] if *attempt == next));
-    assert_eq!(fake.prepared.get(), 0);
-    drop(custody);
-    let started = store.start(run.run_id, &fake, &|_, _| unreachable!(), &later)?;
-    assert!(matches!(started.as_slice(), [Started::Refused { attempt, .. }] if *attempt == next));
-    assert_eq!(fake.prepared.get(), 1);
-    Ok(())
-}
-
 /// Refuses preparation, after recording whether the launch had a short alias.
 struct RefusesAfterAlias(std::cell::Cell<Option<bool>>);
 
