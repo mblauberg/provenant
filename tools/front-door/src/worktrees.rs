@@ -1566,6 +1566,7 @@ mod human_tests {
     #[allow(dead_code)] // The harness=false driver compiles only the helpers.
     fn info(path: &str) -> Result<worktrees::WorktreeInfo, Box<dyn std::error::Error>> {
         Ok(worktrees::WorktreeInfo {
+            warnings: Vec::new(),
             path: PathBuf::from(path),
             branch: Some("refs/heads/master".into()),
             head: GitOid::parse(&"4a".repeat(20))?,

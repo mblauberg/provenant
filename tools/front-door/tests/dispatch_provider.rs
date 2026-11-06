@@ -5704,7 +5704,7 @@ fn owned_dispatch_refuses_adopted_owner_and_cleans_refused_creation() -> Result 
             result["error"]["message"]
                 .as_str()
                 .unwrap_or_default()
-                .contains("new managed worktree retained for gc"),
+                .contains("new managed worktree retained at"),
             "{result}"
         );
         let admin = rig.execute(

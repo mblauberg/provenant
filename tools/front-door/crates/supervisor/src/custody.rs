@@ -335,15 +335,12 @@ impl CustodyLease {
     fn ensure_lease(&mut self) -> Result<()> {
         if self.lease.is_none() {
             let clock = provenant_os::clock::SystemClock::new();
-            let observation = writer_admission_guard(&self.lock_directory)?;
-            self.lease = Some(self.lock_directory.lock(
-                OsStr::new("writer.lock"),
-                LockMode::Exclusive,
+            self.lease = Some(lock_writer_exclusion(
+                &self.lock_directory,
                 WaitBudget::cli(clock.mono_now(), 5).map_err(|_| CustodyError::InvalidRecord)?,
                 &CancelToken::new(),
                 &clock,
             )?);
-            drop(observation);
         }
         Ok(())
     }
@@ -412,20 +409,11 @@ pub(crate) fn acquire_writer_with_observer(
     clock: &dyn Clock,
     observer: &dyn ProcessObserver,
 ) -> Result<CustodyLease> {
-    let observation = writer_admission_guard(&directory)?;
-    let lease = directory
-        .lock(
-            OsStr::new("writer.lock"),
-            LockMode::Exclusive,
-            budget,
-            cancel,
-            clock,
-        )
-        .map_err(|error| match error {
-            FsError::LockTimeout { .. } => CustodyError::Busy,
-            other => other.into(),
+    let lease =
+        lock_writer_exclusion(&directory, budget, cancel, clock).map_err(|error| match error {
+            CustodyError::Filesystem(FsError::LockTimeout { .. }) => CustodyError::Busy,
+            other => other,
         })?;
-    drop(observation);
     let lock_directory = directory;
     // Old guardians kept their evidence in the slot itself. Do not admit a
     // successor over that fence before recovery has retained its writer head.
@@ -1499,6 +1487,83 @@ fn observe_checkpoint(
     })
 }
 
+#[cfg(any(test, feature = "fixture"))]
+thread_local! {
+    pub(crate) static WRITER_LOCK_WAIT_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Acquire writer exclusion without keeping the observation gate while another
+/// writer owns the lease. Every attempt revalidates both stable lock inodes.
+/// A nonblocking writer budget still allows the separate brief observer wait.
+#[allow(clippy::disallowed_methods)] // The bounded wait must expire even with a stopped caller clock.
+pub fn lock_writer_exclusion(
+    directory: &Directory,
+    budget: WaitBudget,
+    cancel: &CancelToken,
+    clock: &dyn Clock,
+) -> Result<LockGuard> {
+    let timeout = Duration::from_micros(budget.remaining(clock.mono_now()).as_micros());
+    let path = directory.current_path()?.join("writer.lock");
+    let deadline = Instant::now()
+        .checked_add(timeout)
+        .ok_or_else(|| FsError::LockDeadlineOverflow { path: path.clone() })?;
+    loop {
+        if cancel.is_cancelled() {
+            return Err(FsError::Cancelled { path }.into());
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let gate_wait = if timeout.is_zero() {
+            Duration::from_secs(5)
+        } else {
+            remaining.min(Duration::from_secs(5))
+        };
+        let observation = directory
+            .lock(
+                OsStr::new("writer-probe.lock"),
+                LockMode::Exclusive,
+                WaitBudget::up_to(
+                    clock.mono_now(),
+                    provenant_core::DurationMicros::from_micros(
+                        u64::try_from(gate_wait.as_micros())
+                            .map_err(|_| CustodyError::InvalidRecord)?,
+                    ),
+                ),
+                cancel,
+                clock,
+            )
+            .map_err(|error| match error {
+                FsError::Cancelled { .. } => CustodyError::Filesystem(error),
+                other => CustodyError::ObservationGate(other.to_string()),
+            })?;
+        let attempt = directory.lock(
+            OsStr::new("writer.lock"),
+            LockMode::Exclusive,
+            WaitBudget::nonblocking(clock.mono_now()),
+            cancel,
+            clock,
+        );
+        drop(observation);
+        match attempt {
+            Ok(lease) => return Ok(lease),
+            Err(FsError::LockTimeout { .. }) => {}
+            Err(error) => return Err(error.into()),
+        }
+        if cancel.is_cancelled() {
+            return Err(FsError::Cancelled { path }.into());
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(FsError::LockTimeout { path, timeout }.into());
+        }
+        #[cfg(any(test, feature = "fixture"))]
+        if let Some(hook) = WRITER_LOCK_WAIT_HOOK.with(|hook| hook.borrow_mut().take()) {
+            hook();
+        }
+        provenant_os::sys::wait_pause(remaining.min(Duration::from_millis(5)));
+    }
+}
+
 /// Initialise the short observer gate before publishing writer exclusion.
 /// Registry mutation owns creation; read-only reports only open this file.
 pub fn prepare_writer_observation(directory: &Directory) -> Result<()> {
@@ -1578,15 +1643,7 @@ pub fn acquire_recovery(
     cancel: &CancelToken,
     clock: &dyn Clock,
 ) -> Result<Recovery> {
-    let observation = writer_admission_guard(&directory)?;
-    let lease = directory.lock(
-        OsStr::new("writer.lock"),
-        LockMode::Exclusive,
-        budget,
-        cancel,
-        clock,
-    )?;
-    drop(observation);
+    let lease = lock_writer_exclusion(&directory, budget, cancel, clock)?;
     let lock_directory = directory;
     // recovery_evidence applies legacy_record_fences, so another attempt's
     // legacy slot-root record is never read as this attempt's reservation.
@@ -1647,15 +1704,7 @@ pub(crate) fn acquire_reboot_recovery_with(
     clock: &dyn Clock,
     observer: &dyn ProcessObserver,
 ) -> Result<Recovery> {
-    let observation = writer_admission_guard(&directory)?;
-    let lease = directory.lock(
-        OsStr::new("writer.lock"),
-        LockMode::Exclusive,
-        budget,
-        cancel,
-        clock,
-    )?;
-    drop(observation);
+    let lease = lock_writer_exclusion(&directory, budget, cancel, clock)?;
     let lock_directory = directory;
     let directory = recovery_evidence(&lock_directory, scope)?;
     let reservation: Reservation = read_record(&directory, "reservation.json", RECORD_LIMIT)?;
@@ -1705,15 +1754,7 @@ pub fn prove_unreserved(
     cancel: &CancelToken,
     clock: &dyn Clock,
 ) -> Result<Option<Unreserved>> {
-    let observation = writer_admission_guard(directory)?;
-    let lease = directory.lock(
-        OsStr::new("writer.lock"),
-        LockMode::Exclusive,
-        budget,
-        cancel,
-        clock,
-    )?;
-    drop(observation);
+    let lease = lock_writer_exclusion(directory, budget, cancel, clock)?;
     for name in ["launch.json", "process-exit.json"] {
         match directory.metadata_at(OsStr::new(name), false) {
             Ok(_) => return Ok(None),

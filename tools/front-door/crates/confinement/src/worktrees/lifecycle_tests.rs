@@ -66,6 +66,7 @@ fn create_defaults_to_fetched_remote_head_and_preserves_existing_and_explicit_ba
         &cancel(),
     )?;
     assert_eq!(new.head, latest);
+    assert!(new.warnings.is_empty());
     let existing = create(
         &context,
         WorktreeCreate {
@@ -75,6 +76,7 @@ fn create_defaults_to_fetched_remote_head_and_preserves_existing_and_explicit_ba
         &cancel(),
     )?;
     assert_eq!(existing.head, old);
+    assert!(existing.warnings.is_empty());
     let explicit = create(
         &context,
         WorktreeCreate {
@@ -84,6 +86,7 @@ fn create_defaults_to_fetched_remote_head_and_preserves_existing_and_explicit_ba
         &cancel(),
     )?;
     assert_eq!(explicit.head, old);
+    assert!(explicit.warnings.is_empty());
     Ok(())
 }
 
@@ -117,6 +120,8 @@ fn create_defaults_to_local_head_when_remote_unavailable_or_head_missing()
         &cancel(),
     )?;
     assert_eq!(missing.head, head);
+    assert_eq!(missing.warnings.len(), 1);
+    assert!(missing.warnings[0].contains(&head.to_string()));
     let mut offline_fixture = Fixture::new()?;
     offline_fixture.run(&["remote", "add", "origin", "/nonexistent/provenant-2998"])?;
     offline_fixture.repo = offline_fixture.runtime.open_repo(
@@ -137,11 +142,161 @@ fn create_defaults_to_local_head_when_remote_unavailable_or_head_missing()
         &cancel(),
     )?;
     assert_eq!(offline.head, offline_head);
+    assert_eq!(offline.warnings.len(), 1);
+    let receipt = serde_json::to_value(&offline)?;
+    assert_eq!(receipt["warnings"][0], offline.warnings[0]);
     let mut warning = Vec::new();
     lifecycle::write_default_base_warning(&mut warning, head)?;
     let warning = String::from_utf8(warning)?;
     assert!(warning.contains("local HEAD"));
     assert!(warning.contains(&head.to_string()));
+    Ok(())
+}
+
+#[test]
+fn default_base_fetch_is_outside_registry_lock_and_failed_fetch_ignores_cached_tip()
+-> Result<(), Box<dyn Error>> {
+    struct FailedFetch<'a> {
+        inner: &'a dyn Executor,
+        project_state: &'a Directory,
+        calls: std::sync::atomic::AtomicUsize,
+    }
+    impl Executor for FailedFetch<'_> {
+        fn execute(
+            &self,
+            options: provenant_os::exec::ExecOptions<'_>,
+        ) -> Result<ExecOutcome, provenant_os::exec::ExecError> {
+            if options
+                .argv
+                .iter()
+                .any(|word| word == "fetch" || word == "ls-remote")
+            {
+                let guard = self
+                    .project_state
+                    .try_lock_existing(OsStr::new(REPOSITORY_LOCK), LockMode::Exclusive)
+                    .expect("remote discovery must not own the registry lock");
+                drop(guard);
+                assert!(options.timeout <= std::time::Duration::from_secs(5));
+            }
+            if options.argv.iter().any(|word| word == "fetch") {
+                self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                return Ok(ExecOutcome {
+                    termination: Termination::Exit(1),
+                    stdout: Default::default(),
+                    stderr: Default::default(),
+                    timed_out: false,
+                    drain_truncated: false,
+                    overflow_stopped: false,
+                    cancelled: false,
+                    elapsed_micros: 0,
+                });
+            }
+            self.inner.execute(options)
+        }
+    }
+    let source = Fixture::new()?;
+    let mut fixture = Fixture::new()?;
+    fixture.run(&[
+        "remote",
+        "add",
+        "origin",
+        source.root.to_str().ok_or("source")?,
+    ])?;
+    fixture.run(&["fetch", "origin"])?;
+    let source_branch = source.run(&["symbolic-ref", "--short", "HEAD"])?;
+    let source_branch = std::str::from_utf8(&source_branch.stdout.bytes)?.trim();
+    fixture.run(&[
+        "symbolic-ref",
+        "refs/remotes/origin/HEAD",
+        &format!("refs/remotes/origin/{source_branch}"),
+    ])?;
+    fixture.run(&["commit", "--allow-empty", "-m", "local-only work"])?;
+    fixture.repo = fixture.runtime.open_repo(
+        &fixture.executor,
+        &fixture.root,
+        fixture.budget()?,
+        &cancel(),
+    )?;
+    let local = fixture.head()?;
+    let test = TestContext::new(&fixture)?;
+    let mut context = test.context();
+    let failed = FailedFetch {
+        inner: context.executor,
+        project_state: context.project_state,
+        calls: Default::default(),
+    };
+    context.executor = &failed;
+    let created = create(
+        &context,
+        WorktreeCreate {
+            branch: "offline-with-cache".into(),
+            base: None,
+        },
+        &cancel(),
+    )?;
+    assert_eq!(
+        created.head, local,
+        "a stale cached remote tip cannot replace local HEAD after fetch failure"
+    );
+    assert_eq!(failed.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(created.warnings.len(), 1);
+    assert!(created.warnings[0].contains(&local.to_string()));
+    Ok(())
+}
+
+#[test]
+fn gc_legacy_observer_gate_preview_is_read_only_and_apply_initialises_it()
+-> Result<(), Box<dyn Error>> {
+    let fixture = Fixture::new()?;
+    let test = TestContext::new(&fixture)?;
+    let context = test.context();
+    let lane = gc_merged_worktree(&fixture, &context, "gc-legacy-gate")?;
+    let slot = writer_directory(context.project_state, &lane.path)?;
+    drop(slot.try_lock(OsStr::new(WRITER_LOCK), LockMode::Exclusive)?);
+    let gate = slot.current_path()?.join("writer-probe.lock");
+    fs::remove_file(&gate)?;
+    let policy = WorktreeGcPolicy {
+        upstream: Some(fixture.head()?),
+        terminal: &|_| false,
+        no_live_lanes: &|_| true,
+        regenerable: &[],
+        keep: &[],
+        written_before_ns: i128::MAX,
+        dry_run: true,
+        foreign_merged_clean: true,
+    };
+    let preview = collect(&context, std::slice::from_ref(&lane), &policy, &cancel())?;
+    assert!(preview.worktrees.removed.is_empty());
+    assert_eq!(
+        preview.worktrees.retained,
+        vec![RetainedBranch {
+            branch: "gc-legacy-gate".into(),
+            reason: RetainReason::UnknownWriter,
+            detail: None,
+        }]
+    );
+    assert!(
+        matches!(
+            cache_writer_probe(context.project_state, &lane.path),
+            Err(Occupancy::Unknown { scope, evidence, source: OccupancyUnknownSource::Custody })
+                if scope == lane.path && evidence.contains("writer-probe.lock")
+        ),
+        "the missing observer gate must be the specific custody uncertainty"
+    );
+    assert!(!gate.exists(), "preview cannot upgrade custody state");
+    assert!(lane.path.is_dir());
+    let applied = collect(
+        &context,
+        std::slice::from_ref(&lane),
+        &WorktreeGcPolicy {
+            dry_run: false,
+            ..policy
+        },
+        &cancel(),
+    )?;
+    assert_eq!(applied.worktrees.removed.len(), 1, "{applied:?}");
+    assert!(gate.is_file(), "mutation upgrades legacy observation gates");
+    assert!(!lane.path.exists());
     Ok(())
 }
 

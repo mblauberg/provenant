@@ -379,3 +379,72 @@ fn legacy_gate_upgrade_and_missing_lock_preserve_custody_evidence() -> Result<()
     );
     Ok(())
 }
+
+#[test]
+fn recovery_wait_releases_the_observer_gate_while_a_writer_is_held() -> Result<(), Box<dyn Error>> {
+    use provenant_supervisor::custody::{self, CustodyError};
+    use std::sync::mpsc;
+    use std::time::Duration;
+    let fixture = Fixture::new()?;
+    let test = TestContext::new(&fixture)?;
+    let context = test.context();
+    let path = fixture.root.join("recovery-wait");
+    fixture.run(&[
+        "worktree",
+        "add",
+        "-b",
+        "recovery-wait",
+        path.to_str().ok_or("path")?,
+    ])?;
+    let slot = writer_directory(context.project_state, &path)?;
+    let scope = custody::Scope {
+        run: provenant_core::RunId::from_bytes([101; 16]),
+        attempt: AttemptId::from_bytes([102; 16]),
+        generation: 1,
+    };
+    let lease = provenant_supervisor::fixture::acquire_writer(
+        slot.try_clone()?,
+        scope,
+        WaitBudget::nonblocking(context.clock.mono_now()),
+        &CancelToken::new(),
+        context.clock,
+    )?;
+    let cancel = CancelToken::new();
+    let worker_cancel = cancel.clone();
+    let (waiting, waited) = mpsc::channel();
+    let (resume, resumed) = mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        provenant_supervisor::fixture::on_writer_lock_wait(move || {
+            waiting.send(()).expect("waiting observer");
+            resumed
+                .recv_timeout(Duration::from_secs(5))
+                .expect("resume recovery");
+        });
+        let clock = provenant_os::clock::SystemClock::new();
+        custody::acquire_recovery(
+            slot,
+            scope,
+            WaitBudget::cli(clock.mono_now(), 5).expect("recovery budget"),
+            &worker_cancel,
+            &clock,
+        )
+    });
+    // The recovery has attempted the actual held writer lease and is paused
+    // between retries. Doctor must still acquire its observation gate.
+    waited.recv_timeout(Duration::from_secs(5))?;
+    let report = doctor(&context, &path, &CancelToken::new())?;
+    assert_eq!(report.state, WorktreeDiagnosisState::LiveWriter);
+    assert_eq!(report.holder, Some(scope.attempt));
+    cancel.cancel();
+    resume.send(())?;
+    assert!(matches!(
+        worker.join().map_err(|_| "recovery worker panicked")?,
+        Err(CustodyError::Filesystem(FsError::Cancelled { .. }))
+    ));
+    assert!(matches!(
+        cache_writer_probe(context.project_state, &path),
+        Err(Occupancy::Held)
+    ));
+    drop(lease);
+    Ok(())
+}

@@ -1695,6 +1695,7 @@ mod tests {
     fn reused_worktrees_name_a_differing_head_or_dirty_tree() {
         let base = provenant_core::GitOid::parse(&"a".repeat(40)).unwrap();
         let mut info = worktrees::WorktreeInfo {
+            warnings: Vec::new(),
             path: "/repo/.worktrees/x".into(),
             branch: Some("feat/x".into()),
             head: base,

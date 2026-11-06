@@ -937,20 +937,24 @@ mod tests {
         // Synthetic credentials exercise the real helper without network access.
         // Never include the captured credential response in assertion output.
         let token = "fixture-token";
-        let mut child = command()
-            .args(["credential", "fill"])
-            .env("GH_TOKEN", token)
-            .env("GIT_TERMINAL_PROMPT", "0")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()?;
-        child
-            .stdin
-            .take()
-            .ok_or("credential stdin")?
-            .write_all(b"protocol=https\nhost=github.com\n\n")?;
-        let output = child.wait_with_output()?;
+        let fill = |request: &[u8]| -> Result<std::process::Output, Box<dyn std::error::Error>> {
+            let mut child = command()
+                .args(["credential", "fill"])
+                .env("GH_TOKEN", token)
+                .env("GIT_TERMINAL_PROMPT", "0")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()?;
+            child
+                .stdin
+                .take()
+                .ok_or("credential stdin")?
+                .write_all(request)?;
+            Ok(child.wait_with_output()?)
+        };
+        let password = format!("password={token}");
+        let output = fill(b"protocol=https\nhost=github.com\n\n")?;
         assert!(output.status.success(), "credential helper failed");
         assert!(
             output
@@ -962,8 +966,36 @@ mod tests {
             output
                 .stdout
                 .split(|byte| *byte == b'\n')
-                .any(|line| line == format!("password={token}").as_bytes())
+                .any(|line| line == password.as_bytes())
         );
+        // Userinfo is not the destination host: an unrelated username at
+        // GitHub is safe, while a GitHub-looking username at another host is not.
+        let output = fill(b"url=https://fixture-user@github.com/project/repo.git\n\n")?;
+        assert!(output.status.success(), "GitHub userinfo request failed");
+        assert!(
+            output
+                .stdout
+                .split(|byte| *byte == b'\n')
+                .any(|line| line == password.as_bytes())
+        );
+        for request in [
+            b"url=https://github.com.evil.example/project/repo.git\n\n".as_slice(),
+            b"url=https://notgithub.com/project/repo.git\n\n",
+            b"url=https://example.com/project/repo.git\n\n",
+            b"url=http://github.com/project/repo.git\n\n",
+            b"url=https://github.com@evil.example/project/repo.git\n\n",
+            b"protocol=https\nhost=github.com@evil.example\n\n",
+        ] {
+            let output = fill(request)?;
+            assert!(
+                !output.status.success(),
+                "credential request outside GitHub HTTPS succeeded"
+            );
+            assert!(
+                output.stdout.is_empty(),
+                "unexpected credential response outside GitHub HTTPS"
+            );
+        }
         Ok(())
     }
 

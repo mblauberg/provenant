@@ -93,6 +93,10 @@ is reported as scoped custody uncertainty rather than as a live held lease.
 Read-only inventory and doctor take the existing short `writer-probe.lock`
 gate before probing writer exclusion. Writer acquisition takes that gate before
 trying `writer.lock`, so an observer cannot cause a spurious `WriterBusy`.
+A budgeted acquisition holds the gate only for each nonblocking writer-lock
+attempt, then releases it before waiting to retry. A recovery or delivery waiting
+for a live writer therefore cannot hide that writer from list or doctor. Each
+retry repeats verified-inode checks and preserves cancellation and its deadline.
 The gate wait has its own five-second bound and reports observation uncertainty,
 never writer contention, if it cannot complete. Registry mutation initialises
 the gate; a read-only report does not create missing state. Legacy slots without
