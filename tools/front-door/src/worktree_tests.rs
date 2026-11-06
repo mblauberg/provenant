@@ -2421,6 +2421,18 @@ fn create_list_and_remove_a_managed_worktree() -> Result {
                 && tree["owner"] == "unowned")
     );
     assert!(trees.iter().any(|tree| tree["owner"] == "primary"));
+    let diagnosis = ok(
+        &rig,
+        &["worktree", "doctor", ".worktrees/feature-topic", "--json"],
+    )?;
+    assert_eq!(diagnosis["command"], "worktree doctor");
+    assert_eq!(diagnosis["data"]["state"], "clean");
+    assert_eq!(diagnosis["data"]["path"], created["data"]["path"]);
+    assert!(
+        diagnosis["data"]["repair"]
+            .as_str()
+            .is_some_and(|repair| { repair.starts_with("provenant worktree doctor ") })
+    );
     let cache = prepare_lane_cache(
         &rig,
         &rig.project.join(".worktrees/feature-topic"),
@@ -3328,6 +3340,7 @@ fn lane_prepare_with(cases: &[(&str, bool, bool, u8)], probe: Probe) -> Result {
             project_id: Some(context.project_id),
             host: None,
             cancel: None,
+            repo_facts: Default::default(),
         };
         let clock = provenant_os::clock::SystemClock::new();
         let cancel = provenant_core::CancelToken::new();

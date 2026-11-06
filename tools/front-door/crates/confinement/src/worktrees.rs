@@ -3,13 +3,20 @@
 mod census;
 mod context;
 mod custody;
+mod doctor;
+#[cfg(test)]
+mod doctor_tests;
 mod gc;
 mod inventory;
 mod lifecycle;
 mod owner;
 pub use census::*;
-pub use context::{with_context, with_context_using_workers};
+pub use context::{
+    with_context, with_context_using_facts, with_context_using_workers,
+    with_context_using_workers_and_facts,
+};
 pub use custody::*;
+pub use doctor::{WorktreeDiagnosis, WorktreeDiagnosisState, doctor};
 pub use gc::{OutputEntry, WorktreeGcPolicy, WorktreeGcReport, collect, collect_lazy};
 pub use inventory::*;
 pub use lifecycle::*;

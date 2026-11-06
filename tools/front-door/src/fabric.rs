@@ -1224,6 +1224,7 @@ pub(crate) fn tick_graphs(
                     workers,
                 };
                 let mut owner = BoundGraphOwner {
+                    repo_facts: Default::default(),
                     factory: &factory,
                     integration_base: Some(BoundGraphBases {
                         integration: execution.integration_base,
@@ -2022,6 +2023,24 @@ impl BinaryRunOwner<'_> {
             .with_host(ctx.identity.host);
         Ok(provenant_cli::run::Session { store, context })
     }
+    fn session_with_facts(
+        &self,
+        cancel: &CancelToken,
+        facts: &provenant_confinement::worktrees::RepoFacts,
+    ) -> Result<provenant_cli::run::Session, FacadeError> {
+        let mut session = self.session(cancel)?;
+        session.store = session.store.with_repo_facts(facts);
+        Ok(session)
+    }
+
+    fn store_with_facts(
+        &self,
+        cancel: &CancelToken,
+        facts: &provenant_confinement::worktrees::RepoFacts,
+    ) -> Result<provenant_run::RunStore, FacadeError> {
+        Ok(self.session_with_facts(cancel, facts)?.store)
+    }
+
     fn store(&self, cancel: &CancelToken) -> Result<provenant_run::RunStore, FacadeError> {
         Ok(self.session(cancel)?.store)
     }
@@ -2408,6 +2427,7 @@ impl BinaryRunOwner<'_> {
         budget: WaitBudget,
         cancel: &CancelToken,
     ) -> Result<SubmissionReceipt, FacadeError> {
+        let facts = provenant_confinement::worktrees::RepoFacts::default();
         self.submit_inner(
             input,
             budget,
@@ -2415,6 +2435,7 @@ impl BinaryRunOwner<'_> {
             provenant_records::run::LaneAccess::default(),
             None,
             true,
+            &facts,
         )
         .map_err(|error| scope_io(error, "submit"))
     }
@@ -2426,10 +2447,20 @@ impl BinaryRunOwner<'_> {
         cancel: &CancelToken,
         access: provenant_records::run::LaneAccess,
         settlement_retry_limit: Option<u8>,
+        facts: &provenant_confinement::worktrees::RepoFacts,
     ) -> Result<SubmissionReceipt, FacadeError> {
-        self.submit_inner(input, budget, cancel, access, settlement_retry_limit, false)
-            .map_err(|error| scope_io(error, "submit"))
+        self.submit_inner(
+            input,
+            budget,
+            cancel,
+            access,
+            settlement_retry_limit,
+            false,
+            facts,
+        )
+        .map_err(|error| scope_io(error, "submit"))
     }
+    #[allow(clippy::too_many_arguments)]
     fn submit_inner(
         &mut self,
         input: SubmitInput,
@@ -2438,6 +2469,7 @@ impl BinaryRunOwner<'_> {
         access: provenant_records::run::LaneAccess,
         settlement_retry_limit: Option<u8>,
         apply_project_defaults: bool,
+        facts: &provenant_confinement::worktrees::RepoFacts,
     ) -> Result<SubmissionReceipt, FacadeError> {
         use provenant_cli::run::{Submission, Submitted, derived_task, worktree_access};
         let SubmitInput::Submit {
@@ -2493,6 +2525,7 @@ impl BinaryRunOwner<'_> {
         }
         // Peer ingress creates a writer's worktree in this host's clone; a
         // caller never names a path here, and a batch creates at most one.
+        let session = self.session_with_facts(cancel, facts)?;
         let ingress = !self.allow_remote;
         let mut tasks = tasks;
         let mut created = None;
@@ -2510,7 +2543,7 @@ impl BinaryRunOwner<'_> {
             {
                 return Err(FacadeError::InvalidInput { detail: None });
             }
-            let worktree = self.peer_worktree(&operation_id, spec, budget, cancel)?;
+            let worktree = self.peer_worktree(&session, &operation_id, spec, budget, cancel)?;
             task.worktree = Some(worktree.path.clone());
             created = Some(worktree);
         }
@@ -2578,7 +2611,6 @@ impl BinaryRunOwner<'_> {
                 access: task_access,
             });
         }
-        let session = self.session(cancel)?;
         let call = self.call(cancel);
         let (run, started) = self.with_edge(|edge| {
             provenant_cli::run::submit_with_host(
@@ -2605,6 +2637,7 @@ impl BinaryRunOwner<'_> {
     /// clean at that base; a replayed operation finds the one it created.
     fn peer_worktree(
         &self,
+        session: &provenant_cli::run::Session,
         operation_id: &provenant_core::OperationId,
         spec: NewWorktree,
         budget: WaitBudget,
@@ -2617,8 +2650,8 @@ impl BinaryRunOwner<'_> {
             .map_err(|_| FacadeError::InvalidInput { detail: None })?;
         provenant_confinement::repo::GitRevision::new(&spec.base)
             .map_err(|_| FacadeError::InvalidInput { detail: None })?;
-        let replay = self
-            .store(cancel)?
+        let replay = session
+            .store
             .operation(operation_id, &self.call(cancel))
             .map_err(run_error)?
             .is_some();
@@ -2629,38 +2662,30 @@ impl BinaryRunOwner<'_> {
             std::time::Duration::from_micros(micros)
         };
         let project = &self.factory.cwd;
-        let facts = worktrees::RepoFacts::default();
+        let facts = session.store.repo_facts();
         let base = if replay {
             None
         } else {
-            let resolved = crate::worktrees::with_context(
+            let resolved = crate::worktrees::with_context_using_facts(
                 &self.factory.context.roots,
                 &self.factory.home,
                 project,
                 half(),
                 self.factory.workers,
-                |context, cancel| {
-                    let context = &worktrees::WorktreeContext {
-                        facts: &facts,
-                        ..*context
-                    };
-                    Ok(remote_base(context, &spec.base, half(), true, cancel))
-                },
+                facts,
+                |context, cancel| Ok(remote_base(context, &spec.base, half(), true, cancel)),
             )
             .map_err(|_| FacadeError::io("resolve peer base"))?;
             Some(resolved?)
         };
-        let (info, warning) = crate::worktrees::with_context(
+        let (info, warning) = crate::worktrees::with_context_using_facts(
             &self.factory.context.roots,
             &self.factory.home,
             project,
             half(),
             self.factory.workers,
+            facts,
             |context, cancel| {
-                let context = &worktrees::WorktreeContext {
-                    facts: &facts,
-                    ..*context
-                };
                 let existing = worktrees::list(context, cancel)?
                     .into_iter()
                     .find(|entry| entry.branch.as_deref() == Some(branch.as_str()));
@@ -3326,6 +3351,7 @@ struct BoundGraphBases {
 
 struct BoundGraphOwner<'a> {
     factory: &'a Factory,
+    repo_facts: provenant_confinement::worktrees::RepoFacts,
     // Both immutable graph bases travel together through every host owner.
     integration_base: Option<BoundGraphBases>,
     integration_branch: Option<String>,
@@ -3880,6 +3906,7 @@ fn advance_graphs_after_settlement(
                 workers,
             };
             let mut owner = BoundGraphOwner {
+                repo_facts: Default::default(),
                 factory: &factory,
                 integration_base: Some(BoundGraphBases {
                     integration: execution.integration_base,
@@ -4017,16 +4044,18 @@ fn settle_owned_worktree(
             return Ok(());
         }
     }
+    let facts = store.repo_facts();
     // Refresh before taking the collection lock and before the prune budget starts.
     // Explicit worktrees have no owner record, so use their verified HEAD.
     let mut tracking_ref_warning = None;
     let mut lane_owned = false;
-    let _ = crate::worktrees::with_context(
+    let _ = crate::worktrees::with_context_using_facts(
         roots,
         &settled.roots.home,
         &writer.project,
         std::time::Duration::from_secs(15),
         workers,
+        facts,
         |context, _| {
             use std::io::Read;
             let tree = provenant_confinement::verify_worktree(context.repo, &writer.worktree)
@@ -4111,12 +4140,13 @@ fn settle_owned_worktree(
             .get(&settled.project_id.to_string())
             .cloned()
             .unwrap_or_default();
-        Ok(crate::worktrees::with_context(
+        Ok(crate::worktrees::with_context_using_facts(
             roots,
             &settled.roots.home,
             &writer.project,
             std::time::Duration::from_secs(120),
             workers,
+            facts,
             |context, cancel| {
                 let tree = provenant_confinement::verify_worktree(context.repo, &writer.worktree)
                     .map_err(worktrees::WorktreeError::from)?;
@@ -5364,7 +5394,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             actor: None,
             chair: None,
         };
-        let store = owner.store(self.cancel)?;
+        let store = owner.store_with_facts(self.cancel, &self.repo_facts)?;
         let attempt = attempt.parse().map_err(|_| FacadeError::StateCorrupt)?;
         let call = owner.call(self.cancel);
         let record = store.record(attempt, &call).map_err(run_error)?;
@@ -5391,7 +5421,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             actor: None,
             chair: None,
         };
-        let store = owner.store(self.cancel)?;
+        let store = owner.store_with_facts(self.cancel, &self.repo_facts)?;
         let call = owner.call(self.cancel);
         let record = store
             .record(
@@ -5436,7 +5466,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             actor: None,
             chair: None,
         };
-        let store = owner.store(self.cancel)?;
+        let store = owner.store_with_facts(self.cancel, &self.repo_facts)?;
         let call = owner.call(self.cancel);
         let record = store
             .record(
@@ -5620,11 +5650,10 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             Path::new(path),
         )
         .map_err(run_error)?;
-        let writer = provenant_run::prepare_writer(
+        let writer = provenant_run::prepare_writer_with_facts(
             &request,
             self.factory.context.roots.state.as_path(),
-            self.factory.context.identity.project,
-        )
+            self.factory.context.identity.project, &self.repo_facts)
         .map_err(|error| match error {
             provenant_run::RunError::Validation("writer needs a branch") => FacadeError::DispatchRefused {
                 fact: Some(provenant_fabric_runtime::coordination::facade::DispatchRefusalFact::DetachedWriter),
@@ -5711,7 +5740,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             actor: None,
             chair: None,
         };
-        let store = owner.store(self.cancel)?;
+        let store = owner.store_with_facts(self.cancel, &self.repo_facts)?;
         let call = owner.call(self.cancel);
         let record = store
             .record(
@@ -5859,7 +5888,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             actor: None,
             chair: None,
         }
-        .session(self.cancel)?;
+        .session_with_facts(self.cancel, &self.repo_facts)?;
         let call = provenant_run::Request {
             clock: &self.factory.clock,
             cancel: self.cancel,
@@ -6024,7 +6053,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             ) && record.custody_pending == Some(false));
         }
         let operation = graph_operation("graph-attempt-operation", &attempt.key)?;
-        let store = owner.store(self.cancel)?;
+        let store = owner.store_with_facts(self.cancel, &self.repo_facts)?;
         let call = owner.call(self.cancel);
         match store.operation(&operation, &call).map_err(run_error)? {
             None => Ok(true),
@@ -6078,7 +6107,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             chair: None,
         };
         let operation_id = graph_operation("graph-attempt-operation", &attempt.key)?;
-        let store = owner.store(self.cancel)?;
+        let store = owner.store_with_facts(self.cancel, &self.repo_facts)?;
         let call = owner.call(self.cancel);
         Ok(store
             .operation(&operation_id, &call)
@@ -6143,7 +6172,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                 });
             }
             let operation_id = graph_operation("graph-attempt-operation", key)?;
-            let store = owner.store(self.cancel)?;
+            let store = owner.store_with_facts(self.cancel, &self.repo_facts)?;
             let call = owner.call(self.cancel);
             let operation = store.operation(&operation_id, &call).map_err(run_error)?;
             let accepted = operation.as_ref().is_some_and(|operation| {
@@ -6222,10 +6251,11 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                     other => run_error(other),
                 })?;
                 if let Err(provenant_run::RunError::Validation("writer needs a branch")) =
-                    provenant_run::prepare_writer(
+                    provenant_run::prepare_writer_with_facts(
                         &writer,
                         self.factory.context.roots.state.as_path(),
                         self.factory.context.identity.project,
+                        &self.repo_facts,
                     )
                 {
                     return Err(FacadeError::DispatchRefused {
@@ -6249,12 +6279,13 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                 let head = commit
                     .parse()
                     .map_err(|_| FacadeError::InvalidInput { detail: None })?;
-                let descends = provenant_confinement::worktrees::with_context(
+                let descends = provenant_confinement::worktrees::with_context_using_facts(
                     &self.factory.context.roots,
                     &self.factory.home,
                     &self.factory.cwd,
                     &self.factory.clock,
                     self.cancel,
+                    &self.repo_facts,
                     |context| {
                         provenant_confinement::worktrees::is_ancestor(
                             context,
@@ -6283,12 +6314,13 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                 let head = commit
                     .parse()
                     .map_err(|_| FacadeError::InvalidInput { detail: None })?;
-                provenant_confinement::worktrees::with_context(
+                provenant_confinement::worktrees::with_context_using_facts(
                     &self.factory.context.roots,
                     &self.factory.home,
                     &self.factory.cwd,
                     &self.factory.clock,
                     self.cancel,
+                    &self.repo_facts,
                     |context| {
                         provenant_confinement::worktrees::fast_forward(
                             context,
@@ -6308,10 +6340,11 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                         Path::new(path),
                     )
                     .map_err(run_error)?;
-                    provenant_run::prepare_writer(
+                    provenant_run::prepare_writer_with_facts(
                         &writer,
                         self.factory.context.roots.state.as_path(),
                         self.factory.context.identity.project,
+                        &self.repo_facts,
                     )
                     .map_err(run_error)?
                     .branch
@@ -6654,8 +6687,14 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                 }
             }
             let retry_limit = accepted_retry_limit.unwrap_or(node.settlement_retries);
-            let receipt =
-                owner.submit_with_access(input, self.budget, self.cancel, grants, retry_limit)?;
+            let receipt = owner.submit_with_access(
+                input,
+                self.budget,
+                self.cancel,
+                grants,
+                retry_limit,
+                &self.repo_facts,
+            )?;
             if let Some(reason) = blocked(&owner)? {
                 return Err(FacadeError::DispatchRefused {
                     fact: None,
@@ -6682,7 +6721,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             .host
             .is_none_or(|host| host == self.factory.context.identity.host)
         {
-            let store = owner.store(self.cancel)?;
+            let store = owner.store_with_facts(self.cancel, &self.repo_facts)?;
             attempt = store
                 .policy_tail(attempt.attempt_id, &owner.call(self.cancel))
                 .map_err(run_error)?;
@@ -6694,7 +6733,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
         use provenant_records::run::{AttemptState, Outcome};
         match attempt.state {
             AttemptState::Terminal { outcome, .. } => {
-                let store = owner.store(self.cancel)?;
+                let store = owner.store_with_facts(self.cancel, &self.repo_facts)?;
                 let call = owner.call(self.cancel);
                 match store.custody_released(&attempt, &call) {
                     Ok(true) => {}
@@ -7121,6 +7160,7 @@ impl Factory {
         cancel: &CancelToken,
         prepared_scratch: Option<&Path>,
     ) -> Result<provenant_fabric_runtime::graph::GraphRun, FacadeError> {
+        let facts = provenant_confinement::worktrees::RepoFacts::default();
         use provenant_fabric_runtime::coordination::input::ValidateInput;
         use provenant_fabric_runtime::graph::{FileJournal, GraphJournal};
         let input = match input {
@@ -7228,10 +7268,11 @@ impl Factory {
                             Path::new(path),
                         )
                         .map_err(run_error)?;
-                        let writer = provenant_run::prepare_writer(
+                        let writer = provenant_run::prepare_writer_with_facts(
                             &writer,
                             self.context.roots.state.as_path(),
                             self.context.identity.project,
+                            &facts,
                         )
                         .map_err(run_error)?;
                         provenant_run::HostDeliveryContext::check_delivery_branch(
@@ -7255,10 +7296,11 @@ impl Factory {
                             Path::new(path),
                         )
                         .map_err(run_error)?;
-                        let writer = provenant_run::prepare_writer(
+                        let writer = provenant_run::prepare_writer_with_facts(
                             &writer,
                             self.context.roots.state.as_path(),
                             self.context.identity.project,
+                            &facts,
                         )
                         .map_err(run_error)?;
                         if writer.branch.as_str().trim_start_matches("refs/heads/") == target {
@@ -7529,6 +7571,7 @@ impl Factory {
                 None
             };
             let mut owner = BoundGraphOwner {
+                repo_facts: facts.clone(),
                 factory: rebound.as_ref().unwrap_or(self),
                 integration_base: Some(BoundGraphBases {
                     integration: integration_base,
@@ -7638,6 +7681,7 @@ impl Factory {
                 }
             }
             let mut graph_owner = BoundGraphOwner {
+                repo_facts: facts.clone(),
                 factory: self,
                 integration_base: None,
                 integration_branch: None,

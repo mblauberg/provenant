@@ -3,10 +3,11 @@ use super::*;
 
 /// Command-scoped repository observations. A GC preview consumes its inventory
 /// snapshot; mutation paths always perform a fresh read while holding custody.
+#[derive(Clone)]
 pub struct RepoFacts {
     inventory_limit: usize,
     scalar_limit: usize,
-    inventories: std::sync::Mutex<BTreeMap<PathBuf, InventorySnapshot>>,
+    inventories: std::sync::Arc<std::sync::Mutex<BTreeMap<PathBuf, InventorySnapshot>>>,
 }
 
 struct InventorySnapshot {
@@ -21,7 +22,7 @@ impl Default for RepoFacts {
         Self {
             inventory_limit: provenant_os::exec::DEFAULT_CAPTURE_LIMIT,
             scalar_limit: provenant_os::git::REPO_FACT_SCALAR_LIMIT,
-            inventories: std::sync::Mutex::new(BTreeMap::new()),
+            inventories: std::sync::Arc::new(std::sync::Mutex::new(BTreeMap::new())),
         }
     }
 }
@@ -58,7 +59,8 @@ impl RepoFacts {
         )
     }
 
-    fn resolve_repo_commit(
+    /// Resolve a commit in a verified repository with this session's scalar cap.
+    pub fn resolve_repo_commit(
         &self,
         repo: &VerifiedRepo,
         executor: &dyn Executor,
@@ -67,16 +69,47 @@ impl RepoFacts {
         name: GitRefName,
         cancel: &CancelToken,
     ) -> Result<GitOid, WorktreeError> {
-        repo.revalidate()?;
-        let budget = budget.with_stdout_cap(self.scalar_limit)?;
-        let outcome = run_utility(
-            executor,
-            GitRead::ResolveRef { name },
+        self.resolve_repo_fact(
             repo,
+            executor,
             utility,
             budget,
+            GitRead::ResolveRef { name },
             cancel,
-        )?;
+        )
+    }
+
+    /// Read the current checkout commit with this session's scalar cap.
+    pub fn repo_head(
+        &self,
+        repo: &VerifiedRepo,
+        executor: &dyn Executor,
+        utility: &UtilityRuntime,
+        budget: UtilityBudget,
+        cancel: &CancelToken,
+    ) -> Result<GitOid, WorktreeError> {
+        self.resolve_repo_fact(
+            repo,
+            executor,
+            utility,
+            budget,
+            GitRead::RevParseHead,
+            cancel,
+        )
+    }
+
+    fn resolve_repo_fact(
+        &self,
+        repo: &VerifiedRepo,
+        executor: &dyn Executor,
+        utility: &UtilityRuntime,
+        budget: UtilityBudget,
+        operation: GitRead,
+        cancel: &CancelToken,
+    ) -> Result<GitOid, WorktreeError> {
+        repo.revalidate()?;
+        let budget = budget.with_stdout_cap(self.scalar_limit)?;
+        let outcome = run_utility(executor, operation, repo, utility, budget, cancel)?;
         if exit_code(&outcome)? != 0 {
             return Err(WorktreeError::NotFound);
         }
@@ -197,19 +230,13 @@ impl RepoFacts {
         if repo.common_git_dir() != context.repo.common_git_dir() {
             return Err(WorktreeError::IdentityChanged);
         }
-        let budget = context.utility_budget.with_stdout_cap(self.scalar_limit)?;
-        let outcome = run_utility(
-            context.executor,
-            GitRead::RevParseHead,
+        self.repo_head(
             repo,
+            context.executor,
             context.utility,
-            budget,
+            context.utility_budget,
             cancel,
-        )?;
-        if exit_code(&outcome)? != 0 {
-            return Err(WorktreeError::NotFound);
-        }
-        parse_oid(trim_ascii(&outcome.stdout.bytes))
+        )
     }
 
     /// Resolve the full symbolic name of a revision, if Git can identify one.

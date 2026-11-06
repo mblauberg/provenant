@@ -1549,7 +1549,7 @@ pub(crate) mod peer_tests {
         };
         let cancel = CancelToken::new();
         let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
-        let mut graph_owner = BoundGraphOwner { factory: &factory, integration_base: None,
+        let mut graph_owner = BoundGraphOwner { repo_facts: Default::default(), factory: &factory, integration_base: None,
             integration_branch: None, network: None, capability_overrides: Default::default(), exclude: Vec::new(), budget, cancel: &cancel,
             prices: None, tick: false };
         let actor = graph_owner.actor();
@@ -1619,7 +1619,7 @@ pub(crate) mod peer_tests {
         };
         let cancel = CancelToken::new();
         let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
-        let mut owner = BoundGraphOwner { factory: &factory, integration_base: None,
+        let mut owner = BoundGraphOwner { repo_facts: Default::default(), factory: &factory, integration_base: None,
             capability_overrides: (Vec::new(), Vec::new()),
             integration_branch: None, network: None, exclude: Vec::new(), budget, cancel: &cancel, prices: None, tick: false };
         let pinned = owner.resolve_review_base("review-pin", Some(rig.project.to_str().ok_or("project")?))?.ok_or("base")?;
@@ -1643,7 +1643,7 @@ pub(crate) mod peer_tests {
         let replayed = match reattached { graph::AttemptObservation::Pending { attempt_ref } | graph::AttemptObservation::Unknown { attempt_ref } | graph::AttemptObservation::Terminal { attempt_ref, .. } => attempt_ref.ok_or("replay reference")? };
         assert_eq!(replayed, reference);
         let other_factory = factory.for_graph_directory(&other)?;
-        let mut replay_owner = BoundGraphOwner { factory: &other_factory, integration_base: None,
+        let mut replay_owner = BoundGraphOwner { repo_facts: Default::default(), factory: &other_factory, integration_base: None,
             capability_overrides: (Vec::new(), Vec::new()),
             integration_branch: None, network: None, exclude: Vec::new(), budget, cancel: &cancel, prices: None, tick: false };
         replay_owner.observe_or_start(&key, node(), &route, graph::AccessMode::ReadOnly, Some(rig.project.to_str().ok_or("source path")?),
@@ -1688,7 +1688,7 @@ pub(crate) mod peer_tests {
         };
         let cancel = CancelToken::new();
         let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
-        let mut owner = BoundGraphOwner { factory: &factory, integration_base: None,
+        let mut owner = BoundGraphOwner { repo_facts: Default::default(), factory: &factory, integration_base: None,
             capability_overrides: (Vec::new(), Vec::new()),
             integration_branch: None, network: None, exclude: Vec::new(), budget, cancel: &cancel,
             prices: None, tick: false };
@@ -1721,7 +1721,7 @@ pub(crate) mod peer_tests {
         };
         let cancel = CancelToken::new();
         let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
-        let mut owner = BoundGraphOwner { factory: &factory,
+        let mut owner = BoundGraphOwner { repo_facts: Default::default(), factory: &factory,
             capability_overrides: (Vec::new(), Vec::new()),
             integration_base: Some(BoundGraphBases { integration: Some(base.parse()?), review: None }),
             integration_branch: Some("batch".into()), network: None, exclude: Vec::new(),
@@ -1793,7 +1793,7 @@ pub(crate) mod peer_tests {
         }))?;
         let receipt = run_owner.submit_with_access(input, budget, &cancel, Default::default(), None)?;
         let target = receipt.targets.first().ok_or("target")?;
-        let mut graph_owner = BoundGraphOwner {
+        let mut graph_owner = BoundGraphOwner { repo_facts: Default::default(),
             factory: &factory,
             integration_base: None,
             integration_branch: None,
@@ -2510,7 +2510,7 @@ pub(crate) mod peer_tests {
                 &Default::default(),
                 &Default::default(),
             )?;
-            let mut owner = BoundGraphOwner {
+            let mut owner = BoundGraphOwner { repo_facts: Default::default(),
                 factory: &factory,
                 integration_base: None,
                 integration_branch: None,
@@ -2621,7 +2621,7 @@ pub(crate) mod peer_tests {
             &Default::default(),
             &Default::default(),
         )?;
-        let mut owner = BoundGraphOwner {
+        let mut owner = BoundGraphOwner { repo_facts: Default::default(),
             factory: &factory,
             integration_base: None,
             integration_branch: None,
@@ -2822,7 +2822,7 @@ pub(crate) mod peer_tests {
             &Default::default(),
             &Default::default(),
         )?;
-        let mut owner = BoundGraphOwner {
+        let mut owner = BoundGraphOwner { repo_facts: Default::default(),
             factory: &factory,
             integration_base: None,
             integration_branch: None,
@@ -2962,7 +2962,7 @@ pub(crate) mod peer_tests {
             &document.graph_id, budget, &cancel, &factory.clock).map_err(|error| format!("open journal: {error}"))?;
         journal.bind(graph::GraphExecution { review_base: None, extra: Default::default(),
             integration_base: None, directory: fixture.rig.project.clone(), document: document.clone() })?;
-        let mut owner = BoundGraphOwner { factory: &factory, integration_base: None, integration_branch: None,
+        let mut owner = BoundGraphOwner { repo_facts: Default::default(), factory: &factory, integration_base: None, integration_branch: None,
             network: None, capability_overrides: Default::default(), exclude: Vec::new(), budget, cancel: &cancel, prices: None, tick: false };
         let catalogue = Catalogue::bundled()?;
         let models = ["codex/gpt-6-luna", "claude/claude-haiku-5-5", "agy/gemini-3.8-flash", "opencode/opencode-go/glm-5.3-flash"];
@@ -3081,7 +3081,7 @@ pub(crate) mod peer_tests {
         };
         let cancel = CancelToken::new();
         let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
-        let mut bound = BoundGraphOwner {
+        let mut bound = BoundGraphOwner { repo_facts: Default::default(),
             factory: &factory,
             integration_base: None,
             integration_branch: None,
@@ -3663,7 +3663,7 @@ pub(crate) mod peer_tests {
             "graph_id":"pinned-base", "node_id":"later-lens", "route_index":0
         }))?;
         let route = serde_json::from_value(serde_json::json!({"adapter":"fixture", "model":"fixture/model"}))?;
-        let mut bound = BoundGraphOwner {
+        let mut bound = BoundGraphOwner { repo_facts: Default::default(),
             factory: &factory, integration_base: None, integration_branch: None,
             network: None, capability_overrides: Default::default(), exclude: Vec::new(), budget, cancel: &cancel, prices: None, tick: false,
         };
@@ -4972,7 +4972,7 @@ pub(crate) mod peer_tests {
         )?;
 
         // Now advance with BoundGraphOwner.
-        let mut owner = BoundGraphOwner {
+        let mut owner = BoundGraphOwner { repo_facts: Default::default(),
             factory: &factory,
             integration_base: Some(BoundGraphBases { integration: Some(node_source), review: None }),
             integration_branch: None,

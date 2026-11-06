@@ -348,7 +348,8 @@ pub(super) fn dispatch_with_workers(
 ) -> Reply {
     let operation_id = command.operation_id.clone();
     let mut created = None;
-    let mut result = dispatch_inner(command, edge, &mut created, workers);
+    let facts = provenant_confinement::worktrees::RepoFacts::default();
+    let mut result = dispatch_inner(command, edge, &mut created, workers, &facts);
     if let (Err(fail), Some((path, branch))) = (&mut result, created) {
         // A failed launch can follow admission. Those trees belong to the
         // accepted run and must remain available for resume.
@@ -361,17 +362,19 @@ pub(super) fn dispatch_with_workers(
             let census = provenant_confinement::worktrees::CensusSession::new(&workers, &clock);
             let cancel = CancelToken::new();
             let call = request(&clock, &cancel)?;
-            let session = open(edge, &call)?;
+            let mut session = open(edge, &call)?;
+            session.store = session.store.with_repo_facts(&facts);
             if session.store.operation(&operation_id, &call)?.is_some() {
                 return Ok(());
             }
-            provenant_confinement::worktrees::with_context_using_workers(
+            provenant_confinement::worktrees::with_context_using_workers_and_facts(
                 edge.roots,
                 edge.home,
                 edge.cwd,
                 &clock,
                 &cancel,
                 &census,
+                &facts,
                 |context| {
                     use provenant_confinement::worktrees;
                     let info = worktrees::list(context, &cancel)?
@@ -702,6 +705,7 @@ pub(super) fn dispatch_inner(
     edge: &Edge<'_>,
     created: &mut Option<(PathBuf, String)>,
     workers: &dyn provenant_confinement::worktrees::WorkerObserver,
+    facts: &provenant_confinement::worktrees::RepoFacts,
 ) -> Result<(Value, String, bool), Fail> {
     // Resolve the project default before admission, so child authority checks
     // see the same effective capabilities as the provider.
@@ -1028,7 +1032,8 @@ pub(super) fn dispatch_inner(
         let cancel = CancelToken::new();
         // Initialise the state before entering the shared confinement context.
         let call = request(&clock, &cancel)?;
-        let session = open(edge, &call)?;
+        let mut session = open(edge, &call)?;
+        session.store = session.store.with_repo_facts(facts);
         if let Some(replayed) = replay_owned_dispatch(
             &command,
             edge,
@@ -1140,10 +1145,11 @@ pub(super) fn dispatch_inner(
     if let Some(mode) = &command.deliver {
         let branch = if let Some(path) = &command.access.worktree {
             let writer = run::resolve_writer(edge.roots.state.as_path(), edge.cwd, path)?;
-            run::prepare_writer(
+            run::prepare_writer_with_facts(
                 &writer,
                 edge.roots.state.as_path(),
                 execution_context(edge)?.project_id,
+                facts,
             )?
             .branch
             .as_str()
@@ -1369,6 +1375,7 @@ pub(super) fn dispatch_inner(
         return Ok((data, human, timed_out));
     }
     let mut session = open(edge, &call)?;
+    session.store = session.store.with_repo_facts(facts);
     // Protection governs new admission. Service::dispatch still compares the
     // immutable inputs when an existing operation is replayed.
     if session
@@ -1554,12 +1561,13 @@ pub(super) fn dispatch_inner(
             );
             let res: Result<(Value, Option<provenant_core::GitOid>), WorktreeAdmissionError> =
                 if let Some(owned) = &owned {
-                    match own_worktree(
+                    match own_worktree_using_facts(
                         owned,
                         command.base.as_deref(),
                         &command.operation_id,
                         edge,
                         workers,
+                        facts,
                         |attempt| {
                             session.store.record(attempt, &call).is_ok_and(|record| {
                                 matches!(record.state, run::AttemptState::Terminal { .. })
@@ -1597,13 +1605,14 @@ pub(super) fn dispatch_inner(
                         .operation(&command.operation_id, &call)
                         .map_err(WorktreeAdmissionError::Run)?
                         .is_some();
-                    provenant_confinement::worktrees::with_context_using_workers(
+                    provenant_confinement::worktrees::with_context_using_workers_and_facts(
                         edge.roots,
                         edge.home,
                         &writer.project,
                         &clock,
                         &cancel,
                         workers,
+                        facts,
                         |context| {
                             use provenant_confinement::worktrees;
                             let context = &worktrees::WorktreeContext {
@@ -2241,13 +2250,14 @@ pub(super) fn replay_owned_dispatch(
     }
     let mut settlement = None;
     let owned = if writer.worktree.exists() {
-        provenant_confinement::worktrees::with_context_using_workers(
+        provenant_confinement::worktrees::with_context_using_workers_and_facts(
             edge.roots,
             edge.home,
             &writer.project,
             call.clock,
             call.cancel,
             workers,
+            session.store.repo_facts(),
             |context| {
                 let tree = provenant_confinement::verify_worktree(context.repo, &writer.worktree)?;
                 Ok(
@@ -3079,6 +3089,7 @@ pub(super) fn launch_on_host_with_wait(
         // continue to use their sealed host executable authority.
         host: inherited_host.then_some(&host),
         cancel: Some(call.cancel),
+        repo_facts: session.store.repo_facts().clone(),
     };
     let providers = PreparedProvider {
         fallback: &registry,

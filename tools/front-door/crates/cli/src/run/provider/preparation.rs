@@ -969,8 +969,13 @@ pub(super) fn prepare_candidates(
     )?;
     let writer = match &task.writer {
         Some(request) => Some(
-            run::prepare_writer(request, roots.state.as_path(), project_id)
-                .map_err(|error| error.to_string())?,
+            run::prepare_writer_with_facts(
+                request,
+                roots.state.as_path(),
+                project_id,
+                &registry.repo_facts,
+            )
+            .map_err(|error| error.to_string())?,
         ),
         None => None,
     };

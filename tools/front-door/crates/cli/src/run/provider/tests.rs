@@ -1783,6 +1783,7 @@ fn registry_provider_resolves_prepares_and_reports_quota(
         project_id: Some(binding.project_id()),
         host: None,
         cancel: Some(&cancel),
+        repo_facts: Default::default(),
     };
     let prepared = super::preparation::prepare_candidates(
         &registry,
@@ -1980,6 +1981,7 @@ fn opencode_stale_auth_prepares_with_an_unverified_warning()
         project_id: Some(binding.project_id()),
         host: None,
         cancel: Some(&cancel),
+        repo_facts: Default::default(),
     };
     let prepared = prepare_with(
         &registry,
@@ -2161,6 +2163,7 @@ fn writer_plan_stages_scratch_in_private_temporary_directory()
         project_id: Some(binding.project_id()),
         host: None,
         cancel: Some(&cancel),
+        repo_facts: Default::default(),
     };
     // A recorded sign-out followed by a healthy account-scoped status probe
     // must permit preparation without waiting for the quota backoff.
@@ -2366,6 +2369,7 @@ printf 'agy 1.0.0\n'
             let linked_cwd = project.join(".worktrees/writer");
             let selected_registry = Registry {
                 cwd: Some(if linked { &linked_cwd } else { &project }),
+                repo_facts: registry.repo_facts.clone(),
                 ..registry
             };
             let prepared = prepare_with(
@@ -3745,6 +3749,7 @@ fn writer_continuation_dirty_brief(committed: bool) -> Result<(), Box<dyn std::e
         project_id: Some(binding.project_id()),
         cancel: Some(&cancel),
         host: None,
+        repo_facts: Default::default(),
     };
 
     let reason = prepare_policy_writer_successor(&registry, &task, prompt, &executable)?;
@@ -5446,6 +5451,7 @@ fn graph_read_only_snapshot_survives_moving_and_replaced_checkout()
         project_id: Some(binding.project_id()),
         host: None,
         cancel: Some(&cancel),
+        repo_facts: Default::default(),
     };
     let mut task = super::super::tests::trace_run(
         50,

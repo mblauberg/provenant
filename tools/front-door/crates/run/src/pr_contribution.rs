@@ -65,6 +65,7 @@ pub(crate) fn read_only_branch(
     host: &Path,
     project: ProjectId,
     cwd: &Path,
+    facts: &provenant_confinement::worktrees::RepoFacts,
 ) -> Result<Option<provenant_confinement::repo::GitRefName>> {
     let writer = match crate::resolve_writer(host, cwd, cwd) {
         Ok(writer) => writer,
@@ -74,7 +75,7 @@ pub(crate) fn read_only_branch(
         | Err(crate::RunError::WriterProjectMismatch { .. }) => return Ok(None),
         Err(error) => return Err(error),
     };
-    match crate::prepare_writer(&writer, host, project) {
+    match crate::prepare_writer_with_facts(&writer, host, project, facts) {
         Ok(writer) => Ok(Some(writer.branch)),
         // A detached read-only worktree has no contribution branch; only
         // writers need one, and they are refused before launch.

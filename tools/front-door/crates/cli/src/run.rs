@@ -215,6 +215,7 @@ pub struct Registry<'a> {
     pub project_id: Option<provenant_core::ProjectId>,
     pub host: Option<&'a run::HostLaunchContext>,
     pub cancel: Option<&'a CancelToken>,
+    pub repo_facts: provenant_confinement::worktrees::RepoFacts,
 }
 impl Registry<'_> {
     fn prepare_with_wait(

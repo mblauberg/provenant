@@ -619,7 +619,12 @@ impl RunStore {
             .find(|task| task.task_id == record.task_id)
             .and_then(|task| task.writer.as_ref())
             .ok_or(RunError::Validation("land writer request missing"))?;
-        let launch = crate::prepare_writer(writer, &self.writer_registry, record.project_id)?;
+        let launch = crate::prepare_writer_with_facts(
+            writer,
+            &self.writer_registry,
+            record.project_id,
+            &self.repo_facts,
+        )?;
         recovery
             .writer_base(
                 launch.worktree.repo().root_dir(),
@@ -717,23 +722,23 @@ impl RunStore {
                 .as_ref()
                 .ok_or(RunError::Validation("pending import lacks writer"))?;
             let cancel = driver.cancellation();
-            let imported = crate::prepare_writer(writer, &self.writer_registry, record.project_id)
-                .and_then(|launch| {
-                    crate::settlement::with_cancellation(
+            let imported = crate::prepare_writer_with_facts(
+                writer,
+                &self.writer_registry,
+                record.project_id,
+                &self.repo_facts,
+            )
+            .and_then(|launch| {
+                crate::settlement::with_cancellation(attempt, Self::scope(&record), &cancel, || {
+                    launch.terminal(
+                        self.context.state_root.as_path(),
                         attempt,
-                        Self::scope(&record),
-                        &cancel,
-                        || {
-                            launch.terminal(
-                                self.context.state_root.as_path(),
-                                attempt,
-                                recovery,
-                                &mut driver,
-                                false, // Budget commit was attempted before recording terminal state.
-                            )
-                        },
+                        recovery,
+                        &mut driver,
+                        false, // Budget commit was attempted before recording terminal state.
                     )
-                });
+                })
+            });
             if let Err(error) = &imported {
                 driver.record_failure(&error.to_string())?;
             }
@@ -1384,23 +1389,26 @@ impl RunStore {
                 decoded.reason = Some(reason);
                 Ok(())
             } else {
-                crate::prepare_writer(writer, &self.writer_registry, record.project_id).and_then(
-                    |writer| {
-                        let driver = settlement.as_mut().ok_or(RunError::Contention)?;
-                        let cancel = driver.cancellation();
-                        crate::settlement::with_cancellation(attempt, exit.scope, &cancel, || {
-                            writer.terminal(
-                                self.context.state_root.as_path(),
-                                attempt,
-                                recovery.ok_or(RunError::Validation(
-                                    "writer terminal custody missing",
-                                ))?,
-                                driver,
-                                exit.stop_reason == Some(StopReason::TokenBudget),
-                            )
-                        })
-                    },
+                crate::prepare_writer_with_facts(
+                    writer,
+                    &self.writer_registry,
+                    record.project_id,
+                    &self.repo_facts,
                 )
+                .and_then(|writer| {
+                    let driver = settlement.as_mut().ok_or(RunError::Contention)?;
+                    let cancel = driver.cancellation();
+                    crate::settlement::with_cancellation(attempt, exit.scope, &cancel, || {
+                        writer.terminal(
+                            self.context.state_root.as_path(),
+                            attempt,
+                            recovery
+                                .ok_or(RunError::Validation("writer terminal custody missing"))?,
+                            driver,
+                            exit.stop_reason == Some(StopReason::TokenBudget),
+                        )
+                    })
+                })
             };
             if let Some(bytes) = read_sealed(attempt, "budget-commit.json", RECORD_LIMIT)? {
                 let result: serde_json::Value = crate::db::decode(&bytes)?;
@@ -1570,27 +1578,26 @@ impl RunStore {
                 }
                 Ok(_) if decoded.outcome == Outcome::Succeeded => {
                     // Edits with no commit are not a success, and nothing is delivered.
-                    let left =
-                        crate::prepare_writer(writer, &self.writer_registry, record.project_id)
-                            .and_then(|launch| {
-                                let cancel = settlement
-                                    .as_ref()
-                                    .map_or_else(CancelToken::new, |driver| driver.cancellation());
-                                crate::settlement::with_cancellation(
-                                    attempt,
-                                    exit.scope,
-                                    &cancel,
-                                    || {
-                                        launch.uncommitted(
-                                            self.context.state_root.as_path(),
-                                            recovery.ok_or(RunError::Validation(
-                                                "writer terminal custody missing",
-                                            ))?,
-                                            &cancel,
-                                        )
-                                    },
-                                )
-                            });
+                    let left = crate::prepare_writer_with_facts(
+                        writer,
+                        &self.writer_registry,
+                        record.project_id,
+                        &self.repo_facts,
+                    )
+                    .and_then(|launch| {
+                        let cancel = settlement
+                            .as_ref()
+                            .map_or_else(CancelToken::new, |driver| driver.cancellation());
+                        crate::settlement::with_cancellation(attempt, exit.scope, &cancel, || {
+                            launch.uncommitted(
+                                self.context.state_root.as_path(),
+                                recovery.ok_or(RunError::Validation(
+                                    "writer terminal custody missing",
+                                ))?,
+                                &cancel,
+                            )
+                        })
+                    });
                     let note = match left {
                         Ok(None) => None,
                         Ok(Some(reason)) => {

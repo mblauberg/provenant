@@ -216,7 +216,7 @@ mod graph_writer_admission_tests {
             }]
         }))?;
         let budget = WaitBudget::cli(factory.clock.mono_now(), 60)?;
-        let mut owner = BoundGraphOwner { factory: &factory, integration_base: None, integration_branch: None, network: None, capability_overrides: Default::default(), exclude: Vec::new(), budget, cancel: &cancel, prices: None, tick: false };
+        let mut owner = BoundGraphOwner { repo_facts: Default::default(), factory: &factory, integration_base: None, integration_branch: None, network: None, capability_overrides: Default::default(), exclude: Vec::new(), budget, cancel: &cancel, prices: None, tick: false };
         let mut journal = MemoryJournal::default();
         let directory = Directory::open_anchor(&registry)?;
         let guard = directory.lock(std::ffi::OsStr::new("worktrees.lock"), LockMode::Exclusive, budget, &cancel, &factory.clock)?;
@@ -741,7 +741,7 @@ mod result_tests {
             assets: rig.project.clone(), host_launch: None, mcp_project: None, workers: &FreeWorkers,
         };
         let cancel = CancelToken::new();
-        let mut owner = BoundGraphOwner {
+        let mut owner = BoundGraphOwner { repo_facts: Default::default(),
             capability_overrides: (Vec::new(), Vec::new()),
             factory: &factory, integration_base: None, integration_branch: None, network: None,
             exclude: Vec::new(), budget: WaitBudget::cli(factory.clock.mono_now(), 30)?,
