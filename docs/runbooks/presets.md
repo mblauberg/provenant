@@ -12,10 +12,22 @@ landing. `explore`, `research` and `design` gather evidence or settle options;
 
 ```sh
 provenant run --route junior --file brief.md --explain
-provenant run --use deliver --file brief.md --explain
-provenant run --use deliver --file brief.md
+provenant run --use deliver --file brief.md --set 'worktree="/absolute/project/.worktrees/delivery"' --set 'write_scope=["src"]' --explain
+provenant run --use deliver --file delivery.toml
 provenant status
 provenant output TARGET
+```
+
+Register the writer worktree first with `provenant worktree create delivery --base BASE`.
+Use its absolute path and literal write scope. For `delivery.toml`, bind the
+same parameters in a reusable node document:
+
+```toml
+use = "deliver"
+[with]
+worktree = "/absolute/project/.worktrees/delivery"
+write_scope = ["src"]
+brief = "Meet the approved acceptance criteria and run the named checks."
 ```
 
 `templates` inspects the library. `run [BRIEF]` accepts `--use`, `--tier`,

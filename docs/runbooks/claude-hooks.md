@@ -11,7 +11,7 @@ diagnostics to stderr.
 | Event | Handler | What it does |
 |---|---|---|
 | `PreToolUse` (`Bash`) | `hook claude pre-tool-use` | Enforces the guard, then optionally offers human answers |
-| `SessionStart` (`startup`, `retry`, `clear`) | `hook claude session-start` | Reports the checkpoint status, then the state digest |
+| `SessionStart` (`startup`, `resume`, `clear`) | `hook claude session-start` | Reports the checkpoint status, then the state digest |
 | `SessionStart` (`compact`) | `hook claude compact` | The same report after compaction |
 | `PreCompact` | `hook claude pre-compact` | Writes derived state to `autosave.md`, preserving the chair checkpoint |
 | `Stop` | `hook claude stop` | Refreshes `autosave.md` if an existing session is 10 minutes quiet |

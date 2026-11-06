@@ -30,18 +30,14 @@ and ADRs live, and apply engineering-docs' default homes.
 
 ## Autonomy
 
-Record the chosen level in the runbook and wire it into config:
+Record the chosen autonomy and landing gates in the repository runbook.
+Put project templates under `.provenant/templates/`; a leaf holds a brief,
+tier, access and outputs, while a composite holds nodes. Use `plan` for open
+shape, `batch` for disjoint slices and `deliver` through landing. Keep write
+scopes and decision authority explicit; a template grants no new authority.
 
-- `.provenant/preset-rules.toml` selects the preset: `by_readiness` (underspecified
-  work goes to `scope-then-run`), `by_risk`, `by_paths` (for example a security path to
-  `review`).
-- `.provenant/roles.toml` holds project lenses and strictness, such as the verifier's
-  `family = "cross_required"`.
-- The `deliver` template parameters `land_tier` and `decision_session` set what lands
-  unattended. Routine and substantial work land on green CI by default, and crucial
-  work asks the session. A repo file cannot lower `land_tier`; say so rather than try.
-
-Confirm each with `provenant run --use NAME --file BRIEF --explain` and `provenant config check`.
+Inspect with `provenant templates NAME` and
+`provenant run --use NAME --file BRIEF --explain`; run `provenant config check`.
 
 ## GitHub steps
 

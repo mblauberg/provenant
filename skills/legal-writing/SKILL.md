@@ -64,7 +64,6 @@ independent review.
 - Preserve contentions as contentions, in the register the stage requires.
   Protective-order, police-issued or safety material stays a dated source with
   the legal effect its verified text supports, not a finding.
-- Current-law research runs `research` with dated primary sources, and its claims
-  carry the date retrieved.
+- Use `research` for current law; claims cite primary sources and retrieval dates.
 - Condensing runs the token set-diff plus an independent qualitative pass. Final
   scrub adds no argument, fact, authority, history or courtesy closer.

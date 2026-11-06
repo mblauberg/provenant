@@ -28,8 +28,8 @@ does not fix them without the grant.
 
 ## How it runs
 
-- Audit with `provenant run --use explore --route junior --over skill-a,skill-b --file B.md --explain`; synthesise the evidence.
-- Rewrite with `provenant run --use batch --file B.md --explain`, disjoint scopes and one integration branch. Inspect before submitting.
+- Audit with `provenant run --use explore --route junior --over skill-a,skill-b --file work.toml --explain`; synthesise the evidence.
+- Rewrite with `provenant run --use batch --file work.toml --explain`, disjoint scopes and one integration branch; bind worktree and write_scope in the document.
 
 ## Working rules
 

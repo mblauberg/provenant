@@ -1216,7 +1216,7 @@ pub fn run(
                 message,
                 cause: None,
                 repair: Some(
-                    "Read `provenant help --all --json` provider_controls for what each provider supports; use resume to continue a lane."
+                    "Read `provenant help --all --json` provider_controls for what each provider supports; use `provenant retry` to continue a lane."
                         .into(),
                 ),
             });

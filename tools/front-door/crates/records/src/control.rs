@@ -25,7 +25,7 @@ pub enum ControlSupport {
     LiveInjection,
     /// Left in Fabric mail for the session to read.
     MailOnly,
-    /// No live path; only `resume` continues the work.
+    /// No live path; only `retry` continues the work.
     ContinuationOnly,
     Unsupported,
 }
@@ -38,7 +38,7 @@ impl ControlSupport {
         match self {
             Self::LiveInjection => "injected at a tool boundary of the live session",
             Self::MailOnly => "delivered as Fabric mail for the session to read",
-            Self::ContinuationOnly => "no live control path; use resume to continue",
+            Self::ContinuationOnly => "no live control path; use retry to continue",
             Self::Unsupported => "the adapter offers no control path for this launch",
         }
     }

@@ -211,7 +211,7 @@ under `domains.routing.review.size`; each small limit must not exceed its medium
 limit. The risk tier sets a floor. Integration heads select deep and are not
 measured. An empty diff leaves the size unknown; a diff that cannot be measured
 also leaves it unknown and reports git's error as a warning. Either way,
-selection falls back to risk, kind and the default shape. A preset review of a
+selection falls back to risk, kind and the default shape. A template review of a
 `head` or `node` subject, such as `deliver`'s, with no `size` or `review_shape`
 is deferred: the graph carries one `review` node and the host measures the
 pinned reviewed commit against `base` when that review starts, so the panel fits
@@ -324,33 +324,12 @@ A selector takes one of three forms:
 An unknown selector is refused with the valid forms, before anything is
 submitted.
 
-For one dispatch, pass `--exclude` to `run`, `review` or `route resolve`. Repeat
-the flag once per selector; it takes no comma-separated list:
-
-```sh
-provenant run --route junior --file brief.md --explain
-provenant run --use review --file brief.md
-provenant route resolve junior --exclude claude
-```
-
-`--explain` and `route resolve` list each exclusion that removed a candidate
-and where it came from. `review` keeps its family separation: it substitutes
-an unused family around the exclusions, and refuses once they exhaust the
-families left, naming the exclusions in the refusal.
-
-Three sources combine as a union, never as a replacement, and each rule keeps
-its source in refusals and `--explain`:
-
-| Source | Set by | Knob |
-|---|---|---|
-| `config` | The standing list in `[knobs]` | `routing.exclude` |
-| `flag` | `--exclude` on this dispatch | `routing.flag_exclude` |
-| `graph` | `--exclude` on a preset or automatically selected graph, inherited by every node | `routing.graph_exclude` |
-
-A list that is not a list of strings, or holds an unknown selector, is
-refused, the same as on the flag. `--explain` and `route resolve` read the
-standing and flag lists the dispatch would use; a graph's list is applied only
-when its nodes launch.
+Inspect exclusions with `provenant route resolve junior --exclude claude`.
+Standing exclusions live in `[knobs] routing.exclude`; graph-wide exclusions
+use `routing.graph_exclude`. They combine as a union, preserving each source
+in resolution diagnostics. Unknown selectors are refused before launch.
+`run --route junior` uses the configured policy; use `config schema --all`
+for advanced routing settings.
 
 An exclusion applies to named-route pools, to the fallback models of a named
 route, and to a named route that holds a single model. A pinned `--model`, and

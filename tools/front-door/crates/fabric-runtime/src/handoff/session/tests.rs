@@ -154,7 +154,7 @@ fn delivery_stores_the_prompt_and_launches_once_through_the_seam() {
         "Briefing.",
         "## On this host",
         "`feat/x`: `/Users/me/Repos/project/.worktrees/feat-x` (created from origin)",
-        "provenant status --host laptop",
+        "provenant status` on source host laptop",
     ] {
         assert!(
             prompt.contains(expected),
