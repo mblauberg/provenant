@@ -49,7 +49,7 @@ fn approved(outputs: &NodeOutputs) -> bool {
             == Some(provenant_records::workflow::ReviewVerdict::Approve)
 }
 
-fn blocking(finding: &Finding) -> bool {
+pub(super) fn blocking(finding: &Finding) -> bool {
     !matches!(
         finding.status.to_ascii_lowercase().as_str(),
         "closed" | "resolved" | "fixed"

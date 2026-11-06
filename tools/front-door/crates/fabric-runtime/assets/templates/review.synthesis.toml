@@ -1,0 +1,6 @@
+doc = "Reconcile the input review findings."
+review = "synthesis"
+brief = "Reconcile the input review findings."
+tier = "senior"
+access = "read_only"
+outputs = ["result", "findings", "verdict"]

@@ -1776,159 +1776,181 @@ fn large_synthesis_trims_metadata_and_replays_with_finding_identities() {
 
 #[test]
 fn large_synthesis_compacts_immutable_fields_and_replays_with_finding_identities() {
-    let input = |id: &str| GraphInput {
-        required_outputs: Vec::new(),
-        extra: Default::default(),
-        node: id.into(),
-        outputs: vec![OutputKind::Findings],
-    };
-    let mut nodes = vec![node("seed", route("first"))];
-    let qualified =
-        entry(",\"lens\":\"tests\",\"evidence\":\"observed\",\"proposed_fix\":\"repair\"");
-    let mut observations = VecDeque::from([terminal_with_result(
-        AttemptOutcome::Succeeded,
-        &findings_text(&format!("{},{}", qualified, qualified.replace("F1", "F2"))),
-    )]);
-    let long_file = "a".repeat(80);
-    let verifier_entry = entry(",\"propagates\":\"seed:F1\",\"lens\":\"tests\",\"evidence\":\"observed\",\"proposed_fix\":\"repair\"").replace("a.rs", &long_file);
-    let entries = [
-        vec![verifier_entry.clone(); MAX_FINDINGS / 2],
-        vec![verifier_entry.replace("F1", "F2"); MAX_FINDINGS / 2],
-    ]
-    .concat()
-    .join(",");
-    let verifier_text = findings_text(&entries);
-    for i in 0..20 {
-        let mut verifier = node(&format!("verifier{i}"), route("first"));
-        verifier.depends_on = vec!["seed".into()];
-        verifier.inputs = vec![input("seed")];
-        nodes.push(verifier);
+    for verifying in [false, true] {
+        let input = |id: &str| GraphInput {
+            required_outputs: Vec::new(),
+            extra: Default::default(),
+            node: id.into(),
+            outputs: vec![OutputKind::Findings],
+        };
+        let mut nodes = vec![node("seed", route("first"))];
+        let qualified =
+            entry(",\"lens\":\"tests\",\"evidence\":\"observed\",\"proposed_fix\":\"repair\"");
+        let mut observations = VecDeque::from([terminal_with_result(
+            AttemptOutcome::Succeeded,
+            &findings_text(&format!("{},{}", qualified, qualified.replace("F1", "F2"))),
+        )]);
+        let long_file = "a".repeat(80);
+        let verifier_entry = entry(",\"propagates\":\"seed:F1\",\"lens\":\"tests\",\"evidence\":\"observed\",\"proposed_fix\":\"repair\"").replace("a.rs", &long_file);
+        let entries = [
+            vec![verifier_entry.clone(); MAX_FINDINGS / 2],
+            vec![verifier_entry.replace("F1", "F2"); MAX_FINDINGS / 2],
+        ]
+        .concat()
+        .join(",");
+        let verifier_text = findings_text(&if verifying {
+            entries.replace(
+                "\"status\":\"open\"",
+                "\"status\":\"open\",\"verification\":\"upheld\"",
+            )
+        } else {
+            entries
+        });
+        for i in 0..20 {
+            let mut verifier = node(&format!("verifier{i}"), route("first"));
+            verifier.depends_on = vec!["seed".into()];
+            verifier.inputs = vec![input("seed")];
+            nodes.push(verifier);
+            observations.push_back(terminal_with_result(
+                AttemptOutcome::Succeeded,
+                &verifier_text,
+            ));
+        }
+        let mut synthesis = node("synthesis", route("first"));
+        synthesis.depends_on = (0..20).map(|i| format!("verifier{i}")).collect();
+        synthesis.inputs = synthesis.depends_on.iter().map(|id| input(id)).collect();
+        if verifying {
+            synthesis
+                .extra
+                .insert("review_behaviour".into(), "verify".into());
+        } else {
+            synthesis.dispositions = DISPOSITIONS.map(String::from).to_vec();
+        }
+        nodes.push(synthesis);
+        let mut next = node("next", route("first"));
+        next.depends_on = vec!["synthesis".into()];
+        next.inputs = vec![input("synthesis")];
+        nodes.push(next);
+        let decisions = serde_json::json!({"id":"F1", "disposition":"accepted", "reason":"yes", "detail":"detail", "verification":"falsified"});
         observations.push_back(terminal_with_result(
             AttemptOutcome::Succeeded,
-            &verifier_text,
+            &findings_text(&format!(
+                "{},{}",
+                decisions,
+                decisions.to_string().replace("F1", "F2")
+            )),
+        ));
+        observations.push_back(terminal_with_result(
+            AttemptOutcome::Succeeded,
+            &findings_text(""),
+        ));
+        let document = graph(nodes);
+        let mut journal = MemoryJournal::default();
+        let mut owner = FakeOwner {
+            observations,
+            ..Default::default()
+        };
+        let run = advance(&document, &mut owner, &mut journal).unwrap();
+        let synthesis = run
+            .checkpoint
+            .nodes
+            .iter()
+            .find(|node| node.id == "synthesis")
+            .unwrap();
+        assert_eq!(
+            synthesis.state,
+            NodeState::Succeeded,
+            "{:?}",
+            synthesis.advance_error
+        );
+        let outputs = synthesis.outputs.as_ref().unwrap();
+        assert!(
+            outputs
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("findings compacted"))
+        );
+        assert!(outputs.findings.is_empty());
+        let expanded =
+            loops::expand(&document, &[], &crate::config::GraphLimits::default()).unwrap();
+        let (plan, positions) =
+            validate_flat_plan(&expanded, &crate::config::GraphLimits::default()).unwrap();
+        let reconstructed =
+            materialised_findings(positions["synthesis"], &plan, &run.checkpoint, &positions);
+        let bound = graph_envelope_bound(&document, &[], &[], &plan);
+        assert!(canonical_len(&run.checkpoint) <= bound);
+        let mut reporting = run.checkpoint.clone();
+        materialise_checkpoint_findings(&document, &mut reporting).unwrap();
+        assert_eq!(
+            reporting.nodes[positions["synthesis"]]
+                .outputs
+                .as_ref()
+                .unwrap()
+                .findings
+                .len(),
+            20 * MAX_FINDINGS
+        );
+        assert_eq!(reconstructed.len(), 20 * MAX_FINDINGS);
+        if verifying {
+            assert!(
+                reconstructed
+                    .iter()
+                    .all(|finding| finding.extra["verification"] == "falsified")
+            );
+        }
+        assert!(reconstructed.iter().all(|finding| {
+            (finding.id == "F1" || finding.id == "F2")
+                && finding.severity == "high"
+                && finding.file == long_file
+                && finding
+                    .extra
+                    .get("lens")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("tests")
+                && finding
+                    .extra
+                    .get("evidence")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("observed")
+                && finding
+                    .extra
+                    .get("proposed_fix")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("repair")
+        }));
+        assert_eq!(
+            run.checkpoint.nodes.last().unwrap().state,
+            NodeState::Succeeded
+        );
+        let prompt = owner.prompts.last().unwrap();
+        assert!(
+            prompt.contains("F1")
+                && prompt.contains("F2")
+                && prompt.contains("high")
+                && prompt.contains(&long_file)
+        );
+        let stored = serde_json::to_vec(journal.0.as_ref().unwrap()).unwrap();
+        journal.0 = Some(serde_json::from_slice(&stored).unwrap());
+        let replay = advance(&document, &mut FakeOwner::default(), &mut journal).unwrap();
+        assert_eq!(run.checkpoint, replay.checkpoint);
+        let checkpoint = journal.0.as_mut().unwrap();
+        let outputs = checkpoint
+            .nodes
+            .iter_mut()
+            .find(|node| node.id == "synthesis")
+            .unwrap()
+            .outputs
+            .as_mut()
+            .unwrap();
+        outputs.extra.insert(
+            "_compact_disposition_findings".into(),
+            serde_json::json!("{}"),
+        );
+        assert!(matches!(
+            advance(&document, &mut FakeOwner::default(), &mut journal),
+            Err(GraphError::BadCheckpoint { .. })
         ));
     }
-    let mut synthesis = node("synthesis", route("first"));
-    synthesis.depends_on = (0..20).map(|i| format!("verifier{i}")).collect();
-    synthesis.inputs = synthesis.depends_on.iter().map(|id| input(id)).collect();
-    synthesis.dispositions = DISPOSITIONS.map(String::from).to_vec();
-    nodes.push(synthesis);
-    let mut next = node("next", route("first"));
-    next.depends_on = vec!["synthesis".into()];
-    next.inputs = vec![input("synthesis")];
-    nodes.push(next);
-    let decisions =
-        serde_json::json!({"id":"F1", "disposition":"accepted", "reason":"yes", "detail":"detail"});
-    observations.push_back(terminal_with_result(
-        AttemptOutcome::Succeeded,
-        &findings_text(&format!(
-            "{},{}",
-            decisions,
-            decisions.to_string().replace("F1", "F2")
-        )),
-    ));
-    observations.push_back(terminal_with_result(
-        AttemptOutcome::Succeeded,
-        &findings_text(""),
-    ));
-    let document = graph(nodes);
-    let mut journal = MemoryJournal::default();
-    let mut owner = FakeOwner {
-        observations,
-        ..Default::default()
-    };
-    let run = advance(&document, &mut owner, &mut journal).unwrap();
-    let synthesis = run
-        .checkpoint
-        .nodes
-        .iter()
-        .find(|node| node.id == "synthesis")
-        .unwrap();
-    assert_eq!(
-        synthesis.state,
-        NodeState::Succeeded,
-        "{:?}",
-        synthesis.advance_error
-    );
-    let outputs = synthesis.outputs.as_ref().unwrap();
-    assert!(
-        outputs
-            .warnings
-            .iter()
-            .any(|warning| warning.contains("findings compacted"))
-    );
-    assert!(outputs.findings.is_empty());
-    let expanded = loops::expand(&document, &[], &crate::config::GraphLimits::default()).unwrap();
-    let (plan, positions) =
-        validate_flat_plan(&expanded, &crate::config::GraphLimits::default()).unwrap();
-    let reconstructed =
-        materialised_findings(positions["synthesis"], &plan, &run.checkpoint, &positions);
-    let bound = graph_envelope_bound(&document, &[], &[], &plan);
-    assert!(canonical_len(&run.checkpoint) <= bound);
-    let mut reporting = run.checkpoint.clone();
-    materialise_checkpoint_findings(&document, &mut reporting).unwrap();
-    assert_eq!(
-        reporting.nodes[positions["synthesis"]]
-            .outputs
-            .as_ref()
-            .unwrap()
-            .findings
-            .len(),
-        20 * MAX_FINDINGS
-    );
-    assert_eq!(reconstructed.len(), 20 * MAX_FINDINGS);
-    assert!(reconstructed.iter().all(|finding| {
-        (finding.id == "F1" || finding.id == "F2")
-            && finding.severity == "high"
-            && finding.file == long_file
-            && finding
-                .extra
-                .get("lens")
-                .and_then(serde_json::Value::as_str)
-                == Some("tests")
-            && finding
-                .extra
-                .get("evidence")
-                .and_then(serde_json::Value::as_str)
-                == Some("observed")
-            && finding
-                .extra
-                .get("proposed_fix")
-                .and_then(serde_json::Value::as_str)
-                == Some("repair")
-    }));
-    assert_eq!(
-        run.checkpoint.nodes.last().unwrap().state,
-        NodeState::Succeeded
-    );
-    let prompt = owner.prompts.last().unwrap();
-    assert!(
-        prompt.contains("F1")
-            && prompt.contains("F2")
-            && prompt.contains("high")
-            && prompt.contains(&long_file)
-    );
-    let stored = serde_json::to_vec(journal.0.as_ref().unwrap()).unwrap();
-    journal.0 = Some(serde_json::from_slice(&stored).unwrap());
-    let replay = advance(&document, &mut FakeOwner::default(), &mut journal).unwrap();
-    assert_eq!(run.checkpoint, replay.checkpoint);
-    let checkpoint = journal.0.as_mut().unwrap();
-    let outputs = checkpoint
-        .nodes
-        .iter_mut()
-        .find(|node| node.id == "synthesis")
-        .unwrap()
-        .outputs
-        .as_mut()
-        .unwrap();
-    outputs.extra.insert(
-        "_compact_disposition_findings".into(),
-        serde_json::json!("{}"),
-    );
-    assert!(matches!(
-        advance(&document, &mut FakeOwner::default(), &mut journal),
-        Err(GraphError::BadCheckpoint { .. })
-    ));
 }
 
 #[test]
@@ -11451,5 +11473,118 @@ fn new_worktree_authority_requires_matching_writer_location_and_safe_refs() {
     assert_eq!(
         validate_plan(&graph(vec![writer])).unwrap_err(),
         "new worktree cannot override a source binding"
+    );
+}
+
+#[test]
+fn typed_review_synthesis_retains_omitted_findings_and_refuses_pass() {
+    let bundled = template::TemplateLibrary::bundled();
+    let mut synthesis = template::Compiler::new(&bundled)
+        .compile(&serde_json::json!({
+            "id":"synthesis", "use":"review.synthesis", "after":["lens"],
+            "inputs":[{"node":"lens","outputs":["findings"]}]
+        }))
+        .unwrap();
+    synthesis.route = Some(route("fixture"));
+    let mut owner = FakeOwner {
+        observations: [
+            terminal_with_result(AttemptOutcome::Succeeded, &findings_text(&entry(""))),
+            terminal_with_result(
+                AttemptOutcome::Succeeded,
+                "```findings\n{\"schema_version\":1,\"findings\":[]}\n```\nVERDICT: PASS",
+            ),
+        ]
+        .into(),
+        ..Default::default()
+    };
+    let run = advance(
+        &graph(vec![node("lens", route("fixture")), synthesis]),
+        &mut owner,
+        &mut MemoryJournal::default(),
+    )
+    .unwrap();
+    let synthesis = &run.checkpoint.nodes[1];
+    assert_eq!(synthesis.state, NodeState::Failed);
+    assert_eq!(synthesis.outputs.as_ref().unwrap().findings.len(), 1);
+    assert_eq!(
+        synthesis.advance_error_code.as_deref(),
+        Some("disposition_count")
+    );
+}
+
+#[test]
+fn typed_review_cannot_pass_open_blockers_or_incomplete_findings() {
+    let bundled = template::TemplateLibrary::bundled();
+    for (findings, verdict) in [
+        (entry(""), "VERDICT: FAIL"),
+        (entry(",\"disposition\":\"deferred\""), "VERDICT: PASS"),
+        (format!("{},{{}}", entry("")), "VERDICT: INCONCLUSIVE"),
+        (String::new(), "VERDICT: PASS"),
+    ] {
+        let review = template::Compiler::new(&bundled)
+            .compile(&serde_json::json!({
+                "id":"review", "use":"review.tests", "route":{"alias":"fixture"}
+            }))
+            .unwrap();
+        let text = findings_text(&findings);
+        let mut owner = FakeOwner {
+            observations: [terminal_with_result(AttemptOutcome::Succeeded, &text)].into(),
+            ..Default::default()
+        };
+        let run = advance(
+            &graph(vec![review]),
+            &mut owner,
+            &mut MemoryJournal::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            run.checkpoint.nodes[0]
+                .outputs
+                .as_ref()
+                .unwrap()
+                .verdict
+                .as_deref(),
+            Some(verdict)
+        );
+    }
+}
+
+#[test]
+fn typed_delta_verifier_can_falsify_a_previously_upheld_finding() {
+    let bundled = template::TemplateLibrary::bundled();
+    let verify = template::Compiler::new(&bundled)
+        .compile(&serde_json::json!({
+            "id":"verify", "use":"review.verify", "route":{"alias":"fixture"}, "after":["prior"],
+            "inputs":[{"node":"prior","outputs":["findings"]}]
+        }))
+        .unwrap();
+    let mut owner = FakeOwner {
+        observations: [
+            terminal_with_result(AttemptOutcome::Succeeded, &findings_text(&entry(",\"verification\":\"upheld\""))),
+            terminal_with_result(AttemptOutcome::Succeeded, &findings_text(r#"{"id":"F1","verification":"falsified","reason":"Delta removed the failing path"}"#)),
+        ].into(),
+        ..Default::default()
+    };
+    let document = graph(vec![node("prior", route("fixture")), verify]);
+    let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
+    let output = run.checkpoint.nodes[1].outputs.as_ref().unwrap();
+    assert_eq!(run.checkpoint.nodes[1].state, NodeState::Succeeded);
+    assert_eq!(output.findings[0].extra["verification"], "falsified");
+    assert_eq!(output.findings[0].extra["propagates"], "prior:F1");
+    assert_eq!(output.verdict.as_deref(), Some("VERDICT: PASS"));
+    let (plan, _) = validate_plan(&document).unwrap();
+    assert!(
+        review_verification_error(
+            &plan.nodes[1],
+            &[],
+            &[],
+            &[(output.findings[0].id.clone(), "member:0".into())],
+            output
+        )
+        .is_none()
+    );
+    // An overflow proof owns completeness for these known upstream identities.
+    assert!(
+        review_verification_error(&plan.nodes[1], &output.findings, &[], &[], output).is_none()
     );
 }
