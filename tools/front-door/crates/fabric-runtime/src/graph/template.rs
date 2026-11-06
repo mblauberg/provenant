@@ -619,7 +619,13 @@ impl<'a> Compiler<'a> {
             }
             let template = self.library.resolve(&name)?;
             let with = node.remove("with").unwrap_or(Value::Null);
-            let parameters = template.bind(&name, &with)?;
+            let mut parameters = template.bind(&name, &with)?;
+            if name == "review-repair"
+                && with.get("lenses").is_none()
+                && let Some(lenses) = self.resolvers.get("review-panel")
+            {
+                parameters.insert("lenses".into(), serde_json::json!(lenses));
+            }
             stack.push(name.clone());
             let lowered = self.instantiate(&name, &template, node, &parameters, stack);
             stack.pop();
@@ -751,9 +757,14 @@ impl<'a> Compiler<'a> {
             max_rounds: usize,
             #[serde(default)]
             max_extension_rounds: Option<usize>,
+            #[serde(default)]
+            review_repair: bool,
         }
         let repeat: Repeat =
             serde_json::from_value(repeat).map_err(|error| format!("invalid repeat: {error}"))?;
+        let review_repair = repeat.review_repair
+            || (node.get("use").and_then(Value::as_str) == Some("repair")
+                && self.library.layer("repair") == Some(Layer::Bundled));
         let mut boundary = Map::new();
         for key in [
             "id",
@@ -762,6 +773,7 @@ impl<'a> Compiler<'a> {
             "depends_on",
             "inputs",
             "skip_without_findings",
+            "on_fail",
         ] {
             if let Some(value) = node.remove(key) {
                 boundary.insert(key.into(), value);
@@ -778,6 +790,12 @@ impl<'a> Compiler<'a> {
         spec.insert("body".into(), Value::Array(body));
         spec.insert("until".into(), Value::String(repeat.until));
         spec.insert("max_rounds".into(), repeat.max_rounds.into());
+        if review_repair {
+            if !(1..=3).contains(&repeat.max_rounds) {
+                return Err("review repair cycles must be between 1 and 3".into());
+            }
+            spec.insert("review_repair".into(), Value::Bool(true));
+        }
         if let Some(rounds) = repeat.max_extension_rounds {
             spec.insert("max_extension_rounds".into(), rounds.into());
         }
@@ -811,6 +829,54 @@ impl<'a> Compiler<'a> {
             let mut children = Vec::with_capacity(template.nodes.len());
             for member in &template.nodes {
                 children.push(self.lower_in(member, parameters, stack)?);
+            }
+            let bundled = self.library.layer(name) == Some(Layer::Bundled);
+            if bundled
+                && name == "repair"
+                && parameters.get("writer").and_then(Value::as_str) == Some("")
+            {
+                // A standalone or integration repair has no PR writer to continue.
+                if let Some(fix) = children.first_mut().and_then(Value::as_object_mut) {
+                    fix.remove("continues");
+                }
+            }
+            if bundled
+                && name == "repair"
+                && let Some(branch) = parameters
+                    .get("integration_branch")
+                    .and_then(Value::as_str)
+                    .filter(|branch| !branch.is_empty())
+            {
+                children[0]["delivery"] = Value::String(format!("integrate:{branch}"));
+            }
+            if bundled && name == "review-repair" {
+                // Bind a host-authored slice to the same literal write authority.
+                // The read-only continuation planner cannot invent writer authority.
+                let mut fix = children[0]["loop"]["body"][0].clone();
+                fix["id"] = Value::String("fix".into());
+                fix.as_object_mut()
+                    .ok_or("repair writer must be a node")?
+                    .remove("inputs");
+                fix["acceptance_checks"] = serde_json::json!([
+                    "Meet the principal's acceptance evidence within the approved scope"
+                ]);
+                let prompt = fix
+                    .as_object_mut()
+                    .ok_or("repair writer must be a node")?
+                    .remove("prompt");
+                let access = fix
+                    .as_object_mut()
+                    .ok_or("repair writer must be a node")?
+                    .remove("access");
+                fix.as_object_mut()
+                    .ok_or("repair writer must be a node")?
+                    .remove("id");
+                children[2]["plan"]["patterns"] = serde_json::json!([{
+                    "name": "repair-slice", "brief": prompt, "access": access, "node": fix
+                }]);
+                children[2]["plan"]["wire_exports"] = Value::Bool(true);
+                children[2]["plan"]["resolvers"] =
+                    serde_json::json!({"review-panel": parameters["lenses"]});
             }
             let single_review = name == "review-panel"
                 && self.library.layer(name) == Some(Layer::Bundled)

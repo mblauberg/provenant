@@ -40,6 +40,7 @@ pub mod patch;
 mod plans;
 mod prompt_store;
 pub mod relay;
+mod repair;
 pub mod template;
 #[cfg(test)]
 mod template_tests;
@@ -1578,7 +1579,8 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                 .extra
                 .get("retry_generation")
                 .is_none()
-                && loops::inactive_round(node, &checkpoint, &positions)
+                && (loops::inactive_round(node, &plan, &checkpoint, &positions)
+                    || repair::inactive_lens(node, &plan, &checkpoint, &positions))
             {
                 checkpoint.nodes[node_index].state = NodeState::Skipped;
                 journal.save(&checkpoint).map_err(GraphError::Journal)?;
@@ -2709,7 +2711,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     Replay {
                         delivery: land::delivery(node),
                         branch: continued.as_deref(),
-                        fast_forward_only: node.round.is_some(),
+                        fast_forward_only: node.round.is_some() || node.continues.is_some(),
                         stored_ref: stored_ref.as_deref(),
                         launch_actor: &launch_actor,
                     },
@@ -2887,21 +2889,22 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         }
                         _ => None,
                     };
-                // Every selected upstream finding identity needs a disposition.
-                let upstream_findings: Vec<Finding> = if node.dispositions.is_empty() {
-                    Default::default()
-                } else {
-                    selected_findings(node, &plan, &checkpoint, &positions)
-                        .into_iter()
-                        .map(|(source, mut finding)| {
-                            finding.extra.insert(
-                                "propagates".into(),
-                                format!("{source}:{}", finding.id).into(),
-                            );
-                            finding
-                        })
-                        .collect()
-                };
+                // Synthesis retains qualified evidence even without a disposition contract.
+                let upstream_findings: Vec<Finding> =
+                    if node.dispositions.is_empty() && node.kind != Some(NodeKind::Synthesise) {
+                        Default::default()
+                    } else {
+                        selected_findings(node, &plan, &checkpoint, &positions)
+                            .into_iter()
+                            .map(|(source, mut finding)| {
+                                finding.extra.insert(
+                                    "propagates".into(),
+                                    format!("{source}:{}", finding.id).into(),
+                                );
+                                finding
+                            })
+                            .collect()
+                    };
                 let proof_dispositions = if node.dispositions.is_empty()
                     && node.role.as_deref() == Some("review.verify")
                 {
@@ -2972,11 +2975,21 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                                 commit,
                                 &upstream_findings,
                             );
+                            if node.kind == Some(NodeKind::Synthesise)
+                                && node.dispositions.is_empty()
+                            {
+                                retain_synthesis_findings(&mut outputs, &upstream_findings);
+                            }
                             if node.access == AccessMode::ReadOnly
                                 && let Some(lens) = node
                                     .role
                                     .as_deref()
                                     .and_then(|role| role.strip_prefix("lens."))
+                                    .or_else(|| {
+                                        node.extra
+                                            .get("review_lens")
+                                            .and_then(serde_json::Value::as_str)
+                                    })
                             {
                                 for finding in &mut outputs.findings {
                                     if !upstream_findings
