@@ -2326,7 +2326,7 @@ mod narrowing {
         }
         let scripted = Scripted {
             cwd: match scripted.cwd {
-                CwdObservation::Path(path) if path == PathBuf::from("inside") => {
+                CwdObservation::Path(path) if path.as_path() == std::path::Path::new("inside") => {
                     CwdObservation::Path(root.clone())
                 }
                 CwdObservation::Path(_) => CwdObservation::Path(base.clone()),
