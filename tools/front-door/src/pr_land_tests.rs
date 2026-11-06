@@ -778,6 +778,7 @@ fn contribution_terminal(
         id,
         record.revision,
         &provenant_run::TerminalPublication {
+            terminal_cause: None,
             outcome,
             started_at: Some(record.queued_at),
             finished_at: call.clock.wall_now()?,
@@ -1716,6 +1717,7 @@ pub(crate) fn pr_land_preserves_terminal_writer_evidence_in_parent_and_child_sto
             id,
             running.revision,
             &TerminalPublication {
+                terminal_cause: None,
                 outcome: provenant_run::Outcome::Succeeded,
                 started_at: running.started_at,
                 finished_at: clock.wall_now()?,

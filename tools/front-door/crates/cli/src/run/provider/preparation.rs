@@ -40,6 +40,28 @@ pub(super) fn provider_preparation_fallback(
     }
 }
 
+/// Refresh failures retain login guidance only when the credential owner has
+/// classified the cause. Other provider errors cannot supply diagnostic text.
+pub(super) fn credential_failure_skip(
+    route: &str,
+    error: &provenant_providers::ProviderError,
+    label: &str,
+    directory: &Path,
+) -> SkippedRoute {
+    use provenant_providers::ProviderError;
+    let mut skipped = skip(route, SkipKind::AuthRequired, "credential refresh failed");
+    let cause = match error {
+        ProviderError::CredentialNotFound => provenant_records::RouteExclusionReason::AuthRequired,
+        ProviderError::CredentialExpired => provenant_records::RouteExclusionReason::LoginExpired,
+        _ => return skipped,
+    };
+    skipped.set_cause(cause);
+    skipped.detail = provenant_records::diagnostic::safe_text(&credential_failure_message(
+        error, label, directory,
+    ));
+    skipped
+}
+
 // Resolve only PATH, leaving the rest of the daemon environment intact. The
 // login shell runs from the account home, never the writer's checkout.
 fn host_dependency_path(
@@ -1984,14 +2006,11 @@ pub(super) fn prepare_candidates(
                 Ok(token) => Some(token),
                 Err(error) => {
                     previous_outcome = provenant_routing::FallbackOutcome::AuthRequired;
-                    reasons.push(skip(
+                    reasons.push(credential_failure_skip(
                         &label,
-                        SkipKind::AuthRequired,
-                        credential_failure_message(
-                            &error,
-                            entry.map_or("unknown", |e| e.label.as_str()),
-                            account.directory(),
-                        ),
+                        &error,
+                        entry.map_or("unknown", |e| e.label.as_str()),
+                        account.directory(),
                     ));
                     continue;
                 }

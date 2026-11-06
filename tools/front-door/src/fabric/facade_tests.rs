@@ -819,6 +819,7 @@ pub(crate) mod peer_tests {
             record.attempt_id,
             record.revision,
             &provenant_run::TerminalPublication {
+                terminal_cause: None,
                 outcome,
                 finished_at: call.clock.wall_now()?,
                 started_at: None,

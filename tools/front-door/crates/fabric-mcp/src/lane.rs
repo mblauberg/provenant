@@ -80,6 +80,7 @@ fn relay_cause(error: &FacadeError) -> FacadeError {
 fn service_cause(error: &ServiceError) -> Option<FacadeError> {
     match error {
         ServiceError::Facade(cause) => Some(relay_cause(cause)),
+        ServiceError::Coordination(cause) => Some(relay_cause(&FacadeError::from(cause))),
         ServiceError::Invalid(cause) => Some(FacadeError::from(
             &provenant_fabric_runtime::coordination::CoordinationError::Input(cause.clone()),
         )),
@@ -732,6 +733,49 @@ mod tests {
             assert_eq!(value["code"], "LAUNCH_UNKNOWN");
             assert_eq!(value["operation_id"], "dispatch-17");
             assert!(value["next"].as_str().unwrap().contains("dispatch-17"));
+            serving.join().unwrap().unwrap();
+        });
+        Ok(())
+    }
+
+    #[test]
+    fn relay_coordination_unknown_keeps_typed_operation_and_remedy()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let operation_id = provenant_core::OperationId::parse("peer-dispatch-17")?;
+        let (mut client, mut server) = UnixStream::pair()?;
+        thread::scope(|scope| {
+            let serving = scope.spawn(|| {
+                serve_one(
+                    &mut server,
+                    provenant_records::Limits::CONFIG,
+                    &|_, _, _| {
+                        Err(
+                            provenant_fabric_runtime::coordination::CoordinationError::Peer(
+                                provenant_fabric_runtime::hosts::PeerError::Unknown {
+                                    operation_id: operation_id.clone(),
+                                },
+                            )
+                            .into(),
+                        )
+                    },
+                    &CancelToken::new(),
+                )
+            });
+            let error = exchange(&mut client, &request(), &CancelToken::new()).unwrap_err();
+            assert!(matches!(
+                &error,
+                ServiceError::Facade(FacadeError::LaunchUnknown { operation_id: actual })
+                    if actual == &operation_id
+            ));
+            let value = error.structured_error();
+            assert_eq!(value["code"], "LAUNCH_UNKNOWN");
+            assert_eq!(value["operation_id"], operation_id.as_str());
+            assert!(
+                value["next"]
+                    .as_str()
+                    .unwrap()
+                    .contains(operation_id.as_str())
+            );
             serving.join().unwrap().unwrap();
         });
         Ok(())

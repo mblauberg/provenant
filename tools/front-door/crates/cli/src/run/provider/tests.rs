@@ -926,6 +926,59 @@ fn credential_messages_suggest_signin_only_for_missing_or_expired_tokens() {
     }
 }
 
+#[test]
+fn credential_refresh_skip_retains_selected_account_login_only_for_typed_causes() {
+    use provenant_providers::ProviderError;
+    use provenant_records::RouteExclusionReason;
+    let entry: provenant_providers::accounts::Registration =
+        serde_json::from_value(serde_json::json!({
+            "adapter":"claude", "label":"work", "key":"selected-work",
+            "directory":"/fixture/account work"
+        }))
+        .unwrap();
+    for (error, cause) in [
+        (
+            ProviderError::CredentialNotFound,
+            RouteExclusionReason::AuthRequired,
+        ),
+        (
+            ProviderError::CredentialExpired,
+            RouteExclusionReason::LoginExpired,
+        ),
+    ] {
+        let skipped =
+            credential_failure_skip("claude/model", &error, &entry.label, &entry.directory);
+        let skipped: SkippedRoute =
+            serde_json::from_slice(&serde_json::to_vec(&skipped).unwrap()).unwrap();
+        assert_eq!(skipped.kind, SkipKind::AuthRequired);
+        assert_eq!(skipped.cause, Some(cause));
+        assert!(skipped.detail.contains("account work"));
+        assert!(
+            skipped
+                .detail
+                .contains("CLAUDE_CONFIG_DIR='/fixture/account work'")
+        );
+        assert!(skipped.detail.contains("claude auth login"));
+        let diagnostic = serde_json::to_string(&skipped.diagnostic()).unwrap();
+        assert!(!diagnostic.contains("/fixture/account work"));
+        assert_eq!(skipped.diagnostic().code, "REFUSED");
+    }
+    for error in [
+        ProviderError::CredentialReadFailed("TOKEN_SENTINEL /private/provider\u{1b}".into()),
+        ProviderError::CredentialUnavailable,
+    ] {
+        let skipped =
+            credential_failure_skip("claude/model", &error, &entry.label, &entry.directory);
+        assert_eq!(skipped.kind, SkipKind::AuthRequired);
+        assert_eq!(skipped.cause, None);
+        assert!(!skipped.detail.contains("TOKEN_SENTINEL"));
+        assert!(!skipped.detail.contains("/private/provider"));
+        assert!(!skipped.detail.contains("CLAUDE_CONFIG_DIR"));
+        assert!(!skipped.detail.contains("/fixture/account work"));
+        assert!(!skipped.detail.chars().any(char::is_control));
+    }
+}
+
 fn prompt_paths(attempt: &Path) -> Result<run::LaunchPaths, Box<dyn std::error::Error>> {
     Ok(run::LaunchPaths {
         attempt_id: provenant_core::AttemptId::from_bytes([1; 16]),
