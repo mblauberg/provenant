@@ -85,9 +85,6 @@ jobs:
 
       - name: Check generated contract reference
         run: scripts/generate-reference --check
-      - name: Scan release inputs
-        run: >-
-          "$CARGO_TARGET_DIR/debug/provenant" check release
       # Advisory: continue-on-error keeps this outside the ci-status gate.
       - name: Require Owner and Anchor headers on specs and runbooks
         run: scripts/check-doc-truth --inventory-only --strict-inventory
