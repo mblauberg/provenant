@@ -237,13 +237,17 @@ impl RunStore {
             let paths = local_or_withdraw!(
                 writer
                     .uncommitted_paths(&git)
-                    .map_err(|error| local("writer status", &error))
+                    .map_err(|error| typed_local("writer status", &error))
             );
             if !paths.is_empty() {
-                local_or_withdraw!(Err::<(), _>(local(
-                    "writer continuation",
-                    &format!("uncommitted predecessor edits: {}", paths.join(", ")),
-                )));
+                local_or_withdraw!(Err::<(), _>(HandOff::Boundary {
+                    message: format!(
+                        "writer continuation: uncommitted predecessor edits: {}",
+                        paths.join(", ")
+                    ),
+                    class: provenant_records::diagnostic::BoundaryClass::Authority,
+                    cause: None,
+                }));
             }
         }
         // Reconcile may have withdrawn this attempt before the lease existed.
@@ -253,7 +257,11 @@ impl RunStore {
                     && now.run_id == record.run_id
                     && now.task_id == record.task_id => {}
             Ok(_) => {
-                local_or_withdraw!(Err::<(), _>(local("attempt", &"changed before handoff")));
+                local_or_withdraw!(Err::<(), _>(HandOff::Boundary {
+                    message: "attempt: changed before handoff".into(),
+                    class: provenant_records::diagnostic::BoundaryClass::Authority,
+                    cause: None,
+                }));
             }
             Err(error) => {
                 local_or_withdraw!(Err::<(), _>(typed_local("attempt record", &error)));

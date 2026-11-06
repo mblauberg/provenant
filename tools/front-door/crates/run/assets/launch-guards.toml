@@ -215,6 +215,11 @@ boundary = "authority"
 reason = "A continuation must retain its recorded worktree ownership and cannot take custody from a nonterminal predecessor."
 
 [[guard]]
+site = "run/src/launch/hand_off.rs#RunStore::hand_off"
+boundary = "authority"
+reason = "A writer continuation cannot discard uncommitted predecessor edits, and an attempt changed after custody acquisition cannot be handed off."
+
+[[guard]]
 site = "run/src/launch.rs#RunStore::start_inner"
 boundary = "unclassified"
 reason = "Mixed or untyped candidate failures remain combined in RefusalKind::Preparation. Typed run errors, nested argv prompt guards, protected host stores, and uniformly classified plan failures retain their boundaries."
