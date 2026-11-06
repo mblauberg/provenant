@@ -164,6 +164,16 @@ boundary = "authority"
 reason = "A child attempt must still belong to the validated request and cannot duplicate a child task when the host reads it for launch."
 
 [[guard]]
+site = "cli/src/run/provider/preparation.rs#check_graph_inputs_root"
+boundary = "authority"
+reason = "A graph-bound task may receive only its own node's input directory, without a redirected path."
+
+[[guard]]
+site = "cli/src/run/provider/preparation.rs#prepare_candidates"
+boundary = "authority"
+reason = "A writer continuation cannot take over a predecessor's worktree while its edits are uncommitted."
+
+[[guard]]
 site = "run/src/launch/hand_off.rs#RunStore::hand_off"
 boundary = "lane_git"
 reason = "A retained writer import keeps its worktree fenced until the protected Git state is reconciled."

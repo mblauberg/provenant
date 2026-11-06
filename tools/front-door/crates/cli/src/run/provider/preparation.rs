@@ -375,6 +375,10 @@ pub(super) enum PrepareError {
     HostIndexOverlap,
     #[error("write grants overlap the host target seed store")]
     TargetSeedOverlap,
+    #[error("{0}")]
+    GraphInputsAuthority(String),
+    #[error("{0}")]
+    DirtyWriter(String),
     #[error("{message}")]
     Candidates {
         message: String,
@@ -457,6 +461,11 @@ impl PrepareError {
                 refusal.boundary_class = provenant_records::diagnostic::BoundaryClass::Integrity;
                 refusal
             }
+            error @ (Self::GraphInputsAuthority(_) | Self::DirtyWriter(_)) => {
+                let mut refusal = run::PrepareRefusal::from(error.to_string());
+                refusal.boundary_class = provenant_records::diagnostic::BoundaryClass::Authority;
+                refusal
+            }
             other => other.to_string().into(),
         }
     }
@@ -479,6 +488,15 @@ fn preparation_preserves_typed_boundaries_without_classifying_other_errors() {
     assert_eq!(prompt.boundary_class, BoundaryClass::Authority);
     let other = PrepareError::Other("TOKEN_SENTINEL".into()).into_refusal();
     assert_eq!(other.boundary_class, BoundaryClass::None);
+    for error in [
+        PrepareError::GraphInputsAuthority("invalid graph inputs root".into()),
+        PrepareError::DirtyWriter("uncommitted predecessor edits".into()),
+    ] {
+        assert_eq!(
+            error.into_refusal().boundary_class,
+            BoundaryClass::Authority
+        );
+    }
     for error in [
         PrepareError::HostIndexOverlap,
         PrepareError::TargetSeedOverlap,
@@ -1060,12 +1078,14 @@ pub(super) fn prepare_candidates(
         project_id,
         task.context.as_ref(),
         task.access.inputs_root.as_deref(),
-    )?;
+    )
+    .map_err(PrepareError::GraphInputsAuthority)?;
     let writer = match &task.writer {
-        Some(request) => Some(
-            run::prepare_writer(request, roots.state.as_path(), project_id)
-                .map_err(|error| error.to_string())?,
-        ),
+        Some(request) => Some(run::prepare_writer(
+            request,
+            roots.state.as_path(),
+            project_id,
+        )?),
         None => None,
     };
     let source = match writer.as_ref() {
@@ -1106,17 +1126,14 @@ pub(super) fn prepare_candidates(
                     || format!("writer continuation from {source} to {predecessor}"),
                     |error| error.to_string(),
                 );
-                return Err(format!(
+                return Err(PrepareError::DirtyWriter(format!(
                     "{detail}; uncommitted predecessor edits: {}",
                     uncommitted.join(", ")
-                )
-                .into());
+                )));
             }
-            lineage.map_err(|error| error.to_string())?;
+            lineage?;
         } else if let Some(head) = task.head.as_deref() {
-            writer
-                .require_source(head.parse().map_err(|_| "invalid pinned writer source")?)
-                .map_err(|error| error.to_string())?;
+            writer.require_source(head.parse().map_err(|_| "invalid pinned writer source")?)?;
         }
     }
     // Publishing is opt-in (`lanes.publish`): it hands the lane the GitHub
