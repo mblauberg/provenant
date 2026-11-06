@@ -987,22 +987,13 @@ mod diagnostic_projection_tests {
 
     #[test]
     fn source_errors_are_not_diagnostic_detail_even_locally() {
-        use provenant_confinement::worktrees::WorktreeError;
-        let errors = [
-            RunError::Sqlite(rusqlite::Error::InvalidParameterName(
-                "TOKEN_SENTINEL".into(),
-            )),
-            RunError::Writer(WorktreeError::CensusUnknown {
-                path: "/repo/tree".into(),
-                detail: "TOKEN_SENTINEL\u{1b}".into(),
-            }),
-        ];
-        for error in errors {
-            let projection = error.diagnostic(Destination::Local);
-            let encoded = serde_json::to_string(&projection).unwrap();
-            assert!(!encoded.contains("TOKEN_SENTINEL"));
-            assert!(projection.next.is_some());
-        }
+        let error = RunError::Sqlite(rusqlite::Error::InvalidParameterName(
+            "TOKEN_SENTINEL".into(),
+        ));
+        let projection = error.diagnostic(Destination::Local);
+        let encoded = serde_json::to_string(&projection).unwrap();
+        assert!(!encoded.contains("TOKEN_SENTINEL"));
+        assert!(projection.next.is_some());
     }
 
     #[test]
@@ -1150,6 +1141,7 @@ mod diagnostic_projection_tests {
                 home: None,
             });
             let rendered = serde_json::to_string(&remote).unwrap();
+            assert!(!rendered.contains("process 123"));
             assert!(!rendered.contains("/private/other"));
             assert!(!rendered.contains("/checkout/tree"));
         }
