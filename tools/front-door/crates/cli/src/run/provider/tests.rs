@@ -5374,22 +5374,14 @@ fn graph_read_only_snapshot_survives_moving_and_replaced_checkout()
     let executor = provenant_os::exec::SystemExecutor::new(1)?;
     let git = init_fixture_repository(&executor, &project, &git_home)?;
     std::fs::write(project.join("subject"), "verified checkout")?;
-    for args in [
-        vec!["add", "subject"],
-        vec![
-            "-c",
-            "user.name=Fixture",
-            "-c",
-            "user.email=fixture@example.invalid",
-            "commit",
-            "-qm",
-            "subject",
-        ],
-    ] {
+    for args in [vec!["add", "subject"], vec!["commit", "-qm", "subject"]] {
         let argv: Vec<std::ffi::OsString> = std::iter::once(git.clone().into_os_string())
             .chain(args.into_iter().map(Into::into))
             .collect();
-        let result = executor.execute(ExecOptions::new(&argv, &project, Duration::from_secs(5)))?;
+        let env = provenant_os::fixture::git_env();
+        let mut options = ExecOptions::new(&argv, &project, Duration::from_secs(5));
+        options.env = Some(&env);
+        let result = executor.execute(options)?;
         assert_eq!(result.termination, Termination::Exit(0));
     }
     let head = run::resolve_git_base(&git, &project, "HEAD")?;
@@ -5615,10 +5607,6 @@ fn graph_read_only_snapshot_survives_moving_and_replaced_checkout()
         let args: Vec<std::ffi::OsString> = [
             thread_git.as_os_str(),
             "-c".as_ref(),
-            "user.name=Fixture".as_ref(),
-            "-c".as_ref(),
-            "user.email=fixture@example.invalid".as_ref(),
-            "-c".as_ref(),
             "core.hooksPath=/dev/null".as_ref(),
             "commit".as_ref(),
             "--allow-empty".as_ref(),
@@ -5628,12 +5616,13 @@ fn graph_read_only_snapshot_survives_moving_and_replaced_checkout()
         .into_iter()
         .map(ToOwned::to_owned)
         .collect();
-        let env = vec![
+        let mut env = vec![
             ("HOME".into(), thread_home.into_os_string()),
             ("PATH".into(), "/usr/bin:/bin".into()),
             ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
             ("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()),
         ];
+        env.extend(provenant_os::fixture::fixture_git_settings());
         let mut options = ExecOptions::new(&args, &live_source, Duration::from_secs(5));
         options.env = Some(&env);
         let result = provenant_os::exec::SystemExecutor::new(1)
@@ -5676,10 +5665,6 @@ fn graph_read_only_snapshot_survives_moving_and_replaced_checkout()
     );
     let moved_args: Vec<std::ffi::OsString> = [
         git.as_os_str(),
-        "-c".as_ref(),
-        "user.name=Fixture".as_ref(),
-        "-c".as_ref(),
-        "user.email=fixture@example.invalid".as_ref(),
         "commit".as_ref(),
         "--allow-empty".as_ref(),
         "-qm".as_ref(),
@@ -5688,11 +5673,10 @@ fn graph_read_only_snapshot_survives_moving_and_replaced_checkout()
     .into_iter()
     .map(ToOwned::to_owned)
     .collect();
-    let moved = executor.execute(ExecOptions::new(
-        &moved_args,
-        &source,
-        Duration::from_secs(5),
-    ))?;
+    let env = provenant_os::fixture::git_env();
+    let mut options = ExecOptions::new(&moved_args, &source, Duration::from_secs(5));
+    options.env = Some(&env);
+    let moved = executor.execute(options)?;
     assert_eq!(moved.termination, Termination::Exit(0));
     let historical = prepare_command(
         &registry,
