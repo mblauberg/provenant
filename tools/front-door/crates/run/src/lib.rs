@@ -713,11 +713,12 @@ impl RunError {
                 floor,
                 origin,
             }) => {
-                diagnostic = diagnostic
-                    .detail(format!(
-                        "disk space: {free} bytes available; gc.free_floor is {floor} bytes (source: {})", origin.description()
-                    ))
-                    .next("free disk space above gc.free_floor before retrying");
+                diagnostic = provenant_records::diagnostic::ResourceFact::Disk {
+                    free: *free,
+                    floor: *floor,
+                    origin: *origin,
+                }
+                .project(diagnostic);
             }
             Self::Admission(AdmissionError::MemoryPressure {
                 level,

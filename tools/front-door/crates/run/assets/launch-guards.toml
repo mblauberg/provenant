@@ -623,3 +623,52 @@ boundary = "configurable_default"
 code = "HOST_PROCESSES"
 setting = "operating system RLIMIT_NPROC"
 reason = "The operating system's per-user soft process limit is adjustable; the refusal identifies the limit and shipped reserved headroom."
+
+[[guard]]
+site = "run/src/launch/hand_off.rs#custody_refusal"
+boundary = "configurable_default"
+code = "DISK_FLOOR"
+setting = "gc.free_floor"
+reason = "A custody admission resource refusal retains the effective setting and source in its typed fact."
+
+[[guard]]
+site = "run/src/launch/hand_off.rs#custody_refusal"
+boundary = "configurable_default"
+code = "MEMORY_PRESSURE"
+setting = "domains.fabric.lanes.memory_pressure_threshold"
+reason = "A custody admission resource refusal retains the effective setting and source in its typed fact."
+
+[[guard]]
+site = "run/src/launch/hand_off.rs#custody_refusal"
+boundary = "configurable_default"
+code = "LANE_CAP"
+setting = "domains.fabric.lanes.max_project_writer_lanes"
+reason = "A custody admission resource refusal retains the effective setting and source in its typed fact."
+
+[[guard]]
+site = "run/src/launch/hand_off.rs#custody_refusal"
+boundary = "configurable_default"
+code = "LANE_CAP"
+setting = "domains.fabric.lanes.max_writer_lanes"
+reason = "A custody admission resource refusal retains the effective setting and source in its typed fact."
+
+[[guard]]
+site = "run/src/launch/hand_off.rs#custody_refusal"
+boundary = "configurable_default"
+code = "LANE_CAP"
+setting = "domains.fabric.lanes.max_lanes"
+reason = "A custody admission resource refusal retains the effective setting and source in its typed fact."
+
+[[guard]]
+site = "run/src/launch/hand_off.rs#custody_refusal"
+boundary = "configurable_default"
+code = "LANE_CAP"
+setting = "domains.fabric.lanes.max_project_lanes"
+reason = "A custody admission resource refusal retains the effective setting and source in its typed fact."
+
+[[guard]]
+site = "run/src/launch/hand_off.rs#custody_refusal"
+boundary = "configurable_default"
+code = "HOST_PROCESSES"
+setting = "operating system RLIMIT_NPROC"
+reason = "A custody admission resource refusal retains the effective setting and source in its typed fact."

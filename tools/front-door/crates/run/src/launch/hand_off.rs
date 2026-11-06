@@ -1,6 +1,34 @@
 use super::*;
 
 fn typed_local(phase: &str, error: &RunError) -> HandOff {
+    if let RunError::Admission(AdmissionError::Disk {
+        free,
+        floor,
+        origin,
+    }) = error
+    {
+        return HandOff::Resource {
+            message: format!("{phase}: {error}"),
+            fact: provenant_records::diagnostic::ResourceFact::Disk {
+                free: *free,
+                floor: *floor,
+                origin: *origin,
+            },
+        };
+    }
+    if matches!(error, RunError::Admission(_))
+        && let Some(provenant_records::diagnostic::DiagnosticFact::Resource(fact)) = error
+            .diagnostic(provenant_records::diagnostic::Destination::Remote {
+                repository: None,
+                home: None,
+            })
+            .fact
+    {
+        return HandOff::Resource {
+            message: format!("{phase}: {error}"),
+            fact,
+        };
+    }
     let cause = match error {
         RunError::Confinement(
             provenant_confinement::permissions::PermissionError::BackendNotAvailable(
@@ -167,6 +195,7 @@ impl RunStore {
                             let cause = match &error {
                                 HandOff::Local(cause)
                                 | HandOff::Boundary { message: cause, .. }
+                                | HandOff::Resource { message: cause, .. }
                                 | HandOff::TypedLocal { message: cause, .. } => cause.as_str(),
                                 _ => "launch preparation failed",
                             };
@@ -391,6 +420,108 @@ mod tests {
     use provenant_core::CancelToken;
 
     #[test]
+    fn custody_resource_refusals_keep_typed_facts_and_inventoried_sources() {
+        use provenant_records::diagnostic::{
+            LaneLimit, PressureLevel, PressureThreshold, SettingSource,
+        };
+        let inventory = include_str!("../../assets/launch-guards.toml")
+            .parse::<toml_edit::DocumentMut>()
+            .unwrap();
+        let guards = inventory["guard"].as_array_of_tables().unwrap();
+        let cases = [
+            (
+                "DISK_FLOOR",
+                AdmissionError::Disk {
+                    free: 1,
+                    floor: 2,
+                    origin: SettingSource::Configuration,
+                },
+            ),
+            (
+                "MEMORY_PRESSURE",
+                AdmissionError::MemoryPressure {
+                    level: PressureLevel::Critical,
+                    threshold: PressureThreshold::Warning,
+                    origin: SettingSource::ShippedDefault,
+                },
+            ),
+            (
+                "HOST_PROCESSES",
+                AdmissionError::Processes { used: 3, limit: 4 },
+            ),
+            (
+                "LANE_CAP",
+                AdmissionError::LaneCap {
+                    active: 5,
+                    limit: 5,
+                    kind: LaneLimit::ProjectWriters,
+                    origin: SettingSource::Configuration,
+                },
+            ),
+            (
+                "LANE_CAP",
+                AdmissionError::LaneCap {
+                    active: 5,
+                    limit: 5,
+                    kind: LaneLimit::HostWriters,
+                    origin: SettingSource::ShippedDefault,
+                },
+            ),
+            (
+                "LANE_CAP",
+                AdmissionError::LaneCap {
+                    active: 5,
+                    limit: 5,
+                    kind: LaneLimit::HostTotal,
+                    origin: SettingSource::Configuration,
+                },
+            ),
+            (
+                "LANE_CAP",
+                AdmissionError::LaneCap {
+                    active: 5,
+                    limit: 5,
+                    kind: LaneLimit::ProjectTotal,
+                    origin: SettingSource::ShippedDefault,
+                },
+            ),
+        ];
+        for (code, cause) in cases {
+            let handoff = custody_refusal(
+                crate::writer::WriterCustodyError::Admission(custody::CustodyError::Admission(
+                    cause,
+                )),
+                None,
+            );
+            let HandOff::Resource { fact, .. } = handoff else {
+                panic!("resource refusal lost its fact")
+            };
+            let kind = RefusalKind::HandoffResource(fact);
+            let diagnostic = kind.diagnostic().expect("resource diagnostic");
+            assert_eq!(diagnostic.code, code);
+            let detail = diagnostic.detail.as_deref().unwrap();
+            assert!(diagnostic.next.is_some());
+            assert!(detail.contains("source:") || detail.contains("shipped"));
+            assert!(guards.iter().any(|guard| {
+                guard.get("site").and_then(|value| value.as_str())
+                    == Some("run/src/launch/hand_off.rs#custody_refusal")
+                    && guard.get("code").and_then(|value| value.as_str()) == Some(code)
+                    && guard.get("boundary").and_then(|value| value.as_str())
+                        == Some("configurable_default")
+                    && guard
+                        .get("setting")
+                        .and_then(|value| value.as_str())
+                        .is_some_and(|setting| detail.contains(setting))
+            }));
+            assert_eq!(
+                serde_json::from_value::<RefusalKind>(serde_json::to_value(&kind).unwrap())
+                    .unwrap(),
+                kind
+            );
+        }
+    }
+
+    #[test]
     fn custody_refusals_distinguish_authority_from_operational_failures() {
         use crate::writer::WriterCustodyError;
         use provenant_records::diagnostic::BoundaryClass;
@@ -575,6 +706,9 @@ mod tests {
             Err(HandOff::Boundary { message, class, .. }) => {
                 panic!("unexpected {class:?} boundary: {message}")
             }
+            Err(HandOff::Resource { message, fact }) => {
+                panic!("unexpected resource refusal {fact:?}: {message}")
+            }
             Err(HandOff::TypedLocal { message, cause }) => {
                 panic!("unexpected typed refusal {cause:?}: {message}")
             }
@@ -617,6 +751,9 @@ mod tests {
             Err(HandOff::Boundary { message, class, .. }) => {
                 panic!("unexpected {class:?} boundary: {message}")
             }
+            Err(HandOff::Resource { message, fact }) => {
+                panic!("unexpected resource refusal {fact:?}: {message}")
+            }
             Err(HandOff::TypedLocal { message, cause }) => {
                 panic!("unexpected typed refusal {cause:?}: {message}")
             }
@@ -655,6 +792,9 @@ mod tests {
             Err(HandOff::Local(reason)) => panic!("local: {reason}"),
             Err(HandOff::Boundary { message, class, .. }) => {
                 panic!("unexpected {class:?} boundary: {message}")
+            }
+            Err(HandOff::Resource { message, fact }) => {
+                panic!("unexpected resource refusal {fact:?}: {message}")
             }
             Err(HandOff::TypedLocal { message, cause }) => {
                 panic!("unexpected typed refusal {cause:?}: {message}")

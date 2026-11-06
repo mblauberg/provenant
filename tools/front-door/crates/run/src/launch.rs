@@ -588,6 +588,10 @@ enum HandOff {
         class: provenant_records::diagnostic::BoundaryClass,
         cause: Option<TerminalCause>,
     },
+    Resource {
+        message: String,
+        fact: provenant_records::diagnostic::ResourceFact,
+    },
     TypedLocal {
         message: String,
         cause: TerminalCause,
@@ -638,6 +642,7 @@ pub enum RefusalKind {
     WriteGrantsLimit,
     Handoff,
     HandoffBoundary(provenant_records::diagnostic::BoundaryClass),
+    HandoffResource(provenant_records::diagnostic::ResourceFact),
     RetainedImport {
         run: RunId,
         attempt: AttemptId,
@@ -646,6 +651,21 @@ pub enum RefusalKind {
 }
 
 impl RefusalKind {
+    /// Project an inventoried resource refusal without trusting source text.
+    pub fn diagnostic(&self) -> Option<provenant_records::diagnostic::Diagnostic> {
+        use provenant_records::diagnostic::{Diagnostic, ResourceFact};
+        let Self::HandoffResource(fact) = self else {
+            return None;
+        };
+        let kind = match fact {
+            ResourceFact::Disk { .. } => ErrorKind::DiskFloor,
+            ResourceFact::MemoryPressure { .. } => ErrorKind::MemoryPressure,
+            ResourceFact::Processes { .. } => ErrorKind::Processes,
+            ResourceFact::LaneCap { .. } => ErrorKind::LaneCap,
+        };
+        Some(fact.project(Diagnostic::new(kind.code()).category(kind.category())))
+    }
+
     /// The boundary established by this kind alone. Generic preparation and
     /// handoff errors need their original cause to establish a boundary.
     pub fn boundary_class(&self) -> provenant_records::diagnostic::BoundaryClass {
@@ -660,7 +680,8 @@ impl RefusalKind {
             | Self::PacingReserve
             | Self::PriorityUnavailable
             | Self::WriteGrantsLimit
-            | Self::Handoff => B::None,
+            | Self::Handoff
+            | Self::HandoffResource(_) => B::None,
         }
     }
 }
@@ -1959,6 +1980,7 @@ impl RunStore {
                     Err(
                         error @ (HandOff::Local(_)
                         | HandOff::Boundary { .. }
+                        | HandOff::Resource { .. }
                         | HandOff::TypedLocal { .. }
                         | HandOff::Busy
                         | HandOff::RetainedImport { .. }),
@@ -1977,6 +1999,10 @@ impl RunStore {
                             HandOff::Boundary { message, class, .. } => (
                                 format!("launch preparation failed: {message}"),
                                 RefusalKind::HandoffBoundary(class),
+                            ),
+                            HandOff::Resource { message, fact } => (
+                                format!("launch preparation failed: {message}"),
+                                RefusalKind::HandoffResource(fact),
                             ),
                             HandOff::RetainedImport {
                                 run,
