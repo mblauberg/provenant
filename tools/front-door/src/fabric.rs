@@ -1716,7 +1716,9 @@ impl Factory {
                         chair: None,
                     };
                     for attempt in checkpoint.nodes.iter().flat_map(|node| &node.attempts) {
-                        if attempt.state != provenant_fabric_runtime::graph::AttemptState::Terminal
+                        if (attempt.state
+                            != provenant_fabric_runtime::graph::AttemptState::Terminal
+                            || self.remote_graph_attempt(attempt))
                             && let Err(error) =
                                 self.cancel_graph_attempt(&mut owner, attempt, budget, cancel)
                         {
@@ -1965,7 +1967,9 @@ impl Factory {
                     continue;
                 }
                 for attempt in &node.attempts {
-                    if attempt.state == provenant_fabric_runtime::graph::AttemptState::Terminal {
+                    if attempt.state == provenant_fabric_runtime::graph::AttemptState::Terminal
+                        && !self.remote_graph_attempt(attempt)
+                    {
                         continue;
                     }
                     if let Err(error) =
@@ -2048,6 +2052,19 @@ fn graph_selector_forms() -> String {
 }
 
 impl Factory {
+    /// A finished peer attempt may still own attached descendants.
+    pub(crate) fn remote_graph_attempt(
+        &self,
+        attempt: &provenant_fabric_runtime::graph::GraphAttempt,
+    ) -> bool {
+        attempt.extra.contains_key("placement_host")
+            && attempt
+                .attempt_ref
+                .as_deref()
+                .and_then(|reference| reference.split_once('/'))
+                .is_some_and(|(host, _)| host != self.context.identity.host.to_string())
+    }
+
     /// Cancel one live graph attempt. A missing checkpoint reference (a crash
     /// between acceptance and the save) is recovered from the stable operation ID.
     pub(crate) fn cancel_graph_attempt(

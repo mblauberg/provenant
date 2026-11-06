@@ -993,6 +993,10 @@ pub(crate) mod peer_tests {
         include!("tick_tests.rs");
     }
 
+    mod peer_graph_tests {
+        include!("peer_graph_tests.rs");
+    }
+
     struct SettlementFixture {
         rig: crate::worktree_tests::support::TestRig,
         roots: provenant_core::Roots,

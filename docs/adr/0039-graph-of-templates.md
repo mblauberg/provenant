@@ -63,11 +63,33 @@ or further planner, so replanning after a wave is ordinary.
 
 **Children.** A lane runs `provenant run` or `fabric_run`; the call crosses
 `crates/fabric-mcp/src/lane.rs#HostRelay` and the host writes the journal. Children
-join the same graph, sharing budget, cancellation and trace, and may be writers
-integrating into the parent's branch. Spawning is recorded separately from
-completion dependencies, so a parent can yield its slot while it waits. A composite
-completes when its dynamic producers have closed and its join condition holds.
-Cancellation follows the subtree unless a child was explicitly detached.
+join the host's graph, sharing its budget, cancellation and trace, and may be
+writers integrating into the parent's branch. Spawning is recorded separately
+from completion dependencies, so a parent can yield its slot while it waits. A
+composite completes when its dynamic producers have closed and its join condition
+holds. Cancellation follows the subtree unless a child was explicitly detached.
+
+**Peer placement.** `tools/front-door/src/fabric/peer.rs#peer_submit_graph` gives
+an authenticated submitted attempt its own graph on the receiving host, using
+the ordinary scheduler and checkpoint-before-launch discipline. Its local relay
+serves child launches, graph edits and slot yields. Children default to that host;
+an explicit host uses ordinary placement, so any agent can launch further nodes
+on any configured reachable host. A submitted operation replays into the same
+receiver graph rather than launching another parent.
+
+The origin retains one node for the remote attempt. The peer returns a
+host-and-graph pointer with the original graph/node binding and bounded pages of
+redacted subtree metadata in status. `tools/front-door/src/fabric/unified.rs#enrich_status_rows`
+exposes that pointer; `tools/front-door/src/fabric/unified.rs#unified_graph_output`
+follows those pages' attempt references for graph and node output. Explicit
+attempt output remains the ordinary byte reader. Cancelling the origin node
+sends the existing peer cancellation request; the receiver fences and stops its
+subtree before replying. All communication uses forward SSH requests from the
+origin. A collected terminal peer checkpoint is reported explicitly, so the
+origin can retain its own status row while the attempt record remains readable.
+No reverse connection or replicated journal is required. Budgets and
+recovery are owned by each host's graph; this boundary does not provide a shared
+cross-host spending ledger.
 
 A child's roots and capabilities need not be a subset of its parent's. A lane
 may request what its agent could request by calling the CLI directly; spawning
