@@ -1291,7 +1291,7 @@ pub(crate) fn pr_land_refuses_incomplete_worker_census() -> Result {
         assert_eq!(status(&value, "branch")?, "skipped", "{value}");
         let text = value.to_string();
         assert!(text.contains("incomplete worker census"), "{value}");
-        assert!(text.contains("fixture census unavailable"), "{value}");
+        assert!(text.contains("process census unavailable"), "{value}");
         assert!(
             text.contains("deletion skipped because its registered worktree was kept"),
             "{value}"
