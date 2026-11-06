@@ -1088,7 +1088,10 @@ fn older_request_bytes_are_verified_before_decoding() -> TestResult {
     )?;
     let decoded = store.request(input.run_id, &call)?;
     assert_eq!(decoded.tasks[0].profile, input.request.tasks[0].profile);
-    assert_eq!(decoded.tasks[0].extra.get("fallback"), Some(&serde_json::json!([])));
+    assert_eq!(
+        decoded.tasks[0].extra.get("fallback"),
+        Some(&serde_json::json!([]))
+    );
     assert_ne!(decoded.digest()?, digest);
 
     raw[0] ^= 1;

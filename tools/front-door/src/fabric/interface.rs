@@ -292,10 +292,13 @@ impl Factory {
                 "document".into(),
             )));
         }
-        if raw.and_then(|document| document.get("integration_branch"))
+        if raw
+            .and_then(|document| document.get("integration_branch"))
             .is_some_and(|branch| !branch.is_null() && !branch.is_string())
         {
-            return Err(FacadeError::invalid(InvalidInputDetail::Field("integration_branch".into())));
+            return Err(FacadeError::invalid(InvalidInputDetail::Field(
+                "integration_branch".into(),
+            )));
         }
         let has_overrides = ["brief", "use", "tier", "over"]
             .iter()
@@ -403,15 +406,27 @@ impl Factory {
             }
             // Node parameters supplied explicitly (including CLI --set) beat
             // document settings; template defaults are the final fallback.
-            let bundled_batch = node["use"] == "batch"
-                && library.layer("batch") == Some(Layer::Bundled);
+            let bundled_batch =
+                node["use"] == "batch" && library.layer("batch") == Some(Layer::Bundled);
             let integration_branch = bundled_batch
                 .then(|| parameters.get("integration_branch").cloned())
                 .flatten()
-                .or_else(|| raw.and_then(|document| document.get("integration_branch")).filter(|branch| !branch.is_null()).cloned())
-                .or_else(|| bundled_batch
-                    .then(|| template.parameters.get("integration_branch")?.default.clone())
-                    .flatten());
+                .or_else(|| {
+                    raw.and_then(|document| document.get("integration_branch"))
+                        .filter(|branch| !branch.is_null())
+                        .cloned()
+                })
+                .or_else(|| {
+                    bundled_batch
+                        .then(|| {
+                            template
+                                .parameters
+                                .get("integration_branch")?
+                                .default
+                                .clone()
+                        })
+                        .flatten()
+                });
             if bundled_batch && let Some(branch) = &integration_branch {
                 parameters["integration_branch"] = branch.clone();
             }
@@ -452,9 +467,14 @@ impl Factory {
         }
         // Template compilation selected a schema before document metadata was
         // applied; a retained review base requires the schema-2 representation.
-        if raw.is_none() || lane_document.is_some()
-            || raw.is_some_and(|document| document.get("templates").is_some()
-                || document["nodes"].as_array().is_some_and(|nodes| nodes.iter().any(|node| node.get("use").is_some())))
+        if raw.is_none()
+            || lane_document.is_some()
+            || raw.is_some_and(|document| {
+                document.get("templates").is_some()
+                    || document["nodes"]
+                        .as_array()
+                        .is_some_and(|nodes| nodes.iter().any(|node| node.get("use").is_some()))
+            })
         {
             document.schema_version = document.schema_version.max(u64::from(
                 provenant_fabric_runtime::graph::minimum_schema_version(&document),
@@ -489,8 +509,8 @@ impl Factory {
         // Patch admission scans nodes and parameters. Graph-wide metadata is
         // retained separately, so scan the complete bound record before any
         // preview or publication can expose or persist it.
-        let bound_document = serde_json::to_string(&document)
-            .map_err(|_| FacadeError::StateCorrupt)?;
+        let bound_document =
+            serde_json::to_string(&document).map_err(|_| FacadeError::StateCorrupt)?;
         patch::scan_for_secrets(&bound_document)
             .map_err(|_| FacadeError::InvalidInput { detail: None })?;
         if input["explain"] == true {
@@ -1106,15 +1126,34 @@ mod tests {
             "nodes":[{"id":"inspect", "prompt":"Inspect code", "access":"read_only", "route":{"alias":"junior"}}]
         });
         for explain in [true, false] {
-            let error = factory.graph_document(json!({
-                "op":"run", "document":document, "explain":explain
-            }), budget, &cancel).err().ok_or("context credential was accepted")?;
+            let error = factory
+                .graph_document(
+                    json!({
+                        "op":"run", "document":document, "explain":explain
+                    }),
+                    budget,
+                    &cancel,
+                )
+                .err()
+                .ok_or("context credential was accepted")?;
             assert_eq!(error, FacadeError::InvalidInput { detail: None });
             assert!(!serde_json::to_string(&error)?.contains(secret));
             assert!(!serde_json::to_string(&error.diagnostic())?.contains(secret));
             assert!(!rig.project.join(".provenant/scratch/graphs").exists());
-            assert!(FileJournal::graph_ids(&factory.context.roots.state, factory.context.identity.project)?.is_empty());
-            assert!(FileJournal::event_graph_ids(&factory.context.roots.state, factory.context.identity.project)?.is_empty());
+            assert!(
+                FileJournal::graph_ids(
+                    &factory.context.roots.state,
+                    factory.context.identity.project
+                )?
+                .is_empty()
+            );
+            assert!(
+                FileJournal::event_graph_ids(
+                    &factory.context.roots.state,
+                    factory.context.identity.project
+                )?
+                .is_empty()
+            );
         }
         Ok(())
     }
@@ -1144,24 +1183,46 @@ mod tests {
             "id":"inspect", "use":"task", "source":{"type":"integration"}
         }]);
         let response = factory.graph_document(
-            json!({"op":"run", "document":source, "explain":true}), budget, &cancel,
+            json!({"op":"run", "document":source, "explain":true}),
+            budget,
+            &cancel,
         )?;
         let compiled = &response["document"];
-        assert!(compiled["graph_id"].as_str().is_some_and(|id| id.starts_with("g-")));
+        assert!(
+            compiled["graph_id"]
+                .as_str()
+                .is_some_and(|id| id.starts_with("g-"))
+        );
         for (field, expected) in settings.as_object().ok_or("settings object")? {
             assert_eq!(&compiled[field], expected, "lost graph setting {field}");
         }
-        for invalid_branch in [json!(7), json!({"branch":"batch/document"}), json!(["batch/document"])] {
+        for invalid_branch in [
+            json!(7),
+            json!({"branch":"batch/document"}),
+            json!(["batch/document"]),
+        ] {
             let error = factory.graph_document(json!({
                 "op":"run", "explain":true,
                 "document":{"integration_branch":invalid_branch,"nodes":[{"id":"task","use":"task"}]}
             }), budget, &cancel).err().ok_or("invalid branch was accepted")?;
-            assert_eq!(error, FacadeError::invalid(InvalidInputDetail::Field("integration_branch".into())));
+            assert_eq!(
+                error,
+                FacadeError::invalid(InvalidInputDetail::Field("integration_branch".into()))
+            );
         }
         let document: GraphDocument = serde_json::from_value(compiled.clone())?;
-        assert!(document.expanded(&factory.context.config.graph.limits)?.nodes.iter().any(|node| {
-            matches!(node.source, Some(provenant_fabric_runtime::graph::SourceBinding::Integration))
-        }));
+        assert!(
+            document
+                .expanded(&factory.context.config.graph.limits)?
+                .nodes
+                .iter()
+                .any(|node| {
+                    matches!(
+                        node.source,
+                        Some(provenant_fabric_runtime::graph::SourceBinding::Integration)
+                    )
+                })
+        );
         Ok(())
     }
 
@@ -1173,24 +1234,49 @@ mod tests {
         let budget = WaitBudget::cli(factory.clock.mono_now(), 10)?;
         for (node_parameters, parameters, expected) in [
             (json!({}), json!({}), "batch/document"),
-            (json!({"integration_branch":"batch/node"}), json!({}), "batch/node"),
-            (json!({"integration_branch":"batch/node"}), json!({"integration_branch":"batch/cli"}), "batch/cli"),
+            (
+                json!({"integration_branch":"batch/node"}),
+                json!({}),
+                "batch/node",
+            ),
+            (
+                json!({"integration_branch":"batch/node"}),
+                json!({"integration_branch":"batch/cli"}),
+                "batch/cli",
+            ),
         ] {
             let mut bindings = json!({"worktree":rig.project,"write_scope":["."]});
-            bindings.as_object_mut().ok_or("bindings object")?
-                .extend(node_parameters.as_object().ok_or("parameters object")?.clone());
-            let response = factory.graph_document(json!({
-                "op":"run", "explain":true, "set":parameters,
-                "document":{
-                    "use":"batch", "integration_branch":"batch/document",
-                    "with":bindings
-                }
-            }), budget, &cancel)?;
+            bindings.as_object_mut().ok_or("bindings object")?.extend(
+                node_parameters
+                    .as_object()
+                    .ok_or("parameters object")?
+                    .clone(),
+            );
+            let response = factory.graph_document(
+                json!({
+                    "op":"run", "explain":true, "set":parameters,
+                    "document":{
+                        "use":"batch", "integration_branch":"batch/document",
+                        "with":bindings
+                    }
+                }),
+                budget,
+                &cancel,
+            )?;
             assert_eq!(response["document"]["integration_branch"], expected);
             let document: GraphDocument = serde_json::from_value(response["document"].clone())?;
-            assert!(document.expanded(&factory.context.config.graph.limits)?.nodes.iter().any(|node| {
-                node.delivery == Some(provenant_records::run::DeliveryMode::Integrate(expected.into()))
-            }));
+            assert!(
+                document
+                    .expanded(&factory.context.config.graph.limits)?
+                    .nodes
+                    .iter()
+                    .any(|node| {
+                        node.delivery
+                            == Some(provenant_records::run::DeliveryMode::Integrate(
+                                expected.into(),
+                            ))
+                    })
+            );
         }
         Ok(())
     }

@@ -3285,9 +3285,7 @@ fn mcp_submission_places_read_only_work_on_a_named_peer() -> Result {
 #[test]
 fn graph_cancel_reconciles_a_remote_attempt_using_existing_peer_calls() -> Result {
     use provenant_core::{CancelToken, Clock, ProjectId, RootInputs, WaitBudget};
-    use provenant_fabric_runtime::graph::{
-        FileJournal, GraphDocument, GraphExecution,
-    };
+    use provenant_fabric_runtime::graph::{FileJournal, GraphDocument, GraphExecution};
     use provenant_os::clock::SystemClock;
 
     let mut rig = TestRig::new()?;
@@ -3324,7 +3322,9 @@ fn graph_cancel_reconciles_a_remote_attempt_using_existing_peer_calls() -> Resul
     }
     impl provenant_fabric_runtime::graph::AttemptOwner for AcceptedPeer {
         type Error = std::io::Error;
-        fn actor(&self) -> String { self.actor.clone() }
+        fn actor(&self) -> String {
+            self.actor.clone()
+        }
         fn observe_or_start(
             &mut self,
             _key: &provenant_fabric_runtime::graph::AttemptKey,
@@ -3334,7 +3334,11 @@ fn graph_cancel_reconciles_a_remote_attempt_using_existing_peer_calls() -> Resul
             _worktree: Option<&str>,
             _replay: provenant_fabric_runtime::graph::Replay<'_>,
         ) -> std::io::Result<provenant_fabric_runtime::graph::AttemptObservation> {
-            Ok(provenant_fabric_runtime::graph::AttemptObservation::Pending { attempt_ref: Some(self.reference.clone()) })
+            Ok(
+                provenant_fabric_runtime::graph::AttemptObservation::Pending {
+                    attempt_ref: Some(self.reference.clone()),
+                },
+            )
         }
     }
     let mut journal = FileJournal::open(&state, project, "remote-graph", budget, &cancel, &clock)?;
@@ -3347,12 +3351,18 @@ fn graph_cancel_reconciles_a_remote_attempt_using_existing_peer_calls() -> Resul
     })?;
     let seeded = provenant_fabric_runtime::graph::advance_with_budget(
         &document,
-        &mut AcceptedPeer { actor: actor.into(), reference: format!("{peer}/{attempt}") },
+        &mut AcceptedPeer {
+            actor: actor.into(),
+            reference: format!("{peer}/{attempt}"),
+        },
         &mut journal,
         &Default::default(),
         &Default::default(),
     )?;
-    assert_eq!(seeded.checkpoint.nodes[0].state, provenant_fabric_runtime::graph::NodeState::Running);
+    assert_eq!(
+        seeded.checkpoint.nodes[0].state,
+        provenant_fabric_runtime::graph::NodeState::Running
+    );
     drop(journal);
     let (status, result) = json_command(
         &rig,
