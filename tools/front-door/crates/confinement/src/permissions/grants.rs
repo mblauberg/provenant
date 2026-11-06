@@ -79,9 +79,11 @@ pub fn prepare_writer_directories(
             directory = match directory.open_directory(name) {
                 Ok(child) => child,
                 Err(error) if error.is_not_found() => {
-                    directory
-                        .mkdir(name, 0o700)
-                        .map_err(PermissionError::Filesystem)?;
+                    match directory.mkdir(name, 0o700) {
+                        Ok(()) => {}
+                        Err(error) if error.is_exists() => {}
+                        Err(error) => return Err(PermissionError::Filesystem(error)),
+                    }
                     directory
                         .open_directory(name)
                         .map_err(PermissionError::Filesystem)?

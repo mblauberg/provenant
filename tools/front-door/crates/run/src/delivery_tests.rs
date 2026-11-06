@@ -1,7 +1,7 @@
 //! Host Git conformance with a linked worktree and a local bare remote.
 use super::delivery::*;
 use super::*;
-use provenant_core::GitOid;
+use provenant_core::{CancelToken, GitOid};
 use provenant_os::exec::{ExecOptions, Executor, SystemExecutor, Termination};
 use provenant_os::fs::Directory;
 use std::{ffi::OsString, path::Path, time::Duration};
@@ -1079,6 +1079,131 @@ fn integration_refreshes_forged_tracking_ref_and_fails_closed()
             WriterDeliveryStage::Integrate
         )?
     );
+    Ok(())
+}
+
+// Medium: real filesystem locking with the remote process edge supplied as a callback.
+#[test]
+#[allow(clippy::disallowed_methods)] // Concurrent requests exercise cross-thread flock contention.
+fn overlapping_origin_requests_share_a_fetch_even_when_it_starts_later()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    use std::sync::{
+        Barrier,
+        atomic::{AtomicUsize, Ordering},
+    };
+    let temp = tempfile::tempdir()?;
+    let common = Directory::open_anchor(temp.path())?;
+    let start = Barrier::new(8);
+    let fetches = AtomicUsize::new(0);
+    std::thread::scope(|scope| -> crate::Result<()> {
+        let mut workers = Vec::new();
+        for _ in 0..8 {
+            let common = &common;
+            let start = &start;
+            let fetches = &fetches;
+            workers.push(scope.spawn(move || {
+                let requested = OriginRefreshRequest::capture()?;
+                start.wait();
+                coalesced_origin_refresh(common, &requested, &CancelToken::new(), || {
+                    // Origin refresh must never need or retain the config lock.
+                    let _config = common.try_lock(
+                        std::ffi::OsStr::new("provenant-lane-setup.lock"),
+                        provenant_os::fs::LockMode::Exclusive,
+                    )?;
+                    fetches.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                })
+            }));
+        }
+        for worker in workers {
+            worker.join().expect("refresh request panicked")?;
+        }
+        Ok(())
+    })?;
+    assert_eq!(fetches.load(Ordering::SeqCst), 1);
+    // A fetch starting after the request counts even if it finishes before
+    // that caller reaches the fetch lock (e.g. during transport validation).
+    let requested = OriginRefreshRequest::capture()?;
+    coalesced_origin_refresh(&common, &requested, &CancelToken::new(), || {
+        fetches.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    })?;
+    coalesced_origin_refresh(&common, &requested, &CancelToken::new(), || {
+        panic!("newer fetch already satisfies this request")
+    })?;
+    assert_eq!(fetches.load(Ordering::SeqCst), 2);
+    // A caller arriving during an in-flight fetch also reuses its completion,
+    // even if transport checks delay its acquisition of the fetch lock.
+    let mut during_fetch = None;
+    coalesced_origin_refresh(
+        &common,
+        &OriginRefreshRequest::capture()?,
+        &CancelToken::new(),
+        || {
+            fetches.fetch_add(1, Ordering::SeqCst);
+            during_fetch = Some(OriginRefreshRequest::capture()?);
+            Ok(())
+        },
+    )?;
+    coalesced_origin_refresh(
+        &common,
+        &during_fetch.ok_or("request")?,
+        &CancelToken::new(),
+        || panic!("overlapping fetch already completed"),
+    )?;
+    assert_eq!(fetches.load(Ordering::SeqCst), 3);
+    let _held = common.try_lock(
+        std::ffi::OsStr::new("provenant-lane-origin-refresh.lock"),
+        provenant_os::fs::LockMode::Exclusive,
+    )?;
+    let cancelled = CancelToken::new();
+    cancelled.cancel();
+    let error = coalesced_origin_refresh(
+        &common,
+        &OriginRefreshRequest::capture()?,
+        &cancelled,
+        || panic!("cancelled request must not fetch"),
+    )
+    .expect_err("cancelled lock wait must stop");
+    assert!(matches!(
+        error,
+        RunError::Filesystem(provenant_os::fs::FsError::Cancelled { .. })
+    ));
+    Ok(())
+}
+
+// Medium: an external Git client holds a real tracking-ref lock.
+#[test]
+fn origin_refresh_ref_collision_does_not_refuse_launch_or_hide_transport_failure()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let fixture = OriginFixture::new()?;
+    let previous = fixture.local(&["rev-parse", "refs/remotes/origin/main"])?;
+    let newer = fixture.commit("newer")?;
+    fixture.advertise(&[("main", &newer)], "main")?;
+    let lock = fixture.project.join(".git/refs/remotes/origin/main.lock");
+    std::fs::write(&lock, b"external Git transaction")?;
+    fixture.refresh(None)?;
+    assert_eq!(
+        fixture.local(&["rev-parse", "refs/remotes/origin/main"])?,
+        previous
+    );
+    assert_eq!(std::fs::read(&lock)?, b"external Git transaction");
+    std::fs::remove_file(&lock)?;
+    fixture.refresh(None)?;
+    assert_eq!(
+        fixture.local(&["rev-parse", "refs/remotes/origin/main"])?,
+        newer
+    );
+    fixture.local(&[
+        "remote",
+        "set-url",
+        "origin",
+        fixture.root.join("absent.git").to_str().ok_or("path")?,
+    ])?;
+    assert!(matches!(
+        fixture.refresh(None),
+        Err(RunError::DeliveryPrepare { .. })
+    ));
     Ok(())
 }
 

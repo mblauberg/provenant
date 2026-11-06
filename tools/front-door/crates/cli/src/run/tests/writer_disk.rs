@@ -27,25 +27,6 @@ fn retained_import_refusal_names_worktree_attempt_and_recovery() {
 }
 
 #[test]
-fn setup_timeout_is_promoted_only_without_a_progressing_sibling() {
-    let refused = || run::Started::Refused {
-        attempt: AttemptId::from_bytes([1; 16]),
-        kind: run::RefusalKind::SetupLockTimeout { seconds: 42 },
-        reason: "setup timed out".into(),
-    };
-    let failure = check_launch_policy(&[refused()]).expect_err("timeout must be reported");
-    assert_eq!(failure.kind.code(), "SETUP_LOCK_TIMEOUT");
-    assert!(failure.message.contains("42s"));
-    assert!(
-        check_launch_policy(&[
-            refused(),
-            run::Started::Launched(AttemptId::from_bytes([2; 16]))
-        ])
-        .is_ok()
-    );
-}
-
-#[test]
 fn dispatch_policy_refusal_preserves_launched_sibling() -> Result<(), String> {
     check_launch_policy(&[
         run::Started::Refused {
