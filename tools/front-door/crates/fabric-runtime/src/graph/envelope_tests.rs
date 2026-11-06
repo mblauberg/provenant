@@ -90,6 +90,7 @@ fn filled_outputs(composite: bool, writer: bool) -> NodeOutputs {
         Some(worst(4 * OUTPUT_FIELD_BYTES)),
         Some(worst(4 * OUTPUT_FIELD_BYTES)),
     );
+    outputs.extra.insert(review::PARTIAL.into(), true.into());
     outputs.verdict = Some(worst(OUTPUT_FIELD_BYTES));
     outputs.verdict_error = Some("verdict malformed, repeated or not final".into());
     outputs.findings = findings();

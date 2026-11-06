@@ -509,9 +509,37 @@ A read-only node with role `lens.*` or `review.*` that returns a valid
 findings block and verdict settles succeeded regardless of verdict. A lane's
 `declared_stop` also settles as a result under those conditions; writer stops
 retain their usual failure semantics. Disposition validation still applies.
+Review templates additionally enforce their output contract independently of
+brief overrides (`crates/fabric-runtime/src/graph/review.rs#contract_error`).
+Their verdict is exactly one final `VERDICT: PASS`, `VERDICT: FAIL` or
+`VERDICT: INCONCLUSIVE`. A new finding needs non-empty strings `id`, `severity`,
+`file`, `summary`, `status`, `evidence` and `proposed_fix`; `line` is optional
+and may be null. Independent IDs cannot repeat. Invalid replies settle
+`task_failed` with `review_verdict_invalid`, `review_findings_invalid`,
+`review_propagation_invalid` or `review_verdict_conflict`; disposition and verification errors retain their
+specific codes. `verdict_error` records the code and `advance_error` explains it.
+A PASS with unresolved blocking, accepted or unverifiable findings is a contract
+failure. A valid FAIL remains a completed review execution.
+
+`review.verify` must account for every selected finding with `upheld`, `falsified`
+or `unverifiable` and a non-empty evidence reason; a new finding uses
+`verification = "new"`. `review.synthesis` must dispose of every selected
+finding as `accepted`, `rejected` or `deferred` with a non-empty reason. Both
+inherit qualified identities and original evidence. Omitted findings remain
+available to downstream repair even when their consumer violates the contract.
+
 A partial composite waits for its members to settle, exports the successful
-members and names unavailable members in its result. A blocked node reports
-its blocking upstream node and state in status.
+members and names unavailable members in its result. Review composites also
+retain usable findings and full-result references from contract-invalid
+members without counting them towards `min_ok`. Review lens and verifier fan-outs use `min_ok = 1`: one failed lens does not
+prevent verification or synthesis of the remaining evidence. Missing coverage
+sets `NodeOutputs.review_partial = true` and `findings_available = false`,
+propagating through selected review inputs and nested composite exports.
+Approval becomes INCONCLUSIVE while a negative verdict remains negative.
+Selected inconclusive review evidence also prevents a downstream approval. An
+overflow proof can cover truncated findings but cannot replace an unavailable
+reviewer. Shapes without synthesis reduce both lens and verifier verdicts.
+A blocked node reports its blocking upstream node and state in status.
 
 A composite may declare `reduce_verdict = true`. It computes a verdict without
 an attempt from its successful exporting members: request changes is worse than
@@ -1142,7 +1170,7 @@ A warning gives the dropped count, members and available attempt references; the
 notice. Downstream input listings identify the staged paths for those member results. When materialisation is capped or its listing is too long, an input index
 names the graph and every source, status, path, attempt reference and finding ID prefix. A member with findings
 but no attempt result supplies a materialised findings block instead. Consumers
-must read the full member results and account for omitted findings. Review-council verification and
+must read the full member results and account for omitted findings. Review verification and
 synthesis receive those results. When their structured blocks cannot hold all
 the findings, the additional decisions remain in the full result. For a truncated
 composite, a verifier or disposing node must emit one `DISPOSITION` JSON
