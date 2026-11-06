@@ -183,7 +183,8 @@ pub struct Answer {
 }
 #[derive(Debug, Args)]
 pub struct Steer {
-    /// Attempt ID
+    /// Attempt ID, graph ID or graph/node target
+    #[arg(value_name = "TARGET")]
     pub attempt: String,
     /// Read the message from standard input (at most 4 KiB; input must finish within 5 seconds)
     #[arg(long, required = true)]
@@ -944,6 +945,31 @@ fn host_wide(
     }
 }
 
+/// Select a unique live graph attempt before reading or delivering steering text.
+/// Reservations without a reference still count towards ambiguity.
+pub fn live_steer_reference<'a>(
+    checkpoint: &'a provenant_fabric_runtime::graph::GraphCheckpoint,
+    node: Option<&str>,
+    selected_reference: Option<&str>,
+) -> Result<&'a str, &'static str> {
+    use provenant_fabric_runtime::graph::AttemptState;
+    if node.is_some_and(|id| !checkpoint.nodes.iter().any(|node| node.id == id)) {
+        return Err("target node was not found");
+    }
+    let mut live = checkpoint.nodes.iter()
+        .filter(|candidate| node.is_none_or(|id| candidate.id == id))
+        .flat_map(|candidate| &candidate.attempts)
+        .filter(|attempt| attempt.state != AttemptState::Terminal)
+        .filter(|attempt| selected_reference.is_none_or(|reference| attempt.attempt_ref.as_deref() == Some(reference)));
+    let first = live.next().ok_or("target has no live attempt")?;
+    if live.next().is_some() {
+        return Err("target has several live attempts; select graph/node or an attempt ID");
+    }
+    first.attempt_ref.as_deref()
+        .ok_or("live attempt has no resolved attempt ID yet; retry after launch resolves")
+}
+
+
 fn execute(
     command: HumanCommand,
     roots: provenant_core::Roots,
@@ -1282,6 +1308,35 @@ pub fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn graph_steer_resolves_unique_live_attempt_and_refuses_ambiguity() {
+        use provenant_fabric_runtime::graph::{AttemptState, GraphCheckpoint};
+        let host = provenant_core::HostId::from_bytes([1; 16]);
+        let attempt = provenant_core::AttemptId::from_bytes([2; 16]);
+        let reference = format!("{host}/{attempt}");
+        let mut checkpoint: GraphCheckpoint = serde_json::from_value(serde_json::json!({
+            "schema_version":1, "graph_id":"g", "plan_digest":"digest",
+            "nodes":[{"id":"task", "state":"running", "worktree":null,
+                "attempts":[{"key":{"graph_id":"g", "node_id":"task", "route_index":0},
+                    "launched":true, "route":{"alias":"senior"}, "state":"running",
+                    "attempt_ref":format!("{host}/{attempt}"), "outcome":null, "launch_actor":"fixture"}]}]
+        })).unwrap();
+        assert_eq!(live_steer_reference(&checkpoint, None, None).unwrap(), reference);
+        assert_eq!(live_steer_reference(&checkpoint, Some("task"), None).unwrap(), reference);
+        assert!(matches!(live_steer_reference(&checkpoint, Some("missing"), None), Err("target node was not found")));
+        let mut second = checkpoint.nodes[0].clone();
+        second.id = "other".into();
+        checkpoint.nodes.push(second);
+        let error = live_steer_reference(&checkpoint, None, None).unwrap_err();
+        assert!(error.to_string().contains("several live attempts"));
+        assert_eq!(live_steer_reference(&checkpoint, Some("task"), None).unwrap(), reference);
+        checkpoint.nodes[0].attempts[0].attempt_ref = None;
+        assert!(live_steer_reference(&checkpoint, None, None).unwrap_err().contains("several live attempts"));
+        assert!(live_steer_reference(&checkpoint, Some("task"), None).unwrap_err().to_string().contains("no resolved attempt ID"));
+        checkpoint.nodes[0].attempts[0].state = AttemptState::Terminal;
+        assert!(live_steer_reference(&checkpoint, Some("task"), None).unwrap_err().to_string().contains("no live attempt"));
+    }
 
     #[test]
     fn authored_requests_reject_unknown_fields_at_every_depth() {

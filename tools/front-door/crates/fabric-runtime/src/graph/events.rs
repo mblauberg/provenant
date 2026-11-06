@@ -193,9 +193,17 @@ pub(super) fn append_changes(
                 if attempt.state != AttemptState::Terminal && !attempt.launched {
                     events.push(event(GraphEventKind::Wait, &node.id, "slot", &attempt.key)?);
                 }
-                // Reservations without a reference are trace events but not yet
-                // countable attempts; the reference may arrive on a later save.
-                let identity = attempt.attempt_ref.clone();
+                // A live reservation is not countable until its reference arrives.
+                // A terminal refusal may never receive one: retain a stable identity
+                // from the graph key and settlement order so its outcome is counted.
+                let identity = match &attempt.attempt_ref {
+                    Some(reference) => Some(reference.clone()),
+                    None if attempt.state == AttemptState::Terminal => Some(format!(
+                        "unreferenced:{}",
+                        digest(&(&attempt.key, attempt.settled))?
+                    )),
+                    None => None,
+                };
                 let metrics = attempt.usage.as_ref().map(|usage| &usage.extra);
                 let template = expanded
                     .as_ref()
@@ -522,6 +530,36 @@ mod tests {
                 .unwrap()
                 .contains("private brief")
         );
+    }
+
+    #[test]
+    fn terminal_refusals_without_a_reference_are_counted_once() {
+        let temp = tempfile::tempdir().unwrap();
+        let directory = Directory::open_anchor(temp.path()).unwrap();
+        let mut checkpoint: GraphCheckpoint = serde_json::from_value(serde_json::json!({
+            "schema_version":1,"graph_id":"g","plan_digest":"digest",
+            "nodes":[{"id":"task","state":"running","worktree":null,"attempts":[{
+                "key":{"graph_id":"g","node_id":"task","route_index":0},
+                "route":{"alias":"senior"},"state":"starting","launched":false,
+                "attempt_ref":null,"outcome":null,"launch_actor":"actor"
+            }]}]
+        })).unwrap();
+        append_changes(&directory, "g", None, &checkpoint, None).unwrap();
+        assert!(read(&directory, "g").unwrap().iter().all(|event| event.attempt.is_none()));
+        let before = checkpoint.clone();
+        checkpoint.nodes[0].state = NodeState::Failed;
+        let attempt = &mut checkpoint.nodes[0].attempts[0];
+        attempt.state = AttemptState::Terminal;
+        attempt.outcome = Some(AttemptOutcome::AdapterUnavailable);
+        attempt.settled = 1;
+        append_changes(&directory, "g", Some(&before), &checkpoint, None).unwrap();
+        append_changes(&directory, "g", Some(&checkpoint), &checkpoint, None).unwrap();
+        let attempts = read(&directory, "g").unwrap().into_iter()
+            .filter_map(|event| event.attempt).collect::<Vec<_>>();
+        assert_eq!(attempts.len(), 1);
+        assert_eq!(attempts[0].outcome.as_deref(), Some("adapter_unavailable"));
+        assert_eq!(attempts[0].tier, "senior");
+        assert!(!attempts[0].has_usage);
     }
 
     #[test]

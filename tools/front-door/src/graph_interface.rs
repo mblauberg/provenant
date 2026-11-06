@@ -1,6 +1,6 @@
 //! CLI documents for the shared graph service.
 use crate::fabric;
-use provenant_cli::{Edit, Globals, GraphRunArgs, GraphStats, Status, Templates};
+use provenant_cli::{Edit, Globals, GraphRunArgs, Templates};
 use provenant_confinement::worktrees::WorkerObserver;
 use provenant_core::{CancelToken, Clock, WaitBudget};
 use provenant_records::{CommandResult, Outcome};
@@ -223,26 +223,15 @@ pub(crate) fn templates(
     invoke("templates", input, globals, workers)
 }
 pub(crate) fn stats(
-    request: Status,
+    command: &str,
+    id: Option<String>,
+    by: String,
     globals: &Globals,
     workers: &'static dyn WorkerObserver,
 ) -> u8 {
     invoke(
-        "status",
-        Ok(json!({"op":"status","id":request.id,"stats":true,"by":request.by})),
-        globals,
-        workers,
-    )
-}
-
-pub(crate) fn graph_stats(
-    request: GraphStats,
-    globals: &Globals,
-    workers: &'static dyn WorkerObserver,
-) -> u8 {
-    invoke(
-        "stats",
-        Ok(json!({"op":"status","id":request.id,"stats":true,"by":request.by})),
+        command,
+        Ok(json!({"op":"status","id":id,"stats":true,"by":by})),
         globals,
         workers,
     )

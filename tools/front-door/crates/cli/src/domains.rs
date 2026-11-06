@@ -852,11 +852,6 @@ mod tests {
         );
         let markers = field("domains.run.push_conflict_markers");
         assert_eq!((markers.kind, &markers.default), ("bool", &json!(true)));
-        let brief_warnings = field("domains.run.brief_read_root_warnings");
-        assert_eq!(
-            (brief_warnings.kind, &brief_warnings.default),
-            ("bool", &json!(true))
-        );
         let idle = field("gc.idle_days");
         assert_eq!(
             (idle.kind, idle.min, idle.max, &idle.default),

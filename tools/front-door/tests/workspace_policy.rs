@@ -729,7 +729,7 @@ fn executor_git_policy_flags_only_inherited_env() {
         "crates/run/src/tests.rs",
         "crates/cli/src/run/provider/confinement_test.rs",
         "crates/x/src/foo_tests.rs",
-        "tools/front-door/tests/preset_cli.rs",
+        "tools/front-door/tests/graph_cli.rs",
     ] {
         assert!(is_test_source(name), "{name}");
         assert!(executor_git_violation(offending, is_test_source(name)));
