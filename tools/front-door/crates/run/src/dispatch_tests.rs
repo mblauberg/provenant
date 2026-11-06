@@ -4211,7 +4211,11 @@ fn admission_holds_run_concurrency_spacing_floors_and_deadline() -> TestResult {
         "run concurrency 1"
     );
 
-    store.set_admission_policy(AdmissionPolicy::default());
+    store.set_admission_policy(AdmissionPolicy {
+        startup_spacing_ms: 20_000,
+        read_only_spacing_ms: 2_000,
+        ..AdmissionPolicy::default()
+    });
     let mut spaced = two_tasks(2);
     spaced.run_id = provenant_core::RunId::from_bytes([10; 16]);
     spaced.operation_id = provenant_core::OperationId::parse("spaced")?;
@@ -4307,7 +4311,12 @@ fn read_only_lane_is_admitted_inside_a_writers_spacing_window() -> TestResult {
     let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());
     let call = call(&clock, &cancel);
-    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let mut store = RunStore::open(&context(temp.path())?, &call)?;
+    store.set_admission_policy(AdmissionPolicy {
+        startup_spacing_ms: 20_000,
+        read_only_spacing_ms: 2_000,
+        ..AdmissionPolicy::default()
+    });
     let writer = starting(&store, &lane(20, true), &call)?;
     let reader = starting(&store, &lane(21, false), &call)?;
     assert!(store.claim(writer, &at(10_000), &call)?.is_some());
@@ -4323,7 +4332,12 @@ fn writers_stay_20_seconds_apart_and_read_only_starts_do_not_reset_the_clock() -
     let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());
     let call = call(&clock, &cancel);
-    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let mut store = RunStore::open(&context(temp.path())?, &call)?;
+    store.set_admission_policy(AdmissionPolicy {
+        startup_spacing_ms: 20_000,
+        read_only_spacing_ms: 2_000,
+        ..AdmissionPolicy::default()
+    });
     let first = starting(&store, &lane(30, true), &call)?;
     let second = starting(&store, &lane(31, true), &call)?;
     let third = starting(&store, &lane(32, true), &call)?;
@@ -4348,7 +4362,12 @@ fn read_only_lanes_are_spaced_2_seconds_apart() -> TestResult {
     let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());
     let call = call(&clock, &cancel);
-    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let mut store = RunStore::open(&context(temp.path())?, &call)?;
+    store.set_admission_policy(AdmissionPolicy {
+        startup_spacing_ms: 20_000,
+        read_only_spacing_ms: 2_000,
+        ..AdmissionPolicy::default()
+    });
     let first = starting(&store, &lane(40, false), &call)?;
     let second = starting(&store, &lane(41, false), &call)?;
     let third = starting(&store, &lane(42, false), &call)?;
@@ -4425,7 +4444,7 @@ fn a_nested_lane_reads_class_spacing_from_the_host_ledger_only_with_the_host_roo
         "the host root shows the class's spacing wait"
     );
     assert!(
-        waits(None)?.starts_with("host capacity"),
+        waits(None)?.starts_with("launch preparation"),
         "the child directory has no ledger, so the wait goes unseen"
     );
     Ok(())
@@ -4518,7 +4537,12 @@ fn a_wall_clock_step_back_then_forward_cannot_admit_two_writers_within_a_spacing
     let temp = tempfile::tempdir()?;
     let (host, cancel) = (Stepped::up(100_000), CancelToken::new());
     let call = stepped_call(&host, &cancel);
-    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let mut store = RunStore::open(&context(temp.path())?, &call)?;
+    store.set_admission_policy(AdmissionPolicy {
+        startup_spacing_ms: 20_000,
+        read_only_spacing_ms: 2_000,
+        ..AdmissionPolicy::default()
+    });
     let [first, second] = writers(&store, [80, 81], &call)?;
     assert!(store.claim(first, &host, &call)?.is_some());
 
@@ -4547,7 +4571,12 @@ fn a_forward_wall_clock_step_alone_does_not_free_the_class() -> TestResult {
     let temp = tempfile::tempdir()?;
     let (host, cancel) = (Stepped::up(100_000), CancelToken::new());
     let call = stepped_call(&host, &cancel);
-    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let mut store = RunStore::open(&context(temp.path())?, &call)?;
+    store.set_admission_policy(AdmissionPolicy {
+        startup_spacing_ms: 20_000,
+        read_only_spacing_ms: 2_000,
+        ..AdmissionPolicy::default()
+    });
     let [first, second] = writers(&store, [82, 83], &call)?;
     assert!(store.claim(first, &host, &call)?.is_some());
     host.step_wall_ms(86_400_000);
@@ -4567,7 +4596,12 @@ fn read_only_spacing_holds_on_the_host_clock_and_never_holds_a_writer() -> TestR
     let temp = tempfile::tempdir()?;
     let (host, cancel) = (Stepped::up(100_000), CancelToken::new());
     let call = stepped_call(&host, &cancel);
-    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let mut store = RunStore::open(&context(temp.path())?, &call)?;
+    store.set_admission_policy(AdmissionPolicy {
+        startup_spacing_ms: 20_000,
+        read_only_spacing_ms: 2_000,
+        ..AdmissionPolicy::default()
+    });
     let first = starting(&store, &lane(85, false), &call)?;
     let second = starting(&store, &lane(86, false), &call)?;
     let [writer] = writers(&store, [87], &call)?;
@@ -4589,7 +4623,12 @@ fn a_new_boot_frees_the_class_and_spacing_runs_on_the_new_boot() -> TestResult {
     let temp = tempfile::tempdir()?;
     let (host, cancel) = (Stepped::up(500_000), CancelToken::new());
     let call = stepped_call(&host, &cancel);
-    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let mut store = RunStore::open(&context(temp.path())?, &call)?;
+    store.set_admission_policy(AdmissionPolicy {
+        startup_spacing_ms: 20_000,
+        read_only_spacing_ms: 2_000,
+        ..AdmissionPolicy::default()
+    });
     let [first, second, third] = writers(&store, [88, 89, 90], &call)?;
     assert!(store.claim(first, &host, &call)?.is_some());
     // The host restarted. Its clock is behind the recorded start, which is
@@ -4654,7 +4693,12 @@ fn lane_waits_count_spacing_on_the_host_clock_and_say_nothing_when_it_is_unreada
     let temp = tempfile::tempdir()?;
     let (host, cancel) = (Stepped::up(100_000), CancelToken::new());
     let call = stepped_call(&host, &cancel);
-    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let mut store = RunStore::open(&context(temp.path())?, &call)?;
+    store.set_admission_policy(AdmissionPolicy {
+        startup_spacing_ms: 20_000,
+        read_only_spacing_ms: 2_000,
+        ..AdmissionPolicy::default()
+    });
     let [first, second] = writers(&store, [92, 93], &call)?;
     assert!(store.claim(first, &host, &call)?.is_some());
     let wait = |host: &Stepped| -> Result<String> {
@@ -4674,7 +4718,7 @@ fn lane_waits_count_spacing_on_the_host_clock_and_say_nothing_when_it_is_unreada
     );
     *host.host_readable.lock().unwrap() = false;
     assert!(
-        wait(&host)?.starts_with("host capacity"),
+        wait(&host)?.starts_with("launch preparation"),
         "no wait is stated when the host clock cannot be read"
     );
     Ok(())
@@ -4685,7 +4729,12 @@ fn a_start_ahead_of_the_host_clock_in_the_same_boot_never_frees_the_class() -> T
     let temp = tempfile::tempdir()?;
     let (host, cancel) = (Stepped::up(100_000), CancelToken::new());
     let call = stepped_call(&host, &cancel);
-    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let mut store = RunStore::open(&context(temp.path())?, &call)?;
+    store.set_admission_policy(AdmissionPolicy {
+        startup_spacing_ms: 20_000,
+        read_only_spacing_ms: 2_000,
+        ..AdmissionPolicy::default()
+    });
     let [first, second] = writers(&store, [94, 95], &call)?;
     assert!(store.claim(first, &host, &call)?.is_some());
     let ledger = crate::ledger::open(&store.writer_registry, &call)?;
@@ -4746,6 +4795,7 @@ fn a_delayed_admission_cannot_start_inside_a_newer_start_or_rewind_it() -> TestR
     )?;
     store.set_admission_policy(AdmissionPolicy {
         admission_seconds: 1,
+        startup_spacing_ms: 20_000,
         ..AdmissionPolicy::default()
     });
     let (delayed, rival) = (lane(70, true), lane(71, true));
@@ -4968,7 +5018,12 @@ fn lane_waits_name_the_class_and_what_each_unstarted_lane_waits_for() -> TestRes
     let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());
     let call = call(&clock, &cancel);
-    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let mut store = RunStore::open(&context(temp.path())?, &call)?;
+    store.set_admission_policy(AdmissionPolicy {
+        startup_spacing_ms: 20_000,
+        read_only_spacing_ms: 2_000,
+        ..AdmissionPolicy::default()
+    });
     let first = starting(&store, &lane(100, true), &call)?;
     let second = starting(&store, &lane(101, true), &call)?;
     let reader = starting(&store, &lane(102, false), &call)?;
@@ -4993,7 +5048,7 @@ fn lane_waits_name_the_class_and_what_each_unstarted_lane_waits_for() -> TestRes
     let reader = wait(reader).ok_or("read-only lane waits")?;
     assert_eq!(reader.lane_class, LaneClass::ReadOnly);
     assert!(
-        reader.waiting_for.starts_with("host capacity"),
+        reader.waiting_for.starts_with("launch preparation"),
         "no read-only start yet, so the writer's spacing is not its wait: {}",
         reader.waiting_for
     );
@@ -9058,7 +9113,12 @@ fn upgrading_a_version_1_ledger_is_atomic() -> TestResult {
     let temp = tempfile::tempdir()?;
     let (host, cancel) = (Stepped::up(100_000), CancelToken::new());
     let call = stepped_call(&host, &cancel);
-    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let mut store = RunStore::open(&context(temp.path())?, &call)?;
+    store.set_admission_policy(AdmissionPolicy {
+        startup_spacing_ms: 20_000,
+        read_only_spacing_ms: 2_000,
+        ..AdmissionPolicy::default()
+    });
     let version_1 = "CREATE TABLE leases (attempt TEXT PRIMARY KEY, project TEXT NOT NULL, store BLOB NOT NULL) STRICT;
          CREATE INDEX lease_projects ON leases(project);";
     // A spacing that cannot be dropped fails the upgrade after it has added
@@ -9133,7 +9193,12 @@ fn a_version_1_start_of_any_age_holds_each_class_one_full_spacing() -> TestResul
         let temp = tempfile::tempdir()?;
         let (host, cancel) = (Stepped::up(100_000), CancelToken::new());
         let call = stepped_call(&host, &cancel);
-        let store = RunStore::open(&context(temp.path())?, &call)?;
+        let mut store = RunStore::open(&context(temp.path())?, &call)?;
+        store.set_admission_policy(AdmissionPolicy {
+            startup_spacing_ms: 20_000,
+            read_only_spacing_ms: 2_000,
+            ..AdmissionPolicy::default()
+        });
         version_1_start(&store, &host, ago_ms)?;
         let writer = starting(&store, &lane(100, true), &call)?;
         let reader = starting(&store, &lane(101, false), &call)?;
@@ -9490,6 +9555,63 @@ fn raised_write_grant_limit_preserves_large_terminal_ledger() -> TestResult {
     assert_eq!(
         reopened.record(id, &call)?.write_grants,
         record.write_grants
+    );
+    Ok(())
+}
+
+#[test]
+fn admission_default_spacing_does_not_hold_a_second_writer() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let [first, second] = writers(&store, [80, 81], &call)?;
+    assert!(store.claim(first, &clock, &call)?.is_some());
+    assert!(store.claim(second, &clock, &call)?.is_some());
+    Ok(())
+}
+
+#[test]
+fn admission_configured_spacing_applies_to_both_classes() -> TestResult {
+    for writer in [true, false] {
+        let temp = tempfile::tempdir()?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        let store = RunStore::open(&context(temp.path())?, &call)?;
+        std::fs::write(
+            store.writer_registry.join("config.toml"),
+            "schema_version=1\n[domains.fabric.lanes]\nstart_spacing_ms=500\n",
+        )?;
+        let first = starting(&store, &lane(80, writer), &call)?;
+        let second = starting(&store, &lane(81, writer), &call)?;
+        assert!(store.claim(first, &at(0), &call)?.is_some());
+        assert!(store.claim(second, &at(499), &call)?.is_none());
+        assert!(store.claim(second, &at(500), &call)?.is_some());
+    }
+    Ok(())
+}
+
+#[test]
+fn admission_wait_reason_names_the_reached_writer_cap() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    std::fs::write(
+        store.writer_registry.join("config.toml"),
+        "schema_version=1\n[domains.fabric.lanes]\nmax_writer_lanes=1\nmax_project_writer_lanes=1\n",
+    )?;
+    let [first, second] = writers(&store, [80, 81], &call)?;
+    assert!(store.claim(first, &clock, &call)?.is_some());
+    assert!(store.claim(second, &clock, &call)?.is_none());
+    let waits = store.lane_waits_with_resources(
+        &[store.record(second, &call)?],
+        &call,
+        &HostFacts::new(100),
+    );
+    assert_eq!(
+        waits[0].waiting_for,
+        "host capacity: host lane cap: 1 of 1 lanes active"
     );
     Ok(())
 }

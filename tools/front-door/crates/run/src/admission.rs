@@ -58,33 +58,17 @@ pub struct AdmissionPolicy {
     pub admission_seconds: u64,
 }
 impl Default for AdmissionPolicy {
-    /// Defaults: five per cent memory, the GC disk floor, 20 s writer spacing, 2 s
-    /// read-only spacing and a one-hour admission deadline.
+    /// Defaults: five per cent memory, no startup spacing and a one-hour deadline.
     fn default() -> Self {
-        let policy = Self {
+        Self {
             memory_floor_basis_points: 500,
-            startup_spacing_ms: 20_000,
-            read_only_spacing_ms: 2_000,
+            startup_spacing_ms: 0,
+            read_only_spacing_ms: 0,
             admission_seconds: 3600,
-        };
-        // Debug builds let integration fixtures shorten both spacings; a
-        // fixture that starts a successor writer would otherwise wait out the
-        // full 20 s. The override only lowers a spacing, and release builds
-        // ignore it.
-        #[cfg(debug_assertions)]
-        let policy = {
-            let mut policy = policy;
-            if let Some(ms) = std::env::var_os(provenant_supervisor::STARTUP_SPACING_ENV)
-                .and_then(|value| value.to_str()?.parse::<u64>().ok())
-            {
-                policy.startup_spacing_ms = policy.startup_spacing_ms.min(ms);
-                policy.read_only_spacing_ms = policy.read_only_spacing_ms.min(ms);
-            }
-            policy
-        };
-        policy
+        }
     }
 }
+
 impl AdmissionPolicy {
     /// The spacing a lane of `class` waits out after the last start of its class.
     pub fn spacing_ms(&self, class: LaneClass) -> u64 {
@@ -350,7 +334,9 @@ impl RunStore {
             active: false,
             memory_floor_basis_points: self.policy.memory_floor_basis_points,
             disk_floor_bytes,
-            startup_spacing_ms: self.policy.spacing_ms(class),
+            startup_spacing_ms: provenant_config::LaneBuildSettings::read(&self.writer_registry)?
+                .start_spacing_ms
+                .unwrap_or_else(|| self.policy.spacing_ms(class)),
             lane_class: class,
             run_concurrency: concurrency,
             quota_permit: None,
@@ -514,6 +500,8 @@ impl RunStore {
                             tenths(left),
                             tenths(spacing)
                         )
+                    } else if let Some(hit) = self.writer_cap_hit(&ticket, call) {
+                        format!("host capacity: {} lane cap: {} of {} lanes active", hit.scope, hit.active, hit.limit)
                     } else {
                         match resources.pressure() {
                             Ok(Some(pressure)) if pressure_threshold.defers(pressure) => {
@@ -555,7 +543,7 @@ impl RunStore {
                                         probe_error(error)
                                     )
                                 } else {
-                                    "host capacity: active lane caps and disk floor"
+                                    "launch preparation: preparing the lane"
                                         .to_owned()
                                 }
                             }
@@ -1458,6 +1446,30 @@ mod process_wait_tests {
             None,
             call,
         )?)
+    }
+
+    #[test]
+    fn admission_starting_lane_reports_launch_preparation_without_a_limit()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let clock = crate::tests::clock();
+        let cancel = CancelToken::new();
+        let call = crate::tests::call(&clock, &cancel);
+        let store = RunStore::open(&crate::tests::context(temp.path())?, &call)?;
+        let lane = starting_lane(&store, &call)?;
+        let waits = store.lane_waits_with_resources(
+            &[lane],
+            &call,
+            &Probes {
+                pressure: None,
+                budget: Budget::Unlimited,
+            },
+        );
+        assert_eq!(
+            waits[0].waiting_for,
+            "launch preparation: preparing the lane"
+        );
+        Ok(())
     }
 
     #[test]
