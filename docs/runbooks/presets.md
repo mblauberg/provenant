@@ -681,8 +681,11 @@ refuses such a graph. The graph fast-forwards the batch worktree to the
 council's pinned integration head when the principal launches, and each
 repair then continues from the head the previous delivery left there:
 
+The graph creates a missing local integration branch at the graph's
+`review_base` (the batch `base`, or `HEAD` when none), so only the batch
+worktree needs preparing:
+
 ```sh
-git branch batch/graph BASE
 git worktree add -b batch/work /absolute/path/to/batch-writer BASE
 ```
 

@@ -1734,6 +1734,20 @@ impl Factory {
                 };
                 let git = provenant_os::git::git_executable()
                     .ok_or(FacadeError::InvalidInput { detail: None })?;
+                // A missing local integration branch starts where the batch is
+                // measured from, rather than refusing the graph.
+                if !branch.starts_with("origin/") {
+                    provenant_run::ensure_local_branch(
+                        &git,
+                        &self.cwd,
+                        branch,
+                        document
+                            .review_base
+                            .as_deref()
+                            .filter(|base| !base.is_empty()),
+                    )
+                    .map_err(run_error)?;
+                }
                 Some(
                     provenant_run::resolve_git_base(&git, &self.cwd, &reference)
                         .map_err(run_error)?

@@ -53,7 +53,6 @@ native test moves, changes name, or is added.
 | `run::provider::project_paths::tests::configured_shared_path_allows_lane_lock_contended_by_host` | macOS | `custody` | `PROVENANT_CONFINEMENT_REQUIRED` | sandbox-exec, perl | `provenant-cli` |
 | `lane_prepare_isolates_nested_writer_state` | macOS | `capability` | `PROVENANT_CONFINEMENT_REQUIRED, PROVENANT_LANE_TOOLS_REQUIRED` | sandbox-exec, git, rg, cargo, cargo-nextest, swift, node, pnpm, python3 | `provenant::worktrees` |
 | `writer_production_plan_denies_outside_writes` | macOS | `dispatch` | `PROVENANT_CONFINEMENT_REQUIRED, PROVENANT_LANE_TOOLS_REQUIRED` | sandbox-exec, git | `provenant::worktrees` |
-| `writer_protected_changes_wait_for_review_and_ignore_upstream` | macOS | `dispatch` | `PROVENANT_CONFINEMENT_REQUIRED, PROVENANT_LANE_TOOLS_REQUIRED` | sandbox-exec, git | `provenant::worktrees` |
 | `worktrees::census_tests::native_full_census_places_clean_merged_worktree_and_same_user_sleep` | macOS | `census` | `PROVENANT_CONFINEMENT_REQUIRED, PROVENANT_POSTGRES_REQUIRED` | git, sleep | `provenant-confinement` |
 | `worktrees::census_tests::native_unreadable_windowserver_allows_cleanup_of_a_merged_clean_tree` | macOS | `census` | `PROVENANT_CONFINEMENT_REQUIRED, PROVENANT_POSTGRES_REQUIRED` | git | `provenant-confinement` |
 | `sys::pid::tests::native_occupancy_reports_image_and_open_file_with_identity_completeness` | macOS | `census` | `PROVENANT_CONFINEMENT_REQUIRED, PROVENANT_POSTGRES_REQUIRED` | sleep | `provenant-os` |
@@ -100,13 +99,11 @@ The 20 slowest cases in that run's preserved native JUnit reports (seconds):
 | `lane_prepare_isolates_nested_publishing_state` (`provenant::worktrees`) | 11.448 |
 | `lane_prepare_isolates_nested_state` (`provenant::worktrees`) | 10.771 |
 | `interrupted_progress_recovers_on_another_account_in_the_same_worktree` (`provenant::dispatch_provider`) | 10.338 |
-| `writer_protected_changes_wait_for_review_and_ignore_upstream` (`provenant::worktrees`) | 10.257 |
 | `command_network_is_per_task_through_manifest_and_single_task_route` (`provenant::command_adapter`) | 9.895 |
 | `graph_settlement_advances_writer_and_account_routed_review` (`provenant::dispatch_provider`) | 9.819 |
 | `command_lane_reads_its_supervisors_process_tree_through_the_cli` (`provenant::command_adapter`) | 9.586 |
 | `worktrees::lifecycle_tests::remote_base_uses_exact_advertisement_instead_of_tracking_ref` (`provenant-confinement`) | 9.470 |
 | `owned_dispatch_retains_failed_attempt_and_replays` (`provenant::dispatch_provider`) | 9.343 |
-| `quarantine::custody_integration_tests::quarantine_attributes_protected_changes_against_delivery_merge_base` (`provenant-confinement`) | 9.309 |
 | `worktrees::lifecycle_tests::gc_merge_proof_requires_containment_in_the_pinned_default` (`provenant-confinement`) | 9.148 |
 | `codex_dispatch_observes_rollout` (`provenant::dispatch_provider`) | 8.870 |
 | `writer_dispatch_edits_a_linked_worktree` (`provenant::worktrees`) | 8.805 |

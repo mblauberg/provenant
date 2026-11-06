@@ -2152,17 +2152,8 @@ fn submit_names_the_fix_for_a_bare_word_model_and_unsupported_effort()
         "{}",
         bare.message
     );
-    let Err(unknown) = super::catalogued("codex/gpt-6-lunaa", None) else {
-        panic!("uncatalogued model accepted");
-    };
-    assert_eq!(unknown.status, Status::Invalid);
-    assert!(
-        unknown
-            .message
-            .starts_with("model codex/gpt-6-lunaa is not in the catalogue"),
-        "{}",
-        unknown.message
-    );
+    // An uncatalogued exact model warns and is tried; the provider decides.
+    assert!(super::catalogued("codex/gpt-6-lunaa", None).is_ok());
     let Err(effort) = super::catalogued("claude/claude-sonnet-5-5", Some("low")) else {
         panic!("unsupported effort accepted");
     };

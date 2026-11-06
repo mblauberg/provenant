@@ -135,28 +135,6 @@ impl<'a> SysvAudit<'a> {
         Ok(library)
     }
 
-    /// Objects whose key lies in `keys`, found by key so concurrent unrelated
-    /// activity cannot affect the result.
-    pub(super) fn keyed_objects(
-        &self,
-        keys: std::ops::RangeInclusive<u32>,
-    ) -> Result<Vec<String>, Box<dyn std::error::Error>> {
-        let (_, inventory) = Self::inventory(self.executor)?;
-        let mut found = Vec::new();
-        for line in std::str::from_utf8(&inventory)?.lines() {
-            let words = line.split_whitespace().collect::<Vec<_>>();
-            if matches!(words.first(), Some(&"m" | &"s" | &"q"))
-                && let Some(key) = words
-                    .get(2)
-                    .and_then(|key| u32::from_str_radix(key.trim_start_matches("0x"), 16).ok())
-                && keys.contains(&key)
-            {
-                found.push(line.to_owned());
-            }
-        }
-        Ok(found)
-    }
-
     fn inventory(
         executor: &SystemExecutor,
     ) -> Result<(ObjectIds, Vec<u8>), Box<dyn std::error::Error>> {

@@ -1023,7 +1023,9 @@ impl GitRepo<'_> {
                     && same_mode
                     && !binary
                     && !renamed
-                    && !provenant_confinement::quarantine::is_instruction_path(path.as_bytes())
+                    && !provenant_confinement::review_exempt::is_review_protected_path(
+                        path.as_bytes(),
+                    )
                     && !policy.excludes(path);
                 // Do not trust diff attributes that force a binary blob to text.
                 if eligible {

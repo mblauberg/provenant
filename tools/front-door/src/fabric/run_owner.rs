@@ -43,6 +43,11 @@ pub(crate) fn events_within<T: serde::Serialize>(
     Ok(events.len())
 }
 pub(crate) fn run_error(error: provenant_run::RunError) -> FacadeError {
+    // The unresolvable ref is the caller's own input; name it instead of
+    // collapsing to a bare "invalid input".
+    if let provenant_run::RunError::InvalidBase(base) = &error {
+        return FacadeError::invalid(format!("unresolvable base `{base}`"));
+    }
     fail_error(error.into())
 }
 pub(crate) fn fail_error(fail: provenant_cli::run::Fail) -> FacadeError {
