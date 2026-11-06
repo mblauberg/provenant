@@ -741,16 +741,17 @@ record, including a refusal before launch, carries a `settlement_reason`
 (`RunStore::commit_terminal`, or `commit_lost` for an attempt whose record was
 lost). Lane rows expose that settlement classification as `cause`. When a
 specific typed terminal cause was recorded, `terminal_cause` identifies it and
-`reason` uses fixed text from that cause. Pre-launch causes distinguish an
+`reason` uses a short fixed label from that cause and points to `provenant output ID`. Pre-launch causes distinguish an
 unsupported platform, an unknown pacing account, an unregistered selected
 account, a credential-helper failure at delivery Prepare, a configured command
 that cannot be resolved, an unconfigured host-native route and a provider
 identity that was not observed. A terminal record may also carry a
 `terminal_note`, a bounded sentence Provenant composes from fixed text and typed
 values: the configured executable of an unresolved command, or a policy retry
-decision such as "retrying this session (attempt 2 of 2)". The lane `reason`
-appends it to the fixed text. These projections never copy raw preparation
-errors or provider output. A refused resume retains
+decision such as "retrying this session (attempt 2 of 2)". Listings omit the note
+and full remedy. `lanes --id ID` and `output ID` retain the full safe cause,
+remedy and note, including disk-wait observations before a result exists.
+These projections never copy raw preparation errors or provider output. A refused resume retains
 the specific preparation reason without consuming a continuation or creating a
 new run.
 

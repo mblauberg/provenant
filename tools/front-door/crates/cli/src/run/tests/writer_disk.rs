@@ -306,10 +306,10 @@ fn writer_disk_policy_refusal_keeps_disk_facts_and_safe_recovery() -> Result<(),
     );
     assert!(
         TerminalCause::DiskFloor
-            .reason()
+            .detail()
             .contains("provenant gc --apply")
     );
-    assert!(!TerminalCause::DiskFloor.reason().contains("access grants"));
+    assert!(!TerminalCause::DiskFloor.detail().contains("access grants"));
     let unobserved =
         writer_disk_policy_refusal(DiskCheck::Unobserved("HOST_ERROR_SENTINEL".into()));
     assert_eq!(
@@ -319,12 +319,12 @@ fn writer_disk_policy_refusal_keeps_disk_facts_and_safe_recovery() -> Result<(),
     assert!(unobserved.terminal_note.is_none());
     assert!(
         !TerminalCause::DiskObservationUnavailable
-            .reason()
+            .detail()
             .contains("HOST_ERROR_SENTINEL")
     );
     assert!(
         TerminalCause::DiskObservationUnavailable
-            .reason()
+            .detail()
             .contains("restore the host disk observation")
     );
     Ok(())

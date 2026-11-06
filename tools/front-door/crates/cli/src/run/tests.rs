@@ -9033,3 +9033,285 @@ fn lane_listing_omits_large_grants_but_id_retains_them() -> Result<(), Box<dyn s
         },
     )?
 }
+
+#[test]
+fn lane_detail_and_output_retain_safe_refusal_remedies() -> Result<(), Box<dyn std::error::Error>> {
+    struct Refusing {
+        note: String,
+    }
+    impl run::Providers for Refusing {
+        fn prepare(
+            &self,
+            _: &run::TaskRequest,
+            _: &str,
+            _: &run::LaunchPaths,
+            _: Option<&run::AttemptRecord>,
+        ) -> Result<run::PreparedLaunch, run::PrepareRefusal> {
+            Err(run::PrepareRefusal {
+                terminal_cause: Some(provenant_records::run::TerminalCause::AccessPolicyRefused),
+                terminal_note: Some(self.note.clone()),
+                message: "PROVIDER_SENTINEL must not become a public diagnostic".into(),
+                skipped_routes: Vec::new(),
+                fallback_outcome: None,
+            })
+        }
+        fn decode(
+            &self,
+            _: &run::RouteRecord,
+            _: &[u8],
+            _: &ExitObservation,
+            _: &Path,
+        ) -> Result<run::Decoded, String> {
+            unreachable!("a refused launch never reaches a provider")
+        }
+    }
+    let fixture = linked_fixture()?;
+    with_edge(
+        &fixture.root,
+        &fixture.project,
+        |edge| -> Result<(), Box<dyn std::error::Error>> {
+            let clock = SystemClock::new();
+            let cancel = CancelToken::new();
+            let call = request(&clock, &cancel).map_err(|fail| fail.message)?;
+            let session = open(edge, &call).map_err(|fail| fail.message)?;
+            let prepared = trace_run(10, AttemptId::from_bytes([99; 16]), clock.wall_now()?)?;
+            session.store.create(&prepared, &call)?;
+            let note = format!(
+                "configured access boundary: {} END_SAFE_NOTE",
+                "fixture setting ".repeat(24)
+            );
+            assert!(note.len() > 160);
+            session.store.start(
+                prepared.run_id,
+                &Refusing { note: note.clone() },
+                &|_, _| unreachable!(),
+                &call,
+            )?;
+            let target = Target {
+                selection: None,
+                run: Some(prepared.run_id),
+                task: None,
+                attempt: Some(prepared.attempts[0].attempt_id),
+            };
+            let crate::ParseOutcome::Invocation(invocation) =
+                crate::parse(["lanes", "--all"].into_iter().map(std::ffi::OsString::from))
+            else {
+                return Err("parse lanes failed".into());
+            };
+            let crate::Command::Lanes(mut command) = invocation.command else {
+                return Err("not lanes".into());
+            };
+            let (listing, human, _) =
+                status::lanes_inner(&command, edge, true, &mut |_| Ok(()), None)
+                    .map_err(|fail| fail.message)?;
+            assert_eq!(
+                listing["lanes"][0]["reason"],
+                provenant_records::run::TerminalCause::AccessPolicyRefused.reason()
+            );
+            for text in [serde_json::to_string(&listing)?, human] {
+                assert!(!text.contains(&note), "{text}");
+                assert!(!text.contains("PROVIDER_SENTINEL"), "{text}");
+            }
+            command.id = vec![target.clone()];
+            let (detail, human, _) =
+                status::lanes_inner(&command, edge, true, &mut |_| Ok(()), None)
+                    .map_err(|fail| fail.message)?;
+            let expected = format!(
+                "{}; {note}",
+                provenant_records::run::TerminalCause::AccessPolicyRefused.detail()
+            );
+            assert_eq!(detail["lanes"][0]["reason"], expected);
+            assert!(human.contains(&expected));
+            let explicit = status::lanes_streaming(command, edge, false, &mut |_| Ok(()));
+            assert!(
+                explicit
+                    .summary
+                    .as_ref()
+                    .ok_or("explicit summary")?
+                    .lines
+                    .join("\n")
+                    .contains(&expected)
+            );
+            let output_command = || Output {
+                attempt: crate::Attempt(target.clone()),
+                host: None,
+                part: Part::Result,
+                to: None,
+                path: false,
+                offset: 0,
+                tail: None,
+                max_bytes: 65_536,
+                trace: false,
+            };
+            let (data, text) =
+                output::output_inner(output_command(), edge, None).map_err(|fail| fail.message)?;
+            assert_eq!(data["reason"], expected);
+            assert!(text.contains(&expected));
+            assert!(!serde_json::to_string(&data)?.contains("PROVIDER_SENTINEL"));
+            let reply = output::output(output_command(), edge);
+            let mut bytes = Vec::new();
+            crate::render(
+                &reply.result,
+                crate::RenderMode::Compact {
+                    text: &reply.human,
+                    read_only: true,
+                    summary: reply.summary.as_ref(),
+                },
+                &mut bytes,
+            )?;
+            let default = String::from_utf8(bytes)?;
+            assert!(default.contains(&expected), "{default}");
+            assert_eq!(default.matches("END_SAFE_NOTE").count(), 1, "{default}");
+            assert!(!default.contains("PROVIDER_SENTINEL"));
+            Ok(())
+        },
+    )?
+}
+
+#[test]
+fn disk_wait_rows_stay_compact_and_explicit_output_keeps_the_sample()
+-> Result<(), Box<dyn std::error::Error>> {
+    let now = WallTime::from_micros(100)?;
+    let reason = "host capacity: disk space: 23622320128 bytes available; gc.free_floor is 32212254720 bytes (source: host configuration)";
+    let lanes: Vec<_> = (1..=20)
+        .map(|number| {
+            lane_fixture(
+                number,
+                number,
+                run::AttemptState::Starting {
+                    extra: Default::default(),
+                },
+            )
+        })
+        .collect::<Result<_, _>>()?;
+    let waits: Vec<_> = lanes
+        .iter()
+        .map(|lane| run::LaneWait {
+            extra: Default::default(),
+            attempt_id: lane.attempt_id,
+            lane_class: run::LaneClass::Writer,
+            waiting_for: reason.into(),
+        })
+        .collect();
+    let compact = status::compact_status(&lanes, &waits, now);
+    assert!(compact.len() <= 2048, "{compact}");
+    assert!(compact.contains("disk below gc.free_floor; provenant output ID"));
+    assert!(!compact.contains("23622320128"));
+    let (data, _) = render_lanes(&lanes, &waits, None, Path::new("/state"), None);
+    assert!(
+        data["lanes"]
+            .as_array()
+            .ok_or("rows")?
+            .iter()
+            .all(|row| row["waiting_for"] == reason)
+    );
+    let summary = status::lane_summary(&status::lane_lines(&data), None);
+    let mut bytes = Vec::new();
+    crate::render(
+        &CommandResult::new("status", Status::Ok, data),
+        crate::RenderMode::Compact {
+            text: &compact,
+            read_only: true,
+            summary: Some(&summary),
+        },
+        &mut bytes,
+    )?;
+    assert!(bytes.len() <= 2048, "{}", String::from_utf8_lossy(&bytes));
+
+    let fixture = linked_fixture()?;
+    with_edge(
+        &fixture.root,
+        &fixture.project,
+        |edge| -> Result<(), Box<dyn std::error::Error>> {
+            let clock = SystemClock::new();
+            let cancel = CancelToken::new();
+            let call = request(&clock, &cancel).map_err(|fail| fail.message)?;
+            let session = open(edge, &call).map_err(|fail| fail.message)?;
+            std::fs::write(
+                edge.roots.state.as_path().join("config.toml"),
+                "schema_version=1\n[gc]\nfree_floor='32212254720B'\n",
+            )?;
+            let mut prepared = trace_run(10, AttemptId::from_bytes([99; 16]), clock.wall_now()?)?;
+            prepared.request.tasks[0].writer = Some(run::WriterRequest {
+                extra: Default::default(),
+                project: fixture.project.clone(),
+                worktree: fixture.tree.clone(),
+            });
+            session.store.create(&prepared, &call)?;
+            let mut lane = session
+                .store
+                .record(prepared.attempts[0].attempt_id, &call)?;
+            lane.state = run::AttemptState::Starting {
+                extra: Default::default(),
+            };
+            let database = rusqlite::Connection::open(
+                session.context.state_root.as_path().join("run.sqlite3"),
+            )?;
+            assert_eq!(
+                database.execute(
+                    "UPDATE attempts SET record=?1 WHERE id=?2",
+                    rusqlite::params![serde_json::to_vec(&lane)?, lane.attempt_id.to_string()]
+                )?,
+                1
+            );
+            std::fs::write(
+                artifact(
+                    session.context.state_root.as_path(),
+                    &lane,
+                    "admission-disk.json",
+                ),
+                serde_json::to_vec(&json!({"generation":lane.generation,"free":23622320128_u64}))?,
+            )?;
+            let target = Target {
+                selection: None,
+                run: Some(lane.run_id),
+                task: None,
+                attempt: Some(lane.attempt_id),
+            };
+            let command = || Output {
+                attempt: crate::Attempt(target.clone()),
+                host: None,
+                part: Part::Result,
+                to: None,
+                path: false,
+                offset: 0,
+                tail: None,
+                max_bytes: 65_536,
+                trace: false,
+            };
+            let (data, text) =
+                output::output_inner(command(), edge, None).map_err(|fail| fail.message)?;
+            let expected = format!("{reason}; free disk space or run `provenant gc --apply`");
+            assert_eq!(data["reason"], expected);
+            assert!(text.contains(&expected), "{text}");
+            let selection = format!("{}/{}", lane.run_id, lane.attempt_id);
+            let crate::ParseOutcome::Invocation(invocation) = crate::parse(
+                ["lanes", "--id", selection.as_str()]
+                    .into_iter()
+                    .map(std::ffi::OsString::from),
+            ) else {
+                return Err("parse lanes failed".into());
+            };
+            let crate::Command::Lanes(detail_command) = invocation.command else {
+                return Err("not lanes".into());
+            };
+            let (detail, human, _) =
+                status::lanes_inner(&detail_command, edge, true, &mut |_| Ok(()), None)
+                    .map_err(|fail| fail.message)?;
+            assert_eq!(detail["lanes"][0]["reason"], expected);
+            assert!(human.contains(&expected), "{human}");
+            for field in ["length", "digest", "complete", "clipped"] {
+                assert!(data[field].is_null(), "{field}: {data}");
+            }
+            assert_eq!(data["bytes"]["data"], "");
+            let destination = fixture.root.join("preserved.txt");
+            std::fs::write(&destination, "existing content")?;
+            let mut save = command();
+            save.to = Some(destination.clone());
+            let reply = output::output(save, edge);
+            assert!(reply.result.error.is_some(), "{:?}", reply.result);
+            assert_eq!(std::fs::read_to_string(destination)?, "existing content");
+            Ok(())
+        },
+    )?
+}

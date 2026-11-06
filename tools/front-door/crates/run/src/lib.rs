@@ -321,7 +321,7 @@ impl std::fmt::Display for ArtifactProvenance {
 
 #[derive(Debug, Error)]
 pub enum RunError {
-    #[error("continuation preparation refused: {}", cause.reason())]
+    #[error("continuation preparation refused: {}", cause.detail())]
     ContinuationRefused {
         cause: provenant_records::run::TerminalCause,
     },
@@ -532,7 +532,7 @@ impl RunError {
         let mut diagnostic = Diagnostic::new(kind.code()).category(kind.category());
         match self {
             Self::ContinuationRefused { cause } => {
-                diagnostic = diagnostic.detail(cause.reason());
+                diagnostic = diagnostic.detail(cause.detail());
             }
             Self::PromptTooLarge { task_index, limit } => {
                 let field = task_index.map_or_else(

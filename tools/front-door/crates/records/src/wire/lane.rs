@@ -87,8 +87,20 @@ pub(super) fn grant_schema() -> Value {
 }
 
 impl LaneRow {
-    /// Project the recorded state without rewriting missing history.
+    /// Project a listing label without per-lane notes or long remedies.
     pub fn state_and_reason(state: &crate::run::AttemptState) -> (String, Option<String>) {
+        Self::state_diagnostic(state, false)
+    }
+
+    /// Project full safe cause, remedy and note for an explicit lane request.
+    pub fn state_and_detail(state: &crate::run::AttemptState) -> (String, Option<String>) {
+        Self::state_diagnostic(state, true)
+    }
+
+    fn state_diagnostic(
+        state: &crate::run::AttemptState,
+        detail: bool,
+    ) -> (String, Option<String>) {
         use crate::run::AttemptState;
         match state {
             AttemptState::Terminal {
@@ -106,7 +118,14 @@ impl LaneRow {
                     .and_then(|value| {
                         serde_json::from_value::<crate::run::TerminalCause>(value.clone()).ok()
                     })
-                    .map(|cause| cause.reason().to_owned())
+                    .map(|cause| {
+                        if detail {
+                            cause.detail()
+                        } else {
+                            cause.reason()
+                        }
+                        .to_owned()
+                    })
                     .or_else(|| {
                         (reason.is_some() || *outcome != crate::run::Outcome::Succeeded)
                             .then(|| outcome.diagnostic_reason().to_owned())
@@ -115,7 +134,7 @@ impl LaneRow {
                     // decision or a configured executable), never provider output.
                     .map(
                         |safe| match extra.get("terminal_note").and_then(Value::as_str) {
-                            Some(note) if !note.is_empty() => {
+                            Some(note) if detail && !note.is_empty() => {
                                 format!("{safe}; {}", crate::diagnostic::safe_text(note))
                             }
                             _ => safe,
@@ -492,6 +511,10 @@ mod terminal_cause_tests {
                 "terminal_cause".into(),
                 serde_json::to_value(cause).unwrap(),
             );
+            extra.insert(
+                "terminal_note".into(),
+                Value::String("fixture scoped note".into()),
+            );
             let state = AttemptState::Terminal {
                 extra,
                 outcome: Outcome::Failed,
@@ -501,8 +524,16 @@ mod terminal_cause_tests {
             };
             let (_, reason) = LaneRow::state_and_reason(&state);
             assert_eq!(reason.as_deref(), Some(cause.reason()));
-            assert!(!reason.unwrap().contains("secret"));
+            let reason = reason.unwrap();
+            assert!(reason.len() <= 60, "{cause:?}: {reason}");
+            assert!(reason.contains("provenant output ID"), "{reason}");
+            assert!(!reason.contains("fixture scoped note"), "{reason}");
+            assert!(!reason.contains("secret"));
+            let (_, detail) = LaneRow::state_and_detail(&state);
+            let detail = detail.unwrap();
+            assert_eq!(detail, format!("{}; fixture scoped note", cause.detail()));
+            assert!(!detail.contains("secret"));
         }
-        assert!(TerminalCause::FreePoolQuota.reason().contains("paid route"));
+        assert!(TerminalCause::FreePoolQuota.detail().contains("paid route"));
     }
 }

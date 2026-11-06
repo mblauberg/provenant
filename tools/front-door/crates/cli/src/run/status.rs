@@ -387,6 +387,42 @@ mod graph_status_tests {
     }
 }
 
+/// Keep recurring disk observations out of compact rows; the full sample stays
+/// available in explicit lane and output detail.
+fn compact_wait_reason(reason: &str) -> &str {
+    if reason.starts_with("host capacity: disk space:") {
+        "disk below gc.free_floor; provenant output ID"
+    } else if reason.starts_with("disk pressure paused builds") {
+        "builds paused for disk; provenant output ID"
+    } else {
+        reason
+    }
+}
+
+pub(super) fn lane_detail(lane: &run::AttemptRecord, waits: &[run::LaneWait]) -> Option<String> {
+    let summary = provenant_records::wire::LaneRow::state_and_reason(&lane.state).1;
+    provenant_records::wire::LaneRow::state_and_detail(&lane.state)
+        .1
+        // Preserve projection-specific settlement and custody reasons when
+        // there is no additional cause or note to expand.
+        .filter(|detail| Some(detail) != summary.as_ref())
+        .or_else(|| {
+            waits
+                .iter()
+                .find(|wait| wait.attempt_id == lane.attempt_id)
+                .map(|wait| {
+                    if wait.waiting_for.starts_with("host capacity: disk space:") {
+                        format!(
+                            "{}; free disk space or run `provenant gc --apply`",
+                            wait.waiting_for
+                        )
+                    } else {
+                        wait.waiting_for.clone()
+                    }
+                })
+        })
+}
+
 /// One lane as the compact views show it.
 pub(super) struct LaneLine {
     id: String,
@@ -448,7 +484,7 @@ pub(super) fn lane_summary(lanes: &[LaneLine], continuation: Option<String>) -> 
                 &lane.id[..lane.id.len().min(8)],
                 lane.state,
                 plain_text(&lane.model, usize::MAX),
-                plain_text(&lane.reason, usize::MAX)
+                plain_text(compact_wait_reason(&lane.reason), usize::MAX)
             )
             .trim_end()
             .to_owned()
@@ -504,11 +540,22 @@ pub(super) fn lane_lines(data: &Value) -> Vec<LaneLine> {
                             .as_str()
                             .unwrap_or("unresolved")
                             .to_owned(),
-                        reason: row["reason"]
-                            .as_str()
-                            .or_else(|| row["waiting_for"].as_str())
-                            .unwrap_or_default()
-                            .to_owned(),
+                        reason: row
+                            .get("terminal_cause")
+                            .and_then(|value| {
+                                serde_json::from_value::<provenant_records::run::TerminalCause>(
+                                    value.clone(),
+                                )
+                                .ok()
+                            })
+                            .map(|cause| cause.reason().to_owned())
+                            .unwrap_or_else(|| {
+                                row["reason"]
+                                    .as_str()
+                                    .or_else(|| row["waiting_for"].as_str())
+                                    .unwrap_or_default()
+                                    .to_owned()
+                            }),
                         provider_error: row["provider_error"].as_str().map(str::to_owned),
                         result_path: structured_path_text(&row["result_path"]),
                     })
@@ -581,7 +628,7 @@ pub(super) fn compact_status(
                 "{} {state} {} {age} {}\n",
                 &id[..8],
                 plain_text(model, usize::MAX),
-                plain_text(&reason, usize::MAX)
+                plain_text(compact_wait_reason(&reason), usize::MAX)
             )
         })
         .collect()
@@ -883,7 +930,7 @@ pub(super) fn render_lanes_with_view(
             let reason = projected.reason.clone();
             let reason_text = reason
                 .as_deref()
-                .map(|r| format!(" ({})", plain_text(r, usize::MAX)))
+                .map(|r| format!(" ({})", plain_text(compact_wait_reason(r), usize::MAX)))
                 .unwrap_or_default();
             let title_text = lane
                 .title
@@ -1141,7 +1188,19 @@ pub fn lanes_streaming(
         && out.result.data["lanes"].is_array()
         && !(command.watch.is_some() && !json)
     {
-        out.summary = Some(lane_summary(&lane_lines(&out.result.data), None));
+        let mut summary = lane_summary(&lane_lines(&out.result.data), None);
+        if !command.id.is_empty()
+            && let Some(rows) = out.result.data["lanes"].as_array()
+        {
+            for row in rows {
+                if let Some(reason) = row["reason"].as_str() {
+                    summary
+                        .lines
+                        .push(format!("detail: {}", plain_text(reason, usize::MAX)));
+                }
+            }
+        }
+        out.summary = Some(summary);
     }
     out.read_only = true;
     out
@@ -1445,6 +1504,16 @@ pub(super) fn lanes_inner(
     append_provider_errors(&session, &lanes, &mut data, &mut human);
     attach_handoffs(&session, &lanes, &mut data);
     omit_listing_write_grants(&command.id, &mut data);
+    if !command.id.is_empty()
+        && let Some(rows) = data["lanes"].as_array_mut()
+    {
+        for (row, lane) in rows.iter_mut().zip(&lanes) {
+            if let Some(detail) = lane_detail(lane, &waits) {
+                human.push_str(&format!("  detail: {}\n", plain_text(&detail, usize::MAX)));
+                row["reason"] = json!(detail);
+            }
+        }
+    }
     attach_cloud_jobs(&session.store, &lanes, &mut data, &mut human, &call)?;
     Ok((data, human, false))
 }

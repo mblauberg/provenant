@@ -107,7 +107,14 @@ fn exact_model_refusal_keeps_safe_cause_without_skipped_routes()
             Some(&serde_json::to_value(cause)?)
         );
         let reason = reason.ok_or("missing reason")?;
-        assert!(reason.starts_with(cause.reason()), "{reason}");
+        assert_eq!(reason, cause.reason());
+        assert!(reason.len() <= 60, "{reason}");
+        assert!(!reason.contains("PROVIDER_SECRET_SENTINEL"), "{reason}");
+        assert!(!reason.contains("unsupported_effort"), "{reason}");
+        assert!(!reason.contains("99 bytes available"), "{reason}");
+        let (_, detail) = LaneRow::state_and_detail(&record.state);
+        let reason = detail.ok_or("missing detail")?;
+        assert!(reason.starts_with(cause.detail()), "{reason}");
         assert!(!reason.contains("PROVIDER_SECRET_SENTINEL"), "{reason}");
         if disk {
             assert!(reason.contains("gc.free_floor"), "{reason}");

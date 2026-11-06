@@ -812,7 +812,39 @@ pub enum TerminalCause {
 }
 
 impl TerminalCause {
+    /// Bounded listing label. Full remedies belong in explicit lane detail.
     pub fn reason(self) -> &'static str {
+        match self {
+            Self::PreparationRefused => "preparation refused; provenant output ID",
+            Self::AccountLoginRequired => "login required; provenant output ID",
+            Self::RouteResolutionRefused => "route refused; provenant output ID",
+            Self::AccessPolicyRefused => "access policy refused; provenant output ID",
+            Self::DiskFloor => "disk below gc.free_floor; provenant output ID",
+            Self::DiskObservationUnavailable => "disk probe unavailable; provenant output ID",
+            Self::StoredPromptUnreadable => "stored prompt unreadable; provenant output ID",
+            Self::WriteGrantsRefused => "write grants refused; provenant output ID",
+            Self::WorktreeBusy => "worktree busy; provenant output ID",
+            Self::HandoffRefused => "launch handoff refused; provenant output ID",
+            Self::RetainedWriterImport => "writer import retained; provenant output ID",
+            Self::UnsupportedPlatform => "sandbox unavailable; provenant output ID",
+            Self::UnknownPacingAccount => "pacing account unknown; provenant output ID",
+            Self::UnregisteredAccount => "account unregistered; provenant output ID",
+            Self::DeliveryPrepareCredentialHelper => {
+                "credential helper failed; provenant output ID"
+            }
+            Self::SpawnFailure => "provider spawn failed; provenant output ID",
+            Self::ProcessCrash => "provider crashed; provenant output ID",
+            Self::SettlementFailure => "settlement failed; provenant output ID",
+            Self::ProviderEarlyStop => "provider stopped early; provenant output ID",
+            Self::FreePoolQuota => "free-pool quota exhausted; provenant output ID",
+            Self::CommandUnavailable => "command unavailable; provenant output ID",
+            Self::HostNativeUnconfigured => "host-native unconfigured; provenant output ID",
+            Self::IdentityUnobserved => "provider identity unobserved; provenant output ID",
+        }
+    }
+
+    /// Full safe cause and remedy for explicit detail and error responses.
+    pub fn detail(self) -> &'static str {
         match self {
             Self::AccountLoginRequired => {
                 crate::diagnostic::ProviderFailureFact::AuthRequired.reason()
