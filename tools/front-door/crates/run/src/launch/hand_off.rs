@@ -812,6 +812,64 @@ mod tests {
     }
 
     #[test]
+    fn cancel_watch_forwards_a_stop_request_to_setup_within_a_fraction_of_a_second()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        let store = RunStore::open(&context(temp.path())?, &call)?;
+        let request = input();
+        store.create(&request, &call)?;
+        let id = request.attempts[0].attempt_id;
+        store.mark_starting(
+            &store.record(id, &call)?,
+            &route(),
+            &[],
+            &Default::default(),
+            None,
+            &call,
+        )?;
+        let record = store.record(id, &call)?;
+        let scope = RunStore::scope(&record);
+        let directory = store.attempt_dir(request.run_id, id, false)?;
+        // The launcher's setup token must not fire without a request.
+        let setup = CancelToken::new();
+        let watch = CancelWatch::start(directory.try_clone()?, scope, &setup, &cancel);
+        let real = provenant_core::ThreadPause;
+        let never = CancelToken::new();
+        provenant_core::Pause::wait(
+            &real,
+            provenant_core::DurationMicros::from_micros(250_000),
+            &never,
+        );
+        assert!(!setup.is_cancelled(), "no request, no setup cancel");
+        custody::request_stop(
+            directory,
+            scope,
+            provenant_core::ActorId::from_bytes([2; 16]),
+            provenant_supervisor::machine::StopReason::ExplicitCancellation,
+        )?;
+        // Two seconds at 10 ms steps: the watch polls every 100 ms.
+        for _ in 0..200 {
+            if setup.is_cancelled() {
+                break;
+            }
+            provenant_core::Pause::wait(
+                &real,
+                provenant_core::DurationMicros::from_micros(10_000),
+                &never,
+            );
+        }
+        assert!(setup.is_cancelled(), "setup was not cancelled");
+        assert!(
+            !cancel.is_cancelled(),
+            "the caller's own token is untouched"
+        );
+        drop(watch);
+        Ok(())
+    }
+
+    #[test]
     fn missing_priority_withdraws_acquired_custody()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
