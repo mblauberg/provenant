@@ -63,6 +63,8 @@ fn existing_git_worktree_with_spaces_has_a_followable_branch_remedy() -> Result 
         "topic/remedy",
         "--base",
         "HEAD",
+        "--operation-id",
+        "worktree-remedy",
         "--write-scope",
         ".",
         "--wait=10s",
@@ -97,6 +99,21 @@ fn existing_git_worktree_with_spaces_has_a_followable_branch_remedy() -> Result 
     let graph = refusal["data"]["checkpoint"]["graph_id"]
         .as_str()
         .ok_or("missing graph id")?;
+    let (_, replay) = rig.run(&[
+        "run",
+        "inspect",
+        "--branch",
+        "topic/remedy",
+        "--base",
+        "HEAD",
+        "--operation-id",
+        "worktree-remedy",
+        "--write-scope",
+        ".",
+        "--wait=10s",
+    ])?;
+    assert_eq!(replay["data"]["checkpoint"]["graph_id"], graph, "{replay}");
+    assert_eq!(replay["data"]["local_worktree_remedy"], action, "{replay}");
     let (_, status) = rig.run(&["status", graph])?;
     assert!(
         status["data"]["rows"]
