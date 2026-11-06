@@ -8,10 +8,10 @@ pub(crate) use unified::{
     GraphCommand, append_graph_status, read_status_rows, target_text, unified_graph_command,
     unified_graph_output, unified_graph_steer,
 };
+mod graph_document;
 pub(crate) mod landing;
 pub(crate) mod owner;
 mod peer;
-mod graph_document;
 pub(crate) mod run_owner;
 pub(crate) mod settlement;
 
@@ -20,6 +20,7 @@ pub(crate) use owner::*;
 pub(crate) use run_owner::*;
 pub(crate) use settlement::*;
 
+pub(crate) use graph_document::publish_graph_document;
 #[cfg(test)]
 #[allow(unused_imports)]
 use graph_human::graph_ci_waiting;
@@ -28,7 +29,6 @@ pub(crate) use graph_human::graph_human;
 use graph_human::graph_summary;
 use graph_status::{graph_snapshot, graph_status_elapsed, redact_checkout_paths};
 pub use peer::{hosts, peer};
-pub(crate) use graph_document::publish_graph_document;
 pub(crate) use settlement::advance_live_graph;
 
 #[cfg(test)]
@@ -699,9 +699,14 @@ impl F3Facade for BoundFacade<'_> {
         Ok(self.factory.context.identity.clone())
     }
     fn submit(
-        &mut self, _input: SubmitInput, _budget: WaitBudget, _cancel: &CancelToken,
+        &mut self,
+        _input: SubmitInput,
+        _budget: WaitBudget,
+        _cancel: &CancelToken,
     ) -> Result<SubmissionReceipt, FacadeError> {
-        Err(FacadeError::invalid(InvalidInputDetail::Field("submit".into())))
+        Err(FacadeError::invalid(InvalidInputDetail::Field(
+            "submit".into(),
+        )))
     }
     fn run(
         &mut self,
@@ -2371,7 +2376,10 @@ mod test_presentation {
     use super::*;
     fn shell_path(path: &std::path::Path) -> String {
         let value = path.to_string_lossy();
-        if value.chars().all(|character| character.is_ascii_alphanumeric() || "_./-".contains(character)) {
+        if value
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || "_./-".contains(character))
+        {
             value.into_owned()
         } else {
             format!("'{}'", value.replace('\'', "'\\''"))
@@ -2402,10 +2410,7 @@ mod test_presentation {
             .count();
         let mut status = String::from("provenant");
         if let Some(state_dir) = &globals.state_dir {
-            status.push_str(&format!(
-                " --state-dir {}",
-                shell_path(state_dir)
-            ));
+            status.push_str(&format!(" --state-dir {}", shell_path(state_dir)));
         }
         if let Some(project) = &globals.project {
             status.push_str(&format!(" --project {}", shell_path(project)));

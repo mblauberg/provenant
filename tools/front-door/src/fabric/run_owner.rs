@@ -350,18 +350,33 @@ impl BinaryRunOwner<'_> {
             .with_host(ctx.identity.host);
         Ok(provenant_cli::run::Session { store, context })
     }
-    fn read_session(&self, cancel: &CancelToken) -> Result<provenant_cli::run::Session, FacadeError> {
+    fn read_session(
+        &self,
+        cancel: &CancelToken,
+    ) -> Result<provenant_cli::run::Session, FacadeError> {
         let ctx = &self.factory.context;
         let context = provenant_run::ExecutionContext {
-            state_root: ctx.roots.state.clone(), project_id: ctx.identity.project,
-            actor_id: self.actor.unwrap_or(ctx.identity.inbox.actor), read_prompts: true,
+            state_root: ctx.roots.state.clone(),
+            project_id: ctx.identity.project,
+            actor_id: self.actor.unwrap_or(ctx.identity.inbox.actor),
+            read_prompts: true,
         };
         let store = provenant_run::RunStore::open_read_only(&context, &self.call(cancel))
-            .map_err(run_error)?.ok_or(FacadeError::NotFound)?.with_host(ctx.identity.host);
+            .map_err(run_error)?
+            .ok_or(FacadeError::NotFound)?
+            .with_host(ctx.identity.host);
         Ok(provenant_cli::run::Session { store, context })
     }
-    fn require_graph_control(&self, target: &AttemptTarget, cancel: &CancelToken) -> Result<(), FacadeError> {
-        let record = self.read_session(cancel)?.service().status_for_wait(target.attempt, &self.call(cancel)).map_err(run_error)?;
+    fn require_graph_control(
+        &self,
+        target: &AttemptTarget,
+        cancel: &CancelToken,
+    ) -> Result<(), FacadeError> {
+        let record = self
+            .read_session(cancel)?
+            .service()
+            .status_for_wait(target.attempt, &self.call(cancel))
+            .map_err(run_error)?;
         require_graph_context(record.context.as_ref())
     }
     pub(crate) fn store(
@@ -636,14 +651,22 @@ impl BinaryRunOwner<'_> {
             host,
             ..
         } = input;
-        if tasks.iter().any(|task| task.context.as_ref().is_none_or(|context|
-            context.graph_id.is_none() || context.node_id.is_none())) {
-            return Err(FacadeError::invalid(InvalidInputDetail::Field("graph context".into())));
+        if tasks.iter().any(|task| {
+            task.context
+                .as_ref()
+                .is_none_or(|context| context.graph_id.is_none() || context.node_id.is_none())
+        }) {
+            return Err(FacadeError::invalid(InvalidInputDetail::Field(
+                "graph context".into(),
+            )));
         }
         // Graph worktree and placement are resolved before the sealed attempt reaches this owner.
         if host.is_some_and(|host| host != self.factory.context.identity.host)
-            || tasks.iter().any(|task| task.new_worktree.is_some()) {
-            return Err(FacadeError::invalid(InvalidInputDetail::Field("attempt placement".into())));
+            || tasks.iter().any(|task| task.new_worktree.is_some())
+        {
+            return Err(FacadeError::invalid(InvalidInputDetail::Field(
+                "attempt placement".into(),
+            )));
         }
         let mut submitted = Vec::new();
         for (index, task) in tasks.into_iter().enumerate() {
@@ -1310,11 +1333,15 @@ impl BinaryRunOwner<'_> {
     }
 }
 
-fn require_graph_context(context: Option<&provenant_records::run::WorkContext>) -> Result<(), FacadeError> {
+fn require_graph_context(
+    context: Option<&provenant_records::run::WorkContext>,
+) -> Result<(), FacadeError> {
     if context.is_some_and(|context| context.graph_id.is_some() && context.node_id.is_some()) {
         Ok(())
     } else {
-        Err(FacadeError::invalid(InvalidInputDetail::Field("retained non-graph lanes are read-only".into())))
+        Err(FacadeError::invalid(InvalidInputDetail::Field(
+            "retained non-graph lanes are read-only".into(),
+        )))
     }
 }
 

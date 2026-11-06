@@ -139,7 +139,6 @@ pub fn status(command: crate::Status, _json_output: bool, edge: &Edge<'_>) -> Re
                 next,
                 session.context.state_root.as_path(),
                 None,
-
             );
             append_provider_errors(&session, &rows, &mut data, &mut human);
             let continuation = next.map(|cursor| {
@@ -224,13 +223,8 @@ pub fn status_wait_details(
     let call = request(&clock, &cancel)?;
     let resolved = targets::resolve(edge, target, true)?;
     let (session, _) = targets::read_resolved(edge, resolved, &call)?;
-    let (mut data, mut human) = render_lanes(
-        rows,
-        &[],
-        None,
-        session.context.state_root.as_path(),
-        None,
-    );
+    let (mut data, mut human) =
+        render_lanes(rows, &[], None, session.context.state_root.as_path(), None);
     append_provider_errors(&session, rows, &mut data, &mut human);
     let summary = lane_summary(&lane_lines(&data), None);
     Ok(Some(summary.lines.join("\n")))
@@ -860,7 +854,6 @@ pub fn project_retained_attempt(
         &record,
         &[],
         session.context.state_root.as_path(),
-
         clock.wall_now().ok(),
         false,
     ))
@@ -1567,7 +1560,6 @@ pub(super) fn lanes_inner(
         next,
         session.context.state_root.as_path(),
         lane_cooldown_view(&cooldowns),
-
     );
     append_provider_errors(&session, &lanes, &mut data, &mut human);
     attach_handoffs(&session, &lanes, &mut data);
@@ -1701,13 +1693,7 @@ pub(super) fn route_label(record: &run::AttemptRecord) -> String {
 /// Receipt facts shared by explicit PR opening and graph delivery. Workflow
 /// review receipts, when present, are added by the caller that owns that store.
 pub fn recorded_attempt_facts(record: &run::AttemptRecord) -> AttemptFacts {
-    let lane = project_lane(
-        record,
-        &[],
-        Path::new("/"),
-        None,
-        false,
-    );
+    let lane = project_lane(record, &[], Path::new("/"), None, false);
     let state = lane.state;
     let exit_code = lane.exit_code;
     AttemptFacts {

@@ -10,22 +10,17 @@ use crate::{
     fabric::{Context, PeerFailure},
 };
 use provenant_core::{
-    AttemptId, CancelToken, Clock, HostId, OperationId, Roots, RunId, TaskId,
-    WaitBudget, WallTime,
+    AttemptId, CancelToken, Clock, HostId, OperationId, Roots, RunId, TaskId, WaitBudget, WallTime,
 };
 use provenant_fabric_runtime::{
     coordination::facade::{
-        AttemptTarget, FacadeError, OutputBytes, OutputInput, OutputPart,
-        OutputResult, RunInput,
+        AttemptTarget, FacadeError, OutputBytes, OutputInput, OutputPart, OutputResult, RunInput,
     },
     hosts::{PeerAction, PeerResult},
     identity::{Address, CrossHostProjectKey},
     runs::RunResult,
 };
-use provenant_os::{
-    clock::SystemClock,
-    fs::Directory,
-};
+use provenant_os::{clock::SystemClock, fs::Directory};
 use provenant_run as run;
 use run::ErrorKind;
 use serde::{Deserialize, Serialize};

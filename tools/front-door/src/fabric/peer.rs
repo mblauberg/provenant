@@ -375,14 +375,15 @@ pub fn peer(
                     }
                 })
             }
-            PeerAction::Submit { .. } => {
-                peer_result(Err::<provenant_fabric_runtime::runs::SubmissionReceipt, _>(FacadeError::invalid(InvalidInputDetail::Field("submit".into()))), |data| {
-                    PeerResult::Submitted {
-                        data,
-                        extra: Default::default(),
-                    }
-                })
-            }
+            PeerAction::Submit { .. } => peer_result(
+                Err::<provenant_fabric_runtime::runs::SubmissionReceipt, _>(FacadeError::invalid(
+                    InvalidInputDetail::Field("submit".into()),
+                )),
+                |data| PeerResult::Submitted {
+                    data,
+                    extra: Default::default(),
+                },
+            ),
             PeerAction::Output { input, .. } => {
                 peer_result(owner.output(input.clone(), budget, &cancel), |data| {
                     PeerResult::Output {

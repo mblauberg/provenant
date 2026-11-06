@@ -850,17 +850,26 @@ impl ToolCall {
         {
             let operation = lane_run_request(input)?;
             if input["explain"] == true {
-                return service.limit_response(response(self.name(), serde_json::to_value(operation)?), false, false);
+                return service.limit_response(
+                    response(self.name(), serde_json::to_value(operation)?),
+                    false,
+                    false,
+                );
             }
             let seconds = input["wait_seconds"].as_u64();
             if let Some(seconds) = seconds {
                 service.budget(seconds)?;
             }
             let mut value = service.facade.add_from_lane(
-                &operation, cancel, std::time::Duration::from_secs(crate::MAX_WAIT_SECONDS),
+                &operation,
+                cancel,
+                std::time::Duration::from_secs(crate::MAX_WAIT_SECONDS),
             )?;
             if let Some(seconds) = seconds {
-                match service.facade.wait_for_children(cancel, std::time::Duration::from_secs(seconds)) {
+                match service
+                    .facade
+                    .wait_for_children(cancel, std::time::Duration::from_secs(seconds))
+                {
                     Ok(states) => value["wait"] = states,
                     Err(error) => value["observation_error"] = serde_json::json!(error.to_string()),
                 }
@@ -1435,27 +1444,52 @@ pub fn lane_run_request(
     input: &Value,
 ) -> Result<provenant_fabric_runtime::graph::relay::RelayOp, ServiceError> {
     use provenant_fabric_runtime::graph::relay::{ChildRequest, RelayOp};
-    let invalid = || ServiceError::Cli {
+    let invalid = || {
+        ServiceError::Cli {
         code: "invalid_input".into(),
         message: "child runs accept a template, brief, tier, access mode and write scope; use a graph patch for other controls".into(),
         data: Value::Null,
+    }
     };
     let node = input.get("document").unwrap_or(input);
-    if !node.is_object() || node.get("nodes").is_some()
+    if !node.is_object()
+        || node.get("nodes").is_some()
         || node.get("templates").is_some()
         || input.get("over").is_some()
-        || input.get("set").is_some_and(|value| value.as_object().is_none_or(|fields| !fields.is_empty()))
-        || ["worktree", "branch", "base", "attempt"].iter().any(|key| node.get(*key).is_some() || input.get(*key).is_some())
+        || input
+            .get("set")
+            .is_some_and(|value| value.as_object().is_none_or(|fields| !fields.is_empty()))
+        || ["worktree", "branch", "base", "attempt"]
+            .iter()
+            .any(|key| node.get(*key).is_some() || input.get(*key).is_some())
     {
         return Err(invalid());
     }
-    if node.as_object().is_none_or(|fields| fields.keys().any(|key| !matches!(key.as_str(),
-        "op" | "document" | "id" | "brief" | "use" | "tier" | "access" | "write_scope" | "explain" | "wait_seconds" | "idempotency_key" | "set"))) {
+    if node.as_object().is_none_or(|fields| {
+        fields.keys().any(|key| {
+            !matches!(
+                key.as_str(),
+                "op" | "document"
+                    | "id"
+                    | "brief"
+                    | "use"
+                    | "tier"
+                    | "access"
+                    | "write_scope"
+                    | "explain"
+                    | "wait_seconds"
+                    | "idempotency_key"
+                    | "set"
+            )
+        })
+    }) {
         return Err(invalid());
     }
     let field = |name: &str| input.get(name).or_else(|| node.get(name));
     let text = |name: &str| -> Result<Option<String>, ServiceError> {
-        field(name).map(|value| value.as_str().map(str::to_owned).ok_or_else(invalid)).transpose()
+        field(name)
+            .map(|value| value.as_str().map(str::to_owned).ok_or_else(invalid))
+            .transpose()
     };
     let brief = text("brief")?.unwrap_or_default();
     let template = text("use")?.unwrap_or_else(|| "task".into());
@@ -1466,19 +1500,31 @@ pub fn lane_run_request(
         Some(value) if value == "worktree_write" => true,
         _ => return Err(invalid()),
     };
-    let write_scope = field("write_scope").map(|value| serde_json::from_value(value.clone()).map_err(|_| invalid())).transpose()?.unwrap_or_default();
+    let write_scope = field("write_scope")
+        .map(|value| serde_json::from_value(value.clone()).map_err(|_| invalid()))
+        .transpose()?
+        .unwrap_or_default();
     let idempotency_key = text("idempotency_key")?.unwrap_or(
-        provenant_os::fs::entropy_128().map(|bytes| provenant_core::hex(&bytes))
+        provenant_os::fs::entropy_128()
+            .map(|bytes| provenant_core::hex(&bytes))
             .map_err(|_| invalid())?,
     );
     if idempotency_key.is_empty() || idempotency_key.len() > 200 {
         return Err(invalid());
     }
-    let digest = provenant_records::CanonicalV1::file_digest(idempotency_key.as_bytes()).to_string();
+    let digest =
+        provenant_records::CanonicalV1::file_digest(idempotency_key.as_bytes()).to_string();
     Ok(RelayOp::Add(ChildRequest {
         id: format!("child-{}", &digest[7..39]),
-        template, brief, tier, timeout_seconds: None, writer, write_scope, detached: false,
-        idempotency_key, reason: Some("run".into()),
+        template,
+        brief,
+        tier,
+        timeout_seconds: None,
+        writer,
+        write_scope,
+        detached: false,
+        idempotency_key,
+        reason: Some("run".into()),
     }))
 }
 

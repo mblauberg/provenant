@@ -362,7 +362,6 @@ pub(super) fn render_settled(
         None,
         session.context.state_root.as_path(),
         cooldowns,
-
     );
     append_provider_errors(session, lanes, &mut data, &mut human);
     attach_handoffs(session, lanes, &mut data);

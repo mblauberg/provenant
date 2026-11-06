@@ -56,7 +56,6 @@ pub(super) fn project_id_for_lane_gitdir(
     matches.next().is_none().then_some(project)
 }
 
-
 pub fn nested_dispatch_context(roots: &Roots) -> Result<(u64, Option<AttemptId>), Fail> {
     let parent_depth = environment_text(run::LANE_DEPTH_ENV)?;
     let parent_attempt = environment_text(run::PARENT_ATTEMPT_ENV)?;
@@ -93,7 +92,6 @@ pub(super) fn worktree_was_pruned(receipt: &Value, path: &Path) -> bool {
             && std::fs::symlink_metadata(path)
                 .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
 }
-
 
 pub(super) fn environment_text(name: &str) -> Result<Option<String>, Fail> {
     match std::env::var(name) {
@@ -711,4 +709,3 @@ pub(super) fn check_launch_policy(started: &[run::Started]) -> Result<(), Fail> 
     }
     Ok(())
 }
-

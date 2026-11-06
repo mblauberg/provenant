@@ -2195,13 +2195,7 @@ fn lanes_distinguish_exhausted_continuations_from_a_retry() -> Result<(), Box<dy
     )?;
     let next = AttemptId::from_bytes([3; 16]);
     pending.superseded_by = Some(next);
-    let (data, human) = render_lanes(
-        &[pending, exhausted],
-        &[],
-        None,
-        Path::new("/state"),
-        None,
-    );
+    let (data, human) = render_lanes(&[pending, exhausted], &[], None, Path::new("/state"), None);
     assert_eq!(data["lanes"][0]["superseded_by"], json!(next));
     assert_eq!(data["lanes"][1]["state"], "failed");
     assert!(data["lanes"][1]["superseded_by"].is_null());

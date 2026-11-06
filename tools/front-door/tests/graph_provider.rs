@@ -2377,7 +2377,11 @@ fn run_graph_provider(rig: &TestRig, graph_id: &str, node: Value) -> Result<Valu
     ])?;
     let response: Value = serde_json::from_slice(&out.stdout.bytes)?;
     let outcome: provenant_records::Outcome = serde_json::from_value(response["status"].clone())?;
-    assert_eq!(code(&out), i32::from(provenant_cli::exit_status(&outcome)), "{response}");
+    assert_eq!(
+        code(&out),
+        i32::from(provenant_cli::exit_status(&outcome)),
+        "{response}"
+    );
     assert!(response["error"].is_null(), "{response}");
     assert!(response["data"]["checkpoint"].is_object(), "{response}");
     let reference = response["data"]["checkpoint"]["nodes"][0]["attempts"][0]["attempt_ref"]
@@ -2799,21 +2803,33 @@ fn graph_launch_proceeds_when_provider_update_is_busy() -> Result {
 }
 
 fn graph_codex_rollout_binds_observed_route_and_missing_rollout_is_explicit() -> Result {
-    if !graph_fixture_available()? { return Ok(()); }
+    if !graph_fixture_available()? {
+        return Ok(());
+    }
     let rig = policy_codex_fixture()?;
     let cleanup = rig.process_cleanup();
     for (id, brief, has_rollout) in [
         ("rollout-present", "reply OK", true),
         ("rollout-missing", "fixture missing rollout", false),
     ] {
-        let lane = run_graph_provider(&rig, id, json!({
-            "id":"provider", "prompt":brief, "access":"read_only",
-            "route":{"adapter":"codex","model":"gpt-6-luna","effort":"low"}
-        }))?;
+        let lane = run_graph_provider(
+            &rig,
+            id,
+            json!({
+                "id":"provider", "prompt":brief, "access":"read_only",
+                "route":{"adapter":"codex","model":"gpt-6-luna","effort":"low"}
+            }),
+        )?;
         assert_eq!(lane["state"], "succeeded", "{lane}");
         if has_rollout {
-            assert_eq!(lane["observed_route"]["model"], "codex/gpt-6-luna", "{lane}");
-            assert_eq!(lane["transcript"]["session"], "01234567-89ab-cdef-0123-456789abcdef");
+            assert_eq!(
+                lane["observed_route"]["model"], "codex/gpt-6-luna",
+                "{lane}"
+            );
+            assert_eq!(
+                lane["transcript"]["session"],
+                "01234567-89ab-cdef-0123-456789abcdef"
+            );
         } else {
             assert!(lane["observed_route"].is_null(), "{lane}");
             assert!(!lane["transcript"].is_null(), "{lane}");
@@ -2824,7 +2840,9 @@ fn graph_codex_rollout_binds_observed_route_and_missing_rollout_is_explicit() ->
 }
 
 fn graph_host_native_launch_uses_the_provider_contract() -> Result {
-    if !graph_fixture_available()? { return Ok(()); }
+    if !graph_fixture_available()? {
+        return Ok(());
+    }
     claude_dispatch(true, false)
 }
 

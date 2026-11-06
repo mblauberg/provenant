@@ -3901,12 +3901,29 @@ mod route_tests {
             fallback: vec![],
             exclude: vec!["claude".into()],
         };
-        use super::{Roots, RouteResolve, execute, SystemClock, RoutingError, Clock, Data, Route, EdgeError, resolved_text};
+        use super::{
+            Clock, Data, EdgeError, Roots, Route, RouteResolve, RoutingError, SystemClock, execute,
+            resolved_text,
+        };
         let preview = |request: &super::RouteRequest, roots: &Roots| {
-            let query = RouteResolve { writes: false, account: None, name: None, request: request.clone() };
-            let data = execute(&Route::Resolve(query), roots, SystemClock::new().wall_now()?)?;
-            let Data::Resolved(preview) = &data else { return Err(EdgeError::from(RoutingError::Catalogue)); };
-            Ok::<_, EdgeError>((serde_json::to_value(&data).map_err(|_| RoutingError::Catalogue)?, resolved_text(preview)))
+            let query = RouteResolve {
+                writes: false,
+                account: None,
+                name: None,
+                request: request.clone(),
+            };
+            let data = execute(
+                &Route::Resolve(query),
+                roots,
+                SystemClock::new().wall_now()?,
+            )?;
+            let Data::Resolved(preview) = &data else {
+                return Err(EdgeError::from(RoutingError::Catalogue));
+            };
+            Ok::<_, EdgeError>((
+                serde_json::to_value(&data).map_err(|_| RoutingError::Catalogue)?,
+                resolved_text(preview),
+            ))
         };
         let (data, text) = preview(&request, &roots)?;
         assert_ne!(data["adapter"], "claude");
@@ -3936,9 +3953,7 @@ mod route_tests {
                 .to_vec(),
             ..request
         };
-        let message = preview(&all, &roots)
-            .unwrap_err()
-            .to_string();
+        let message = preview(&all, &roots).unwrap_err().to_string();
         assert!(message.contains("excluded by flag: provider"), "{message}");
         Ok(())
     }

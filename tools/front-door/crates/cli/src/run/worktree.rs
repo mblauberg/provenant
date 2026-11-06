@@ -22,4 +22,3 @@ pub fn worktree_access(
         Some(_) => Ok(()),
     }
 }
-

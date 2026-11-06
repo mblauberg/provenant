@@ -1300,8 +1300,12 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
             ),
             (
                 progress.extra.get("new_worktree_base").is_some_and(|base| {
-                    node.attempt.as_ref().is_none_or(|spec| spec.new_worktree.is_none())
-                        || base.as_str().is_none_or(|base| base.parse::<provenant_core::GitOid>().is_err())
+                    node.attempt
+                        .as_ref()
+                        .is_none_or(|spec| spec.new_worktree.is_none())
+                        || base
+                            .as_str()
+                            .is_none_or(|base| base.parse::<provenant_core::GitOid>().is_err())
                 }),
                 "writer provisioning must retain a full commit base",
             ),
