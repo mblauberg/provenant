@@ -8485,3 +8485,36 @@ fn projected_cli_error_omits_unsafe_source_and_keeps_bounded_fields() {
             .contains("TOKEN_SENTINEL")
     );
 }
+
+#[test]
+fn malformed_claude_result_preserves_provider_error_in_settlement() {
+    let route = run::RouteRecord {
+        provider: Some("claude".into()),
+        model: Some("claude/fixture".into()),
+        ..Default::default()
+    };
+    let message = "Permission mode forced to default — CLAUDE_CODE_SUBPROCESS_ENV_SCRUB is set";
+    let result =
+        serde_json::json!({"type":"result", "is_error":true, "errors":[message]}).to_string();
+    let earlier = r#"{"type":"result","session_id":"s","subtype":"success","is_error":false,"result":"earlier answer"}"#;
+    for (result, reason) in [
+        (
+            result.as_str(),
+            format!("provider protocol is malformed: {message}"),
+        ),
+        ("{", "provider protocol is malformed".into()),
+    ] {
+        for suffix in ["", "\n"] {
+            let decoded = Registry::default()
+                .decode(
+                    &route,
+                    format!("{earlier}\n{result}{suffix}").as_bytes(),
+                    &clean_exit(),
+                    Path::new("/unused"),
+                )
+                .unwrap();
+            assert_eq!(decoded.outcome, run::Outcome::Failed);
+            assert_eq!(decoded.reason.as_deref(), Some(reason.as_str()));
+        }
+    }
+}
