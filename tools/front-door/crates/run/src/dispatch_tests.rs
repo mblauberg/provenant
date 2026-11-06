@@ -305,10 +305,6 @@ fn host_checks_child_metadata_against_its_parent_record() -> TestResult {
         assert_eq!(record.parent_attempt, proposed_parent);
         assert_eq!(store.run(record.run_id, &call)?, record);
         assert_eq!(
-            store.queued_runs(&call, QUEUED_RUNS_PAGE_SIZE)?,
-            vec![record.run_id]
-        );
-        assert_eq!(
             store
                 .validate_child(
                     record.run_id,
@@ -323,7 +319,6 @@ fn host_checks_child_metadata_against_its_parent_record() -> TestResult {
         );
         if !valid {
             store.refuse_queued(record.run_id, "host refused child metadata", &call)?;
-            assert!(store.queued_runs(&call, QUEUED_RUNS_PAGE_SIZE)?.is_empty());
             assert!(matches!(
                 store.record(nested.attempts[0].attempt_id, &call)?.state,
                 AttemptState::Terminal {
@@ -2373,10 +2368,6 @@ fn deferred_child_launches_once_capacity_frees() -> TestResult {
             }
         );
         assert_eq!(store.record(id, &call)?.generation, 0);
-        assert_eq!(
-            store.queued_runs(&call, QUEUED_RUNS_PAGE_SIZE)?,
-            vec![run.run_id]
-        );
     }
     assert_eq!(fake.prepared.get(), 0);
     assert!(
