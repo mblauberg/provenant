@@ -169,6 +169,21 @@ boundary = "authority"
 reason = "A graph-bound task may receive only its own node's input directory, without a redirected path."
 
 [[guard]]
+site = "cli/src/run/provider/source_tree.rs#ensure_source_roots"
+boundary = "authority"
+reason = "Access and asset grants cannot reopen the live checkout beside the selected pinned source view."
+
+[[guard]]
+site = "cli/src/run/provider/source_tree.rs#ensure_profile_isolated"
+boundary = "authority"
+reason = "Provider grants cannot reopen the live checkout beside the selected pinned source view."
+
+[[guard]]
+site = "cli/src/run/provider/source_tree.rs#ensure_view_read_only"
+boundary = "authority"
+reason = "Provider writes cannot modify the immutable source view supplied to the task."
+
+[[guard]]
 site = "cli/src/run/provider/preparation.rs#prepare_candidates"
 boundary = "authority"
 reason = "A writer continuation cannot take over a predecessor's worktree while its edits are uncommitted."

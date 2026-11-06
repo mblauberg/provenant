@@ -378,6 +378,8 @@ pub(super) enum PrepareError {
     #[error("{0}")]
     GraphInputsAuthority(String),
     #[error("{0}")]
+    SourceAuthority(String),
+    #[error("{0}")]
     DirtyWriter(String),
     #[error("{message}")]
     Candidates {
@@ -461,7 +463,9 @@ impl PrepareError {
                 refusal.boundary_class = provenant_records::diagnostic::BoundaryClass::Integrity;
                 refusal
             }
-            error @ (Self::GraphInputsAuthority(_) | Self::DirtyWriter(_)) => {
+            error @ (Self::GraphInputsAuthority(_)
+            | Self::SourceAuthority(_)
+            | Self::DirtyWriter(_)) => {
                 let mut refusal = run::PrepareRefusal::from(error.to_string());
                 refusal.boundary_class = provenant_records::diagnostic::BoundaryClass::Authority;
                 refusal
@@ -490,6 +494,7 @@ fn preparation_preserves_typed_boundaries_without_classifying_other_errors() {
     assert_eq!(other.boundary_class, BoundaryClass::None);
     for error in [
         PrepareError::GraphInputsAuthority("invalid graph inputs root".into()),
+        PrepareError::SourceAuthority("source grant overlaps".into()),
         PrepareError::DirtyWriter("uncommitted predecessor edits".into()),
     ] {
         assert_eq!(
@@ -1095,7 +1100,8 @@ pub(super) fn prepare_candidates(
     let isolated =
         writer.is_none() && task.access.source_root.is_some() && !task.access.source_live;
     let cwd = if isolated {
-        super::source_tree::ensure_source_roots(&source, &task.access, assets)?;
+        super::source_tree::ensure_source_roots(&source, &task.access, assets)
+            .map_err(PrepareError::SourceAuthority)?;
         super::source_tree::snapshot_source(registry, task, paths, &source, &git)?
     } else {
         source.clone()
@@ -2408,11 +2414,13 @@ pub(super) fn prepare_candidates(
         }
         spec.complete_tool_requirements(&plan, &home, &cwd);
         if isolated {
-            super::source_tree::ensure_profile_isolated(&source, &spec.profile.spec)?;
+            super::source_tree::ensure_profile_isolated(&source, &spec.profile.spec)
+                .map_err(PrepareError::SourceAuthority)?;
             super::source_tree::ensure_view_read_only(
                 &cwd,
                 &provenant_confinement::write_grants(plan.permissions(), &spec.profile),
-            )?;
+            )
+            .map_err(PrepareError::SourceAuthority)?;
         }
         let transcript_account = account
             .as_ref()
