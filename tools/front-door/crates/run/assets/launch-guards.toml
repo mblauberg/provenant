@@ -493,8 +493,3 @@ reason = "Unrepresentable optional build-slot shim configuration leaves the laun
 site = "providers/src/identity.rs#RegisteredAccount::validate_route"
 boundary = "authority"
 reason = "The selected account must match the route it authorises."
-
-[[guard]]
-site = "run/src/launch.rs#RunStore::check_child_attempt_id"
-boundary = "authority"
-reason = "Child attempts must be host-derived members of the validated request."
