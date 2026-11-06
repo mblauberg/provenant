@@ -15,12 +15,12 @@ pub enum Verdict {
     Unreported,
 }
 
-/// Whether `provider` reports token usage while running, allowing the
-/// guardian to enforce a writer token budget. Claude reports usage during a
-/// turn. Codex exec reports it only at `turn.completed`, so a Codex writer is
-/// stopped when a completed turn takes it past the budget, never mid-turn.
+/// Whether `provider` reports live token usage while running, allowing the
+/// guardian to enforce a writer token budget. Codex exec runs one turn per
+/// launch and reports usage only at its final `turn.completed` frame: there
+/// is no further turn to stop.
 pub fn enforces(provider: &str) -> bool {
-    matches!(provider, "claude" | "codex")
+    provider == "claude"
 }
 
 /// Fresh tokens the provider reported, summed. Cache reads do not count:
@@ -124,7 +124,7 @@ mod tests {
         let task = &input.request.tasks[0];
         assert_eq!(
             crate::launch::capture_plan(task, 60, 500, "codex").token_budget,
-            500
+            0
         );
         assert_eq!(
             crate::launch::capture_plan(task, 60, 500, "opencode").token_budget,
@@ -139,7 +139,7 @@ mod tests {
     #[test]
     fn budget_enforcement_requires_usage_reported_while_running() {
         assert!(enforces("claude"));
-        assert!(enforces("codex"));
+        assert!(!enforces("codex"));
         assert!(!enforces("opencode"));
         assert!(!enforces("cursor"));
     }

@@ -1350,9 +1350,13 @@ impl RunStore {
             if let Some(p) = provider
                 && !crate::token_budget::enforces(p)
             {
-                let note = format!(
-                    "token budget is not enforced for provider {p}: usage is not reported while it runs"
-                );
+                let note = if p == "codex" {
+                    "token budget does not stop Codex writers: codex exec reports usage only at its final turn.completed frame; there is no further turn to stop".to_owned()
+                } else {
+                    format!(
+                        "token budget is not enforced for provider {p}: usage is not reported while it runs"
+                    )
+                };
                 decoded.reason = Some(match decoded.reason.take() {
                     Some(existing) => format!("{existing}; {note}"),
                     None => note,
@@ -2909,9 +2913,21 @@ mod writer_recovery_tests {
         budget_stop_case(BudgetStopCase::InProgress("rebase"))
     }
 
+    #[test]
+    fn writer_token_budget_commit_leaves_a_revert_uncommitted()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        budget_stop_case(BudgetStopCase::InProgress("revert"))
+    }
+
+    #[test]
+    fn writer_token_budget_commit_leaves_an_apply_rebase_uncommitted()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        budget_stop_case(BudgetStopCase::InProgress("rebase-apply"))
+    }
+
     #[derive(Clone, Copy)]
     enum BudgetStopCase {
-        /// An operation Git left in progress: `cherry-pick` or `rebase`.
+        /// An operation Git left in progress.
         InProgress(&'static str),
         Commit,
         CommitFailure,
@@ -3126,13 +3142,17 @@ mod writer_recovery_tests {
         }
         if let BudgetStopCase::InProgress(operation) = case {
             let git_dir = candidate.join("git-common");
-            if operation == "rebase" {
-                std::fs::create_dir(git_dir.join("rebase-merge"))?;
-            } else {
-                std::fs::write(
-                    git_dir.join("CHERRY_PICK_HEAD"),
+            match operation {
+                "rebase" => std::fs::create_dir(git_dir.join("rebase-merge"))?,
+                "rebase-apply" => std::fs::create_dir(git_dir.join("rebase-apply"))?,
+                operation => std::fs::write(
+                    git_dir.join(if operation == "revert" {
+                        "REVERT_HEAD"
+                    } else {
+                        "CHERRY_PICK_HEAD"
+                    }),
                     format!("{}\n", launch.base),
-                )?;
+                )?,
             }
         }
         let mut observed = crate::tests::exit();
@@ -3163,6 +3183,7 @@ mod writer_recovery_tests {
             "reason: {reason_text}"
         );
         if let BudgetStopCase::InProgress(operation) = case {
+            let operation = if operation == "rebase-apply" { "rebase" } else { operation };
             assert!(
                 reason_text.contains(&format!(
                     "budget commit skipped: in-progress {operation} left uncommitted"
