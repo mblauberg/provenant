@@ -1130,7 +1130,7 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
                 &fabric::target_text(&cmd.attempt.0),
                 fabric::GraphCommand::Retry {
                     extend: &cmd.extend,
-                    node: cmd.node,
+                    node: cmd.node.as_deref(),
                     brief: cmd.brief.as_deref(),
                     legacy_prompt: cmd.prompt.prompt_file.is_some() || cmd.prompt.prompt_stdin,
                     no_fallback: cmd.no_fallback,

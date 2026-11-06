@@ -1322,6 +1322,7 @@ mod tests {
                 "retry",
                 id,
                 "--node",
+                "verify",
                 "--brief",
                 "Repair the failure",
                 "--extend",
@@ -1331,7 +1332,7 @@ mod tests {
             else {
                 panic!("retry command");
             };
-            assert!(retry.node);
+            assert_eq!(retry.node.as_deref(), Some("verify"));
             assert_eq!(retry.brief.as_deref(), Some("Repair the failure"));
             assert_eq!(retry.extend, ["budget=20"]);
         }
