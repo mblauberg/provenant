@@ -168,6 +168,8 @@ pub struct PatchError {
     /// `conflict`, `started`, `secret`, `journal` or `invalid`.
     pub code: &'static str,
     pub message: String,
+    /// Closed diagnostic fact retained when a planner uses this admission path.
+    pub cause: Option<PlanFailureFact>,
 }
 
 impl PatchError {
@@ -175,6 +177,7 @@ impl PatchError {
         Self {
             code,
             message: message.into(),
+            cause: None,
         }
     }
     fn invalid(message: impl Into<String>) -> Self {
@@ -1145,14 +1148,21 @@ pub(super) fn prepare(
     let (plan, _) = validate_flat_plan(&preview, &plans::generous())
         .map_err(|reason| classify(reason.to_string()))?;
     validate_output_kinds(&preview).map_err(|error| PatchError::invalid(error.to_string()))?;
-    if let Some(reason) = structural_limit_reason(&preview, &plan, context.limits) {
-        return Err(PatchError::invalid(reason));
+    if let Some(limit) = structural_limit(&preview, &plan, context.limits) {
+        return Err(PatchError {
+            code: "invalid", message: limit.to_string(),
+            cause: Some(PlanFailureFact::Structural(limit)),
+        });
     }
     let mut expansions = checkpoint.expansions.clone();
     expansions.push(expansion.clone());
-    if let Some(reason) = graph_envelope_reason(source, &expansions, &checkpoint.extensions, &plan)
-    {
-        return Err(PatchError::invalid(reason));
+    let bound = graph_envelope_bound(source, &expansions, &checkpoint.extensions, &plan);
+    if bound > MAX_CHECKPOINT_BYTES as usize {
+        let limit = GraphEnvelopeLimit { bound };
+        return Err(PatchError {
+            code: "invalid", message: limit.to_string(),
+            cause: Some(PlanFailureFact::Envelope(limit)),
+        });
     }
     Ok(Prepared::Ready(Box::new(Admission {
         expansion,

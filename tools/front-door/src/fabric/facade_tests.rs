@@ -1914,6 +1914,7 @@ esac
             "op":"submit", "operation_id":graph_operation("graph-attempt-operation", &key)?,
             "tasks":[{
                 "title":"inspect", "prompt":"Review the slice",
+                "base":original_head,
                 "head":successor_head,
                 "source_head":original_head,
                 "route":{"kind":"model", "provider":"fixture", "model":"fixture/model"},
@@ -1927,7 +1928,8 @@ esac
             ..Default::default()
         };
         let accepted = graph::AttemptSpec { build_heavy: true, ..Default::default() };
-        let receipt = run_owner.submit_with_access(input, budget, &cancel, grants, None, Some(accepted))?;
+        let receipt = run_owner.submit_with_access(input, budget, &cancel, grants, None, Some(accepted))
+            .map_err(|error| format!("accept fixture launch: {error:?}"))?;
         let target = receipt.targets.first().ok_or("target")?;
         // The plain lane and graph owner both lower through the same submission
         // boundary; compare their durable launch fields, excluding identities.
@@ -1941,7 +1943,7 @@ esac
             require_skill_location: false, settlement_retry_limit: None, context: None,
             title: Some("inspect".into()),
             task_id: provenant_cli::run::derived_task(&plain_operation, 0).map_err(|_| "plain task id")?,
-            prompt: "Review the slice".into(), base: None, pinned_base: None,
+            prompt: "Review the slice".into(), base: Some(original_head.clone()), pinned_base: None,
             head: Some(successor_head.clone()),
             source_head: Some(original_head.clone()),
             route: serde_json::from_value(serde_json::json!({"kind":"model", "provider":"fixture", "model":"fixture/model"}))?,
@@ -2015,7 +2017,7 @@ esac
                     stored_ref: None,
                     launch_actor: &actor,
                 },
-            )?;
+            ).map_err(|error| format!("recover accepted graph launch: {error:?}"))?;
             let graph::AttemptObservation::Terminal { attempt_ref, .. } = observation else {
                 return Err("expected settled fixture attempt".into());
             };

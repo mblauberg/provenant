@@ -113,13 +113,19 @@ pub(super) fn expand_for_run(
         vec![json!({"name":"correctness", "tier":"senior"})]
     };
     let selected = builder.select_items(lenses)?;
-    let resolvers = BTreeMap::from([(
+    let mut resolvers = BTreeMap::from([
+        ("review-topology".into(), vec!["f0-v0-s0".into()]),
+        ("review-verifiers".into(), vec!["1".into()]),
+    ]);
+    for lens in selected.iter().filter_map(|lens| lens["name"].as_str()).chain([
+        "correctness", "security", "tests", "contract", "design", "adversarial",
+    ]) {
+        resolvers.insert(format!("review-advice-{lens}"), vec![String::new()]);
+    }
+    resolvers.insert(
         "review-panel".into(),
-        selected
-            .iter()
-            .filter_map(|lens| lens["name"].as_str().map(str::to_owned))
-            .collect(),
-    )]);
+        selected.iter().filter_map(|lens| lens["name"].as_str().map(str::to_owned)).collect(),
+    );
     let lanes: Vec<CompositeLane> = values
         .get("lanes")
         .and_then(Value::as_array)

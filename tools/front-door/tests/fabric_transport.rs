@@ -994,12 +994,14 @@ fn graph_persists_auth_and_usage_refusals_before_fallback() -> Result {
         let run = rig.command(&["run", "--file", "graph.json", "--json"])?;
         assert_eq!(
             code(&run),
-            0,
+            1,
             "{scenario}: stdout={} stderr={}",
             String::from_utf8_lossy(&run.stdout.bytes),
             String::from_utf8_lossy(&run.stderr.bytes)
         );
         let run: Value = serde_json::from_slice(&run.stdout.bytes)?;
+        assert_eq!(run["status"], "failed", "{run}");
+        assert_eq!(run["data"]["outcome"], "failed", "{run}");
         let node = &run["data"]["checkpoint"]["nodes"][0];
         let attempts = node["attempts"].as_array().ok_or("attempts")?;
         assert_eq!(attempts.len(), 2, "{scenario}: {run}");
@@ -1109,11 +1111,13 @@ fn graph_run_falls_back_across_routes_refused_before_launch() -> Result {
     let run = rig.command(&["run", "--file", "graph.json", "--json"])?;
     assert_eq!(
         code(&run),
-        0,
+        1,
         "{}",
         String::from_utf8_lossy(&run.stderr.bytes)
     );
     let run: Value = serde_json::from_slice(&run.stdout.bytes)?;
+    assert_eq!(run["status"], "failed", "{run}");
+    assert_eq!(run["data"]["outcome"], "failed", "{run}");
     assert_eq!(run["data"]["status"], "complete");
     let node = &run["data"]["checkpoint"]["nodes"][0];
     assert_eq!(node["state"], "failed");
@@ -1205,7 +1209,7 @@ fn graph_cancel_recovers_an_attempt_missing_its_checkpoint_reference() -> Result
         )?,
     )?;
     let run = rig.command(&["run", "--file", "graph.json", "--json"])?;
-    assert_eq!(code(&run), 0);
+    assert_eq!(code(&run), 1);
     // Model a crash after acceptance but before the reference was saved.
     let mut roots = RootInputs::new(rig.home.clone(), rig.project.clone());
     roots.state_dir = Some(rig.state.clone());
@@ -1223,9 +1227,14 @@ fn graph_cancel_recovers_an_attempt_missing_its_checkpoint_reference() -> Result
             &clock,
         )?;
         let mut checkpoint = journal.load("lost")?.ok_or("checkpoint")?;
+        checkpoint.nodes[0].state = provenant_fabric_runtime::graph::NodeState::Running;
+        checkpoint.nodes[0].outputs = None;
+        checkpoint.settlements = 0;
         let attempt = checkpoint.nodes[0].attempts.last_mut().ok_or("attempt")?;
         attempt.state = AttemptState::Running;
         attempt.attempt_ref = None;
+        attempt.outcome = None;
+        attempt.settled = 0;
         journal.save(&checkpoint)?;
     }
     let cancelled = rig.command(&["stop", "lost", "--json"])?;
@@ -3277,14 +3286,14 @@ fn mcp_submission_places_read_only_work_on_a_named_peer() -> Result {
 fn graph_cancel_reconciles_a_remote_attempt_using_existing_peer_calls() -> Result {
     use provenant_core::{CancelToken, Clock, ProjectId, RootInputs, WaitBudget};
     use provenant_fabric_runtime::graph::{
-        FileJournal, GraphCheckpoint, GraphDocument, GraphExecution, GraphJournal,
+        FileJournal, GraphDocument, GraphExecution,
     };
     use provenant_os::clock::SystemClock;
 
     let mut rig = TestRig::new()?;
     let cleanup = rig.process_cleanup();
     let peer = loopback_peer(&mut rig)?;
-    let task = json!({"prompt":"fixture", "route":{"kind":"model","provider":"codex","model":"gpt-6-luna"},"timeout_seconds":60});
+    let task = json!({"prompt":"fixture", "context":{"graph_id":"remote-graph","node_id":"one"}, "route":{"kind":"model","provider":"codex","model":"gpt-6-luna"},"timeout_seconds":60});
     let replies = mcp(
         &rig,
         &[
@@ -3309,23 +3318,41 @@ fn graph_cancel_reconciles_a_remote_attempt_using_existing_peer_calls() -> Resul
     let document: GraphDocument = serde_json::from_value(
         json!({"schema_version":1,"graph_id":"remote-graph","nodes":[{"id":"one","access":"read_only","prompt":"fixture","route":{"alias":"senior"}}]}),
     )?;
-    let checkpoint: GraphCheckpoint = serde_json::from_value(json!({
-        "schema_version":1,"graph_id":"remote-graph","plan_digest":"digest",
-        "nodes":[{"id":"one","state":"running","worktree":null,"attempts":[{
-            "launched":true,"key":{"graph_id":"remote-graph","node_id":"one","route_index":0},
-            "route":{"alias":"senior"},"state":"running","attempt_ref":format!("{peer}/{attempt}"),
-            "outcome":null,"launch_actor":actor
-        }]}]
-    }))?;
+    struct AcceptedPeer {
+        actor: String,
+        reference: String,
+    }
+    impl provenant_fabric_runtime::graph::AttemptOwner for AcceptedPeer {
+        type Error = std::io::Error;
+        fn actor(&self) -> String { self.actor.clone() }
+        fn observe_or_start(
+            &mut self,
+            _key: &provenant_fabric_runtime::graph::AttemptKey,
+            _node: provenant_fabric_runtime::graph::NodeInput<'_>,
+            _route: &provenant_fabric_runtime::graph::GraphRoute,
+            _access: provenant_fabric_runtime::graph::AccessMode,
+            _worktree: Option<&str>,
+            _replay: provenant_fabric_runtime::graph::Replay<'_>,
+        ) -> std::io::Result<provenant_fabric_runtime::graph::AttemptObservation> {
+            Ok(provenant_fabric_runtime::graph::AttemptObservation::Pending { attempt_ref: Some(self.reference.clone()) })
+        }
+    }
     let mut journal = FileJournal::open(&state, project, "remote-graph", budget, &cancel, &clock)?;
     journal.bind(GraphExecution {
         extra: Default::default(),
         integration_base: None,
         review_base: None,
         directory: rig.project.clone(),
-        document,
+        document: document.clone(),
     })?;
-    journal.save(&checkpoint)?;
+    let seeded = provenant_fabric_runtime::graph::advance_with_budget(
+        &document,
+        &mut AcceptedPeer { actor: actor.into(), reference: format!("{peer}/{attempt}") },
+        &mut journal,
+        &Default::default(),
+        &Default::default(),
+    )?;
+    assert_eq!(seeded.checkpoint.nodes[0].state, provenant_fabric_runtime::graph::NodeState::Running);
     drop(journal);
     let (status, result) = json_command(
         &rig,

@@ -151,6 +151,7 @@ pub fn replay_child(
     request: &ChildRequest,
 ) -> Result<Option<ChildReceipt>, PatchError> {
     let invalid = |message: String| PatchError {
+        cause: None,
         code: "invalid",
         message,
     };
@@ -172,6 +173,7 @@ pub fn replay_child(
         || record.extra.get(REQUEST_DIGEST).and_then(Value::as_str) != Some(digest.as_str())
     {
         return Err(PatchError {
+            cause: None,
             code: "idempotency_conflict",
             message: "child idempotency key was used for a different request or parent".into(),
         });
@@ -255,6 +257,7 @@ pub fn admit_child_bound(
     writer_base: Option<(&str, &str)>,
 ) -> Result<ChildReceipt, PatchError> {
     let invalid = |message: String| PatchError {
+        cause: None,
         code: "invalid",
         message,
     };
@@ -307,6 +310,7 @@ pub fn admit_child_bound(
             .ok_or_else(|| invalid(format!("unknown parent node {parent}")))?;
         if progress.state != NodeState::Running {
             return Err(PatchError {
+                cause: None,
                 code: "parent_settled",
                 message: format!("parent node {parent} is not running"),
             });
@@ -314,6 +318,7 @@ pub fn admit_child_bound(
         let limit = child_depth(graph.document);
         if depth(&node) > limit {
             return Err(PatchError {
+                cause: None,
                 code: "child_depth",
                 message: format!(
                     "child {node} is {} levels deep; limits.child_depth={limit}",
@@ -382,6 +387,7 @@ fn child_patch(
         }
     } else if !request.write_scope.is_empty() {
         return Err(PatchError {
+            cause: None,
             code: "invalid",
             message: "write_scope requires a writer child".into(),
         });
@@ -394,6 +400,7 @@ fn child_patch(
     {
         if request.writer {
             return Err(PatchError {
+                cause: None,
                 code: "invalid",
                 message: "writer composite children require explicit per-node work bindings".into(),
             });
@@ -410,6 +417,7 @@ fn child_patch(
         let mut compiled = compiler
             .lower(&Value::Object(node.clone()))
             .map_err(|message| PatchError {
+                cause: None,
                 code: "invalid",
                 message,
             })?;

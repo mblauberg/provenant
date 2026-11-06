@@ -5,10 +5,28 @@
 use super::*;
 
 fn resolvers() -> BTreeMap<String, Vec<String>> {
-    BTreeMap::from([(
-        "review-panel".into(),
-        vec!["correctness".into(), "tests".into()],
-    )])
+    BTreeMap::from([
+        ("review-topology".into(), vec!["f0-v0-s0".into()]),
+        ("review-verifiers".into(), vec!["1".into()]),
+        ("review-panel".into(), vec!["correctness".into(), "tests".into()]),
+        ("review-advice-correctness".into(), vec![String::new()]),
+        ("review-advice-tests".into(), vec![String::new()]),
+        ("review-advice-security".into(), vec![String::new()]),
+        ("review-advice-contract".into(), vec![String::new()]),
+        ("review-advice-design".into(), vec![String::new()]),
+        ("review-advice-adversarial".into(), vec![String::new()]),
+    ])
+}
+
+
+fn review_leaves(value: &Value) -> Vec<&Value> {
+    match value {
+        Value::Object(fields) if fields.get("review_lens").is_some_and(Value::is_string)
+            && !fields.contains_key("composite") => vec![value],
+        Value::Object(fields) => fields.values().flat_map(review_leaves).collect(),
+        Value::Array(values) => values.iter().flat_map(review_leaves).collect(),
+        _ => Vec::new(),
+    }
 }
 
 #[test]
@@ -195,20 +213,18 @@ fn composite_integration_branch_is_created_once_without_checkout() {
 #[test]
 fn composite_review_of_one_is_one_attempt_and_multi_panel_requires_every_lens() {
     let layers = Layers::empty();
-    let one = BTreeMap::from([("review-panel".into(), vec!["correctness".into()])]);
+    let mut one = resolvers();
+    one.insert("review-panel".into(), vec!["correctness".into()]);
     let expansion = expand_composite(&layers, "review", &json!({}), &[], &one).unwrap();
-    let nodes = expansion.document["nodes"][0]["composite"]["nodes"]
-        .as_array()
-        .unwrap();
+    let nodes = review_leaves(&expansion.document);
     assert_eq!(nodes.len(), 1);
     assert_eq!(nodes[0]["kind"], Value::Null);
     assert_eq!(nodes[0]["required_verdict"], "VERDICT: PASS");
     let multi = expand_composite(&layers, "review", &json!({}), &[], &resolvers()).unwrap();
-    assert!(
-        multi.document["nodes"][0]["composite"]["nodes"][0]["composite"]
-            .get("min_successful")
-            .is_none()
-    );
+    let lenses = &multi.document["nodes"][0]["composite"]["nodes"][0]["composite"]["nodes"][0]["composite"]["nodes"][0];
+    assert_eq!(lenses["id"], "lenses");
+    assert!(lenses["composite"].get("min_successful").is_none());
+    assert_eq!(review_leaves(&multi.document).len(), 2);
 }
 
 #[test]
@@ -265,7 +281,7 @@ fn production_selection_uses_composites_parameters_and_host_panel_routes() {
     }));
     let params = vec![("risk_tier".into(), json!("substantial"))];
     let review = expand_for_run(&layers, "review", "Review this brief", &params, &[]).unwrap();
-    let lenses = &review.document["nodes"][0]["composite"]["nodes"][0]["composite"]["nodes"];
+    let lenses = review_leaves(&review.document);
     assert_eq!(lenses[0]["id"], "correctness");
     assert_eq!(lenses[0]["route"]["alias"], "principal");
     assert_eq!(lenses[1]["route"]["alias"], "junior");
@@ -297,8 +313,7 @@ fn production_selection_uses_composites_parameters_and_host_panel_routes() {
     let members = &batch.document["nodes"][0]["composite"]["nodes"][0]["composite"]["nodes"];
     assert_eq!(members[0]["worktree"], "/repo/core");
     assert_eq!(members[0]["route"]["alias"], "junior");
-    let panel = &batch.document["nodes"][0]["composite"]["nodes"][1]["composite"]["nodes"][0]["composite"]
-        ["nodes"];
+    let panel = review_leaves(&batch.document["nodes"][0]["composite"]["nodes"][1]);
     assert_eq!(panel[0]["route"]["alias"], "principal");
     assert_eq!(panel[1]["route"]["alias"], "junior");
     assert_batch_repair_binding(&batch.document);
