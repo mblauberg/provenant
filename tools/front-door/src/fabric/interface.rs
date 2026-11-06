@@ -831,18 +831,14 @@ impl Factory {
             return Err(FacadeError::NotFound);
         }
         if let Some(node) = node {
-            let subject =
-                provenant_records::CanonicalV1::record_digest("fabric-graph-event", 1, &node)
-                    .map_err(|_| FacadeError::StateCorrupt)?
-                    .to_string();
-            events.retain(|event| event.subject == subject);
+            events.retain(|event| event.subject == node);
         }
         Ok(json!({"graph_id":id,"events":events}))
     }
 
     fn graph_stats(&self, input: &Value) -> Result<Value, FacadeError> {
         let by = input.get("by").and_then(Value::as_str).unwrap_or("tier");
-        if !matches!(by, "tier" | "template") {
+        if !matches!(by, "node" | "tier" | "template") {
             return Err(FacadeError::invalid(InvalidInputDetail::Field(
                 "tier".into(),
             )));
@@ -869,24 +865,8 @@ impl Factory {
             if target.as_ref().is_some_and(|target| target.graph != id) {
                 continue;
             }
-            let subject = target
-                .as_ref()
-                .and_then(|target| target.node.as_ref())
-                .map(|node| {
-                    provenant_records::CanonicalV1::record_digest("fabric-graph-event", 1, node)
-                        .map(|digest| digest.to_string())
-                        .map_err(|_| FacadeError::StateCorrupt)
-                })
-                .transpose()?;
-            let selected_attempt = target
-                .as_ref()
-                .and_then(|target| target.attempt.as_ref())
-                .map(|attempt| {
-                    provenant_records::CanonicalV1::record_digest("fabric-graph-event", 1, attempt)
-                        .map(|digest| digest.to_string())
-                        .map_err(|_| FacadeError::StateCorrupt)
-                })
-                .transpose()?;
+            let subject = target.as_ref().and_then(|target| target.node.as_ref());
+            let selected_attempt = target.as_ref().and_then(|target| target.attempt.as_ref());
             for event in FileJournal::read_events(
                 &self.context.roots.state,
                 self.context.identity.project,
@@ -896,42 +876,67 @@ impl Factory {
             {
                 if subject
                     .as_ref()
-                    .is_some_and(|subject| *subject != event.subject)
+                    .is_some_and(|subject| subject.as_str() != event.subject)
                 {
                     continue;
                 }
                 if let Some(attempt) = event.attempt {
                     if selected_attempt
                         .as_ref()
-                        .is_some_and(|selected| *selected != attempt.identity)
+                        .is_some_and(|selected| selected.as_str() != attempt.identity)
                     {
                         continue;
                     }
-                    attempts.insert(attempt.identity.clone(), attempt);
+                    attempts.insert((id.clone(), attempt.identity.clone()), (event.subject, attempt));
                 }
             }
         }
         let mut groups = BTreeMap::<String, Value>::new();
-        for attempt in attempts.into_values() {
-            let group = if by == "template" {
-                &attempt.template
-            } else {
-                &attempt.tier
+        for ((graph, _), (node, attempt)) in attempts {
+            let group = match by {
+                "node" => format!("{graph}/{node}"),
+                "template" => attempt.template.clone(),
+                _ => attempt.tier.clone(),
             };
-            let row = groups.entry(group.clone()).or_insert_with(|| json!({"name":group,"attempts":0,"tokens":0,"cost_micro_usd":0,"wall_time_seconds":0,"unknown_usage":0}));
+            let row = groups.entry(group.clone()).or_insert_with(|| json!({
+                "name":group,"attempts":0,"tokens":0,"cost_micro_usd":0,
+                "wall_time_seconds":0,"queue_time_ms":0,"cache_read_tokens":0,
+                "input_tokens":0,"unknown_usage":0,"outcomes":{},
+                "unknown_queue_time":0,"unknown_cache_usage":0
+            }));
             add(row, "attempts", 1);
             for (key, value) in [
                 ("tokens", attempt.tokens),
                 ("cost_micro_usd", attempt.cost_micro_usd),
                 ("wall_time_seconds", attempt.wall_time_seconds),
+                ("queue_time_ms", attempt.queue_time_ms),
             ] {
                 if let Some(value) = value {
                     add(row, key, value);
                 }
             }
+            // The share uses input tokens only, with cache writes counted once.
+            if let (Some(read), Some(input)) = (attempt.cache_read_tokens, attempt.input_tokens) {
+                add(row, "cache_read_tokens", read);
+                add(row, "input_tokens", input);
+            } else {
+                add(row, "unknown_cache_usage", 1);
+            }
+            if attempt.queue_time_ms.is_none() {
+                add(row, "unknown_queue_time", 1);
+            }
+            add(&mut row["outcomes"], attempt.outcome.as_deref().unwrap_or("unsettled"), 1);
             if !attempt.has_usage {
                 add(row, "unknown_usage", 1);
             }
+        }
+        for row in groups.values_mut() {
+            let input = row["input_tokens"].as_u64().unwrap_or(0);
+            row["cache_read_share"] = if input == 0 {
+                Value::Null
+            } else {
+                json!(row["cache_read_tokens"].as_u64().unwrap_or(0) as f64 / input as f64)
+            };
         }
         Ok(json!({"by":by,"groups":groups.into_values().collect::<Vec<_>>()}))
     }
@@ -1528,7 +1533,7 @@ mod tests {
                 .clone(),
         )?;
         let id = document.graph_id.clone();
-        let attempt = json!({"key":{"graph_id":id,"node_id":"task","route_index":0},"launched":true,"route":{"alias":"senior"},"state":"terminal","attempt_ref":"host/attempt","launch_actor":"actor","usage":{"tokens":100,"cost_micro_usd":25,"wall_time_seconds":3}});
+        let attempt = json!({"key":{"graph_id":id,"node_id":"task","route_index":0},"launched":true,"route":{"alias":"senior"},"state":"terminal","attempt_ref":"host/attempt","launch_actor":"actor","usage":{"tokens":100,"cost_micro_usd":25,"wall_time_seconds":3,"cache_read_tokens":60,"input_tokens":80,"queue_time_ms":1500,"outcome":"timed_out","tier":"principal","template":"implement.fix"}});
         let checkpoint: provenant_fabric_runtime::graph::GraphCheckpoint = serde_json::from_value(
             json!({"schema_version":1,"graph_id":id,"plan_digest":"test","nodes":[
                 {"id":"group","worktree":null,"state":"succeeded","attempts":[],"children":["task"],"usage":{"tokens":100}},
@@ -1565,6 +1570,17 @@ mod tests {
         assert_eq!(stats["groups"][0]["tokens"], 100);
         assert_eq!(stats["groups"][0]["cost_micro_usd"], 25);
         assert_eq!(stats["groups"][0]["wall_time_seconds"], 3);
+        assert_eq!(stats["groups"][0]["name"], "principal");
+        assert_eq!(stats["groups"][0]["cache_read_share"], 0.75);
+        assert_eq!(stats["groups"][0]["queue_time_ms"], 1500);
+        assert_eq!(stats["groups"][0]["outcomes"]["timed_out"], 1);
+        let nodes = factory.graph_document(
+            json!({"op":"status","id":id,"stats":true,"by":"node"}),
+            budget, &cancel,
+        )?;
+        assert_eq!(nodes["groups"][0]["name"], format!("{id}/task"));
+        assert_eq!(nodes["groups"][0]["tokens"], 100);
+
         let before = FileJournal::read_status_checkpoint(
             &factory.context.roots.state,
             factory.context.identity.project,
@@ -1612,6 +1628,10 @@ mod tests {
             &cancel,
         )?;
         assert_eq!(all["groups"][0]["attempts"], 1);
+        assert_eq!(all["groups"][0]["name"], "implement.fix");
+        assert_eq!(all["groups"][0]["cache_read_share"], 0.75);
+        assert_eq!(all["groups"][0]["queue_time_ms"], 1500);
+        assert_eq!(all["groups"][0]["outcomes"]["timed_out"], 1);
         Ok(())
     }
 }

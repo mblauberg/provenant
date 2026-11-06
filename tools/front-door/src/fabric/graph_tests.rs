@@ -1581,6 +1581,36 @@ mod result_tests {
         assert!(!result.cost_partial);
         assert_eq!(result.wall_time_seconds, Some(2));
         assert_eq!(result.cost_unknown_reason, None);
+        assert_eq!(result.extra["cache_read_tokens"], 1_000_000);
+        assert_eq!(result.extra["input_tokens"], 3_000_000);
+        assert_eq!(result.extra["outcome"], "lost");
+        assert!(!result.extra.contains_key("queue_time_ms"));
+
+        let mut labelled = usage_record("priced", full.clone(), Some(1));
+        labelled.context = Some(provenant_records::run::WorkContext {
+            tier: Some("principal".into()), template: Some("review.security".into()),
+            ..Default::default()
+        });
+        labelled.observed_route = Some(provenant_records::run::RouteRecord {
+            provider: Some("observed".into()), model: Some("actual".into()),
+            effort: Some("high".into()), account_label: Some("private account".into()),
+            ..Default::default()
+        });
+        labelled.queued_at = provenant_core::WallTime::from_micros(1_000_000).unwrap();
+        labelled.started_at = Some(provenant_core::WallTime::from_micros(2_500_000).unwrap());
+        if let provenant_records::run::AttemptState::Terminal { finished_at, reason, .. } = &mut labelled.state {
+            *finished_at = provenant_core::WallTime::from_micros(5_000_001).unwrap();
+            *reason = Some("private provider reason".into());
+        }
+        let facts = super::graph_attempt_usage(labelled, Some(&prices), None);
+        assert_eq!(facts.wall_time_seconds, Some(3));
+        assert_eq!(facts.extra["queue_time_ms"], 1500);
+        assert_eq!(facts.extra["tier"], "principal");
+        assert_eq!(facts.extra["template"], "review.security");
+        assert_eq!(facts.extra["resolved_route"], json!({"provider":"observed", "model":"actual", "effort":"high"}));
+        assert!(!serde_json::to_string(&facts.extra).unwrap().contains("private account"));
+        assert!(!serde_json::to_string(&facts.extra).unwrap().contains("private provider reason"));
+
 
         // No provider reports reasoning apart from output, so its absence is
         // not partial usage.
