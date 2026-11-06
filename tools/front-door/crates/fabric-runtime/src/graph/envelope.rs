@@ -302,6 +302,7 @@ fn node_bound(
         skip_reason: Some("graph cancelled".into()),
         advance_error: Some(String::new()),
         advance_error_code: Some("c".repeat(REFUSAL_CODE_BYTES)),
+        advance_owner_code: Some("c".repeat(REFUSAL_CODE_BYTES)),
         outputs: Some(if boundary {
             gate_outputs(false)
         } else {

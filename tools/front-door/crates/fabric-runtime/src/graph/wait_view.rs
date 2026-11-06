@@ -73,13 +73,17 @@ pub fn graph_waits(checkpoint: &GraphCheckpoint) -> Vec<GraphNodeWait> {
             } else {
                 "running"
             };
-            let code = node.advance_error_code.clone().unwrap_or_else(|| {
-                if quota {
-                    "usage_limited".into()
-                } else {
-                    "unavailable".into()
-                }
-            });
+            let code = node
+                .advance_owner_code
+                .clone()
+                .or_else(|| node.advance_error_code.clone())
+                .unwrap_or_else(|| {
+                    if quota {
+                        "usage_limited".into()
+                    } else {
+                        "unavailable".into()
+                    }
+                });
             let next = node
                 .advance_error
                 .as_deref()
@@ -116,8 +120,9 @@ pub fn graph_waits(checkpoint: &GraphCheckpoint) -> Vec<GraphNodeWait> {
                 }),
                 next,
                 cause: node
-                    .advance_error_code
+                    .advance_owner_code
                     .clone()
+                    .or_else(|| node.advance_error_code.clone())
                     .or_else(|| node.loop_pause_code.clone())
                     .or_else(|| quota.then(|| "usage_limited".into())),
                 branch: node

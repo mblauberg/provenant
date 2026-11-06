@@ -164,6 +164,7 @@ pub(crate) fn apply_launch_disposition(
     };
     progress.advance_error_code = Some(code.into());
     let projected = launch_diagnostic(error);
+    progress.advance_owner_code = Some(projected.code.clone());
     let detail = projected.detail.as_deref().unwrap_or(&projected.code);
     let action = projected
         .next
@@ -615,6 +616,7 @@ pub(super) fn fail_node(
     progress.state = NodeState::Failed;
     if code.is_some() {
         progress.advance_error_code = code;
+        progress.advance_owner_code = None;
     }
     if message.is_some() {
         progress.advance_error = message;

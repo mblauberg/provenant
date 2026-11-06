@@ -219,7 +219,11 @@ pub(crate) fn status_rows(run: &GraphRun, target: &GraphTarget) -> Vec<Value> {
         } else {
             json!(attempt.and_then(|attempt| attempt.outcome))
         };
-        row["cause_code"] = json!(node.and_then(|node| node.advance_error_code.as_deref()));
+        row["cause_code"] = json!(node.and_then(|node| {
+            node.advance_owner_code
+                .as_deref()
+                .or(node.advance_error_code.as_deref())
+        }));
         if row["cause_code"].is_null() && !row["outcome"].is_null() {
             row["cause_code"] = row["outcome"].clone();
         }
@@ -248,7 +252,7 @@ pub(crate) fn status_rows(run: &GraphRun, target: &GraphTarget) -> Vec<Value> {
             // presented as permission to start a fresh attempt.
             "blocked" | "failed"
                 if matches!(
-                    row["cause_code"].as_str(),
+                    node.and_then(|node| node.advance_error_code.as_deref()),
                     Some(
                         "launch_refused" | "launch_retry_exhausted" | "writer_binding_unavailable"
                     )
@@ -1597,10 +1601,34 @@ mod tests {
     }
 
     #[test]
+    fn graph_failure_rows_prefer_owner_code_and_fall_back_for_old_checkpoints() {
+        let mut checkpoint = checkpoint("g");
+        checkpoint.nodes[0].state = NodeState::Blocked;
+        checkpoint.nodes[0].advance_error_code = Some("launch_refused".into());
+        checkpoint.nodes[0].advance_owner_code = Some("invalid_input".into());
+        let target = GraphTarget {
+            graph: "g".into(),
+            node: None,
+            attempt: None,
+        };
+        let rows = status_rows(&graph_snapshot(checkpoint.clone()), &target);
+        assert_eq!(rows[1]["cause_code"], "invalid_input");
+        let mut old = serde_json::to_value(checkpoint).unwrap();
+        old["nodes"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("advance_owner_code");
+        let old = serde_json::from_value(old).unwrap();
+        let rows = status_rows(&graph_snapshot(old), &target);
+        assert_eq!(rows[1]["cause_code"], "launch_refused");
+    }
+
+    #[test]
     fn graph_failure_rows_preserve_the_owner_cause_and_action() {
         let mut checkpoint = checkpoint("g");
         checkpoint.nodes[0].state = NodeState::Blocked;
         checkpoint.nodes[0].advance_error_code = Some("launch_retry_exhausted".into());
+        checkpoint.nodes[0].advance_owner_code = Some("LAUNCH_UNKNOWN".into());
         checkpoint.nodes[0].advance_error = Some("[LAUNCH_UNKNOWN] inspect the receipt for operation op-123 before retrying with the same operation ID".into());
         let target = GraphTarget {
             graph: "g".into(),
@@ -1609,6 +1637,7 @@ mod tests {
         };
         let rows = status_rows(&graph_snapshot(checkpoint), &target);
         let node = &rows[1];
+        assert_eq!(node["cause_code"], "LAUNCH_UNKNOWN");
         assert!(node["next"].as_str().unwrap().contains("op-123"));
         assert!(
             !node["next"]

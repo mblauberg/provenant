@@ -287,6 +287,7 @@ fn filled_checkpoint(document: &GraphDocument, plan: &PlannedGraph) -> GraphChec
                 skip_reason: Some("graph cancelled".into()),
                 advance_error: Some(worst(MAX_ADVANCE_ERROR_BYTES)),
                 advance_error_code: Some("c".repeat(envelope::REFUSAL_CODE_BYTES)),
+                advance_owner_code: Some("c".repeat(envelope::REFUSAL_CODE_BYTES)),
                 launch_retry: None,
                 last_launch_retry: (!boundary
                     && node.composite.is_none()
