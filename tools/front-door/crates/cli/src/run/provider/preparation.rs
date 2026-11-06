@@ -435,6 +435,8 @@ pub(super) enum PrepareError {
     #[error(transparent)]
     SourceHead(#[from] SourceHeadError),
     #[error(transparent)]
+    SourceCwd(#[from] SourceCwdError),
+    #[error(transparent)]
     ContinuationRequest(#[from] ContinuationRequestError),
     #[error("{message}")]
     DependencyPreparation { message: String, configured: bool },
@@ -510,6 +512,11 @@ impl PrepareError {
                     skipped_routes,
                     fallback_outcome,
                 }
+            }
+            Self::SourceCwd(error) => {
+                let mut refusal = run::PrepareRefusal::from(error.to_string());
+                refusal.boundary_class = error.boundary_class();
+                refusal
             }
             Self::Permission(error) => {
                 let mut refusal = run::PrepareRefusal::from(error.to_string());
@@ -615,6 +622,14 @@ fn preparation_preserves_typed_boundaries_without_classifying_other_errors() {
             BoundaryClass::Authority
         );
     }
+    let source =
+        PrepareError::SourceCwd(SourceCwdError::Authority("source identity changed".into()))
+            .into_refusal();
+    assert_eq!(source.boundary_class, BoundaryClass::Authority);
+    let unavailable =
+        PrepareError::SourceCwd(SourceCwdError::Operational("cwd unavailable".into()))
+            .into_refusal();
+    assert_eq!(unavailable.boundary_class, BoundaryClass::None);
     let unsupported = PrepareError::Unsupported(provenant_records::UnsupportedLaunch {
         adapter: "fixture",
         field: provenant_records::LaunchField::Write,

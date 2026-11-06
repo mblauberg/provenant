@@ -5580,6 +5580,7 @@ fn graph_read_only_snapshot_survives_moving_and_replaced_checkout()
     assert!(
         source_cwd(&registry, &missing_identity)
             .unwrap_err()
+            .to_string()
             .contains("identity changed")
     );
     let mut replaced = task.clone();
@@ -5592,6 +5593,7 @@ fn graph_read_only_snapshot_survives_moving_and_replaced_checkout()
     assert!(
         source_cwd(&registry, &replaced)
             .unwrap_err()
+            .to_string()
             .contains("identity changed")
     );
     let mut protected = task.clone();
@@ -5599,13 +5601,14 @@ fn graph_read_only_snapshot_survives_moving_and_replaced_checkout()
     assert!(
         source_cwd(&registry, &protected)
             .unwrap_err()
+            .to_string()
             .contains("not an allowed read root")
     );
     let foreign = base.join("foreign");
     std::fs::create_dir(&foreign)?;
     init_fixture_repository(&executor, &foreign, &git_home)?;
     protected.access.source_root = Some(foreign.clone());
-    let error = source_cwd(&registry, &protected).unwrap_err();
+    let error = source_cwd(&registry, &protected).unwrap_err().to_string();
     assert!(error.contains("no longer registered"));
     assert!(!error.contains(&foreign.to_string_lossy().into_owned()));
     let launch = prepare_command(
@@ -5824,6 +5827,7 @@ fn graph_read_only_snapshot_survives_moving_and_replaced_checkout()
     assert!(
         source_cwd(&registry, &task)
             .unwrap_err()
+            .to_string()
             .contains("identity changed")
     );
     Ok(())

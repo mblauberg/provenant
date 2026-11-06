@@ -264,34 +264,67 @@ pub(super) fn source_identity(path: &Path) -> Result<run::SourceIdentity, String
 
 /// Reopen the graph-bound checkout at launch, refusing a moved or replaced
 /// worktree rather than falling back to the daemon's checkout.
+#[derive(Debug, thiserror::Error)]
+pub(super) enum SourceCwdError {
+    #[error("{0}")]
+    Authority(String),
+    #[error("{0}")]
+    Operational(String),
+}
+impl SourceCwdError {
+    pub(super) fn boundary_class(&self) -> provenant_records::diagnostic::BoundaryClass {
+        match self {
+            Self::Authority(_) => provenant_records::diagnostic::BoundaryClass::Authority,
+            Self::Operational(_) => provenant_records::diagnostic::BoundaryClass::None,
+        }
+    }
+}
+
 pub(super) fn source_cwd(
     registry: &Registry<'_>,
     task: &run::TaskRequest,
-) -> Result<PathBuf, String> {
-    let cwd = registry.cwd.ok_or("working directory is unavailable")?;
+) -> Result<PathBuf, SourceCwdError> {
+    let cwd = registry
+        .cwd
+        .ok_or_else(|| SourceCwdError::Operational("working directory is unavailable".into()))?;
     let Some(source) = &task.access.source_root else {
         if task.access.source_identity.is_some() || task.access.source_live {
-            return Err("graph source identity has no checkout".into());
+            return Err(SourceCwdError::Authority(
+                "graph source identity has no checkout".into(),
+            ));
         }
-        return canonical(cwd);
+        return canonical(cwd).map_err(SourceCwdError::Operational);
     };
     if task.writer.is_some() || (!task.access.source_live && task.head.is_none()) {
-        return Err("read-only source needs a pinned head and no writer".into());
+        return Err(SourceCwdError::Authority(
+            "read-only source needs a pinned head and no writer".into(),
+        ));
     }
-    let state = registry.state_root.ok_or("state root is unavailable")?;
+    let state = registry
+        .state_root
+        .ok_or_else(|| SourceCwdError::Operational("state root is unavailable".into()))?;
     if !run::access_root_allowed(source, state, true)
         || provenant_confinement::refuses_lane_root(source, true, registry.home)
     {
-        return Err("graph source checkout is not an allowed read root".into());
+        return Err(SourceCwdError::Authority(
+            "graph source checkout is not an allowed read root".into(),
+        ));
     }
-    let verified = run::resolve_reader_source(state, cwd, source)
-        .map_err(|_| "graph source checkout is no longer registered with the project")?;
+    let verified = run::resolve_reader_source(state, cwd, source).map_err(|_| {
+        SourceCwdError::Authority(
+            "graph source checkout is no longer registered with the project".into(),
+        )
+    })?;
     if verified != *source {
-        return Err("graph source checkout changed location".into());
+        return Err(SourceCwdError::Authority(
+            "graph source checkout changed location".into(),
+        ));
     }
-    let identity = source_identity(&verified)?;
+    let identity = source_identity(&verified).map_err(SourceCwdError::Authority)?;
     if task.access.source_identity.as_ref() != Some(&identity) {
-        return Err("graph source checkout identity changed".into());
+        return Err(SourceCwdError::Authority(
+            "graph source checkout identity changed".into(),
+        ));
     }
     Ok(verified)
 }
