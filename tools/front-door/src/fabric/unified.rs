@@ -155,7 +155,8 @@ pub(crate) fn status_rows(run: &GraphRun, target: &GraphTarget) -> Vec<Value> {
             run.checkpoint
                 .cancel_reason
                 .as_deref()
-                .or(run.checkpoint.pause_reason.as_deref()),
+                .or(run.checkpoint.pause_reason.as_deref())
+                .or(run.advance_error.as_deref()),
         ));
     }
     for node in &run.checkpoint.nodes {
