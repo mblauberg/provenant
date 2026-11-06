@@ -1,8 +1,9 @@
-doc = "Fix qualified findings, then have their raising lens review the delta. Use with `repeat = { until = \"accepted\", max_rounds = N }`, at most three rounds. Supply the initial findings as inputs and the raising lens as a parameter."
+doc = "Repair qualified findings and re-review their delta through the raising lenses. Repeat with review_repair = true and at most three rounds."
 nodes = [
-  { id = "fix", use = "implement.fix", worktree = "${worktree}", write_scope = "${write_scope}", inputs = [{ node = "previous.check", outputs = ["findings"] }] },
-  { id = "check", use = "review", after = ["fix"], source = { type = "node", node = "fix" }, inputs = [{ node = "fix", outputs = ["result"] }], with = { lens = "${lens}" }, brief = "Review the repair delta at the pinned head through the ${lens} lens. Check the findings in the repair report and report any remaining defects with their IDs and evidence. End with VERDICT: PASS if all blocking findings are resolved, VERDICT: FAIL if any remain, or VERDICT: INCONCLUSIVE if evidence is insufficient." },
-  { id = "accepted", kind = "gate", access = "read_only", after = ["check"], inputs = [{ node = "check", outputs = ["verdict"] }], condition = { type = "verdict", expected = "VERDICT: PASS", threshold = "all" } },
+  { id = "fix", use = "implement.fix", worktree = "${worktree}", write_scope = "${write_scope}", continues = "${writer}", distinct_from = "dependencies", distinct_strength = "prefer", inputs = [{ node = "previous.synthesis", outputs = ["findings"] }] },
+  { id = "check", use = "review", over = "${lenses}", after = ["fix"], source = { type = "node", node = "fix" }, inputs = [{ node = "fix", outputs = ["result"] }], with = { lens = "${item}" }, repair_lens = "${item}", distinct_from = "writer", distinct_strength = "prefer", brief = "Review the repair delta at the pinned head through the ${item} lens. Check closure of the qualified findings and relevant tests. Preserve finding IDs, lens, severity, location, evidence and proposed_fix. If the delta grows risk tier or scope, record risk_grew=true or scope_grew=true in the finding so the host re-plans the full @review-panel. End with VERDICT: PASS if all blocking findings are resolved, VERDICT: FAIL if any remain, or VERDICT: INCONCLUSIVE if evidence is insufficient." },
+  { id = "synthesis", use = "synthesise", after = ["check"], inputs = [{ node = "check", outputs = ["result", "findings"] }], require_findings = true, brief = "Reconcile the delta reviews, preserving every qualified finding and its lens, severity, location, evidence and proposed_fix. End with VERDICT: PASS only if every raising lens passed and no blocking finding remains; otherwise VERDICT: FAIL." },
+  { id = "accepted", kind = "gate", access = "read_only", after = ["synthesis"], inputs = [{ node = "synthesis", outputs = ["verdict"] }], condition = { type = "verdict", expected = "VERDICT: PASS", threshold = "all" } },
 ]
 exports = [{ node = "accepted", outputs = ["result"] }]
 
@@ -15,6 +16,18 @@ type = "list"
 min = 1
 doc = "Relative paths the fix may write"
 
-[parameters.lens]
+[parameters.lenses]
+type = "list"
+default = ["correctness"]
+min = 1
+doc = "Candidate lenses; the host selects those that raised findings"
+
+[parameters.writer]
 type = "string"
-doc = "Lens that raised the findings"
+default = ""
+doc = "Delivering writer to continue when repairing a pull request"
+
+[parameters.integration_branch]
+type = "string"
+default = ""
+doc = "Integration branch for batch repair commits"

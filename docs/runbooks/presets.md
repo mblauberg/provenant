@@ -31,9 +31,28 @@ the authority envelope; a template grants no publication or promotion authority.
 
 ## Host-native repairs
 
-A repair template may select a configured host-native route. Its success is
-input to verification, rather than permission to bypass CI, review or landing
-gates. Keep the repair within the original write scope and review its delta.
+`deliver` and `batch` collect qualified findings before repair: id, raising
+lens, severity, file and line, evidence and proposed fix. Synthesis retains
+these fields and their qualified identities, including when it uses a model.
+
+Set `max_repair_cycles` to one, two or three (default three). This counts repairs
+after the first review and is separate from CI's `max_iterations`. Each repair
+starts a fresh writer attempt. Prefer a route outside the reviewers' families;
+when none is available, continue on the available route and retain the separation
+warning. The raising lenses review the delta and relevant tests. Risk or scope
+growth requires a full panel re-plan through `@review-panel`. Continuation
+fragments currently retain the launch-time resolver snapshot; selecting a new
+panel from a raised risk tier still needs host resolver support.
+
+An evidenced `design_defect` or a recurring blocking finding escalates early.
+Exhausting the repair limit takes the same read-only principal `design` path,
+returning the root constraint, two or three options, the smallest viable slice
+and acceptance evidence. A continuation planner uses the bound `repair-slice`
+template within the original write authority and records owner notification in
+the graph outcome. Changed scope or a one-way door requires a `decide` node
+before further writing. Review repair loops cannot be extended or accepted as
+is to bypass the cap. The final CI, review, acceptance and exact-head landing
+checks still apply to the delivered head.
 
 ## Composition rules
 

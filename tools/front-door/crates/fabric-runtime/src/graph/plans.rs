@@ -1520,7 +1520,14 @@ fn fragment(
             "fragment requires 1..{model_limit} nodes and schema_version 1"
         ));
     }
-    let resolvers = BTreeMap::new();
+    let resolvers: BTreeMap<String, Vec<String>> = spec
+        .extra
+        .get("resolvers")
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|error| format!("invalid planner resolvers: {error}"))?
+        .unwrap_or_default();
     let context = super::patch::PatchContext {
         library: bundled_templates(),
         resolvers: &resolvers,
@@ -1705,7 +1712,19 @@ pub(super) fn flatten_fragment(
     // limits see every member and round.
     let local = loops::expand(&local, &[], &generous())?;
     validate_schema(&local).map_err(str::to_owned)?;
-    let (plan, _) = validate_flat_plan(&local, &generous()).map_err(str::to_owned)?;
+    // The enclosing writer is not part of this isolated fragment. Preserve
+    // its binding for the full patch preview, which checks ancestry, delivery
+    // mode and worktree after the fragment has joined its parent graph.
+    let mut local_validation = local.clone();
+    for child in &mut local_validation.nodes {
+        if child.continues.as_ref().is_some_and(|writer| {
+            !local.nodes.iter().any(|node| &node.id == writer)
+                && document.nodes.iter().any(|node| &node.id == writer)
+        }) {
+            child.continues = None;
+        }
+    }
+    let (plan, _) = validate_flat_plan(&local_validation, &generous()).map_err(str::to_owned)?;
     validate_output_kinds(&local)?;
     let mut nodes: Vec<GraphNode> = plan
         .nodes
@@ -1878,7 +1897,18 @@ fn coordinate(
             return Err("expansion connects existing writers on different branches; use one shared worktree".into());
         }
         if let Some(checkout) = checkouts.first() {
-            if document.integration_branch.is_none() {
+            let continues_settled_branch = members.iter().all(|child| {
+                child.continues.as_ref().is_some_and(|target| {
+                    existing.iter().all(|writer| {
+                        (writer.id == *target || writer.continues.as_ref() == Some(target))
+                            && writer.worktree == child.worktree
+                            && checkpoint.nodes.iter().any(|progress| {
+                                progress.id == writer.id && progress.state.settled()
+                            })
+                    })
+                })
+            });
+            if document.integration_branch.is_none() && !continues_settled_branch {
                 return Err("overlapping writers require an integration_branch".into());
             }
             for child in nodes

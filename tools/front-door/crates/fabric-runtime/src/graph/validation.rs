@@ -380,7 +380,7 @@ pub(super) fn validate_flat_plan(
         land::validate_node(node)?;
         let is_gate = node.kind == Some(NodeKind::Gate);
         if is_gate != node.condition.is_some()
-            || !is_gate && node.on_fail.is_some()
+            || !is_gate && node.loop_body.is_none() && node.on_fail.is_some()
             || is_gate
                 && (node.route.is_some()
                     || node.routes.is_some()
@@ -1270,12 +1270,13 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
                     "gate evidence must match state, dependencies and condition",
                 ));
             }
-        } else if progress.gate.is_some() || progress.ci.is_some() {
+        } else if progress.gate.is_some() && !repair::is_repair(node) || progress.ci.is_some() {
             return Err(bad("only gate nodes may carry gate or CI evidence"));
         }
         if progress.state == NodeState::Skipped
             && (dependency_state(node, plan, checkpoint, &positions) != Some(NodeState::Skipped)
-                && !loops::inactive_round(node, checkpoint, &positions)
+                && !loops::inactive_round(node, plan, checkpoint, &positions)
+                && !repair::inactive_lens(node, plan, checkpoint, &positions)
                 && !patch::skipped_by_patch(checkpoint, &node.id)
                 || !progress.attempts.is_empty()
                 || progress.outputs.is_some())
