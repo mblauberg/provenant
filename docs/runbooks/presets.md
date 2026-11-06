@@ -85,8 +85,9 @@ are overridable within authority. MCP uses the same service and JSON with docume
 
 Inside a worker, `run --use TEMPLATE` adds children to the same graph. They share
 budget, stopping and trace. Template access determines whether a child writes;
-a read-only parent can launch a writer. Writers use separate worktrees and may
-integrate into the parent's branch. `--over`, `--set` and inline documents also
+a read-only parent can launch a writer. Writers use registered worktrees and
+may integrate into the parent's branch. Writers with overlapping scopes share
+a worktree and run in sequence; disjoint scopes can use separate worktrees. `--over`, `--set` and inline documents also
 work inside a worker. Repeating the same launch under the same logical parent
 returns its existing children, including after a retry or continuation.
 A waiting parent yields its slot. A composite completes when its dynamic
