@@ -29,7 +29,7 @@
     {
       "id": "q3",
       "relation": "positive",
-      "prompt": "Run the deliver preset for this approved migration and report the outcome.",
+      "prompt": "Run the deliver composite for this approved migration and report the outcome.",
       "tags": [
         "direct"
       ],

@@ -1,6 +1,6 @@
 ---
 name: code-review
-description: "Use for independent read-only review of PRs, diffs, commits and refactors against the spec, through review or provenant review. Not for root cause (diagnose), fixes (implement) or rendered UI (ui-ux-design)."
+description: "Use for independent read-only review of PRs, diffs, commits and refactors against the spec, through the review template. Not for root cause (diagnose), fixes (implement) or rendered UI (ui-ux-design)."
 ---
 
 # Code review
@@ -15,33 +15,20 @@ Conventions and the review ladder come from the repo's own `AGENTS.md`,
 ## How it runs
 
 ```sh
-provenant run --preset review --prompt-file BRIEF.md \
-  --set 'parameters.subject.commit="SHA"' --set 'parameters.base="origin/main"' \
-  --set 'parameters.spec="#N"' --set 'parameters.risk_tags=["security"]' --plan on --explain
+provenant run --use review --file BRIEF.md --explain
 ```
 
-Lens coverage comes first: cover every question the change needs, and record
-family separation as a bonus when available. The default is a planner-led panel
-under the HARNESS review floors. Configured path floors raise the shape and add
-required lenses when a plan omits them; the chair checks the recorded plan for
-additional coverage the change needs. The base lenses are
-`correctness-spec`,
-`design-fit-reuse`, `simplicity`, `conventions-readability`, `tests`,
-`refactor-cleanup`, `reliability`, and `flexibility`; risk tags add
-`security-privacy`, `concurrency-data-errors` and `adversarial`. Integration
-heads get the full panel; the runtime may select `conventions-readability` alone
-for docs, so add the policy-required coverage. Standard and deep include a
-verifier and synthesis; quick reduces the lens verdicts. To choose a shape directly, run
-`provenant review TARGET --brief-file B --shape quick|standard|deep`.
-`deliver` already runs this council on the newest head.
+Pin the base, subject commit and spec in the brief. Use `review` by default;
+a dotted flavour such as `review.security` selects a specific lens. A composite
+runs `review` over a panel resolved at launch, then `verify` and `synthesise`
+where needed. The planner chooses lenses and tiers from risk, changed paths
+and author tier; the chair checks HARNESS floors and adds missing coverage.
+Review each slice lightly and the integrated head with the full required panel.
+Lens breadth comes before family spread. `deliver` includes review before landing.
 
-For a native panel, take the lens list from `provenant review TARGET --explain`,
-which prints the selected shape, lenses and the reason without dispatching. Launch
-one independent read-only sub-agent per selected lens in parallel. Prefer the
-cross-family leg the review ladder asks for, then have the chair synthesise
-findings and dispositions across the panel.
-
-Review a stacked PR against its own base; do not re-review lower PRs. See the [stacked PR workflow](../../docs/runbooks/github-workflow.md#stacked-pull-requests).
+Inspect the explanation, then submit without `--explain`. Collect findings with
+`provenant output TARGET`; use `provenant output TARGET --trace` for lineage.
+A changed subject needs review of its delta against the prior findings.
 
 ## Independence
 
@@ -86,7 +73,7 @@ reachable. Never infer coverage from a green summary. Check that acceptance
 criteria map to evidence and that no test was loosened, skipped or deleted.
 Inspection questions are in [review-lenses.md](references/review-lenses.md).
 Reviewer-facing context is [reviewer-context.md](references/reviewer-context.md);
-the lens prompts under `references/lenses/` load into the presets by path.
+the lens prompts under `references/lenses/` supply the template briefs.
 
 ## Boundaries
 
