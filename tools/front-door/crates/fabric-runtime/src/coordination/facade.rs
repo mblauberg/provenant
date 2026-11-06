@@ -263,6 +263,18 @@ pub enum FacadeError {
         )]
         detail: Option<InvalidInputDetail>,
     },
+    /// A graph relay refusal retains its named cause across CLI and MCP.
+    #[error("graph relay refused: {refusal_code}")]
+    GraphRelayRefused {
+        refusal_code: String,
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            serialize_with = "serialise_invalid_detail",
+            deserialize_with = "deserialise_invalid_detail"
+        )]
+        detail: Option<InvalidInputDetail>,
+    },
     #[error("record not found")]
     NotFound,
     #[error("request conflicts with current state")]
@@ -573,7 +585,7 @@ impl FacadeError {
         use provenant_records::diagnostic::Diagnostic;
         let mut projected = Diagnostic::new(self.code());
         match self {
-            Self::InvalidInput { detail: Some(detail) } => {
+            Self::InvalidInput { detail: Some(detail) } | Self::GraphRelayRefused { detail: Some(detail), .. } => {
                 if let Some(detail) = detail.safe_text() {
                     projected = projected.detail(detail);
                 }
@@ -646,10 +658,22 @@ impl FacadeError {
         projected
     }
 
-    pub const fn code(&self) -> &'static str {
+    pub fn code(&self) -> &str {
+        if let Self::GraphRelayRefused { refusal_code, .. } = self
+            && !refusal_code.is_empty() && refusal_code.len() <= 128
+            && refusal_code.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+        {
+            return refusal_code;
+        }
+        self.static_code()
+    }
+
+    /// Error category for callers projecting a temporary facade conversion.
+    pub const fn static_code(&self) -> &'static str {
         match self {
             Self::OwnerUnavailable => "owner_unavailable",
             Self::InvalidInput { .. } => "invalid_input",
+            Self::GraphRelayRefused { .. } => "graph_relay_refused",
             Self::NotFound => "not_found",
             Self::Conflict | Self::GenerationConflict { .. } => "conflict",
             Self::NotTerminal => "not_terminal",

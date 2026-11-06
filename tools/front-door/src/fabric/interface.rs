@@ -11,6 +11,16 @@ fn graph_input_reason(reason: impl std::fmt::Display) -> FacadeError {
     FacadeError::invalid(InvalidInputDetail::graph_reason(reason))
 }
 
+fn relay_error(error: ServiceError) -> FacadeError {
+    match error {
+        ServiceError::Facade(error) => error,
+        error => FacadeError::GraphRelayRefused {
+            refusal_code: error.code().to_owned(),
+            detail: Some(InvalidInputDetail::graph_reason(error)),
+        },
+    }
+}
+
 fn encode(value: impl serde::Serialize) -> Result<Value, FacadeError> {
     serde_json::to_value(value).map_err(|_| FacadeError::StateCorrupt)
 }
@@ -117,7 +127,7 @@ impl Factory {
         .map_err(|_| FacadeError::InvalidInput { detail: None })
     }
 
-    fn relay_document(
+    pub(crate) fn relay_document(
         &self,
         input: &Value,
         budget: WaitBudget,
@@ -131,7 +141,7 @@ impl Factory {
         let within =
             std::time::Duration::from_micros(budget.remaining(self.clock.mono_now()).as_micros());
         let receipt = provenant_cli::fabric::graph_relay::from_lane(&request, cancel, within)
-            .map_err(|_| FacadeError::InvalidInput { detail: None })?;
+            .map_err(relay_error)?;
         if let Some(seconds) = input.get("wait_seconds").and_then(Value::as_u64) {
             return Ok(
                 match provenant_cli::fabric::graph_relay::wait_for_children(
@@ -241,7 +251,6 @@ impl Factory {
         }
         bind_launch_controls(input, &mut node, &self.cwd)?;
         node["id"] = json!(key);
-        self.confine_node(&mut node)?;
         let resolvers = self.launch_resolvers(raw)?;
         let mut compiled = provenant_fabric_runtime::graph::template::Compiler {
             library: &library,
@@ -256,7 +265,6 @@ impl Factory {
             override_tier(&mut typed, &route);
             compiled = encode(typed)?;
         }
-        self.confine_node(&mut compiled)?;
         let writer = compiled["access"] == "worktree_write"
             && compiled.get("composite").is_none()
             && compiled.get("loop").is_none();
@@ -399,7 +407,7 @@ impl Factory {
                     budget.remaining(self.clock.mono_now()).as_micros(),
                 );
                 return provenant_cli::fabric::graph_relay::from_lane(&op, cancel, within)
-                    .map_err(|_| FacadeError::InvalidInput { detail: None });
+                    .map_err(relay_error);
             }
             if operation == "stop" {
                 let op = provenant_fabric_runtime::graph::relay::RelayOp::Stop {
@@ -409,7 +417,7 @@ impl Factory {
                     budget.remaining(self.clock.mono_now()).as_micros(),
                 );
                 return provenant_cli::fabric::graph_relay::from_lane(&op, cancel, within)
-                    .map_err(|_| FacadeError::InvalidInput { detail: None });
+                    .map_err(relay_error);
             }
             if operation == "retry" {
                 return Err(FacadeError::ConfinementRefused { resource: None });
@@ -1284,6 +1292,29 @@ fn add(row: &mut Value, key: &str, value: u64) {
     reason = "the custom worktree driver omits libtest functions"
 )]
 mod tests {
+    #[test]
+    fn relay_refusals_preserve_named_code_and_detail() -> Result<()> {
+        for (code, detail) in [
+            ("parent_settled", "parent has already settled"),
+            ("child_depth", "child exceeds limits.child_depth=2"),
+        ] {
+            let error = super::relay_error(ServiceError::Cli {
+                code: code.into(), message: detail.into(), data: Value::Null,
+            });
+            assert_eq!(error.code(), code);
+            let diagnostic = error.diagnostic();
+            assert_eq!(diagnostic.code, code);
+            assert!(diagnostic.detail.as_deref().is_some_and(|text| text.contains(detail)));
+            let restored: FacadeError = serde_json::from_value(serde_json::to_value(&error)?)?;
+            assert_eq!(restored.code(), code);
+            assert_eq!(restored.diagnostic(), diagnostic);
+            let mcp = ServiceError::Facade(error).structured_error();
+            assert_eq!(mcp["code"], code);
+            assert!(mcp["message"].as_str().is_some_and(|text| text.contains(detail)));
+        }
+        Ok(())
+    }
+
     use super::*;
     use crate::worktree_tests::support::{Result, TestRig};
 
@@ -1798,7 +1829,7 @@ mod tests {
     }
 
     #[test]
-    fn child_launch_confines_read_roots_after_template_parameters_are_bound() -> Result {
+    fn child_launch_retains_agent_roots_after_template_parameters_are_bound() -> Result {
         let rig = TestRig::new()?;
         let factory = factory(&rig)?;
         let escaping = json!({"op":"run", "document":{
@@ -1808,10 +1839,9 @@ mod tests {
                 "node":{"read_roots":["${root}"]}
             }}, "use":"escaped"
         }, "set":{"root":rig.home}});
-        assert!(matches!(
-            factory.child_request(&escaping),
-            Err(FacadeError::InvalidInput { .. })
-        ));
+        let request = factory.child_request(&escaping)?;
+        let launch = request.launch.ok_or("missing child launch")?;
+        assert_eq!(launch.node["read_roots"], json!([rig.home]));
         Ok(())
     }
 

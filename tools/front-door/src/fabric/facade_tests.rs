@@ -1499,6 +1499,63 @@ esac
     }
 
     #[test]
+    fn child_launch_refuses_credential_and_state_roots_at_the_host()
+    -> Result<(), Box<dyn std::error::Error>> {
+        if host_test("fabric::peer_tests::child_launch_refuses_credential_and_state_roots_at_the_host")? {
+            return Ok(());
+        }
+        use provenant_fabric_runtime::graph::{self, AttemptOwner};
+        let rig = crate::worktree_tests::repository()?;
+        let credential = rig.home.join(".ssh");
+        std::fs::create_dir_all(&credential)?;
+        std::fs::create_dir_all(&rig.state)?;
+        let roots = crate::roots::child(&rig.home, &rig.project, rig.state.clone())?;
+        let factory = Factory {
+            context: Context::open(roots, &rig.home, &rig.project)?,
+            project_attribution: false, clock: SystemClock, backoff: ThreadPause,
+            executor: SystemExecutor::new(1)?, home: rig.home.clone(), cwd: rig.project.clone(),
+            assets: rig.project.clone(), host_launch: None, mcp_project: None, workers: &FreeWorkers,
+        };
+        let cancel = CancelToken::new();
+        let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
+        let mut owner = BoundGraphOwner { factory: &factory, integration_base: None,
+            integration_branch: None, network: None, capability_overrides: Default::default(),
+            exclude: Vec::new(), budget, cancel: &cancel, prices: None, tick: false };
+        let actor = owner.actor();
+        let route = serde_json::from_value(serde_json::json!({"adapter":"fixture", "model":"fixture/model"}))?;
+        let run_owner = BinaryRunOwner { factory: &factory, allow_remote: false, actor: None, chair: None };
+        let call = run_owner.call(&cancel);
+        let store = run_owner.store(&cancel)?;
+        for (name, root) in [("credential", credential), ("state", rig.state.clone())] {
+            // The lane forwards the request; only the host decides access at launch.
+            let child = factory.child_request(&serde_json::json!({
+                "op":"run", "document":{"use":"task", "brief":"Read requested root", "read_roots":[root]}
+            }))?;
+            assert_eq!(child.launch.ok_or("missing child launch")?.node["read_roots"], serde_json::json!([root]));
+            for write in [false, true] {
+                let key: graph::AttemptKey = serde_json::from_value(serde_json::json!({
+                    "graph_id":"child-roots", "node_id":format!("parent--{name}-{write}"), "route_index":0
+                }))?;
+                let roots = vec![root.to_string_lossy().into_owned()];
+                let attempt = graph::AttemptSpec { write_roots: if write { roots.clone() } else { Vec::new() }, ..Default::default() };
+                let result = owner.observe_or_start(&key, graph::NodeInput {
+                    attachments: &[], capabilities: None, capability_sources: None, attempt: Some(&attempt),
+                    require_skill_location: false, settlement_retries: None, prior_attempts: &[], family_peers: &[],
+                    context: graph_test_context(&key), read_roots: if write { &[] } else { &roots },
+                    distinct_from_attempts: &[], require_distinct: false, source_commit: None, review_base: None,
+                    title: "child", prompt: "Read requested root", required_verdict: None,
+                    deadline_seconds: None, inputs_dir: None,
+                }, &route, graph::AccessMode::ReadOnly, None, graph::Replay {
+                    delivery: None, branch: None, fast_forward_only: false, stored_ref: None, launch_actor: &actor,
+                });
+                assert!(matches!(result, Err(FacadeError::DispatchRefused { .. })), "{name}, write={write}: {result:?}");
+                assert!(store.operation(&graph_operation("graph-attempt-operation", &key)?, &call)?.is_none());
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
     fn pinned_review_range_survives_moved_ref_and_another_checkout() -> Result<(), Box<dyn std::error::Error>> {
         if host_test("fabric::peer_tests::pinned_review_range_survives_moved_ref_and_another_checkout")? { return Ok(()); }
         use provenant_fabric_runtime::graph::{self, AttemptOwner};

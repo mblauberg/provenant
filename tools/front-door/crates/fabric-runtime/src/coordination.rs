@@ -55,8 +55,11 @@ pub enum CoordinationError {
 }
 
 impl CoordinationError {
-    pub fn code(&self) -> &'static str {
-        facade::FacadeError::from(self).code()
+    pub fn code(&self) -> &str {
+        if let Self::Peer(crate::hosts::PeerError::Refused { error }) = self {
+            return error.code();
+        }
+        facade::FacadeError::from(self).static_code()
     }
 
     /// Project safe facts before a transport chooses its envelope.

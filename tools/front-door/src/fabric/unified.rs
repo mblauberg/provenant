@@ -139,7 +139,7 @@ fn row(
     reason: Option<&str>,
 ) -> Value {
     let reason = reason.map(|text| provenant_fabric_runtime::hosts::plain_text(text, 1024));
-    json!({"id":id,"kind":kind,"graph_id":target.graph,"node_id":node,"attempt_id":attempt,"state":state,"reason":reason,"cause_code":null,"outcome":null,"next":null})
+    json!({"id":id,"kind":kind,"graph_id":target.graph,"node_id":node,"attempt_id":attempt,"state":state,"reason":reason,"waiting_for":null,"cause_code":null,"outcome":null,"next":null})
 }
 
 pub(crate) fn status_rows(run: &GraphRun, target: &GraphTarget) -> Vec<Value> {
@@ -299,8 +299,13 @@ pub(crate) fn render_graph_status(rows: &[Value]) -> String {
         if !row["cause_code"].is_null() {
             line.push_str(&format!(" cause={}", text(&row["cause_code"], 80)));
         }
-        if !row["reason"].is_null() {
-            line.push_str(&format!(": {}", text(&row["reason"], 240)));
+        let reason = if row["reason"].is_null() {
+            &row["waiting_for"]
+        } else {
+            &row["reason"]
+        };
+        if !reason.is_null() {
+            line.push_str(&format!(": {}", text(reason, 240)));
         }
         line.push('\n');
         if human.len() + line.len() > limit {
@@ -331,7 +336,7 @@ pub(crate) fn enrich_status_rows(
     let store = provenant_run::RunStore::open_read_only(&execution, &call).map_err(run_error)?;
     let peer_budget = WaitBudget::cli(clock.mono_now(), 30).map_err(|_| FacadeError::Timeout)?;
     let mut peer_executor = None;
-    for row in rows {
+    for row in rows.iter_mut() {
         if row["kind"] != "attempt" {
             continue;
         }
@@ -424,7 +429,38 @@ pub(crate) fn enrich_status_rows(
         row["attempt_id"] = reference;
         row["graph_state"] = graph_state;
     }
+    project_node_waits(rows);
     Ok(())
+}
+
+/// Keep a live parent's wait visible before bounded status output reaches its
+/// attempt history. The host's attempt record distinguishes child waits from
+/// admission reclaims; the graph checkpoint only records the yielded slot.
+fn project_node_waits(rows: &mut [Value]) {
+    let waits: std::collections::BTreeMap<_, _> = rows
+        .iter()
+        .filter(|row| {
+            row["kind"] == "attempt"
+                && row["state"] == "running"
+                && row["graph_state"] == "running"
+                && row["waiting_for"].is_string()
+        })
+        .filter_map(|row| {
+            Some((
+                (row["graph_id"].as_str()?.to_owned(), row["node_id"].as_str()?.to_owned()),
+                row["waiting_for"].clone(),
+            ))
+        })
+        .collect();
+    for row in rows.iter_mut().filter(|row| row["kind"] == "node" && row["state"] == "running") {
+        let key = (
+            row["graph_id"].as_str().unwrap_or_default().to_owned(),
+            row["node_id"].as_str().unwrap_or_default().to_owned(),
+        );
+        if let Some(wait) = waits.get(&key) {
+            row["waiting_for"] = wait.clone();
+        }
+    }
 }
 
 pub(crate) enum GraphCommand<'a> {
@@ -1101,6 +1137,28 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0]["kind"], "attempt");
         assert_eq!(rows[0]["node_id"], "parent");
+    }
+
+    #[test]
+    fn graph_status_keeps_admission_reclaim_visible_on_the_running_parent() {
+        let target = GraphTarget { graph: "g".into(), node: None, attempt: None };
+        let mut rows = status_rows(&graph_snapshot(checkpoint("g")), &target);
+        let wait = "admission: reclaiming host and project capacity or startup spacing";
+        let attempt = rows.iter_mut().find(|row| row["kind"] == "attempt").unwrap();
+        attempt["graph_state"] = json!("running");
+        attempt["waiting_for"] = json!(wait);
+        project_node_waits(&mut rows);
+        assert_eq!(rows[1]["waiting_for"], wait);
+        let reading = render_graph_status(&rows);
+        assert!(reading.contains(&format!("node g/parent running: {wait}")));
+        assert_eq!(rows[1]["next"], "provenant status g/parent --wait");
+
+        // A historical attempt's wait must not leak onto a later live parent.
+        rows[1]["waiting_for"] = Value::Null;
+        let attempt = rows.iter_mut().find(|row| row["kind"] == "attempt").unwrap();
+        attempt["state"] = json!("terminal");
+        project_node_waits(&mut rows);
+        assert!(rows[1]["waiting_for"].is_null());
     }
 
     #[test]

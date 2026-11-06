@@ -97,8 +97,11 @@ pub enum PeerError {
     Refused { error: facade::FacadeError },
 }
 impl PeerError {
-    pub fn code(&self) -> &'static str {
-        facade::FacadeError::from(self).code()
+    pub fn code(&self) -> &str {
+        if let Self::Refused { error } = self {
+            return error.code();
+        }
+        facade::FacadeError::from(self).static_code()
     }
 }
 
@@ -778,7 +781,7 @@ pub struct PeerResultError {
 
 impl PeerResultError {
     /// Preserve the refusal code supplied by the peer.
-    pub fn code(&self) -> &'static str {
+    pub fn code(&self) -> &str {
         self.error.code()
     }
 }

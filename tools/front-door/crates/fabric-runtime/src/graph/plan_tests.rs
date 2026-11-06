@@ -3152,6 +3152,51 @@ fn admit_patch_skips_and_replaces_only_unstarted_nodes() {
 }
 
 #[test]
+fn admit_patch_confines_lane_edits_but_allows_owner_and_planner_edits() {
+    let (document, checkpoint) = running_graph();
+    for edit in [
+        json!({"schema_version":1, "skip":["b"]}),
+        json!({"schema_version":1, "replace":[{"id":"b", "use":"task", "brief":"Replacement"}]}),
+    ] {
+        let mut refused = checkpoint.clone();
+        let error = admit_with(&document, &mut refused, Some("a"), edit.clone(), &|_| Ok(()))
+            .unwrap_err();
+        assert_eq!(error.code, "edit_scope");
+        assert!(error.message.contains("b"));
+        assert_eq!(refused, checkpoint);
+
+        let mut owner = checkpoint.clone();
+        admit(&document, &mut owner, edit.clone()).unwrap();
+
+        let mut planned = document.clone();
+        let library = TemplateLibrary::bundled();
+        let resolvers = Default::default();
+        planned.nodes[0] = Compiler { library: &library, resolvers: &resolvers }
+            .compile(&json!({"id":"a", "use":"plan"}))
+            .unwrap();
+        let mut planner = checkpoint.clone();
+        admit_with(&planned, &mut planner, Some("a"), edit, &|_| Ok(())).unwrap();
+    }
+}
+
+#[test]
+fn admit_patch_allows_lane_edits_in_its_subtree() {
+    let (document, mut checkpoint) = running_graph();
+    admit_with(
+        &document, &mut checkpoint, Some("a"),
+        json!({"schema_version":1,"nodes":[{"id":"child", "use":"task", "brief":"Child"}]}),
+        &|_| Ok(()),
+    ).unwrap();
+    for edit in [
+        json!({"schema_version":1, "skip":["a--child"]}),
+        json!({"schema_version":1, "replace":[{"id":"a--child", "use":"task", "brief":"Replacement"}]}),
+    ] {
+        let mut edited = checkpoint.clone();
+        admit_with(&document, &mut edited, Some("a"), edit, &|_| Ok(())).unwrap();
+    }
+}
+
+#[test]
 fn admit_patch_journals_before_commit_and_tags_its_nodes_with_the_parent() {
     let (document, mut checkpoint) = running_graph();
     let library = TemplateLibrary::bundled();

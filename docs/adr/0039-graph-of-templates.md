@@ -69,6 +69,12 @@ completion dependencies, so a parent can yield its slot while it waits. A compos
 completes when its dynamic producers have closed and its join condition holds.
 Cancellation follows the subtree unless a child was explicitly detached.
 
+A child's roots and capabilities need not be a subset of its parent's. A lane
+may request what its agent could request by calling the CLI directly; spawning
+does not introduce a narrower authority envelope. The host applies the ordinary
+launch policy to every child: credential roots, state roots and write roots
+that overlap the worktree remain refused at launch.
+
 **A plain lane** is a one-node patch using `task`, with `AttemptSpec` (#2869)
 carrying placement, account and write roots.
 
