@@ -96,54 +96,14 @@ impl<'a> Service<'a> {
         for task in &input.tasks {
             let route = Self::route(task.route.clone())?;
             if let Err(error) = check_launch_capabilities(task, &route) {
-                // A nested run's ID is derived from its canonical request,
-                // which is not available until parent validation completes.
-                if input.parent_attempt.is_some() {
-                    return Err(error);
-                }
-                let mut extra = provenant_records::ExtraFields::default();
-                extra.insert("preflight_digest_version".into(), serde_json::json!(1));
-                if let Some(notice) = task.profile.knobs.get("chair.refusal_notice") {
-                    extra.insert("refusal_notice".into(), notice.clone());
-                }
-                let diagnostic = ErrorKind::from(&error)
-                    .diagnostic()
-                    .detail(error.to_string());
-                let worktree = task
-                    .worktree
-                    .as_ref()
-                    .and_then(|path| path.file_name())
-                    .and_then(|name| name.to_str())
-                    .map(str::to_owned);
-                let record = OperationRecord {
-                    extra,
-                    schema_version: 1,
-                    project_id: self.store.context.project_id,
-                    actor_id: self.store.context.actor_id,
-                    operation_id: input.operation_id.clone(),
-                    kind: OperationKind::Dispatch,
-                    request_digest: preflight_digest(&input, cwd)?,
-                    run_id: fresh(RunId::from_bytes)?,
-                    state: OperationState::Refused,
-                    blocked_reason: None,
-                    refusal: Some(diagnostic),
-                    worktree,
-                    refused_at: Some(
-                        call.clock
-                            .wall_now()
-                            .map_err(|_| RunError::Validation("wall clock"))?,
-                    ),
-                    refusal_chair: input.chair.clone(),
-                };
-                let saved = self.store.insert_refusal(record, call)?;
-                if saved.state != OperationState::Refused {
-                    return Err(RunError::OperationConflict);
-                }
-                return Err(RunError::RecordedRefusal(
-                    saved
-                        .refusal
-                        .ok_or(RunError::Validation("refusal diagnostic missing"))?,
-                ));
+                return self.preflight_refusal(&input, task, cwd, error, call);
+            }
+        }
+        // Scan every prompt before preparing any writer. A later task must not
+        // leave an earlier task's writer behind when its input is refused.
+        for task in &input.tasks {
+            if let Err(error) = Self::scan(&task.prompt) {
+                return self.preflight_refusal(&input, task, cwd, error, call);
             }
         }
         for mut task in input.tasks {
@@ -155,7 +115,6 @@ impl<'a> Service<'a> {
                 return Err(input_error(ErrorKind::Invalid, "invalid work context"));
             }
             task.route = Self::route(task.route)?;
-            Self::scan(&task.prompt)?;
             if let Some(title) = &task.title {
                 provenant_core::validate_task_title(title)
                     .map_err(|message| RunError::InvalidTaskTitle(message.into()))?;
@@ -420,6 +379,63 @@ impl<'a> Service<'a> {
             self.store.contribution_diagnostic(record.run_id, captured);
         }
         Ok(record)
+    }
+    fn preflight_refusal(
+        &self,
+        input: &DispatchRequest,
+        task: &DispatchTask,
+        cwd: &Path,
+        error: RunError,
+        call: &Request<'_>,
+    ) -> Result<RunRecord> {
+        // A nested run's ID is derived from its canonical request,
+        // which is not available until parent validation completes.
+        if input.parent_attempt.is_some() {
+            return Err(error);
+        }
+        let mut extra = provenant_records::ExtraFields::default();
+        extra.insert("preflight_digest_version".into(), serde_json::json!(1));
+        if let Some(notice) = task.profile.knobs.get("chair.refusal_notice") {
+            extra.insert("refusal_notice".into(), notice.clone());
+        }
+        let diagnostic = ErrorKind::from(&error)
+            .diagnostic()
+            .detail(error.to_string());
+        let worktree = task
+            .worktree
+            .as_ref()
+            .and_then(|path| path.file_name())
+            .and_then(|name| name.to_str())
+            .map(str::to_owned);
+        let record = OperationRecord {
+            extra,
+            schema_version: 1,
+            project_id: self.store.context.project_id,
+            actor_id: self.store.context.actor_id,
+            operation_id: input.operation_id.clone(),
+            kind: OperationKind::Dispatch,
+            request_digest: preflight_digest(&input, cwd)?,
+            run_id: fresh(RunId::from_bytes)?,
+            state: OperationState::Refused,
+            blocked_reason: None,
+            refusal: Some(diagnostic),
+            worktree,
+            refused_at: Some(
+                call.clock
+                    .wall_now()
+                    .map_err(|_| RunError::Validation("wall clock"))?,
+            ),
+            refusal_chair: input.chair.clone(),
+        };
+        let saved = self.store.insert_refusal(record, call)?;
+        if saved.state != OperationState::Refused {
+            return Err(RunError::OperationConflict);
+        }
+        return Err(RunError::RecordedRefusal(
+            saved
+                .refusal
+                .ok_or(RunError::Validation("refusal diagnostic missing"))?,
+        ));
     }
     /// Canonical model IDs carry the provider prefix in every stored request.
     pub fn route(route: RequestedRoute) -> Result<RequestedRoute> {

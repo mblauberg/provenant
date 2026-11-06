@@ -470,19 +470,28 @@ fn secret_input_is_refused_before_publication() -> TestResult {
     let (clock, cancel) = (clock(), CancelToken::new());
     let call = call(&clock, &cancel);
     let store = RunStore::open(&context(temp.path())?, &call)?;
-    let input = submission("sk-abcdefghijklmnopqrstuvwxyz123456");
+    let secret = "sk-abcdefghijklmnopqrstuvwxyz123456";
+    let input = submission(secret);
     let operation = input.operation_id.clone();
     let error = Service::new(&store)
         .dispatch(input, temp.path(), &call)
         .unwrap_err();
     assert!(matches!(
         error,
-        RunError::Input {
-            kind: ErrorKind::SecretInput,
-            ..
-        }
+        RunError::RecordedRefusal(ref diagnostic) if diagnostic.code == ErrorKind::SecretInput.code()
     ));
-    assert!(store.operation(&operation, &call)?.is_none());
+    let saved = store
+        .operation(&operation, &call)?
+        .ok_or("missing refusal")?;
+    assert!(!serde_json::to_string(&saved)?.contains(secret));
+    assert!(matches!(
+        Service::new(&store).dispatch(submission(secret), temp.path(), &call),
+        Err(RunError::RecordedRefusal(_))
+    ));
+    assert!(matches!(
+        Service::new(&store).dispatch(submission("changed"), temp.path(), &call),
+        Err(RunError::OperationConflict)
+    ));
     Ok(())
 }
 
