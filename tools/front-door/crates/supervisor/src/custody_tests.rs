@@ -201,6 +201,40 @@ fn reconciliation_carries_slot_reservation_before_listing() -> TestResult {
 }
 
 #[test]
+fn reconciliation_skips_busy_and_unreadable_slots_without_hiding_other_fences() -> TestResult {
+    let root = tempfile::tempdir()?;
+    let registry = Directory::open_anchor(root.path())?;
+    let clock = SystemClock;
+    let cancel = CancelToken::new();
+    for name in ["busy", "good", "bad"] {
+        std::fs::create_dir(root.path().join(name))?;
+    }
+    let busy = Directory::open_anchor(&root.path().join("busy"))?;
+    let good = Directory::open_anchor(&root.path().join("good"))?;
+    publish_reservation(&busy, &legacy_reservation(scope(), &busy.metadata()?))?;
+    publish_reservation(&good, &legacy_reservation(scope(), &good.metadata()?))?;
+    std::fs::write(root.path().join("bad/reservation.json"), b"unreadable")?;
+    let held = lock_writer_exclusion(
+        &busy,
+        WaitBudget::nonblocking(clock.mono_now()),
+        &cancel,
+        &clock,
+    )?;
+    cutover_writer_reservations(&registry, &cancel, &clock)?;
+    assert!(root.path().join("busy/reservation.json").exists());
+    assert!(root.path().join("bad/reservation.json").exists());
+    assert!(!root.path().join("good/reservation.json").exists());
+    let listing = list_writer_reservations(&registry)?;
+    assert_eq!(listing.issues.len(), 2);
+    assert_eq!(listing.reservations.len(), 1);
+    drop(held);
+    cutover_writer_reservations(&registry, &cancel, &clock)?;
+    assert!(!root.path().join("busy/reservation.json").exists());
+    assert!(root.path().join("bad/reservation.json").exists());
+    Ok(())
+}
+
+#[test]
 fn unreadable_slot_reservation_remains_visible_and_fenced() -> TestResult {
     let root = tempfile::tempdir()?;
     let path = root.path().join("writer");
