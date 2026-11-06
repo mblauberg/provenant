@@ -777,18 +777,14 @@ fn run_leaves_accept_control_and_report_work_refused_per_task() -> Result {
     assert_eq!(pinned["data"]["lanes"][0]["state"], "rejected", "{pinned}");
     let lanes = rig.command(&["lanes", "--all", "--json"])?;
     let lanes: serde_json::Value = serde_json::from_slice(&lanes.stdout.bytes)?;
-    let reason = |run: &str| {
-        lanes["data"]["lanes"]
-            .as_array()
-            .and_then(|all| all.iter().find(|lane| lane["run_id"] == run))
-            .and_then(|lane| lane["reason"].as_str())
-            .unwrap_or_default()
-            .to_owned()
-    };
-    assert!(
-        reason(run).contains("account fixture-account is not registered"),
-        "{lanes}"
-    );
+    let lane = lanes["data"]["lanes"]
+        .as_array()
+        .and_then(|all| all.iter().find(|lane| lane["run_id"] == run))
+        .ok_or("pinned lane")?;
+    assert_eq!(lane["state"], "rejected", "{lanes}");
+    assert_eq!(lane["cause"], "pre_launch_refusal", "{lanes}");
+    assert!(lane["started_at"].is_null(), "{lanes}");
+    assert!(lane["applied_route"].is_null(), "{lanes}");
     // The same pin reaches a writer lane beside the access flags.
     let project = rig.project.to_str().ok_or("project")?;
     let commit = rig.execute(
@@ -854,15 +850,14 @@ fn run_leaves_accept_control_and_report_work_refused_per_task() -> Result {
     assert!(!saved["tasks"][0]["writer"].is_null(), "{saved}");
     let lanes = rig.command(&["lanes", "--all", "--json"])?;
     let lanes: serde_json::Value = serde_json::from_slice(&lanes.stdout.bytes)?;
-    let writer_reason = lanes["data"]["lanes"]
+    let lane = lanes["data"]["lanes"]
         .as_array()
         .and_then(|all| all.iter().find(|lane| lane["run_id"] == run))
-        .and_then(|lane| lane["reason"].as_str())
-        .unwrap_or_default();
-    assert!(
-        writer_reason.contains("account fixture-account is not registered"),
-        "{lanes}"
-    );
+        .ok_or("pinned writer lane")?;
+    assert_eq!(lane["state"], "rejected", "{lanes}");
+    assert_eq!(lane["cause"], "pre_launch_refusal", "{lanes}");
+    assert!(lane["started_at"].is_null(), "{lanes}");
+    assert!(lane["applied_route"].is_null(), "{lanes}");
     // Replaying the operation returns the same run.
     let again: serde_json::Value =
         serde_json::from_slice(&rig.execute(binary, &args, Some(b"hello"))?.stdout.bytes)?;

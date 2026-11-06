@@ -3360,10 +3360,8 @@ fn preset_refuses_readable_state_directories_with_chmod_repair()
             message.contains(&std::fs::canonicalize(path)?.display().to_string()),
             "{value}"
         );
-        assert!(
-            message.contains("0755") && message.contains("other users can read"),
-            "{value}"
-        );
+        assert_eq!(value["error"]["code"], "preset_graph", "{value}");
+        assert!(message.contains("0755"), "{value}");
         let repair = value["error"]["repair"].as_str().ok_or("chmod repair")?;
         assert!(repair.contains("chmod 700"), "{value}");
         // Execute the suggested command to cover paths with spaces and quotes.

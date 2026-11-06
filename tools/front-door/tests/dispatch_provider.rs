@@ -2153,12 +2153,9 @@ fn codex_dispatch_observes_rollout() -> Result {
         let lane = rows.first().ok_or_else(|| format!("lane: {value}"))?;
         if !cfg!(target_os = "macos") {
             assert_eq!(lane["state"], "rejected", "{lane}");
-            assert!(
-                lane["reason"]
-                    .as_str()
-                    .is_some_and(|r| r.contains("UnsupportedPlatform")),
-                "{lane}"
-            );
+            assert_eq!(lane["cause"], "pre_launch_refusal", "{lane}");
+            assert!(lane["started_at"].is_null(), "{lane}");
+            assert!(lane["applied_route"].is_null(), "{lane}");
             rig.assert_legacy_unchanged()?;
             cleanup.disarm();
             return Ok(());
@@ -2458,12 +2455,9 @@ fn opus_writer_dispatch_advises_a_cheaper_route() -> Result {
         let result: Value = serde_json::from_slice(&lanes.stdout.bytes)?;
         let lane = &result["data"]["lanes"][0];
         assert_eq!(lane["state"], "rejected", "{lane}");
-        assert!(
-            lane["reason"].as_str().is_some_and(|message| message
-                .contains("pacing.accounts.pro.deadline.reset_of")
-                && message.contains("removed")),
-            "{lane}"
-        );
+        assert_eq!(lane["cause"], "pre_launch_refusal", "{lane}");
+        assert!(lane["started_at"].is_null(), "{lane}");
+        assert!(lane["applied_route"].is_null(), "{lane}");
         cleanup.disarm();
     }
     for (model, writer, suppress) in [
@@ -3019,12 +3013,9 @@ fn claude_dispatch(host_native: bool, pool: bool) -> Result {
     let lane = &lanes["data"]["lanes"][0];
     if !cfg!(target_os = "macos") {
         assert_eq!(lane["state"], "rejected", "{lane}");
-        assert!(
-            lane["reason"]
-                .as_str()
-                .is_some_and(|r| r.contains("UnsupportedPlatform")),
-            "{lane}"
-        );
+        assert_eq!(lane["cause"], "pre_launch_refusal", "{lane}");
+        assert!(lane["started_at"].is_null(), "{lane}");
+        assert!(lane["applied_route"].is_null(), "{lane}");
         assert!(account.join("refreshed").exists());
         rig.assert_legacy_unchanged()?;
         cleanup.disarm();

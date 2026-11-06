@@ -4861,9 +4861,10 @@ fn peer_writer_reports_delivery_prepare_failure() -> Result {
     assert_eq!(lane["host"], peer.to_string(), "{placed}");
     assert_eq!(lane["state"], "rejected", "{placed}");
     let reason = lane["reason"].as_str().ok_or("peer refusal reason")?;
-    assert!(reason.contains("Prepare (credential helper)"), "{placed}");
-    assert!(reason.contains("missing-helper-gh"), "{placed}");
-    assert!(!reason.contains("receipt"), "{placed}");
+    assert_eq!(lane["cause"], "pre_launch_refusal", "{placed}");
+    assert!(lane["started_at"].is_null(), "{placed}");
+    assert!(lane["applied_route"].is_null(), "{placed}");
+    assert!(!reason.contains("missing-helper-gh"), "{placed}");
     assert_eq!(lane["delivery"], Value::Null, "{placed}");
     let run = placed["data"]["run_id"].as_str().ok_or("run")?;
     let (status, lanes) = json_command(&rig, &["lanes", "--id", run, "--json"])?;
