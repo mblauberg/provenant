@@ -295,6 +295,38 @@ fn lane_run_submits_child_through_parent_relay() -> Result {
     assert_eq!(child.brief, "Inspect the child");
     assert_eq!(child.tier.as_deref(), Some("junior"));
     assert!(!child.detached);
+    host(
+        &rig,
+        &[
+            "run",
+            "Inspect the child",
+            "--use",
+            "explore",
+            "--tier",
+            "junior",
+            "--json",
+        ],
+    )?;
+    let frame = received.recv_timeout(std::time::Duration::from_secs(2))?;
+    let RelayOp::Add(repeated) = serde_json::from_value(frame)? else {
+        return Err("expected repeated child admission".into());
+    };
+    assert_eq!(repeated.brief, child.brief);
+    assert_ne!(repeated.id, child.id);
+    assert_ne!(repeated.idempotency_key, child.idempotency_key);
+    // The legacy CLI recognised the parent marker on its own. Keep that
+    // confinement boundary even when the other lane markers are absent.
+    rig.env.retain(|(key, _)| {
+        key != provenant_core::RUN_STATE_DIRECTORY_ENV && key != provenant_run::LANE_DEPTH_ENV
+    });
+    let launched = host(&rig, &["run", "Parent marker only", "--json"])?;
+    assert_eq!(launched["data"]["parent_attempt"], attempt.to_string());
+    let frame = received.recv_timeout(std::time::Duration::from_secs(2))?;
+    let RelayOp::Add(child) = serde_json::from_value(frame)? else {
+        return Err("expected child admission from parent marker".into());
+    };
+    assert_eq!(child.brief, "Parent marker only");
+    assert_eq!(child.template, "task");
     drop(relay);
     Ok(())
 }

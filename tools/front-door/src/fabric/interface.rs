@@ -73,14 +73,15 @@ impl Factory {
                 "the lane relay accepts a template, brief and tier; document, over and set require host submission",
             ));
         }
-        let mut identity = input.clone();
-        if let Some(fields) = identity.as_object_mut() {
-            fields.remove("explain");
-            fields.remove("wait_seconds");
-        }
-        let digest = provenant_records::CanonicalV1::record_digest("graph-child", 1, &identity)
-            .map_err(|_| FacadeError::StateCorrupt)?;
-        let key = format!("child-{}", &provenant_core::hex(digest.as_bytes())[..30]);
+        // Distinct submissions may have identical briefs. Generate the key once
+        // per call; transport retries retain this request and its identity.
+        let key = format!(
+            "child-{}",
+            provenant_core::hex(
+                &provenant_os::fs::entropy_128()
+                    .map_err(|_| FacadeError::io("create child operation identity"))?
+            )
+        );
         let request = provenant_fabric_runtime::graph::relay::ChildRequest {
             id: key.clone(),
             template: input

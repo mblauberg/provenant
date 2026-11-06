@@ -113,7 +113,8 @@ pub(crate) fn private_dir(root: &Path, path: &Path) -> Result<Directory, EdgeErr
 /// Whether the host launched this process inside a lane. Every Fabric entry
 /// point that can act as an agent checks it before opening the store.
 pub fn in_lane() -> bool {
-    std::env::var_os(provenant_core::RUN_STATE_DIRECTORY_ENV).is_some()
+    std::env::var_os(provenant_run::PARENT_ATTEMPT_ENV).is_some()
+        || std::env::var_os(provenant_core::RUN_STATE_DIRECTORY_ENV).is_some()
         || std::env::var_os(provenant_run::LANE_DEPTH_ENV).is_some_and(|depth| depth != "0")
 }
 
