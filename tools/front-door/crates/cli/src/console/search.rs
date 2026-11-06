@@ -241,7 +241,7 @@ mod tests {
                 let task = TaskId::from_bytes(bytes);
                 let attempt = AttemptId::from_bytes(bytes);
                 let prompt = "searchable fixture";
-                tasks.push(json!({"task_id":task,"prompt_digest":CanonicalV1::file_digest(prompt.as_bytes()),"route":{"kind":"model","provider":"fixture","model":"fixture/model","effort":"high"},"fallback":[],"authority_digest":Digest::from_bytes([5;32]),"provider_timeout_seconds":30,"delivery_id":null}));
+                tasks.push(json!({"task_id":task,"prompt_digest":CanonicalV1::file_digest(prompt.as_bytes()),"route":{"kind":"model","provider":"fixture","model":"fixture/model","effort":"high"},"authority_digest":Digest::from_bytes([5;32]),"provider_timeout_seconds":30,"delivery_id":null}));
                 attempts.push(NewAttempt {
                     task_id: task,
                     attempt_id: attempt,

@@ -1687,7 +1687,6 @@ fn validate_request(input: &PreparedRun) -> Result<()> {
             .ok_or(RunError::Validation("missing task"))?;
         if !attempts.insert(new.attempt_id)
             || task.provider_timeout_seconds == 0
-            || task.fallback.len() > 2
             || CanonicalV1::file_digest(new.prompt.as_bytes()) != task.prompt_digest
         {
             return Err(RunError::Validation("attempt or prompt identity"));

@@ -270,7 +270,6 @@ impl<'a> Service<'a> {
                 source_head: None,
                 route: task.route,
                 account: task.account,
-                fallback: task.fallback,
                 authority_digest: authority,
                 writer,
                 provider_timeout_seconds: task.timeout_seconds,
@@ -524,18 +523,11 @@ impl<'a> Service<'a> {
         run: RunId,
         providers: &dyn Providers,
         holder: &dyn Fn(&AttemptRecord, provenant_core::ActorId) -> Result<Vec<u8>>,
-        validated: Option<&ValidatedChild>,
         expected: &CanonicalRequest,
         call: &Request<'_>,
     ) -> Result<Vec<Started>> {
-        match validated {
-            Some(request) => self
-                .store
-                .start_child(run, request, providers, holder, call),
-            None => self
-                .store
-                .start_checked(run, expected, providers, holder, call),
-        }
+        self.store
+            .start_checked(run, expected, providers, holder, call)
     }
     pub fn resume(&self, input: &Resume, call: &Request<'_>) -> Result<RunRecord> {
         Self::scan(&input.prompt)?;
@@ -787,7 +779,6 @@ pub struct DispatchTask {
     pub head: Option<String>,
     pub route: RequestedRoute,
     pub account: Option<String>,
-    pub fallback: Vec<RouteRecord>,
     pub profile: HarnessProfile,
     pub timeout_seconds: u64,
     pub delivery_id: Option<provenant_core::DeliveryId>,
@@ -846,17 +837,6 @@ fn check_launch_capabilities(task: &DispatchTask, route: &RequestedRoute) -> Res
         } => check(provider, Some(model), effort.as_deref())?,
         RequestedRoute::Adapter { provider, .. } => check(provider, None, None)?,
         _ => {}
-    }
-    for route in &task.fallback {
-        if let Some(provider) = route.provider.as_deref().or_else(|| {
-            route
-                .model
-                .as_deref()
-                .and_then(|model| model.split_once('/'))
-                .map(|(provider, _)| provider)
-        }) {
-            check(provider, route.model.as_deref(), route.effort.as_deref())?;
-        }
     }
     Ok(())
 }

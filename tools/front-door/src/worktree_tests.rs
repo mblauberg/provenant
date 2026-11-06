@@ -1219,7 +1219,6 @@ pub(super) fn start_writer(
             )
         },
         None,
-        None,
         call,
     )?)
 }
@@ -1302,7 +1301,6 @@ pub(super) fn writer_run(
                     model: "claude/test-model".into(),
                     effort: None,
                 },
-                fallback: Vec::new(),
                 authority_digest: provenant_core::Digest::from_bytes([seed; 32]),
                 writer: Some(writer),
                 provider_timeout_seconds: 20,

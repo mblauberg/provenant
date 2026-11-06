@@ -734,28 +734,8 @@ pub(super) fn check_flag_capabilities_with_writes(
             }
             Ok(())
         };
-    let check_fallback = |model: &str,
-                          effort: Option<&str>,
-                          network: Option<run::NetworkAccess>|
-     -> Result<(), Fail> {
-        catalogued(model, None)?;
-        match model.split_once('/') {
-            Some((provider, _)) => check(provider, Some(model), effort, network),
-            None => Ok(()),
-        }
-    };
-    let effort_of = |route: &run::RequestedRoute| match route {
-        run::RequestedRoute::Adapter { .. } => None,
-        run::RequestedRoute::Model { effort, .. }
-        | run::RequestedRoute::Named { effort, .. }
-        | run::RequestedRoute::Review { effort, .. } => effort.clone(),
-    };
     if let Ok(route) = route {
-        let effort = effort_of(&route);
         check_route(route, flag_network)?;
-        for model in &command.route.fallback {
-            check_fallback(&model.0, effort.as_deref(), flag_network)?;
-        }
     }
     // Manifest tasks carry their own routes; read them before any worktree exists.
     // A malformed manifest is reported later by the normal path.
@@ -770,12 +750,8 @@ pub(super) fn check_flag_capabilities_with_writes(
         )
     {
         for task in manifest.tasks {
-            let effort = effort_of(&task.route);
             let network = network_access(task.network, postgres).or(flag_network);
             check_route(task.route, network)?;
-            for model in &task.fallback {
-                check_fallback(model, effort.as_deref(), network)?;
-            }
         }
     }
     Ok(())
@@ -1236,16 +1212,13 @@ pub(super) fn dispatch_inner(
             serde_json::Value::from(command.route.exclude.clone())
         ));
     }
+    if !command.route.fallback.is_empty() {
+        return unsupported("route fallback at launch");
+    }
     let flag_route = (
         command.route.model.as_ref().map(|m| m.0.clone()),
         command.route.route.clone(),
         command.route.effort.clone(),
-        command
-            .route
-            .fallback
-            .iter()
-            .map(|m| m.0.clone())
-            .collect::<Vec<_>>(),
     );
     let mut tasks = Vec::new();
     let mut flag_delivery = None;
@@ -1317,11 +1290,6 @@ pub(super) fn dispatch_inner(
                 }
             };
             let route = run::Service::route(task.route)?;
-            let fallback = if task.fallback.is_empty() {
-                flag_route.3.clone()
-            } else {
-                task.fallback
-            };
             let task_id = match task.task_id {
                 Some(id) => id,
                 None => derived_task(&command.operation_id, index)?,
@@ -1332,7 +1300,6 @@ pub(super) fn dispatch_inner(
                 task.title,
                 prompt,
                 route,
-                fallback,
                 task.delivery_id,
                 task.account,
                 task.deliver.or_else(|| flag_delivery.clone()),
@@ -1373,7 +1340,6 @@ pub(super) fn dispatch_inner(
                     flag_route.2.clone(),
                 )?
             },
-            flag_route.3.clone(),
             command.delivery_id,
             command.account.clone(),
             flag_delivery,
@@ -1398,7 +1364,6 @@ pub(super) fn dispatch_inner(
                 title,
                 prompt,
                 route,
-                fallback,
                 delivery_id,
                 account,
                 deliver,
@@ -1413,9 +1378,6 @@ pub(super) fn dispatch_inner(
             // The peer derives task IDs from the operation and has no fallback field.
             if task_id != derived_task(&command.operation_id, index)? {
                 return unsupported("an explicit task ID with --host");
-            }
-            if !fallback.is_empty() {
-                return unsupported("route fallback with --host");
             }
             if !lane_access.attachments.is_empty() {
                 use std::io::Write;
@@ -1488,7 +1450,7 @@ pub(super) fn dispatch_inner(
         .operation(&command.operation_id, &call)?
         .is_none()
     {
-        for (_, _, _, _, _, _, _, delivery, _, _, _, _, _) in &tasks {
+        for (_, _, _, _, _, _, delivery, _, _, _, _, _) in &tasks {
             if let Some(delivery) = delivery {
                 check_delivery_branch(edge.cwd, &delivery.branch)?;
             }
@@ -1513,13 +1475,12 @@ pub(super) fn dispatch_inner(
     config
         .dispatch_profile(&command.knobs)
         .map_err(|error| Fail::new(Status::Invalid, ErrorKind::Config, error.to_string()))?;
-    for (_, title, prompt, _, models, _, _, _, _, _, _, _, _) in &tasks {
+    for (_, title, prompt, _, _, _, _, _, _, _, _, _) in &tasks {
         run::Service::scan(prompt)?;
         if let Some(title) = title {
             provenant_core::validate_task_title(title)
                 .map_err(|message| Fail::new(Status::Invalid, ErrorKind::Invalid, message))?;
         }
-        fallback(models)?;
     }
 
     let configured_admission = config
@@ -1836,7 +1797,6 @@ pub(super) fn dispatch_inner(
                 title,
                 prompt,
                 route,
-                fallback,
                 delivery_id,
                 account,
                 deliver,
@@ -1877,7 +1837,6 @@ pub(super) fn dispatch_inner(
                     task_id,
                     prompt,
                     route,
-                    fallback,
                     provider_timeout: command.provider_timeout,
                     delivery_id,
                     deliver,
@@ -2609,16 +2568,7 @@ pub(super) fn launch_prepared_with_wait(
     if std::env::var_os(provenant_core::RUN_STATE_DIRECTORY_ENV).is_some() {
         return Ok(Vec::new());
     }
-    launch_on_host_with_wait(
-        session,
-        run,
-        edge,
-        call,
-        None,
-        None,
-        ready,
-        provider_lease_wait,
-    )
+    launch_on_host_with_wait(session, run, edge, call, None, ready, provider_lease_wait)
 }
 
 pub(super) struct PreparedProvider<'a> {
@@ -2728,86 +2678,6 @@ pub(super) fn with_chair_index<T>(
         })
 }
 
-/// New lane-local associations need the same namespace proof as WorkIndex.
-/// A legacy row can be replayed, but a lane cannot create or repair one.
-#[derive(Debug)]
-pub(super) enum ChairRunError {
-    Unauthorised(Fail),
-    Other(Fail),
-}
-
-impl From<ChairRunError> for Fail {
-    fn from(error: ChairRunError) -> Self {
-        match error {
-            ChairRunError::Unauthorised(error) | ChairRunError::Other(error) => error,
-        }
-    }
-}
-
-pub(super) fn check_chair_run_id(
-    session: &Session,
-    roots: &Roots,
-    run: RunId,
-    request: &run::CanonicalRequest,
-    call: &run::Request<'_>,
-) -> Result<(), ChairRunError> {
-    session
-        .store
-        .check_child_run_id(
-            run,
-            request,
-            &session
-                .store
-                .run(run, call)
-                .map_err(Fail::from)
-                .map_err(ChairRunError::Other)?
-                .operation_id,
-        )
-        .map_err(Fail::from)
-        .map_err(ChairRunError::Other)?;
-    if request.child_attempt_id_version.is_none() {
-        let digest = request
-            .digest()
-            .map_err(run::RunError::from)
-            .map_err(Fail::from)
-            .map_err(ChairRunError::Other)?;
-        let mut identity_refused = false;
-        with_chair_index(roots, call, |index, c| {
-            match index.read(session.context.project_id, run, c)? {
-                Some(value) if value.request_digest == digest => Ok(()),
-                Some(_) => Err(provenant_fabric_runtime::chairs::Error::Conflict),
-                None => {
-                    identity_refused = true;
-                    Err(provenant_fabric_runtime::chairs::Error::Invalid(
-                        "new chair associations require host-derived child run IDs",
-                    ))
-                }
-            }
-        })
-        .map_err(|failure| {
-            if identity_refused {
-                ChairRunError::Unauthorised(failure)
-            } else {
-                ChairRunError::Other(failure)
-            }
-        })?;
-    }
-    Ok(())
-}
-
-#[derive(Debug)]
-pub(super) struct ChairSourceError;
-
-pub(super) fn check_chair_source(
-    store: &run::RunStore,
-    request: &run::CanonicalRequest,
-    parent: &run::AttemptRecord,
-) -> Result<(), ChairSourceError> {
-    store
-        .check_child_attempt_id(request, parent)
-        .map_err(|_| ChairSourceError)
-}
-
 pub(super) fn seal_launch_task(
     request_digest: provenant_core::Digest,
     task: &run::TaskRequest,
@@ -2827,7 +2697,6 @@ pub(super) fn launch_on_host_with_wait(
     edge: &Edge<'_>,
     call: &run::Request<'_>,
     host: Option<&run::HostLaunchContext>,
-    validated: Option<&run::ValidatedChild>,
     ready: Option<&run::PreparedStart>,
     provider_lease_wait: Option<u64>,
 ) -> Result<Vec<run::Started>, Fail> {
@@ -2853,54 +2722,29 @@ pub(super) fn launch_on_host_with_wait(
             fixture_state_write: false,
         },
     };
-    let read;
-    let request = match validated {
-        Some(request) => &**request,
-        None => {
-            read = session.store.request(run, call)?;
-            &read
-        }
-    };
+    if session.context.state_root != edge.roots.state {
+        return Err(Fail::new(
+            Status::Refused,
+            ErrorKind::Refused,
+            "launch requires the host run store",
+        ));
+    }
+    let read = session.store.request(run, call)?;
+    let request = &read;
     let request_digest = request.digest().map_err(run::RunError::from)?;
-    if validated.is_none() {
-        if request.parent.is_some() && session.context.state_root != edge.roots.state {
-            check_chair_run_id(session, edge.roots, run, request, call)?;
-        }
+    {
         let operation = match request.parent {
             Some(_) => Some(session.store.run(run, call)?.operation_id),
             None => None,
         };
         with_chair_index(edge.roots, call, |index, index_call| {
             if let Some(prior) = request.parent {
-                let lane_local = session.context.state_root != edge.roots.state;
-                if lane_local
-                    && let Some(sealed) = index.read(session.context.project_id, run, index_call)?
-                {
-                    return if sealed.request_digest == request_digest {
-                        Ok(())
-                    } else {
-                        Err(provenant_fabric_runtime::chairs::Error::Conflict)
-                    };
-                }
                 let parent = session.store.record(prior, call).map_err(|_| {
                     provenant_fabric_runtime::chairs::Error::Invalid("continuation parent")
                 })?;
                 let original = session.store.request(parent.run_id, call).map_err(|_| {
                     provenant_fabric_runtime::chairs::Error::Invalid("continuation request")
                 })?;
-                if lane_local {
-                    check_chair_source(&session.store, &original, &parent).map_err(|_| {
-                        provenant_fabric_runtime::chairs::Error::Invalid(
-                            "continuation source identity does not match host-derived IDs",
-                        )
-                    })?;
-                    if index
-                        .read(session.context.project_id, parent.run_id, index_call)?
-                        .is_none()
-                    {
-                        return Err(provenant_fabric_runtime::chairs::Error::NotFound);
-                    }
-                }
                 let operation =
                     operation
                         .as_ref()
@@ -2911,11 +2755,7 @@ pub(super) fn launch_on_host_with_wait(
                     session.context.project_id,
                     (parent.run_id, original.digest()?),
                     run,
-                    if lane_local {
-                        provenant_fabric_runtime::chairs::Admission::Lane(operation)
-                    } else {
-                        provenant_fabric_runtime::chairs::Admission::HostRoot(operation)
-                    },
+                    provenant_fabric_runtime::chairs::Admission::HostRoot(operation),
                     request,
                     index_call,
                 )
@@ -2926,12 +2766,7 @@ pub(super) fn launch_on_host_with_wait(
                     }
                     // Only the host root's immutable request may repair an
                     // interrupted submission, including owned-worktree replay.
-                    None if session.context.state_root == edge.roots.state => {
-                        index.submit(session.context.project_id, run, request, index_call)
-                    }
-                    None if request.chair.is_some() => {
-                        Err(provenant_fabric_runtime::chairs::Error::NotFound)
-                    }
+                    None => index.submit(session.context.project_id, run, request, index_call),
                     _ => Ok(()),
                 }
             }
@@ -3007,9 +2842,7 @@ pub(super) fn launch_on_host_with_wait(
             launch: Some(host),
             sealed: Some(seal_launch_task(
                 request_digest,
-                &session
-                    .store
-                    .effective_launch_task(request, task, validated),
+                &session.store.effective_launch_task(request, task),
             )),
         }
         .encode()
@@ -3049,7 +2882,6 @@ pub(super) fn launch_on_host_with_wait(
                     call.clock,
                 )
             },
-            validated,
             Some(request),
             call,
         )?;
@@ -3058,7 +2890,7 @@ pub(super) fn launch_on_host_with_wait(
     }
     let started = session
         .service()
-        .start(run, &providers, &holder, validated, request, call)?;
+        .start(run, &providers, &holder, request, call)?;
     check_launch_policy(&started)?;
     Ok(started)
 }

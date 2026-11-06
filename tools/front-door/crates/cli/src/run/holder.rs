@@ -217,102 +217,6 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn inherited_network_survives_holder_context_for_grandchildren()
-    -> Result<(), Box<dyn std::error::Error>> {
-        use provenant_confinement::permissions::NetworkAccess;
-        let temp = tempfile::tempdir()?;
-        let clock = SystemClock::new();
-        let cancel = CancelToken::new();
-        let call = request(&clock, &cancel).map_err(|f| f.message)?;
-        let (context, mut child) = child_fixture(temp.path(), &clock)?;
-        let store = run::RunStore::open(&context, &call)?;
-        store.create(&child, &call)?;
-        let mut parent = child.request.tasks[0].clone();
-        parent.access.network = Some(NetworkAccess::Provider);
-        let validated = store.validate_child(
-            child.run_id,
-            child.request.parent_attempt.unwrap(),
-            &parent,
-            1,
-            3,
-            &call,
-        )?;
-        let sealed = seal_launch_task(
-            validated.digest()?,
-            &store.effective_launch_task(&validated, &validated.tasks[0], Some(&validated)),
-        );
-        let sealed: run::SealedTask = serde_json::from_slice(&serde_json::to_vec(&sealed)?)?;
-        let mut next_parent = validated.tasks[0].clone();
-        sealed.apply_access(&mut next_parent);
-        assert_eq!(sealed.effective_network, NetworkAccess::Provider);
-        child.run_id = RunId::from_bytes([11; 16]);
-        child.operation_id = OperationId::parse("grandchild")?;
-        child.request.parent_attempt = Some(child.attempts[0].attempt_id);
-        child.request.lane_depth = Some(3);
-        child.attempts[0].attempt_id = AttemptId::from_bytes([12; 16]);
-        store.create(&child, &call)?;
-        let grandchild = store.validate_child(
-            child.run_id,
-            child.request.parent_attempt.unwrap(),
-            &next_parent,
-            2,
-            3,
-            &call,
-        )?;
-        assert_eq!(
-            grandchild
-                .effective_task(&grandchild.tasks[0])
-                .access
-                .network(false),
-            NetworkAccess::Provider
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn clamped_database_ipc_stays_off_for_grandchildren() -> Result<(), Box<dyn std::error::Error>>
-    {
-        let temp = tempfile::tempdir()?;
-        let clock = SystemClock::new();
-        let cancel = CancelToken::new();
-        let call = request(&clock, &cancel).map_err(|f| f.message)?;
-        let (context, mut child) = child_fixture(temp.path(), &clock)?;
-        let store =
-            run::RunStore::open(&context, &call)?.with_writer_registry(&temp.path().join("host"));
-        let mut original = child.request.tasks[0].clone();
-        original.access.database_ipc = true;
-        let effective = store.effective_launch_task(&child.request, &original, None);
-        assert!(!effective.access.database_ipc);
-        let sealed = seal_launch_task(child.request.digest()?, &effective);
-        let sealed: run::SealedTask = serde_json::from_slice(&serde_json::to_vec(&sealed)?)?;
-        let mut reconstructed = original;
-        sealed.apply_access(&mut reconstructed);
-        assert!(!reconstructed.access.database_ipc);
-        child.run_id = RunId::from_bytes([11; 16]);
-        child.operation_id = OperationId::parse("grandchild-database")?;
-        child.request.parent_attempt = Some(child.attempts[0].attempt_id);
-        child.request.lane_depth = Some(3);
-        child.attempts[0].attempt_id = AttemptId::from_bytes([12; 16]);
-        child.request.tasks[0].access.database_ipc = true;
-        store.create(&child, &call)?;
-        let result = store.validate_child(
-            child.run_id,
-            child.request.parent_attempt.unwrap(),
-            &reconstructed,
-            2,
-            3,
-            &call,
-        );
-        assert!(matches!(
-            result,
-            Err(run::RunError::Validation(
-                "child database IPC exceeds parent access"
-            ))
-        ));
-        Ok(())
-    }
-
     fn child_fixture(
         base: &Path,
         clock: &SystemClock,
@@ -361,7 +265,6 @@ mod tests {
                         effort: None,
                     },
                     account: None,
-                    fallback: vec![],
                     profile: Default::default(),
                     authority_digest: Digest::from_bytes([5; 32]),
                     provider_timeout_seconds: 3600,

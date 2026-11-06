@@ -201,7 +201,6 @@ pub(super) fn submission(prompt: &str) -> DispatchRequest {
                 effort: None,
             },
             account: None,
-            fallback: vec![],
             profile: HarnessProfile::default(),
             timeout_seconds: 60,
             delivery_id: None,

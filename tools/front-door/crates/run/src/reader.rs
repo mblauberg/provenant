@@ -374,40 +374,7 @@ impl RunStore {
     pub fn run(&self, id: RunId, call: &Request<'_>) -> Result<RunRecord> {
         call.check()?;
         let run = self.run_on(&self.db, id)?;
-        self.held_owner(&run, None)?;
         Ok(run)
-    }
-    /// Every attempt this host view handed to a guardian, once each.
-    pub fn held_attempts(&self) -> Vec<AttemptId> {
-        let mut held: Vec<_> = self
-            .launched
-            .borrow()
-            .iter()
-            .map(|held| held.scope.attempt)
-            .collect();
-        held.sort();
-        held.dedup();
-        held
-    }
-    /// The lane can rewrite a child's records after the host stamps them, so
-    /// the host's view refuses a launched run or attempt naming another owner.
-    fn held_owner(&self, run: &RunRecord, attempt: Option<&AttemptRecord>) -> Result<()> {
-        let Some(requester) = self.sealed_requester else {
-            return Ok(());
-        };
-        let launched = self.launched.borrow();
-        let run_renamed =
-            run.actor_id != requester && launched.iter().any(|held| held.scope.run == run.run_id);
-        let attempt_renamed = attempt.is_some_and(|attempt| {
-            attempt.verified_owner != Some(requester)
-                && launched
-                    .iter()
-                    .any(|held| held.scope.attempt == attempt.attempt_id)
-        });
-        if run_renamed || attempt_renamed {
-            return Err(RunError::Validation("child record names another owner"));
-        }
-        Ok(())
     }
     pub(crate) fn run_on(&self, db: &rusqlite::Connection, id: RunId) -> Result<RunRecord> {
         let raw: Vec<u8> = db
@@ -442,8 +409,7 @@ impl RunStore {
             })
             .collect()
     }
-    /// Snapshot nonterminal refs before a host accepts a child's launch. The
-    /// refs survive partial handoff errors and authorise only that child scope.
+    /// Read nonterminal attempts for a run in submission order.
     pub fn pending_attempts(&self, run: RunId, call: &Request<'_>) -> Result<Vec<AttemptRecord>> {
         let ids: Vec<String> = {
             let mut query = self.db.prepare("SELECT id FROM attempts WHERE run=?1 AND project=?2 AND terminal=0 ORDER BY sequence")?;
@@ -505,8 +471,7 @@ impl RunStore {
         call: &Request<'_>,
         read: RecordRead,
     ) -> Result<AttemptRecord> {
-        let (run, record) = self.record_with_run(id, call, read)?;
-        self.held_owner(&run, Some(&record))?;
+        let (_, record) = self.record_with_run(id, call, read)?;
         Ok(record)
     }
     /// A terminal row may precede the guardian releasing writer custody.

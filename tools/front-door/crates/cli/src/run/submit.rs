@@ -41,8 +41,6 @@ pub(super) struct ManifestTask {
     pub(super) prompt: Option<String>,
     pub(super) prompt_file: Option<PathBuf>,
     pub(super) route: run::RequestedRoute,
-    #[serde(default)]
-    pub(super) fallback: Vec<String>,
     pub(super) delivery_id: Option<DeliveryId>,
     pub(super) deliver: Option<run::WriterDeliveryRequest>,
     pub(super) account: Option<String>,
@@ -149,35 +147,6 @@ pub fn requested(
             "each task needs exactly one of model or route",
         )),
     }
-}
-
-pub(super) fn fallback(models: &[String]) -> Result<Vec<run::RouteRecord>, Fail> {
-    if models.len() > 2 {
-        return Err(Fail::new(
-            Status::Invalid,
-            ErrorKind::Invalid,
-            "at most two fallback models",
-        ));
-    }
-    models
-        .iter()
-        .map(|model| {
-            ModelId::parse(model).map_err(|_| {
-                Fail::new(
-                    Status::Invalid,
-                    ErrorKind::Invalid,
-                    "fallback must be ADAPTER/ID",
-                )
-            })?;
-            Ok(run::RouteRecord {
-                provider: model.split('/').next().map(Into::into),
-                model: Some(model.clone()),
-                effort: None,
-                account_label: None,
-                ..Default::default()
-            })
-        })
-        .collect()
 }
 
 /// Task IDs default to a value derived from the operation, so replaying the
@@ -361,7 +330,6 @@ pub struct Submitted {
     pub pinned_base: Option<provenant_core::GitOid>,
     pub head: Option<String>,
     pub route: run::RequestedRoute,
-    pub fallback: Vec<String>,
     pub provider_timeout: u64,
     pub delivery_id: Option<DeliveryId>,
     pub deliver: Option<run::WriterDeliveryRequest>,
@@ -585,7 +553,6 @@ pub(super) fn submit_with_host_and_wait(
                 call,
                 Some(host),
                 None,
-                None,
                 deadline.map(|end| end.saturating_duration_since(Instant::now()).as_secs()),
             )
         } else if let Some(deadline) = deadline {
@@ -695,7 +662,6 @@ fn submit_with_launcher(
                 head: task.head,
                 route: task.route,
                 account: attempt.account,
-                fallback: fallback(&task.fallback)?,
                 timeout_seconds: task.provider_timeout,
                 delivery_id: task.delivery_id,
                 deliver: task.deliver,

@@ -570,8 +570,7 @@ pub(super) fn prepare_candidates(
             serde_json::json!({"kind": "compiled"}),
         ),
     };
-    if task.fallback.is_empty()
-        && let run::RequestedRoute::Model { model, .. } = &task.route
+    if let run::RequestedRoute::Model { model, .. } = &task.route
         && let Some((adapter, _)) = model.split_once('/')
     {
         check_launch_prompt(prompt_text, paths, Some(adapter), argv_limit, argv_origin)?;

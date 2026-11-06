@@ -257,7 +257,7 @@ mod tests {
         let mut request: CanonicalRequest = serde_json::from_value(json!({"schema_version":1,
             "tasks":[{"task_id":task,"title":"Board fixture","prompt_digest":CanonicalV1::file_digest(b"private body"),
             "route":{"kind":"model","provider":"fixture","model":"fixture/model","effort":"high"},
-            "fallback":[],"authority_digest":Digest::from_bytes([5;32]),"provider_timeout_seconds":30,"delivery_id":null}],
+            "authority_digest":Digest::from_bytes([5;32]),"provider_timeout_seconds":30,"delivery_id":null}],
             "concurrency":1,"parent":null,"lane_depth":1}))?;
         request.chair = Some(provenant_run::ChairBinding {
             extra: Default::default(),

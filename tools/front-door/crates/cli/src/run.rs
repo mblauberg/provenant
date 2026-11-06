@@ -13,7 +13,7 @@ use provenant_fabric_runtime::hosts::plain_text;
 use provenant_os::{clock::SystemClock, fs::entropy_128};
 use provenant_providers::{OutcomeStatus, ProviderEvent, REGISTRY};
 use provenant_records::{CanonicalV1, CommandError, CommandResult, Outcome as Status};
-use provenant_routing::{BoundedModels, Fallback, ModelId, RouteChoice, RouteName};
+use provenant_routing::{Fallback, ModelId, RouteChoice, RouteName};
 use provenant_run as run;
 use provenant_supervisor::custody::ExitObservation;
 use run::ErrorKind;
@@ -27,10 +27,10 @@ use std::{
 };
 
 mod cancel;
-mod children;
 pub mod cloud_owner;
 pub mod cloud_store;
 mod dispatch;
+mod holder;
 mod output;
 mod provider;
 mod reconcile;
@@ -44,8 +44,8 @@ mod wait;
 mod watch;
 mod worktree;
 pub use cancel::*;
-pub use children::HostHolder;
 pub use dispatch::*;
+pub use holder::HostHolder;
 pub use output::*;
 pub(crate) use provider::find_executable as provider_executable;
 #[cfg(feature = "fixture")]
@@ -931,19 +931,6 @@ fn route_request(task: &run::TaskRequest) -> Result<provenant_routing::RouteRequ
             effort.clone(),
         ),
     };
-    let fallback = if task.fallback.is_empty() {
-        Fallback::None
-    } else {
-        Fallback::Models(
-            BoundedModels::new(
-                task.fallback
-                    .iter()
-                    .map(|r| model(r.model.as_deref().unwrap_or_default()))
-                    .collect::<Result<_, _>>()?,
-            )
-            .map_err(|error| error.to_string())?,
-        )
-    };
     Ok(provenant_routing::RouteRequest {
         intent: provenant_routing::RouteIntent {
             writes: run::Service::has_writes(task.writer.is_some(), &task.access.write_roots),
@@ -968,7 +955,7 @@ fn route_request(task: &run::TaskRequest) -> Result<provenant_routing::RouteRequ
         },
         choice,
         effort,
-        fallback,
+        fallback: Fallback::None,
         confidential: false,
     })
 }

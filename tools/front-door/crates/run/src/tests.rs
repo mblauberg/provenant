@@ -383,7 +383,6 @@ pub(super) fn input() -> PreparedRun {
                     effort: Some("high".into()),
                 },
                 account: None,
-                fallback: vec![],
                 authority_digest: Digest::from_bytes([5; 32]),
                 provider_timeout_seconds: 3600,
                 delivery_id: None,
@@ -1817,21 +1816,11 @@ fn publication_crashes_preserve_committed_records_and_allow_retry() -> TestResul
         } else {
             assert!(store.attempt(id, &call).is_ok());
         }
-        if phase == "reserved" {
-            // Queued rows exist, but request.json is unsealed: not launchable.
-            assert!(store.queued_runs(&call, QUEUED_RUNS_PAGE_SIZE)?.is_empty());
-        }
         // A replay mints fresh IDs; it must land on the reserved ones.
         let mut replay = self::input();
         replay.run_id = RunId::from_bytes([9; 16]);
         replay.attempts[0].attempt_id = AttemptId::from_bytes([10; 16]);
         assert_eq!(store.create(&replay, &call)?.run_id, input.run_id);
-        if phase == "reserved" {
-            assert_eq!(
-                store.queued_runs(&call, QUEUED_RUNS_PAGE_SIZE)?,
-                vec![input.run_id]
-            );
-        }
         if !phase.starts_with("withdraw-") {
             seal_exit_fixture(&store, &input)?;
         }

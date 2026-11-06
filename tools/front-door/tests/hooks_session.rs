@@ -126,7 +126,6 @@ fn create_numbered_lane(rig: &TestRig, seed: u8) -> Result<String> {
                         effort: None,
                     },
                     account: None,
-                    fallback: vec![],
                     authority_digest: Digest::from_bytes([5; 32]),
                     writer: None,
                     deliver: None,

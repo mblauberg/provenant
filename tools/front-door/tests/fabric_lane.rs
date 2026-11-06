@@ -253,7 +253,7 @@ fn lane_run_submits_child_through_parent_relay() -> Result {
     host(&rig, &["fabric", "identity", "--json"])?;
     let attempt = AttemptId::from_bytes(provenant_os::fs::entropy_128()?);
     let (sent, received) = std::sync::mpsc::channel();
-    let relay = provenant_fabric_mcp::lane::HostRelay::start_with_graph(
+    let relay = match provenant_fabric_mcp::lane::HostRelay::start_with_graph(
         provenant_providers::LaneRuntime::fabric_socket(attempt),
         provenant_records::Limits::CONFIG,
         |_, _, _| {
@@ -272,7 +272,19 @@ fn lane_run_submits_child_through_parent_relay() -> Result {
                 })?;
             Ok(json!({"parent_attempt":attempt.to_string(),"revision":2}))
         },
-    )?;
+    ) {
+        Ok(relay) => relay,
+        Err(error)
+            if error.kind() == std::io::ErrorKind::PermissionDenied
+                && provenant_cli::fabric::in_lane() =>
+        {
+            provenant_test_support::skip_sandbox_dependent_test(format!(
+                "relay socket unavailable in lane: {error}"
+            ))?;
+            return Ok(());
+        }
+        Err(error) => return Err(error.into()),
+    };
     lane_environment(&mut rig, attempt)?;
     let launched = host(
         &rig,
@@ -327,6 +339,9 @@ fn lane_run_submits_child_through_parent_relay() -> Result {
     };
     assert_eq!(child.brief, "Parent marker only");
     assert_eq!(child.template, "task");
+    // Relay admission must not write a second run store in the lane.
+    let child_store = rig.state.join("children").join(attempt.to_string());
+    assert_eq!(std::fs::read_dir(child_store)?.count(), 0);
     drop(relay);
     Ok(())
 }

@@ -894,7 +894,6 @@ fn request_correlation_edges_verify_host_seals_and_refuse_mismatches() -> Result
                     effort: None,
                 },
                 account: None,
-                fallback: vec![],
                 profile: Default::default(),
                 timeout_seconds: 60,
                 delivery_id: None,
