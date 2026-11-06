@@ -353,19 +353,15 @@ pub(crate) fn pr_contribution_roundtrip() -> Result {
         .iter()
         .find(|lane| lane["attempt_id"] == fixture_id.as_str())
         .ok_or("land fixture lane")?;
-    let list = json(&command(
-        &landing.rig,
-        &["lanes", "--all", "--id", fixture_id, "--json"],
-    )?)?;
     let status_view = json(&command(&landing.rig, &["status", fixture_id, "--json"])?)?;
     let output_view = json(&command(
         &landing.rig,
         &["output", fixture_id, "--part", "prompt", "--json"],
     )?)?;
-    let cancel_view = json(&command(
+    let stop_view = json(&command(
         &landing.rig,
         &[
-            "cancel",
+            "stop",
             fixture_id,
             "--operation-id",
             "land-fixture-cancel",
@@ -382,22 +378,20 @@ pub(crate) fn pr_contribution_roundtrip() -> Result {
         "superseded_by",
     ] {
         assert_eq!(
-            list["data"]["lanes"][0][field], land_lane[field],
-            "lanes {field}"
-        );
-        assert_eq!(
-            status_view["data"]["lanes"][0][field], land_lane[field],
-            "status {field}"
-        );
-        assert_eq!(
             output_view["data"][field], land_lane[field],
             "output {field}"
         );
         assert_eq!(
-            cancel_view["data"]["lanes"][0][field], land_lane[field],
-            "cancel {field}"
+            stop_view["data"]["lanes"][0][field], land_lane[field],
+            "stop {field}"
         );
     }
+    let row = &status_view["data"]["rows"][0];
+    assert_eq!(row["kind"], "attempt");
+    assert_eq!(row["id"], land_lane["attempt_id"]);
+    assert_eq!(row["attempt_id"], land_lane["attempt_id"]);
+    assert_eq!(row["node_id"], land_lane["task_id"]);
+    assert_eq!(row["state"], land_lane["state"]);
     db.execute_batch("DROP TRIGGER reject_binding; DROP TRIGGER reject_binding_update;")?;
     assert_eq!(status(&landed, "worktree")?, "done", "{landed}");
     assert!(!landing.worktree.exists());
@@ -2273,25 +2267,27 @@ pub(crate) fn pr_open_refuses_what_the_receipts_cannot_support() -> Result {
     assert!(!open_refusal(&rig, &args)?.is_empty());
 
     // A lane that never ran cannot back a pull request.
-    let dispatched = rig.execute_os(
-        &std::env::current_exe()?,
-        &[
-            "--state-dir".into(),
-            rig.state.clone().into_os_string(),
-            "dispatch".into(),
-            "--model".into(),
-            "codex/gpt-6-luna".into(),
-            "--operation-id".into(),
-            "pr-open-fixture".into(),
-            "--prompt-stdin".into(),
-            "--json".into(),
-        ],
-        Some(b"never launched"),
+    super::worktree_tests::ok(&rig, &["worktree", "create", "unstarted", "--json"])?;
+    let (_, context) = super::worktree_tests::writer_context(&rig)?;
+    let store = super::worktree_tests::open_writer_store(&context)?;
+    let clock = provenant_os::clock::SystemClock::new();
+    let cancel = provenant_core::CancelToken::new();
+    let call = provenant_run::Request {
+        clock: &clock,
+        cancel: &cancel,
+    };
+    let prepared = super::worktree_tests::writer_run(
+        provenant_run::WriterRequest {
+            extra: Default::default(),
+            project: rig.project.clone(),
+            worktree: rig.project.join(".worktrees/unstarted"),
+        },
+        "pr-open-fixture",
+        211,
+        "never launched",
     )?;
-    let attempt = json(&dispatched)?["data"]["lanes"][0]["attempt_id"]
-        .as_str()
-        .ok_or("attempt")?
-        .to_owned();
+    store.create(&prepared, &call)?;
+    let attempt = prepared.attempts[0].attempt_id.to_string();
     let refusal = open_refusal(
         &rig,
         &[

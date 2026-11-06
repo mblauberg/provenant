@@ -217,8 +217,7 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
             "gc_fetches_default_and_removes_only_clean_merged_worktrees",
             "gc_output_requires_terminal_lanes_and_respects_keep_recent_dirty_and_links",
             "gc_disk_alert_is_once_per_dip_and_manual_preview_does_not_latch",
-            "dispatch_refuses_low_disk_writers",
-            "resume_refuses_low_disk_writer",
+            "graph_run_refuses_low_disk_writers",
             "gc_reports_terminal_tmp_paths_and_bytes_in_json_and_text",
             "lane_prepare_isolates_nested_state",
             "lane_prepare_isolates_nested_claude_state",
@@ -293,8 +292,7 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
                 "gc_fetches_default_and_removes_only_clean_merged_worktrees" => gc_fetches_default_and_removes_only_clean_merged_worktrees(),
                 "gc_output_requires_terminal_lanes_and_respects_keep_recent_dirty_and_links" => gc_output_requires_terminal_lanes_and_respects_keep_recent_dirty_and_links(),
                 "gc_disk_alert_is_once_per_dip_and_manual_preview_does_not_latch" => gc_disk_alert_is_once_per_dip_and_manual_preview_does_not_latch(),
-                "dispatch_refuses_low_disk_writers" => dispatch_refuses_low_disk_writers(),
-                "resume_refuses_low_disk_writer" => resume_refuses_low_disk_writer(),
+                "graph_run_refuses_low_disk_writers" => graph_run_refuses_low_disk_writers(),
                 "gc_reports_terminal_tmp_paths_and_bytes_in_json_and_text" => gc_reports_terminal_tmp_paths_and_bytes_in_json_and_text(),
                 "lane_prepare_isolates_nested_state" => lane_prepare_isolates_nested_state(),
                 "lane_prepare_isolates_nested_claude_state" => lane_prepare_isolates_nested_claude_state(),
@@ -2828,30 +2826,23 @@ fn cross_project_writer_names_both_projects() -> Result {
     )?;
     let worktree = foreign.project.join(".worktrees/foreign");
     assert!(worktree.exists());
-    let prompt = selected.root.join("prompt.txt");
-    fs::write(&prompt, "hello")?;
-    let output = command(
-        &selected,
-        &[
-            "dispatch",
-            "--prompt-file",
-            prompt.to_str().ok_or("prompt")?,
-            "--model",
-            "codex/gpt-6-luna",
-            "--mode",
-            "worktree-write",
-            "--worktree",
-            worktree.to_str().ok_or("foreign worktree")?,
-            "--operation-id",
-            "cross-project-writer",
-            "--json",
-        ],
-    )?;
-    let value = json(&output)?;
-    assert_eq!(code(&output), 1, "{value}");
-    assert_eq!(value["status"], "refused", "{value}");
-    assert_eq!(value["error"]["code"], "WRITER_PROJECT_MISMATCH", "{value}");
-    let message = value["error"]["message"].as_str().ok_or("message")?;
+    let (_, context) = writer_context(&selected)?;
+    let error =
+        provenant_run::resolve_writer(context.state_root.as_path(), &selected.project, &worktree)
+            .err()
+            .ok_or("cross-project writer was accepted")?;
+    let provenant_run::RunError::WriterProjectMismatch {
+        worktree: actual,
+        project,
+        selected: selected_project,
+    } = &error
+    else {
+        return Err(format!("wrong refusal: {error}").into());
+    };
+    assert_eq!(actual, &worktree);
+    assert_eq!(project, &foreign.project);
+    assert_eq!(selected_project, &selected.project);
+    let message = error.to_string();
     for project in [&selected.project, &foreign.project] {
         let name = project.to_str().ok_or("project path")?;
         assert!(message.contains(name), "{message} does not name {name}");
@@ -2871,39 +2862,16 @@ fn git_created_and_recreated_worktrees_are_dispatchable() -> Result {
         &rig,
         &["worktree", "add", "-qb", "stale-again", ".worktrees/stale"],
     )?;
-    let prompt = rig.root.join("prompt.txt");
-    fs::write(&prompt, "hello")?;
-    let prompt = prompt.to_str().ok_or("prompt path")?;
-    let dispatch = |operation: &str| -> Result<Value> {
-        json(&command(
-            &rig,
-            &[
-                "dispatch",
-                "--prompt-file",
-                prompt,
-                "--model",
-                "codex/id",
-                "--mode",
-                "worktree-write",
-                "--worktree",
-                ".worktrees/stale",
-                "--operation-id",
-                operation,
-                "--json",
-            ],
-        )?)
-    };
     let (_, context) = writer_context(&rig)?;
     let request = provenant_run::resolve_writer(
         context.state_root.as_path(),
         &rig.project,
         Path::new(".worktrees/stale"),
     )?;
-    provenant_run::prepare_writer(&request, context.state_root.as_path(), context.project_id)?;
-    // Dispatch gets past custody without any registration repair.
-    let after = dispatch("stale-after")?;
-    let message = after["error"]["message"].as_str().unwrap_or_default();
-    assert!(!message.contains("writer scope refused"), "{after}");
+    let writer =
+        provenant_run::prepare_writer(&request, context.state_root.as_path(), context.project_id)?;
+    assert_eq!(writer.worktree.path(), rig.project.join(".worktrees/stale"));
+    assert_eq!(writer.branch.as_str(), "refs/heads/stale-again");
     Ok(())
 }
 
@@ -4743,7 +4711,7 @@ fn gc_reports_terminal_tmp_paths_and_bytes_in_json_and_text() -> Result {
     Ok(())
 }
 
-fn dispatch_refuses_low_disk_writers() -> Result {
+fn graph_run_refuses_low_disk_writers() -> Result {
     let rig = repository()?;
     ok(&rig, &["worktree", "create", "low-disk", "--json"])?;
     let (roots, _) = writer_context(&rig)?;
@@ -4753,207 +4721,61 @@ fn dispatch_refuses_low_disk_writers() -> Result {
         rig.state.join("config.toml"),
         "schema_version=1\n[gc]\nfree_floor='18446744073709551615B'\n",
     )?;
-    let prompt = rig.root.join("prompt.md");
-    fs::write(&prompt, "hello")?;
+    let document = rig.root.join("low-disk.json");
+    fs::write(
+        &document,
+        serde_json::to_vec(&serde_json::json!({
+            "schema_version": 2, "graph_id":"low-disk", "nodes":[{
+                "id":"writer", "prompt":"hello", "access":"worktree_write",
+                "worktree":rig.project.join(".worktrees/low-disk"),
+                "write_scope":["."], "route":{"adapter":"codex","model":"gpt-6-luna"}
+            }]
+        }))?,
+    )?;
     let output = command(
         &rig,
         &[
-            "dispatch",
-            "--prompt-file",
-            prompt.to_str().ok_or("prompt")?,
-            "--model",
-            "codex/gpt-6-luna",
-            "--mode",
-            "worktree-write",
-            "--worktree",
-            ".worktrees/low-disk",
-            "--operation-id",
-            "low-disk",
+            "run",
+            "--file",
+            document.to_str().ok_or("document")?,
             "--json",
         ],
     )?;
     let value = json(&output)?;
-    assert_eq!(code(&output), 1, "{value}");
-    assert_eq!(value["status"], "refused", "{value}");
-    let message = value["error"]["message"].as_str().ok_or("message")?;
+    assert_eq!(code(&output), 0, "{value}");
+    assert_eq!(value["status"], "ok", "{value}");
+    assert_eq!(value["data"]["outcome"], "failed", "{value}");
+    let node = &value["data"]["checkpoint"]["nodes"][0];
+    assert_eq!(node["state"], "blocked", "{value}");
+    assert_eq!(node["advance_error_code"], "launch_refused", "{value}");
+    assert!(node["attempts"][0]["attempt_ref"].is_null(), "{value}");
+    let message = node["advance_error"].as_str().ok_or("message")?;
     assert!(
         message.contains("available") && message.contains("floor 18446744073709551615"),
         "{message}"
     );
-    assert!(
-        value["error"]["repair"]
-            .as_str()
-            .is_some_and(|repair| repair.contains("provenant gc")),
-        "{value}"
-    );
+    assert!(message.contains("provenant gc"), "{message}");
     assert!(!rig.state.join("runs").exists());
+    fs::write(
+        &document,
+        serde_json::to_vec(&serde_json::json!({
+            "schema_version": 2, "graph_id":"low-disk-reader", "nodes":[{
+                "id":"reader", "prompt":"hello", "access":"read_only",
+                "route":{"adapter":"codex","model":"gpt-6-luna"}
+            }]
+        }))?,
+    )?;
     let reader = ok(
         &rig,
         &[
-            "dispatch",
-            "--prompt-file",
-            prompt.to_str().ok_or("prompt")?,
-            "--model",
-            "codex/gpt-6-luna",
-            "--operation-id",
-            "low-disk-reader",
+            "run",
+            "--file",
+            document.to_str().ok_or("document")?,
             "--json",
         ],
     )?;
     assert_eq!(reader["status"], "ok", "{reader}");
     assert!(rig.state.join("runs").exists());
-    Ok(())
-}
-
-fn resume_refuses_low_disk_writer() -> Result {
-    use provenant_run::AttemptReader;
-    let rig = repository()?;
-    ok(&rig, &["worktree", "create", "resume-disk", "--json"])?;
-    let (_, context) = writer_context(&rig)?;
-    let store = open_writer_store(&context)?;
-    let clock = provenant_os::clock::SystemClock::new();
-    let cancel = provenant_core::CancelToken::new();
-    let call = writer_call(&clock, &cancel)?;
-    let input = writer_run(
-        provenant_run::WriterRequest {
-            extra: Default::default(),
-            project: rig.project.clone(),
-            worktree: rig.project.join(".worktrees/resume-disk"),
-        },
-        "resume-disk-prior",
-        211,
-        "prior",
-    )?;
-    store.create(&input, &call)?;
-    let id = input.attempts[0].attempt_id;
-    // Publish a synthetic provider exit through the normal immutable-record API.
-    let exit = provenant_supervisor::custody::ExitObservation {
-        publication: provenant_supervisor::custody::PublicationState::Durable,
-        scope: provenant_supervisor::custody::Scope {
-            run: input.run_id,
-            attempt: id,
-            generation: 0,
-        },
-        termination: Some(provenant_os::exec::Termination::Exit(0)),
-        never_spawned: false,
-        stop_reason: None,
-        delivered_signals: vec![],
-        reaped: vec![],
-        omitted_reaped: 0,
-        spared: vec![],
-        cancel_delivered_before_exit: None,
-        omitted_spared: 0,
-        warnings: vec![],
-        omitted_warnings: 0,
-        terminal_observed: true,
-        unresolved_cleanup: false,
-        unresolved_pids: vec![],
-        settlement_evidence:
-            provenant_supervisor::custody::SettlementEvidence::DarwinCensusAndCustodyLease,
-        stdout: Default::default(),
-        stderr: Default::default(),
-    };
-    let attempt = rig
-        .state
-        .join(format!("runs/{}/attempts/{id}", input.run_id));
-    let mut evidence = serde_json::to_value(&exit)?;
-    evidence["schema_version"] = 1.into();
-    use std::os::unix::fs::OpenOptionsExt;
-    let mut file = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(attempt.join("process-exit.json"))?;
-    file.write_all(&serde_json::to_vec(&evidence)?)?;
-    drop(file);
-    store.publish_terminal(
-        id,
-        store.record(id, &call)?.revision,
-        &provenant_run::TerminalPublication {
-            outcome: provenant_run::Outcome::Succeeded,
-            started_at: Some(input.created_at),
-            finished_at: clock.wall_now()?,
-            provider_ms: Some(1),
-            reason: None,
-            result: "prior result",
-            complete: true,
-            redacted: false,
-            resolved_route: Some(fixture_route()),
-            applied_route: Some(fixture_route()),
-            observed_route: Some(fixture_route()),
-            usage: Default::default(),
-            session: Some("fixture-session".into()),
-            partial_signals: Vec::new(),
-        },
-        &exit,
-        &call,
-    )?;
-    drop(store);
-    fs::write(
-        rig.state.join("config.toml"),
-        "schema_version=1\n[gc]\nfree_floor='18446744073709551615B'\n",
-    )?;
-    let prompt = rig.root.join("resume.txt");
-    fs::write(&prompt, "continue")?;
-    let output = command(
-        &rig,
-        &[
-            "resume",
-            &id.to_string(),
-            "--prompt-file",
-            prompt.to_str().ok_or("prompt")?,
-            "--operation-id",
-            "resume-disk-low",
-            "--json",
-        ],
-    )?;
-    let value = json(&output)?;
-    assert_eq!(code(&output), 1, "{value}");
-    assert_eq!(value["status"], "refused", "{value}");
-    assert_eq!(value["error"]["code"], "REFUSED", "{value}");
-    assert!(
-        value["error"]["message"]
-            .as_str()
-            .ok_or("message")?
-            .contains("provenant gc"),
-        "{value}"
-    );
-    let store = open_writer_store(&context)?;
-    // The CLI continuation belongs to its actor, rather than the fixture actor.
-    let db = rusqlite::Connection::open(rig.state.join("run.sqlite3"))?;
-    let run: String = db.query_row(
-        "SELECT run FROM operations WHERE project=?1 AND operation=?2",
-        rusqlite::params![context.project_id.to_string(), "resume-disk-low"],
-        |row| row.get(0),
-    )?;
-    let run = provenant_core::RunId::parse(&run)?;
-    let attempts = store
-        .attempts(
-            provenant_run::AttemptFilter {
-                run_id: Some(run),
-                task_id: None,
-            },
-            &call,
-        )?
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-    assert_eq!(attempts.len(), 1);
-    let refused = store.record(attempts[0].attempt_id, &call)?;
-    assert!(matches!(
-        refused.state,
-        provenant_run::AttemptState::Terminal {
-            outcome: provenant_run::Outcome::Rejected,
-            ..
-        }
-    ));
-    assert!(refused.applied_route.is_none());
-    assert!(
-        !rig.state
-            .join(format!(
-                "runs/{}/attempts/{}/launch.json",
-                run, attempts[0].attempt_id
-            ))
-            .exists()
-    );
     Ok(())
 }
 
