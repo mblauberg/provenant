@@ -7,6 +7,15 @@ pub use fixture_git::{
     fixture_git_settings, git_command, git_command_at, git_env, run_git, scrub_git_env,
 };
 
+/// Create a fixture state root with the private permissions required by stores.
+///
+/// Set permissions explicitly so fixtures are independent of the process umask.
+pub fn private_state_dir(path: &Path) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::create_dir_all(path)?;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+}
+
 /// Create a temporary directory beneath the canonical environment temporary root.
 ///
 /// `create` makes the directory inside the root it is given, so callers keep

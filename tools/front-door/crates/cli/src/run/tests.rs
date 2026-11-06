@@ -3020,7 +3020,7 @@ fn lane_access_maps_network_capability_and_roots() -> Result<(), Box<dyn std::er
     let temp = tempfile::tempdir()?;
     let state = temp.path().join("state");
     let project = temp.path().join("project");
-    std::fs::create_dir_all(&state)?;
+    provenant_os::fixture::private_state_dir(&state)?;
     std::fs::create_dir_all(&project)?;
     let access = |mode, network, capability: &[&str], write_root: Vec<PathBuf>| crate::Access {
         attach: Vec::new(),
@@ -3105,7 +3105,7 @@ fn lane_access_refuses_write_root_overlapping_the_worktree()
     let state = temp.path().join("state");
     let worktree = temp.path().join("work").join("tree");
     let inside = worktree.join("src");
-    std::fs::create_dir_all(&state)?;
+    provenant_os::fixture::private_state_dir(&state)?;
     std::fs::create_dir_all(&inside)?;
     let access = |read_root: Vec<PathBuf>, write_root: Vec<PathBuf>| crate::Access {
         attach: Vec::new(),
@@ -3639,7 +3639,7 @@ fn nested_capacity_settlement_does_not_write_shared_cooldown()
         provenant_core::RootInputs::new(temp.path().join("home"), temp.path().join("checkout"));
     inputs.state_dir = Some(temp.path().join("state"));
     let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
-    std::fs::create_dir_all(roots.state.as_path())?;
+    provenant_os::fixture::private_state_dir(roots.state.as_path())?;
     let registry = Registry {
         roots: Some(&roots),
         ..Default::default()
@@ -4789,7 +4789,7 @@ fn settled_auth_uses_only_the_selected_registered_account() -> Result<(), Box<dy
         provenant_core::RootInputs::new(temp.path().join("home"), temp.path().join("checkout"));
     inputs.state_dir = Some(temp.path().join("state"));
     let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
-    std::fs::create_dir_all(roots.state.as_path())?;
+    provenant_os::fixture::private_state_dir(roots.state.as_path())?;
     std::fs::write(
         roots.state.as_path().join("config.toml"),
         "schema_version = 1\n[domains.accounts.entries.work]\nadapter = 'codex'\nlabel = 'work'\nkey = 'key'\ndirectory = '/fixture/work'\n",

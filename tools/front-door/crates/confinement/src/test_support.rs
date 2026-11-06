@@ -82,7 +82,7 @@ impl Fixture {
 
     pub(crate) fn binding(&self) -> Result<provenant_config::ProjectBinding, Box<dyn Error>> {
         let state = self._temp.path().join("state");
-        fs::create_dir_all(&state)?;
+        provenant_os::fixture::private_state_dir(&state)?;
         let mut input = provenant_core::RootInputs::new(self.home.clone(), self.root.clone());
         input.state_dir = Some(state);
         let roots = input.resolve(&provenant_os::fs::SystemPathResolver)?;

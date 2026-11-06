@@ -27,7 +27,7 @@ impl Fixture {
         let mut inputs = RootInputs::new(base.join("home"), base.join("checkout"));
         inputs.state_dir = Some(base.join("state"));
         let roots = inputs.resolve(&Resolver)?;
-        std::fs::create_dir_all(base.join("state"))?;
+        provenant_os::fixture::private_state_dir(roots.state.as_path())?;
         Ok(Self {
             _temp: temp,
             base,

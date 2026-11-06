@@ -9,11 +9,9 @@ use provenant_run::{
     CanonicalRequest, ExecutionContext, NewAttempt, PreparedRun, Request, RunStore,
 };
 use serde_json::{Value, json};
-use std::os::unix::fs::PermissionsExt;
 
 pub fn seed(rig: &TestRig, operation: &str, contexts: &[Value]) -> Result<RunId> {
-    std::fs::create_dir_all(&rig.state)?;
-    std::fs::set_permissions(&rig.state, std::fs::Permissions::from_mode(0o700))?;
+    provenant_os::fixture::private_state_dir(&rig.state)?;
     let mut inputs = RootInputs::new(rig.home.clone(), rig.project.clone());
     inputs.state_dir = Some(rig.state.clone());
     let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;

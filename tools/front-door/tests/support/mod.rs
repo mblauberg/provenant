@@ -4,7 +4,6 @@ use provenant_os::exec::{ExecOptions, ExecOutcome, Executor, StreamPolicy, Syste
 use std::{
     ffi::OsString,
     fs,
-    os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     sync::Mutex,
     time::Duration,
@@ -33,8 +32,7 @@ pub fn register_account(
     key: &str,
     directory: &Path,
 ) -> Result {
-    fs::create_dir_all(&rig.state)?;
-    fs::set_permissions(&rig.state, fs::Permissions::from_mode(0o700))?;
+    provenant_os::fixture::private_state_dir(&rig.state)?;
     let config = rig.state.join("config.toml");
     let mut doc: toml_edit::DocumentMut = if config.exists() {
         fs::read_to_string(&config)?.parse()?
@@ -129,6 +127,7 @@ impl TestRig {
     pub fn with_object_format(parent: &Path, format: &str) -> Result<Self> {
         let temp = tempdir_in(parent)?;
         let root = fs::canonicalize(temp.path())?;
+        provenant_os::fixture::private_state_dir(&root)?;
         let home = root.join("home");
         let project = root.join("project");
         let state = root.join("state");
@@ -142,8 +141,7 @@ impl TestRig {
         ] {
             fs::create_dir_all(path)?;
         }
-        fs::create_dir(&state)?;
-        fs::set_permissions(&state, fs::Permissions::from_mode(0o700))?;
+        provenant_os::fixture::private_state_dir(&state)?;
         // Writer fixtures must not depend on the host volume's free space.
         fs::write(
             state.join("config.toml"),

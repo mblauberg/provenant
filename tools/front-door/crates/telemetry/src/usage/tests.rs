@@ -62,7 +62,7 @@ fn recording_on_a_missing_root_creates_nothing() -> Result {
 fn chair_observations_survive_rotation_and_respect_window_bounds() -> Result {
     let (_temp, base) = tempdir()?;
     let roots = roots(&base)?;
-    std::fs::create_dir(roots.state.as_path())?;
+    provenant_os::fixture::private_state_dir(roots.state.as_path())?;
     let project = ProjectId::from_bytes([1; 16]);
     record_chair(
         &roots,
@@ -108,7 +108,7 @@ fn chair_observations_survive_rotation_and_respect_window_bounds() -> Result {
 fn unattributed_events_omit_trace_from_json() -> Result {
     let (_temp, base) = tempdir()?;
     let roots = roots(&base)?;
-    std::fs::create_dir(roots.state.as_path())?;
+    provenant_os::fixture::private_state_dir(roots.state.as_path())?;
     record_cli(&roots, CLOCK, "root", 0, 4, None);
     record_tool(&roots, CLOCK, "fabric_context", "ok", 1, None);
     assert!(roots.state.as_path().join(LOG).is_file());
@@ -132,7 +132,7 @@ fn unattributed_events_omit_trace_from_json() -> Result {
 fn attributed_events_are_reported_under_their_project_id() -> Result {
     let (_temp, base) = tempdir()?;
     let roots = roots(&base)?;
-    std::fs::create_dir(roots.state.as_path())?;
+    provenant_os::fixture::private_state_dir(roots.state.as_path())?;
     let expected_id = ProjectId::from_bytes([1; 16]);
     record_cli(&roots, CLOCK, "root", 0, 4, Some(expected_id));
     record_tool(&roots, CLOCK, "fabric_context", "ok", 1, Some(expected_id));
@@ -174,11 +174,7 @@ fn attributed_events_are_reported_under_their_project_id() -> Result {
 fn rotation_preserves_appends_and_reports_while_the_rotation_lock_is_busy() -> Result {
     let (_temp, base) = tempdir()?;
     let roots = roots(&base)?;
-    std::fs::create_dir(roots.state.as_path())?;
-    std::fs::set_permissions(
-        roots.state.as_path(),
-        <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o700),
-    )?;
+    provenant_os::fixture::private_state_dir(roots.state.as_path())?;
     record_cli(&roots, CLOCK, "root", 0, 4, None);
     let log = roots.state.as_path().join(LOG);
     assert!(!roots.state.as_path().join(LOCK).exists());
@@ -234,7 +230,7 @@ fn rotation_preserves_appends_and_reports_while_the_rotation_lock_is_busy() -> R
 fn oversized_log_reads_recent_complete_events() -> Result {
     let (_temp, base) = tempdir()?;
     let roots = roots(&base)?;
-    std::fs::create_dir(roots.state.as_path())?;
+    provenant_os::fixture::private_state_dir(roots.state.as_path())?;
     let mut bytes = vec![b'x'; CAP as usize];
     bytes.extend_from_slice(b"\n{\"kind\":\"cli.verb\",\"unit\":\"root\",\"duration_ms\":0,\"timestamp\":\"2026-10-26T00:00:00.000000Z\"}\n");
     std::fs::write(roots.state.as_path().join(LOG), bytes)?;
@@ -255,7 +251,7 @@ fn oversized_log_reads_recent_complete_events() -> Result {
 fn window_starting_on_a_record_start_keeps_that_record() -> Result {
     let (_temp, base) = tempdir()?;
     let roots = roots(&base)?;
-    std::fs::create_dir(roots.state.as_path())?;
+    provenant_os::fixture::private_state_dir(roots.state.as_path())?;
     let event = b"{\"kind\":\"cli.verb\",\"unit\":\"root\",\"duration_ms\":0,\"timestamp\":\"2026-10-26T00:00:00.000000Z\"}\n";
     // The newline before the event puts the window's start exactly on the event.
     let mut bytes = b"x\n".to_vec();

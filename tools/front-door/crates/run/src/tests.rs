@@ -1804,11 +1804,7 @@ fn read_only_open_treats_missing_store_and_schema_as_empty() -> TestResult {
     assert!(RunStore::open_read_only(&context, &call)?.is_none());
     assert!(!context.state_root.as_path().exists());
 
-    std::fs::create_dir_all(context.state_root.as_path())?;
-    std::fs::set_permissions(
-        context.state_root.as_path(),
-        std::fs::Permissions::from_mode(0o700),
-    )?;
+    provenant_os::fixture::private_state_dir(context.state_root.as_path())?;
     let database = context.state_root.as_path().join("run.sqlite3");
     std::fs::write(&database, [])?;
     std::fs::set_permissions(&database, std::fs::Permissions::from_mode(0o600))?;

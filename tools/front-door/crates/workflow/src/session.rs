@@ -805,7 +805,7 @@ mod tests {
         let home = base.join("home");
         std::fs::create_dir(&home).unwrap();
         let state = base.join("state");
-        std::fs::create_dir(&state).unwrap();
+        provenant_os::fixture::private_state_dir(&state).unwrap();
         let mut inputs = RootInputs::new(home, base.join("checkout"));
         inputs.state_dir = Some(state);
         (
