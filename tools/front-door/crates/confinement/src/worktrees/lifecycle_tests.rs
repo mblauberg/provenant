@@ -3021,7 +3021,7 @@ fn gc_foreign_merged_clean_is_opt_in_immediate_and_requires_complete_census()
                     branch: "native".into(),
                     reason,
                     detail: (scenario == "unknown")
-                        .then(|| "worker census did not prove the tree free".into()),
+                        .then(|| "fixture census unavailable".into()),
                 })
                 .collect::<Vec<_>>(),
             "{scenario}"
