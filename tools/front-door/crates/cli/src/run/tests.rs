@@ -2396,7 +2396,7 @@ fn dispatch_existing_worktree_checks_custody_and_replays() -> Result<(), Box<dyn
                     worktrees::save_owner(
                         &verified,
                         &WorktreeOwner {
-                            attempt_id: Some(holder),
+                            attempt_id: Some(AttemptId::from_bytes([8; 16])),
                             operation_id: Some("holder".parse().unwrap()),
                             branch: "writer".into(),
                             base: info.head.to_string(),
@@ -3057,9 +3057,27 @@ fn own_worktree_pending_reservation_takes_precedence_over_census()
         Ok((info.path, info.head))
     })?;
 
+    let holder = provenant_core::AttemptId::from_bytes([42; 16]);
     let held = worktrees::with_context(&roots, &home, &project, &clock, &cancel, |context| {
-        worktrees::cache_writer_guard(context.project_state, &path)
-            .map_err(|_| worktrees::WorktreeError::UnknownWriter)
+        drop(
+            worktrees::cache_writer_guard(context.project_state, &path)
+                .map_err(|_| worktrees::WorktreeError::UnknownWriter)?,
+        );
+        let slot = context
+            .project_state
+            .open_verified_directory(&worktrees::state_dir_name(&path))?;
+        provenant_supervisor::fixture::acquire_writer(
+            slot,
+            provenant_supervisor::custody::Scope {
+                run: provenant_core::RunId::from_bytes([41; 16]),
+                attempt: holder,
+                generation: 1,
+            },
+            provenant_core::WaitBudget::nonblocking(clock.mono_now()),
+            &cancel,
+            &clock,
+        )
+        .map_err(|_| worktrees::WorktreeError::UnknownWriter)
     })?;
     let busy = super::own_worktree(
         &super::OwnedWorktree {
@@ -3071,7 +3089,7 @@ fn own_worktree_pending_reservation_takes_precedence_over_census()
         &OperationId::parse("second-writer")?,
         &edge,
         &Free,
-        |_| false,
+        |attempt| attempt == prior_attempt,
         &mut None,
         &clock,
         &cancel,
@@ -3081,7 +3099,7 @@ fn own_worktree_pending_reservation_takes_precedence_over_census()
         busy,
         Err(super::OwnWorktreeError::Other(run::RunError::Writer(
             worktrees::WorktreeError::WriterBusy { holder: Some(holder) }
-        ))) if holder == prior_attempt
+        ))) if holder == provenant_core::AttemptId::from_bytes([42; 16])
     ));
     drop(held);
 

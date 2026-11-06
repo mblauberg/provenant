@@ -666,6 +666,7 @@ impl WorktreeAdmissionError {
                     | WorktreeError::LockBusy
                     | WorktreeError::UnknownWriter
                     | WorktreeError::UnknownWriterAt { .. }
+                    | WorktreeError::UnknownOccupancy { .. }
             ),
             _ => false,
         }
@@ -683,6 +684,10 @@ mod admission_retry_tests {
             |error| WorktreeAdmissionError::Run(run::RunError::Writer(error)).is_transient();
         assert!(retry(WorktreeError::LockBusy));
         assert!(retry(WorktreeError::UnknownWriter));
+        assert!(retry(WorktreeError::UnknownOccupancy {
+            path: "lane".into(),
+            detail: "registration race".into()
+        }));
         assert!(!retry(WorktreeError::LiveWriter));
         assert!(!retry(WorktreeError::Dirty(String::new())));
     }
@@ -1608,14 +1613,10 @@ pub(super) fn dispatch_inner(
                                 ) {
                                     Ok(_) => {}
                                     Err(worktrees::Occupancy::Held) => {
-                                        let tree = provenant_confinement::verify_worktree(
-                                            context.repo,
+                                        let holder = worktrees::writer_holder(
+                                            context.project_state,
                                             &info.path,
-                                        )?;
-                                        let holder = worktrees::load_owner(&tree)
-                                            .ok()
-                                            .flatten()
-                                            .and_then(|owner| owner.attempt_id);
+                                        );
                                         return Err(worktrees::WorktreeError::WriterBusy {
                                             holder,
                                         });

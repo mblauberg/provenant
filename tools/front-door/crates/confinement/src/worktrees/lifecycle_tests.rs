@@ -280,6 +280,18 @@ fn repo_facts_resolves_a_moved_ref_fresh() -> Result<(), Box<dyn Error>> {
         vec![fixture.repo.root_path().to_path_buf()]
     );
     let limited_inventory = RepoFacts::with_limits(1, provenant_os::git::REPO_FACT_SCALAR_LIMIT)?;
+    assert!(matches!(
+        limited_inventory.writer_inventory(
+            context.repo,
+            context.executor,
+            context.utility,
+            context.utility_budget,
+            &cancel()
+        ),
+        Err(WorktreeError::Utility(UtilityError::Truncated {
+            stream: "stdout"
+        }))
+    ));
     let git = provenant_os::git::git_executable().ok_or("Git executable unavailable")?;
     let environment = provenant_os::fixture::git_env();
     assert!(matches!(
@@ -2008,19 +2020,16 @@ fn lane_owner_reassignment_holds_custody_and_preserves_adopted_owners() -> Resul
         ..owner.clone()
     };
     save_owner(&tree, &pending)?;
-    assert!(matches!(
-        save_lane_owner_when_free(
-            &context,
-            &tree,
-            &next,
-            info.head,
-            Some(&pending),
-            false,
-            &cancel()
-        ),
-        Err(WorktreeError::WriterBusy { holder: None })
-    ));
-    assert_eq!(load_owner(&tree)?, Some(pending));
+    save_lane_owner_when_free(
+        &context,
+        &tree,
+        &next,
+        info.head,
+        Some(&pending),
+        false,
+        &cancel(),
+    )?;
+    assert_eq!(load_owner(&tree)?, Some(next.clone()));
     save_owner(&tree, &owner)?;
     fs::write(info.path.join("dirty"), "keep")?;
     let error = save_lane_owner_when_free(
@@ -3020,8 +3029,7 @@ fn gc_foreign_merged_clean_is_opt_in_immediate_and_requires_complete_census()
                 .map(|reason| RetainedBranch {
                     branch: "native".into(),
                     reason,
-                    detail: (scenario == "unknown")
-                        .then(|| "fixture census unavailable".into()),
+                    detail: (scenario == "unknown").then(|| "fixture census unavailable".into()),
                 })
                 .collect::<Vec<_>>(),
             "{scenario}"

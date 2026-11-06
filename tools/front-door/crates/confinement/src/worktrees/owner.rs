@@ -160,6 +160,7 @@ pub fn save_lane_owner_when_free(
         && prior.origin == WorktreeOrigin::Lane
         && prior.operation_id != owner.operation_id
         && !terminal_prior
+        && prior.attempt_id.is_some()
     {
         return Err(WorktreeError::WriterBusy {
             holder: prior.attempt_id,

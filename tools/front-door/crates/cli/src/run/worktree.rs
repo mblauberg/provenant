@@ -179,7 +179,7 @@ pub(super) fn own_worktree(
                     let owner = worktrees::load_owner(&tree);
                     if matches!(info.occupancy, Occupancy::Held) {
                         return Err(worktrees::WorktreeError::WriterBusy {
-                            holder: owner.ok().flatten().and_then(|owner| owner.attempt_id),
+                            holder: worktrees::writer_holder(context.project_state, &info.path),
                         });
                     }
                     let owner = owner?;

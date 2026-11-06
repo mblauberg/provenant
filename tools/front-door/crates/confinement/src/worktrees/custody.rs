@@ -428,6 +428,18 @@ pub fn custody_refusal(state: Occupancy) -> WorktreeError {
     }
 }
 
+/// Identify the attempt recorded in the held writer slot, when unambiguous.
+pub fn writer_holder(project_state: &Directory, path: &Path) -> Option<provenant_core::AttemptId> {
+    let slot = PathBuf::from(state_dir_name(path));
+    let listing = provenant_supervisor::custody::list_writer_reservations(project_state).ok()?;
+    let mut matches = listing
+        .reservations
+        .iter()
+        .filter(|record| record.custody_directory() == Some(slot.as_path()));
+    let holder = matches.next()?.scope.attempt;
+    matches.next().is_none().then_some(holder)
+}
+
 /// Observe exclusion without creating state during listing or disk reports.
 pub(crate) fn disk_writer_state(project_state: &Directory, path: &Path) -> Occupancy {
     match cache_writer_probe(project_state, path) {

@@ -80,7 +80,7 @@ fn warn_fetch(error: &Error) {
     eprintln!("warning: {error}; using the current integration resolution");
 }
 
-fn local_worktree_message(error: &WorktreeError) -> String {
+pub(crate) fn local_worktree_message(error: &WorktreeError) -> String {
     use provenant_records::diagnostic::{Destination, safe_path, safe_text};
     match error {
         WorktreeError::CensusUnknown { path, detail }
@@ -130,6 +130,7 @@ impl Error {
                 | WorktreeError::LiveWriter
                 | WorktreeError::LiveProcess(_)
                 | WorktreeError::UnknownWriter
+                | WorktreeError::UnknownOccupancy { .. }
                 | WorktreeError::GitEntryHeld { .. }
                 | WorktreeError::IncompleteCensus { .. }
                 | WorktreeError::Primary
@@ -1524,6 +1525,16 @@ mod human_tests {
             assert!(message.contains("\\nretry"));
             assert!(!message.contains('\n'));
             assert!(!error.to_string().contains("/project/lane"));
+            if matches!(error, WorktreeError::UnknownOccupancy { .. }) {
+                assert!(matches!(
+                    Error::Worktree(WorktreeError::UnknownOccupancy {
+                        path: "/lane".into(),
+                        detail: "fence".into()
+                    })
+                    .outcome(),
+                    Outcome::Refused
+                ));
+            }
             assert_eq!(Error::Worktree(error).local_message(), message);
         }
     }

@@ -153,14 +153,14 @@ fn graph_writer_initialisation_error(
     use provenant_confinement::worktrees::WorktreeError;
     match error {
         WorktreeError::RegistryLockTimeout | WorktreeError::LockBusy => FacadeError::WriterLockBusy,
-        WorktreeError::UnknownWriter
-        | WorktreeError::UnknownWriterAt { .. }
-        | WorktreeError::CensusUnknown { .. }
-        | WorktreeError::IncompleteCensus { .. } => FacadeError::WriterUnknown,
+        WorktreeError::UnknownWriter => FacadeError::WriterUnknown,
         error => FacadeError::DispatchRefused {
             fact: None,
             disk: None,
-            reason: format!("initialise graph writer at {commit}: {error}"),
+            reason: format!(
+                "initialise graph writer at {commit}: {}",
+                crate::worktrees::local_worktree_message(&error)
+            ),
         },
     }
 }

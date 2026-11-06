@@ -24,6 +24,10 @@ mod graph_writer_admission_tests {
             graph_writer_initialisation_error("head", WorktreeError::UnknownWriter),
             FacadeError::WriterUnknown
         ));
+        let error = graph_writer_initialisation_error("head", WorktreeError::UnknownOccupancy {
+            path: "/lane".into(), detail: "retained fence".into(),
+        });
+        assert!(matches!(error, FacadeError::DispatchRefused { reason, .. } if reason.contains("/lane") && reason.contains("retained fence")));
         for error in [
             lock("writer.lock"),
             WorktreeError::LiveWriter,

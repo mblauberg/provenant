@@ -403,6 +403,29 @@ impl RepoFacts {
         inventory_paths(&inventory)
     }
 
+    /// Read bounded worktree registrations for writer membership verification.
+    pub fn writer_inventory(
+        &self,
+        repo: &VerifiedRepo,
+        executor: &dyn Executor,
+        utility: &UtilityRuntime,
+        budget: UtilityBudget,
+        cancel: &CancelToken,
+    ) -> Result<Vec<u8>, WorktreeError> {
+        let outcome = run_utility(
+            executor,
+            GitRead::WorktreeList,
+            repo,
+            utility,
+            budget.with_stdout_cap(self.inventory_limit)?,
+            cancel,
+        )?;
+        if exit_code(&outcome)? != 0 {
+            return Err(WorktreeError::InvalidOutput);
+        }
+        Ok(outcome.stdout.bytes)
+    }
+
     /// Read inventory afresh and invalidate any older advisory snapshot.
     pub(super) fn read_inventory(
         &self,
