@@ -187,7 +187,9 @@ fn read_git_within(
         .collect();
     let mut options = ExecOptions::new(&argv, cwd, timeout);
     options.env = Some(env);
-    options.stdout = StreamPolicy::Capture { limit };
+    options.stdout = StreamPolicy::Capture {
+        limit: provenant_os::git::fact_capture_limit(args, limit),
+    };
     options.stderr = StreamPolicy::Capture { limit: 4096 };
     options.stop_on_output_limit = true;
     let mut out = executor.execute(options).map_err(execution_error)?;

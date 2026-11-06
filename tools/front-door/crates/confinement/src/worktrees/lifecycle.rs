@@ -18,14 +18,14 @@ pub fn fast_forward(
     if path == canonicalize(context.repo.root_path())? {
         return Err(WorktreeError::Primary);
     }
-    let entries = context.facts.read_inventory(context, cancel)?;
+    let entries = context.facts.fresh_inventory(context, cancel)?;
     let entry = entries
         .iter()
         .find(|entry| canonicalize(&entry.path).ok().as_ref() == Some(&path))
         .ok_or(WorktreeError::NotFound)?;
     let branch = entry.branch.as_ref().ok_or(WorktreeError::InvalidRequest)?;
     let locked = lock_worktree_for_mutation(context, entry, cancel)?;
-    let fresh = context.facts.read_inventory(context, cancel)?;
+    let fresh = context.facts.fresh_inventory(context, cancel)?;
     let current = matching_worktree(&fresh, branch, context.repo.root_path())?
         .ok_or(WorktreeError::IdentityChanged)?;
     if canonicalize(&current.path)? != path
@@ -310,7 +310,7 @@ pub fn create(
     let facts = context.facts;
     let _lock = repository_lock(context, LockMode::Exclusive, cancel)?;
     context.repo.revalidate()?;
-    let entries = context.facts.read_inventory(context, cancel)?;
+    let entries = context.facts.fresh_inventory(context, cancel)?;
     let checked_out = entries
         .iter()
         .filter(|entry| !entry.prunable)
@@ -473,7 +473,7 @@ pub fn create(
         return Err(WorktreeError::PrimaryMoved);
     }
     context.repo.revalidate()?;
-    let fresh = context.facts.read_inventory(context, cancel)?;
+    let fresh = context.facts.fresh_inventory(context, cancel)?;
     let entry = fresh
         .iter()
         .find(|entry| canonicalize(&entry.path).ok().as_deref() == Some(target.as_path()))
@@ -524,7 +524,7 @@ pub(super) fn roll_back_failed_add(
     let Some((branch, base)) = created_branch else {
         return clean;
     };
-    let Ok(entries) = context.facts.read_inventory(context, cancel) else {
+    let Ok(entries) = context.facts.fresh_inventory(context, cancel) else {
         return false;
     };
     if entries
@@ -855,7 +855,7 @@ pub(super) fn remove_tree_when(
     let mut locked = lock_worktree_for_mutation(context, entry, cancel)?;
     context.repo.revalidate()?;
     tree_unchanged(
-        &context.facts.read_inventory(context, cancel)?,
+        &context.facts.fresh_inventory(context, cancel)?,
         entry,
         expected_head,
     )?;
@@ -888,7 +888,7 @@ pub(super) fn remove_tree_when(
         }
     };
     tree_unchanged(
-        &context.facts.read_inventory(context, cancel)?,
+        &context.facts.fresh_inventory(context, cancel)?,
         entry,
         expected_head,
     )?;
@@ -1190,7 +1190,7 @@ pub(super) fn settle_branch(
         Disposition::Discard => true,
     };
     context.repo.revalidate()?;
-    let fresh = context.facts.read_inventory(context, cancel)?;
+    let fresh = context.facts.fresh_inventory(context, cancel)?;
     if checked_out_elsewhere(&fresh, branch, None)? {
         retain(outcome, branch, RetainReason::CheckedOut);
         return Ok(());
@@ -1388,7 +1388,7 @@ fn remove_with_owner(
     let mut detached = Vec::new();
     let result = (|| {
         context.repo.revalidate()?;
-        let entries = context.facts.read_inventory(context, cancel)?;
+        let entries = context.facts.fresh_inventory(context, cancel)?;
         let mut outcome = RemoveOutcome::default();
         match request {
             WorktreeRemove::Name {
