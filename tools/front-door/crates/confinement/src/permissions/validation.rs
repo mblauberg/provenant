@@ -113,8 +113,7 @@ pub(super) fn verify_git_control_links(
             .enumerate()
         {
             if seen == ENTRIES_PER_DIRECTORY {
-                return Err(PermissionError::BoundExceeded {
-                    family: "Git control directory entry count",
+                return Err(PermissionError::GitControlEntriesExceeded {
                     limit: ENTRIES_PER_DIRECTORY,
                     path: parent,
                 });

@@ -15,6 +15,11 @@ boundary = "lane_git"
 reason = "A second link to a Git control file could permit writes through another name."
 
 [[guard]]
+site = "confinement/src/permissions/validation.rs#verify_git_control_links"
+boundary = "object_integrity"
+reason = "An incomplete control-directory scan cannot establish that protected Git files have no extra hard links."
+
+[[guard]]
 site = "confinement/src/permissions/validation.rs#refuses_lane_root"
 boundary = "credentials"
 reason = "A lane root must not expose credential stores."

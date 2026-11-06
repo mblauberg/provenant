@@ -78,12 +78,8 @@ pub enum PermissionError {
         source: Box<PermissionError>,
         origin: provenant_records::diagnostic::SettingSource,
     },
-    #[error("{family} exceeds its bound of {limit}: {path:?}")]
-    BoundExceeded {
-        family: &'static str,
-        limit: usize,
-        path: PathBuf,
-    },
+    #[error("Git control directory entry count exceeds its bound of {limit}: {path:?}")]
+    GitControlEntriesExceeded { limit: usize, path: PathBuf },
     #[error("sandbox backend is unavailable on this platform")]
     BackendUnavailable,
     #[error("sandbox backend probe reported unavailable: {0:?}")]
@@ -121,6 +117,7 @@ impl PermissionError {
             Self::CredentialRoot | Self::CredentialRootAt { .. } | Self::CredentialGrant { .. } => {
                 B::Credentials
             }
+            Self::GitControlEntriesExceeded { .. } => B::Integrity,
             Self::GitControlHardLinked(_)
             | Self::GitWriteAuthorityMissing
             | Self::Repository(_) => B::LaneGit,
@@ -208,6 +205,13 @@ mod repository_error_tests {
                 B::Credentials,
             ),
             (PermissionError::GitWriteAuthorityMissing, B::LaneGit),
+            (
+                PermissionError::GitControlEntriesExceeded {
+                    limit: 1,
+                    path: "/fixture".into(),
+                },
+                B::Integrity,
+            ),
             (PermissionError::AnchorMismatch, B::Authority),
             (PermissionError::NonUtf8Path, B::Authority),
             (
