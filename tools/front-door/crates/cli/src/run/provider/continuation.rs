@@ -30,6 +30,49 @@ pub(super) fn continuation_request(
     })
 }
 
+#[derive(Debug, thiserror::Error)]
+pub(super) enum ContinuationError {
+    #[error("route differs from the prior attempt's provider, model or account")]
+    RouteMismatch,
+    #[error("{0}")]
+    Other(String),
+}
+
+impl ContinuationError {
+    pub(super) fn boundary_class(&self) -> provenant_records::diagnostic::BoundaryClass {
+        use provenant_records::diagnostic::BoundaryClass;
+        match self {
+            Self::RouteMismatch => BoundaryClass::Authority,
+            Self::Other(_) => BoundaryClass::None,
+        }
+    }
+}
+
+#[test]
+fn continuation_route_mismatch_is_a_typed_authority_boundary() {
+    use provenant_records::diagnostic::BoundaryClass;
+    assert_eq!(
+        ContinuationError::RouteMismatch.boundary_class(),
+        BoundaryClass::Authority
+    );
+    assert_eq!(
+        ContinuationError::Other("unavailable".into()).boundary_class(),
+        BoundaryClass::None
+    );
+}
+
+impl From<String> for ContinuationError {
+    fn from(value: String) -> Self {
+        Self::Other(value)
+    }
+}
+
+impl From<&str> for ContinuationError {
+    fn from(value: &str) -> Self {
+        Self::Other(value.into())
+    }
+}
+
 /// The continuation of `prior` on this candidate route. It must be the very
 /// provider, model and account the prior attempt ran with. The prior attempt's
 /// retained private state is copied into the new attempt's own, so the new
@@ -40,7 +83,7 @@ pub(super) fn continuation_for(
     grant_digest: &str,
     state_root: &Path,
     private_state: &Path,
-) -> Result<provenant_providers::Continuation, String> {
+) -> Result<provenant_providers::Continuation, ContinuationError> {
     let session = prior
         .session
         .as_deref()
@@ -53,7 +96,7 @@ pub(super) fn continuation_for(
         || applied.model.as_deref() != Some(format!("{}/{}", route.adapter, route.model).as_str())
         || applied.account_key != route.account_key
     {
-        return Err("route differs from the prior attempt's provider, model or account".into());
+        return Err(ContinuationError::RouteMismatch);
     }
     let continuation =
         provenant_providers::Continuation::retained(&route.adapter, session, route, grant_digest)
@@ -76,7 +119,7 @@ pub(super) fn continuation_for(
             return Err(format!(
                 "the prior attempt's retained provider state exceeds {} entries",
                 RETAINED_STATE.entries
-            ));
+            ).into());
         }
     }
     Ok(continuation)

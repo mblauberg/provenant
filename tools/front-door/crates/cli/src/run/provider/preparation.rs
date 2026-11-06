@@ -2117,7 +2117,11 @@ pub(super) fn prepare_candidates(
             ) {
                 Ok(continuation) => Some(continuation),
                 Err(error) => {
-                    reasons.push(skip(&label, SkipKind::Refused, error));
+                    let class = error.boundary_class();
+                    if class != provenant_records::diagnostic::BoundaryClass::None {
+                        reason_boundaries.insert(reasons.len(), class);
+                    }
+                    reasons.push(skip(&label, SkipKind::Refused, error.to_string()));
                     continue;
                 }
             },
@@ -2204,6 +2208,7 @@ pub(super) fn prepare_candidates(
             adapter.id(),
             publishing_gh.is_some(),
         )
+        .map_err(PlanCheckError::Other)
         .and_then(|request| match writer.as_ref() {
             Some(writer) => ConfinedPlan::new(request)
                 .map(|plan| {
@@ -2217,7 +2222,7 @@ pub(super) fn prepare_candidates(
                         Some(writer.worktree.repo().private_git_dir().to_owned()),
                     )
                 })
-                .map_err(|error| error.to_string()),
+                .map_err(PlanCheckError::from),
             None => read_only_plan(
                 roots,
                 project_id,
@@ -2241,11 +2246,18 @@ pub(super) fn prepare_candidates(
                     require_source_head(task, planned.1)?;
                 }
                 Ok(planned)
-            }),
+            })
+            .map_err(PlanCheckError::Other),
         }) {
             Ok(planned) => planned,
             Err(error) => {
-                reasons.push(skip(&label, SkipKind::Refused, error));
+                if let PlanCheckError::Plan(ref cause) = error {
+                    let class = cause.boundary_class();
+                    if class != provenant_records::diagnostic::BoundaryClass::None {
+                        reason_boundaries.insert(reasons.len(), class);
+                    }
+                }
+                reasons.push(skip(&label, SkipKind::Refused, error.to_string()));
                 continue;
             }
         };
