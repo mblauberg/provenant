@@ -709,12 +709,18 @@ fn each_refusal_has_its_own_stable_code() {
         (RunError::Refused, "REFUSED"),
         (RunError::GitUnavailable, "GIT"),
         (
-            RunError::Admission(AdmissionError::Disk { free: 1, floor: 2 }),
+            RunError::Admission(AdmissionError::Disk {
+                free: 1,
+                floor: 2,
+                origin: provenant_records::diagnostic::SettingSource::Configuration,
+            }),
             "DISK_FLOOR",
         ),
         (
             RunError::Admission(AdmissionError::MemoryPressure {
-                level: "critical".into(),
+                level: provenant_records::diagnostic::PressureLevel::Critical,
+                threshold: provenant_records::diagnostic::PressureThreshold::Critical,
+                origin: provenant_records::diagnostic::SettingSource::ShippedDefault,
             }),
             "MEMORY_PRESSURE",
         ),
@@ -722,7 +728,8 @@ fn each_refusal_has_its_own_stable_code() {
             RunError::Admission(AdmissionError::LaneCap {
                 active: 3,
                 limit: 3,
-                scope: "host",
+                kind: provenant_records::diagnostic::LaneLimit::HostWriters,
+                origin: provenant_records::diagnostic::SettingSource::ShippedDefault,
             }),
             "LANE_CAP",
         ),

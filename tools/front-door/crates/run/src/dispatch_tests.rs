@@ -2653,8 +2653,30 @@ fn memory_pressure_threshold_controls_admission_and_waits() -> TestResult {
                 }
             );
         } else {
-            assert!(
-                matches!(result, Err(RunError::Admission(AdmissionError::MemoryPressure { level: actual })) if actual == format!("{level:?}"))
+            let Err(RunError::Admission(AdmissionError::MemoryPressure {
+                level: actual,
+                threshold: selected,
+                origin,
+            })) = result
+            else {
+                return Err("memory pressure was not refused".into());
+            };
+            assert_eq!(format!("{actual:?}"), format!("{level:?}"));
+            assert_eq!(
+                origin,
+                if threshold.is_some() {
+                    provenant_records::diagnostic::SettingSource::Configuration
+                } else {
+                    provenant_records::diagnostic::SettingSource::ShippedDefault
+                }
+            );
+            assert_eq!(
+                selected,
+                if threshold == Some("warning") {
+                    provenant_records::diagnostic::PressureThreshold::Warning
+                } else {
+                    provenant_records::diagnostic::PressureThreshold::Critical
+                }
             );
         }
     }
@@ -2722,7 +2744,7 @@ fn admission_refuses_near_the_user_process_limit() -> TestResult {
 }
 
 #[test]
-fn pressure_errors_fall_back_and_normal_still_obeys_floor() -> TestResult {
+fn pressure_errors_and_low_advisory_memory_do_not_refuse() -> TestResult {
     use provenant_os::sys::resources::MemoryPressure;
     struct Probe {
         available: u64,
@@ -2754,8 +2776,8 @@ fn pressure_errors_fall_back_and_normal_still_obeys_floor() -> TestResult {
     }
     for (available, error, threshold, pressure, admitted) in [
         (100, true, None, MemoryPressure::Normal, true),
-        (4, false, None, MemoryPressure::Normal, false),
-        (4, false, Some("never"), MemoryPressure::Critical, false),
+        (4, false, None, MemoryPressure::Normal, true),
+        (4, false, Some("never"), MemoryPressure::Critical, true),
     ] {
         let temp = tempfile::tempdir()?;
         let (clock, cancel) = (clock(), CancelToken::new());
@@ -2979,12 +3001,24 @@ fn the_writer_cap_refuses_at_its_limit_and_names_it() -> TestResult {
             Err(
                 error @ RunError::Admission(AdmissionError::LaneCap {
                     limit: 3,
-                    scope: refused,
+                    kind: refused,
+                    origin,
                     ..
                 }),
             ) => {
                 assert_eq!(error.code(), "LANE_CAP");
-                assert_eq!(refused, scope);
+                assert_eq!(
+                    refused,
+                    if scope == "host" {
+                        provenant_records::diagnostic::LaneLimit::HostWriters
+                    } else {
+                        provenant_records::diagnostic::LaneLimit::ProjectWriters
+                    }
+                );
+                assert_eq!(
+                    origin,
+                    provenant_records::diagnostic::SettingSource::Configuration
+                );
                 // The message names the configuration key to raise.
                 let key = if scope == "project" {
                     "max_project_writer_lanes"
@@ -3008,13 +3042,13 @@ pub(super) struct Fake {
     network: Cell<Option<NetworkAccess>>,
     refuse: bool,
     policy_task: Option<TaskId>,
-    observed: Option<RouteRecord>,
+    pub(super) observed: Option<RouteRecord>,
     pub(super) decoded: Cell<usize>,
     prepared: Cell<usize>,
     resumed: Cell<Option<AttemptId>>,
     prompt: RefCell<String>,
     /// The outcome a decode reports; success when unset.
-    outcome: Option<Outcome>,
+    pub(super) outcome: Option<Outcome>,
     /// The answer a decode reports, instead of the captured stdout.
     answer: Option<String>,
     /// Partial-finish signals a decode reports.
@@ -3022,6 +3056,17 @@ pub(super) struct Fake {
     /// Report `QuotaLimited` only when this exact sealed stderr arrives.
     quota_stderr: Option<&'static [u8]>,
     assess_empty: bool,
+    failure_note: Option<String>,
+}
+
+impl Fake {
+    pub(super) fn with_observed(observed: Option<RouteRecord>, outcome: Option<Outcome>) -> Self {
+        Self {
+            observed,
+            outcome,
+            ..Default::default()
+        }
+    }
 }
 
 #[test]
@@ -3053,6 +3098,10 @@ fn policy_refusal_skips_provider_preparation_and_preserves_sibling_progress() ->
 }
 
 impl Providers for Fake {
+    fn failure_diagnostic(&self, _: &RouteRecord, _: &[u8]) -> Option<String> {
+        self.failure_note.clone()
+    }
+
     fn assess_result(
         &self,
         _: &TaskRequest,
@@ -3121,6 +3170,7 @@ impl Providers for Fake {
         assert_eq!(applied, &route());
         self.decoded.set(self.decoded.get() + 1);
         Ok(Decoded {
+            terminal_cause: None,
             outcome: self.outcome.unwrap_or(Outcome::Succeeded),
             result: self
                 .answer
@@ -3418,7 +3468,7 @@ fn empty_success_is_assessed_before_settlement_rejects_it() -> TestResult {
 }
 
 #[test]
-fn failed_lane_reason_preserves_path_denial_evidence() -> TestResult {
+fn failed_lane_reason_reports_path_denial_without_captured_text() -> TestResult {
     let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());
     let call = call(&clock, &cancel);
@@ -3440,7 +3490,7 @@ fn failed_lane_reason_preserves_path_denial_evidence() -> TestResult {
     artifacts::seal(
         &dir,
         "stderr.log",
-        b"tool: /fixture/missing-grant: Permission denied\n",
+        b"tool: /fixture/missing-grant: Permission denied TOKEN_SENTINEL\n",
         CAPTURE_LIMIT,
     )?;
     let mut observed = exit();
@@ -3448,11 +3498,14 @@ fn failed_lane_reason_preserves_path_denial_evidence() -> TestResult {
     seal_exit(&store, &observed)?;
     let fake = Fake {
         outcome: Some(Outcome::Failed),
+        failure_note: Some("TOKEN_SENTINEL /private/source".into()),
         ..Fake::default()
     };
     store.finish(id, &dir, &observed, &fake, &call)?;
     let reason = terminal_reason(&store, id, &call)?;
-    assert!(reason.contains("/fixture/missing-grant"), "{reason}");
+    assert!(!reason.contains("/private/source"), "{reason}");
+    assert!(!reason.contains("/fixture/missing-grant"), "{reason}");
+    assert!(!reason.contains("TOKEN_SENTINEL"), "{reason}");
     assert!(reason.contains("access grant"), "{reason}");
     Ok(())
 }
@@ -3479,7 +3532,7 @@ fn a_lane_without_a_handoff_reports_a_stdout_path_denial_in_its_reason() -> Test
     artifacts::seal(
         &dir,
         "stdout.log",
-        b"tool: /fixture/missing-grant: Permission denied\n",
+        b"tool: /fixture/missing-grant: Permission denied TOKEN_SENTINEL\n",
         CAPTURE_LIMIT,
     )?;
     artifacts::seal(&dir, "stderr.log", b"", CAPTURE_LIMIT)?;
@@ -3493,9 +3546,11 @@ fn a_lane_without_a_handoff_reports_a_stdout_path_denial_in_its_reason() -> Test
     };
     store.finish(id, &dir, &observed, &fake, &call)?;
     let reason = terminal_reason(&store, id, &call)?;
-    assert!(reason.contains("/fixture/missing-grant"), "{reason}");
+    assert!(!reason.contains("/fixture/missing-grant"), "{reason}");
+    assert!(!reason.contains("TOKEN_SENTINEL"), "{reason}");
     assert!(reason.contains("access grant"), "{reason}");
-    assert_eq!(terminal(&store, id, &call)?, Outcome::ReviewRequired);
+    // A read-only answer is its own proof, so the denial is a diagnostic only.
+    assert_eq!(terminal(&store, id, &call)?, Outcome::Succeeded);
     Ok(())
 }
 
@@ -3534,7 +3589,8 @@ fn a_path_denial_leaves_a_finished_lanes_answer_and_success_intact() -> TestResu
     let result = artifacts::read_sealed(&dir, "result.md", RESULT_LIMIT)?.ok_or("result")?;
     assert_eq!(String::from_utf8(result)?, answer);
     let reason = terminal_reason(&store, id, &call)?;
-    assert!(reason.contains("/fixture/missing-grant"), "{reason}");
+    assert!(!reason.contains("/fixture/missing-grant"), "{reason}");
+    assert!(!reason.contains("TOKEN_SENTINEL"), "{reason}");
     Ok(())
 }
 
@@ -3560,7 +3616,7 @@ fn denial_evidence_does_not_turn_an_empty_answer_into_success() -> TestResult {
     artifacts::seal(
         &dir,
         "stdout.log",
-        b"tool: /fixture/missing-grant: Permission denied\n",
+        b"tool: /fixture/missing-grant: Permission denied TOKEN_SENTINEL\n",
         CAPTURE_LIMIT,
     )?;
     artifacts::seal(&dir, "stderr.log", b"", CAPTURE_LIMIT)?;
@@ -3575,7 +3631,8 @@ fn denial_evidence_does_not_turn_an_empty_answer_into_success() -> TestResult {
     };
     let record = store.finish(id, &dir, &observed, &fake, &call)?;
     let reason = terminal_reason(&store, id, &call)?;
-    assert!(reason.contains("/fixture/missing-grant"), "{reason}");
+    assert!(!reason.contains("/fixture/missing-grant"), "{reason}");
+    assert!(!reason.contains("TOKEN_SENTINEL"), "{reason}");
     assert!(reason.contains("access grant"), "{reason}");
     assert_eq!(terminal(&store, id, &call)?, Outcome::Failed);
     assert!(store.staged_policy_retry(&record)?.is_some());
@@ -3889,32 +3946,26 @@ fn a_declared_stop_settles_review_required() -> TestResult {
 }
 
 #[test]
-fn a_complete_finish_and_prose_about_remaining_work_are_not_flagged() -> TestResult {
+fn a_read_only_answer_without_handoff_settles_succeeded() -> TestResult {
+    // `input()` is a read-only task, so its complete answer is its proof.
     for answer in [
+        "answer".to_owned(),
         "All of the brief is done.".to_owned(),
         "Work remains in the renderer, which I did not finish.".to_owned(),
         // A block quoted mid-answer is not the lane's closing statement.
         format!("The contract says:\n{STOPPED_EARLY}\nI followed it and finished."),
     ] {
         let record = settle_with(&answer, Some(Outcome::Succeeded), Vec::new())?;
-        assert_eq!(
-            record.partial_signals,
-            [PartialSignal::HandoffMissing],
-            "{answer}"
-        );
+        assert!(record.partial_signals.is_empty(), "{answer}");
         let AttemptState::Terminal {
-            outcome: Outcome::ReviewRequired,
-            reason: Some(reason),
+            outcome: Outcome::Succeeded,
+            reason: None,
             ..
         } = &record.state
         else {
-            return Err(format!("no handoff must need review: {:?}", record.state).into());
+            return Err(format!("read-only answer must succeed: {:?}", record.state).into());
         };
-        assert!(
-            reason.starts_with(crate::holder::NO_HANDOFF_REASON),
-            "{reason}"
-        );
-        assert_eq!(
+        assert_ne!(
             record.settlement_reason,
             Some(provenant_records::run::SettlementReason::HandoffMissing)
         );
@@ -3929,10 +3980,7 @@ fn provider_stops_are_kept_and_failures_carry_no_flag() -> TestResult {
         Some(Outcome::Succeeded),
         vec![PartialSignal::ProviderStop],
     )?;
-    assert_eq!(
-        record.partial_signals,
-        [PartialSignal::HandoffMissing, PartialSignal::ProviderStop]
-    );
+    assert_eq!(record.partial_signals, [PartialSignal::ProviderStop]);
     let record = settle_with(
         &format!("{STOPPED_EARLY}\n"),
         Some(Outcome::Failed),
@@ -4107,6 +4155,7 @@ fn skipped_fallback_candidates_are_recorded_on_the_attempt() -> TestResult {
         extra: Default::default(),
         route: "claude".into(),
         kind: SkipKind::AuthRequired,
+        cause: None,
         detail: "account work: sign in again".into(),
     }];
     store.record_skipped_routes(id, &skipped, &call)?;
@@ -4164,7 +4213,11 @@ fn admission_holds_run_concurrency_spacing_floors_and_deadline() -> TestResult {
         "run concurrency 1"
     );
 
-    store.set_admission_policy(AdmissionPolicy::default());
+    store.set_admission_policy(AdmissionPolicy {
+        startup_spacing_ms: 20_000,
+        read_only_spacing_ms: 2_000,
+        ..AdmissionPolicy::default()
+    });
     let mut spaced = two_tasks(2);
     spaced.run_id = provenant_core::RunId::from_bytes([10; 16]);
     spaced.operation_id = provenant_core::OperationId::parse("spaced")?;
@@ -4188,6 +4241,8 @@ fn admission_holds_run_concurrency_spacing_floors_and_deadline() -> TestResult {
     // A one-second window from the queued time, 100 microseconds, so the
     // starved wait pauses on the virtual clock until the deadline.
     store.set_admission_policy(AdmissionPolicy {
+        startup_spacing_ms: 20_000,
+        read_only_spacing_ms: 2_000,
         admission_seconds: 1,
         ..AdmissionPolicy::default()
     });
@@ -4260,7 +4315,12 @@ fn read_only_lane_is_admitted_inside_a_writers_spacing_window() -> TestResult {
     let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());
     let call = call(&clock, &cancel);
-    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let mut store = RunStore::open(&context(temp.path())?, &call)?;
+    store.set_admission_policy(AdmissionPolicy {
+        startup_spacing_ms: 20_000,
+        read_only_spacing_ms: 2_000,
+        ..AdmissionPolicy::default()
+    });
     let writer = starting(&store, &lane(20, true), &call)?;
     let reader = starting(&store, &lane(21, false), &call)?;
     assert!(store.claim(writer, &at(10_000), &call)?.is_some());
@@ -4276,7 +4336,12 @@ fn writers_stay_20_seconds_apart_and_read_only_starts_do_not_reset_the_clock() -
     let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());
     let call = call(&clock, &cancel);
-    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let mut store = RunStore::open(&context(temp.path())?, &call)?;
+    store.set_admission_policy(AdmissionPolicy {
+        startup_spacing_ms: 20_000,
+        read_only_spacing_ms: 2_000,
+        ..AdmissionPolicy::default()
+    });
     let first = starting(&store, &lane(30, true), &call)?;
     let second = starting(&store, &lane(31, true), &call)?;
     let third = starting(&store, &lane(32, true), &call)?;
@@ -4301,7 +4366,12 @@ fn read_only_lanes_are_spaced_2_seconds_apart() -> TestResult {
     let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());
     let call = call(&clock, &cancel);
-    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let mut store = RunStore::open(&context(temp.path())?, &call)?;
+    store.set_admission_policy(AdmissionPolicy {
+        startup_spacing_ms: 20_000,
+        read_only_spacing_ms: 2_000,
+        ..AdmissionPolicy::default()
+    });
     let first = starting(&store, &lane(40, false), &call)?;
     let second = starting(&store, &lane(41, false), &call)?;
     let third = starting(&store, &lane(42, false), &call)?;
@@ -4378,7 +4448,7 @@ fn a_nested_lane_reads_class_spacing_from_the_host_ledger_only_with_the_host_roo
         "the host root shows the class's spacing wait"
     );
     assert!(
-        waits(None)?.starts_with("host capacity"),
+        waits(None)?.starts_with("launch preparation"),
         "the child directory has no ledger, so the wait goes unseen"
     );
     Ok(())
@@ -4471,7 +4541,12 @@ fn a_wall_clock_step_back_then_forward_cannot_admit_two_writers_within_a_spacing
     let temp = tempfile::tempdir()?;
     let (host, cancel) = (Stepped::up(100_000), CancelToken::new());
     let call = stepped_call(&host, &cancel);
-    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let mut store = RunStore::open(&context(temp.path())?, &call)?;
+    store.set_admission_policy(AdmissionPolicy {
+        startup_spacing_ms: 20_000,
+        read_only_spacing_ms: 2_000,
+        ..AdmissionPolicy::default()
+    });
     let [first, second] = writers(&store, [80, 81], &call)?;
     assert!(store.claim(first, &host, &call)?.is_some());
 
@@ -4500,7 +4575,12 @@ fn a_forward_wall_clock_step_alone_does_not_free_the_class() -> TestResult {
     let temp = tempfile::tempdir()?;
     let (host, cancel) = (Stepped::up(100_000), CancelToken::new());
     let call = stepped_call(&host, &cancel);
-    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let mut store = RunStore::open(&context(temp.path())?, &call)?;
+    store.set_admission_policy(AdmissionPolicy {
+        startup_spacing_ms: 20_000,
+        read_only_spacing_ms: 2_000,
+        ..AdmissionPolicy::default()
+    });
     let [first, second] = writers(&store, [82, 83], &call)?;
     assert!(store.claim(first, &host, &call)?.is_some());
     host.step_wall_ms(86_400_000);
@@ -4520,7 +4600,12 @@ fn read_only_spacing_holds_on_the_host_clock_and_never_holds_a_writer() -> TestR
     let temp = tempfile::tempdir()?;
     let (host, cancel) = (Stepped::up(100_000), CancelToken::new());
     let call = stepped_call(&host, &cancel);
-    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let mut store = RunStore::open(&context(temp.path())?, &call)?;
+    store.set_admission_policy(AdmissionPolicy {
+        startup_spacing_ms: 20_000,
+        read_only_spacing_ms: 2_000,
+        ..AdmissionPolicy::default()
+    });
     let first = starting(&store, &lane(85, false), &call)?;
     let second = starting(&store, &lane(86, false), &call)?;
     let [writer] = writers(&store, [87], &call)?;
@@ -4542,7 +4627,12 @@ fn a_new_boot_frees_the_class_and_spacing_runs_on_the_new_boot() -> TestResult {
     let temp = tempfile::tempdir()?;
     let (host, cancel) = (Stepped::up(500_000), CancelToken::new());
     let call = stepped_call(&host, &cancel);
-    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let mut store = RunStore::open(&context(temp.path())?, &call)?;
+    store.set_admission_policy(AdmissionPolicy {
+        startup_spacing_ms: 20_000,
+        read_only_spacing_ms: 2_000,
+        ..AdmissionPolicy::default()
+    });
     let [first, second, third] = writers(&store, [88, 89, 90], &call)?;
     assert!(store.claim(first, &host, &call)?.is_some());
     // The host restarted. Its clock is behind the recorded start, which is
@@ -4607,7 +4697,12 @@ fn lane_waits_count_spacing_on_the_host_clock_and_say_nothing_when_it_is_unreada
     let temp = tempfile::tempdir()?;
     let (host, cancel) = (Stepped::up(100_000), CancelToken::new());
     let call = stepped_call(&host, &cancel);
-    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let mut store = RunStore::open(&context(temp.path())?, &call)?;
+    store.set_admission_policy(AdmissionPolicy {
+        startup_spacing_ms: 20_000,
+        read_only_spacing_ms: 2_000,
+        ..AdmissionPolicy::default()
+    });
     let [first, second] = writers(&store, [92, 93], &call)?;
     assert!(store.claim(first, &host, &call)?.is_some());
     let wait = |host: &Stepped| -> Result<String> {
@@ -4627,7 +4722,7 @@ fn lane_waits_count_spacing_on_the_host_clock_and_say_nothing_when_it_is_unreada
     );
     *host.host_readable.lock().unwrap() = false;
     assert!(
-        wait(&host)?.starts_with("host capacity"),
+        wait(&host)?.starts_with("launch preparation"),
         "no wait is stated when the host clock cannot be read"
     );
     Ok(())
@@ -4638,7 +4733,12 @@ fn a_start_ahead_of_the_host_clock_in_the_same_boot_never_frees_the_class() -> T
     let temp = tempfile::tempdir()?;
     let (host, cancel) = (Stepped::up(100_000), CancelToken::new());
     let call = stepped_call(&host, &cancel);
-    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let mut store = RunStore::open(&context(temp.path())?, &call)?;
+    store.set_admission_policy(AdmissionPolicy {
+        startup_spacing_ms: 20_000,
+        read_only_spacing_ms: 2_000,
+        ..AdmissionPolicy::default()
+    });
     let [first, second] = writers(&store, [94, 95], &call)?;
     assert!(store.claim(first, &host, &call)?.is_some());
     let ledger = crate::ledger::open(&store.writer_registry, &call)?;
@@ -4699,6 +4799,7 @@ fn a_delayed_admission_cannot_start_inside_a_newer_start_or_rewind_it() -> TestR
     )?;
     store.set_admission_policy(AdmissionPolicy {
         admission_seconds: 1,
+        startup_spacing_ms: 20_000,
         ..AdmissionPolicy::default()
     });
     let (delayed, rival) = (lane(70, true), lane(71, true));
@@ -4736,7 +4837,7 @@ fn a_delayed_admission_cannot_start_inside_a_newer_start_or_rewind_it() -> TestR
     Ok(())
 }
 #[test]
-fn memory_floor_refuses_both_lane_classes() -> TestResult {
+fn memory_floor_warns_for_both_lane_classes() -> TestResult {
     // Each case has its own store and ledger, so only the floor can decide it.
     for (seed, writer, available) in [
         (50, true, 1),
@@ -4756,29 +4857,21 @@ fn memory_floor_refuses_both_lane_classes() -> TestResult {
         let id = starting(&store, &run, &call)?;
         let attempt = store.attempt_dir(run.run_id, id, false)?;
         let admitted = store.admit(id, &attempt, &HostFacts::new(available), &clock, &cancel);
-        if available < 5 {
-            assert!(
-                matches!(admitted, Err(RunError::Refused)),
-                "1% memory is under the 5% floor (writer: {writer})"
-            );
-        } else {
-            assert_eq!(
-                admitted?.state,
-                AttemptState::Running {
-                    extra: Default::default()
-                },
-                "writer: {writer}"
-            );
-        }
+        assert_eq!(
+            admitted?.state,
+            AttemptState::Running {
+                extra: Default::default()
+            },
+            "writer: {writer}"
+        );
     }
     Ok(())
 }
 
 #[test]
-fn admission_uses_injected_memory_floor_and_host_facts() -> TestResult {
-    // Exercise both sides of the injected 1% floor. No host memory or process
-    // table is consulted, and the virtual clock supplies the admission time.
-    for (available, fits) in [(0, false), (1, true), (2, true), (100, true)] {
+fn admission_warns_for_unconfigured_memory_floor_without_refusing() -> TestResult {
+    // Both sides of the unconfigured floor admit; the floor is advisory.
+    for available in [0, 1, 2, 100] {
         let temp = tempfile::tempdir()?;
         let (clock, cancel) = (clock(), CancelToken::new());
         let call = call(&clock, &cancel);
@@ -4798,13 +4891,58 @@ fn admission_uses_injected_memory_floor_and_host_facts() -> TestResult {
             &clock,
             &cancel,
         );
-        if fits {
-            let admitted = admitted?;
-            assert!(matches!(admitted.state, AttemptState::Running { .. }));
-            assert_eq!(admitted.started_at, Some(clock.wall_now()?));
-        } else {
-            assert!(matches!(admitted, Err(RunError::Refused)));
-            assert_eq!(clock.mono_now(), MonoTime::from_micros(1_000_000));
+        let admitted = admitted?;
+        assert!(matches!(admitted.state, AttemptState::Running { .. }));
+        assert_eq!(admitted.started_at, Some(clock.wall_now()?));
+    }
+    Ok(())
+}
+
+#[test]
+fn total_lane_caps_report_setting_and_source_for_read_only_lanes() -> TestResult {
+    use provenant_records::diagnostic::{LaneLimit, SettingSource};
+    for (config, expected) in [
+        ("max_lanes = 3\nmax_project_lanes = 3", LaneLimit::HostTotal),
+        (
+            "max_lanes = 8\nmax_project_lanes = 3",
+            LaneLimit::ProjectTotal,
+        ),
+    ] {
+        let temp = tempfile::tempdir()?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        let mut store = RunStore::open(&context(temp.path())?, &call)?;
+        store.set_admission_policy(AdmissionPolicy {
+            read_only_spacing_ms: 0,
+            admission_seconds: 1,
+            ..AdmissionPolicy::default()
+        });
+        std::fs::write(
+            store.writer_registry.join("config.toml"),
+            format!("schema_version=1\n[domains.fabric.lanes]\n{config}\n"),
+        )?;
+        let facts = super::tests::HostFacts::new(100);
+        for seed in 80..84 {
+            let run = lane(seed, false);
+            let id = starting(&store, &run, &call)?;
+            let dir = store.attempt_dir(run.run_id, id, false)?;
+            let result = store.admit(id, &dir, &facts, &clock, &cancel);
+            if seed < 83 {
+                assert!(matches!(result?.state, AttemptState::Running { .. }));
+            } else {
+                let Err(error @ RunError::Admission(AdmissionError::LaneCap { kind, origin, .. })) =
+                    result
+                else {
+                    return Err("total cap did not refuse with its typed reason".into());
+                };
+                assert_eq!(kind, expected);
+                assert_eq!(origin, SettingSource::Configuration);
+                assert_eq!(error.code(), "LANE_CAP");
+                let projection =
+                    error.diagnostic(provenant_records::diagnostic::Destination::Local);
+                assert!(projection.detail.unwrap().contains(kind.setting()));
+                assert!(projection.next.unwrap().contains(kind.setting()));
+            }
         }
     }
     Ok(())
@@ -4884,7 +5022,12 @@ fn lane_waits_name_the_class_and_what_each_unstarted_lane_waits_for() -> TestRes
     let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());
     let call = call(&clock, &cancel);
-    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let mut store = RunStore::open(&context(temp.path())?, &call)?;
+    store.set_admission_policy(AdmissionPolicy {
+        startup_spacing_ms: 20_000,
+        read_only_spacing_ms: 2_000,
+        ..AdmissionPolicy::default()
+    });
     let first = starting(&store, &lane(100, true), &call)?;
     let second = starting(&store, &lane(101, true), &call)?;
     let reader = starting(&store, &lane(102, false), &call)?;
@@ -4909,7 +5052,7 @@ fn lane_waits_name_the_class_and_what_each_unstarted_lane_waits_for() -> TestRes
     let reader = wait(reader).ok_or("read-only lane waits")?;
     assert_eq!(reader.lane_class, LaneClass::ReadOnly);
     assert!(
-        reader.waiting_for.starts_with("host capacity"),
+        reader.waiting_for.starts_with("launch preparation"),
         "no read-only start yet, so the writer's spacing is not its wait: {}",
         reader.waiting_for
     );
@@ -5413,6 +5556,8 @@ fn private_temporary_directories_are_removed_after_terminal_and_withdrawal() -> 
     observed.termination = Some(Termination::Exit(1));
     seal_exit(&store, &observed)?;
     let publication = TerminalPublication {
+        terminal_cause: None,
+        terminal_note: None,
         outcome: Outcome::Failed,
         finished_at: WallTime::from_micros(160)?,
         started_at: Some(WallTime::from_micros(120)?),
@@ -8192,13 +8337,15 @@ fn admission_uses_configured_gc_floor_and_reports_the_fix() -> TestResult {
                 error,
                 RunError::Admission(AdmissionError::Disk {
                     free: 99,
-                    floor: 100
+                    floor: 100,
+                    origin: provenant_records::diagnostic::SettingSource::Configuration,
                 })
             ));
             assert_eq!(error.code(), "DISK_FLOOR");
             // The message names the floor's key and the repair command.
             let message = error.to_string();
             assert!(message.contains("gc.free_floor"), "{message}");
+            assert!(message.contains("source: host configuration"), "{message}");
             assert!(message.contains("provenant gc --apply"), "{message}");
         }
     }
@@ -8274,7 +8421,8 @@ fn admission_below_the_floor_reclaims_build_output_and_then_admits() -> TestResu
                 result,
                 Err(RunError::Admission(AdmissionError::Disk {
                     free: 40,
-                    floor: 100
+                    floor: 100,
+                    ..
                 }))
             ));
         }
@@ -8324,7 +8472,7 @@ fn admission_missing_configuration_uses_the_default_host_floor() -> TestResult {
         let result = store.admit(id, &attempt, &Disk(free), &clock, &cancel);
         if below {
             assert!(
-                matches!(result, Err(RunError::Admission(AdmissionError::Disk { free: f, floor: p })) if f == free && p == floor)
+                matches!(result, Err(RunError::Admission(AdmissionError::Disk { free: f, floor: p, origin: provenant_records::diagnostic::SettingSource::ShippedDefault })) if f == free && p == floor)
             );
         } else {
             assert_eq!(
@@ -8771,6 +8919,102 @@ fn resolved_named_route_survives_launch_admission() -> TestResult {
 }
 
 #[test]
+fn preparation_pacing_refusal_uses_typed_skipped_route_cause() -> TestResult {
+    use provenant_records::RouteExclusionReason;
+    struct Excluded {
+        cause: Option<RouteExclusionReason>,
+        message: &'static str,
+    }
+    impl Providers for Excluded {
+        fn prepare(
+            &self,
+            _: &TaskRequest,
+            _: &str,
+            _: &LaunchPaths,
+            _: Option<&AttemptRecord>,
+        ) -> std::result::Result<PreparedLaunch, crate::PrepareRefusal> {
+            Err(crate::PrepareRefusal {
+                terminal_cause: None,
+                terminal_note: None,
+                message: self.message.into(),
+                fallback_outcome: None,
+                skipped_routes: [
+                    Some(RouteExclusionReason::UnknownAvailability),
+                    self.cause.clone(),
+                ]
+                .into_iter()
+                .enumerate()
+                .map(|(index, cause)| SkippedRoute {
+                    extra: Default::default(),
+                    route: format!("codex/example-{index}"),
+                    kind: SkipKind::Unavailable,
+                    cause,
+                    detail: "opaque candidate detail".into(),
+                })
+                .collect(),
+            })
+        }
+        fn decode(
+            &self,
+            _: &RouteRecord,
+            _: &[u8],
+            _: &ExitObservation,
+            _: &std::path::Path,
+        ) -> std::result::Result<Decoded, String> {
+            unreachable!()
+        }
+    }
+    for (cause, message, expected_kind) in [
+        (
+            Some(RouteExclusionReason::PacingReserve),
+            "opaque preparation refusal",
+            RefusalKind::PacingReserve,
+        ),
+        (
+            Some(RouteExclusionReason::UnknownAvailability),
+            "opaque preparation refusal",
+            RefusalKind::Preparation,
+        ),
+        (
+            None,
+            "codex/example: PacingReserve",
+            RefusalKind::Preparation,
+        ),
+    ] {
+        let temp = tempfile::tempdir()?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        let store = RunStore::open(&context(temp.path())?, &call)?;
+        let run = input();
+        let id = run.attempts[0].attempt_id;
+        store.create(&run, &call)?;
+        let started = store.start(
+            run.run_id,
+            &Excluded {
+                cause: cause.clone(),
+                message,
+            },
+            &|_, _| unreachable!(),
+            &call,
+        )?;
+        assert!(matches!(
+            started.as_slice(),
+            [Started::Refused { attempt, kind, reason }]
+                if *attempt == id && *kind == expected_kind && reason == message
+        ));
+        assert_eq!(terminal(&store, id, &call)?, Outcome::Rejected);
+        let record = store.record(id, &call)?;
+        assert_eq!(record.provider_launched, Some(false));
+        assert_eq!(record.skipped_routes[1].cause, cause);
+        assert_eq!(
+            record.terminal_evidence,
+            Some(provenant_records::run::TerminalEvidence::PreLaunchRefusal)
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn all_candidates_skipped_for_auth_settle_auth_required() -> TestResult {
     struct SignedOut(bool);
     impl Providers for SignedOut {
@@ -8782,6 +9026,8 @@ fn all_candidates_skipped_for_auth_settle_auth_required() -> TestResult {
             _: Option<&AttemptRecord>,
         ) -> std::result::Result<PreparedLaunch, crate::PrepareRefusal> {
             Err(crate::PrepareRefusal {
+                terminal_cause: None,
+                terminal_note: None,
                 message: "all candidates require sign-in; run provenant accounts".into(),
                 fallback_outcome: (!self.0)
                     .then_some(provenant_records::run::PreparationFailure::AuthRequired),
@@ -8794,6 +9040,7 @@ fn all_candidates_skipped_for_auth_settle_auth_required() -> TestResult {
                         } else {
                             SkipKind::AuthRequired
                         },
+                        cause: None,
                         detail: "sign-in required".into(),
                     })
                     .to_vec(),
@@ -8873,7 +9120,12 @@ fn upgrading_a_version_1_ledger_is_atomic() -> TestResult {
     let temp = tempfile::tempdir()?;
     let (host, cancel) = (Stepped::up(100_000), CancelToken::new());
     let call = stepped_call(&host, &cancel);
-    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let mut store = RunStore::open(&context(temp.path())?, &call)?;
+    store.set_admission_policy(AdmissionPolicy {
+        startup_spacing_ms: 20_000,
+        read_only_spacing_ms: 2_000,
+        ..AdmissionPolicy::default()
+    });
     let version_1 = "CREATE TABLE leases (attempt TEXT PRIMARY KEY, project TEXT NOT NULL, store BLOB NOT NULL) STRICT;
          CREATE INDEX lease_projects ON leases(project);";
     // A spacing that cannot be dropped fails the upgrade after it has added
@@ -8948,7 +9200,12 @@ fn a_version_1_start_of_any_age_holds_each_class_one_full_spacing() -> TestResul
         let temp = tempfile::tempdir()?;
         let (host, cancel) = (Stepped::up(100_000), CancelToken::new());
         let call = stepped_call(&host, &cancel);
-        let store = RunStore::open(&context(temp.path())?, &call)?;
+        let mut store = RunStore::open(&context(temp.path())?, &call)?;
+        store.set_admission_policy(AdmissionPolicy {
+            startup_spacing_ms: 20_000,
+            read_only_spacing_ms: 2_000,
+            ..AdmissionPolicy::default()
+        });
         version_1_start(&store, &host, ago_ms)?;
         let writer = starting(&store, &lane(100, true), &call)?;
         let reader = starting(&store, &lane(101, false), &call)?;
@@ -9006,7 +9263,12 @@ fn a_version_1_upgrade_refuses_when_the_host_clock_cannot_be_read() -> TestResul
     let temp = tempfile::tempdir()?;
     let (host, cancel) = (Stepped::up(100_000), CancelToken::new());
     let call = stepped_call(&host, &cancel);
-    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let mut store = RunStore::open(&context(temp.path())?, &call)?;
+    store.set_admission_policy(AdmissionPolicy {
+        startup_spacing_ms: 20_000,
+        read_only_spacing_ms: 2_000,
+        ..AdmissionPolicy::default()
+    });
     version_1_start(&store, &host, 5_000)?;
     let writer = starting(&store, &lane(103, true), &call)?;
     *host.boot_readable.lock().unwrap() = false;
@@ -9032,7 +9294,12 @@ fn a_version_2_ledger_that_kept_wall_milliseconds_starts_every_class_free() -> T
     let temp = tempfile::tempdir()?;
     let (host, cancel) = (Stepped::up(100_000), CancelToken::new());
     let call = stepped_call(&host, &cancel);
-    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let mut store = RunStore::open(&context(temp.path())?, &call)?;
+    store.set_admission_policy(AdmissionPolicy {
+        startup_spacing_ms: 20_000,
+        read_only_spacing_ms: 2_000,
+        ..AdmissionPolicy::default()
+    });
     old_ledger(
         &store,
         "CREATE TABLE leases (
@@ -9061,7 +9328,11 @@ fn legacy_tickets_without_a_class_are_treated_as_writers() -> TestResult {
     let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());
     let call = call(&clock, &cancel);
-    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let mut store = RunStore::open(&context(temp.path())?, &call)?;
+    store.set_admission_policy(AdmissionPolicy {
+        startup_spacing_ms: 20_000,
+        ..AdmissionPolicy::default()
+    });
     // A ledger from before lane classes, holding one lease and no start, so
     // the upgrade holds no class (the carried start has its own tests).
     old_ledger(
@@ -9305,6 +9576,63 @@ fn raised_write_grant_limit_preserves_large_terminal_ledger() -> TestResult {
     assert_eq!(
         reopened.record(id, &call)?.write_grants,
         record.write_grants
+    );
+    Ok(())
+}
+
+#[test]
+fn admission_default_spacing_does_not_hold_a_second_writer() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let [first, second] = writers(&store, [80, 81], &call)?;
+    assert!(store.claim(first, &clock, &call)?.is_some());
+    assert!(store.claim(second, &clock, &call)?.is_some());
+    Ok(())
+}
+
+#[test]
+fn admission_configured_spacing_applies_to_both_classes() -> TestResult {
+    for writer in [true, false] {
+        let temp = tempfile::tempdir()?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        let store = RunStore::open(&context(temp.path())?, &call)?;
+        std::fs::write(
+            store.writer_registry.join("config.toml"),
+            "schema_version=1\n[domains.fabric.lanes]\nstart_spacing_ms=500\n",
+        )?;
+        let first = starting(&store, &lane(80, writer), &call)?;
+        let second = starting(&store, &lane(81, writer), &call)?;
+        assert!(store.claim(first, &at(0), &call)?.is_some());
+        assert!(store.claim(second, &at(499), &call)?.is_none());
+        assert!(store.claim(second, &at(500), &call)?.is_some());
+    }
+    Ok(())
+}
+
+#[test]
+fn admission_wait_reason_names_the_reached_writer_cap() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    std::fs::write(
+        store.writer_registry.join("config.toml"),
+        "schema_version=1\n[domains.fabric.lanes]\nmax_writer_lanes=1\nmax_project_writer_lanes=1\n",
+    )?;
+    let [first, second] = writers(&store, [80, 81], &call)?;
+    assert!(store.claim(first, &clock, &call)?.is_some());
+    assert!(store.claim(second, &clock, &call)?.is_none());
+    let waits = store.lane_waits_with_resources(
+        &[store.record(second, &call)?],
+        &call,
+        &HostFacts::new(100),
+    );
+    assert_eq!(
+        waits[0].waiting_for,
+        "host capacity: host writer lanes: 1 of 1 active"
     );
     Ok(())
 }

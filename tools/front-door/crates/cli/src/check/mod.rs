@@ -482,7 +482,7 @@ pub fn config_page(
                 (
                     "config.schema",
                     location.line,
-                    format!("{}: {}{repair}", source.field, source.code),
+                    format!("{}: {}{repair}", source.field, source.detail.unwrap_or(source.code)),
                 )
             }
             _ => return Err(CheckError::Evidence("config inspection failed")),
@@ -613,6 +613,7 @@ mod tests {
                     column: 1,
                 },
                 source: Box::new(provenant_config::SectionError {
+                    detail: None,
                     field: "limits.bundle_bytes".into(),
                     code: "retired.bundle_bytes",
                 }),

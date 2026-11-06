@@ -1,5 +1,499 @@
 #[cfg(test)]
 #[test]
+fn peer_remote_base_pins_a_commit_reachable_from_the_remote(
+) -> Result<(), Box<dyn std::error::Error>> {
+    use provenant_confinement::worktrees::{self, WorkerObserver, Occupancy};
+    use std::collections::BTreeMap;
+    struct Free;
+    impl WorkerObserver for Free {
+        fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, Occupancy> {
+            roots
+                .iter()
+                .cloned()
+                .map(|path| (path, Occupancy::Available))
+                .collect()
+        }
+    }
+    let temp = tempfile::tempdir()?;
+    let home = temp.path().join("home");
+    let state = temp.path().join("state");
+    let project = temp.path().join("project");
+    let remote = temp.path().join("remote.git");
+    for path in [&home, &state, &project, &remote] {
+        std::fs::create_dir_all(path)?;
+    }
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700))?;
+    provenant_os::fixture::run_git(&remote, &["init", "--bare", "-q"])?;
+    provenant_os::fixture::run_git(&project, &["init", "-q"])?;
+    provenant_os::fixture::run_git(&project, &["commit", "--allow-empty", "-qm", "base"])?;
+    provenant_os::fixture::run_git(
+        &project,
+        &[
+            "remote",
+            "add",
+            "origin",
+            remote.to_str().ok_or("remote path")?,
+        ],
+    )?;
+    provenant_os::fixture::run_git(&project, &["push", "origin", "HEAD:refs/heads/main"])?;
+    let initial = String::from_utf8(provenant_os::fixture::run_git(
+        &project,
+        &["rev-parse", "HEAD"],
+    )?)?;
+    let mut inputs = provenant_core::RootInputs::new(home.clone(), project.clone());
+    inputs.state_dir = Some(state);
+    let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    worktrees::with_context_using_workers(
+        &roots,
+        &home,
+        &project,
+        &clock,
+        &cancel,
+        &Free,
+        |context| {
+            let pinned = remote_base(
+                context,
+                "HEAD",
+                std::time::Duration::from_secs(30),
+                true,
+                &cancel,
+            )
+            .map_err(|_| worktrees::WorktreeError::InvalidOutput)?;
+            assert_eq!(pinned.to_string(), initial.trim());
+            Ok(())
+        },
+    )?;
+    let absent = temp.path().join("absent.git");
+    provenant_os::fixture::run_git(
+        &project,
+        &[
+            "remote",
+            "add",
+            "a-unavailable",
+            absent.to_str().ok_or("absent path")?,
+        ],
+    )?;
+    worktrees::with_context_using_workers(
+        &roots,
+        &home,
+        &project,
+        &clock,
+        &cancel,
+        &Free,
+        |context| {
+            assert_eq!(
+                remote_base(
+                    context,
+                    "HEAD",
+                    std::time::Duration::from_secs(30),
+                    false,
+                    &cancel
+                )
+                .map_err(|_| worktrees::WorktreeError::InvalidOutput)?
+                .to_string(),
+                initial.trim()
+            );
+            Ok(())
+        },
+    )?;
+    provenant_os::fixture::run_git(&project, &["remote", "remove", "a-unavailable"])?;
+    // Fetch leaves a deleted remote-tracking ref behind; it must not make the
+    // old tip appear to remain advertised by the remote.
+    provenant_os::fixture::run_git(&remote, &["update-ref", "-d", "refs/heads/main"])?;
+    worktrees::with_context_using_workers(
+        &roots,
+        &home,
+        &project,
+        &clock,
+        &cancel,
+        &Free,
+        |context| {
+            assert!(matches!(
+                remote_base(
+                    context,
+                    "HEAD",
+                    std::time::Duration::from_secs(30),
+                    true,
+                    &cancel
+                ),
+                Err(FacadeError::BaseUnreachable)
+            ));
+            Ok(())
+        },
+    )?;
+    provenant_os::fixture::run_git(&remote, &["update-ref", "refs/heads/main", initial.trim()])?;
+    let limited = worktrees::RepoFacts::with_limits(provenant_os::exec::DEFAULT_CAPTURE_LIMIT, 1)?;
+    worktrees::with_context_using_workers(
+        &roots,
+        &home,
+        &project,
+        &clock,
+        &cancel,
+        &Free,
+        |context| {
+            let context = &worktrees::WorktreeContext {
+                facts: &limited,
+                ..*context
+            };
+            let error = remote_base(
+                context,
+                "HEAD",
+                std::time::Duration::from_secs(30),
+                false,
+                &cancel,
+            )
+            .expect_err("bounded fact output must be reported");
+            assert!(matches!(
+                &error,
+                FacadeError::Io { operation, .. }
+                    if operation == provenant_fabric_runtime::coordination::facade::REPOSITORY_FACT_LIMIT_OPERATION
+            ));
+            let wire = serde_json::to_value(&error)
+                .map_err(|_| worktrees::WorktreeError::InvalidOutput)?;
+            assert_eq!(wire["operation"], "repository fact output limit exceeded");
+            let cancelled = CancelToken::new();
+            cancelled.cancel();
+            assert!(matches!(
+                remote_base(
+                    context,
+                    "HEAD",
+                    std::time::Duration::from_secs(30),
+                    false,
+                    &cancelled
+                ),
+                Err(FacadeError::Cancelled)
+            ));
+            Ok(())
+        },
+    )?;
+    // A replacement object must not make a local-only root look reachable
+    // from the real remote-tracking commit.
+    let tree = String::from_utf8(provenant_os::fixture::run_git(
+        &project,
+        &["rev-parse", "HEAD^{tree}"],
+    )?)?;
+    let local = String::from_utf8(provenant_os::fixture::run_git(
+        &project,
+        &["commit-tree", tree.trim(), "-m", "local only"],
+    )?)?;
+    let replacement = String::from_utf8(provenant_os::fixture::run_git(
+        &project,
+        &[
+            "commit-tree",
+            tree.trim(),
+            "-p",
+            local.trim(),
+            "-m",
+            "poisoned ancestry",
+        ],
+    )?)?;
+    provenant_os::fixture::run_git(&project, &["update-ref", "HEAD", local.trim()])?;
+    provenant_os::fixture::run_git(&project, &["replace", initial.trim(), replacement.trim()])?;
+    let contains = format!("--contains={}", local.trim());
+    let poisoned = provenant_os::fixture::run_git(
+        &project,
+        &[
+            "for-each-ref",
+            "--format=%(refname)",
+            &contains,
+            "refs/remotes",
+        ],
+    )?;
+    assert!(
+        !poisoned.is_empty(),
+        "fixture must poison ordinary reachability"
+    );
+    worktrees::with_context_using_workers(
+        &roots,
+        &home,
+        &project,
+        &clock,
+        &cancel,
+        &Free,
+        |context| {
+            assert!(matches!(
+                remote_base(
+                    context,
+                    "HEAD",
+                    std::time::Duration::from_secs(30),
+                    false,
+                    &cancel
+                ),
+                Err(FacadeError::BaseUnreachable)
+            ));
+            provenant_os::fixture::run_git(&project, &["replace", "-d", initial.trim()])
+                .map_err(|_| worktrees::WorktreeError::InvalidOutput)?;
+            let grafts = project.join(".git/info/grafts");
+            std::fs::write(&grafts, format!("{} {}\n", initial.trim(), local.trim()))
+                .map_err(|_| worktrees::WorktreeError::InvalidOutput)?;
+            let poisoned = provenant_os::fixture::run_git(
+                &project,
+                &[
+                    "for-each-ref",
+                    "--format=%(refname)",
+                    &contains,
+                    "refs/remotes",
+                ],
+            )
+            .map_err(|_| worktrees::WorktreeError::InvalidOutput)?;
+            assert!(
+                !poisoned.is_empty(),
+                "fixture must poison ordinary reachability"
+            );
+            assert!(matches!(
+                remote_base(
+                    context,
+                    "HEAD",
+                    std::time::Duration::from_secs(30),
+                    false,
+                    &cancel
+                ),
+                Err(FacadeError::BaseUnreachable)
+            ));
+            std::fs::remove_file(grafts).map_err(|_| worktrees::WorktreeError::InvalidOutput)?;
+            std::fs::rename(&project, temp.path().join("moved-project"))
+                .map_err(|_| worktrees::WorktreeError::InvalidOutput)?;
+            std::fs::create_dir(&project).map_err(|_| worktrees::WorktreeError::InvalidOutput)?;
+            assert!(matches!(
+                remote_base(
+                    context,
+                    "HEAD",
+                    std::time::Duration::from_secs(30),
+                    true,
+                    &cancel
+                ),
+                Err(FacadeError::BaseUnreachable)
+            ));
+            Ok(())
+        },
+    )?;
+    Ok(())
+}
+
+#[cfg(test)]
+#[test]
+fn peer_adoption_checks_lease_and_treats_census_as_advisory()
+-> Result<(), Box<dyn std::error::Error>> {
+    use provenant_confinement::worktrees::{self, WorkerObserver, Occupancy};
+    use std::collections::BTreeMap;
+    struct Observer(Occupancy);
+    impl WorkerObserver for Observer {
+        fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, Occupancy> {
+            roots.iter().cloned().map(|path| (path, self.0.clone())).collect()
+        }
+    }
+    let temp = tempfile::tempdir()?;
+    let home = temp.path().join("home");
+    let state = temp.path().join("state");
+    let project = temp.path().join("project");
+    std::fs::create_dir_all(&home)?;
+    std::fs::create_dir_all(&state)?;
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700))?;
+    std::fs::create_dir_all(&project)?;
+    provenant_os::fixture::run_git(&project, &["init", "-q"])?;
+    provenant_os::fixture::run_git(&project, &["commit", "--allow-empty", "-qm", "base"])?;
+    let mut inputs = provenant_core::RootInputs::new(home.clone(), project.clone());
+    inputs.state_dir = Some(state);
+    let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let attempt = provenant_core::AttemptId::from_bytes([23; 16]);
+    let operation = provenant_core::OperationId::parse("peer-adoption")?;
+    let info = worktrees::with_context_using_workers(
+        &roots,
+        &home,
+        &project,
+        &clock,
+        &cancel,
+        &Observer(Occupancy::Available),
+        |context| {
+            let info = worktrees::create(
+                context,
+                worktrees::WorktreeCreate {
+                    branch: "peer-adoption".into(),
+                    base: None,
+                },
+                &cancel,
+            )?;
+            let tree = provenant_confinement::verify_worktree(context.repo, &info.path)?;
+            worktrees::save_owner(
+                &tree,
+                &worktrees::WorktreeOwner {
+                    attempt_id: Some(attempt),
+                    operation_id: Some(operation.clone()),
+                    branch: "peer-adoption".into(),
+                    base: info.head.to_string(),
+                    host: provenant_core::HostId::from_bytes([9; 16]),
+                    created_at: clock
+                        .wall_now()
+                        .map_err(|_| worktrees::WorktreeError::InvalidRequest)?,
+                    origin: worktrees::WorktreeOrigin::Lane,
+                    label: None,
+                },
+            )?;
+            Ok(info)
+        },
+    )?;
+    let held = worktrees::with_context_using_workers(
+        &roots,
+        &home,
+        &project,
+        &clock,
+        &cancel,
+        &Observer(Occupancy::Available),
+        |context| {
+            worktrees::cache_writer_guard(context.project_state, &info.path)
+                .map_err(|_| worktrees::WorktreeError::UnknownWriter)
+        },
+    )?;
+    let observe = |state| {
+        worktrees::with_context_using_workers(
+            &roots,
+            &home,
+            &project,
+            &clock,
+            &cancel,
+            &Observer(state),
+            |context| {
+                let entry = worktrees::list(context, &cancel)?
+                    .into_iter()
+                    .find(|entry| entry.path == info.path)
+                    .ok_or(worktrees::WorktreeError::NotFound)?;
+                peer_adoption_custody(context, &entry, &cancel)
+            },
+        )
+    };
+    let busy = observe(Occupancy::Observed { process: None }).expect_err("a held lease must refuse adoption");
+    assert!(matches!(
+        &busy,
+        worktrees::WorktreeError::WriterBusy { holder: Some(id) } if *id == attempt
+    ));
+    assert!(matches!(
+        run_error(provenant_run::RunError::Writer(busy)),
+        FacadeError::WriterBusy { holder: Some(id) } if id == attempt
+    ));
+    let stale_held = worktrees::with_context_using_workers(
+        &roots,
+        &home,
+        &project,
+        &clock,
+        &cancel,
+        &Observer(Occupancy::Available),
+        |context| {
+            worktrees::list(context, &cancel)?
+                .into_iter()
+                .find(|entry| entry.path == info.path)
+                .ok_or(worktrees::WorktreeError::NotFound)
+        },
+    )?;
+    assert!(matches!(&stale_held.occupancy, worktrees::Occupancy::Held));
+    drop(held);
+    assert!(
+        worktrees::with_context_using_workers(
+            &roots,
+            &home,
+            &project,
+            &clock,
+            &cancel,
+            &Observer(Occupancy::Available),
+            |context| peer_adoption_custody(context, &stale_held, &cancel),
+        )?
+        .is_none()
+    );
+    assert!(observe(Occupancy::Observed { process: None })?.is_some());
+    assert!(observe(Occupancy::census_unknown(info.path.clone(), "fixture census unavailable"))?.is_some());
+    let stale = worktrees::with_context_using_workers(
+        &roots,
+        &home,
+        &project,
+        &clock,
+        &cancel,
+        &Observer(Occupancy::Available),
+        |context| {
+            worktrees::list(context, &cancel)?
+                .into_iter()
+                .find(|entry| entry.path == info.path)
+                .ok_or(worktrees::WorktreeError::NotFound)
+        },
+    )?;
+    std::fs::write(info.path.join("uncommitted"), "preserve")?;
+    assert!(matches!(
+        worktrees::with_context_using_workers(
+            &roots,
+            &home,
+            &project,
+            &clock,
+            &cancel,
+            &Observer(Occupancy::Available),
+            |context| peer_adoption_custody(context, &stale, &cancel),
+        ),
+        Err(worktrees::WorktreeError::Dirty(_))
+    ));
+    assert_eq!(
+        std::fs::read_to_string(info.path.join("uncommitted"))?,
+        "preserve"
+    );
+    std::fs::remove_file(info.path.join("uncommitted"))?;
+    let git_dir = worktrees::with_context_using_workers(
+        &roots,
+        &home,
+        &project,
+        &clock,
+        &cancel,
+        &Observer(Occupancy::Available),
+        |context| {
+            Ok(
+                provenant_confinement::verify_worktree(context.repo, &info.path)?
+                    .repo()
+                    .private_git_dir()
+                    .to_path_buf(),
+            )
+        },
+    )?;
+    std::fs::write(git_dir.join("MERGE_HEAD"), format!("{}\n", info.head))?;
+    assert!(matches!(
+        worktrees::with_context_using_workers(
+            &roots,
+            &home,
+            &project,
+            &clock,
+            &cancel,
+            &Observer(Occupancy::Available),
+            |context| peer_adoption_custody(context, &stale, &cancel),
+        ),
+        Err(worktrees::WorktreeError::GitOperationInProgress)
+    ));
+    assert!(git_dir.join("MERGE_HEAD").exists());
+    std::fs::remove_file(git_dir.join("MERGE_HEAD"))?;
+    provenant_os::fixture::run_git(&info.path, &["commit", "--allow-empty", "-qm", "moved"])?;
+    assert!(matches!(
+        worktrees::with_context_using_workers(
+            &roots,
+            &home,
+            &project,
+            &clock,
+            &cancel,
+            &Observer(Occupancy::Available),
+            |context| peer_adoption_custody(context, &stale, &cancel),
+        ),
+        Err(worktrees::WorktreeError::IdentityChanged)
+    ));
+    provenant_os::fixture::run_git(
+        &project,
+        &["worktree", "lock", info.path.to_str().ok_or("path")?],
+    )?;
+    assert!(
+        matches!(observe(Occupancy::Available), Err(worktrees::WorktreeError::UnknownOccupancy { path, detail }) if path == info.path && detail.contains("locked"))
+    );
+    Ok(())
+}
+
+#[cfg(test)]
+#[test]
 fn graph_document_decoder_checks_header_before_typed_graph() {
     for version in [1, 2] {
         let source = format!(r#"{{"schema_version":{version},"graph_id":"test","nodes":[]}}"#);
@@ -32,6 +526,91 @@ fn scratch_prepare_io_error_retains_its_cause() {
     assert!(error.to_string().contains(".provenant/scratch"));
     assert!(matches!(error, FacadeError::Io { path: Some(path), .. }
         if path == ".provenant/scratch"));
+}
+
+#[test]
+fn prompt_limit_refusal_keeps_safe_field_and_existing_code() {
+    let error = run_error(provenant_run::RunError::PromptTooLarge {
+        task_index: Some(0),
+        limit: 1_048_576,
+    });
+    let projection = error.diagnostic();
+    assert_eq!(projection.code, "invalid_input");
+    let detail = projection.detail.unwrap();
+    assert!(detail.contains("tasks[0].prompt"));
+    assert!(detail.contains("1048576"));
+    assert!(projection.next.is_some());
+}
+
+#[test]
+fn memory_pressure_refusal_keeps_source_and_resource_action() {
+    use provenant_records::diagnostic::{PressureLevel, PressureThreshold, SettingSource};
+    let error = run_error(provenant_run::RunError::Admission(
+        provenant_run::AdmissionError::MemoryPressure {
+            level: PressureLevel::Critical,
+            threshold: PressureThreshold::Warning,
+            origin: SettingSource::Configuration,
+        },
+    ));
+    let projection = error.diagnostic();
+    assert_eq!(projection.code, "confinement_refused");
+    assert!(projection.detail.unwrap().contains("host configuration"));
+    assert!(projection.next.unwrap().contains("memory"));
+
+    let fail = provenant_cli::run::Fail::from(provenant_run::RunError::Admission(
+        provenant_run::AdmissionError::MemoryPressure {
+            level: PressureLevel::Critical,
+            threshold: PressureThreshold::Warning,
+            origin: SettingSource::Configuration,
+        },
+    ));
+    let error = dispatch_refused(fail);
+    let wire = serde_json::to_vec(&error).unwrap();
+    let decoded: FacadeError = serde_json::from_slice(&wire).unwrap();
+    let projection = decoded.diagnostic();
+    assert_eq!(projection.code, "dispatch_refused");
+    assert!(projection.detail.unwrap().contains("host configuration"));
+    assert!(projection.next.unwrap().contains("memory"));
+}
+
+#[test]
+fn lane_cap_refusal_retains_the_setting_through_both_adapters() {
+    use provenant_records::diagnostic::{LaneLimit, SettingSource};
+    let failure = || provenant_run::RunError::Admission(provenant_run::AdmissionError::LaneCap {
+        active: 3,
+        limit: 3,
+        kind: LaneLimit::ProjectWriters,
+        origin: SettingSource::Configuration,
+    });
+    for error in [run_error(failure()), dispatch_refused(failure().into())] {
+        let decoded: FacadeError = serde_json::from_slice(&serde_json::to_vec(&error).unwrap()).unwrap();
+        let projection = decoded.diagnostic();
+        assert!(projection.detail.as_deref().unwrap().contains("max_project_writer_lanes"));
+        assert!(projection.detail.as_deref().unwrap().contains("host configuration"));
+        assert!(projection.next.as_deref().unwrap().contains("max_project_writer_lanes"));
+    }
+}
+
+#[test]
+fn process_limit_retains_io_code_and_safe_resource_facts() {
+    let failure = || provenant_run::RunError::Admission(provenant_run::AdmissionError::Processes {
+        used: 950,
+        limit: 1000,
+    });
+    for (error, code) in [
+        (run_error(failure()), "io"),
+        (dispatch_refused(failure().into()), "dispatch_refused"),
+    ] {
+        let decoded: FacadeError = serde_json::from_slice(&serde_json::to_vec(&error).unwrap()).unwrap();
+        let projection = decoded.diagnostic();
+        assert_eq!(projection.code, code);
+        let detail = projection.detail.unwrap();
+        assert!(detail.contains("RLIMIT_NPROC"));
+        assert!(detail.contains("950"));
+        assert!(detail.contains("1000"));
+        assert!(detail.contains("100"));
+        assert!(projection.next.unwrap().contains("process"));
+    }
 }
 
 #[test]
@@ -607,12 +1186,12 @@ pub(crate) mod peer_tests {
         fn observe_roots(
             &self,
             roots: &[PathBuf],
-        ) -> std::collections::BTreeMap<PathBuf, provenant_confinement::worktrees::WorkerState>
+        ) -> std::collections::BTreeMap<PathBuf, provenant_confinement::worktrees::Occupancy>
         {
             roots
                 .iter()
                 .cloned()
-                .map(|root| (root, provenant_confinement::worktrees::WorkerState::Free))
+                .map(|root| (root, provenant_confinement::worktrees::Occupancy::Available))
                 .collect()
         }
     }
@@ -734,6 +1313,8 @@ pub(crate) mod peer_tests {
             record.attempt_id,
             record.revision,
             &provenant_run::TerminalPublication {
+                terminal_cause: None,
+                terminal_note: None,
                 outcome,
                 finished_at: call.clock.wall_now()?,
                 started_at: None,
@@ -1351,7 +1932,11 @@ pub(crate) mod peer_tests {
         let second = serde_json::to_value(&page.items[0])?;
         assert_ne!(second["attempt_id"], row["attempt_id"]);
         assert_eq!(second["state"], "cancelled");
-        assert_eq!(second["reason"], "fixture");
+        assert_eq!(
+            second["reason"],
+            provenant_records::run::Outcome::Cancelled.diagnostic_reason()
+        );
+        assert!(!second["reason"].as_str().unwrap().contains("fixture"));
         assert!(second["finished_at"].is_string());
         let status = owner.run(
             RunInput::Status {
@@ -2667,7 +3252,7 @@ pub(crate) mod peer_tests {
             "protected push was admitted: {result:?}"
         );
         assert!(
-            matches!(result, Err(FacadeError::ConfinementRefused)),
+            matches!(result, Err(FacadeError::ConfinementRefused { .. })),
             "{result:?}"
         );
         Ok(())
@@ -3762,7 +4347,7 @@ pub(crate) mod peer_tests {
                 _: &[std::path::PathBuf],
             ) -> std::collections::BTreeMap<
                 std::path::PathBuf,
-                provenant_confinement::worktrees::WorkerState,
+                provenant_confinement::worktrees::Occupancy,
             > {
                 std::collections::BTreeMap::new()
             }
@@ -3885,6 +4470,8 @@ pub(crate) mod peer_tests {
             super::FacadeError::Io {
             delivery_limit: None,
             delivery_stage: None,
+            resource: None,
+            input_failure: None,
                 operation: "submit: access Fabric database".into(),
                 path: None,
             }
@@ -3896,6 +4483,8 @@ pub(crate) mod peer_tests {
         let peer_error = super::FacadeError::Io {
             delivery_limit: None,
             delivery_stage: None,
+            resource: None,
+            input_failure: None,
             operation: "submit: open writer repository".into(),
             path: Some("/repo".into()),
         };
@@ -3905,6 +4494,8 @@ pub(crate) mod peer_tests {
             super::FacadeError::Io {
             delivery_limit: None,
             delivery_stage: None,
+            resource: None,
+            input_failure: None,
                 operation: "submit: open writer repository".into(),
                 path: Some("/repo".into()),
             }
@@ -3913,6 +4504,8 @@ pub(crate) mod peer_tests {
         let local_error = super::FacadeError::Io {
             delivery_limit: None,
             delivery_stage: None,
+            resource: None,
+            input_failure: None,
             operation: "open writer repository".into(),
             path: Some("/repo".into()),
         };
@@ -3922,6 +4515,8 @@ pub(crate) mod peer_tests {
             super::FacadeError::Io {
             delivery_limit: None,
             delivery_stage: None,
+            resource: None,
+            input_failure: None,
                 operation: "submit: open writer repository".into(),
                 path: Some("/repo".into()),
             }
@@ -3997,6 +4592,8 @@ pub(crate) mod peer_tests {
             super::FacadeError::Io {
             delivery_limit: None,
             delivery_stage: None,
+            resource: None,
+            input_failure: None,
                 operation: "openat directory".into(),
                 path: Some("/state/worktrees".into()),
             },
@@ -4443,4 +5040,31 @@ pub(crate) mod peer_tests {
 
         Ok(())
     }
+}
+
+#[test]
+fn fallback_cause_uses_only_unanimous_typed_facts() {
+    use provenant_records::{
+        RouteExclusionReason as Cause,
+        run::{SkipKind, SkippedRoute},
+    };
+    let route = |cause| SkippedRoute {
+        extra: Default::default(),
+        route: "/private/token".into(),
+        kind: SkipKind::Unavailable,
+        cause,
+        detail: "prompt token \u{1b} /private/secret".into(),
+    };
+    let first = route(Some(Cause::StaleAvailability));
+    let first: SkippedRoute = serde_json::from_slice(&serde_json::to_vec(&first).unwrap()).unwrap();
+    assert_eq!(
+        unanimous_preparation_cause(std::slice::from_ref(&first)),
+        Some(Cause::StaleAvailability)
+    );
+    assert_eq!(unanimous_preparation_cause(&[first.clone(), route(None)]), None);
+    assert_eq!(
+        unanimous_preparation_cause(&[first, route(Some(Cause::AuthRequired))]),
+        None
+    );
+    assert_eq!(unanimous_preparation_cause(&[]), None);
 }

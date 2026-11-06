@@ -24,12 +24,12 @@ impl provenant_confinement::worktrees::WorkerObserver for FreeWorkers {
     fn observe_roots(
         &self,
         roots: &[std::path::PathBuf],
-    ) -> std::collections::BTreeMap<std::path::PathBuf, provenant_confinement::worktrees::WorkerState>
+    ) -> std::collections::BTreeMap<std::path::PathBuf, provenant_confinement::worktrees::Occupancy>
     {
         roots
             .iter()
             .cloned()
-            .map(|root| (root, provenant_confinement::worktrees::WorkerState::Free))
+            .map(|root| (root, provenant_confinement::worktrees::Occupancy::Available))
             .collect()
     }
 }
@@ -39,17 +39,26 @@ impl provenant_confinement::worktrees::WorkerObserver for UnknownWorkers {
     fn observe_roots(
         &self,
         roots: &[PathBuf],
-    ) -> BTreeMap<PathBuf, provenant_confinement::worktrees::WorkerState> {
+    ) -> BTreeMap<PathBuf, provenant_confinement::worktrees::Occupancy> {
         static OBSERVATIONS: std::sync::atomic::AtomicUsize =
             std::sync::atomic::AtomicUsize::new(0);
         let late = std::env::var("FIXTURE_UNKNOWN_WORKERS").is_ok_and(|mode| mode == "late");
-        let observed = if late && OBSERVATIONS.fetch_add(1, std::sync::atomic::Ordering::SeqCst) < 2
-        {
-            provenant_confinement::worktrees::WorkerState::Free
-        } else {
-            provenant_confinement::worktrees::WorkerState::Unknown
-        };
-        roots.iter().cloned().map(|root| (root, observed)).collect()
+        let free = late && OBSERVATIONS.fetch_add(1, std::sync::atomic::Ordering::SeqCst) < 2;
+        roots
+            .iter()
+            .cloned()
+            .map(|root| {
+                let observed = if free {
+                    provenant_confinement::worktrees::Occupancy::Available
+                } else {
+                    provenant_confinement::worktrees::Occupancy::census_unknown(
+                        root.clone(),
+                        "fixture census unavailable",
+                    )
+                };
+                (root, observed)
+            })
+            .collect()
     }
 }
 
@@ -238,6 +247,7 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
             "writer_reconcile_refuses_unfinished_cherry_pick_and_releases",
             "recreated_worktree_accepts_writer_after_settlement",
             "existing_branch_with_base_names_the_repair_in_json_and_human_output",
+            "create_from_remote_base_reports_ok_and_exists",
             "create_list_and_remove_a_managed_worktree",
             "gc_idle_keeps_live_and_unobservable_writers_and_removes_free_cache",
             "scheduled_gc_runs_outside_a_checkout_and_obeys_disable_and_writer_locks",
@@ -347,6 +357,7 @@ fn suite(args: &[std::ffi::OsString]) -> std::io::Result<()> {
                 "existing_branch_with_base_names_the_repair_in_json_and_human_output" => {
                     existing_branch_with_base_names_the_repair_in_json_and_human_output()
                 }
+                "create_from_remote_base_reports_ok_and_exists" => create_from_remote_base_reports_ok_and_exists(),
                 "create_list_and_remove_a_managed_worktree" => {
                     create_list_and_remove_a_managed_worktree()
                 }
@@ -1770,7 +1781,38 @@ fn gc_refuses_bare_projects_and_their_linked_checkout_fallback() -> Result {
                 "--porcelain",
             ],
         )?;
+        // The common configuration may get its bare identity from an
+        // included file rather than from an entry in config itself.
+        let included = rig.root.join("bare-include.conf");
+        fs::write(&included, "[core]\n bare = true\n")?;
+        git(
+            &rig,
+            &[
+                "--git-dir",
+                bare.to_str().ok_or("path")?,
+                "config",
+                "--unset",
+                "core.bare",
+            ],
+        )?;
         rig.project = linked.clone();
+        let missing = command(&rig, &["gc", "--apply", "--json"])?;
+        assert_ne!(
+            code(&missing),
+            0,
+            "unknown bare identity accepted as primary: {name}"
+        );
+        git(
+            &rig,
+            &[
+                "--git-dir",
+                bare.to_str().ok_or("path")?,
+                "config",
+                "--add",
+                "include.path",
+                included.to_str().ok_or("path")?,
+            ],
+        )?;
         let from_linked = command(&rig, &["gc", "--apply", "--json"])?;
         assert_ne!(
             code(&from_linked),
@@ -1803,6 +1845,18 @@ fn gc_refuses_bare_projects_and_their_linked_checkout_fallback() -> Result {
             "-q",
             "--separate-git-dir",
             separate.to_str().ok_or("path")?,
+        ],
+    )?;
+    let included = rig.root.join("non-bare-include.conf");
+    fs::write(&included, "[core]\n bare = false\n")?;
+    git(&rig, &["config", "--unset", "core.bare"])?;
+    git(
+        &rig,
+        &[
+            "config",
+            "--add",
+            "include.path",
+            included.to_str().ok_or("path")?,
         ],
     )?;
     ok(&rig, &["gc", "--pressure", "--apply", "--json"])?;
@@ -2297,6 +2351,38 @@ fn gc_idle_keeps_live_and_unobservable_writers_and_removes_free_cache() -> Resul
     Ok(())
 }
 
+fn create_from_remote_base_reports_ok_and_exists() -> Result {
+    let upstream = repository()?;
+    let rig = repository()?;
+    git(
+        &rig,
+        &[
+            "remote",
+            "add",
+            "origin",
+            upstream.project.to_str().ok_or("upstream path")?,
+        ],
+    )?;
+    git(&rig, &["fetch", "origin"])?;
+    git(&rig, &["config", "worktree.useRelativePaths", "true"])?;
+    let config = fs::read(rig.project.join(".git/config"))?;
+    let created = ok(
+        &rig,
+        &[
+            "worktree",
+            "create",
+            "feature/status",
+            "--base",
+            "origin/main",
+            "--json",
+        ],
+    )?;
+    assert_eq!(created["status"], "ok");
+    assert!(rig.project.join(".worktrees/feature-status/.git").is_file());
+    assert_eq!(fs::read(rig.project.join(".git/config"))?, config);
+    Ok(())
+}
+
 fn create_list_and_remove_a_managed_worktree() -> Result {
     let rig = repository()?;
     let base = git(&rig, &["rev-parse", "HEAD"])?;
@@ -2330,8 +2416,11 @@ fn create_list_and_remove_a_managed_worktree() -> Result {
     assert!(
         trees
             .iter()
-            .any(|tree| tree["branch"] == "refs/heads/feature/topic" && tree["dirty"] == "clean")
+            .any(|tree| tree["branch"] == "refs/heads/feature/topic"
+                && tree["dirty"] == "clean"
+                && tree["owner"] == "unowned")
     );
+    assert!(trees.iter().any(|tree| tree["owner"] == "primary"));
     let cache = prepare_lane_cache(
         &rig,
         &rig.project.join(".worktrees/feature-topic"),
@@ -4246,8 +4335,8 @@ if (process.argv[2] === 'child') {
             Err(error) => Err(error.into()),
         }
     };
-    // Startup spacing is host-wide: the child would otherwise wait out the
-    // default 20 s after the parent's own start, past this test's deadline.
+    // Startup spacing is host-wide: the child would otherwise wait out any
+    // spacing after the parent's own start, past this test's deadline.
     // Clear only the last-start time; the lease counts stay real.
     let ledger = state.join("admission.sqlite3");
     if ledger.exists() {
@@ -5270,6 +5359,8 @@ fn resume_refuses_low_disk_writer() -> Result {
         id,
         store.record(id, &call)?.revision,
         &provenant_run::TerminalPublication {
+            terminal_cause: None,
+            terminal_note: None,
             outcome: provenant_run::Outcome::Succeeded,
             started_at: Some(input.created_at),
             finished_at: clock.wall_now()?,

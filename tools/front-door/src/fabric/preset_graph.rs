@@ -355,17 +355,36 @@ pub(crate) fn run_preset_graph(
                 code
             }
         }
-        Err(error) => crate::fail_with_repair(
-            "run",
-            Outcome::Error,
-            "preset_graph",
-            &error.to_string(),
-            error
-                .downcast_ref::<provenant_cli::fabric::EdgeError>()
-                .and_then(|error| error.repair())
-                .as_deref(),
-            globals,
-        ),
+        Err(error) => {
+            let projection = error
+                .downcast_ref::<FacadeError>()
+                .map(FacadeError::diagnostic)
+                .or_else(|| {
+                    error
+                        .downcast_ref::<provenant_cli::fabric::EdgeError>()
+                        .and_then(provenant_cli::fabric::edge_diagnostic)
+                });
+            let message = projection.as_ref().map_or_else(
+                || "preset graph could not be submitted".to_owned(),
+                |diagnostic| {
+                    diagnostic
+                        .detail
+                        .clone()
+                        .unwrap_or_else(|| diagnostic.code.clone())
+                },
+            );
+            crate::fail_with_repair(
+                "run",
+                Outcome::Error,
+                "preset_graph",
+                &message,
+                projection
+                    .as_ref()
+                    .and_then(|diagnostic| diagnostic.next.as_deref())
+                    .or(Some("inspect the preset and graph status before retrying")),
+                globals,
+            )
+        }
     }
 }
 

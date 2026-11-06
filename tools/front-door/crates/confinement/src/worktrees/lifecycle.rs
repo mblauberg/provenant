@@ -18,14 +18,14 @@ pub fn fast_forward(
     if path == canonicalize(context.repo.root_path())? {
         return Err(WorktreeError::Primary);
     }
-    let entries = read_worktrees(context, cancel)?;
+    let entries = context.facts.read_inventory(context, cancel)?;
     let entry = entries
         .iter()
         .find(|entry| canonicalize(&entry.path).ok().as_ref() == Some(&path))
         .ok_or(WorktreeError::NotFound)?;
     let branch = entry.branch.as_ref().ok_or(WorktreeError::InvalidRequest)?;
     let locked = lock_worktree_for_mutation(context, entry, cancel)?;
-    let fresh = read_worktrees(context, cancel)?;
+    let fresh = context.facts.read_inventory(context, cancel)?;
     let current = matching_worktree(&fresh, branch, context.repo.root_path())?
         .ok_or(WorktreeError::IdentityChanged)?;
     if canonicalize(&current.path)? != path
@@ -56,11 +56,14 @@ pub fn fast_forward(
         });
     }
     repo.revalidate()?;
-    let actual = run_git(context, repo, GitRead::RevParseHead, cancel)?;
-    if exit_code(&actual)? != 0 || parse_oid(trim_ascii(&actual.stdout.bytes))? != current.head {
-        return Err(WorktreeError::IdentityChanged);
+    let actual = context.facts.checkout_head(context, repo, cancel);
+    match actual {
+        Ok(actual) if actual == current.head => {}
+        Ok(_) | Err(WorktreeError::NotFound) => return Err(WorktreeError::IdentityChanged),
+        Err(error) => return Err(error),
     }
     if current.head != head {
+        let _ = context.facts.take_inventory(context);
         context.workers.invalidate();
         let outcome = execute_git_mutation(
             context.executor,
@@ -76,9 +79,11 @@ pub fn fast_forward(
     }
     repo.revalidate()?;
     check_writer_terminal(repo)?;
-    let actual = run_git(context, repo, GitRead::RevParseHead, cancel)?;
-    if exit_code(&actual)? != 0 || parse_oid(trim_ascii(&actual.stdout.bytes))? != head {
-        return Err(WorktreeError::IdentityChanged);
+    let actual = context.facts.checkout_head(context, repo, cancel);
+    match actual {
+        Ok(actual) if actual == head => {}
+        Ok(_) | Err(WorktreeError::NotFound) => return Err(WorktreeError::IdentityChanged),
+        Err(error) => return Err(error),
     }
     Ok(())
 }
@@ -88,28 +93,16 @@ pub fn list(
     context: &WorktreeContext<'_>,
     cancel: &CancelToken,
 ) -> Result<Vec<WorktreeInfo>, WorktreeError> {
-    Ok(list_with_observation(context, cancel)?
-        .into_iter()
-        .map(|observation| observation.info)
-        .collect())
+    list_streaming(context, cancel, |_, _| {})
 }
 
-/// The native census and registration/custody provenance for one inventory row.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct WorktreeObservation {
-    pub info: WorktreeInfo,
-    pub observed: WorkerState,
-    pub registration_unknown: bool,
-}
-
-/// Like [`list`], preserving the native observation and whether registration
-/// or on-disk custody was itself unresolved. Admission callers use these
-/// typed facts to distinguish incomplete census from unresolved custody.
-pub fn list_with_observation(
+/// List using this command's advisory inventory snapshot where available.
+/// Any mutation still rechecks the inventory under custody.
+pub fn list_cached(
     context: &WorktreeContext<'_>,
     cancel: &CancelToken,
-) -> Result<Vec<WorktreeObservation>, WorktreeError> {
-    list_streaming(context, cancel, |_, _| {})
+) -> Result<Vec<WorktreeInfo>, WorktreeError> {
+    list_impl(context, cancel, |_, _| {}, true, true)
 }
 
 /// Report the inventory size before the census and each completed row after
@@ -119,8 +112,8 @@ pub fn list_streaming(
     context: &WorktreeContext<'_>,
     cancel: &CancelToken,
     report: impl FnMut(usize, Option<&WorktreeInfo>),
-) -> Result<Vec<WorktreeObservation>, WorktreeError> {
-    list_impl(context, cancel, report, true)
+) -> Result<Vec<WorktreeInfo>, WorktreeError> {
+    list_impl(context, cancel, report, true, false)
 }
 
 /// Inventory for GC. Cleanliness is checked only for candidates after the
@@ -129,10 +122,7 @@ pub fn list_for_gc(
     context: &WorktreeContext<'_>,
     cancel: &CancelToken,
 ) -> Result<Vec<WorktreeInfo>, WorktreeError> {
-    Ok(list_impl(context, cancel, |_, _| {}, false)?
-        .into_iter()
-        .map(|observation| observation.info)
-        .collect())
+    list_impl(context, cancel, |_, _| {}, false, false)
 }
 
 fn list_impl(
@@ -140,12 +130,19 @@ fn list_impl(
     cancel: &CancelToken,
     mut report: impl FnMut(usize, Option<&WorktreeInfo>),
     eager_git: bool,
-) -> Result<Vec<WorktreeObservation>, WorktreeError> {
+    reuse_inventory: bool,
+) -> Result<Vec<WorktreeInfo>, WorktreeError> {
     validate_binding(context)?;
     let entries = {
         let _lock = repository_lock(context, LockMode::Exclusive, cancel)?;
         context.repo.revalidate()?;
-        read_worktrees(context, cancel)?
+        match reuse_inventory
+            .then(|| context.facts.cached_inventory(context))
+            .flatten()
+        {
+            Some(entries) => entries,
+            None => context.facts.capture_inventory(context, cancel)?,
+        }
     };
     // A stale Git registration must not hide the remaining worktrees from GC.
     let candidates: Vec<_> = entries
@@ -156,7 +153,7 @@ fn list_impl(
     let total = candidates.len();
     report(total, None);
     let roots: Vec<_> = candidates.iter().map(|(path, _)| path.clone()).collect();
-    let worker_states = context.workers.observe_roots(&roots);
+    let worker_evidence = context.workers.observe_evidence(&roots, false);
     let primary = canonicalize(context.repo.root_path())?;
     let mut result = Vec::with_capacity(candidates.len());
     for (path, entry) in candidates {
@@ -164,13 +161,19 @@ fn list_impl(
             .branch
             .as_ref()
             .map(|branch| branch.as_str().to_owned());
-        let observed = worker_states
+        let observed = worker_evidence
+            .states
             .get(&path)
-            .copied()
-            .unwrap_or(WorkerState::Unknown);
-        let mut owner = OwnerStatus::Unknown;
-        let (dirty, writer, registration_unknown) = if path == primary {
-            owner = OwnerStatus::Primary;
+            .cloned()
+            .unwrap_or_else(|| {
+                Occupancy::census_unknown(path.clone(), context.workers.incomplete_census_detail())
+            });
+        let mut owner = Err("worktree registration could not be verified".to_owned());
+        let mut owner_evidence = None;
+        let mut registration_evidence = None;
+        let is_primary = path == primary;
+        let (dirty, disk, registration_unknown) = if is_primary {
+            owner = Ok(None);
             (
                 if eager_git {
                     worktree_dirty_at(context, context.repo, cancel)
@@ -178,7 +181,7 @@ fn list_impl(
                 } else {
                     WorktreeCondition::Unknown
                 },
-                combine_worker_state(WorkerState::Unknown, observed),
+                Occupancy::custody_unknown(path.clone(), "primary custody was not observed"),
                 true,
             )
         } else {
@@ -193,12 +196,18 @@ fn list_impl(
             match verified {
                 Ok(worktree) => {
                     owner = match load_owner(&worktree) {
-                        Ok(Some(_)) => OwnerStatus::Registered,
-                        Ok(None) => OwnerStatus::Unowned,
-                        Err(_) => OwnerStatus::Unknown,
+                        Ok(record) => Ok(record),
+                        Err(error) => {
+                            let evidence = format!("owner record could not be read: {error}");
+                            owner_evidence = Some(evidence.clone());
+                            Err(evidence)
+                        }
                     };
                     let disk = if entry.locked || entry.prunable {
-                        WorkerState::Unknown
+                        Occupancy::custody_unknown(
+                            path.clone(),
+                            "Git registration is locked or prunable",
+                        )
                     } else {
                         disk_writer_state(context.project_state, &path)
                     };
@@ -209,31 +218,81 @@ fn list_impl(
                         } else {
                             WorktreeCondition::Unknown
                         },
-                        if entry.locked || entry.prunable {
-                            WriterState::Unknown
-                        } else {
-                            combine_worker_state(disk, observed)
-                        },
-                        entry.locked || entry.prunable || disk == WorkerState::Unknown,
+                        disk.clone(),
+                        entry.locked
+                            || entry.prunable
+                            || matches!(&disk, Occupancy::Unknown { .. }),
                     )
                 }
-                Err(_) => (WorktreeCondition::Unknown, WriterState::Unknown, true),
+                Err(error) => {
+                    registration_evidence = Some(format!("worktree verification failed: {error}"));
+                    (
+                        WorktreeCondition::Unknown,
+                        Occupancy::custody_unknown(
+                            path.clone(),
+                            "worktree registration could not be verified",
+                        ),
+                        true,
+                    )
+                }
             }
         };
-        let observation = WorktreeObservation {
-            info: WorktreeInfo {
-                path,
-                branch: branch_text,
-                head: entry.head,
-                dirty,
-                writer,
-                owner,
-            },
-            observed,
-            registration_unknown,
+        let occupancy = if matches!(&disk, Occupancy::Held) {
+            Occupancy::Held
+        } else if registration_unknown || owner_evidence.is_some() {
+            let evidence = if entry.locked {
+                "Git marks the worktree locked".to_owned()
+            } else if entry.prunable {
+                "Git marks the worktree prunable".to_owned()
+            } else {
+                owner_evidence
+                    .or(registration_evidence)
+                    .or_else(|| match &disk {
+                        Occupancy::Unknown { evidence, .. } => Some(evidence.clone()),
+                        _ => None,
+                    })
+                    .unwrap_or_else(|| {
+                        "worktree registration or writer custody could not be verified".to_owned()
+                    })
+            };
+            Occupancy::Unknown {
+                scope: path.clone(),
+                evidence,
+                source: OccupancyUnknownSource::Custody,
+            }
+        } else {
+            match observed {
+                Occupancy::Available => Occupancy::Available,
+                Occupancy::Held => Occupancy::census_unknown(
+                    path.clone(),
+                    "census reported contention without a held writer lease",
+                ),
+                Occupancy::Observed { process } => Occupancy::Observed {
+                    process: process
+                        .or_else(|| worker_evidence.holders.get(&path).cloned())
+                        .or_else(|| context.workers.live_process(&path)),
+                },
+                Occupancy::Unknown { evidence, .. } => Occupancy::census_unknown(
+                    path.clone(),
+                    worker_evidence
+                        .details
+                        .get(&path)
+                        .cloned()
+                        .unwrap_or(evidence),
+                ),
+            }
         };
-        report(total, Some(&observation.info));
-        result.push(observation);
+        let info = WorktreeInfo {
+            path,
+            branch: branch_text,
+            head: entry.head,
+            dirty,
+            occupancy,
+            owner,
+            primary: is_primary,
+        };
+        report(total, Some(&info));
+        result.push(info);
     }
     Ok(result)
 }
@@ -248,16 +307,17 @@ pub fn create(
 ) -> Result<WorktreeInfo, WorktreeError> {
     validate_binding(context)?;
     let branch = GitRefName::branch(&request.branch).map_err(|_| WorktreeError::InvalidRequest)?;
+    let facts = context.facts;
     let _lock = repository_lock(context, LockMode::Exclusive, cancel)?;
     context.repo.revalidate()?;
-    let entries = read_worktrees(context, cancel)?;
+    let entries = context.facts.read_inventory(context, cancel)?;
     let checked_out = entries
         .iter()
         .filter(|entry| !entry.prunable)
         .find(|entry| entry.branch.as_ref() == Some(&branch));
     if let Some(entry) = checked_out {
         return Err(if let Some(base) = request.base.as_deref() {
-            let base_oid = pin_revision(context, base, cancel)?;
+            let base_oid = pin_revision(context, facts, base, cancel)?;
             if !is_ancestor(context, base_oid, entry.head, cancel)? {
                 WorktreeError::BranchExistsWithBase {
                     branch: request.branch.clone(),
@@ -282,7 +342,7 @@ pub fn create(
     if let Some(existing_head) = existing
         && let Some(base) = request.base.as_deref()
     {
-        let base_oid = pin_revision(context, base, cancel)?;
+        let base_oid = pin_revision(context, facts, base, cancel)?;
         if !is_ancestor(context, base_oid, existing_head, cancel)? {
             return Err(WorktreeError::BranchExistsWithBase {
                 branch: request.branch.clone(),
@@ -320,13 +380,18 @@ pub fn create(
     let base = if let Some(existing) = existing {
         existing
     } else if let Some(base) = request.base.as_deref() {
-        pin_revision(context, base, cancel)?
+        pin_revision(context, facts, base, cancel)?
     } else {
-        let outcome = run_git(context, context.repo, GitRead::RevParseHead, cancel)?;
-        if exit_code(&outcome)? != 0 {
-            return Err(WorktreeError::InvalidOutput);
-        }
-        parse_oid(trim_ascii(&outcome.stdout.bytes))?
+        let head = GitRevision::new("HEAD").map_err(|_| WorktreeError::InvalidRequest)?;
+        facts
+            .resolve_revision(context, head, cancel)
+            .map_err(|error| {
+                if matches!(error, WorktreeError::NotFound) {
+                    WorktreeError::InvalidOutput
+                } else {
+                    error
+                }
+            })?
     };
     let worktree_root = match context
         .repo
@@ -371,11 +436,7 @@ pub fn create(
             return Err(WorktreeError::UnknownWriter);
         }
     }
-    let _writer =
-        cache_writer_guard(context.project_state, &target).map_err(|state| match state {
-            WorkerState::Busy => WorktreeError::LockBusy,
-            _ => WorktreeError::UnknownWriter,
-        })?;
+    let _writer = cache_writer_guard(context.project_state, &target).map_err(custody_refusal)?;
     let named_root = context
         .repo
         .root_dir()
@@ -383,7 +444,7 @@ pub fn create(
     if !root_identity.same_identity(&named_root) {
         return Err(WorktreeError::UnknownWriter);
     }
-    let primary_head = primary_head(context, cancel)?;
+    let primary_head = primary_head(context, facts, cancel)?;
     if let Err(cause) = execute_mutation(
         context,
         GitMutation::WorktreeAdd {
@@ -408,11 +469,11 @@ pub fn create(
     // Creating a linked worktree must leave the primary's HEAD, branch or
     // detached, exactly as it was (#1331). A hook or race that moved it is
     // reported rather than hidden; the worktree stays for the operator.
-    if primary_head != self::primary_head(context, cancel)? {
+    if primary_head != self::primary_head(context, facts, cancel)? {
         return Err(WorktreeError::PrimaryMoved);
     }
     context.repo.revalidate()?;
-    let fresh = read_worktrees(context, cancel)?;
+    let fresh = context.facts.read_inventory(context, cancel)?;
     let entry = fresh
         .iter()
         .find(|entry| canonicalize(&entry.path).ok().as_deref() == Some(target.as_path()))
@@ -429,19 +490,17 @@ pub fn create(
         return Err(WorktreeError::RegistrationUnconfirmed);
     }
     let worker = context.workers.observe_roots(std::slice::from_ref(&target));
-    let writer = worker.get(&target).copied().unwrap_or(WorkerState::Unknown);
+    let writer = worker.get(&target).cloned().unwrap_or_else(|| {
+        Occupancy::census_unknown(target.clone(), context.workers.incomplete_census_detail())
+    });
     Ok(WorktreeInfo {
-        path: target,
+        path: target.clone(),
         branch: Some(branch.as_str().to_owned()),
         head: entry.head,
         dirty: WorktreeCondition::Clean,
-        owner: OwnerStatus::Unowned,
-        writer: match writer {
-            WorkerState::Free => WriterState::Free,
-            WorkerState::Live => WriterState::Live,
-            WorkerState::Busy => WriterState::Busy,
-            WorkerState::Unknown => WriterState::Unknown,
-        },
+        owner: Ok(None),
+        primary: false,
+        occupancy: combine_occupancy(&target, Occupancy::Available, writer),
     })
 }
 
@@ -465,7 +524,7 @@ pub(super) fn roll_back_failed_add(
     let Some((branch, base)) = created_branch else {
         return clean;
     };
-    let Ok(entries) = read_worktrees(context, cancel) else {
+    let Ok(entries) = context.facts.read_inventory(context, cancel) else {
         return false;
     };
     if entries
@@ -529,6 +588,7 @@ pub(super) fn remove_admin_entry(common_git_dir: &Path, target: &Path) -> bool {
 /// failures propagate: an unreadable snapshot must not disable the check.
 pub(super) fn primary_head(
     context: &WorktreeContext<'_>,
+    facts: &RepoFacts,
     cancel: &CancelToken,
 ) -> Result<(Vec<u8>, Option<GitOid>), WorktreeError> {
     let bytes = std::fs::read(context.repo.common_git_dir().join("HEAD"))
@@ -538,17 +598,17 @@ pub(super) fn primary_head(
         return Ok((bytes, None));
     };
     let name = GitRefName::new(name).map_err(|_| WorktreeError::InvalidOutput)?;
-    let outcome = run_git(context, context.repo, GitRead::ResolveRef { name }, cancel)?;
-    let commit = if exit_code(&outcome)? == 0 {
-        Some(parse_oid(trim_ascii(&outcome.stdout.bytes))?)
-    } else {
-        None
+    let commit = match facts.resolve_commit(context, name, cancel) {
+        Ok(commit) => Some(commit),
+        Err(WorktreeError::NotFound) => None,
+        Err(error) => return Err(error),
     };
     Ok((bytes, commit))
 }
 
 pub(super) fn pin_revision(
     context: &WorktreeContext<'_>,
+    facts: &RepoFacts,
     revision: &str,
     cancel: &CancelToken,
 ) -> Result<GitOid, WorktreeError> {
@@ -557,18 +617,8 @@ pub(super) fn pin_revision(
     // root against the remote's advertisement and apply any operators to that.
     let (root, suffix) = provenant_core::split_revision_root(revision);
     let parsed = GitRevision::new(root).map_err(|_| WorktreeError::InvalidRequest)?;
-    let symbolic = run_git(
-        context,
-        context.repo,
-        GitRead::SymbolicRevision { revision: parsed },
-        cancel,
-    )?;
-    let symbolic_name = if exit_code(&symbolic)? == 0 {
-        std::str::from_utf8(trim_ascii(&symbolic.stdout.bytes))
-            .map_err(|_| WorktreeError::InvalidOutput)?
-    } else {
-        ""
-    };
+    let symbolic = facts.symbolic_revision(context, parsed, cancel)?;
+    let symbolic_name = symbolic.as_deref().unwrap_or("");
     let tracking = symbolic_name.starts_with("refs/remotes/");
     let remote_head = (tracking && !root.contains('/') && GitRefName::branch(root).is_ok())
         .then(|| format!("{root}/HEAD"));
@@ -618,18 +668,17 @@ pub(super) fn pin_revision(
         crate::utility::RemoteBase::NotRemote => revision.to_owned(),
     };
     let parsed = GitRevision::new(&verified_revision).map_err(|_| WorktreeError::InvalidRequest)?;
-    let outcome = run_git(
-        context,
-        context.repo,
-        GitRead::ResolveRevision { revision: parsed },
-        cancel,
-    )?;
-    if exit_code(&outcome)? != 0 {
-        return Err(WorktreeError::BaseNotFound {
-            base: revision.to_owned(),
-        });
-    }
-    parse_oid(trim_ascii(&outcome.stdout.bytes))
+    facts
+        .resolve_revision(context, parsed, cancel)
+        .map_err(|error| {
+            if matches!(error, WorktreeError::NotFound) {
+                WorktreeError::BaseNotFound {
+                    base: revision.to_owned(),
+                }
+            } else {
+                error
+            }
+        })
 }
 
 pub(super) fn execute_mutation(
@@ -638,6 +687,7 @@ pub(super) fn execute_mutation(
     cancel: &CancelToken,
 ) -> Result<(), WorktreeError> {
     // A failed or timed-out mutation may still have changed repository state.
+    let _ = context.facts.take_inventory(context);
     context.workers.invalidate();
     let outcome = execute_git_mutation(
         context.executor,
@@ -703,7 +753,10 @@ pub(super) fn branch_unchanged(
     cancel: &CancelToken,
 ) -> Result<(), WorktreeError> {
     if checked_out_elsewhere(fresh, branch, Some(path))?
-        || resolve_ref(context, branch.clone(), cancel)? != head
+        || context
+            .facts
+            .resolve_commit(context, branch.clone(), cancel)?
+            != head
     {
         return Err(WorktreeError::IdentityChanged);
     }
@@ -792,7 +845,11 @@ pub(super) fn remove_tree_when(
     }
     let mut locked = lock_worktree_for_mutation(context, entry, cancel)?;
     context.repo.revalidate()?;
-    tree_unchanged(&read_worktrees(context, cancel)?, entry, expected_head)?;
+    tree_unchanged(
+        &context.facts.read_inventory(context, cancel)?,
+        entry,
+        expected_head,
+    )?;
     eligible()?;
     let prepared =
         worktree_dirty_at(context, locked.verified.repo(), cancel)? == WorktreeCondition::Ignored;
@@ -821,7 +878,11 @@ pub(super) fn remove_tree_when(
             Some(repository_lock(context, LockMode::Exclusive, cancel)?)
         }
     };
-    tree_unchanged(&read_worktrees(context, cancel)?, entry, expected_head)?;
+    tree_unchanged(
+        &context.facts.read_inventory(context, cancel)?,
+        entry,
+        expected_head,
+    )?;
     let fenced = match repository {
         Repository::Held => {
             eligible()?;
@@ -864,8 +925,9 @@ pub(super) fn remove_tree_when(
             .map(|branch| branch.as_str().to_owned()),
         head: expected_head,
         dirty: WorktreeCondition::Clean,
-        owner: OwnerStatus::Unknown,
-        writer: WriterState::Free,
+        owner: Err("worktree registration was not observed".into()),
+        primary: false,
+        occupancy: Occupancy::Available,
     };
     let writer = locked.writer.take().ok_or(WorktreeError::UnknownWriter)?;
     Ok(RemovedTree {
@@ -888,17 +950,21 @@ pub(super) fn refresh_census_under_custody(
     let (states, details) = context
         .workers
         .observe_roots_with_details(std::slice::from_ref(&root.to_path_buf()));
-    match states.get(root).copied().unwrap_or(WorkerState::Unknown) {
-        WorkerState::Free => Ok(()),
-        WorkerState::Unknown if !context.workers.requires_complete_census() => Ok(()),
-        WorkerState::Unknown => Err(WorktreeError::IncompleteCensus {
+    match states.get(root) {
+        Some(Occupancy::Available) => Ok(()),
+        Some(Occupancy::Unknown { .. }) if !context.workers.requires_complete_census() => Ok(()),
+        Some(Occupancy::Unknown { evidence, .. }) => Err(WorktreeError::IncompleteCensus {
             detail: details
                 .get(root)
                 .cloned()
-                .unwrap_or_else(|| context.workers.incomplete_census_detail()),
+                .unwrap_or_else(|| evidence.clone()),
         }),
-        WorkerState::Live => Err(live_refusal(context.workers, root)),
-        WorkerState::Busy => Err(WorktreeError::LockBusy),
+        Some(Occupancy::Observed { .. }) => Err(live_refusal(context.workers, root)),
+        Some(Occupancy::Held) => Err(WorktreeError::LockBusy),
+        None if !context.workers.requires_complete_census() => Ok(()),
+        None => Err(WorktreeError::IncompleteCensus {
+            detail: context.workers.incomplete_census_detail(),
+        }),
     }
 }
 
@@ -915,6 +981,7 @@ pub(super) fn pin_integration(
     text: &str,
     cancel: &CancelToken,
 ) -> Result<(GitRefName, GitOid), WorktreeError> {
+    let facts = context.facts;
     let candidates = [
         GitRefName::new(text),
         GitRefName::branch(text),
@@ -923,10 +990,10 @@ pub(super) fn pin_integration(
     let mut invalid = true;
     for candidate in candidates.into_iter().flatten() {
         invalid = false;
-        match resolve_ref(context, candidate.clone(), cancel) {
+        match facts.resolve_commit(context, candidate.clone(), cancel) {
             Ok(oid) => {
                 let oid = if candidate.as_str().starts_with("refs/remotes/") {
-                    pin_revision(context, candidate.as_str(), cancel)?
+                    pin_revision(context, facts, candidate.as_str(), cancel)?
                 } else {
                     oid
                 };
@@ -994,7 +1061,9 @@ pub(super) fn pin_branch_ref(
     let reference = GitRefName::new(reference)
         .or_else(|_| GitRefName::branch(reference))
         .map_err(|_| WorktreeError::InvalidRequest)?;
-    let oid = resolve_ref(context, reference.clone(), cancel)?;
+    let oid = context
+        .facts
+        .resolve_commit(context, reference.clone(), cancel)?;
     Ok((reference, oid))
 }
 
@@ -1112,12 +1181,15 @@ pub(super) fn settle_branch(
         Disposition::Discard => true,
     };
     context.repo.revalidate()?;
-    let fresh = read_worktrees(context, cancel)?;
+    let fresh = context.facts.read_inventory(context, cancel)?;
     if checked_out_elsewhere(&fresh, branch, None)? {
         retain(outcome, branch, RetainReason::CheckedOut);
         return Ok(());
     }
-    match resolve_ref(context, branch.clone(), cancel) {
+    match context
+        .facts
+        .resolve_commit(context, branch.clone(), cancel)
+    {
         Ok(current) if current == tip => {}
         Ok(_) | Err(WorktreeError::NotFound) => {
             retain(outcome, branch, RetainReason::Changed);
@@ -1129,6 +1201,7 @@ pub(super) fn settle_branch(
         }
     }
     context.repo.revalidate()?;
+    let _ = context.facts.take_inventory(context);
     let deleted = execute_git_mutation(
         context.executor,
         context.repo,
@@ -1268,12 +1341,45 @@ pub fn remove_with_output(
     cancel: &CancelToken,
     output: &provenant_config::ProjectGcSettings,
 ) -> Result<RemoveOutcome, WorktreeError> {
+    remove_with_owner(context, request, cancel, output, None)
+}
+
+/// Remove a freshly created lane only while it is still owned by this operation.
+/// The owner is checked again under repository and writer custody.
+pub fn remove_created_by_operation(
+    context: &WorktreeContext<'_>,
+    name: String,
+    expected_head: GitOid,
+    operation: &provenant_core::OperationId,
+    cancel: &CancelToken,
+) -> Result<RemoveOutcome, WorktreeError> {
+    remove_with_owner(
+        context,
+        WorktreeRemove::Name {
+            name,
+            discard: false,
+            integration: None,
+            expected_head: Some(expected_head),
+        },
+        cancel,
+        &Default::default(),
+        Some(operation),
+    )
+}
+
+fn remove_with_owner(
+    context: &WorktreeContext<'_>,
+    request: WorktreeRemove,
+    cancel: &CancelToken,
+    output: &provenant_config::ProjectGcSettings,
+    operation: Option<&provenant_core::OperationId>,
+) -> Result<RemoveOutcome, WorktreeError> {
     validate_binding(context)?;
     let repository = repository_lock(context, LockMode::Exclusive, cancel)?;
     let mut detached = Vec::new();
     let result = (|| {
         context.repo.revalidate()?;
-        let entries = read_worktrees(context, cancel)?;
+        let entries = context.facts.read_inventory(context, cancel)?;
         let mut outcome = RemoveOutcome::default();
         match request {
             WorktreeRemove::Name {
@@ -1289,6 +1395,29 @@ pub fn remove_with_output(
                 let branch_tips = read_branch_tips(context, cancel)?;
                 let entry = named_worktree(&entries, &name, context.repo.root_path())?;
                 let tip = entry.head;
+                let remove_named = || {
+                    let eligible = || {
+                        if let Some(operation) = operation {
+                            let tree = verify_worktree(context.repo, &entry.path)?;
+                            let owner = load_owner(&tree)?.ok_or(WorktreeError::UnknownWriter)?;
+                            if owner.origin != WorktreeOrigin::Lane
+                                || owner.operation_id.as_ref() != Some(operation)
+                            {
+                                return Err(WorktreeError::IdentityChanged);
+                            }
+                        }
+                        Ok(())
+                    };
+                    remove_tree_when(
+                        context,
+                        entry,
+                        tip,
+                        cancel,
+                        &eligible,
+                        Some(output),
+                        Repository::Held,
+                    )
+                };
                 // `remove_tree` rechecks this tip under the worktree lock, so
                 // a commit made after the caller's check cannot be removed.
                 if expected_head.is_some_and(|expected| expected != tip) {
@@ -1298,7 +1427,7 @@ pub fn remove_with_output(
                     if !discard && !is_ancestor(context, tip, integration_tip, cancel)? {
                         return Err(WorktreeError::DetachedUnmerged { head: tip });
                     }
-                    let removed = remove_tree(context, entry, tip, cancel, output)?;
+                    let removed = remove_named()?;
                     outcome.removed.push(removed.info.clone());
                     detached.push(removed);
                     return Ok(outcome);
@@ -1318,7 +1447,7 @@ pub fn remove_with_output(
                     cancel,
                 );
                 // A dirty or live worktree fails here, before any branch changes.
-                let removed = remove_tree(context, entry, tip, cancel, output)?;
+                let removed = remove_named()?;
                 outcome.removed.push(removed.info.clone());
                 detached.push(removed);
                 settle_branch(context, branch, tip, disposition, cancel, &mut outcome)?;

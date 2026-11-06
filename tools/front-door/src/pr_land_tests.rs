@@ -778,6 +778,8 @@ fn contribution_terminal(
         id,
         record.revision,
         &provenant_run::TerminalPublication {
+            terminal_cause: None,
+            terminal_note: None,
             outcome,
             started_at: Some(record.queued_at),
             finished_at: call.clock.wall_now()?,
@@ -1229,6 +1231,8 @@ pub(crate) fn pr_land_default_batch_gates_then_cleans_up() -> Result {
     );
     assert!(!landing.worktree.exists());
     assert!(!branch_exists(rig, "feat")?);
+    let remaining = git(rig, &["worktree", "list", "--porcelain"])?;
+    assert!(!remaining.contains("branch refs/heads/feat"), "{remaining}");
     Ok(())
 }
 
@@ -1288,7 +1292,7 @@ pub(crate) fn pr_land_refuses_incomplete_worker_census() -> Result {
         assert_eq!(status(&value, "worktree")?, "refused", "{value}");
         assert_eq!(status(&value, "branch")?, "skipped", "{value}");
         let text = value.to_string();
-        assert!(text.contains("process census unavailable"), "{value}");
+        assert!(text.contains("incomplete worker census"), "{value}");
         assert!(
             text.contains("deletion skipped because its registered worktree was kept"),
             "{value}"
@@ -1459,6 +1463,8 @@ pub(crate) fn pr_land_canonicalises_quoted_worktree_paths() -> Result {
     assert_eq!(code(&output), 0, "{value}");
     assert_eq!(status(&value, "worktree")?, "done", "{value}");
     assert!(!landing.worktree.exists());
+    let remaining = git(&landing.rig, &["worktree", "list", "--porcelain"])?;
+    assert!(!remaining.contains("branch refs/heads/feat"), "{remaining}");
     Ok(())
 }
 
@@ -1716,6 +1722,8 @@ pub(crate) fn pr_land_preserves_terminal_writer_evidence_in_parent_and_child_sto
             id,
             running.revision,
             &TerminalPublication {
+                terminal_cause: None,
+                terminal_note: None,
                 outcome: provenant_run::Outcome::Succeeded,
                 started_at: running.started_at,
                 finished_at: clock.wall_now()?,
@@ -1827,6 +1835,8 @@ pub(crate) fn pr_land_primary_with_separate_git_directory() -> Result {
         assert!(!landing.worktree.exists());
         landing.rig.project = main;
         assert!(!branch_exists(&landing.rig, "feat")?);
+        let remaining = git(&landing.rig, &["worktree", "list", "--porcelain"])?;
+        assert!(!remaining.contains("branch refs/heads/feat"), "{remaining}");
     }
     Ok(())
 }
@@ -1873,6 +1883,8 @@ pub(crate) fn pr_land_out_of_tree_with_separate_git_directory() -> Result {
             assert_eq!(status(&value, "branch")?, "done", "{value}");
             assert!(!lane.exists());
             assert!(!branch_exists(&landing.rig, "feat")?);
+            let remaining = git(&landing.rig, &["worktree", "list", "--porcelain"])?;
+            assert!(!remaining.contains("branch refs/heads/feat"), "{remaining}");
         } else {
             assert_eq!(code(&output), 0, "{value}");
             assert_eq!(value["data"]["cleanup_pending"], true);

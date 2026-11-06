@@ -413,6 +413,8 @@ pub(super) fn route() -> RouteRecord {
 }
 pub(super) fn publication() -> TerminalPublication<'static> {
     TerminalPublication {
+        terminal_cause: None,
+        terminal_note: None,
         outcome: Outcome::Succeeded,
         finished_at: WallTime::from_micros(200).unwrap(),
         started_at: Some(WallTime::from_micros(110).unwrap()),
@@ -1628,6 +1630,54 @@ fn oversize_is_refused_before_publication_or_read() -> TestResult {
     ));
     Ok(())
 }
+
+#[test]
+fn oversized_prompt_retains_code_and_projects_field_limit() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let mut request = input();
+    request.attempts[0].prompt = format!(
+        "TOKEN_SENTINEL{}",
+        "é".repeat((RECORD_LIMIT / 2 + 1) as usize)
+    );
+    request.request.tasks[0].prompt_digest =
+        CanonicalV1::file_digest(request.attempts[0].prompt.as_bytes());
+    let Err(error) = store.create(&request, &call) else {
+        return Err("oversized prompt accepted".into());
+    };
+    assert_eq!(
+        error.to_string(),
+        format!("read or record exceeds byte limit {RECORD_LIMIT}")
+    );
+    let projection = error.diagnostic(provenant_records::diagnostic::Destination::Local);
+    assert_eq!(projection.code, "INVALID");
+    assert!(
+        projection
+            .detail
+            .as_deref()
+            .unwrap()
+            .contains("tasks[0].prompt")
+    );
+    assert!(
+        projection
+            .detail
+            .as_deref()
+            .unwrap()
+            .contains(&RECORD_LIMIT.to_string())
+    );
+    assert!(!serde_json::to_string(&projection)?.contains("TOKEN_SENTINEL"));
+    assert!(
+        RunError::TooLarge {
+            limit: RECORD_LIMIT
+        }
+        .diagnostic(provenant_records::diagnostic::Destination::Local)
+        .detail
+        .is_none()
+    );
+    Ok(())
+}
 #[test]
 fn contained_artifact_refuses_symlink_escape_for_reads_and_writes() -> TestResult {
     use std::os::unix::fs::symlink;
@@ -2466,24 +2516,28 @@ fn a_version_seven_store_upgrades_on_open_and_can_admit() -> TestResult {
 }
 
 #[test]
-fn a_store_failure_names_its_cause_only_on_the_local_host() {
+fn a_store_failure_omits_source_text_at_every_destination() {
     use provenant_records::diagnostic::Destination;
     let error = RunError::Sqlite(rusqlite::Error::SqliteFailure(
         rusqlite::ffi::Error::new(1),
-        Some("no such table: example".to_owned()),
+        Some("no such table: TOKEN_SENTINEL /private/host\u{1b}".to_owned()),
     ));
-    let local = error.diagnostic(Destination::Local);
-    assert!(
-        local
-            .detail
-            .as_deref()
-            .is_some_and(|detail| detail.contains("no such table"))
-    );
-    let remote = error.diagnostic(Destination::Remote {
-        repository: None,
-        home: None,
-    });
-    assert!(remote.detail.is_none());
+    for destination in [
+        Destination::Local,
+        Destination::Remote {
+            repository: None,
+            home: None,
+        },
+    ] {
+        let diagnostic = error.diagnostic(destination);
+        assert_eq!(diagnostic.code, "IO");
+        assert!(diagnostic.detail.is_none());
+        assert!(diagnostic.next.is_some());
+        let wire = serde_json::to_string(&diagnostic).unwrap();
+        assert!(!wire.contains("TOKEN_SENTINEL"));
+        assert!(!wire.contains("/private/host"));
+        assert!(!wire.chars().any(char::is_control));
+    }
 }
 
 #[test]
@@ -3004,6 +3058,8 @@ fn receipt_lost_recovery_converges_on_a_sealed_non_lost_decision() -> TestResult
         );
         blocker.execute_batch("ROLLBACK")?;
         let conflicting = TerminalPublication {
+            terminal_cause: None,
+            terminal_note: None,
             result: "conflicting result",
             ..publication()
         };
@@ -3065,6 +3121,8 @@ fn receipt_busy_then_replay_converges_and_retains_conflict() -> TestResult {
         let original = std::fs::read(path.join("terminal-pending.json"))?;
         blocker.execute_batch("ROLLBACK")?;
         let conflicting = TerminalPublication {
+            terminal_cause: None,
+            terminal_note: None,
             result: "conflicting result",
             ..publication()
         };

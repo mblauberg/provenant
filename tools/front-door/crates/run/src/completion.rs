@@ -210,6 +210,7 @@ mod tests {
     }
     fn decoded() -> Decoded {
         Decoded {
+            terminal_cause: None,
             outcome: Outcome::QuotaLimited,
             result: String::new(),
             complete: false,
@@ -456,6 +457,7 @@ mod tests {
             _: &Path,
         ) -> std::result::Result<Decoded, String> {
             Ok(Decoded {
+                terminal_cause: None,
                 outcome: self.outcome,
                 complete: true,
                 result: "Result policy fixture".into(),

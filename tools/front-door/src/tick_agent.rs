@@ -62,6 +62,37 @@ fn diagnosis_installed(
     }
 }
 
+/// Interpret launchd's textual protocol once at the platform boundary.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TickExitCause {
+    ExitCode,
+    Signal,
+    LaunchConstraint,
+    Crash,
+    Killed,
+}
+
+fn exit_cause(
+    exit: Option<&str>,
+    signal: Option<&str>,
+    reason: Option<&str>,
+) -> Option<TickExitCause> {
+    if exit.is_some_and(|code| code != "0" && code != "(never exited)") {
+        return Some(TickExitCause::ExitCode);
+    }
+    if signal.is_some_and(|signal| signal != "0") {
+        return Some(TickExitCause::Signal);
+    }
+    let reason = reason?.to_ascii_lowercase();
+    [
+        ("constraint", TickExitCause::LaunchConstraint),
+        ("crash", TickExitCause::Crash),
+        ("kill", TickExitCause::Killed),
+    ]
+    .into_iter()
+    .find_map(|(word, cause)| reason.contains(word).then_some(cause))
+}
+
 fn parse_diagnosis(output: &str) -> Diagnosis {
     let field = |key: &str| {
         output.lines().find_map(|line| {
@@ -79,14 +110,7 @@ fn parse_diagnosis(output: &str) -> Diagnosis {
     let exit = field("last exit code");
     let signal = field("last terminating signal");
     let reason = field("last exit reason");
-    let abnormal = exit
-        .as_deref()
-        .is_some_and(|code| code != "0" && code != "(never exited)")
-        || signal.as_deref().is_some_and(|signal| signal != "0")
-        || reason.as_deref().is_some_and(|reason| {
-            let reason = reason.to_ascii_lowercase();
-            reason.contains("constraint") || reason.contains("crash") || reason.contains("kill")
-        });
+    let cause = exit_cause(exit.as_deref(), signal.as_deref(), reason.as_deref());
     let last_exit_reason = match (exit, signal, reason) {
         (None, None, None) => None,
         (exit, signal, reason) => Some(
@@ -104,11 +128,11 @@ fn parse_diagnosis(output: &str) -> Diagnosis {
     Diagnosis {
         state,
         last_exit_reason,
-        warning: abnormal.then(|| {
+        warning: cause.is_some().then(|| {
             "Tick failed or is crash-looping; a SIGKILL may indicate a launch-constraint kill"
                 .into()
         }),
-        repair: abnormal.then(|| "provenant upgrade".into()),
+        repair: cause.is_some().then(|| "provenant upgrade".into()),
     }
 }
 const TIMER: &str = "provenant-tick.timer";
@@ -402,6 +426,30 @@ mod tests {
             assert!(diagnosis.last_exit_reason.is_some());
             assert_eq!(diagnosis.repair.as_deref(), Some("provenant upgrade"));
         }
+    }
+
+    #[test]
+    fn launchd_exit_cause_is_classified_at_the_boundary() {
+        assert_eq!(exit_cause(Some("0"), None, None), None);
+        assert_eq!(exit_cause(Some("(never exited)"), Some("0"), None), None);
+        for (text, cause) in [
+            (
+                "Launch Constraint Violation",
+                TickExitCause::LaunchConstraint,
+            ),
+            ("service crashed", TickExitCause::Crash),
+            ("was killed", TickExitCause::Killed),
+        ] {
+            assert_eq!(exit_cause(None, None, Some(text)), Some(cause));
+        }
+        assert_eq!(
+            exit_cause(Some("1"), None, Some("crashed")),
+            Some(TickExitCause::ExitCode)
+        );
+        assert_eq!(
+            exit_cause(None, Some("9"), None),
+            Some(TickExitCause::Signal)
+        );
     }
 
     #[test]

@@ -2977,7 +2977,10 @@ fn composite_exports_are_checked_when_a_preset_is_compiled() {
     document["nodes"][0]["composite"]["exports"][0]["node"] = json!("missing");
     let document: provenant_fabric_runtime::graph::GraphDocument =
         serde_json::from_value(document).unwrap();
-    assert_eq!(error, document.admit(&Default::default()).unwrap_err());
+    assert_eq!(
+        error,
+        document.admit(&Default::default()).unwrap_err().to_string()
+    );
 }
 
 #[test]
@@ -3012,7 +3015,13 @@ fn loop_safety_bound_is_shared_by_preset_compile_and_admission() {
     document["nodes"][0]["loop"]["max_rounds"] = json!(1024);
     let document: provenant_fabric_runtime::graph::GraphDocument =
         serde_json::from_value(document).unwrap();
-    assert_eq!(document.admit(&layers.graph_limits).unwrap_err(), error);
+    assert_eq!(
+        document
+            .admit(&layers.graph_limits)
+            .unwrap_err()
+            .to_string(),
+        error
+    );
     let error = expand(&layers, "too-many-rounds", "brief", &[]).unwrap_err();
     assert!(
         error.contains("limits.loop_expansion_rounds=1024"),
@@ -3047,7 +3056,13 @@ fn invalid_loop_round_settings_fail_at_compile_and_admission() {
         document["nodes"][0]["loop"][field] = json!(invalid);
         let document: provenant_fabric_runtime::graph::GraphDocument =
             serde_json::from_value(document).unwrap();
-        assert_eq!(document.admit(&layers.graph_limits).unwrap_err(), error);
+        assert_eq!(
+            document
+                .admit(&layers.graph_limits)
+                .unwrap_err()
+                .to_string(),
+            error
+        );
     }
 }
 
@@ -3061,7 +3076,13 @@ fn preset_node_limit_uses_the_host_admission_bound() {
         .document;
     let document: provenant_fabric_runtime::graph::GraphDocument =
         serde_json::from_value(document).unwrap();
-    assert_eq!(error, document.admit(&layers.graph_limits).unwrap_err());
+    assert_eq!(
+        error,
+        document
+            .admit(&layers.graph_limits)
+            .unwrap_err()
+            .to_string()
+    );
     assert!(error.contains("limits.nodes=1"), "{error}");
     assert!(error.contains("domains.fabric.graph.limits"), "{error}");
 
@@ -3079,7 +3100,13 @@ fn preset_node_limit_uses_the_host_admission_bound() {
             .document,
     )
     .unwrap();
-    assert_eq!(error, document.admit(&layers.graph_limits).unwrap_err());
+    assert_eq!(
+        error,
+        document
+            .admit(&layers.graph_limits)
+            .unwrap_err()
+            .to_string()
+    );
     layers.graph_limits.nodes = 3;
     assert!(expand(&layers, "counted-loop", "brief", &[]).is_ok());
     assert!(document.admit(&layers.graph_limits).is_ok());
@@ -3118,7 +3145,10 @@ fn expanded_composite_id_refusal_matches_admission() {
     document["nodes"][0]["id"] = json!(outer);
     let document: provenant_fabric_runtime::graph::GraphDocument =
         serde_json::from_value(document).unwrap();
-    assert_eq!(error, document.admit(&Default::default()).unwrap_err());
+    assert_eq!(
+        error,
+        document.admit(&Default::default()).unwrap_err().to_string()
+    );
 }
 
 #[test]
@@ -3140,7 +3170,10 @@ fn expanded_loop_id_refusal_matches_admission() {
     document["nodes"][0]["id"] = json!(outer);
     let document: provenant_fabric_runtime::graph::GraphDocument =
         serde_json::from_value(document).unwrap();
-    assert_eq!(error, document.admit(&Default::default()).unwrap_err());
+    assert_eq!(
+        error,
+        document.admit(&Default::default()).unwrap_err().to_string()
+    );
 }
 
 #[test]
@@ -5029,7 +5062,7 @@ prompt = "Look at ${prompt}"
     let expansion = expand(&layers, "outer", "brief", &[]).unwrap();
     let document: provenant_fabric_runtime::graph::GraphDocument =
         serde_json::from_value(expansion.document).unwrap();
-    let error = document.admit(&Default::default()).unwrap_err();
+    let error = document.admit(&Default::default()).unwrap_err().to_string();
     assert!(error.contains("look"), "{error}");
     assert!(error.contains("inner"), "{error}");
     assert!(error.contains("commit"), "{error}");
@@ -5047,7 +5080,9 @@ fn selection(stages: &str) -> Result<Expansion, String> {
     let expansion = expand(&layers, "sel", "brief", &[])?;
     let document: provenant_fabric_runtime::graph::GraphDocument =
         serde_json::from_value(expansion.document.clone()).map_err(|error| error.to_string())?;
-    document.admit(&Default::default())?;
+    document
+        .admit(&Default::default())
+        .map_err(|error| error.to_string())?;
     Ok(expansion)
 }
 
@@ -5959,7 +5994,7 @@ mod planner_front_end {
     fn linked_worktrees_come_from_git_without_the_main_checkout() {
         let temp = tempfile::tempdir().unwrap();
         let main = temp.path().join("main");
-        let linked = temp.path().join("linked");
+        let linked = temp.path().join("linked \"worktree\"\nline");
         std::fs::create_dir(&main).unwrap();
         let git = |dir: &std::path::Path, args: &[&str]| {
             let output = provenant_os::fixture::git_command()
@@ -5990,6 +6025,9 @@ mod planner_front_end {
             ))
         };
         let found = linked_worktrees(&main);
+        let subdirectory = main.join("nested project directory");
+        std::fs::create_dir(&subdirectory).unwrap();
+        assert_eq!(linked_worktrees(&subdirectory), found);
         let expected = std::fs::canonicalize(&linked)
             .unwrap()
             .display()
@@ -6006,6 +6044,35 @@ mod planner_front_end {
         let bare = temp.path().join("bare");
         std::fs::create_dir(&bare).unwrap();
         assert!(linked_worktrees(&bare).is_empty());
+        let bare_repo = temp.path().join("bare.git");
+        let bare_lane = temp.path().join("bare lane");
+        git(
+            &main,
+            &[
+                "clone",
+                "-q",
+                "--bare",
+                main.to_str().unwrap(),
+                bare_repo.to_str().unwrap(),
+            ],
+        );
+        git(
+            &bare_repo,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "bare-lane",
+                bare_lane.to_str().unwrap(),
+            ],
+        );
+        let bare_found = linked_worktrees(&bare_repo);
+        assert_eq!(bare_found.len(), 1);
+        assert_eq!(
+            std::fs::canonicalize(&bare_found[0]).unwrap(),
+            std::fs::canonicalize(&bare_lane).unwrap()
+        );
         // The discovered list is what the planner is offered by default.
         let mut project = layers(PlanMode::On, None);
         project.plan.as_mut().unwrap().worktrees = found.clone();

@@ -640,6 +640,7 @@ impl DomainConfig for RoutingConfig {
                 || !identifier(&row.task_kind)
             {
                 errors.push(SectionError {
+                    detail: None,
                     field: format!("model_choices.{index}"),
                     code: "selector",
                 });
@@ -647,6 +648,7 @@ impl DomainConfig for RoutingConfig {
         }
         if self.model_exclusions.len() > 256 {
             errors.push(SectionError {
+                detail: None,
                 field: "model_exclusions".into(),
                 code: "limit",
             });
@@ -654,6 +656,7 @@ impl DomainConfig for RoutingConfig {
         for (index, exclusion) in self.model_exclusions.iter().enumerate() {
             if !exclusion.schedule.valid() {
                 errors.push(SectionError {
+                    detail: None,
                     field: format!("model_exclusions.{index}"),
                     code: "schedule",
                 });
@@ -664,6 +667,7 @@ impl DomainConfig for RoutingConfig {
         }
         if self.settlement_retries > MAX_SETTLEMENT_RETRIES {
             errors.push(SectionError {
+                detail: None,
                 field: "settlement_retries".into(),
                 code: "limit",
             });
@@ -683,6 +687,7 @@ impl DomainConfig for RoutingConfig {
         ] {
             if seconds > MAX_RETRY_WAIT_SECONDS {
                 errors.push(SectionError {
+                    detail: None,
                     field: field.into(),
                     code: "limit",
                 });
@@ -690,6 +695,7 @@ impl DomainConfig for RoutingConfig {
         }
         if self.routes.len() > 128 {
             errors.push(SectionError {
+                detail: None,
                 field: "routes".into(),
                 code: "limit",
             });
@@ -703,6 +709,7 @@ impl DomainConfig for RoutingConfig {
                 .is_none()
             {
                 errors.push(SectionError {
+                    detail: None,
                     field: format!("routes.{name}.model"),
                     code: "unknown_model",
                 });
@@ -713,6 +720,7 @@ impl DomainConfig for RoutingConfig {
                 || route.effort.as_deref().is_some_and(|e| !effort_valid(e))
             {
                 errors.push(SectionError {
+                    detail: None,
                     field: "routes".into(),
                     code: if collides_with_pool {
                         "collision"
@@ -724,6 +732,7 @@ impl DomainConfig for RoutingConfig {
         }
         if self.pools.len() > 32 {
             errors.push(SectionError {
+                detail: None,
                 field: "pools".into(),
                 code: "limit",
             });
@@ -731,6 +740,7 @@ impl DomainConfig for RoutingConfig {
         for (name, members) in &self.pools {
             if !identifier(name) || self.routes.contains_key(name) {
                 errors.push(SectionError {
+                    detail: None,
                     field: format!("pools.{name}"),
                     code: if self.routes.contains_key(name) {
                         "collision"
@@ -741,6 +751,7 @@ impl DomainConfig for RoutingConfig {
             }
             if members.len() > 16 {
                 errors.push(SectionError {
+                    detail: None,
                     field: format!("pools.{name}"),
                     code: "limit",
                 });
@@ -750,12 +761,14 @@ impl DomainConfig for RoutingConfig {
                 let prefix = format!("pools.{name}[{index}]");
                 if !seen.insert(&member.model) {
                     errors.push(SectionError {
+                        detail: None,
                         field: format!("{prefix}.model"),
                         code: "duplicate",
                     });
                 }
                 if member.weight > 100 {
                     errors.push(SectionError {
+                        detail: None,
                         field: format!("{prefix}.weight"),
                         code: "range",
                     });
@@ -765,6 +778,7 @@ impl DomainConfig for RoutingConfig {
                     .and_then(|value| value.model(&member.model));
                 if model.is_none() {
                     errors.push(SectionError {
+                        detail: None,
                         field: format!("{prefix}.model"),
                         code: "unknown_model",
                     });
@@ -774,6 +788,7 @@ impl DomainConfig for RoutingConfig {
                     .any(|provider| provider.adapter.id() == member.model.adapter())
                 {
                     errors.push(SectionError {
+                        detail: None,
                         field: format!("{prefix}.model"),
                         code: "unknown_provider",
                     });
@@ -788,12 +803,14 @@ impl DomainConfig for RoutingConfig {
                         .any(|effort| !effort_valid(effort) || !seen_efforts.insert(effort))
                 {
                     errors.push(SectionError {
+                        detail: None,
                         field: format!("{prefix}.efforts"),
                         code: "unsupported_effort",
                     });
                 }
                 if member.effort.as_deref().is_some_and(|e| !effort_valid(e)) {
                     errors.push(SectionError {
+                        detail: None,
                         field: format!("{prefix}.effort"),
                         code: "unsupported_effort",
                     });
@@ -806,6 +823,7 @@ impl DomainConfig for RoutingConfig {
                 .any(|registration| registration.adapter.id() == provider)
             {
                 errors.push(SectionError {
+                    detail: None,
                     field: format!("pacing.{provider}"),
                     code: "unknown_provider",
                 });
@@ -814,6 +832,7 @@ impl DomainConfig for RoutingConfig {
         for (account, profile) in &self.pacing.accounts {
             if !account_identifier(account) {
                 errors.push(SectionError {
+                    detail: None,
                     field: format!("pacing.accounts.{account}"),
                     code: "selector",
                 });
@@ -827,6 +846,7 @@ impl DomainConfig for RoutingConfig {
                 .any(|r| r.adapter.id() == provider)
             {
                 errors.push(SectionError {
+                    detail: None,
                     field: format!("pacing.free.{provider}"),
                     code: "unknown_provider",
                 });
@@ -845,6 +865,7 @@ impl DomainConfig for RoutingConfig {
                 })
             {
                 errors.push(SectionError {
+                    detail: None,
                     field: format!("pacing_overrides.{index}"),
                     code: "selector",
                 });
@@ -852,6 +873,7 @@ impl DomainConfig for RoutingConfig {
                 // Reported at the override, so recovery drops the override
                 // rather than its schedule, which would make it permanent.
                 errors.push(SectionError {
+                    detail: None,
                     field: format!("pacing_overrides.{index}"),
                     code: "schedule",
                 });
@@ -863,12 +885,14 @@ impl DomainConfig for RoutingConfig {
                 .any(|r| r.adapter.id() == provider)
             {
                 errors.push(SectionError {
+                    detail: None,
                     field: format!("pacing_reserve.{provider}"),
                     code: "unknown_provider",
                 });
             }
             if reserve.five_hour_percent > 100 || reserve.seven_day_percent > 100 {
                 errors.push(SectionError {
+                    detail: None,
                     field: format!("pacing_reserve.{provider}"),
                     code: "range",
                 });
@@ -887,6 +911,7 @@ fn account_identifier(value: &str) -> bool {
 fn validate_profile(field: &str, profile: &PacingProfile, errors: &mut Vec<SectionError>) {
     if profile.reserve.values().any(|percent| *percent > 100) {
         errors.push(SectionError {
+            detail: None,
             field: format!("{field}.reserve"),
             code: "range",
         });
@@ -897,6 +922,7 @@ fn validate_profile(field: &str, profile: &PacingProfile, errors: &mut Vec<Secti
         .is_some_and(|deadline| matches!(deadline, PacingDeadline::ResetOf(reset) if !account_identifier(&reset.reset_of)))
     {
         errors.push(SectionError {
+                detail: None,
             field: format!("{field}.deadline"),
             code: "selector",
         });
@@ -907,6 +933,7 @@ fn validate_profile(field: &str, profile: &PacingProfile, errors: &mut Vec<Secti
         .is_some_and(|windows| windows.iter().collect::<BTreeSet<_>>().len() != windows.len())
     {
         errors.push(SectionError {
+            detail: None,
             field: format!("{field}.windows"),
             code: "duplicate",
         });
@@ -1207,12 +1234,14 @@ impl WriterAdvisory {
             label.is_empty() || label.len() > 128 || label.chars().any(char::is_control)
         }) {
             errors.push(SectionError {
+                detail: None,
                 field: format!("{prefix}.label"),
                 code: "label",
             });
         }
         if self.warn_models.len() > 256 || self.cheaper_models.len() > 256 {
             errors.push(SectionError {
+                detail: None,
                 field: prefix.into(),
                 code: "limit",
             });
@@ -1225,6 +1254,7 @@ impl WriterAdvisory {
                 .any(|pool| !identifier(pool) || !seen.insert(pool))
         {
             errors.push(SectionError {
+                detail: None,
                 field: format!("{prefix}.pool_priority"),
                 code: "selector",
             });

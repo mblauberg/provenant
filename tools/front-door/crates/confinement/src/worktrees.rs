@@ -15,6 +15,7 @@ pub use inventory::*;
 pub use lifecycle::*;
 pub use owner::{
     WorktreeOrigin, WorktreeOwner, load_owner, prune_owned, save_lane_owner_when_free, save_owner,
+    update_owner_when_unchanged,
 };
 
 use crate::repo::{
@@ -130,6 +131,8 @@ pub enum WorktreeError {
     /// as `UnknownWriter`; lifecycle consumers get a typed retry cause.
     #[error("worktree writer or registration is unknown")]
     CensusUnknown { detail: String, path: PathBuf },
+    #[error("worktree writer or registration is unknown")]
+    UnknownOccupancy { detail: String, path: PathBuf },
     #[error("Git marks the worktree {}", if *.locked { "locked" } else { "prunable" })]
     GitEntryHeld { locked: bool },
     #[error("worktree operation was cancelled")]
@@ -195,9 +198,10 @@ impl WorktreeError {
             Self::RegistryLockTimeout => Some(AdmissionCause::RegistryLockTimeout),
             Self::IncompleteCensus { .. } => Some(AdmissionCause::CensusIncomplete),
             Self::CensusUnknown { .. } => Some(AdmissionCause::CensusIncomplete),
-            Self::UnknownWriter | Self::UnknownWriterAt { .. } | Self::GitEntryHeld { .. } => {
-                Some(AdmissionCause::RegistrationOrCustodyUnknown)
-            }
+            Self::UnknownWriter
+            | Self::UnknownWriterAt { .. }
+            | Self::UnknownOccupancy { .. }
+            | Self::GitEntryHeld { .. } => Some(AdmissionCause::RegistrationOrCustodyUnknown),
             Self::LockBusy | Self::LiveWriter | Self::LiveProcess(_) | Self::WriterBusy { .. } => {
                 Some(AdmissionCause::LiveWriter)
             }
@@ -214,6 +218,7 @@ impl WorktreeError {
             Self::UnknownWriter
                 | Self::UnknownWriterAt { .. }
                 | Self::CensusUnknown { .. }
+                | Self::UnknownOccupancy { .. }
                 | Self::GitEntryHeld { .. }
         )
     }
@@ -244,7 +249,10 @@ impl WorktreeError {
             Self::GitOperationInProgress => {
                 "run `git -C PATH status` and complete or abort the Git operation before retrying"
             }
-            Self::UnknownWriter | Self::UnknownWriterAt { .. } | Self::CensusUnknown { .. } => {
+            Self::UnknownWriter
+            | Self::UnknownWriterAt { .. }
+            | Self::CensusUnknown { .. }
+            | Self::UnknownOccupancy { .. } => {
                 "run `provenant worktree list` and inspect the registration and writer state before retrying"
             }
             Self::IncompleteCensus { .. } => {
@@ -365,6 +373,8 @@ pub struct WorktreeContext<'a> {
     pub project_state: &'a Directory,
     pub executor: &'a dyn Executor,
     pub utility: &'a UtilityRuntime,
+    /// Repository observations shared by operations in this context.
+    pub facts: &'a RepoFacts,
     pub workers: &'a dyn WorkerObserver,
     pub clock: &'a dyn Clock,
     /// Bounds Git reads. Keep it short: a stuck read is a defect to surface.
@@ -420,23 +430,66 @@ pub enum WorktreeCondition {
     Unknown,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum WriterState {
-    Free,
-    Busy,
-    Live,
-    Unknown,
+/// A worktree's observed occupancy, including the scope and evidence when it
+/// cannot be determined. Process observations are advisory; held custody is
+/// determined by the writer exclusion slot and retained fences.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Occupancy {
+    Available,
+    Held,
+    Observed {
+        process: Option<ObservedProcess>,
+    },
+    Unknown {
+        scope: PathBuf,
+        evidence: String,
+        source: OccupancyUnknownSource,
+    },
 }
 
-/// Observed lane-ownership registration; absence does not prove custody is free.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum OwnerStatus {
-    Registered,
-    Unowned,
-    Unknown,
-    Primary,
+impl Occupancy {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Available => "free",
+            Self::Held => "busy",
+            Self::Observed { .. } => "live",
+            Self::Unknown { .. } => "unknown",
+        }
+    }
+
+    pub fn is_available(&self) -> bool {
+        matches!(self, Self::Available)
+    }
+
+    pub fn is_observed(&self) -> bool {
+        matches!(self, Self::Observed { .. })
+    }
+
+    pub fn is_unknown(&self) -> bool {
+        matches!(self, Self::Unknown { .. })
+    }
+
+    pub fn census_unknown(scope: PathBuf, evidence: impl Into<String>) -> Self {
+        Self::Unknown {
+            scope,
+            evidence: evidence.into(),
+            source: OccupancyUnknownSource::Census,
+        }
+    }
+
+    pub fn custody_unknown(scope: PathBuf, evidence: impl Into<String>) -> Self {
+        Self::Unknown {
+            scope,
+            evidence: evidence.into(),
+            source: OccupancyUnknownSource::Custody,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OccupancyUnknownSource {
+    Census,
+    Custody,
 }
 
 /// CLI result facts are serialize-only. Its absolute path is emitted through
@@ -447,8 +500,28 @@ pub struct WorktreeInfo {
     pub branch: Option<String>,
     pub head: GitOid,
     pub dirty: WorktreeCondition,
-    pub writer: WriterState,
-    pub owner: OwnerStatus,
+    pub occupancy: Occupancy,
+    /// The existing owner record, or the evidence that it could not be read.
+    pub owner: Result<Option<WorktreeOwner>, String>,
+    pub primary: bool,
+}
+
+impl WorktreeInfo {
+    pub fn is_unowned(&self) -> bool {
+        !self.primary && matches!(self.owner, Ok(None))
+    }
+
+    fn owner_label(&self) -> &'static str {
+        if self.primary {
+            "primary"
+        } else {
+            match &self.owner {
+                Ok(Some(_)) => "registered",
+                Ok(None) => "unowned",
+                Err(_) => "unknown",
+            }
+        }
+    }
 }
 
 impl Serialize for WorktreeInfo {
@@ -462,9 +535,9 @@ impl Serialize for WorktreeInfo {
         state.serialize_field("branch", &self.branch)?;
         state.serialize_field("head", &self.head)?;
         state.serialize_field("dirty", &self.dirty)?;
-        state.serialize_field("writer", &self.writer)?;
-        state.serialize_field("owner", &self.owner)?;
-        if self.owner == OwnerStatus::Unowned {
+        state.serialize_field("writer", self.occupancy.label())?;
+        state.serialize_field("owner", self.owner_label())?;
+        if self.is_unowned() {
             state.serialize_field("next", "This checkout has no Provenant lane owner; it may have been created outside Provenant. Inspect its custody, then select it explicitly with --worktree <path>.")?;
         }
         state.end()
@@ -513,14 +586,6 @@ pub struct RemoveOutcome {
 pub struct DiscardedRef {
     pub branch: String,
     pub head: GitOid,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum WorkerState {
-    Free,
-    Busy,
-    Live,
-    Unknown,
 }
 
 /// The typed reason a worktree root is tainted (not free).
@@ -589,13 +654,10 @@ impl std::fmt::Display for UncertaintyReason {
 }
 
 /// Per-root custody states and reasons for unknown states.
-pub type WorkerObservations = (BTreeMap<PathBuf, WorkerState>, BTreeMap<PathBuf, String>);
+pub type WorkerObservations = (BTreeMap<PathBuf, Occupancy>, BTreeMap<PathBuf, String>);
 
 /// Per-root custody states and typed causes for tainted states.
-pub type WorkerTaintObservations = (
-    BTreeMap<PathBuf, WorkerState>,
-    BTreeMap<PathBuf, TaintCause>,
-);
+pub type WorkerTaintObservations = (BTreeMap<PathBuf, Occupancy>, BTreeMap<PathBuf, TaintCause>);
 
 #[cfg(test)]
 mod census_tests;

@@ -32,7 +32,8 @@ in practice:
 - Record environment failures and failures in untouched code, then skip them.
   Do not repair them inside the slice.
 - Give a budget of about 35 to 60 minutes and a priority order, so a stop part
-  way still returns the most valuable items.
+  way still returns the most valuable items. Keep lanes this short; a longer
+  lane is for coupled work that cannot be split.
 - Name one writer per worktree, and forbid checkout, switch or detach in any
   other checkout. When a lane ends partial, confirm its process has exited
   before a new writer adopts the worktree.

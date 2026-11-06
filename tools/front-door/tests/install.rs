@@ -2733,6 +2733,46 @@ fn shared_settings_sync_conflict_adopt_force_and_refusal() -> Result {
     let (status, refused) = run_json(&rig, &["accounts", "sync"])?;
     assert_ne!(status, 0, "{refused}");
     assert!(refused.to_string().contains("is never synced"), "{refused}");
+    assert_eq!(refused["error"]["code"], "SHARED_SETTINGS_NEVER_SYNCED");
+    assert!(
+        refused["error"]["repair"]
+            .as_str()
+            .unwrap()
+            .contains("shared settings")
+    );
+    for command in [&["accounts", "list"][..], &["route", "list"][..]] {
+        let (status, refused) = run_json(&rig, command)?;
+        assert_ne!(status, 0, "{command:?}: {refused}");
+        assert_eq!(
+            refused["error"]["code"], "SHARED_SETTINGS_NEVER_SYNCED",
+            "{command:?}: {refused}"
+        );
+        assert!(refused.to_string().contains("is never synced"), "{refused}");
+        assert!(
+            refused["error"]["repair"]
+                .as_str()
+                .unwrap()
+                .contains("shared settings")
+        );
+    }
+    write_accounts_section(&rig, |accounts| {
+        let mut keys = toml_edit::Array::new();
+        keys.push("env");
+        accounts["shared_settings"]["keys"] = toml_edit::value(keys);
+    })?;
+    fs::write(
+        &source,
+        r#"{"env":{"ANTHROPIC_AUTH_TOKEN":"TOKEN_SENTINEL"}}"#,
+    )?;
+    let (status, refused) = run_json(&rig, &["accounts", "sync"])?;
+    assert_ne!(status, 0, "{refused}");
+    assert_eq!(refused["error"]["code"], "SHARED_SETTINGS_NEVER_SYNCED");
+    assert!(!refused.to_string().contains("TOKEN_SENTINEL"));
+    write_accounts_section(&rig, |accounts| {
+        let mut keys = toml_edit::Array::new();
+        keys.push("apiKeyHelper");
+        accounts["shared_settings"]["keys"] = toml_edit::value(keys);
+    })?;
     let removed = rig.command(&["uninstall", "--harness", "claude"])?;
     assert_eq!(code(&removed), 0, "{removed:?}");
     // `CLAUDE_CONFIG_DIR` selects the one matching recorded target.

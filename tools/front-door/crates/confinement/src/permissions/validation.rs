@@ -621,3 +621,20 @@ pub(super) fn validate_endpoint(endpoint: &NetworkEndpoint) -> Result<(), Permis
     }
     Ok(())
 }
+
+#[cfg(any(target_os = "macos", test))]
+pub(super) fn filtered_native_controls(controls: &[String]) -> Vec<String> {
+    let filtered: Vec<_> = controls
+        .iter()
+        .filter(|control| valid_native_control(control))
+        .cloned()
+        .collect();
+    if filtered.len() != controls.len() {
+        use std::io::Write;
+        let _ = writeln!(
+            std::io::stderr().lock(),
+            "warning: invalid native control labels were omitted"
+        );
+    }
+    filtered
+}

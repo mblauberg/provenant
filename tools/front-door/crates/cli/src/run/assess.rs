@@ -222,6 +222,27 @@ pub(super) fn assess_settlement_retry(
             ..Default::default()
         };
     }
+    // A quota refusal before any generated output has no work to retain.
+    // Redraw the alias with the spent member excluded by the successor record.
+    let no_work = decoded.result.trim().is_empty()
+        && decoded.usage.output_excluding_reasoning.unwrap_or(0) == 0
+        && decoded.usage.reasoning.unwrap_or(0) == 0
+        && (task.writer.is_none()
+            || decoded.usage.output_excluding_reasoning == Some(0)
+            || decoded.session.as_deref().is_none_or(str::is_empty));
+    if quota && no_work && matches!(record.requested_route, run::RequestedRoute::Named { .. }) {
+        return run::ResultAssessment {
+            cause: Some(typed_cause),
+            note: Some("quota limit before work; retrying another member of the alias".into()),
+            retry: Some(run::PolicyRetry {
+                schema_version: 2, cause: typed_cause, action: run::PolicyAction::Retry,
+                route: record.requested_route.clone(), resume: false, max_attempts,
+                instruction: "The previous member reached its quota before doing work. Complete the original task on another eligible member of the same alias.".into(),
+                not_before_unix_seconds: None,
+            }),
+            ..Default::default()
+        };
+    }
     // A settled provider has left local preparation. Route or account
     // switching is denied by the shared policy. Verified handoff recovery and
     // same-session continuation use the existing model and retained work.
@@ -342,6 +363,7 @@ mod tests {
         });
         let task = &input.request.tasks[0];
         let mut decoded = run::Decoded {
+            terminal_cause: None,
             outcome: run::Outcome::Succeeded,
             result: String::new(),
             complete: true,
@@ -351,6 +373,41 @@ mod tests {
             reason: None,
             partial_signals: Vec::new(),
         };
+        let mut alias_task = task.clone();
+        alias_task.route = run::RequestedRoute::Named {
+            extra: Default::default(),
+            name: "junior".into(),
+            effort: None,
+        };
+        record.requested_route = alias_task.route.clone();
+        decoded.outcome = run::Outcome::QuotaLimited;
+        let config = provenant_routing::RoutingConfig::default();
+        let retry = assess_settlement_retry(&config, &alias_task, &record, &decoded, 1, 100, false)
+            .retry
+            .ok_or("empty quota alias retry")?;
+        assert_eq!(retry.route, alias_task.route);
+        assert!(!retry.resume);
+        decoded.session = Some("startup-session".into());
+        assert!(
+            assess_settlement_retry(&config, &alias_task, &record, &decoded, 1, 100, false)
+                .retry
+                .is_some()
+        );
+        decoded.usage.output_excluding_reasoning = Some(1);
+        assert!(
+            assess_settlement_retry(&config, &alias_task, &record, &decoded, 1, 100, false)
+                .retry
+                .is_none()
+        );
+        decoded.session = None;
+        decoded.usage.output_excluding_reasoning = None;
+        record.requested_route = task.route.clone();
+        assert!(
+            assess_settlement_retry(&config, task, &record, &decoded, 1, 100, false)
+                .retry
+                .is_none()
+        );
+        decoded.outcome = run::Outcome::Succeeded;
         let policy = provenant_routing::ModelPolicies::default()
             .effective(
                 &ModelId::parse("agy/gemini-3.8-flash")?,

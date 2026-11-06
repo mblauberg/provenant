@@ -24,6 +24,27 @@ impl RunStore {
         let local = |phase: &str, error: &dyn std::fmt::Display| {
             HandOff::Local(format!("{phase}: {error}"))
         };
+        let typed_local = |phase: &str, error: &RunError| {
+            let cause = match error {
+                RunError::Confinement(
+                    provenant_confinement::permissions::PermissionError::BackendNotAvailable(
+                        provenant_confinement::permissions::AvailabilityReason::UnsupportedPlatform,
+                    ),
+                ) => Some(TerminalCause::UnsupportedPlatform),
+                RunError::DeliveryPrepare {
+                    step: "credential helper",
+                    ..
+                } => Some(TerminalCause::DeliveryPrepareCredentialHelper),
+                _ => None,
+            };
+            match cause {
+                Some(cause) => HandOff::TypedLocal {
+                    message: format!("{phase}: {error}"),
+                    cause,
+                },
+                None => local(phase, error),
+            }
+        };
         let id = record.attempt_id;
         let scope = Scope {
             run: record.run_id,
@@ -113,7 +134,8 @@ impl RunStore {
                     Err(error) => {
                         lease.withdraw_unlaunched().map_err(|release| {
                             let cause = match &error {
-                                HandOff::Local(cause) => cause.as_str(),
+                                HandOff::Local(cause)
+                                | HandOff::TypedLocal { message: cause, .. } => cause.as_str(),
                                 _ => "launch preparation failed",
                             };
                             HandOff::Protected(format!("{cause}; custody withdrawal: {release}"))
@@ -186,7 +208,7 @@ impl RunStore {
             match prepare() {
                 Ok(context) => holder_context = context,
                 Err(error) => {
-                    local_or_withdraw!(Err::<(), _>(local("delivery", &error)));
+                    local_or_withdraw!(Err::<(), _>(typed_local("delivery", &error)));
                 }
             }
         }
@@ -236,7 +258,7 @@ impl RunStore {
             match confinement.command(&plan.argv, &id, call.cancel) {
                 Ok(argv) => plan.argv = argv,
                 Err(error) => {
-                    local_or_withdraw!(Err::<(), _>(local("confinement command", &error)));
+                    local_or_withdraw!(Err::<(), _>(typed_local("confinement command", &error)));
                 }
             }
         }
@@ -280,7 +302,17 @@ impl RunStore {
                     .ok_or_else(|| local("lane priority", &"missing"))
             ),
         };
-        let capture = capture_plan(task, runtime_seconds);
+        let capture = capture_plan(
+            task,
+            runtime_seconds,
+            crate::launch::token_budget(
+                task,
+                self.context.state_root.as_path(),
+                &record.project_id.to_string(),
+            )
+            .tokens,
+            provider,
+        );
         // Held before launch: an unconfirmed handoff may still have a guardian.
         if let Some((held, custody)) = held {
             self.hold_child(held, custody);
@@ -380,6 +412,9 @@ mod tests {
         );
         match result {
             Err(HandOff::Local(reason)) => assert!(reason.contains("lane priority"), "{reason}"),
+            Err(HandOff::TypedLocal { message, cause }) => {
+                panic!("unexpected typed refusal {cause:?}: {message}")
+            }
             Err(HandOff::Busy) => panic!("custody busy"),
             Err(HandOff::RetainedImport { .. }) => {
                 panic!("unexpected refusal")
@@ -416,6 +451,9 @@ mod tests {
             Err(HandOff::Protected(reason)) => assert!(reason.contains("fixture"), "{reason}"),
             Err(HandOff::Uncertain(reason)) => panic!("uncertain: {reason}"),
             Err(HandOff::Local(reason)) => panic!("local: {reason}"),
+            Err(HandOff::TypedLocal { message, cause }) => {
+                panic!("unexpected typed refusal {cause:?}: {message}")
+            }
             Err(HandOff::Busy) => panic!("busy"),
             Err(HandOff::RetainedImport { .. }) => {
                 panic!("unexpected refusal")
@@ -449,6 +487,9 @@ mod tests {
             }
             Err(HandOff::Uncertain(reason)) => panic!("uncertain: {reason}"),
             Err(HandOff::Local(reason)) => panic!("local: {reason}"),
+            Err(HandOff::TypedLocal { message, cause }) => {
+                panic!("unexpected typed refusal {cause:?}: {message}")
+            }
             Err(HandOff::Busy) => panic!("busy"),
             Err(HandOff::RetainedImport { .. }) => {
                 panic!("unexpected refusal")

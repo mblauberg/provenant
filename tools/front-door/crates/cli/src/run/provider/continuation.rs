@@ -374,10 +374,16 @@ pub(super) fn credential_failure_message(
         provenant_providers::ProviderError::CredentialNotFound
             | provenant_providers::ProviderError::CredentialExpired
     ) {
-        message.push_str(&format!(
-            "; sign in again with CLAUDE_CONFIG_DIR={} claude auth login",
-            directory.display()
-        ));
+        if let Some(directory) = provenant_records::diagnostic::shell_path(
+            directory,
+            provenant_records::diagnostic::Destination::Local,
+        ) {
+            message.push_str(&format!(
+                "; sign in again with CLAUDE_CONFIG_DIR={directory} claude auth login"
+            ));
+        } else {
+            message.push_str("; check the registered account directory before signing in again");
+        }
     }
     message
 }

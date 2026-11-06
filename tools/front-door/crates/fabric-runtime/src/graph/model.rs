@@ -370,12 +370,101 @@ pub(super) fn expansion_safety_limits(
     }
 }
 
+/// A host graph limit whose value can be safely reported.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GraphLimitKey {
+    Nodes,
+    Edges,
+    RoutesPerNode,
+    NodePromptBytes,
+    GraphPromptBytes,
+    FanOutWidth,
+    ExpansionDepth,
+}
+impl GraphLimitKey {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Nodes => "nodes",
+            Self::Edges => "edges",
+            Self::RoutesPerNode => "routes_per_node",
+            Self::NodePromptBytes => "node_prompt_bytes",
+            Self::GraphPromptBytes => "graph_prompt_bytes",
+            Self::FanOutWidth => "fan_out_width",
+            Self::ExpansionDepth => "expansion_depth",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GraphStructuralLimit {
+    pub key: GraphLimitKey,
+    pub actual: usize,
+    pub max: usize,
+}
+impl std::fmt::Display for GraphStructuralLimit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "limits.{}={} reached ({}); set by domains.fabric.graph.limits",
+            self.key.name(),
+            self.max,
+            self.actual
+        )
+    }
+}
+
+/// Worst-case checkpoint size that exceeded the fixed graph envelope.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GraphEnvelopeLimit {
+    pub bound: usize,
+}
+
+impl std::fmt::Display for GraphEnvelopeLimit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "graph checkpoint could reach {} bytes, over its {}-byte limit; split the graph into smaller batches, or use fewer nodes, routes, loop rounds or extensions, or smaller prompts",
+            self.bound, MAX_CHECKPOINT_BYTES
+        )
+    }
+}
+
+/// The static admission check that refused a graph. The contained text is the
+/// existing operator-facing reason; callers branch on the variant, not text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GraphOutputField {
+    Input,
+    CompositeExport,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum AdmissionError {
+    #[error("{0}")]
+    Schema(String),
+    #[error("{0}")]
+    Composite(String),
+    #[error("{0}")]
+    Plan(String),
+    #[error("{0}")]
+    StructuralLimit(GraphStructuralLimit),
+    #[error("{0}")]
+    Envelope(GraphEnvelopeLimit),
+    #[error("{reason}")]
+    OutputKind {
+        field: GraphOutputField,
+        reason: String,
+    },
+}
+
 impl GraphDocument {
     /// Check nested composite structure with the same expansion safety bounds
     /// used by graph admission, without starting a graph.
     pub fn check_composites(&self, limits: &crate::config::GraphLimits) -> Result<(), String> {
         let expansion_limits = expansion_safety_limits(limits);
-        let expanded = composites::expand(self, &expansion_limits)?;
+        let expanded =
+            composites::expand(self, &expansion_limits).map_err(|error| error.to_string())?;
         loops::check_expanded_ids(&expanded, &[])?;
         let count = loops::expanded_node_count(&expanded, &[])?;
         if let Some(reason) = limits.nodes_bound().refusal(count) {
@@ -389,8 +478,8 @@ impl GraphDocument {
     /// A plan whose worst-case checkpoint would not fit is refused here, naming
     /// the size, rather than stopping mid-run on an oversized checkpoint.
     pub fn expanded(&self, limits: &crate::config::GraphLimits) -> Result<Self, String> {
-        self.admit(limits)?;
-        loops::expand(self, &[], limits)
+        self.admit(limits).map_err(|error| error.to_string())?;
+        loops::expand(self, &[], limits).map_err(|error| error.to_string())
     }
 
     /// The checks admission applies to a submitted document, without running
@@ -398,16 +487,16 @@ impl GraphDocument {
     /// expanded plan against `limits`. A document that passes here is not
     /// refused as invalid when it is submitted.
     pub fn validate(&self, limits: &crate::config::GraphLimits) -> Result<(), String> {
-        self.admit(limits)
+        self.admit(limits).map_err(|error| error.to_string())
     }
 
     /// The single static admission decision for a submitted graph. The reason
     /// is suitable for bounded display and typed projection by the front door.
-    pub fn admit(&self, limits: &crate::config::GraphLimits) -> Result<(), String> {
-        validate_schema(self).map_err(String::from)?;
+    pub fn admit(&self, limits: &crate::config::GraphLimits) -> Result<(), AdmissionError> {
+        validate_schema(self)?;
         let expansion_limits = expansion_safety_limits(limits);
         let expanded = loops::expand(self, &[], &expansion_limits)?;
-        let (plan, _) = validate_flat_plan(&expanded, &expansion_limits).map_err(String::from)?;
+        let (plan, _) = validate_flat_plan(&expanded, &expansion_limits)?;
         for node in &expanded.nodes {
             if node.review.is_some() {
                 let longest_lens = node
@@ -429,26 +518,25 @@ impl GraphDocument {
                     .saturating_add(longest_lens.max(32))
                     > 200
                 {
-                    return Err(
+                    return Err(AdmissionError::Plan(
                         "deferred review node id leaves insufficient room for expanded review ids"
                             .into(),
-                    );
+                    ));
                 }
             }
         }
-        if let Some(reason) = structural_limit_reason(&expanded, &plan, limits) {
-            return Err(reason);
+        if let Some(reason) = structural_limit(&expanded, &plan, limits) {
+            return Err(AdmissionError::StructuralLimit(reason));
         }
-        if let Some(reason) = graph_envelope_reason(self, &[], &[], &plan) {
-            return Err(reason);
-        }
+        envelope::admit(self, &[], &[], &plan)?;
         validate_output_kinds(&expanded)
     }
 
     pub fn inspect(&self, limits: &crate::config::GraphLimits) -> Result<GraphInspection, String> {
-        validate_schema(self).map_err(String::from)?;
+        validate_schema(self).map_err(|error| error.to_string())?;
         let inspect_limits = expansion_safety_limits(limits);
-        let expanded = loops::expand(self, &[], &inspect_limits)?;
+        let expanded =
+            loops::expand(self, &[], &inspect_limits).map_err(|error| error.to_string())?;
         let generous = crate::config::GraphLimits {
             nodes: usize::MAX,
             edges: usize::MAX,
@@ -457,7 +545,8 @@ impl GraphDocument {
             graph_prompt_bytes: usize::MAX,
             ..limits.clone()
         };
-        let (plan, _) = validate_flat_plan(&expanded, &generous)?;
+        let (plan, _) =
+            validate_flat_plan(&expanded, &generous).map_err(|error| error.to_string())?;
         let mut depths = std::collections::BTreeMap::<&str, usize>::new();
         let mut dependency_depth = 0;
         for node in &plan.nodes {
@@ -833,6 +922,76 @@ pub(super) fn not_delivered(delivered: &bool) -> bool {
     !delivered
 }
 
+/// Approved planner failure facts, without captured fragment text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "limit", rename_all = "snake_case")]
+pub enum PlanFailureFact {
+    MissingBlock,
+    MissingResult,
+    InvalidBlock,
+    InvalidFragment,
+    InvalidContinuation,
+    Schema,
+    InvalidGraph,
+    OutputKind,
+    Structural(GraphStructuralLimit),
+    Envelope(GraphEnvelopeLimit),
+}
+
+impl std::fmt::Display for PlanFailureFact {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MissingBlock => f.write_str("fragment block missing"),
+            Self::MissingResult => f.write_str("planner result missing"),
+            Self::InvalidBlock => f.write_str("invalid fragment block; check its format and size"),
+            Self::InvalidFragment => {
+                f.write_str("invalid fragment; check the declared graph constraints")
+            }
+            Self::InvalidContinuation => {
+                f.write_str("invalid writer continuation; inspect the handoff")
+            }
+            Self::Schema => f.write_str("schema version"),
+            Self::InvalidGraph => {
+                f.write_str("expanded graph is invalid; check the declared graph constraints")
+            }
+            Self::OutputKind => f.write_str("expanded graph selects an unavailable output kind"),
+            Self::Structural(limit) => write!(f, "{limit}"),
+            Self::Envelope(limit) => write!(f, "{limit}"),
+        }
+    }
+}
+
+/// Scheduler-owned causes whose decisions must not depend on rendered prose.
+/// Paused or truncated checkpoints require a finish-first drain before this
+/// checkpoint meaning is installed; no legacy cause reader is provided.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum NodeDecisionCause {
+    LoopPaused,
+    LoopAskClosed,
+    InvalidLoopDecision,
+    PlanExpansionPaused {
+        active: bool,
+        fallback: bool,
+        fragment_error: Option<PlanFailureFact>,
+    },
+    CompositeFindingsTruncated {
+        warning_indices: Vec<usize>,
+        notice_lines: usize,
+    },
+}
+
+impl NodeDecisionCause {
+    pub(super) fn from_loop_code(code: &str) -> Option<Self> {
+        match code {
+            "loop_paused" => Some(Self::LoopPaused),
+            "loop_ask_closed" => Some(Self::LoopAskClosed),
+            "invalid_loop_decision" => Some(Self::InvalidLoopDecision),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NodeProgress {
     #[serde(flatten)]
@@ -869,9 +1028,15 @@ pub struct NodeProgress {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expansion_pause: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expansion_cause: Option<NodeDecisionCause>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub loop_pause: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub loop_pause_code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub loop_cause: Option<NodeDecisionCause>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub truncation_cause: Option<NodeDecisionCause>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub round: Option<LoopRound>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1072,6 +1237,28 @@ impl NodeState {
 }
 
 impl GraphCheckpoint {
+    pub(super) fn deactivate_expansion_pauses(&mut self) {
+        for node in &mut self.nodes {
+            if let Some(NodeDecisionCause::PlanExpansionPaused { active, .. }) =
+                &mut node.expansion_cause
+            {
+                *active = false;
+                if node.expansion_pause.is_none() {
+                    node.expansion_cause = None;
+                }
+            }
+        }
+    }
+
+    pub(super) fn activate_expansion_pause(&mut self, index: usize) {
+        self.deactivate_expansion_pauses();
+        if let Some(NodeDecisionCause::PlanExpansionPaused { active, .. }) =
+            &mut self.nodes[index].expansion_cause
+        {
+            *active = true;
+        }
+    }
+
     /// Classify settled work without relaxing the strict delivery gate.
     pub fn outcome(&self) -> GraphOutcome {
         if self.successful() {
@@ -1146,6 +1333,41 @@ impl GraphCheckpoint {
 }
 
 impl NodeProgress {
+    pub(super) fn truncation(&self) -> Option<(&[usize], usize)> {
+        match self.truncation_cause.as_ref()? {
+            NodeDecisionCause::CompositeFindingsTruncated {
+                warning_indices,
+                notice_lines,
+            } => Some((warning_indices, *notice_lines)),
+            _ => None,
+        }
+    }
+
+    pub(super) fn truncation_warnings(&self) -> Vec<&String> {
+        let Some((indices, _)) = self.truncation() else {
+            return Vec::new();
+        };
+        let Some(outputs) = &self.outputs else {
+            return Vec::new();
+        };
+        indices
+            .iter()
+            .filter_map(|index| outputs.warnings.get(*index))
+            .collect()
+    }
+
+    pub(super) fn truncation_notices(&self) -> Vec<&str> {
+        let Some((_, lines)) = self.truncation() else {
+            return Vec::new();
+        };
+        self.outputs
+            .as_ref()
+            .and_then(|outputs| outputs.result.as_ref())
+            .map_or_else(Vec::new, |result| {
+                result.excerpt.lines().take(lines).collect()
+            })
+    }
+
     /// Attempt-less evidence for final graph delivery.
     pub fn deterministic_summary(&self) -> Option<String> {
         if let Some(reason) = self

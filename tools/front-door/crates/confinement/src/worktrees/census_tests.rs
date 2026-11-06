@@ -12,12 +12,12 @@ fn session_reuses_evidence_and_refreshes_at_epoch_boundaries() -> Result<(), Box
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     struct Counting(AtomicUsize, AtomicBool);
     impl WorkerObserver for Counting {
-        fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, WorkerState> {
+        fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, Occupancy> {
             self.0.fetch_add(1, Ordering::SeqCst);
             roots
                 .iter()
                 .cloned()
-                .map(|root| (root, WorkerState::Free))
+                .map(|root| (root, Occupancy::Available))
                 .collect()
         }
         fn epoch_policy(&self) -> Option<CensusEpochPolicy> {
@@ -39,14 +39,15 @@ fn session_reuses_evidence_and_refreshes_at_epoch_boundaries() -> Result<(), Box
     let observer = Counting(AtomicUsize::new(0), AtomicBool::new(false));
     let session = CensusSession::new(&observer, &clock);
     assert_eq!(
-        session.observe_roots(std::slice::from_ref(&a))[&a],
-        WorkerState::Free
+        (session.observe_roots(std::slice::from_ref(&a))[&a]).label(),
+        "free"
     );
     assert_eq!(
-        session
+        (session
             .observe_roots_with_details(std::slice::from_ref(&a))
-            .0[&a],
-        WorkerState::Free
+            .0[&a])
+            .label(),
+        "free"
     );
     assert_eq!(session.observed_at(), Some(clock.mono_now()));
     assert_eq!(observer.0.load(Ordering::SeqCst), 1);
@@ -77,7 +78,7 @@ fn session_acquires_with_captured_policy_during_aba() -> Result<(), Box<dyn Erro
         acquisitions: AtomicUsize,
     }
     impl WorkerObserver for Changing {
-        fn observe_roots(&self, _: &[PathBuf]) -> BTreeMap<PathBuf, WorkerState> {
+        fn observe_roots(&self, _: &[PathBuf]) -> BTreeMap<PathBuf, Occupancy> {
             panic!("acquisition must use the captured policy")
         }
         fn epoch_policy(&self) -> Option<CensusEpochPolicy> {
@@ -95,13 +96,17 @@ fn session_acquires_with_captured_policy_during_aba() -> Result<(), Box<dyn Erro
             self.acquisitions.fetch_add(1, Ordering::SeqCst);
             self.policy_b.store(true, Ordering::SeqCst);
             let state = if policy.exclude_ancestors {
-                WorkerState::Free
+                Occupancy::Available
             } else {
-                WorkerState::Live
+                Occupancy::Observed { process: None }
             };
             self.policy_b.store(false, Ordering::SeqCst);
             WorkerEvidence {
-                states: roots.iter().cloned().map(|root| (root, state)).collect(),
+                states: roots
+                    .iter()
+                    .cloned()
+                    .map(|root| (root, state.clone()))
+                    .collect(),
                 ..WorkerEvidence::default()
             }
         }
@@ -117,12 +122,12 @@ fn session_acquires_with_captured_policy_during_aba() -> Result<(), Box<dyn Erro
     };
     let session = CensusSession::new(&observer, &clock);
     assert_eq!(
-        session.observe_roots(std::slice::from_ref(&fixture.root))[&fixture.root],
-        WorkerState::Live
+        (session.observe_roots(std::slice::from_ref(&fixture.root))[&fixture.root]).label(),
+        "live"
     );
     assert_eq!(
-        session.observe_roots(std::slice::from_ref(&fixture.root))[&fixture.root],
-        WorkerState::Live
+        (session.observe_roots(std::slice::from_ref(&fixture.root))[&fixture.root]).label(),
+        "live"
     );
     assert_eq!(observer.acquisitions.load(Ordering::SeqCst), 1);
     Ok(())
@@ -134,7 +139,7 @@ fn session_refusal_uses_decision_evidence_and_missing_root_is_unknown() -> Resul
     use std::sync::atomic::{AtomicUsize, Ordering};
     struct Sequenced(AtomicUsize);
     impl WorkerObserver for Sequenced {
-        fn observe_roots(&self, _: &[PathBuf]) -> BTreeMap<PathBuf, WorkerState> {
+        fn observe_roots(&self, _: &[PathBuf]) -> BTreeMap<PathBuf, Occupancy> {
             panic!("must acquire evidence together")
         }
         fn observe_evidence(&self, roots: &[PathBuf], _: bool) -> WorkerEvidence {
@@ -144,9 +149,9 @@ fn session_refusal_uses_decision_evidence_and_missing_root_is_unknown() -> Resul
                 states: BTreeMap::from([(
                     root.clone(),
                     if n == 0 {
-                        WorkerState::Live
+                        Occupancy::Observed { process: None }
                     } else {
-                        WorkerState::Free
+                        Occupancy::Available
                     },
                 )]),
                 holders: BTreeMap::from([(
@@ -180,7 +185,7 @@ fn session_refusal_uses_decision_evidence_and_missing_root_is_unknown() -> Resul
     let session = CensusSession::new(&observer, &clock);
     let root = fixture.root.clone();
     let (states, details) = session.observe_roots_with_details(std::slice::from_ref(&root));
-    assert_eq!(states[&root], WorkerState::Live);
+    assert_eq!((states[&root]).label(), "live");
     assert_eq!(details[&root], "first observation");
     assert_eq!(session.live_process(&root).unwrap().pid, 123);
     let (_, taints) = session.observe_roots_with_taints(std::slice::from_ref(&root));
@@ -188,12 +193,12 @@ fn session_refusal_uses_decision_evidence_and_missing_root_is_unknown() -> Resul
     assert_eq!(observer.0.load(Ordering::SeqCst), 1);
     let missing = root.join("missing");
     assert_eq!(
-        session.observe_roots(std::slice::from_ref(&missing))[&missing],
-        WorkerState::Unknown
+        (session.observe_roots(std::slice::from_ref(&missing))[&missing]).label(),
+        "unknown"
     );
     let states = session.observe_roots(&[root.clone(), missing.clone()]);
-    assert_eq!(states[&root], WorkerState::Free);
-    assert_eq!(states[&missing], WorkerState::Unknown);
+    assert_eq!((states[&root]).label(), "free");
+    assert_eq!((states[&missing]).label(), "unknown");
     Ok(())
 }
 
@@ -202,12 +207,12 @@ fn command_session_is_reused_across_worktree_contexts() -> Result<(), Box<dyn Er
     use std::sync::atomic::{AtomicUsize, Ordering};
     struct Counting(AtomicUsize);
     impl WorkerObserver for Counting {
-        fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, WorkerState> {
+        fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, Occupancy> {
             self.0.fetch_add(1, Ordering::SeqCst);
             roots
                 .iter()
                 .cloned()
-                .map(|root| (root, WorkerState::Free))
+                .map(|root| (root, Occupancy::Available))
                 .collect()
         }
     }
@@ -231,12 +236,12 @@ fn command_session_is_reused_across_worktree_contexts() -> Result<(), Box<dyn Er
             |context| {
                 let roots = std::slice::from_ref(&fixture.root);
                 assert_eq!(
-                    context.workers.observe_roots(roots)[&fixture.root],
-                    WorkerState::Free
+                    (context.workers.observe_roots(roots)[&fixture.root]).label(),
+                    "free"
                 );
                 assert_eq!(
-                    context.workers.observe_roots_with_details(roots).0[&fixture.root],
-                    WorkerState::Free
+                    (context.workers.observe_roots_with_details(roots).0[&fixture.root]).label(),
+                    "free"
                 );
                 Ok(())
             },
@@ -340,7 +345,7 @@ fn native_full_census_places_clean_merged_worktree_and_same_user_sleep()
     );
     // A readable occupant is positively Live, a stronger refusal than
     // Unknown. Never weaken that existing refusal to satisfy the fixture.
-    assert_eq!(occupied[&root], WorkerState::Live);
+    assert_eq!((occupied[&root]).label(), "live");
     assert_eq!(
         occupied_details[&root],
         format!("process {pid}: cwd inside root")
@@ -351,8 +356,8 @@ fn native_full_census_places_clean_merged_worktree_and_same_user_sleep()
     );
     if complete {
         assert_eq!(
-            clean[&root],
-            WorkerState::Free,
+            (clean[&root]).label(),
+            "free",
             "native clean full census: {first}"
         );
         eprintln!(
@@ -391,7 +396,7 @@ fn native_unreadable_windowserver_allows_cleanup_of_a_merged_clean_tree()
         }
     }
     impl WorkerObserver for WindowServerWorkers {
-        fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, WorkerState> {
+        fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, Occupancy> {
             self.observe_roots_with_details(roots).0
         }
         fn observe_roots_with_details(&self, roots: &[PathBuf]) -> WorkerObservations {
@@ -578,14 +583,15 @@ fn worker_census_places_a_process_in_a_deleted_directory_by_its_nearest_ancestor
             false,
         )
         .0[&root]
+            .clone()
     };
     // A deleted directory elsewhere is unrelated to the root.
     assert_eq!(
-        observe(outside.join("gone").join("deeper")),
-        WorkerState::Free
+        (observe(outside.join("gone").join("deeper"))).label(),
+        "free"
     );
     // A deleted subdirectory of the root still holds the process inside it.
-    assert_eq!(observe(root.join("gone").join("deeper")), WorkerState::Live);
+    assert_eq!((observe(root.join("gone").join("deeper"))).label(), "live");
     Ok(())
 }
 
@@ -686,21 +692,18 @@ fn land_worker_census_excludes_only_ancestors_through_the_session_leader()
                 ancestors,
             )
             .0[&root]
+                .clone()
         };
-        assert_eq!(observe(&cwds, false), WorkerState::Live);
+        assert_eq!((observe(&cwds, false)).label(), "live");
         assert_eq!(
-            observe(&cwds, true),
-            if complete {
-                WorkerState::Free
-            } else {
-                WorkerState::Unknown
-            }
+            (observe(&cwds, true)).label(),
+            if complete { "free" } else { "unknown" }
         );
         // Above-session ancestors, siblings, descendants and independent
         // sessions remain live, even when the census is incomplete.
         for pid in [1, 95, 110, 200] {
             cwds.0.insert(pid, root.clone());
-            assert_eq!(observe(&cwds, true), WorkerState::Live, "pid {pid}");
+            assert_eq!((observe(&cwds, true)).label(), "live", "pid {pid}");
             cwds.0.insert(pid, outside.clone());
         }
     }
@@ -770,14 +773,15 @@ fn land_worker_census_excludes_only_ancestors_through_the_session_leader()
                 true,
             )
             .0[&root]
+                .clone()
         };
         // An ambiguous ancestry excludes no unverified ancestor, so it
         // says nothing about a root no process is inside.
-        assert_eq!(observe(&cwds), WorkerState::Free, "{ambiguity}");
+        assert_eq!((observe(&cwds)).label(), "free", "{ambiguity}");
         // The session leader is never verified once the walk stops, so
         // inside the root it still makes the root live.
         cwds.0.insert(10, root.clone());
-        assert_eq!(observe(&cwds), WorkerState::Live, "{ambiguity}");
+        assert_eq!((observe(&cwds)).label(), "live", "{ambiguity}");
     }
     Ok(())
 }
@@ -839,7 +843,7 @@ impl CwdObserver for InjectedCensus {
 }
 
 impl WorkerObserver for InjectedCensus {
-    fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, WorkerState> {
+    fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, Occupancy> {
         observe_worker_roots(roots, self, self, &self.current, true).0
     }
     fn requires_complete_census(&self) -> bool {
@@ -955,7 +959,7 @@ fn configurable_census_refusal_names_signed_entry_key_path_and_team() -> Result<
     };
     let path = "/Library/Developer/CoreSimulator/CoreSimulator.framework/Versions/A/Resources/bin/simdiskimaged";
     let (refused, details) = observe_refused(&root, &[200], &cwd(SYSTEM_UIDS, path))?;
-    assert_eq!(refused[&root], WorkerState::Unknown);
+    assert_eq!((refused[&root]).label(), "unknown");
     assert!(details[&root].contains("confinement.census_ignore_unreadable"));
     assert!(details[&root].contains(path));
     assert!(details[&root].contains("team_id=TEAM123"));
@@ -972,7 +976,7 @@ fn configurable_census_refusal_names_signed_entry_key_path_and_team() -> Result<
             path,
         ),
     )?;
-    assert_eq!(user_owned[&root], WorkerState::Unknown);
+    assert_eq!((user_owned[&root]).label(), "unknown");
     assert!(
         !user_details[&root].contains("config_key="),
         "{}",
@@ -985,12 +989,12 @@ fn configurable_census_refusal_names_signed_entry_key_path_and_team() -> Result<
 fn occupancy_is_placed_per_root_and_partial_results_remain_conservative()
 -> Result<(), Box<dyn Error>> {
     use provenant_supervisor::census::{Census, ProcessIdentity};
-    struct Occupancy {
+    struct FixtureOccupancy {
         cwd: PathBuf,
         paths: Vec<PathBuf>,
         complete: bool,
     }
-    impl CwdObserver for Occupancy {
+    impl CwdObserver for FixtureOccupancy {
         fn cwd(&self, _: i64) -> Result<CwdObservation, provenant_os::pid::PidError> {
             Ok(CwdObservation::Path(self.cwd.clone()))
         }
@@ -1034,11 +1038,11 @@ fn occupancy_is_placed_per_root_and_partial_results_remain_conservative()
     let observe = |paths, complete| {
         struct FixtureObserver<'a> {
             processes: &'a InjectedCensus,
-            cwd: Occupancy,
+            cwd: FixtureOccupancy,
             current: &'a ProcessFact,
         }
         impl WorkerObserver for FixtureObserver<'_> {
-            fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, WorkerState> {
+            fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, Occupancy> {
                 self.observe_evidence(roots, false).states
             }
             fn observe_evidence(&self, roots: &[PathBuf], _: bool) -> WorkerEvidence {
@@ -1054,7 +1058,7 @@ fn occupancy_is_placed_per_root_and_partial_results_remain_conservative()
         }
         let observer = FixtureObserver {
             processes: &processes,
-            cwd: Occupancy {
+            cwd: FixtureOccupancy {
                 cwd: base.clone(),
                 paths,
                 complete,
@@ -1070,7 +1074,7 @@ fn occupancy_is_placed_per_root_and_partial_results_remain_conservative()
     let states = observe_worker_roots(
         &roots,
         &processes,
-        &Occupancy {
+        &FixtureOccupancy {
             cwd: unplaceable,
             paths: vec![],
             complete: true,
@@ -1079,24 +1083,28 @@ fn occupancy_is_placed_per_root_and_partial_results_remain_conservative()
         false,
     )
     .0;
-    assert_eq!(states[&a], WorkerState::Unknown);
-    assert_eq!(states[&b], WorkerState::Free);
+    assert_eq!((states[&a]).label(), "unknown");
+    assert_eq!((states[&b]).label(), "free");
     let free = observe(vec![], true);
-    assert_eq!(free[&a], WorkerState::Free);
-    assert_eq!(free[&b], WorkerState::Free);
+    assert_eq!((free[&a]).label(), "free");
+    assert_eq!((free[&b]).label(), "free");
     let live = observe(vec![file.clone()], true);
-    assert_eq!(live[&a], WorkerState::Live);
-    assert_eq!(live[&b], WorkerState::Free);
+    assert_eq!((live[&a]).label(), "live");
+    assert_eq!((live[&b]).label(), "free");
     let partial = observe(vec![file], false);
-    assert_eq!(partial[&a], WorkerState::Live);
-    assert_eq!(partial[&b], WorkerState::Unknown);
+    assert_eq!((partial[&a]).label(), "live");
+    assert!(matches!(
+        &partial[&b],
+        Occupancy::Unknown { scope, evidence, source: OccupancyUnknownSource::Census }
+            if scope == &b && !evidence.is_empty()
+    ));
 
     // A symlink loop makes canonicalisation fail without relying on permissions.
     let outside = base.join("loop");
     std::os::unix::fs::symlink("loop", &outside)?;
     let outside_states = observe(vec![outside], true);
-    assert_eq!(outside_states[&a], WorkerState::Unknown);
-    assert_eq!(outside_states[&b], WorkerState::Unknown);
+    assert_eq!((outside_states[&a]).label(), "unknown");
+    assert_eq!((outside_states[&b]).label(), "unknown");
     let inside = a.join("loop");
     std::os::unix::fs::symlink("loop", &inside)?;
     let alias = if let Ok(suffix) = inside.strip_prefix("/private") {
@@ -1108,7 +1116,7 @@ fn occupancy_is_placed_per_root_and_partial_results_remain_conservative()
     let (alias_states, alias_details) = observe_worker_roots(
         &[alias_root.clone(), b.clone()],
         &processes,
-        &Occupancy {
+        &FixtureOccupancy {
             cwd: base.clone(),
             paths: vec![inside.clone()],
             complete: true,
@@ -1116,15 +1124,15 @@ fn occupancy_is_placed_per_root_and_partial_results_remain_conservative()
         &current,
         false,
     );
-    assert_eq!(alias_states[&alias_root], WorkerState::Unknown);
-    assert_eq!(alias_states[&b], WorkerState::Free);
+    assert_eq!((alias_states[&alias_root]).label(), "unknown");
+    assert_eq!((alias_states[&b]).label(), "free");
     assert!(alias_details[&alias_root].contains(&inside.display().to_string()));
     {
         let path = inside;
         let (states, details) = observe_worker_roots(
             &roots,
             &processes,
-            &Occupancy {
+            &FixtureOccupancy {
                 cwd: base.clone(),
                 paths: vec![path.clone()],
                 complete: true,
@@ -1132,14 +1140,14 @@ fn occupancy_is_placed_per_root_and_partial_results_remain_conservative()
             &current,
             false,
         );
-        assert_eq!(states[&a], WorkerState::Unknown);
-        assert_eq!(states[&b], WorkerState::Free);
+        assert_eq!((states[&a]).label(), "unknown");
+        assert_eq!((states[&b]).label(), "free");
         assert!(details[&a].contains(&path.display().to_string()));
     }
     for path in [PathBuf::new(), PathBuf::from("relative")] {
         let states = observe(vec![path], true);
-        assert_eq!(states[&a], WorkerState::Unknown);
-        assert_eq!(states[&b], WorkerState::Unknown);
+        assert_eq!((states[&a]).label(), "unknown");
+        assert_eq!((states[&b]).label(), "unknown");
     }
     Ok(())
 }
@@ -1149,13 +1157,13 @@ fn occupancy_failures_retain_every_root_and_positive_occupants_stay_live()
 -> Result<(), Box<dyn Error>> {
     use provenant_supervisor::census::{Census, ProcessIdentity};
     use std::cell::Cell;
-    struct Occupancy {
+    struct FixtureOccupancy {
         base: PathBuf,
         paths: Vec<PathBuf>,
         complete: bool,
         supported: bool,
     }
-    impl CwdObserver for Occupancy {
+    impl CwdObserver for FixtureOccupancy {
         fn cwd(&self, _: i64) -> Result<CwdObservation, provenant_os::pid::PidError> {
             Ok(CwdObservation::Path(self.base.clone()))
         }
@@ -1222,34 +1230,34 @@ fn occupancy_failures_retain_every_root_and_positive_occupants_stay_live()
         platform_uids: BTreeMap::new(),
     };
     let roots = vec![a.clone(), b.clone()];
-    let occupancy = |paths: Vec<PathBuf>, complete, supported| Occupancy {
+    let occupancy = |paths: Vec<PathBuf>, complete, supported| FixtureOccupancy {
         base: base.clone(),
         paths,
         complete,
         supported,
     };
-    let states = |observer: &dyn ProcessObserver, cwd: &Occupancy| {
+    let states = |observer: &dyn ProcessObserver, cwd: &FixtureOccupancy| {
         observe_worker_roots(&roots, observer, cwd, &current, false).0
     };
     // An executable inside one root, with the other root provably unrelated.
     let live = states(&processes, &occupancy(vec![b.join("bin/tool")], true, true));
-    assert_eq!(live[&a], WorkerState::Free);
-    assert_eq!(live[&b], WorkerState::Live);
+    assert_eq!((live[&a]).label(), "free");
+    assert_eq!((live[&b]).label(), "live");
     // A reused pid cannot prove a snapshot belongs to the census process.
     let reused = states(
         &Reused(&processes, Cell::new(0)),
         &occupancy(vec![], true, true),
     );
-    assert_eq!(reused[&a], WorkerState::Unknown);
-    assert_eq!(reused[&b], WorkerState::Unknown);
+    assert_eq!((reused[&a]).label(), "unknown");
+    assert_eq!((reused[&b]).label(), "unknown");
     // An unsupported query (default observation) is not an empty one.
     let unsupported = states(&processes, &occupancy(vec![], true, false));
-    assert_eq!(unsupported[&a], WorkerState::Unknown);
-    assert_eq!(unsupported[&b], WorkerState::Unknown);
+    assert_eq!((unsupported[&a]).label(), "unknown");
+    assert_eq!((unsupported[&b]).label(), "unknown");
     // A positive occupant stays live beside incompleteness elsewhere.
     let partial = states(&processes, &occupancy(vec![a.join("x")], false, true));
-    assert_eq!(partial[&a], WorkerState::Live);
-    assert_eq!(partial[&b], WorkerState::Unknown);
+    assert_eq!((partial[&a]).label(), "live");
+    assert_eq!((partial[&b]).label(), "unknown");
     Ok(())
 }
 
@@ -1306,12 +1314,8 @@ fn native_worker_census_places_both_data_firmlink_spellings() -> Result<(), Box<
             );
             let inside = cwd != sibling;
             assert_eq!(
-                states[&registered],
-                if inside {
-                    WorkerState::Live
-                } else {
-                    WorkerState::Free
-                },
+                (states[&registered]).label(),
+                if inside { "live" } else { "free" },
                 "root={registered:?}, cwd={cwd:?}"
             );
             assert_eq!(
@@ -1367,8 +1371,8 @@ fn unreadable_platform_policy_rechecks_identity_and_preserves_other_unknowns()
         )]),
     };
     assert_eq!(
-        observer.observe_roots(std::slice::from_ref(&root))[&root],
-        WorkerState::Unknown
+        (observer.observe_roots(std::slice::from_ref(&root))[&root]).label(),
+        "unknown"
     );
     struct Racing<'a> {
         observer: &'a InjectedCensus,
@@ -1407,14 +1411,14 @@ fn unreadable_platform_policy_rechecks_identity_and_preserves_other_unknowns()
         .cwds
         .insert(300, CwdObservation::Path(root.clone()));
     assert_eq!(
-        observer.observe_roots(std::slice::from_ref(&root))[&root],
-        WorkerState::Live
+        (observer.observe_roots(std::slice::from_ref(&root))[&root]).label(),
+        "live"
     );
     // Owner/identity lookup failure never licenses exclusion or placement.
     let missing = root.join("missing-root");
     assert_eq!(
-        observer.observe_roots(std::slice::from_ref(&missing))[&missing],
-        WorkerState::Unknown
+        (observer.observe_roots(std::slice::from_ref(&missing))[&missing]).label(),
+        "unknown"
     );
     Ok(())
 }
@@ -1466,7 +1470,7 @@ fn worker_census_audit_keeps_all_unplaceable_processes_and_first_detail()
             audit.insert(pid, condition);
         },
     );
-    assert_eq!(states[&root], WorkerState::Unknown);
+    assert_eq!((states[&root]).label(), "unknown");
     assert_eq!(
         details[&root],
         "process 1: cwd unreadable; policy_condition=image policy evidence unavailable"
@@ -1509,7 +1513,7 @@ fn worker_census_audit_keeps_all_unplaceable_processes_and_first_detail()
             audit.insert(pid, condition);
         },
     );
-    assert_eq!(states[&root], WorkerState::Unknown);
+    assert_eq!((states[&root]).label(), "unknown");
     assert_eq!(audit.len(), 2);
     assert!(!builtin_audit_has_only_rejections(audit.values().copied()));
     Ok(())
@@ -1548,7 +1552,7 @@ fn worker_census_detail_reports_incomplete_listing() -> Result<(), Box<dyn Error
         false,
         &mut |pid, condition| audit.push((pid, condition)),
     );
-    assert_eq!(states[&root], WorkerState::Unknown);
+    assert_eq!((states[&root]).label(), "unknown");
     assert!(details[&root].contains("incomplete"));
     assert_eq!(audit.len(), 1);
     assert!(audit[0].1.is_some());
@@ -1607,7 +1611,7 @@ fn unplaceable_path_failures_retain_process_image_diagnostics() -> Result<(), Bo
             &observer.current,
             false,
         );
-        assert_eq!(states[&root], WorkerState::Unknown);
+        assert_eq!((states[&root]).label(), "unknown");
         let detail = &details[&root];
         for field in [
             "process 200:",
@@ -1625,11 +1629,11 @@ fn unplaceable_path_failures_retain_process_image_diagnostics() -> Result<(), Bo
 fn ancestor_exclusion_is_limited_to_run_admission() -> Result<(), Box<dyn Error>> {
     struct Probe;
     impl WorkerObserver for Probe {
-        fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, WorkerState> {
+        fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, Occupancy> {
             roots
                 .iter()
                 .cloned()
-                .map(|root| (root, WorkerState::Live))
+                .map(|root| (root, Occupancy::Observed { process: None }))
                 .collect()
         }
         fn observe_roots_with_policy(
@@ -1646,9 +1650,9 @@ fn ancestor_exclusion_is_limited_to_run_admission() -> Result<(), Box<dyn Error>
                         (
                             root,
                             if exclude {
-                                WorkerState::Free
+                                Occupancy::Available
                             } else {
-                                WorkerState::Live
+                                Occupancy::Observed { process: None }
                             },
                         )
                     })
@@ -1677,18 +1681,18 @@ fn ancestor_exclusion_is_limited_to_run_admission() -> Result<(), Box<dyn Error>
     let ordinary = CensusPolicyWorkers::from_roots(&Probe, &roots)?;
     let run = CensusPolicyWorkers::for_run(&Probe, &roots)?;
     assert_eq!(
-        ordinary.observe_roots(std::slice::from_ref(&root))[&root],
-        WorkerState::Live
+        (ordinary.observe_roots(std::slice::from_ref(&root))[&root]).label(),
+        "live"
     );
     assert_eq!(ordinary.live_process(&root).unwrap().pid, 90);
     assert_eq!(
-        run.observe_roots(std::slice::from_ref(&root))[&root],
-        WorkerState::Free
+        (run.observe_roots(std::slice::from_ref(&root))[&root]).label(),
+        "free"
     );
     assert!(run.live_process(&root).is_none());
     assert_eq!(
-        ordinary.observe_roots_for_land(std::slice::from_ref(&root))[&root],
-        WorkerState::Free
+        (ordinary.observe_roots_for_land(std::slice::from_ref(&root))[&root]).label(),
+        "free"
     );
     Ok(())
 }
@@ -1698,11 +1702,16 @@ fn host_policy_is_scoped_to_config_roots_and_preserves_injected_refusal()
 -> Result<(), Box<dyn Error>> {
     struct Probe(std::sync::Mutex<Vec<Vec<CensusIgnoreEntry>>>);
     impl WorkerObserver for Probe {
-        fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, WorkerState> {
+        fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, Occupancy> {
             roots
                 .iter()
                 .cloned()
-                .map(|root| (root, WorkerState::Unknown))
+                .map(|root| {
+                    (
+                        root.clone(),
+                        Occupancy::census_unknown(root, "fixture census unavailable"),
+                    )
+                })
                 .collect()
         }
         fn observe_roots_with_policy(
@@ -1732,13 +1741,13 @@ fn host_policy_is_scoped_to_config_roots_and_preserves_injected_refusal()
     let probe = Probe(Default::default());
     let first = CensusPolicyWorkers::from_roots(&probe, &configured_roots)?;
     assert_eq!(
-        first.observe_roots_for_land(std::slice::from_ref(&root))[&root],
-        WorkerState::Unknown
+        (first.observe_roots_for_land(std::slice::from_ref(&root))[&root]).label(),
+        "unknown"
     );
     let second = CensusPolicyWorkers::from_roots(&first, &empty_roots)?;
     assert_eq!(
-        second.observe_roots_for_land(std::slice::from_ref(&root))[&root],
-        WorkerState::Unknown
+        (second.observe_roots_for_land(std::slice::from_ref(&root))[&root]).label(),
+        "unknown"
     );
     let seen = probe.0.lock().unwrap();
     assert_eq!(
@@ -1815,16 +1824,11 @@ fn listed_process_is_excluded_only_after_eperm_and_never_for_the_owner()
             "accepted foreign listing",
             if owner == 88 { 89 } else { 88 },
             true,
-            WorkerState::Free,
+            "free",
         ),
-        ("owner uid refused", owner, true, WorkerState::Unknown),
-        ("human credentials refused", 500, true, WorkerState::Unknown),
-        (
-            "non-EPERM refused",
-            owner.wrapping_add(1),
-            false,
-            WorkerState::Unknown,
-        ),
+        ("owner uid refused", owner, true, "unknown"),
+        ("human credentials refused", 500, true, "unknown"),
+        ("non-EPERM refused", owner.wrapping_add(1), false, "unknown"),
     ] {
         assert_eq!(
             observe_worker_roots(
@@ -1834,7 +1838,8 @@ fn listed_process_is_excluded_only_after_eperm_and_never_for_the_owner()
                 &observer.current,
                 false
             )
-            .0[&root],
+            .0[&root]
+                .label(),
             expected,
             "{name}"
         );
@@ -1872,39 +1877,27 @@ fn denied_daemon_policy_distinguishes_system_owner_human_and_missing_evidence()
         (
             "root daemon",
             Some(0),
-            if owner == 0 {
-                WorkerState::Unknown
-            } else {
-                WorkerState::Free
-            },
+            if owner == 0 { "unknown" } else { "free" },
         ),
         (
             "foreign service daemon",
             Some(if owner == 88 { 89 } else { 88 }),
-            WorkerState::Free,
+            "free",
         ),
         (
             "last system account",
             Some(499),
-            if owner == 499 {
-                WorkerState::Unknown
-            } else {
-                WorkerState::Free
-            },
+            if owner == 499 { "unknown" } else { "free" },
         ),
-        ("first human account", Some(500), WorkerState::Unknown),
-        ("worktree owner", Some(owner), WorkerState::Unknown),
-        (
-            "missing image/signing/uid evidence",
-            None,
-            WorkerState::Unknown,
-        ),
+        ("first human account", Some(500), "unknown"),
+        ("worktree owner", Some(owner), "unknown"),
+        ("missing image/signing/uid evidence", None, "unknown"),
     ] {
         observer.platform_uids = evidence
             .map(|uid| BTreeMap::from([(200, test_uids(uid))]))
             .unwrap_or_default();
         assert_eq!(
-            observer.observe_roots(std::slice::from_ref(&root))[&root],
+            observer.observe_roots(std::slice::from_ref(&root))[&root].label(),
             expected,
             "{name}"
         );
@@ -1945,8 +1938,8 @@ fn denied_daemon_policy_distinguishes_system_owner_human_and_missing_evidence()
     ] {
         observer.platform_uids = BTreeMap::from([(200, uids)]);
         assert_eq!(
-            observer.observe_roots(std::slice::from_ref(&root))[&root],
-            WorkerState::Unknown,
+            (observer.observe_roots(std::slice::from_ref(&root))[&root]).label(),
+            "unknown",
             "{name}"
         );
     }
@@ -1959,18 +1952,18 @@ fn denied_daemon_policy_distinguishes_system_owner_human_and_missing_evidence()
         },
     )]);
     assert_eq!(
-        observer.observe_roots(std::slice::from_ref(&root))[&root],
+        (observer.observe_roots(std::slice::from_ref(&root))[&root]).label(),
         if [0, 88].contains(&owner) {
-            WorkerState::Unknown
+            "unknown"
         } else {
-            WorkerState::Free
+            "free"
         },
         "WindowServer real and saved uids of zero qualify for a foreign owner"
     );
     let roots = [root.clone(), PathBuf::from("/")];
     let states = observer.observe_roots(&roots);
     assert!(
-        states.values().all(|state| *state == WorkerState::Unknown),
+        states.values().all(Occupancy::is_unknown),
         "a credential matching any candidate root's owner refuses exclusion for all roots"
     );
     // A denied fact cannot borrow the cwd exception without a pinned identity.
@@ -1984,8 +1977,8 @@ fn denied_daemon_policy_distinguishes_system_owner_human_and_missing_evidence()
     )?;
     observer.platform_uids = BTreeMap::from([(200, test_uids(88))]);
     assert_eq!(
-        observer.observe_roots(std::slice::from_ref(&root))[&root],
-        WorkerState::Unknown,
+        (observer.observe_roots(std::slice::from_ref(&root))[&root]).label(),
+        "unknown",
         "undescribed process"
     );
     Ok(())
@@ -2180,8 +2173,8 @@ fn only_a_placed_foreign_process_allows_pruning_a_merged_clean_tree() -> Result<
     // Uncertainty that could place a process anywhere keeps the tree.
     let unplaced = observer(ObservationIssue::Io, None)?;
     assert_eq!(
-        unplaced.observe_roots(std::slice::from_ref(&created.path))[&created.path],
-        WorkerState::Unknown
+        (unplaced.observe_roots(std::slice::from_ref(&created.path))[&created.path]).label(),
+        "unknown"
     );
     assert!(matches!(
         remove_named(&unplaced, "landed"),
@@ -2199,8 +2192,8 @@ fn only_a_placed_foreign_process_allows_pruning_a_merged_clean_tree() -> Result<
     // where an unreadable process has its cwd.
     let foreign = observer(ObservationIssue::PermissionDenied, None)?;
     assert_eq!(
-        foreign.observe_roots(std::slice::from_ref(&created.path))[&created.path],
-        WorkerState::Unknown
+        (foreign.observe_roots(std::slice::from_ref(&created.path))[&created.path]).label(),
+        "unknown"
     );
     assert!(matches!(
         remove_named(&foreign, "landed"),
@@ -2235,7 +2228,7 @@ fn only_a_placed_foreign_process_allows_pruning_a_merged_clean_tree() -> Result<
     assert!(
         listed
             .iter()
-            .any(|entry| entry.path == created.path && entry.writer == WriterState::Free)
+            .any(|entry| entry.path == created.path && entry.occupancy.is_available())
     );
     remove_named(&placed, "landed")?;
     assert!(!created.path.exists());
@@ -2251,14 +2244,14 @@ fn nested_worker_protects_all_containing_worktrees() -> Result<(), Box<dyn Error
     fs::create_dir_all(nested.join("src"))?;
     fs::create_dir(&sibling)?;
     let mut states = BTreeMap::from([
-        (outer.clone(), WorkerState::Free),
-        (nested.clone(), WorkerState::Free),
-        (sibling.clone(), WorkerState::Free),
+        (outer.clone(), Occupancy::Available),
+        (nested.clone(), Occupancy::Available),
+        (sibling.clone(), Occupancy::Available),
     ]);
     record_live_path(&mut states, &nested.join("src"));
-    assert_eq!(states[&outer], WorkerState::Live);
-    assert_eq!(states[&nested], WorkerState::Live);
-    assert_eq!(states[&sibling], WorkerState::Free);
+    assert_eq!((states[&outer]).label(), "live");
+    assert_eq!((states[&nested]).label(), "live");
+    assert_eq!((states[&sibling]).label(), "free");
     Ok(())
 }
 
@@ -2304,11 +2297,7 @@ mod narrowing {
         setuid_transition: true,
     });
 
-    type Observed = (
-        WorkerState,
-        String,
-        Vec<(Option<i64>, Option<&'static str>)>,
-    );
+    type Observed = (Occupancy, String, Vec<(Option<i64>, Option<&'static str>)>);
 
     /// Observe one process (pid 200) beside the root; returns state, detail
     /// and the audited (pid, condition) pairs.
@@ -2371,7 +2360,7 @@ mod narrowing {
             &mut |pid, condition| audit.push((pid, condition)),
         );
         Ok((
-            states[&root],
+            states[&root].clone(),
             details.get(&root).cloned().unwrap_or_default(),
             audit,
         ))
@@ -2439,7 +2428,7 @@ mod narrowing {
     /// becomes `exit` during its occupancy query.
     fn exits_during_occupancy(
         exit: impl Fn(ProcessFact) -> ProcessObservation,
-    ) -> Result<WorkerState, Box<dyn Error>> {
+    ) -> Result<Occupancy, Box<dyn Error>> {
         let fixture = Fixture::new()?;
         let root = canonicalize(fixture._temp.path())?.join("root");
         fs::create_dir(&root)?;
@@ -2494,22 +2483,23 @@ mod narrowing {
             false,
             &mut |_, _| {},
         );
-        Ok(states[&root])
+        Ok(states[&root].clone())
     }
 
     #[test]
     fn a_process_that_exits_during_occupancy_inspection_frees_its_root()
     -> Result<(), Box<dyn Error>> {
         assert_eq!(
-            exits_during_occupancy(|_| ProcessObservation::Absent)?,
-            WorkerState::Free
+            (exits_during_occupancy(|_| ProcessObservation::Absent)?).label(),
+            "free"
         );
         assert_eq!(
-            exits_during_occupancy(|fact| ProcessObservation::Present(ProcessFact {
+            (exits_during_occupancy(|fact| ProcessObservation::Present(ProcessFact {
                 zombie: true,
                 ..fact
-            }))?,
-            WorkerState::Free
+            }))?)
+            .label(),
+            "free"
         );
         // A different process that reused the PID proves nothing.
         assert_ne!(
@@ -2520,7 +2510,7 @@ mod narrowing {
                 },
                 ..fact
             }))?,
-            WorkerState::Free
+            Occupancy::Available
         );
         Ok(())
     }
@@ -2532,7 +2522,7 @@ mod narrowing {
             path_scripted(gap(OccupancyGap::DescriptorsDenied), SYSTEM),
             false,
         )?;
-        assert_eq!(state, WorkerState::Free);
+        assert_eq!((state).label(), "free");
         assert!(audit.is_empty());
         Ok(())
     }
@@ -2546,7 +2536,7 @@ mod narrowing {
             OccupancyGap::LimitExceeded,
         ] {
             let (state, detail, audit) = observe(path_scripted(gap(gap_kind), None), false)?;
-            assert_eq!(state, WorkerState::Free, "{gap_kind:?}");
+            assert_eq!(state, Occupancy::Available, "{gap_kind:?}");
             assert!(
                 detail.contains(&format!(
                     "occupancy incomplete (excused): {}",
@@ -2565,7 +2555,7 @@ mod narrowing {
                 },
                 false,
             )?;
-            assert_eq!(state, WorkerState::Unknown, "{gap_kind:?}");
+            assert_eq!(state.label(), "unknown", "{gap_kind:?}");
             let (state, _, _) = observe(
                 Scripted {
                     cwd: CwdObservation::Path(PathBuf::from("inside")),
@@ -2575,7 +2565,7 @@ mod narrowing {
                 },
                 false,
             )?;
-            assert_eq!(state, WorkerState::Live, "{gap_kind:?}");
+            assert_eq!(state.label(), "live", "{gap_kind:?}");
         }
         Ok(())
     }
@@ -2587,7 +2577,7 @@ mod narrowing {
             OccupancyGap::Unobserved,
         ] {
             let (state, detail, _) = observe(path_scripted(gap(gap_kind), SYSTEM), false)?;
-            assert_eq!(state, WorkerState::Unknown, "{gap_kind:?}");
+            assert_eq!((state).label(), "unknown", "{gap_kind:?}");
             assert!(
                 detail.contains(&format!("occupancy incomplete: {}", gap_kind.describe())),
                 "{detail}"
@@ -2608,7 +2598,7 @@ mod narrowing {
             },
             false,
         )?;
-        assert_eq!(state, WorkerState::Free);
+        assert_eq!((state).label(), "free");
         assert!(audit.is_empty());
         Ok(())
     }
@@ -2625,7 +2615,7 @@ mod narrowing {
             },
             false,
         )?;
-        assert_eq!(state, WorkerState::Unknown);
+        assert_eq!((state).label(), "unknown");
         assert!(detail.contains("descriptors unavailable"), "{detail}");
         Ok(())
     }
@@ -2647,7 +2637,7 @@ mod narrowing {
                 },
                 false,
             )?;
-            assert_eq!(state, WorkerState::Unknown, "{sealed:?}");
+            assert_eq!((state).label(), "unknown", "{sealed:?}");
             assert!(
                 detail.starts_with("process 200: cwd unreadable"),
                 "{detail}"
@@ -2667,7 +2657,7 @@ mod narrowing {
             },
             true,
         )?;
-        assert_eq!(state, WorkerState::Free);
+        assert_eq!((state).label(), "free");
         let (state, _, _) = observe(
             Scripted {
                 cwd: CwdObservation::Gone,
@@ -2677,7 +2667,7 @@ mod narrowing {
             },
             false,
         )?;
-        assert_eq!(state, WorkerState::Free);
+        assert_eq!((state).label(), "free");
         // The same process that is neither stays unknown.
         let (state, _, _) = observe(
             Scripted {
@@ -2688,7 +2678,7 @@ mod narrowing {
             },
             false,
         )?;
-        assert_eq!(state, WorkerState::Unknown);
+        assert_eq!((state).label(), "unknown");
         Ok(())
     }
 
@@ -2706,7 +2696,7 @@ mod narrowing {
             ),
             false,
         )?;
-        assert_eq!(state, WorkerState::Unknown);
+        assert_eq!((state).label(), "unknown");
         assert!(
             detail.starts_with("process 200: occupancy path unavailable"),
             "{detail}"
@@ -2784,7 +2774,7 @@ mod narrowing {
             &current,
             true,
         );
-        assert_eq!(states_with_ancestors[&root], WorkerState::Free);
+        assert_eq!((states_with_ancestors[&root]).label(), "free");
 
         // Without ancestor exclusion, parent shell inside root is detected: Live.
         let (states_no_ancestors, holders_no_ancestors, _) = observe_worker_holders(
@@ -2794,7 +2784,7 @@ mod narrowing {
             &current,
             false,
         );
-        assert_eq!(states_no_ancestors[&root], WorkerState::Live);
+        assert_eq!((states_no_ancestors[&root]).label(), "live");
         let holder = holders_no_ancestors.get(&root).unwrap();
         assert_eq!(holder.pid, 90);
         assert_eq!(holder.command.as_deref(), Some("shell"));
@@ -2823,7 +2813,7 @@ mod narrowing {
             &current,
             true,
         );
-        assert_eq!(states_foreign[&root], WorkerState::Live);
+        assert_eq!((states_foreign[&root]).label(), "live");
         let foreign_holder = holders_foreign.get(&root).unwrap();
         assert_eq!(foreign_holder.pid, 200);
         assert_eq!(foreign_holder.cwd.as_ref(), Some(&root));
@@ -2843,16 +2833,16 @@ fn unplaceable_aliased_cwd_does_not_taint_unrelated_worktrees() -> Result<(), Bo
     let non_directory = alias.join("file");
     fs::write(&non_directory, b"")?;
     let mut states = BTreeMap::from([
-        (affected.clone(), WorkerState::Free),
-        (unrelated.clone(), WorkerState::Free),
+        (affected.clone(), Occupancy::Available),
+        (unrelated.clone(), Occupancy::Available),
     ]);
     let mut reported = false;
     record_live_path_with_audit(&mut states, &non_directory.join("cwd"), &mut || {
         reported = true;
     });
     assert!(reported);
-    assert_eq!(states[&affected], WorkerState::Unknown);
-    assert_eq!(states[&unrelated], WorkerState::Free);
+    assert_eq!((states[&affected]).label(), "unknown");
+    assert_eq!((states[&unrelated]).label(), "free");
     Ok(())
 }
 
@@ -2866,8 +2856,8 @@ fn affirmative_evidence_of_different_root_does_not_taint_this_one() -> Result<()
     let inside_other = other_root.join("sub-dir");
     fs::create_dir(&inside_other)?;
     let mut states = BTreeMap::from([
-        (this_root.clone(), WorkerState::Free),
-        (other_root.clone(), WorkerState::Free),
+        (this_root.clone(), Occupancy::Available),
+        (other_root.clone(), Occupancy::Available),
     ]);
     let mut unplaceable_reported = false;
     let placed = record_live_path_with_audit(&mut states, &inside_other, &mut || {
@@ -2875,8 +2865,8 @@ fn affirmative_evidence_of_different_root_does_not_taint_this_one() -> Result<()
     });
     assert!(!unplaceable_reported);
     assert_eq!(placed, vec![other_root.clone()]);
-    assert_eq!(states[&this_root], WorkerState::Free);
-    assert_eq!(states[&other_root], WorkerState::Live);
+    assert_eq!((states[&this_root]).label(), "free");
+    assert_eq!((states[&other_root]).label(), "live");
     Ok(())
 }
 
@@ -2890,8 +2880,8 @@ fn wholly_unplaceable_process_taints_every_root_fail_closed() -> Result<(), Box<
 
     // Relative path cannot safely rule out any root.
     let mut states = BTreeMap::from([
-        (root_a.clone(), WorkerState::Free),
-        (root_b.clone(), WorkerState::Free),
+        (root_a.clone(), Occupancy::Available),
+        (root_b.clone(), Occupancy::Available),
     ]);
     let mut reported = false;
     let placed = record_live_path_with_audit(&mut states, Path::new("relative/path"), &mut || {
@@ -2899,13 +2889,13 @@ fn wholly_unplaceable_process_taints_every_root_fail_closed() -> Result<(), Box<
     });
     assert!(reported);
     assert!(placed.is_empty());
-    assert_eq!(states[&root_a], WorkerState::Unknown);
-    assert_eq!(states[&root_b], WorkerState::Unknown);
+    assert_eq!((states[&root_a]).label(), "unknown");
+    assert_eq!((states[&root_b]).label(), "unknown");
 
     // Empty path is similarly wholly unplaceable and fails closed.
     let mut states_empty = BTreeMap::from([
-        (root_a.clone(), WorkerState::Free),
-        (root_b.clone(), WorkerState::Free),
+        (root_a.clone(), Occupancy::Available),
+        (root_b.clone(), Occupancy::Available),
     ]);
     let mut reported_empty = false;
     let placed_empty = record_live_path_with_audit(&mut states_empty, Path::new(""), &mut || {
@@ -2913,8 +2903,8 @@ fn wholly_unplaceable_process_taints_every_root_fail_closed() -> Result<(), Box<
     });
     assert!(reported_empty);
     assert!(placed_empty.is_empty());
-    assert_eq!(states_empty[&root_a], WorkerState::Unknown);
-    assert_eq!(states_empty[&root_b], WorkerState::Unknown);
+    assert_eq!((states_empty[&root_a]).label(), "unknown");
+    assert_eq!((states_empty[&root_b]).label(), "unknown");
     Ok(())
 }
 
@@ -2949,18 +2939,18 @@ fn taint_causes_distinguish_contention_from_uncertainty() {
 fn live_observer_without_process_details_preserves_unattributed_writer() {
     struct LiveObserver;
     impl WorkerObserver for LiveObserver {
-        fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, WorkerState> {
+        fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, Occupancy> {
             roots
                 .iter()
                 .cloned()
-                .map(|root| (root, WorkerState::Live))
+                .map(|root| (root, Occupancy::Observed { process: None }))
                 .collect()
         }
     }
 
     let root = PathBuf::from("/worktree");
     let (states, taints) = LiveObserver.observe_roots_with_taints(std::slice::from_ref(&root));
-    assert_eq!(states[&root], WorkerState::Live);
+    assert_eq!((states[&root]).label(), "live");
     assert_eq!(taints[&root], TaintCause::UnattributedLiveWriter);
     assert!(!taints[&root].is_contention());
     assert_eq!(taints[&root].to_string(), "live writer");
@@ -3045,9 +3035,9 @@ fn census_observation_produces_typed_taints_for_contention_and_uncertainty()
     let (states, taints) =
         observe_worker_root_taints(&roots, &processes, &cwd_obs, &current, false);
 
-    assert_eq!(states[&live_root], WorkerState::Live);
-    assert_eq!(states[&unknown_root], WorkerState::Unknown);
-    assert_eq!(states[&free_root], WorkerState::Free);
+    assert_eq!((states[&live_root]).label(), "live");
+    assert_eq!((states[&unknown_root]).label(), "unknown");
+    assert_eq!((states[&free_root]).label(), "free");
 
     let live_taint = &taints[&live_root];
     assert!(!live_taint.is_contention());
@@ -3117,7 +3107,7 @@ fn census_refusal_names_working_directory_evidence_kind() -> Result<(), Box<dyn 
         cwd_obs: WdCwdObserver,
     }
     impl WorkerObserver for MockObserver<'_> {
-        fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, WorkerState> {
+        fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, Occupancy> {
             observe_worker_roots(
                 roots,
                 self.processes,
@@ -3247,7 +3237,7 @@ fn census_refusal_names_executable_image_evidence_kind() -> Result<(), Box<dyn E
         cwd_obs: ExeCwdObserver,
     }
     impl WorkerObserver for MockObserver<'_> {
-        fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, WorkerState> {
+        fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, Occupancy> {
             observe_worker_roots(
                 roots,
                 self.processes,
@@ -3383,7 +3373,7 @@ fn census_refusal_names_other_held_path_evidence_kind() -> Result<(), Box<dyn Er
         cwd_obs: OtherHeldPathCwdObserver,
     }
     impl WorkerObserver for MockObserver<'_> {
-        fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, WorkerState> {
+        fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, Occupancy> {
             observe_worker_roots(
                 roots,
                 self.processes,
@@ -3487,7 +3477,7 @@ fn census_keeps_holder_and_evidence_together_across_processes() -> Result<(), Bo
             }
         }
     }
-    let (_, holders, _, taints) = observe_worker_holders_with_taints_and_audit(
+    let (states, holders, _, taints) = observe_worker_holders_with_taints_and_audit(
         std::slice::from_ref(&root),
         &processes,
         &Observer {
@@ -3500,6 +3490,10 @@ fn census_keeps_holder_and_evidence_together_across_processes() -> Result<(), Bo
         &mut |_, _| {},
     );
     let holder = &holders[&root];
+    assert!(matches!(
+        &states[&root],
+        Occupancy::Observed { process: Some(process) } if process == holder
+    ));
     assert_eq!(holder.pid, 200);
     assert_eq!(holder.kind, ProcessEvidenceKind::OtherHeldPath);
     assert!(

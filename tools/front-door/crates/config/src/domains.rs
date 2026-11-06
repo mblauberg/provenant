@@ -1,7 +1,6 @@
 use crate::Profile;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::{marker::PhantomData, path::Path};
-use thiserror::Error;
 use toml_edit::{DocumentMut, Table};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -9,12 +8,21 @@ use toml_edit::{DocumentMut, Table};
 pub struct NoDomains {}
 
 /// Domain-local dotted field path and a static code; never a rejected value.
-#[derive(Debug, Clone, PartialEq, Eq, Error)]
-#[error("{field}: {code}")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SectionError {
     pub field: String,
     pub code: &'static str,
+    /// Safe explanation selected by the domain owner, when the code is stable.
+    pub detail: Option<&'static str>,
 }
+
+impl std::fmt::Display for SectionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}", self.field, self.detail.unwrap_or(self.code))
+    }
+}
+
+impl std::error::Error for SectionError {}
 
 /// Implement on a domain's closed serde section, alongside its TOML assets.
 pub trait DomainConfig: DeserializeOwned {
@@ -132,6 +140,7 @@ fn validate<T: DomainConfig>(table: &Table) -> Vec<SectionError> {
     match toml_edit::de::from_document::<T>(DocumentMut::from(table.clone())) {
         Ok(value) => value.validate(),
         Err(error) => vec![SectionError {
+            detail: None,
             field: crate::loader::key_at(table, error.span().map_or(0, |s| s.start)),
             code: "schema",
         }],

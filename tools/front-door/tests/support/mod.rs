@@ -174,8 +174,6 @@ impl TestRig {
                 ("PROVENANT_DURABILITY", "relaxed"),
                 // Debug hooks otherwise miss the 50 ms delivery budget under CI load.
                 ("PROVENANT_TEST_ANSWER_BUDGET_MS", "1000"),
-                // Host writer spacing is 20 s; a fixture's successor lane must not wait it out.
-                (provenant_supervisor::STARTUP_SPACING_ENV, "0"),
             ]
             .map(|(k, v)| (k.into(), v.into())),
         )

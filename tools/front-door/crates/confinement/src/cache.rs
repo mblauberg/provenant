@@ -1,7 +1,7 @@
 //! Lane cache collection.
 
 use crate::permissions::{PermissionError, validate_absolute};
-use crate::worktrees::{WorkerState, WriterState};
+use crate::worktrees::Occupancy;
 use provenant_os::fs::{Directory, FileKind, FsError, LockGuard, PayloadTree};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -56,7 +56,7 @@ pub struct CacheGcPolicy {
     pub selected_only: bool,
     /// Listing observations for canonical owners with live or unknown writers;
     /// never removed or re-probed during the sweep.
-    pub protected_owners: BTreeMap<PathBuf, WriterState>,
+    pub protected_owners: BTreeMap<PathBuf, Occupancy>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -120,7 +120,7 @@ pub(crate) fn prune_worktree_cargo_cache(home: &Path, cache: &Path) -> Result<()
         name,
         &CacheGcPolicy::default(),
         &mut CacheGcReport::default(),
-        &mut |_| Err(WorkerState::Unknown),
+        &mut |path| Err(missing_custody(path)),
         false,
     )
 }
@@ -134,10 +134,22 @@ pub fn gc_worktree_cargo_caches(
     home: &Path,
     policy: &CacheGcPolicy,
 ) -> Result<CacheGcReport, CacheGcError> {
-    gc_worktree_cargo_caches_with_writer_guard(home, policy, |_| Err(WorkerState::Unknown))
+    gc_worktree_cargo_caches_with_writer_guard(home, policy, |path| Err(missing_custody(path)))
 }
 
-type CacheWriterGuard<'a> = dyn FnMut(&Path) -> Result<Option<LockGuard>, WorkerState> + 'a;
+fn missing_custody(path: &Path) -> Occupancy {
+    Occupancy::custody_unknown(path.to_path_buf(), "writer custody was not established")
+}
+
+fn guard_reason(state: &Occupancy) -> CacheGcReason {
+    match state {
+        Occupancy::Held => CacheGcReason::Busy,
+        Occupancy::Observed { .. } => CacheGcReason::Live,
+        _ => CacheGcReason::Unobservable,
+    }
+}
+
+type CacheWriterGuard<'a> = dyn FnMut(&Path) -> Result<Option<LockGuard>, Occupancy> + 'a;
 
 /// Sweep caches while holding the owner's writer lock across idle or free-floor
 /// detachment.
@@ -145,7 +157,7 @@ type CacheWriterGuard<'a> = dyn FnMut(&Path) -> Result<Option<LockGuard>, Worker
 pub fn gc_worktree_cargo_caches_with_writer_guard(
     home: &Path,
     policy: &CacheGcPolicy,
-    writer_guard: impl FnMut(&Path) -> Result<Option<LockGuard>, WorkerState>,
+    writer_guard: impl FnMut(&Path) -> Result<Option<LockGuard>, Occupancy>,
 ) -> Result<CacheGcReport, CacheGcError> {
     gc_caches_with_free_space(home, policy, writer_guard, |path| {
         provenant_os::fs::Directory::open_anchor(path)
@@ -157,7 +169,7 @@ pub fn gc_worktree_cargo_caches_with_writer_guard(
 fn gc_caches_with_free_space(
     home: &Path,
     policy: &CacheGcPolicy,
-    mut writer_guard: impl FnMut(&Path) -> Result<Option<LockGuard>, WorkerState>,
+    mut writer_guard: impl FnMut(&Path) -> Result<Option<LockGuard>, Occupancy>,
     mut free_space: impl FnMut(&Path) -> std::io::Result<u64>,
 ) -> Result<CacheGcReport, CacheGcError> {
     let mut report = CacheGcReport {
@@ -476,8 +488,8 @@ fn prune_worktree_cache(
                     path: cache_root.join(name),
                     bytes: 0,
                     reason: match state {
-                        WriterState::Live => CacheGcReason::Live,
-                        WriterState::Busy => CacheGcReason::Busy,
+                        Occupancy::Observed { .. } => CacheGcReason::Live,
+                        Occupancy::Held => CacheGcReason::Busy,
                         _ => CacheGcReason::Unobservable,
                     },
                 });
@@ -503,13 +515,7 @@ fn prune_worktree_cache(
                 report.kept.push(CacheGcEntry {
                     path: cache_root.join(name),
                     bytes: 0,
-                    reason: if state == WorkerState::Busy {
-                        CacheGcReason::Busy
-                    } else if state == WorkerState::Live {
-                        CacheGcReason::Live
-                    } else {
-                        CacheGcReason::Unobservable
-                    },
+                    reason: guard_reason(&state),
                 });
                 return Ok(());
             }
@@ -530,20 +536,14 @@ fn prune_worktree_cache(
             ));
             let idle_guard = if matches!(reason, CacheGcReason::Idle | CacheGcReason::FreeFloor) {
                 match writer_guard(&original_owner.path)
-                    .and_then(|guard| guard.ok_or(WorkerState::Unknown))
+                    .and_then(|guard| guard.ok_or_else(|| missing_custody(&original_owner.path)))
                 {
                     Ok(guard) => Some(guard),
                     Err(state) => {
                         report.kept.push(CacheGcEntry {
                             path: cache_root.join(name),
                             bytes: 0,
-                            reason: if state == WorkerState::Busy {
-                                CacheGcReason::Busy
-                            } else if state == WorkerState::Live {
-                                CacheGcReason::Live
-                            } else {
-                                CacheGcReason::Unobservable
-                            },
+                            reason: guard_reason(&state),
                         });
                         return Ok(());
                     }
@@ -1127,7 +1127,7 @@ mod tests {
             policy: &CacheGcPolicy,
             event: Event,
         ) -> Result<CacheGcReport, CacheGcError> {
-            sweep_with_writer_guard(home, policy, event, &mut |_| Err(WorkerState::Unknown))
+            sweep_with_writer_guard(home, policy, event, &mut |path| Err(missing_custody(path)))
         }
 
         fn sweep_with_writer_guard(
@@ -1217,15 +1217,15 @@ mod tests {
                     &policy,
                     |owner| {
                         if owner == owners[3] {
-                            return Err(WorkerState::Live);
+                            return Err(Occupancy::Observed { process: None });
                         }
                         if owner == owners[4] {
-                            return Err(WorkerState::Unknown);
+                            return Err(missing_custody(owner));
                         }
                         locks
                             .try_lock_existing(OsStr::new("writer.lock"), LockMode::Exclusive)
                             .map(Some)
-                            .map_err(|_| WorkerState::Unknown)
+                            .map_err(|_| missing_custody(owner))
                     },
                     |_| Ok(observations.next().unwrap_or(100)),
                 )?;
@@ -1292,7 +1292,7 @@ mod tests {
                 let report = gc_caches_with_free_space(
                     home,
                     &policy,
-                    |_| {
+                    |owner| {
                         // A writer changed the cache after candidate measurement.
                         let result = if change_owner {
                             std::fs::write(path.join(CARGO_CACHE_OWNER), b"changed owner")
@@ -1304,11 +1304,11 @@ mod tests {
                                 )
                             })
                         };
-                        result.map_err(|_| WorkerState::Unknown)?;
+                        result.map_err(|_| missing_custody(owner))?;
                         locks
                             .try_lock_existing(OsStr::new("writer.lock"), LockMode::Exclusive)
                             .map(Some)
-                            .map_err(|_| WorkerState::Unknown)
+                            .map_err(|_| missing_custody(owner))
                     },
                     |_| Ok(0),
                 )?;
@@ -1472,24 +1472,28 @@ mod tests {
             std::fs::create_dir(&owner)?;
             let path = cache(home, &"a".repeat(64), &owner)?;
             for (state, reason) in [
-                (WriterState::Live, CacheGcReason::Live),
-                (WriterState::Busy, CacheGcReason::Busy),
-                (WriterState::Unknown, CacheGcReason::Unobservable),
+                (Occupancy::Observed { process: None }, CacheGcReason::Live),
+                (Occupancy::Held, CacheGcReason::Busy),
+                (
+                    Occupancy::custody_unknown(owner.clone(), "fixture"),
+                    CacheGcReason::Unobservable,
+                ),
             ] {
                 for dry_run in [true, false] {
                     let policy = CacheGcPolicy {
                         idle_before_ns: Some(i128::MAX),
                         dry_run,
                         project_owners: [owner.clone()].into(),
-                        protected_owners: [(owner.clone(), state)].into(),
+                        protected_owners: [(owner.clone(), state.clone())].into(),
                         selected_only: false,
                         free_floor_bytes: None,
                     };
                     let mut probes = 0;
-                    let report = gc_worktree_cargo_caches_with_writer_guard(home, &policy, |_| {
-                        probes += 1;
-                        Err(WorkerState::Unknown)
-                    })?;
+                    let report =
+                        gc_worktree_cargo_caches_with_writer_guard(home, &policy, |path| {
+                            probes += 1;
+                            Err(missing_custody(path))
+                        })?;
                     assert_eq!(probes, 0, "the listing already protects this owner");
                     assert!(report.removed.is_empty());
                     assert_eq!(report.kept.len(), 1);
@@ -1501,7 +1505,7 @@ mod tests {
         }
 
         #[test]
-        fn gc_idle_refuses_writers_that_became_live_or_unobservable()
+        fn gc_idle_refuses_writers_that_became_held_or_unobservable()
         -> Result<(), Box<dyn std::error::Error>> {
             for live in [true, false] {
                 let temporary = tempfile::tempdir()?;
@@ -1522,21 +1526,22 @@ mod tests {
                     project_owners: [owner].into(),
                     ..CacheGcPolicy::default()
                 };
-                let report = gc_worktree_cargo_caches_with_writer_guard(home, &policy, |_| {
-                    locks
-                        .try_lock_existing(OsStr::new("writer.lock"), LockMode::Exclusive)
-                        .map(Some)
-                        .map_err(|error| match error {
-                            FsError::LockTimeout { .. } => WorkerState::Live,
-                            _ => WorkerState::Unknown,
-                        })
-                })?;
+                let report =
+                    gc_worktree_cargo_caches_with_writer_guard(home, &policy, |owner_path| {
+                        locks
+                            .try_lock_existing(OsStr::new("writer.lock"), LockMode::Exclusive)
+                            .map(Some)
+                            .map_err(|error| match error {
+                                FsError::LockTimeout { .. } => Occupancy::Held,
+                                _ => missing_custody(owner_path),
+                            })
+                    })?;
                 assert!(report.removed.is_empty());
                 assert_eq!(report.kept.len(), 1);
                 assert_eq!(
                     report.kept[0].reason,
                     if live {
-                        CacheGcReason::Live
+                        CacheGcReason::Busy
                     } else {
                         CacheGcReason::Unobservable
                     }
@@ -1619,11 +1624,11 @@ mod tests {
                     }
                     Ok(())
                 }),
-                &mut |_| {
+                &mut |path| {
                     locks
                         .try_lock_existing(OsStr::new("writer.lock"), LockMode::Exclusive)
                         .map(Some)
-                        .map_err(|_| WorkerState::Unknown)
+                        .map_err(|_| missing_custody(path))
                 },
             )?;
             assert_eq!(renames.load(Ordering::SeqCst), 2);
@@ -1671,12 +1676,12 @@ mod tests {
                     }
                     Ok(())
                 }),
-                &mut |_| {
+                &mut |path| {
                     probed.store(true, Ordering::SeqCst);
                     locks
                         .try_lock_existing(OsStr::new("writer.lock"), LockMode::Exclusive)
                         .map(Some)
-                        .map_err(|_| WorkerState::Unknown)
+                        .map_err(|_| missing_custody(path))
                 },
             )?;
             assert!(probed.load(Ordering::SeqCst));
@@ -1727,11 +1732,11 @@ mod tests {
                         }
                         Ok(())
                     }),
-                    &mut |_| {
+                    &mut |path| {
                         locks
                             .try_lock_existing(OsStr::new("writer.lock"), LockMode::Exclusive)
                             .map(Some)
-                            .map_err(|_| WorkerState::Unknown)
+                            .map_err(|_| missing_custody(path))
                     },
                 )?;
                 assert!(report.removed.is_empty());
@@ -2163,20 +2168,20 @@ mod tests {
         }
         std::fs::remove_dir(&caches[0].1)?;
         let locks = test_writer_lock(home)?;
-        let mut writer_guard = |_: &Path| {
+        let mut writer_guard = |path: &Path| {
             locks
                 .try_lock_existing(
                     OsStr::new("writer.lock"),
                     provenant_os::fs::LockMode::Exclusive,
                 )
                 .map(Some)
-                .map_err(|_| WorkerState::Unknown)
+                .map_err(|_| missing_custody(path))
         };
         let mut policy = CacheGcPolicy {
             idle_before_ns: Some(i128::MAX),
             dry_run: true,
             project_owners: caches.iter().map(|(_, owner)| owner.clone()).collect(),
-            protected_owners: [(caches[2].1.clone(), WriterState::Live)].into(),
+            protected_owners: [(caches[2].1.clone(), Occupancy::Observed { process: None })].into(),
             free_floor_bytes: None,
             selected_only: false,
         };

@@ -41,8 +41,8 @@ use crate::permissions::PermissionError;
 use crate::repo::VerifiedRepo;
 use crate::utility::{GitRead, UtilityBudget, UtilityRuntime, run_utility};
 use crate::worktrees::{
-    WorkerObserver, WorkerState, WorktreeCondition, WorktreeError, WorktreeInfo, WriterState,
-    combine_worker_state, disk_writer_state, parse_worktree_list,
+    WorkerObserver, WorktreeCondition, WorktreeError, WorktreeInfo, combine_occupancy,
+    disk_writer_state, parse_worktree_list,
 };
 use provenant_core::CancelToken;
 use provenant_os::{
@@ -230,23 +230,33 @@ pub fn worktrees(
     let observed = workers.observe_roots(&roots);
     let mut inventory = Vec::new();
     for listed in listed.into_iter().filter(|entry| !entry.bare) {
-        let registered = registration.map_or(WorkerState::Unknown, |directory| {
-            disk_writer_state(directory, &listed.path)
-        });
-        let writer = combine_worker_state(
+        let registered = registration.map_or_else(
+            || {
+                crate::worktrees::Occupancy::custody_unknown(
+                    listed.path.clone(),
+                    "writer registration is unavailable",
+                )
+            },
+            |directory| disk_writer_state(directory, &listed.path),
+        );
+        let occupancy = combine_occupancy(
+            &listed.path,
             registered,
-            observed
-                .get(&listed.path)
-                .copied()
-                .unwrap_or(WorkerState::Unknown),
+            observed.get(&listed.path).cloned().unwrap_or_else(|| {
+                crate::worktrees::Occupancy::census_unknown(
+                    listed.path.clone(),
+                    "process census did not return the requested root",
+                )
+            }),
         );
         let info = WorktreeInfo {
             path: listed.path,
             branch: listed.branch.map(|branch| branch.as_str().to_owned()),
             head: listed.head,
             dirty: WorktreeCondition::Unknown,
-            writer,
-            owner: crate::worktrees::OwnerStatus::Unknown,
+            occupancy,
+            owner: Err("worktree registration was not observed".into()),
+            primary: false,
         };
         let first = report.entries.len();
         if let Some(index) = report.measure("worktree", &info.path) {
@@ -279,15 +289,7 @@ pub fn worktrees(
                 });
             let entry = &mut report.entries[index];
             entry.branch = info.branch.clone();
-            entry.writer = Some(
-                match writer {
-                    WriterState::Live => "live",
-                    WriterState::Busy => "busy",
-                    WriterState::Free => "free",
-                    WriterState::Unknown => "unknown",
-                }
-                .into(),
-            );
+            entry.writer = Some(info.occupancy.label().into());
             entry.merged = merged;
             let writer = entry.writer.clone();
             for target in &mut report.entries[first..] {
@@ -437,9 +439,10 @@ mod tests {
             classify_lane_cache(&directory, relative, &policy, 100)?.0,
             "live"
         );
-        policy
-            .protected_owners
-            .insert(owner.clone(), crate::worktrees::WriterState::Live);
+        policy.protected_owners.insert(
+            owner.clone(),
+            crate::worktrees::Occupancy::Observed { process: None },
+        );
         assert_eq!(
             classify_lane_cache(&directory, relative, &policy, 0)?.0,
             "live"

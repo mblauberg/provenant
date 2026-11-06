@@ -786,7 +786,7 @@ fn credential_writes_stay_inside_auth_roots_and_state_stays_outside() {
 
 #[test]
 fn invalid_native_control_labels_are_omitted() {
-    use super::super::render::filtered_native_controls;
+    use super::super::validation::filtered_native_controls;
     let mut spec = ProviderProfileSpec {
         process_executables: vec![PathGrant {
             path: "/fixture/provider".into(),
