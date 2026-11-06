@@ -2466,6 +2466,7 @@ fn build_stages(
             ![
                 "stages",
                 "parameters",
+                "templates",
                 "roles",
                 "exports",
                 "limits",
