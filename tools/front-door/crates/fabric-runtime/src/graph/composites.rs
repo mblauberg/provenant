@@ -123,9 +123,9 @@ fn children(
         let mut node = original.clone();
         node.require_skill_location |= require_skill_location;
         node.id = scoped(prefix, &node.id);
-        if !valid_identifier(&node.id) {
+        if !valid_node_identifier(&node.id) {
             return Err(format!(
-                "expanded node id {:?} is invalid; use at most 64 ASCII letters, digits, dots, underscores or hyphens; shorten the composite or node name",
+                "expanded node id {:?} is invalid; use at most 200 ASCII letters, digits, dots, underscores or hyphens; shorten the composite or node name",
                 bounded(&node.id, 256)
             ));
         }

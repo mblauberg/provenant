@@ -730,7 +730,7 @@ mod build_tests {
         }
     }
     #[test]
-    fn memory_pressure_defaults_to_critical_and_accepts_host_policy() {
+    fn memory_pressure_accepts_host_policy() {
         use provenant_os::sys::resources::MemoryPressure;
         use provenant_records::diagnostic::SettingSource;
         assert_eq!(

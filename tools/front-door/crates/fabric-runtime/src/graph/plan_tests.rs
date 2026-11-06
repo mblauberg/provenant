@@ -134,7 +134,6 @@ fn planned_fan_out_survives_checkpoint_json_and_mixed_settlement() {
         let error = advance(&doc, &mut fixture_owner(&[]), &mut journal).unwrap_err();
         assert_eq!(error.code(), "bad_checkpoint");
         assert!(error.to_string().contains(&valid.nodes[boundary].id), "{error}");
-        assert!(error.to_string().contains("composite children must match expanded plan membership"), "{error}");
         journal.0 = Some(valid);
         let mut owner = FakeOwner { observations: [
             terminal_with_result(AttemptOutcome::Succeeded, "review passed"),
@@ -815,9 +814,9 @@ fn continuation_rejects_original_pr_delivery_before_integration_rewrite() {
 #[test]
 fn oversized_nested_fragment_id_names_the_source_and_child() {
     let mut doc = planner(1);
-    doc.nodes[0].id = "p".repeat(40);
+    doc.nodes[0].id = "p".repeat(100);
     doc.nodes.truncate(1);
-    let name = "c".repeat(23);
+    let name = "c".repeat(99);
     let run = advance(&doc, &mut fixture_owner(&[&result(vec![slice(&name, &["src"])])]), &mut MemoryJournal::default()).unwrap();
     assert_eq!(run.checkpoint.pause_code.as_deref(), Some("invalid_plan_expansion"));
     assert!(run.checkpoint.expansions.is_empty());

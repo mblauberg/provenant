@@ -1972,9 +1972,9 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         let mut ids: std::collections::BTreeSet<&str> =
                             expanded.nodes.iter().map(|item| item.id.as_str()).collect();
                         for child in &addition.nodes {
-                            if !valid_identifier(&child.id) {
+                            if !valid_node_identifier(&child.id) {
                                 return Err(format!(
-                                    "expanded review node id {:?} is invalid; use at most 64 ASCII letters, digits, dots, underscores or hyphens; shorten the composite or lens name",
+                                    "expanded review node id {:?} is invalid; use at most 200 ASCII letters, digits, dots, underscores or hyphens; shorten the composite or lens name",
                                     bounded(&child.id, 256)
                                 ));
                             }
@@ -3658,6 +3658,7 @@ fn dependency_state(
 ) -> Option<NodeState> {
     let mut waiting = false;
     let mut skipped = false;
+    let mut blocked = false;
     if node
         .after_expansion
         .iter()
@@ -3706,7 +3707,7 @@ fn dependency_state(
             }
             NodeState::Failed if recovery => {}
             NodeState::Failed if plan.nodes[index].on_fail.is_some() => skipped = true,
-            NodeState::Failed | NodeState::Blocked => return Some(NodeState::Blocked),
+            NodeState::Failed | NodeState::Blocked => blocked = true,
             NodeState::Succeeded if recovery => skipped = true,
             NodeState::Skipped => skipped = true,
             NodeState::Pending | NodeState::Running => waiting = true,
@@ -3715,6 +3716,8 @@ fn dependency_state(
     }
     if waiting {
         Some(NodeState::Pending)
+    } else if blocked {
+        Some(NodeState::Blocked)
     } else if skipped {
         Some(NodeState::Skipped)
     } else {

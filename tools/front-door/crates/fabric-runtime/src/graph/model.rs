@@ -497,6 +497,34 @@ impl GraphDocument {
         let expansion_limits = expansion_safety_limits(limits);
         let expanded = loops::expand(self, &[], &expansion_limits)?;
         let (plan, _) = validate_flat_plan(&expanded, &expansion_limits)?;
+        for node in &expanded.nodes {
+            if node.review.is_some() {
+                let longest_lens = node
+                    .extra
+                    .get("lens_templates")
+                    .and_then(serde_json::Value::as_object)
+                    .into_iter()
+                    .flat_map(|templates| templates.values())
+                    .filter_map(|template| template.get("id").and_then(serde_json::Value::as_str))
+                    .map(str::len)
+                    .max()
+                    .unwrap_or(0);
+                // The host prefixes each lens with `--r--p--`; reserve room
+                // for panel-generated identities even when no lens is selected.
+                if node
+                    .id
+                    .len()
+                    .saturating_add(8)
+                    .saturating_add(longest_lens.max(32))
+                    > 200
+                {
+                    return Err(AdmissionError::Plan(
+                        "deferred review node id leaves insufficient room for expanded review ids"
+                            .into(),
+                    ));
+                }
+            }
+        }
         if let Some(reason) = structural_limit(&expanded, &plan, limits) {
             return Err(AdmissionError::StructuralLimit(reason));
         }

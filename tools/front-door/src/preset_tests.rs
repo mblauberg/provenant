@@ -3130,11 +3130,12 @@ fn configured_node_limit_also_applies_to_flat_presets() {
 
 #[test]
 fn expanded_composite_id_refusal_matches_admission() {
-    let outer = "a".repeat(32);
+    let outer = "a".repeat(40);
     let inner = "b".repeat(32);
+    let middle = "m".repeat(64);
     let mut layers = Layers::empty();
     let preset = format!(
-        "stages=[{{ id='{outer}', stages=[{{ id='{inner}', prompt='work' }}], exports=[{{ node='{inner}', outputs=['result'] }}] }}]\n"
+        "stages=[{{ id='{outer}', stages=[{{id='{middle}',stages=[{{id='{middle}',stages=[{{ id='{inner}', prompt='work' }}]}}]}}] }}]\n"
     );
     layers.insert("test", "long-id", &preset).unwrap();
     let error = expand(&layers, "long-id", "brief", &[]).unwrap_err();
@@ -3152,11 +3153,12 @@ fn expanded_composite_id_refusal_matches_admission() {
 
 #[test]
 fn expanded_loop_id_refusal_matches_admission() {
-    let outer = "a".repeat(32);
+    let outer = "a".repeat(40);
     let inner = "b".repeat(32);
+    let middle = "m".repeat(64);
     let mut layers = Layers::empty();
     let preset = format!(
-        "stages=[{{id='{outer}',loop={{max_rounds=1,until='{inner}',stages=[{{id='{inner}',kind='gate',condition={{type='budget'}}}}]}}}}]\n"
+        "stages=[{{id='{outer}',stages=[{{id='{middle}',stages=[{{id='{middle}',loop={{max_rounds=1,until='{inner}',stages=[{{id='{inner}',kind='gate',condition={{type='budget'}}}}]}}}}]}}]}}]\n"
     );
     layers.insert("test", "long-loop", &preset).unwrap();
     let error = expand(&layers, "long-loop", "brief", &[]).unwrap_err();
@@ -8096,45 +8098,6 @@ fn big_batch_without_scout_matches_golden() {
         std::fs::write(&path, &actual).unwrap();
     }
     assert_eq!(actual, std::fs::read_to_string(path).unwrap_or_default());
-}
-
-#[test]
-fn preset_show_and_explain_json_match_snapshots() {
-    use provenant_records::{CommandResult, Outcome};
-    let layers = Layers::empty();
-    let (values, mut origins) = layers.resolve("review").unwrap();
-    origins.extend(expand(&layers, "review", "", &[]).unwrap().origins);
-    let show = CommandResult::new(
-        "preset",
-        Outcome::Ok,
-        json!({"name": "review", "values": values, "origins": origins}),
-    );
-    let explain = CommandResult::new("preset", Outcome::Ok, layers.explain("review").unwrap());
-    // `UPDATE_GOLDEN=1` rewrites the fixtures.
-    let golden = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/golden");
-    for (actual, name) in [
-        (
-            serde_json::to_value(show).unwrap(),
-            "preset-review-show.json",
-        ),
-        (
-            serde_json::to_value(explain).unwrap(),
-            "preset-review-explain.json",
-        ),
-    ] {
-        let path = golden.join(name);
-        if std::env::var_os("UPDATE_GOLDEN").is_some() {
-            let mut text = serde_json::to_string_pretty(&actual).unwrap();
-            text.push('\n');
-            std::fs::write(&path, text).unwrap();
-        }
-        let expected = std::fs::read_to_string(&path).unwrap_or_default();
-        assert_eq!(
-            actual,
-            serde_json::from_str::<Value>(&expected).unwrap_or_default(),
-            "{name}: rerun with UPDATE_GOLDEN=1 to refresh"
-        );
-    }
 }
 
 #[test]

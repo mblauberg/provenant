@@ -21,4 +21,10 @@ assert module.failures(missing, "false")
 for name in module.MACOS:
     needs[name] = {"result": "skipped"}
 assert not module.failures(needs, "false")
+for name in module.RUST:
+    needs[name] = {"result": "skipped"}
+assert not module.failures(needs, "false", "false")
+assert module.failures(needs, "false", "true")
+needs["rust"] = {"result": "failure"}
+assert module.failures(needs, "false", "false")
 print("CI aggregation fixtures passed.")

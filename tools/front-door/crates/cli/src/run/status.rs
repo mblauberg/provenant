@@ -37,11 +37,16 @@ pub fn status(command: crate::Status, _json_output: bool, edge: &Edge<'_>) -> Re
                 open_read_only(edge, &call)?
             };
             let (exempt, exempt_line) = review_exempt_view(&context);
+            let native = if command.id.is_none() {
+                Some(provenant_telemetry::native_attempts::read(edge.roots))
+            } else {
+                None
+            };
             let Some(store) = store else {
-                return Ok((
-                    json!({"lanes": [], "next_cursor": null, "review_exempt": exempt}),
-                    format!("no lanes\n{exempt_line}"),
-                ));
+                let mut data = json!({"lanes": [], "next_cursor": null, "review_exempt": exempt});
+                let mut human = format!("no lanes\n{exempt_line}");
+                append_native_status(native, &mut data, &mut human);
+                return Ok((data, human));
             };
             let session = Session { store, context };
             let _ = session.store.reap(&call);
@@ -180,6 +185,9 @@ pub fn status(command: crate::Status, _json_output: bool, edge: &Edge<'_>) -> Re
             human.push_str(&capabilities);
             data["review_exempt"] = exempt;
             attach_cloud_jobs(&session.store, &rows, &mut data, &mut human, &call)?;
+            if append_native_status(native, &mut data, &mut human) {
+                summary = None;
+            }
             if data.get("cloud_jobs").is_some() {
                 summary = None;
             }
@@ -189,6 +197,42 @@ pub fn status(command: crate::Status, _json_output: bool, edge: &Edge<'_>) -> Re
     out.summary = summary;
     out.read_only = true;
     out
+}
+
+fn append_native_status(
+    attempts: Option<
+        Result<
+            Vec<provenant_telemetry::native_attempts::Attempt>,
+            provenant_telemetry::native_attempts::AttemptError,
+        >,
+    >,
+    data: &mut Value,
+    human: &mut String,
+) -> bool {
+    match attempts {
+        Some(Ok(attempts)) if !attempts.is_empty() => {
+            human.push_str("native attempts (host):\n");
+            for attempt in &attempts {
+                let state = if attempt.ended_at.is_some() {
+                    "settled"
+                } else {
+                    "running"
+                };
+                human.push_str(&format!(
+                    "  {} {} {} {}\n",
+                    attempt.id, attempt.alias, attempt.model, state
+                ));
+            }
+            data["native_attempts"] = json!(attempts);
+            true
+        }
+        Some(Err(error)) => {
+            human.push_str(&format!("native attempts unavailable: {error}\n"));
+            data["native_attempts_error"] = json!(error.to_string());
+            true
+        }
+        _ => false,
+    }
 }
 
 pub(super) fn attach_capability_sources(

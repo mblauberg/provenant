@@ -1029,6 +1029,10 @@ mod tests {
             observe_model(dir.path(), outcome.session().unwrap()).unwrap(),
             "opencode/opencode/glm-5.3-flash-free"
         );
+        assert!(matches!(
+            observe_model(dir.path(), "ses_none"),
+            Err(ProviderError::UnknownIdentity)
+        ));
         db.execute(
             "INSERT INTO session_message VALUES (?, 'assistant', ?)",
             (

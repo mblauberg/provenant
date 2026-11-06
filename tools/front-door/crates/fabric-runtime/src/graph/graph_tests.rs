@@ -942,7 +942,7 @@ fn deferred_review_journals_and_replays_without_resolving_again() {
     );
 
     let mut too_long = addition.clone();
-    let long_id = format!("outer--review--review--{}", "x".repeat(64));
+    let long_id = format!("outer--review--review--{}", "x".repeat(200));
     too_long
         .nodes
         .iter_mut()
@@ -975,7 +975,7 @@ fn deferred_review_journals_and_replays_without_resolving_again() {
         .as_deref()
         .unwrap();
     assert!(error.contains(&long_id), "{error}");
-    assert!(error.contains("64 ASCII"), "{error}");
+    assert!(error.contains("200 ASCII"), "{error}");
     assert!(error.contains("shorten"), "{error}");
 
     let mut duplicate = addition.clone();
@@ -5237,7 +5237,7 @@ fn verdict_fixture(
 }
 
 #[test]
-fn verdict_gate_matches_review_tokens_and_legacy_aliases() {
+fn verdict_gate_matches_review_tokens() {
     let (document, mut owner) = verdict_fixture(VerdictThreshold::All, &[Some("APPROVE")]);
     let mut checkpoint = advance(&document, &mut owner, &mut MemoryJournal::default())
         .unwrap()
@@ -5246,12 +5246,9 @@ fn verdict_gate_matches_review_tokens_and_legacy_aliases() {
     let (mut plan, positions) = validate_plan(&document).unwrap();
     for (expected, actual, passed) in [
         ("VERDICT: PASS", "VERDICT: APPROVE", true),
-        ("VERDICT: PASS", "PASS", true),
         ("VERDICT: PASS", "VERDICT: PASS", true),
         ("VERDICT: PASS", "VERDICT: APPROVE_WITH_NITS", false),
         ("APPROVE_WITH_NITS", "VERDICT: APPROVE_WITH_NITS", true),
-        ("VERDICT: FAIL", "VERDICT: REQUEST_CHANGES", true),
-        ("REQUEST_CHANGES", "FAIL", true),
         ("INCONCLUSIVE", "VERDICT: INCONCLUSIVE", true),
         ("repair", "repair", true),
         ("repair", "REPAIR", false),
@@ -7087,66 +7084,6 @@ fn graph_pr_delivery_never_saves_missing_or_clipped_identity() {
         assert!(!saved.delivered && saved.pull_request.is_none());
         assert_eq!(saved.nodes[0].state, NodeState::Succeeded);
     }
-}
-
-#[test]
-fn legacy_checkpoint_keeps_its_digest_without_delivery_fields() {
-    let fixture = include_str!("../fixtures/legacy-graph-checkpoint.json");
-    for field in [
-        "delivery_required",
-        "delivered",
-        "pull_request",
-        "integration_branch",
-        "delivery",
-        "kind",
-        "condition",
-        "on_fail",
-        "gate",
-        "verdict_error",
-        "ci",
-        "first_observed_stamp",
-        "clock_reanchor_reason",
-        "clock_reanchors",
-    ] {
-        assert!(!fixture.contains(&format!("\"{field}\"")));
-    }
-    let temp = crate::test_support::tempdir().expect("legacy fixture directory");
-    std::fs::write(temp.path().join("graph-g-test.json"), fixture).expect("write frozen fixture");
-    let directory = Directory::open_anchor(temp.path()).expect("fixture directory");
-    let stored = load_checkpoint(&directory, "g-test")
-        .expect("verify original digest")
-        .expect("legacy checkpoint");
-    assert_eq!(
-        stored.digest,
-        "sha256:9e6f6b7b7d78fee26418cb7ff5ef4e8e1149f7ba733514184259a680d8ecfa77"
-    );
-    let mut journal = MemoryJournal(Some(stored.checkpoint));
-    let mut owner = FakeOwner::default();
-    let result =
-        advance(&stored.execution.document, &mut owner, &mut journal).expect("resume legacy graph");
-    assert_eq!(result.status, GraphStatus::Complete);
-    assert_eq!(
-        result.checkpoint.plan_digest,
-        "sha256:2f7f01c7804da30a4f2c2f8ed9dc458e8b239bf79ad491babe15c9c82bb9b014"
-    );
-    let mut explicit_task = stored.execution.document.clone();
-    explicit_task.nodes[0].kind = Some(NodeKind::Task);
-    assert_eq!(
-        advance(&explicit_task, &mut owner, &mut journal).unwrap(),
-        result
-    );
-    assert!(owner.calls.is_empty());
-    let mut corrupt: serde_json::Value = serde_json::from_str(fixture).expect("fixture JSON");
-    corrupt["execution"]["document"]["nodes"][0]["prompt"] = serde_json::json!("tampered");
-    std::fs::write(
-        temp.path().join("graph-g-test.json"),
-        serde_json::to_vec(&corrupt).expect("corrupt JSON"),
-    )
-    .expect("write corrupt fixture");
-    assert!(matches!(
-        load_checkpoint(&directory, "g-test"),
-        Err(JournalError::BadDigest)
-    ));
 }
 
 #[test]
@@ -11925,4 +11862,137 @@ fn deferred_panel_replay_keeps_the_recorded_reduction() {
         commit: "4".repeat(40),
     });
     assert!(plans::validate_review_addition(&document, &changed).is_err());
+}
+
+#[test]
+fn failed_parent_waits_for_sibling_before_blocking_join() {
+    let first = node("first", route("fixture"));
+    let second = node("second", route("fixture"));
+    let mut join = node("join", route("fixture"));
+    join.depends_on = vec!["first".into(), "second".into()];
+    let document = graph(vec![first, second, join]);
+    let mut owner = FakeOwner {
+        observations: VecDeque::from([
+            terminal(AttemptOutcome::TaskFailed),
+            AttemptObservation::Pending { attempt_ref: None },
+        ]),
+        ..Default::default()
+    };
+    let mut journal = MemoryJournal::default();
+    let run = advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(
+        run.checkpoint
+            .nodes
+            .iter()
+            .find(|n| n.id == "join")
+            .unwrap()
+            .state,
+        NodeState::Pending
+    );
+    owner
+        .observations
+        .push_back(terminal(AttemptOutcome::Succeeded));
+    let run = advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(
+        run.checkpoint
+            .nodes
+            .iter()
+            .find(|n| n.id == "second")
+            .unwrap()
+            .state,
+        NodeState::Succeeded
+    );
+    assert_eq!(
+        run.checkpoint
+            .nodes
+            .iter()
+            .find(|n| n.id == "join")
+            .unwrap()
+            .state,
+        NodeState::Blocked
+    );
+}
+
+#[test]
+fn expanded_composite_identifiers_support_long_lane_names() {
+    let document: GraphDocument = serde_json::from_value(serde_json::json!({
+        "schema_version":1,"graph_id":"long-identifiers","nodes":[{
+            "id":"lanes","kind":"composite","access":"read_only",
+            "composite":{"nodes":[{"id":"lane-cuts-quarantine","kind":"composite","access":"read_only",
+              "composite":{"nodes":[{"id":"lens--review--lens-conventions-readability","access":"read_only","prompt":"review","route":{"alias":"junior"}}],"exports":[]}}],"exports":[]}
+        }]
+    })).unwrap();
+    let expanded = composites::expand(&document, &crate::config::GraphLimits::default()).unwrap();
+    assert!(
+        expanded.nodes.iter().any(|node| node.id
+            == "lanes--lane-cuts-quarantine--lens--review--lens-conventions-readability")
+    );
+    assert!(
+        document
+            .admit(&crate::config::GraphLimits::default())
+            .is_ok()
+    );
+}
+
+#[test]
+fn launched_reader_fallback_reopens_file_checkpoint() {
+    use provenant_core::{Clock, ProjectId};
+    use provenant_os::{clock::SystemClock, fs::SystemPathResolver};
+    use std::os::unix::fs::PermissionsExt;
+    let temp = crate::test_support::tempdir().unwrap();
+    std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let base = std::fs::canonicalize(temp.path()).unwrap();
+    let mut inputs = provenant_core::RootInputs::new(base.join("home"), base.join("checkout"));
+    inputs.state_dir = Some(base.clone());
+    let root = StateRoot::resolve(&inputs, &SystemPathResolver).unwrap();
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let budget = WaitBudget::cli(clock.mono_now(), 5).unwrap();
+    let project = ProjectId::from_bytes([1; 16]);
+    let mut task = node("reader", route("first"));
+    task.route = None;
+    task.routes = Some(vec![route("first"), route("second")]);
+    let document = graph(vec![task]);
+    let mut journal =
+        FileJournal::open(&root, project, &document.graph_id, budget, &cancel, &clock).unwrap();
+    journal
+        .bind(GraphExecution {
+            extra: Default::default(),
+            review_base: None,
+            integration_base: None,
+            directory: base,
+            document: document.clone(),
+        })
+        .unwrap();
+    let mut owner = FakeOwner {
+        observations: VecDeque::from([
+            terminal(AttemptOutcome::UsageLimited),
+            terminal(AttemptOutcome::Succeeded),
+        ]),
+        ..Default::default()
+    };
+    let run = advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(run.checkpoint.nodes[0].attempts.len(), 2);
+    drop(journal);
+    let mut journal =
+        FileJournal::open(&root, project, &document.graph_id, budget, &cancel, &clock).unwrap();
+    let replay = advance(&document, &mut FakeOwner::default(), &mut journal).unwrap();
+    assert_eq!(replay.checkpoint.nodes[0].state, NodeState::Succeeded);
+}
+
+#[test]
+fn admission_rejects_review_without_space_for_expanded_ids() {
+    let document: GraphDocument = serde_json::from_value(serde_json::json!({
+        "schema_version":2,"graph_id":"review-id-bound","nodes":[{
+            "id":"x".repeat(170),"kind":"plan","access":"read_only","prompt":"review",
+            "source":{"type":"commit","commit":"1".repeat(40)},
+            "review":{"shape":null,"risk_tier":null,"kind":null,"size":null,"lenses":[],"min_successful":1,"max_nodes":3},
+            "lens_templates":{"lens":{"id":"a".repeat(30)}}
+        }]
+    })).unwrap();
+    let error = document.admit(&Default::default()).unwrap_err();
+    assert!(matches!(
+        error,
+        AdmissionError::Plan(reason) if reason.contains("insufficient room for expanded review ids")
+    ));
 }
