@@ -82,7 +82,7 @@ impl Factory {
             timeout_seconds: None,
             writer: false,
             write_scope: vec![],
-            detached: false,
+            detached: input.get("detached").and_then(Value::as_bool).unwrap_or(false),
             idempotency_key: key,
             reason: Some("run".into()),
         };
@@ -216,7 +216,17 @@ impl Factory {
                 return provenant_cli::fabric::graph_relay::from_lane(&op, cancel, within)
                     .map_err(|_| FacadeError::InvalidInput { detail: None });
             }
-            if matches!(operation, "stop" | "retry") {
+            if operation == "stop" {
+                let op = provenant_fabric_runtime::graph::relay::RelayOp::Stop {
+                    node: required(&input, "id")?.to_owned(),
+                };
+                let within = std::time::Duration::from_micros(
+                    budget.remaining(self.clock.mono_now()).as_micros(),
+                );
+                return provenant_cli::fabric::graph_relay::from_lane(&op, cancel, within)
+                    .map_err(|_| FacadeError::InvalidInput { detail: None });
+            }
+            if operation == "retry" {
                 return Err(FacadeError::ConfinementRefused { resource: None });
             }
         }
@@ -239,7 +249,12 @@ impl Factory {
                     .collect::<Result<Vec<_>, FacadeError>>()?;
                 Ok(json!({"templates":templates}))
             }
-            "run" => self.submit_document(&input, budget, cancel),
+            "run" => {
+                if input["detached"] == true {
+                    return Err(FacadeError::invalid(InvalidInputDetail::Field("detached".into())));
+                }
+                self.submit_document(&input, budget, cancel)
+            },
             "edit" => self.edit_document(&input, budget, cancel),
             "trace" => self.graph_trace(required(&input, "id")?),
             "output" if input["trace"] == true => self.graph_trace(required(&input, "id")?),

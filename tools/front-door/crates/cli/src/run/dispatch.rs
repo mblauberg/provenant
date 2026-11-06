@@ -9,6 +9,9 @@ pub fn run(mut command: Dispatch, edge: &Edge<'_>) -> Reply {
             crate::fabric::graph_relay::wait_for_children,
         );
     }
+    if command.detached {
+        return reply("run", Err(Fail::new(Status::Invalid, ErrorKind::Invalid, "--detached requires a child launch inside a lane")));
+    }
     if let Err(fail) = require_explicit_target(&command, edge.cwd) {
         return reply("run", Err(fail));
     }
@@ -178,7 +181,7 @@ fn lane_add(command: &Dispatch) -> Result<provenant_fabric_runtime::graph::relay
             .iter()
             .map(|path| path.to_string_lossy().into_owned())
             .collect(),
-        detached: false,
+        detached: command.detached,
         idempotency_key: command.operation_id.to_string(),
         reason: command.title.clone(),
     }))
@@ -3067,6 +3070,7 @@ mod graph_launch_tests {
                 "src",
                 "--operation-id",
                 "child-test",
+                "--detached",
             ],
         );
         command.wait = None;
@@ -3080,6 +3084,7 @@ mod graph_launch_tests {
                 assert_eq!(child.brief, "Implement the scoped change");
                 assert_eq!(child.tier.as_deref(), Some("senior"));
                 assert!(child.writer);
+                assert!(child.detached);
                 assert_eq!(child.write_scope, ["src"]);
                 assert_eq!(child.idempotency_key, "child-test");
                 Ok(json!({"graph_id":"parent-graph", "node":"parent--child", "revision":2}))
