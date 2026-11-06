@@ -371,7 +371,9 @@ fn node_bound(
         bytes += MAX_ADVANCE_ERROR_BYTES; // expansion pause
     }
     if plans::agent(node) && !admitted {
-        bytes += plans::STORED_BLOCK_BYTES;
+        // Final blocks are always externalised by prompt_store. Reserve the
+        // digest and escaped envelope pointer, including the node index.
+        bytes += 256;
     }
     if plans::writer(node) {
         bytes += plans::STORED_HANDOFF_BYTES;
@@ -438,11 +440,8 @@ fn node_bound(
         bytes = bytes.saturating_add(6 * 4096 + 256);
     }
     if !boundary {
-        let excerpt = if node.composite.is_some() {
-            COMPOSITE_EXCERPT_BYTES
-        } else {
-            RESULT_EXCERPT_BYTES
-        };
+        // Result excerpts, like final blocks, are content-addressed text.
+        let excerpt = 256;
         // digest, excerpt, path, verdict, verdict error, findings, branch,
         // commit, warnings, remaining
         bytes += 80

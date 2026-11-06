@@ -1,4 +1,4 @@
-//! Content-addressed node prompts beside the checkpoint.
+//! Content-addressed graph text beside the checkpoint.
 //!
 //! A saved checkpoint carries an envelope-owned map of text references. The
 //! bytes live in `graph-<id>.prompt-<hex>` files in the graph directory, so graph
@@ -35,7 +35,7 @@ fn text_paths(value: &Value, path: &str, found: &mut Vec<String>) {
                 let path = format!("{path}/{escaped}");
                 if value.as_str().is_some_and(|text| {
                     !text.is_empty()
-                        && (matches!(key.as_str(), "prompt" | "brief" | "spec")
+                        && (matches!(key.as_str(), "prompt" | "brief" | "spec" | "fragment" | "excerpt")
                             || text.len() > 4096)
                 }) {
                     found.push(path);
@@ -94,7 +94,7 @@ fn redact(prompt: &str) -> Result<String, JournalError> {
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error).into())
 }
 
-/// Move every non-empty node prompt into the store, redacted. Blobs are durable
+/// Move graph briefs, final blocks and excerpts into the store, redacted. Blobs are durable
 /// before the checkpoint that names them is published.
 pub(super) fn externalise(
     directory: &Directory,
@@ -318,4 +318,24 @@ mod tests {
             original
         );
     }
+
+    #[test]
+    fn small_pending_fragments_are_stored_by_reference_and_reload() {
+        let temp = tempfile::tempdir().unwrap();
+        let directory = Directory::open_anchor(temp.path()).unwrap();
+        let original = json!({"checkpoint":{"nodes":[{
+            "id":"agent", "fragment":"{\"schema_version\":1,\"nodes\":[]}",
+            "outputs":{"result":{"excerpt":"A short final result", "digest":"sha256:unchanged"}}
+        }]}});
+        let mut stored = original.clone();
+        externalise(&directory, "fragment", &mut stored).unwrap();
+        assert!(stored["checkpoint"]["nodes"][0]["fragment"].is_null());
+        assert!(stored["checkpoint"]["nodes"][0]["outputs"]["result"]["excerpt"].is_null());
+        assert_eq!(stored[STORED_TEXT]["/checkpoint/nodes/0/outputs/result/excerpt"].as_str().unwrap().len(), 64);
+        assert_eq!(stored[STORED_TEXT]["/checkpoint/nodes/0/fragment"].as_str().unwrap().len(), 64);
+        let persisted = serde_json::to_vec(&stored).unwrap();
+        let restored = rehydrate(&directory, "fragment", &persisted).unwrap();
+        assert_eq!(serde_json::from_slice::<Value>(&restored).unwrap(), original);
+    }
+
 }

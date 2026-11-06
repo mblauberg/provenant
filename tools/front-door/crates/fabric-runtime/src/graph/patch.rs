@@ -964,6 +964,8 @@ pub(super) fn prepare(
         let trusted = used.is_some_and(|name| {
             (catalogue.contains_key(name) || context.library.layer(name).is_some())
                 && !patch.templates.contains_key(name)
+                && !["role", "source", "capabilities", "attachments", "read_roots",
+                    "composite", "loop", "plan"].iter().any(|field| raw.get(*field).is_some())
         });
         if let Some(name) = used {
             // Record the effective parameters, defaults included, so a replay
