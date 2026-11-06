@@ -195,6 +195,11 @@ boundary = "authority"
 reason = "A graph-bound task may receive only its own node's input directory, without a redirected path."
 
 [[guard]]
+site = "cli/src/run/provider/confinement.rs#read_only_plan"
+boundary = "authority"
+reason = "Read-only plans require the selected project binding and a Git repository when the source is pinned."
+
+[[guard]]
 site = "cli/src/run/provider/source_tree.rs#ensure_source_roots"
 boundary = "authority"
 reason = "Access and asset grants cannot reopen the live checkout beside the selected pinned source view."

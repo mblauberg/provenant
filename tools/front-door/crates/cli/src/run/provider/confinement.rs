@@ -334,6 +334,10 @@ pub(super) enum ReadOnlyPlanError {
     Plan(#[from] provenant_confinement::PlanError),
     #[error("repository does not match dispatch project binding")]
     BindingMismatch,
+    #[error("dispatch project binding missing")]
+    MissingBinding,
+    #[error("pinned source requires a Git repository")]
+    PinnedSourceRequiresGit,
     #[error("{0}")]
     Other(String),
 }
@@ -354,7 +358,9 @@ impl ReadOnlyPlanError {
         match self {
             Self::Run(error) => error.boundary_class(),
             Self::Plan(error) => error.boundary_class(),
-            Self::BindingMismatch => BoundaryClass::Authority,
+            Self::BindingMismatch | Self::MissingBinding | Self::PinnedSourceRequiresGit => {
+                BoundaryClass::Authority
+            }
             Self::Other(_) => BoundaryClass::None,
         }
     }
@@ -365,6 +371,14 @@ fn read_only_plan_preserves_typed_authority_failures() {
     use provenant_records::diagnostic::BoundaryClass;
     assert_eq!(
         ReadOnlyPlanError::BindingMismatch.boundary_class(),
+        BoundaryClass::Authority
+    );
+    assert_eq!(
+        ReadOnlyPlanError::MissingBinding.boundary_class(),
+        BoundaryClass::Authority
+    );
+    assert_eq!(
+        ReadOnlyPlanError::PinnedSourceRequiresGit.boundary_class(),
         BoundaryClass::Authority
     );
     assert_eq!(
@@ -424,7 +438,7 @@ pub(super) fn read_only_plan(
     .map_err(|error| error.to_string())?;
     let binding = provenant_config::lookup_project(roots, &location)
         .map_err(|error| error.to_string())?
-        .ok_or("dispatch project binding missing")?;
+        .ok_or(ReadOnlyPlanError::MissingBinding)?;
     if binding.project_id() != project {
         return Err(ReadOnlyPlanError::BindingMismatch);
     }
@@ -461,7 +475,7 @@ pub(super) fn read_only_plan(
             .map_err(ReadOnlyPlanError::from)
         }
         // Non-Git workspaces have no Git metadata or repository exceptions.
-        None if isolated => Err("pinned source requires a Git repository".into()),
+        None if isolated => Err(ReadOnlyPlanError::PinnedSourceRequiresGit),
         None => ConfinedPlan::new(request)
             .map(|plan| (plan, None, None, None))
             .map_err(ReadOnlyPlanError::from),

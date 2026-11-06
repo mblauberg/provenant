@@ -3974,7 +3974,7 @@ fn read_only_plan_runs_host_git_with_a_private_home_outside_the_child_store()
         false,
         false,
     );
-    assert!(result.is_err());
+    assert!(matches!(result, Err(ReadOnlyPlanError::MissingBinding)));
 
     let seen = std::fs::read_to_string(&record)?;
     assert!(!seen.is_empty(), "host git never ran");
