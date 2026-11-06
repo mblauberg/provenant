@@ -1020,3 +1020,26 @@ fn routing_stratum_flows_from_graph_to_nodes() {
     assert_eq!(context.risk_tier.as_deref(), Some("substantial"));
     assert_eq!(context.task_kind.as_deref(), Some("review"));
 }
+
+#[test]
+fn live_child_patch_keeps_the_planners_final_fragment_envelope_reserve() {
+    let document = mixed();
+    let plan = planned(&document);
+    let before = envelope::checkpoint_bound(&document, &[], &[], &plan);
+    let live: Expansion = serde_json::from_value(json!({
+        "source":"plan", "continuation":false, "nodes":[],
+        "patch":{"revision":1,"digest":format!("sha256:{}", "a".repeat(64)),"parent":"plan"}
+    })).unwrap();
+    let live_bound = envelope::checkpoint_bound(&document, std::slice::from_ref(&live), &[], &plan);
+    assert!(live_bound >= before, "a live child patch must retain space for the planner's final fragment");
+
+    let mut final_fragment = live.clone();
+    final_fragment.extra.insert("final_fragment".into(), true.into());
+    let closed_bound = envelope::checkpoint_bound(&document, &[final_fragment], &[], &plan);
+    assert!(closed_bound < live_bound, "a final fragment releases its producer's fragment reserve");
+
+    let mut fallback = live;
+    fallback.patch = None;
+    let fallback_bound = envelope::checkpoint_bound(&document, &[fallback], &[], &plan);
+    assert!(fallback_bound < live_bound, "a fallback expansion also closes its producer");
+}
