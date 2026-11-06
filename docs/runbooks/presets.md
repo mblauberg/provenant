@@ -99,13 +99,16 @@ concrete purpose.
 
 `status` uses one row schema for graphs, nodes and attempts. `output TARGET`
 collects evidence; `output TARGET --trace` shows the timeline. `trace` exposes
-trace inspection. Events retain identifiers, digests and cause codes for
+trace inspection. Events retain microsecond UTC timestamps, readable identifiers, digests and cause codes for
 patches, attempts, waits, gates, joins, budget and effects. Checkpoints own
 recovery; replay reconciles uncertain launches and reuses finished outputs.
 
 Use `steer` for provider-supported messages, `stop` for a subtree and `retry`
 to continue or redo a target, optionally with a new brief or authorised budget.
 Use `edit` to reshape unstarted work. A synthesis never waives a failed gate.
-`status --stats --by tier` and `status --stats --by template` report efficiency
-without counting composite descendants twice. Land only after exact-head CI
+`status GRAPH` prioritises current failures and their cause codes, with a next
+command inside a 2 KiB reading. `status --stats --by node`, `--by tier` and
+`--by template` report tokens, cache read share of input, wall clock, slot queue
+time and outcome counts from attempt facts. Missing cache and queue measurements
+are counted as unknown. Attempts are counted once, without composite totals. Land only after exact-head CI
 and required independent review, within the repository's authority.
