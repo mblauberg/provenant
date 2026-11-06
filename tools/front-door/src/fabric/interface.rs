@@ -51,41 +51,7 @@ impl Factory {
         budget: WaitBudget,
         cancel: &CancelToken,
     ) -> Result<Value, FacadeError> {
-        if input.get("document").is_some_and(|value| !value.is_null())
-            || input.get("over").is_some_and(|value| !value.is_null())
-            || input
-                .get("set")
-                .is_some_and(|value| value.as_object().is_none_or(|object| !object.is_empty()))
-        {
-            return Err(FacadeError::invalid(InvalidInputDetail::Field(
-                "document".into(),
-            )));
-        }
-        // Distinct submissions may have identical briefs. Generate the key once
-        // per call; transport retries retain this request and its identity.
-        let key = format!(
-            "child-{}",
-            provenant_core::hex(
-                &provenant_os::fs::entropy_128()
-                    .map_err(|_| FacadeError::io("create child operation identity"))?
-            )
-        );
-        let request = provenant_fabric_runtime::graph::relay::ChildRequest {
-            id: key.clone(),
-            template: input
-                .get("use")
-                .and_then(Value::as_str)
-                .unwrap_or("task")
-                .into(),
-            brief: required(input, "brief")?.into(),
-            tier: input.get("tier").and_then(Value::as_str).map(str::to_owned),
-            timeout_seconds: None,
-            writer: false,
-            write_scope: vec![],
-            detached: false,
-            idempotency_key: key,
-            reason: Some("run".into()),
-        };
+        let request = self.child_request(input)?;
         if input["explain"] == true {
             return encode(request);
         }
@@ -106,6 +72,114 @@ impl Factory {
             return Ok(json!({"receipt":receipt,"children":children}));
         }
         Ok(receipt)
+    }
+
+    fn child_request(
+        &self,
+        input: &Value,
+    ) -> Result<provenant_fabric_runtime::graph::relay::ChildRequest, FacadeError> {
+        use provenant_fabric_runtime::graph::relay::{ChildLaunch, ChildRequest};
+        let invalid = || FacadeError::invalid(InvalidInputDetail::Field("document".into()));
+        let raw = input.get("document").filter(|value| !value.is_null());
+        if raw.is_some_and(|value| !value.is_object()) {
+            return Err(invalid());
+        }
+        let mut identity = input.clone();
+        if let Some(fields) = identity.as_object_mut() {
+            fields.remove("explain");
+            fields.remove("wait_seconds");
+        }
+        // A retry or continuation repeats the logical launch, rather than the
+        // provider attempt. The host scopes this identity to its parent node.
+        let digest = provenant_records::CanonicalV1::record_digest("graph-child-launch", 1, &identity)
+            .map_err(|_| FacadeError::StateCorrupt)?;
+        let key = format!("child-{}", &provenant_core::hex(digest.as_bytes())[..32]);
+        let has_overrides = ["brief", "use", "tier", "over"].iter().any(|field| {
+            input.get(*field).is_some_and(|value| !value.is_null())
+        }) || input.get("set").is_some_and(|value| {
+            value.as_object().is_none_or(|object| !object.is_empty())
+        });
+        let full_document = raw.filter(|document| document.get("graph_id").is_some() && !has_overrides);
+        let mut inline = raw.and_then(|document| document.get("templates")).cloned()
+            .unwrap_or_else(|| json!({}));
+        let mut node = if let Some(document) = full_document {
+            json!({"access":"read_only", "composite":{"nodes":document["nodes"]}})
+        } else {
+            match raw {
+                Some(document) if document.get("use").is_some() => document.clone(),
+                Some(document) => {
+                    inline["lane-document"] = document.clone();
+                    json!({"use":"lane-document"})
+                }
+                None => json!({"use":"task"}),
+            }
+        };
+        let library = self.template_library(Some(&inline))?;
+        if full_document.is_none() {
+            for field in ["use", "brief", "tier", "over"] {
+                if let Some(value) = input.get(field).filter(|value| !value.is_null()) {
+                    node[field] = value.clone();
+                }
+            }
+            let template = library.resolve(node["use"].as_str().unwrap_or("task"))
+                .map_err(|_| invalid())?;
+            let mut parameters = node.get("with").cloned().unwrap_or_else(|| json!({}));
+            if let Some(overrides) = input.get("set").filter(|value| !value.is_null()) {
+                parameters.as_object_mut().ok_or_else(invalid)?
+                    .extend(overrides.as_object().ok_or_else(invalid)?.clone());
+            }
+            if template.parameters.contains_key("brief")
+                && let Some(brief) = input.get("brief").filter(|value| !value.is_null())
+            {
+                parameters["brief"] = brief.clone();
+            }
+            if template.is_composite() {
+                let fields = node.as_object_mut().ok_or_else(invalid)?;
+                fields.remove("brief");
+                fields.remove("tier");
+            }
+            node["with"] = parameters;
+        }
+        node["id"] = json!(key);
+        self.confine_node(&mut node)?;
+        let resolvers = self.launch_resolvers(raw)?;
+        let mut compiled = provenant_fabric_runtime::graph::template::Compiler {
+            library: &library,
+            resolvers: &resolvers,
+        }.lower(&node).map_err(|_| invalid())?;
+        if let Some(tier) = input.get("tier").filter(|value| !value.is_null()) {
+            let tier = tier.as_str().ok_or_else(invalid)?;
+            let route = serde_json::from_value(json!({"alias":tier})).map_err(|_| invalid())?;
+            let mut typed = serde_json::from_value(compiled).map_err(|_| invalid())?;
+            override_tier(&mut typed, &route);
+            compiled = encode(typed)?;
+        }
+        self.confine_node(&mut compiled)?;
+        let writer = compiled["access"] == "worktree_write"
+            && compiled.get("composite").is_none()
+            && compiled.get("loop").is_none();
+        let write_scope = if writer {
+            serde_json::from_value(compiled.get("write_scope").cloned().unwrap_or_else(|| json!([])))
+                .map_err(|_| invalid())?
+        } else {
+            Vec::new()
+        };
+        Ok(ChildRequest {
+            id: key.clone(),
+            template: node["use"].as_str().unwrap_or("task").into(),
+            brief: input.get("brief").and_then(Value::as_str).unwrap_or_default().into(),
+            tier: input.get("tier").and_then(Value::as_str).map(str::to_owned),
+            timeout_seconds: None,
+            writer,
+            write_scope,
+            detached: false,
+            idempotency_key: key,
+            reason: Some("run".into()),
+            launch: Some(ChildLaunch {
+                node: compiled,
+                templates: serde_json::from_value(inline).map_err(|_| invalid())?,
+            }),
+        })
     }
 
     fn confine_node(&self, node: &mut Value) -> Result<(), FacadeError> {
@@ -1045,6 +1119,160 @@ mod tests {
             mcp_project: None,
             workers: &Workers,
         })
+    }
+
+    #[test]
+    fn child_launch_retains_writer_access_and_has_a_stable_logical_identity() -> Result {
+        let rig = TestRig::new()?;
+        let factory = factory(&rig)?;
+        let input = json!({"op":"run", "use":"implement", "brief":"Fix the parser"});
+        let first = factory.child_request(&input)?;
+        assert!(first.writer);
+        assert_eq!(first.launch.as_ref().unwrap().node["access"], "worktree_write");
+        let mut retry = input.clone();
+        retry["explain"] = true.into();
+        retry["wait_seconds"] = 30.into();
+        assert_eq!(factory.child_request(&retry)?, first);
+        assert_ne!(factory.child_request(&json!({"op":"run", "use":"implement", "brief":"Fix another parser"}))?.id, first.id);
+        let bound = factory.child_request(&json!({"op":"run", "document":{"use":"implement", "brief":"Bound writer", "worktree":".worktrees/existing"}}))?;
+        assert!(bound.writer);
+        assert!(!bound.needs_worktree_provisioning());
+        assert_eq!(bound.launch.as_ref().unwrap().node["worktree"], ".worktrees/existing");
+        Ok(())
+    }
+
+    #[test]
+    fn child_launch_compiles_over_set_and_inline_documents() -> Result {
+        let rig = TestRig::new()?;
+        let factory = factory(&rig)?;
+        let request = factory.child_request(&json!({
+            "op":"run", "document":{
+                "parameters":{"subject":{"type":"string", "default":"default"}},
+                "nodes":[{"id":"one", "use":"task", "brief":"Inspect ${subject} ${item}"}]
+            }, "set":{"subject":"code"}, "over":["a","b"], "tier":"junior"
+        }))?;
+        assert!(!request.writer);
+        let node = &request.launch.as_ref().unwrap().node;
+        fn prompts(node: &Value, found: &mut Vec<String>) {
+            if let Some(nodes) = node.pointer("/composite/nodes").and_then(Value::as_array) {
+                for child in nodes { prompts(child, found); }
+            } else if let Some(prompt) = node["prompt"].as_str() {
+                found.push(prompt.into());
+                assert_eq!(node["route"]["alias"], "junior");
+            }
+        }
+        let mut found = Vec::new();
+        prompts(node, &mut found);
+        assert_eq!(found, ["Inspect code a", "Inspect code b"]);
+        assert!(request.launch.as_ref().unwrap().templates.contains_key("lane-document"));
+        let request = factory.child_request(&json!({
+            "op":"run", "document":{"graph_id":"child-doc", "nodes":[
+                {"id":"inspect", "use":"task", "brief":"Document child"}
+            ]}
+        }))?;
+        assert_eq!(request.launch.as_ref().unwrap().node["composite"]["nodes"][0]["prompt"], "Document child");
+        let request = factory.child_request(&json!({"op":"run", "use":"implement", "brief":"Fix ${item}", "over":["a","b"]}))?;
+        assert!(!request.writer);
+        let children = request.launch.as_ref().unwrap().node["composite"]["nodes"].as_array().unwrap();
+        assert_eq!(children.len(), 2);
+        assert!(children.iter().all(|node| node["access"] == "worktree_write"));
+        Ok(())
+    }
+
+    #[test]
+    fn child_launch_crosses_the_lane_transport_and_provisions_writer_fanout() -> Result {
+        use provenant_fabric_runtime::graph::{GraphCheckpoint, GraphExecution, relay::RelayOp};
+        fn exercise(input: Value, count: usize, disjoint: bool) -> Result {
+        let rig = TestRig::new()?;
+        crate::worktree_tests::git(&rig, &["commit", "--allow-empty", "-m", "source"])?;
+        let source = crate::worktree_tests::git(&rig, &["rev-parse", "HEAD"])?;
+        let branch = crate::worktree_tests::git(&rig, &["symbolic-ref", "--short", "HEAD"])?;
+        let factory = factory(&rig)?;
+        let cancel = CancelToken::new();
+        let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
+        let document: GraphDocument = serde_json::from_value(json!({
+            "schema_version":2, "graph_id":"g-child-e2e", "integration_branch":branch,
+            "nodes":[{"id":"parent", "access":"read_only", "prompt":"Go", "route":{"alias":"senior"}}]
+        }))?;
+        let reference = format!("{}/caller", factory.context.identity.host);
+        let checkpoint: GraphCheckpoint = serde_json::from_value(json!({
+            "schema_version":1, "graph_id":"g-child-e2e", "plan_digest":"fixture", "bound_integration_base":source,
+            "nodes":[{"id":"parent", "state":"running", "attempts":[{
+                "launched":true, "key":{"graph_id":"g-child-e2e", "node_id":"parent", "route_index":0},
+                "route":{"alias":"senior"}, "state":"running", "attempt_ref":reference, "outcome":null, "launch_actor":"fixture"
+            }]}]
+        }))?;
+        {
+            let mut journal = FileJournal::open(&factory.context.roots.state, factory.context.identity.project,
+                &document.graph_id, budget, &cancel, &factory.clock)?;
+            journal.bind(GraphExecution { review_base:None, extra:Default::default(), integration_base:Some(source.parse()?),
+                directory:rig.project.clone(), document:document.clone() })?;
+            journal.save(&checkpoint)?;
+        }
+        crate::worktree_tests::git(&rig, &["commit", "--allow-empty", "-m", "host head moved"])?;
+        let context = Context::open(factory.context.roots.clone(), &rig.home, &rig.project)?;
+        let socket = rig.root.join("child-relay/socket");
+        let _relay = provenant_fabric_mcp::lane::HostRelay::start_with_graph(socket.clone(), Default::default(),
+            |_, _, _| Err(ServiceError::FabricOwnerUnavailable),
+            move |arguments, cancel: &CancelToken, _| {
+                let clock = SystemClock;
+                let budget = WaitBudget::cli(clock.mono_now(), 30).map_err(|_| ServiceError::FabricOwnerUnavailable)?;
+                provenant_cli::fabric::graph_relay::serve(&context, "caller", arguments, budget, cancel, &clock)
+            })?;
+        {
+            let request = factory.child_request(&input)?;
+            let frame = serde_json::to_value(RelayOp::Add(request))?;
+            let receipt = provenant_fabric_mcp::lane::graph(&socket, frame.clone(), &cancel, std::time::Duration::from_secs(30))?;
+            let replay = provenant_fabric_mcp::lane::graph(&socket, frame, &cancel, std::time::Duration::from_secs(30))?;
+            assert_eq!(replay["replayed"], true);
+            assert_eq!(replay["node"], receipt["node"]);
+            let checkpoint = FileJournal::read_checkpoint(&factory.context.roots.state, factory.context.identity.project,
+                &document.graph_id)?.ok_or("missing checkpoint")?;
+            assert_eq!(checkpoint.expansions.len(), 1);
+            let prefix = receipt["node"].as_str().ok_or("missing child")?;
+            let writers: Vec<_> = checkpoint.expansions[0].nodes.iter().filter(|node| node.access == provenant_fabric_runtime::graph::AccessMode::WorktreeWrite
+                && (node.id == prefix || node.id.starts_with(&format!("{prefix}--")))).collect();
+            assert_eq!(writers.len(), count);
+            let mut paths = std::collections::BTreeSet::new();
+            for writer in writers {
+                let path = writer.worktree.as_ref().ok_or("missing writer worktree")?;
+                let unique = paths.insert(path.clone());
+                if disjoint { assert!(unique); }
+                assert_eq!(crate::worktree_tests::git(&rig, &["-C", path, "rev-parse", "HEAD"])?, source);
+                assert_eq!(writer.delivery, Some(provenant_records::run::DeliveryMode::Integrate(branch.clone())));
+                assert_eq!(writer.source, Some(provenant_fabric_runtime::graph::SourceBinding::Commit { commit:source.clone() }));
+            }
+        }
+        Ok(())
+        }
+        for (input, count, disjoint) in [
+            (json!({"op":"run", "use":"implement", "brief":"Fix the parser"}), 1, false),
+            (json!({"op":"run", "use":"implement", "brief":"Fix ${item}", "over":["one","two"]}), 2, false),
+            (json!({"op":"run", "document":{
+                "parameters":{"subject":{"type":"string"}},
+                "nodes":[{"id":"write", "use":"implement", "brief":"Fix ${subject}"}]
+            }, "set":{"subject":"inline"}}), 1, false),
+            (json!({"op":"run", "document":{"use":"implement", "brief":"Fix ${item}", "write_scope":["${item}"]},
+                "over":["three","four"]}), 2, true),
+        ] {
+            exercise(input, count, disjoint)?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn child_launch_confines_read_roots_after_template_parameters_are_bound() -> Result {
+        let rig = TestRig::new()?;
+        let factory = factory(&rig)?;
+        let escaping = json!({"op":"run", "document":{
+            "templates":{"escaped":{
+                "brief":"Inspect", "tier":"senior", "access":"read_only",
+                "parameters":{"root":{"type":"string"}},
+                "node":{"read_roots":["${root}"]}
+            }}, "use":"escaped"
+        }, "set":{"root":rig.home}});
+        assert!(matches!(factory.child_request(&escaping), Err(FacadeError::InvalidInput { .. })));
+        Ok(())
     }
 
     #[test]

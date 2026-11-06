@@ -106,7 +106,7 @@ fn lane_child_joins_the_same_graph_with_an_idempotent_receipt() {
     let record = checkpoint.expansions[0].patch.as_ref().unwrap();
     assert_eq!(
         (record.parent.as_deref(), record.key.as_deref()),
-        (Some("a"), Some("lane-a-fix-1"))
+        (Some("a"), Some(format!("child:{}", CanonicalV1::record_digest("graph-child-key", 1, &("a", "lane-a-fix-1")).unwrap()).as_str()))
     );
     assert_eq!(checkpoint.expansions[0].uses[0].name, "task");
     assert_eq!(progress(&checkpoint, "a--fix").state, NodeState::Pending);
@@ -761,7 +761,7 @@ fn child_receipt_replay_uses_original_request_after_template_and_parent_changes(
         add(&document, &mut checkpoint, "b", &request)
             .unwrap_err()
             .code,
-        "idempotency_conflict"
+        "parent_settled"
     );
     request.brief = "Different brief".into();
     assert_eq!(
@@ -834,4 +834,103 @@ fn provisioning_fence_survives_a_checkpoint_round_trip_until_cleared() {
     relay::clear_provisioning(&mut checkpoint, "a--w");
     assert!(relay::pending_provisioning(&checkpoint).is_empty());
     assert!(!checkpoint.extra.contains_key("pending_writer_provisioning"));
+}
+
+#[test]
+fn child_key_is_scoped_to_logical_parent_and_replays_a_retried_attempt() {
+    let (mut document, mut checkpoint) = live(None);
+    document.integration_branch = Some("integration".into());
+    let mut request = child("fix", "same-child");
+    request.template = "implement".into();
+    request.writer = true;
+    let first = add(&document, &mut checkpoint, "a", &request).unwrap();
+    let parent = checkpoint.nodes.iter_mut().find(|node| node.id == "a").unwrap();
+    parent.previous_attempts.append(&mut parent.attempts);
+    let mut next = parent.previous_attempts[0].clone();
+    next.attempt_ref = Some("attempt-a-retry".into());
+    parent.attempts.push(next);
+    let checkpoint: GraphCheckpoint = serde_json::from_slice(&serde_json::to_vec(&checkpoint).unwrap()).unwrap();
+    let mut checkpoint = checkpoint;
+    assert_eq!(parent_of_attempt(&checkpoint, "attempt-a-retry"), Some("a"));
+    let replay = add(&document, &mut checkpoint, "a", &request).unwrap();
+    assert_eq!(replay, relay::ChildReceipt { replayed:true, ..first.clone() });
+    mark_running(&mut checkpoint, "b");
+    let other = add(&document, &mut checkpoint, "b", &request).unwrap();
+    assert_eq!(other.node, "b--fix");
+    assert_ne!(other.worktree, first.worktree);
+    assert!(!other.replayed);
+    assert_eq!(checkpoint.expansions.len(), 2);
+}
+
+#[test]
+fn honest_stop_continuation_replays_its_logical_parents_writer_child() {
+    let document: GraphDocument = serde_json::from_value(json!({
+        "schema_version":1, "graph_id":"continuing", "integration_branch":"integration", "nodes":[
+            {"id":"parent", "access":"worktree_write", "worktree":"/fixture/parent", "write_scope":["parent"], "prompt":"Start", "route":{"alias":"senior"}}
+        ]
+    })).unwrap();
+    let mut owner = FakeOwner::default();
+    owner.observations.push_back(AttemptObservation::Pending { attempt_ref:Some("first-attempt".into()) });
+    let mut journal = MemoryJournal::default();
+    let mut checkpoint = advance(&document, &mut owner, &mut journal).unwrap().checkpoint;
+    let mut request = child("fix", "stable-writer");
+    request.template = "implement".into();
+    request.writer = true;
+    request.write_scope = vec!["child".into()];
+    let first = add(&document, &mut checkpoint, "parent", &request).unwrap();
+    journal.0 = Some(checkpoint);
+    owner.observations.extend([
+        AttemptObservation::Terminal {
+            attempt_ref:Some("first-attempt".into()), outcome:AttemptOutcome::Succeeded, launched:true,
+            result:Some(Box::new(capture("```handoff\n{\"schema_version\":2,\"status\":\"stopped_early\",\"remaining\":[],\"decisions\":[],\"verify\":[],\"note\":\"Continue checking\"}\n```"))),
+            result_warning:None, result_path:None, branch:Some("parent".into()), commit:Some("a".repeat(40)),
+        },
+        AttemptObservation::Terminal {
+            attempt_ref:Some("child-attempt".into()), outcome:AttemptOutcome::Succeeded, launched:true,
+            result:Some(Box::new(capture("Child completed"))), result_warning:None, result_path:None,
+            branch:Some("child".into()), commit:Some("a".repeat(40)),
+        },
+        AttemptObservation::Pending { attempt_ref:Some("continuation-attempt".into()) },
+    ]);
+    let run = advance(&document, &mut owner, &mut journal).unwrap();
+    let mut checkpoint: GraphCheckpoint = serde_json::from_slice(&serde_json::to_vec(&run.checkpoint).unwrap()).unwrap();
+    let parent = parent_of_attempt(&checkpoint, "continuation-attempt").unwrap_or_else(|| panic!("missing live continuation: {checkpoint:?}; launches={:?}", owner.calls)).to_owned();
+    assert_eq!(parent, "parent--continue");
+    assert!(checkpoint.expansions.iter().any(|expansion| expansion.continuation && expansion.source == "parent"));
+    let before = checkpoint.clone();
+    let replay = add(&document, &mut checkpoint, &parent, &request).unwrap();
+    assert_eq!(replay, relay::ChildReceipt { replayed:true, ..first });
+    assert_eq!(checkpoint, before);
+    let children = relay::child_states(&checkpoint, &parent);
+    assert_eq!(children["children"].as_array().unwrap().len(), 1);
+    assert_eq!(children["children"][0]["node"], "parent--fix");
+    assert_eq!(children["children"][0]["settled"], true);
+    checkpoint.nodes.iter_mut().find(|node| node.id == "parent--fix").unwrap().state = NodeState::Pending;
+    let cancelled = relay::cancel_subtree(&document, &mut checkpoint, &parent).unwrap();
+    assert_eq!(cancelled.skipped, ["parent--fix"]);
+    assert_eq!(progress(&checkpoint, &parent).state, NodeState::Running);
+}
+
+#[test]
+fn bound_document_child_preserves_explicit_worktree_and_upstream_source() {
+    let (document, mut checkpoint) = live(None);
+    let library = template::TemplateLibrary::bundled();
+    let resolvers = Default::default();
+    let limits = plans::generous();
+    let context = patch::PatchContext { journal:None, library:&library, resolvers:&resolvers, scan:&|_| Ok(()), limits:&limits };
+    let request: ChildRequest = serde_json::from_value(json!({
+        "id":"bound", "brief":"", "writer":true, "idempotency_key":"bound", "launch":{
+            "node":{"id":"bound", "use":"implement", "brief":"Preserve existing work", "worktree":".worktrees/existing",
+                "source":{"type":"node", "node":"a"}, "depends_on":["a"], "delivery":"push"}
+        }
+    })).unwrap();
+    assert!(!request.needs_worktree_provisioning());
+    let receipt = relay::admit_child_bound(&mut patch::LiveGraph { document:&document, checkpoint:&mut checkpoint },
+        "a", &request, &context, Some(("parent", &"a".repeat(40)))).unwrap();
+    assert_eq!(receipt.worktree.as_deref(), Some(".worktrees/existing"));
+    let expanded = plans::expand(&document, &checkpoint.extensions, &checkpoint.expansions, &limits).unwrap();
+    let node = expanded.nodes.iter().find(|node| node.id == receipt.node).unwrap();
+    assert_eq!(node.worktree, receipt.worktree);
+    assert_eq!(node.source, Some(SourceBinding::Node { node:"a".into() }));
+    assert_eq!(node.delivery, Some(provenant_records::run::DeliveryMode::Push));
 }
