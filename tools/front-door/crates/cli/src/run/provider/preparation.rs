@@ -1458,14 +1458,14 @@ pub(super) fn prepare_candidates(
         }
     }
     // Publishing is opt-in (`lanes.publish`): it hands the lane the GitHub
-    // credential. Missing gh tools or configuration leave the
+    // credential. Missing gh tools, or both configuration and a host token, leave the
     // writer able to do local work without publishing credential access.
     let publishing_gh = publishing_requested(
         writer.is_some(),
         task.access.network(true) == NetworkAccess::Open,
         &task.profile.knobs,
     )
-    .then(|| publishing_executable(&home, &locate))
+    .then(|| publishing_executable(&home, &locate, std::env::var_os("GH_TOKEN").as_deref()))
     .flatten();
     let git_context = task
         .base
@@ -2738,6 +2738,9 @@ pub(super) fn prepare_candidates(
             spec.configure_shell(scratch, adapter_spec);
         }
         if let Some(gh) = publishing_gh.as_ref() {
+            // Resolve the login before composing gh's wrapper: token launches
+            // use a private empty config directory, independent of host links.
+            super::gh_auth::inject(&executor, gh, &home, cancel, &mut spec.env);
             let policy = provenant_config::GithubPolicy::read(&roots.state, project_id)
                 .map_err(|error| error.to_string())?;
             let publishing = spec.configure_publishing(scratch, &git, gh, &home, &policy);
@@ -2934,7 +2937,9 @@ pub(super) fn prepare_candidates(
             .clone()
             .or_else(|| reader_gh.then(|| locate("gh").ok()).flatten())
         {
-            super::gh_auth::inject(&executor, &gh, &home, cancel, &mut spec.env);
+            if writer.is_none() {
+                super::gh_auth::inject(&executor, &gh, &home, cancel, &mut spec.env);
+            }
             if adapter_spec.is_some_and(|spec| {
                 spec.github_auth == Some(provenant_records::GithubAuth::ShellEnvironment)
             }) && spec.env.iter().any(|(key, _)| key == "GH_TOKEN")

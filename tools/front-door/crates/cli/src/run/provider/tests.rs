@@ -391,10 +391,28 @@ fn publishing_is_optional_without_gh_configuration() -> Result<(), Box<dyn std::
     let home = temp.path().canonicalize()?;
     let executable = std::env::current_exe()?.canonicalize()?;
     assert_eq!(
-        publishing_executable(&home, &|_| Ok(executable.clone())),
+        publishing_executable(&home, &|_| Ok(executable.clone()), None),
         None
     );
     assert!(!home.join(".config/gh").exists());
+    assert_eq!(
+        publishing_executable(
+            &home,
+            &|_| Ok(executable.clone()),
+            Some(std::ffi::OsStr::new("fixture-token"))
+        ),
+        Some(executable.clone())
+    );
+    for invalid in ["", "token\n", "token with spaces"] {
+        assert_eq!(
+            publishing_executable(
+                &home,
+                &|_| Ok(executable.clone()),
+                Some(std::ffi::OsStr::new(invalid))
+            ),
+            None
+        );
+    }
     Ok(())
 }
 
@@ -408,15 +426,18 @@ fn publishing_canonicalises_symlinked_gh_and_ignores_missing_tools()
     let gh = home.join("gh");
     std::os::unix::fs::symlink(&executable, &gh)?;
     assert_eq!(
-        publishing_executable(&home, &|_| Ok(gh.clone())),
+        publishing_executable(&home, &|_| Ok(gh.clone()), None),
         Some(executable)
     );
     assert_eq!(
-        publishing_executable(&home, &|_| Err("not installed".into())),
+        publishing_executable(&home, &|_| Err("not installed".into()), None),
         None
     );
     std::fs::remove_file(&gh)?;
-    assert_eq!(publishing_executable(&home, &|_| Ok(gh.clone())), None);
+    assert_eq!(
+        publishing_executable(&home, &|_| Ok(gh.clone()), None),
+        None
+    );
     Ok(())
 }
 
@@ -2029,16 +2050,19 @@ fn writer_plan_stages_scratch_in_private_temporary_directory()
     // same process environment that production preparation reads.
     const CHILD: &str = "PROVENANT_TEST_WRITER_TOKEN_CHILD";
     if std::env::var_os(CHILD).is_none() {
-        // A separate test process isolates the fixture token from parallel tests.
-        #[allow(clippy::disallowed_methods)]
-        let status = std::process::Command::new(std::env::current_exe()?)
-            .arg("writer_plan_stages_scratch_in_private_temporary_directory")
-            .env(CHILD, "1")
-            .env("GH_TOKEN", "fixture-host-token")
-            .env_remove("GIT_CONFIG_GLOBAL")
-            .env_remove("XDG_CONFIG_HOME")
-            .status()?;
-        assert!(status.success());
+        // Each auth layout runs the real preparation boundary in an isolated
+        // process; neither depends on another test's host credential state.
+        for layout in ["missing", "symlink", "symlink-xdg"] {
+            #[allow(clippy::disallowed_methods)]
+            let status = std::process::Command::new(std::env::current_exe()?)
+                .arg("writer_plan_stages_scratch_in_private_temporary_directory")
+                .env(CHILD, layout)
+                .env("GH_TOKEN", "fixture-host-token")
+                .env_remove("GIT_CONFIG_GLOBAL")
+                .env_remove("XDG_CONFIG_HOME")
+                .status()?;
+            assert!(status.success(), "GitHub config layout {layout}");
+        }
         return Ok(());
     }
 
@@ -2051,6 +2075,11 @@ fn writer_plan_stages_scratch_in_private_temporary_directory()
     let git_home = base.join("git-home");
     for path in [&home, &state, &project, &assets, &git_home] {
         std::fs::DirBuilder::new().mode(0o700).create(path)?;
+    }
+    if std::env::var_os(CHILD).as_deref() == Some(std::ffi::OsStr::new("symlink-xdg")) {
+        let config = base.join("host-xdg-config");
+        std::fs::create_dir(&config)?;
+        std::os::unix::fs::symlink(config, home.join(".config"))?;
     }
     let executor = SystemExecutor::new(1)?;
     let git = init_fixture_repository(&executor, &project, &git_home)?;
@@ -2809,7 +2838,19 @@ printf 'agy 1.0.0\n'
     }
     // Exercise the host project policy through preparation and the actual
     // generated shim, with a fake gh so no GitHub access is needed.
-    std::fs::create_dir_all(home.join(".config/gh"))?;
+    std::fs::create_dir_all(home.join(".config"))?;
+    if std::env::var_os(CHILD)
+        .as_deref()
+        .is_some_and(|layout| layout != "missing")
+    {
+        let gh_config = base.join("host-gh-config");
+        std::fs::create_dir(&gh_config)?;
+        // Token launches must not consult even a malformed host configuration.
+        std::fs::write(gh_config.join("config.yml"), "fixture: [unterminated\n")?;
+        std::os::unix::fs::symlink(gh_config, home.join(".config/gh"))?;
+    } else {
+        assert!(!home.join(".config/gh").exists());
+    }
     let gh = assets.join("gh");
     std::fs::write(&gh, b"#!/bin/sh\nif [ \"$1\" = auth ] && [ \"$2\" = token ]; then exit 1; fi\nprintf 'forwarded\\n'\n")?;
     std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o700))?;
@@ -2824,6 +2865,8 @@ printf 'agy 1.0.0\n'
     std::fs::create_dir_all(dotfiles.join("xdg/git"))?;
     std::fs::write(dotfiles.join("global"), "[fixture]\n global = true\n")?;
     std::fs::write(dotfiles.join("xdg/git/config"), "[fixture]\n xdg = true\n")?;
+    std::fs::write(dotfiles.join("xdg/git/ignore"), "fixture-ignore\n")?;
+    std::fs::write(dotfiles.join("xdg/git/attributes"), "*.fixture text\n")?;
     std::os::unix::fs::symlink(dotfiles.join("global"), home.join(".gitconfig"))?;
     std::os::unix::fs::symlink(dotfiles.join("xdg/git"), home.join(".config/git"))?;
     let publishing_paths = run::LaunchPaths {
@@ -2872,6 +2915,45 @@ printf 'agy 1.0.0\n'
             .any(|(key, value)| key == "GH_TOKEN" && value == "fixture-host-token")
     );
     assert!(!launch.environment.iter().any(|(key, _)| key == "GH_TOKEN"));
+    let gh_config = publishing_paths.temporary.join("candidate-0/gh-config");
+    assert!(gh_config.is_dir());
+    assert!(
+        publishing
+            .environment
+            .iter()
+            .any(|(key, value)| key == "GH_CONFIG_DIR" && value == gh_config.as_os_str())
+    );
+    assert_eq!(std::fs::read_dir(&gh_config)?.count(), 0);
+    let gh_shim = std::fs::read_to_string(publishing_paths.temporary.join("candidate-0/bin/gh"))?;
+    assert!(gh_shim.contains(gh_config.to_str().ok_or("gh config path")?));
+    assert!(
+        !gh_shim.contains(
+            home.join(".config/gh")
+                .to_str()
+                .ok_or("host gh config path")?
+        )
+    );
+    // If gh is installed, exercise its real configuration parser without a
+    // network request. The private directory gives the ordinary default even
+    // when the host config is linked or absent.
+    if let Ok(real_gh) = find_executable("gh") {
+        let argv = [
+            real_gh.into_os_string(),
+            "config".into(),
+            "get".into(),
+            "git_protocol".into(),
+        ];
+        let environment = [
+            ("HOME".into(), home.as_os_str().to_owned()),
+            ("GH_CONFIG_DIR".into(), gh_config.as_os_str().to_owned()),
+            ("GH_TOKEN".into(), "fixture-host-token".into()),
+        ];
+        let mut options = ExecOptions::new(&argv, &project, Duration::from_secs(5));
+        options.env = Some(&environment);
+        let actual = executor.execute(options)?;
+        assert_eq!(actual.termination, Termination::Exit(0));
+        assert_eq!(actual.stdout.bytes, b"https\n");
+    }
     let profile = &publishing
         .confinement
         .as_ref()
@@ -2891,6 +2973,82 @@ printf 'agy 1.0.0\n'
         provenant_confinement::permissions::AnchoredDirectory::open_canonical(
             target.parent().ok_or("config parent")?,
         )?;
+    }
+    // The original spelling really is unsuitable for the launcher's canonical
+    // anchor boundary: a plan containing it would fail before provider launch.
+    assert!(
+        provenant_confinement::permissions::AnchoredDirectory::open_canonical(
+            home.join(".config/git"),
+        )
+        .is_err()
+    );
+    // Follow the launcher's real grant-anchor and compilation boundary. Merely
+    // inspecting the plan misses non-canonical optional XDG file grants.
+    let confinement = publishing
+        .confinement
+        .as_ref()
+        .ok_or("publishing confinement")?;
+    let writer = confinement
+        .writer
+        .as_ref()
+        .map(|writer| (&writer.worktree, &writer.branch));
+    if let (Some((worktree, branch)), AccessMode::WorktreeWrite(authority)) =
+        (writer, &confinement.plan.permissions().mode)
+    {
+        provenant_confinement::permissions::prepare_writer_directories(
+            worktree, branch, authority, &home,
+        )?;
+    }
+    // Run the real canonical-anchor check on every host-config read. The
+    // unrelated built-in /bin grants follow macOS's filesystem layout, so the
+    // complete native anchor/command pass below remains macOS-only.
+    for grant in &confinement.profile.spec.runtime_reads {
+        if grant.path.starts_with(home.join(".config")) || grant.path.starts_with(&dotfiles) {
+            let anchor = match grant.scope {
+                PathScope::Exact => grant.path.parent().ok_or("config anchor")?,
+                PathScope::Subtree => grant.path.as_path(),
+            };
+            provenant_confinement::permissions::AnchoredDirectory::open_canonical(anchor)?;
+        }
+    }
+    let rendered = provenant_confinement::permissions::snapshot::render(
+        confinement.plan.permissions(),
+        &confinement.profile,
+        &home,
+    )?;
+    assert!(!rendered.is_empty());
+    #[cfg(target_os = "macos")]
+    {
+        let directories = provenant_confinement::permissions::required_anchors(
+            confinement.plan.permissions(),
+            &confinement.profile,
+            writer,
+        )
+        .into_iter()
+        .map(provenant_confinement::permissions::AnchoredDirectory::open_canonical)
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+        let anchors = provenant_confinement::permissions::Anchors {
+            home: &home,
+            directories: &directories,
+            worktree: writer,
+        };
+        let compiled = provenant_confinement::permissions::snapshot::compile(
+            confinement.plan.permissions(),
+            &confinement.profile,
+            &anchors,
+        )?;
+        let confined_command = compiled.command(&publishing.argv, &attempt_id)?;
+        assert!(!confined_command.is_empty());
+    }
+    for name in ["ignore", "attributes"] {
+        let expected = dotfiles.join("xdg/git").join(name).canonicalize()?;
+        assert!(
+            profile
+                .spec
+                .runtime_reads
+                .iter()
+                .any(|grant| grant.path == expected)
+        );
     }
     let worktree = &publishing_task
         .writer

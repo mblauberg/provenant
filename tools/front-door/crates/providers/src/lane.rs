@@ -160,7 +160,24 @@ impl crate::LaunchSpec {
         };
         let git_path = text(git)?;
         let gh_path = text(gh)?;
-        let gh_config = shell_quote(&text(&home.join(".config/gh"))?);
+        // A host-resolved token needs no persisted gh login. Give gh its own
+        // empty configuration directory so linked or unreadable host dotfiles
+        // cannot prevent a token-authenticated publishing command.
+        let gh_config_root = if self
+            .env
+            .iter()
+            .any(|(key, value)| key == "GH_TOKEN" && !value.is_empty())
+        {
+            let root = scratch.join("gh-config");
+            self.setup.push(SetupStep::CreateDir(root.clone()));
+            self.env.retain(|(key, _)| key != "GH_CONFIG_DIR");
+            self.env
+                .push(("GH_CONFIG_DIR".into(), root.as_os_str().to_owned()));
+            root
+        } else {
+            home.join(".config/gh")
+        };
+        let gh_config = shell_quote(&text(&gh_config_root)?);
         let gh = format!("GH_CONFIG_DIR={gh_config} {}", shell_quote(&gh_path));
         let config = scratch.join("publishing.gitconfig");
         let config_text = format!(

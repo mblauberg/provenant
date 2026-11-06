@@ -41,6 +41,12 @@ pub(super) fn codex_shell_environment(
     argv.splice(index..index, config);
 }
 
+pub(super) fn valid_host_token(value: &std::ffi::OsStr) -> bool {
+    value.to_str().is_some_and(|text| {
+        !text.is_empty() && text.len() <= 16 * 1024 && text.bytes().all(|b| b.is_ascii_graphic())
+    })
+}
+
 fn token(
     executor: &dyn Executor,
     gh: &Path,
@@ -51,10 +57,7 @@ fn token(
     // `gh auth token` reads the persisted login and does not return GH_TOKEN.
     // Honour the host token first, with the same bounds as captured output.
     if let Some(value) = host_token
-        && let Some(text) = value.to_str()
-        && !text.is_empty()
-        && text.len() <= 16 * 1024
-        && text.bytes().all(|b| b.is_ascii_graphic())
+        && valid_host_token(&value)
     {
         return Some(value);
     }

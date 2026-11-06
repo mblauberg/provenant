@@ -640,8 +640,11 @@ pub(super) fn publishing_requested(
 pub(super) fn publishing_executable(
     home: &Path,
     locate: &impl Fn(&str) -> Result<PathBuf, String>,
+    host_token: Option<&std::ffi::OsStr>,
 ) -> Option<PathBuf> {
-    if !home.join(".config/gh").is_dir() {
+    if !host_token.is_some_and(super::gh_auth::valid_host_token)
+        && !home.join(".config/gh").is_dir()
+    {
         return None;
     }
     // Resolve links before adding exact executable grants or writing wrappers.
