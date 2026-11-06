@@ -769,3 +769,52 @@ fn child_receipt_replay_uses_original_request_after_template_and_parent_changes(
     );
     assert_eq!(checkpoint, before);
 }
+
+#[test]
+fn receipt_replays_for_a_historical_attempt_after_the_parent_settles() {
+    let (document, mut checkpoint) = live(None);
+    mark_running(&mut checkpoint, "a");
+    let request = child("late", "lost-reply");
+    let receipt = add(&document, &mut checkpoint, "a", &request).unwrap();
+    // The parent settles; its attempt is no longer a live node.
+    let node = checkpoint.nodes.iter_mut().find(|n| n.id == "a").unwrap();
+    node.state = NodeState::Succeeded;
+    for row in &mut node.attempts {
+        row.state = AttemptState::Terminal;
+    }
+    assert_eq!(parent_of_attempt(&checkpoint, "attempt-a"), None);
+    let parent = relay::historical_parent_of_attempt(&checkpoint, "attempt-a").unwrap();
+    assert_eq!(parent, "a");
+    let replay = relay::replay_child(&document, &checkpoint, parent, &request)
+        .unwrap()
+        .unwrap();
+    assert!(replay.replayed);
+    assert_eq!(replay.node, receipt.node);
+    assert_eq!(replay.revision, receipt.revision);
+    // A new key on a settled parent is not a replay.
+    let fresh = child("other", "new-key");
+    assert!(
+        relay::replay_child(&document, &checkpoint, parent, &fresh)
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        add(&document, &mut checkpoint, "a", &fresh).unwrap_err().code,
+        "parent_settled"
+    );
+}
+
+#[test]
+fn provisioning_fence_survives_a_checkpoint_round_trip_until_cleared() {
+    let (_, mut checkpoint) = live(None);
+    relay::fence_provisioning(&mut checkpoint, "a--w", ".worktrees/live-a--w", "abc123");
+    let reloaded: GraphCheckpoint =
+        serde_json::from_value(serde_json::to_value(&checkpoint).unwrap()).unwrap();
+    assert_eq!(
+        relay::pending_provisioning(&reloaded),
+        vec![("a--w".into(), ".worktrees/live-a--w".into(), "abc123".into())]
+    );
+    relay::clear_provisioning(&mut checkpoint, "a--w");
+    assert!(relay::pending_provisioning(&checkpoint).is_empty());
+    assert!(!checkpoint.extra.contains_key("pending_writer_provisioning"));
+}
