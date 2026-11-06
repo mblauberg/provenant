@@ -1045,7 +1045,13 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
             ) {
                 return code;
             }
-            fail(&inv.leaf, Outcome::Refused, "GRAPH_REQUIRED", "retained non-graph lanes are read-only", globals)
+            fail(
+                &inv.leaf,
+                Outcome::Refused,
+                "GRAPH_REQUIRED",
+                "retained non-graph lanes are read-only",
+                globals,
+            )
         }
         Command::Retry(cmd) => {
             if let Some(code) = fabric::unified_graph_command(
@@ -1063,7 +1069,13 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
             ) {
                 return code;
             }
-            fail(&inv.leaf, Outcome::Refused, "GRAPH_REQUIRED", "retained non-graph lanes are read-only", globals)
+            fail(
+                &inv.leaf,
+                Outcome::Refused,
+                "GRAPH_REQUIRED",
+                "retained non-graph lanes are read-only",
+                globals,
+            )
         }
         Command::Lane(cmd) => run_edge(&inv.leaf, globals, |edge| {
             let mut reply = provenant_cli::run::lane(cmd, edge);

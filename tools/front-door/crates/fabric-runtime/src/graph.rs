@@ -1207,7 +1207,11 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     // its starting head becomes known only at that round.
                     if plans::writer(node)
                         && node.round.is_none()
-                        && node.attempt.as_ref().and_then(|spec| spec.new_worktree.as_ref()).is_none()
+                        && node
+                            .attempt
+                            .as_ref()
+                            .and_then(|spec| spec.new_worktree.as_ref())
+                            .is_none()
                     {
                         let worktree = node
                             .worktree
@@ -2085,16 +2089,33 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         .worktree
                         .as_deref()
                         .ok_or_else(|| GraphError::Invalid("writer worktree missing".into()))?;
-                    let binding_result = if let Some(spec) = node.attempt.as_ref().and_then(|spec| spec.new_worktree.as_ref()) {
+                    let binding_result = if let Some(spec) = node
+                        .attempt
+                        .as_ref()
+                        .and_then(|spec| spec.new_worktree.as_ref())
+                    {
                         // Retain the resolved base before any Git effect. Recovery
                         // adopts only the clean worktree at this exact commit.
-                        let base = match checkpoint.nodes[node_index].extra.get("new_worktree_base").and_then(serde_json::Value::as_str) {
+                        let base = match checkpoint.nodes[node_index]
+                            .extra
+                            .get("new_worktree_base")
+                            .and_then(serde_json::Value::as_str)
+                        {
                             Some(base) => base.to_owned(),
                             None => {
-                                let base = owner.resolve_review_base(&spec.base, None).map_err(GraphError::Run)?
+                                let base = owner
+                                    .resolve_review_base(&spec.base, None)
+                                    .map_err(GraphError::Run)?
                                     .filter(|base| base.parse::<provenant_core::GitOid>().is_ok())
-                                    .ok_or_else(|| GraphError::Refused(format!("node {}: writer base could not be resolved", node.id)))?;
-                                checkpoint.nodes[node_index].extra.insert("new_worktree_base".into(), base.clone().into());
+                                    .ok_or_else(|| {
+                                        GraphError::Refused(format!(
+                                            "node {}: writer base could not be resolved",
+                                            node.id
+                                        ))
+                                    })?;
+                                checkpoint.nodes[node_index]
+                                    .extra
+                                    .insert("new_worktree_base".into(), base.clone().into());
                                 journal.save(&checkpoint).map_err(GraphError::Journal)?;
                                 base
                             }
@@ -2117,7 +2138,13 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                             break;
                         }
                     };
-                    if binding.is_none() && (document.schema_version >= 2 || node.attempt.as_ref().is_some_and(|spec| spec.new_worktree.is_some())) {
+                    if binding.is_none()
+                        && (document.schema_version >= 2
+                            || node
+                                .attempt
+                                .as_ref()
+                                .is_some_and(|spec| spec.new_worktree.is_some()))
+                    {
                         return Err(GraphError::Refused(format!(
                             "node {}: host cannot bind the writer source",
                             node.id

@@ -339,10 +339,31 @@ fn schema_tools_report_errors_in_text_in_both_protocol_eras() {
             server.send(&notification("notifications/initialized", json!({})));
         }
         for (index, (id, name, arguments, code, detail)) in [
-            ("identity", "fabric_context", json!({"op":"inspect"}), "not_found", "not_found"),
-            ("bad-identity", "fabric_context", json!({"op":"inspect","extra":true}), "invalid_input", "arguments.<unknown>"),
-            ("bad-submit", "fabric_run", json!({"op":"submit","operation_id":"invalid", "tasks":[]}), "invalid_input", "arguments.op"),
-        ].into_iter().enumerate() {
+            (
+                "identity",
+                "fabric_context",
+                json!({"op":"inspect"}),
+                "not_found",
+                "not_found",
+            ),
+            (
+                "bad-identity",
+                "fabric_context",
+                json!({"op":"inspect","extra":true}),
+                "invalid_input",
+                "arguments.<unknown>",
+            ),
+            (
+                "bad-submit",
+                "fabric_run",
+                json!({"op":"submit","operation_id":"invalid", "tasks":[]}),
+                "invalid_input",
+                "arguments.op",
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
             let mut request = tool_call(id, name, arguments);
             if modern {
                 request["params"]["_meta"] = json!({
@@ -354,7 +375,11 @@ fn schema_tools_report_errors_in_text_in_both_protocol_eras() {
             let frames = server.wait_for_frames(index + 2, TEST_WAIT).unwrap();
             let result = &frames.iter().find(|frame| frame["id"] == id).unwrap()["result"];
             assert_eq!(result["isError"], true, "{result}");
-            assert_eq!(result.get("structuredContent").is_none(), name == "fabric_context", "{result}");
+            assert_eq!(
+                result.get("structuredContent").is_none(),
+                name == "fabric_context",
+                "{result}"
+            );
             let text = result["content"][0]["text"].as_str().unwrap();
             assert!(text.contains(code) && text.contains(detail), "{text}");
             if id == "bad-identity" {

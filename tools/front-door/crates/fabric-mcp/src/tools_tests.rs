@@ -739,20 +739,35 @@ fn submit_is_removed_and_graph_run_is_the_only_launch_operation() {
 
 #[test]
 fn lane_runs_keep_explicit_retry_identity_and_new_calls_have_new_identity() {
-    let request = json!({"op":"run", "brief":"fix X", "access":"worktree_write", "write_scope":["src"]});
+    let request =
+        json!({"op":"run", "brief":"fix X", "access":"worktree_write", "write_scope":["src"]});
     let first = serde_json::to_value(lane_run_request(&request).unwrap()).unwrap();
     let second = serde_json::to_value(lane_run_request(&request).unwrap()).unwrap();
     assert_ne!(first["idempotency_key"], second["idempotency_key"]);
     assert_eq!(first["writer"], true);
     assert_eq!(first["write_scope"], json!(["src"]));
     let explicit = json!({"idempotency_key":"retry-child", "op":"run", "brief":"fix X"});
-    assert_eq!(serde_json::to_value(lane_run_request(&explicit).unwrap()).unwrap(), serde_json::to_value(lane_run_request(&explicit).unwrap()).unwrap());
+    assert_eq!(
+        serde_json::to_value(lane_run_request(&explicit).unwrap()).unwrap(),
+        serde_json::to_value(lane_run_request(&explicit).unwrap()).unwrap()
+    );
     for access in [json!(false), json!({}), json!("writer"), Value::Null] {
-        let mut invalid = request.clone(); invalid["access"] = access;
+        let mut invalid = request.clone();
+        invalid["access"] = access;
         assert!(lane_run_request(&invalid).is_err());
     }
-    for field in ["route", "capabilities", "capability_sources", "read_roots", "inputs", "source", "after", "deadline_seconds"] {
-        let mut invalid = request.clone(); invalid["document"] = json!({"use":"task"});
+    for field in [
+        "route",
+        "capabilities",
+        "capability_sources",
+        "read_roots",
+        "inputs",
+        "source",
+        "after",
+        "deadline_seconds",
+    ] {
+        let mut invalid = request.clone();
+        invalid["document"] = json!({"use":"task"});
         invalid["document"][field] = json!("unsupported");
         assert!(lane_run_request(&invalid).is_err());
     }

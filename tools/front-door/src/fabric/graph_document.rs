@@ -81,46 +81,48 @@ fn private_graph_directory_refusal(
 }
 
 #[cfg(test)]
-#[allow(unused_imports, reason = "custom worktree driver includes the library without libtest")]
+#[allow(
+    unused_imports,
+    reason = "custom worktree driver includes the library without libtest"
+)]
 mod tests {
-use super::*;
-#[test]
-fn graph_publication_is_private_and_idempotent() -> Result<(), Box<dyn std::error::Error>> {
-    use std::os::unix::fs::PermissionsExt;
-    let temp = tempfile::tempdir()?;
-    let graphs = temp.path().join("graphs");
-    std::fs::create_dir(&graphs)?;
-    std::fs::set_permissions(&graphs, std::fs::Permissions::from_mode(0o700))?;
-    let graph = serde_json::json!({"graph_id":"test","nodes":[{"id":"task","access":"read_only","prompt":"brief"}]});
-    let first = publish_graph_document(temp.path(), &graph)?;
-    let second = publish_graph_document(temp.path(), &graph)?;
-    assert_eq!(first, second);
-    assert_eq!(std::fs::read(&first)?, serde_json::to_vec(&graph)?);
-    assert_eq!(std::fs::metadata(&first)?.permissions().mode() & 0o077, 0);
-    std::fs::write(&first, b"different")?;
-    assert!(publish_graph_document(temp.path(), &graph).is_err());
-    std::fs::write(&first, serde_json::to_vec(&graph)?)?;
-    std::fs::set_permissions(&first, std::fs::Permissions::from_mode(0o644))?;
-    assert!(publish_graph_document(temp.path(), &graph).is_err());
-    Ok(())
-}
+    use super::*;
+    #[test]
+    fn graph_publication_is_private_and_idempotent() -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir()?;
+        let graphs = temp.path().join("graphs");
+        std::fs::create_dir(&graphs)?;
+        std::fs::set_permissions(&graphs, std::fs::Permissions::from_mode(0o700))?;
+        let graph = serde_json::json!({"graph_id":"test","nodes":[{"id":"task","access":"read_only","prompt":"brief"}]});
+        let first = publish_graph_document(temp.path(), &graph)?;
+        let second = publish_graph_document(temp.path(), &graph)?;
+        assert_eq!(first, second);
+        assert_eq!(std::fs::read(&first)?, serde_json::to_vec(&graph)?);
+        assert_eq!(std::fs::metadata(&first)?.permissions().mode() & 0o077, 0);
+        std::fs::write(&first, b"different")?;
+        assert!(publish_graph_document(temp.path(), &graph).is_err());
+        std::fs::write(&first, serde_json::to_vec(&graph)?)?;
+        std::fs::set_permissions(&first, std::fs::Permissions::from_mode(0o644))?;
+        assert!(publish_graph_document(temp.path(), &graph).is_err());
+        Ok(())
+    }
 
-#[test]
-fn graph_publication_repairs_owned_loose_directory() -> Result<(), Box<dyn std::error::Error>> {
-    use std::os::unix::fs::PermissionsExt;
-    let temp = tempfile::tempdir()?;
-    let graphs = temp.path().join("graphs");
-    std::fs::create_dir(&graphs)?;
-    std::fs::set_permissions(&graphs, std::fs::Permissions::from_mode(0o755))?;
-    let graph = serde_json::json!({"graph_id":"test","nodes":[{"id":"task","access":"read_only","prompt":"brief"}]});
-    let published = publish_graph_document(temp.path(), &graph)?;
-    assert_eq!(
-        std::fs::metadata(&graphs)?.permissions().mode() & 0o777,
-        0o700
-    );
-    assert!(published.starts_with(&graphs));
-    assert_eq!(std::fs::read(&published)?, serde_json::to_vec(&graph)?);
-    Ok(())
-}
-
+    #[test]
+    fn graph_publication_repairs_owned_loose_directory() -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir()?;
+        let graphs = temp.path().join("graphs");
+        std::fs::create_dir(&graphs)?;
+        std::fs::set_permissions(&graphs, std::fs::Permissions::from_mode(0o755))?;
+        let graph = serde_json::json!({"graph_id":"test","nodes":[{"id":"task","access":"read_only","prompt":"brief"}]});
+        let published = publish_graph_document(temp.path(), &graph)?;
+        assert_eq!(
+            std::fs::metadata(&graphs)?.permissions().mode() & 0o777,
+            0o700
+        );
+        assert!(published.starts_with(&graphs));
+        assert_eq!(std::fs::read(&published)?, serde_json::to_vec(&graph)?);
+        Ok(())
+    }
 }

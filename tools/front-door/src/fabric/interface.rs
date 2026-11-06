@@ -41,9 +41,15 @@ fn bind_launch_controls(input: &Value, node: &mut Value, cwd: &Path) -> Result<(
         node["access"] = json!("worktree_write");
     }
     if let Some(branch) = branch {
-        let branch = branch.as_str().filter(|value| !value.is_empty()).ok_or_else(|| invalid("branch"))?;
+        let branch = branch
+            .as_str()
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| invalid("branch"))?;
         provenant_confinement::repo::GitRefName::branch(branch).map_err(|_| invalid("branch"))?;
-        let base = base.and_then(Value::as_str).filter(|value| !value.is_empty()).ok_or_else(|| invalid("base"))?;
+        let base = base
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| invalid("base"))?;
         provenant_confinement::repo::GitRevision::new(base).map_err(|_| invalid("base"))?;
         node["worktree"] = json!(format!(".worktrees/{}", branch.replace('/', "-")));
         if node.get("attempt").is_none() {
@@ -54,13 +60,25 @@ fn bind_launch_controls(input: &Value, node: &mut Value, cwd: &Path) -> Result<(
         }
         node["attempt"]["new_worktree"] = json!({"branch":branch,"base":base});
     } else if let Some(worktree) = worktree {
-        let path = Path::new(worktree.as_str().filter(|value| !value.is_empty()).ok_or_else(|| invalid("worktree"))?);
-        node["worktree"] = json!(if path.is_absolute() { path.to_owned() } else { cwd.join(path) });
+        let path = Path::new(
+            worktree
+                .as_str()
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| invalid("worktree"))?,
+        );
+        node["worktree"] = json!(if path.is_absolute() {
+            path.to_owned()
+        } else {
+            cwd.join(path)
+        });
     } else if access == Some(&json!("worktree_write")) && node.get("worktree").is_none() {
         node["worktree"] = json!(cwd);
     }
     if let Some(scope) = input.get("write_scope").filter(|value| !value.is_null()) {
-        if !scope.as_array().is_some_and(|paths| paths.iter().all(Value::is_string)) {
+        if !scope
+            .as_array()
+            .is_some_and(|paths| paths.iter().all(Value::is_string))
+        {
             return Err(invalid("write_scope"));
         }
         node["write_scope"] = scope.clone();
@@ -108,20 +126,18 @@ impl Factory {
         }
         let within =
             std::time::Duration::from_micros(budget.remaining(self.clock.mono_now()).as_micros());
-        let receipt = provenant_cli::fabric::graph_relay::from_lane(
-            &request,
-            cancel,
-            within,
-        )
-        .map_err(|_| FacadeError::InvalidInput { detail: None })?;
+        let receipt = provenant_cli::fabric::graph_relay::from_lane(&request, cancel, within)
+            .map_err(|_| FacadeError::InvalidInput { detail: None })?;
         if let Some(seconds) = input.get("wait_seconds").and_then(Value::as_u64) {
-            return Ok(match provenant_cli::fabric::graph_relay::wait_for_children(
-                cancel,
-                std::time::Duration::from_secs(seconds),
-            ) {
-                Ok(children) => json!({"receipt":receipt,"children":children}),
-                Err(error) => json!({"receipt":receipt,"observation_error":error.to_string()}),
-            });
+            return Ok(
+                match provenant_cli::fabric::graph_relay::wait_for_children(
+                    cancel,
+                    std::time::Duration::from_secs(seconds),
+                ) {
+                    Ok(children) => json!({"receipt":receipt,"children":children}),
+                    Err(error) => json!({"receipt":receipt,"observation_error":error.to_string()}),
+                },
+            );
         }
         Ok(receipt)
     }
@@ -318,9 +334,19 @@ impl Factory {
                 "integration_branch".into(),
             )));
         }
-        let has_overrides = ["brief", "use", "tier", "over", "access", "worktree", "branch", "base", "write_scope"]
-            .iter()
-            .any(|field| input.get(*field).is_some_and(|value| !value.is_null()))
+        let has_overrides = [
+            "brief",
+            "use",
+            "tier",
+            "over",
+            "access",
+            "worktree",
+            "branch",
+            "base",
+            "write_scope",
+        ]
+        .iter()
+        .any(|field| input.get(*field).is_some_and(|value| !value.is_null()))
             || input
                 .get("set")
                 .is_some_and(|value| value.as_object().is_none_or(|object| !object.is_empty()));
@@ -393,8 +419,14 @@ impl Factory {
             let template = library
                 .resolve(node["use"].as_str().unwrap_or("task"))
                 .map_err(|_| FacadeError::InvalidInput { detail: None })?;
-            if template.is_composite() && ["access", "worktree", "branch", "base", "write_scope"].iter().any(|field| input.get(*field).is_some_and(|value| !value.is_null())) {
-                return Err(FacadeError::invalid(InvalidInputDetail::Field("launch controls require a leaf template".into())));
+            if template.is_composite()
+                && ["access", "worktree", "branch", "base", "write_scope"]
+                    .iter()
+                    .any(|field| input.get(*field).is_some_and(|value| !value.is_null()))
+            {
+                return Err(FacadeError::invalid(InvalidInputDetail::Field(
+                    "launch controls require a leaf template".into(),
+                )));
             }
             bind_launch_controls(input, &mut node, &self.cwd)?;
             let mut parameters = node.get("with").cloned().unwrap_or_else(|| json!({}));
@@ -1075,17 +1107,27 @@ mod tests {
         let factory = factory(&rig)?;
         let cancel = CancelToken::new();
         let budget = WaitBudget::cli(factory.clock.mono_now(), 10)?;
-        let response = factory.graph_document(json!({
-            "op":"run", "brief":"Fix the parser", "tier":"senior",
-            "worktree":rig.project, "write_scope":["src"], "explain":true
-        }), budget, &cancel)?;
+        let response = factory.graph_document(
+            json!({
+                "op":"run", "brief":"Fix the parser", "tier":"senior",
+                "worktree":rig.project, "write_scope":["src"], "explain":true
+            }),
+            budget,
+            &cancel,
+        )?;
         let document: GraphDocument = serde_json::from_value(response["document"].clone())?;
         assert_eq!(document.nodes.len(), 1);
         let node = &document.nodes[0];
-        assert_eq!(node.access, provenant_fabric_runtime::graph::AccessMode::WorktreeWrite);
+        assert_eq!(
+            node.access,
+            provenant_fabric_runtime::graph::AccessMode::WorktreeWrite
+        );
         assert_eq!(node.worktree.as_deref(), rig.project.to_str());
         assert_eq!(node.write_scope, vec!["src"]);
-        assert_eq!(node.route.as_ref().and_then(|route| route.alias.as_deref()), Some("senior"));
+        assert_eq!(
+            node.route.as_ref().and_then(|route| route.alias.as_deref()),
+            Some("senior")
+        );
         Ok(())
     }
 
@@ -1095,19 +1137,35 @@ mod tests {
         let factory = factory(&rig)?;
         let budget = WaitBudget::cli(factory.clock.mono_now(), 10)?;
         let cancel = CancelToken::new();
-        let response = factory.graph_document(json!({
-            "op":"run", "brief":"Fix the parser", "branch":"fix/parser",
-            "base":"HEAD", "explain":true
-        }), budget, &cancel)?;
+        let response = factory.graph_document(
+            json!({
+                "op":"run", "brief":"Fix the parser", "branch":"fix/parser",
+                "base":"HEAD", "explain":true
+            }),
+            budget,
+            &cancel,
+        )?;
         let document: GraphDocument = serde_json::from_value(response["document"].clone())?;
         assert_eq!(document.nodes.len(), 1);
         let node = &document.nodes[0];
         assert_eq!(node.worktree.as_deref(), Some(".worktrees/fix-parser"));
-        let target = node.attempt.as_ref().and_then(|spec| spec.new_worktree.as_ref()).ok_or("new worktree missing")?;
+        let target = node
+            .attempt
+            .as_ref()
+            .and_then(|spec| spec.new_worktree.as_ref())
+            .ok_or("new worktree missing")?;
         assert_eq!(target.branch, "fix/parser");
         assert_eq!(target.base, "HEAD");
         assert!(!rig.project.join(".worktrees/fix-parser").exists());
-        assert!(factory.graph_document(json!({"op":"run","use":"deliver","worktree":rig.project,"explain":true}), budget, &cancel).is_err());
+        assert!(
+            factory
+                .graph_document(
+                    json!({"op":"run","use":"deliver","worktree":rig.project,"explain":true}),
+                    budget,
+                    &cancel
+                )
+                .is_err()
+        );
         Ok(())
     }
 
@@ -1115,9 +1173,16 @@ mod tests {
     fn writer_controls_preserve_new_branch_and_refuse_conflicting_access() -> Result {
         let cwd = Path::new("/fixture/project");
         let mut node = json!({"id":"task","use":"task"});
-        bind_launch_controls(&json!({"branch":"fix/parser","base":"origin/main"}), &mut node, cwd)?;
+        bind_launch_controls(
+            &json!({"branch":"fix/parser","base":"origin/main"}),
+            &mut node,
+            cwd,
+        )?;
         assert_eq!(node["worktree"], ".worktrees/fix-parser");
-        assert_eq!(node["attempt"]["new_worktree"], json!({"branch":"fix/parser","base":"origin/main"}));
+        assert_eq!(
+            node["attempt"]["new_worktree"],
+            json!({"branch":"fix/parser","base":"origin/main"})
+        );
         assert_eq!(node["access"], "worktree_write");
         for input in [
             json!({"worktree":".","access":"read_only"}),

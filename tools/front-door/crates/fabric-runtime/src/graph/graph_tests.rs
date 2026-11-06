@@ -215,9 +215,13 @@ impl AttemptOwner for FakeOwner {
         }))
     }
     fn provision_writer_worktree(
-        &mut self, path: &str, branch: &str, base: &str,
+        &mut self,
+        path: &str,
+        branch: &str,
+        base: &str,
     ) -> Result<Option<WriterWorktreeBinding>, Self::Error> {
-        self.provisions.push((path.into(), branch.into(), base.into()));
+        self.provisions
+            .push((path.into(), branch.into(), base.into()));
         self.implicit_head = Some(base.into());
         self.bind_writer_worktree(path)
     }
@@ -10117,7 +10121,9 @@ fn cumulative_allowance_counts_graph_attempts_and_survives_observation_replay() 
         *attempt_ref = Some("first".into());
     }
     owner.observations.push_back(refused);
-    owner.observations.push_back(terminal(AttemptOutcome::UsageLimited));
+    owner
+        .observations
+        .push_back(terminal(AttemptOutcome::UsageLimited));
     let run = advance(&document, &mut owner, &mut journal).unwrap();
     assert_eq!(run.checkpoint.nodes[0].state, NodeState::Failed);
     assert_eq!(run.checkpoint.nodes[0].attempts.len(), 2);
@@ -11298,7 +11304,12 @@ fn writer_provision_recovery_keeps_the_checkpointed_base() {
             Ok(self.checkpoint.clone())
         }
         fn save(&mut self, checkpoint: &GraphCheckpoint) -> Result<(), Self::Error> {
-            if self.fail_binding_save && checkpoint.nodes.iter().any(|node| node.writer_binding.is_some()) {
+            if self.fail_binding_save
+                && checkpoint
+                    .nodes
+                    .iter()
+                    .any(|node| node.writer_binding.is_some())
+            {
                 self.fail_binding_save = false;
                 return Err(NoObservation);
             }
@@ -11309,9 +11320,12 @@ fn writer_provision_recovery_keeps_the_checkpointed_base() {
     let mut writer = node("writer", route("first"));
     writer.access = AccessMode::WorktreeWrite;
     writer.worktree = Some(".worktrees/topic-fix".into());
-    writer.attempt = Some(serde_json::from_value(serde_json::json!({
-        "new_worktree":{"branch":"topic/fix","base":"main"}
-    })).unwrap());
+    writer.attempt = Some(
+        serde_json::from_value(serde_json::json!({
+            "new_worktree":{"branch":"topic/fix","base":"main"}
+        }))
+        .unwrap(),
+    );
     let mut document = graph(vec![writer]);
     document.schema_version = 2;
     let pinned = "a".repeat(40);
@@ -11320,8 +11334,14 @@ fn writer_provision_recovery_keeps_the_checkpointed_base() {
         observations: [terminal(AttemptOutcome::Succeeded)].into(),
         ..Default::default()
     };
-    let mut journal = CrashJournal { checkpoint: None, fail_binding_save: true };
-    assert!(matches!(advance(&document, &mut owner, &mut journal), Err(GraphError::Journal(_))));
+    let mut journal = CrashJournal {
+        checkpoint: None,
+        fail_binding_save: true,
+    };
+    assert!(matches!(
+        advance(&document, &mut owner, &mut journal),
+        Err(GraphError::Journal(_))
+    ));
     let checkpoint = journal.checkpoint.as_ref().unwrap();
     assert_eq!(checkpoint.nodes[0].extra["new_worktree_base"], pinned);
     assert!(checkpoint.nodes[0].writer_binding.is_none());
@@ -11345,17 +11365,31 @@ fn new_worktree_authority_requires_matching_writer_location_and_safe_refs() {
         let mut writer = node("writer", route("first"));
         writer.access = AccessMode::WorktreeWrite;
         writer.worktree = Some(worktree.into());
-        writer.attempt = Some(serde_json::from_value(serde_json::json!({
-            "new_worktree":{"branch":branch,"base":base}
-        })).unwrap());
-        assert_eq!(validate_plan(&graph(vec![writer])).unwrap_err(), "invalid new worktree binding");
+        writer.attempt = Some(
+            serde_json::from_value(serde_json::json!({
+                "new_worktree":{"branch":branch,"base":base}
+            }))
+            .unwrap(),
+        );
+        assert_eq!(
+            validate_plan(&graph(vec![writer])).unwrap_err(),
+            "invalid new worktree binding"
+        );
     }
     let mut writer = node("writer", route("first"));
     writer.access = AccessMode::WorktreeWrite;
     writer.worktree = Some(".worktrees/topic-fix".into());
-    writer.attempt = Some(serde_json::from_value(serde_json::json!({
-        "new_worktree":{"branch":"topic/fix","base":"main"}
-    })).unwrap());
-    writer.source = Some(SourceBinding::Commit { commit: "a".repeat(40) });
-    assert_eq!(validate_plan(&graph(vec![writer])).unwrap_err(), "new worktree cannot override a source binding");
+    writer.attempt = Some(
+        serde_json::from_value(serde_json::json!({
+            "new_worktree":{"branch":"topic/fix","base":"main"}
+        }))
+        .unwrap(),
+    );
+    writer.source = Some(SourceBinding::Commit {
+        commit: "a".repeat(40),
+    });
+    assert_eq!(
+        validate_plan(&graph(vec![writer])).unwrap_err(),
+        "new worktree cannot override a source binding"
+    );
 }

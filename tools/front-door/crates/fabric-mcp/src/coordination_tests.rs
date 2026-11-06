@@ -538,7 +538,8 @@ fn lane_run_submission_adds_graph_children_instead_of_attempts() -> Result<(), B
         .ok_or("submission object")?
         .remove("wait_seconds");
     let no_wait = ToolCall::parse("fabric_run", no_wait)?
-        .execute(&mut service, &CancelToken::new())?.structured_content;
+        .execute(&mut service, &CancelToken::new())?
+        .structured_content;
     assert_eq!(no_wait["idempotency_key"], first["idempotency_key"]);
     assert!(no_wait.get("wait").is_none());
     assert!(no_wait.get("observation_error").is_none());
@@ -547,13 +548,20 @@ fn lane_run_submission_adds_graph_children_instead_of_attempts() -> Result<(), B
     assert_eq!(first["tier"], "senior");
     assert_eq!(first["brief"], "implement the child");
     assert_eq!(first["writer"], true);
-    assert!(!first["idempotency_key"].as_str().ok_or("missing key")?.is_empty());
+    assert!(
+        !first["idempotency_key"]
+            .as_str()
+            .ok_or("missing key")?
+            .is_empty()
+    );
     assert!(first.get("targets").is_none());
     for field in ["worktree", "branch", "base", "nodes", "templates"] {
         let mut unsupported = input.clone();
         unsupported["document"][field] = json!("unsupported");
         let error = ToolCall::parse("fabric_run", unsupported)?
-            .execute(&mut service, &CancelToken::new()).err().ok_or("unsupported launch accepted")?;
+            .execute(&mut service, &CancelToken::new())
+            .err()
+            .ok_or("unsupported launch accepted")?;
         assert_eq!(error.code(), "invalid_input");
     }
     Ok(())

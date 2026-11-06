@@ -879,8 +879,23 @@ mod tests {
     use super::*;
     #[test]
     fn run_accepts_writer_branch_base_and_named_route() {
-        let invocation = valid(&["run", "Fix parser", "--mode", "worktree-write", "--branch", "fix/parser", "--base", "origin/main", "--route", "senior", "--write-scope", "src"]);
-        let Command::Run(request) = invocation.command else { panic!("expected run"); };
+        let invocation = valid(&[
+            "run",
+            "Fix parser",
+            "--mode",
+            "worktree-write",
+            "--branch",
+            "fix/parser",
+            "--base",
+            "origin/main",
+            "--route",
+            "senior",
+            "--write-scope",
+            "src",
+        ]);
+        let Command::Run(request) = invocation.command else {
+            panic!("expected run");
+        };
         assert_eq!(request.brief.as_deref(), Some("Fix parser"));
         assert_eq!(request.branch.as_deref(), Some("fix/parser"));
         assert_eq!(request.base.as_deref(), Some("origin/main"));
@@ -889,7 +904,16 @@ mod tests {
         valid(&["run", "Fix parser", "--worktree", ".worktrees/fix-parser"]);
         invalid(&["run", "Fix parser", "--branch", "fix/parser"]);
         invalid(&["run", "Fix parser", "--base", "HEAD"]);
-        invalid(&["run", "Fix parser", "--branch", "fix/parser", "--base", "HEAD", "--worktree", "."]);
+        invalid(&[
+            "run",
+            "Fix parser",
+            "--branch",
+            "fix/parser",
+            "--base",
+            "HEAD",
+            "--worktree",
+            ".",
+        ]);
     }
 
     #[test]

@@ -204,7 +204,6 @@ pub(super) fn cancel_inner(mut command: Cancel, edge: &Edge<'_>) -> Reply {
                     None,
                     session.context.state_root.as_path(),
                     None,
-
                 );
                 data["lanes"] = rendered["lanes"].clone();
             }

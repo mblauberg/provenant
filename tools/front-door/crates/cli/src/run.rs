@@ -2,12 +2,11 @@
 //! `reconcile` and `telemetry stats`, and the provider seam that the
 //! same-binary guardian holder shares.
 use crate::{
-    Cancel, Condition, Lanes, Output, Part, PricesRefresh, Reconcile, Resume,
-    Stats, Switch, Target, Trace, limits,
+    Cancel, Condition, Lanes, Output, Part, PricesRefresh, Reconcile, Resume, Stats, Switch,
+    Target, Trace, limits,
 };
 use provenant_core::{
-    ActorId, AttemptId, CancelToken, Clock, DeliveryId, OperationId, Roots, RunId,
-    TaskId, WallTime,
+    ActorId, AttemptId, CancelToken, Clock, DeliveryId, OperationId, Roots, RunId, TaskId, WallTime,
 };
 use provenant_fabric_runtime::hosts::plain_text;
 use provenant_os::{clock::SystemClock, fs::entropy_128};
@@ -29,8 +28,8 @@ use std::{
 mod cancel;
 pub mod cloud_owner;
 pub mod cloud_store;
-mod launch;
 mod holder;
+mod launch;
 mod output;
 mod provider;
 mod reconcile;
@@ -44,8 +43,8 @@ mod wait;
 mod watch;
 mod worktree;
 pub use cancel::*;
-pub use launch::*;
 pub use holder::HostHolder;
+pub use launch::*;
 pub use output::*;
 pub(crate) use provider::find_executable as provider_executable;
 #[cfg(feature = "fixture")]

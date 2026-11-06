@@ -362,7 +362,6 @@ fn output_read(
         &record,
         &waits,
         session.context.state_root.as_path(),
-
         call.clock.wall_now().ok(),
         true,
     );
