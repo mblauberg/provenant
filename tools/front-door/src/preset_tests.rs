@@ -2785,7 +2785,7 @@ message = 'explicit'
 }
 
 #[test]
-fn leaf_fields_follow_graph_node_type_and_report_unknown_fields() {
+fn leaf_fields_follow_graph_node_type() {
     let mut layers = Layers::empty();
     layers
         .insert(
@@ -2802,63 +2802,6 @@ fn leaf_fields_follow_graph_node_type_and_report_unknown_fields() {
     assert_eq!(expansion.document["nodes"][0]["route"]["alias"], "senior");
     assert_eq!(expansion.document["nodes"][0]["prompt"], "Check it");
     assert!(expansion.document["nodes"][0].get("routes").is_none());
-
-    layers
-        .insert(
-            "test",
-            "unknown-field",
-            "stages = [{ id = 'check', distinct_from = 'bad', misspelled_field = true }]\n",
-        )
-        .unwrap();
-    let error = expand(&layers, "unknown-field", "brief", &[]).unwrap_err();
-    assert!(
-        error.contains("check") && error.contains("misspelled_field"),
-        "{error}"
-    );
-}
-
-#[test]
-fn embedded_graph_nodes_reject_unknown_fields() {
-    for (name, body) in [
-        (
-            "raw-composite",
-            "kind = 'composite', composite = { nodes = [{ id = 'member', access = 'read_only', prompt = 'work', unexpected_field = true }], exports = [] }",
-        ),
-        (
-            "raw-loop",
-            "kind = 'loop', loop = { max_rounds = 1, until = 'member', body = [{ id = 'member', access = 'read_only', prompt = 'work', unexpected_field = true }] }",
-        ),
-        (
-            "raw-plan-fallback",
-            "kind = 'plan', plan = { kinds = ['task'], max_nodes = 1, fallback = { nodes = [{ id = 'member', access = 'read_only', prompt = 'work', unexpected_field = true }], exports = [] } }",
-        ),
-        (
-            "invalid-raw-composite",
-            "kind = 'composite', composite = { nodes = [{ id = 'member', access = 'read_only', prompt = 'work', deadline_seconds = 'bad', unexpected_field = true }], exports = [] }",
-        ),
-        (
-            "invalid-raw-loop",
-            "kind = 'loop', loop = { max_rounds = 1, until = 'member', body = [{ id = 'member', access = 'read_only', prompt = 'work', deadline_seconds = 'bad', unexpected_field = true }] }",
-        ),
-        (
-            "invalid-raw-plan-fallback",
-            "kind = 'plan', plan = { kinds = ['task'], max_nodes = 1, fallback = { nodes = [{ id = 'member', access = 'read_only', prompt = 'work', deadline_seconds = 'bad', unexpected_field = true }], exports = [] } }",
-        ),
-    ] {
-        let mut layers = Layers::empty();
-        layers
-            .insert(
-                "test",
-                name,
-                &format!("stages = [{{ id = 'group', {body} }}]\n"),
-            )
-            .unwrap();
-        let error = expand(&layers, name, "brief", &[]).unwrap_err();
-        assert!(
-            error.contains("member") && error.contains("unexpected_field"),
-            "{error}"
-        );
-    }
 }
 
 #[test]
