@@ -247,6 +247,7 @@ pub(crate) fn graph_stats(
 mod tests {
     use super::*;
 
+    #[allow(dead_code, reason = "the custom worktree driver omits libtest functions")]
     fn run_request() -> GraphRunArgs {
         GraphRunArgs {
             brief: None,

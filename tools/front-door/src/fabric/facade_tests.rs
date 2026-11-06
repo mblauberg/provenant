@@ -4468,7 +4468,7 @@ esac
                 path: "/repo/.worktrees/writer".into(),
             },
         ] {
-            let expected_code = error.code();
+            let expected_code = error.code().to_owned();
             let response = super::peer_result::<()>(Err(error), |()| super::PeerResult::Error {
                 data: provenant_fabric_runtime::hosts::PeerResultError {
                     extra: Default::default(),
