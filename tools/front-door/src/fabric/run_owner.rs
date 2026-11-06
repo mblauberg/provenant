@@ -618,6 +618,7 @@ impl BinaryRunOwner<'_> {
             provenant_records::run::LaneAccess::default(),
             None,
             true,
+            None,
         )
         .map_err(|error| scope_io(error, "submit"))
     }
@@ -629,9 +630,18 @@ impl BinaryRunOwner<'_> {
         cancel: &CancelToken,
         access: provenant_records::run::LaneAccess,
         settlement_retry_limit: Option<u8>,
+        attempt: Option<provenant_fabric_runtime::graph::AttemptSpec>,
     ) -> Result<SubmissionReceipt, FacadeError> {
-        self.submit_inner(input, budget, cancel, access, settlement_retry_limit, false)
-            .map_err(|error| scope_io(error, "submit"))
+        self.submit_inner(
+            input,
+            budget,
+            cancel,
+            access,
+            settlement_retry_limit,
+            false,
+            attempt,
+        )
+        .map_err(|error| scope_io(error, "submit"))
     }
     pub(crate) fn submit_inner(
         &mut self,
@@ -641,6 +651,7 @@ impl BinaryRunOwner<'_> {
         access: provenant_records::run::LaneAccess,
         settlement_retry_limit: Option<u8>,
         apply_project_defaults: bool,
+        attempt: Option<provenant_fabric_runtime::graph::AttemptSpec>,
     ) -> Result<SubmissionReceipt, FacadeError> {
         use provenant_cli::run::{Submission, Submitted, derived_task, worktree_access};
         let SubmitInput::Submit {
@@ -760,11 +771,13 @@ impl BinaryRunOwner<'_> {
                 }
             }
             submitted.push(Submitted {
-                attempt: provenant_fabric_runtime::graph::AttemptSpec {
-                    account: task.account,
-                    build_heavy: task.build_heavy,
-                    ..Default::default()
-                },
+                attempt: attempt.clone().unwrap_or_else(|| {
+                    provenant_fabric_runtime::graph::AttemptSpec {
+                        account: task.account,
+                        build_heavy: task.build_heavy,
+                        ..Default::default()
+                    }
+                }),
                 require_skill_location: task.require_skill_location,
                 settlement_retry_limit,
                 context: task.context,

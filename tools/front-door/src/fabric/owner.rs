@@ -2013,6 +2013,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             let mut accepted_retry_limit = None;
             let mut accepted_access = None;
             let mut accepted_skill_location = None;
+            let mut accepted_attempt = None;
             let context = match &operation {
                 Some(operation) => match store.request(operation.run_id, &call) {
                     Ok(request) => {
@@ -2023,6 +2024,12 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                             accepted_retry_limit = Some(task.profile.settlement_retry_limit);
                             accepted_access = Some(task.access.clone());
                             accepted_skill_location = Some(task.profile.require_skill_location);
+                            accepted_attempt = Some(provenant_fabric_runtime::graph::AttemptSpec {
+                                placement: task.cloud.clone(),
+                                account: task.account.clone(),
+                                build_heavy: task.build_heavy,
+                                ..Default::default()
+                            });
                         }
                         task.context.clone()
                     }
@@ -2422,7 +2429,10 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                             })
                             .collect(),
                         mode: Some(provenant_cli::Mode::ReadOnly),
-                        worktree: None,
+                        worktree: (access
+                            == provenant_fabric_runtime::graph::AccessMode::WorktreeWrite)
+                            .then(|| worktree.map(PathBuf::from))
+                            .flatten(),
                         read_root: node
                             .read_roots
                             .iter()
@@ -2435,7 +2445,19 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                                 }
                             })
                             .collect(),
-                        write_root: Vec::new(),
+                        write_root: node
+                            .attempt
+                            .into_iter()
+                            .flat_map(|spec| &spec.write_roots)
+                            .map(|root| {
+                                let path = Path::new(root);
+                                if path.is_absolute() {
+                                    path.to_owned()
+                                } else {
+                                    self.factory.cwd.join(path)
+                                }
+                            })
+                            .collect(),
                         network: self.network,
                         capability: capabilities.clone(),
                         no_capability: Vec::new(),
@@ -2514,8 +2536,22 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                 }
             }
             let retry_limit = accepted_retry_limit.unwrap_or(node.settlement_retries);
-            let receipt =
-                owner.submit_with_access(input, self.budget, self.cancel, grants, retry_limit)?;
+            let mut attempt = accepted_attempt.unwrap_or_else(|| {
+                let mut attempt = node.attempt.cloned().unwrap_or_default();
+                attempt.account = route.account.clone().or(attempt.account);
+                attempt
+            });
+            // These fields have already been resolved into the sealed access grants.
+            attempt.write_roots.clear();
+            attempt.capabilities.clear();
+            let receipt = owner.submit_with_access(
+                input,
+                self.budget,
+                self.cancel,
+                grants,
+                retry_limit,
+                Some(attempt),
+            )?;
             if let Some(reason) = blocked(&owner)? {
                 return Err(FacadeError::DispatchRefused {
                     fact: None,

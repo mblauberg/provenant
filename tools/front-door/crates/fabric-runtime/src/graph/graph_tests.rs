@@ -485,8 +485,19 @@ fn graph(nodes: Vec<GraphNode>) -> GraphDocument {
 fn node_attempt_spec_reaches_the_launch() {
     let spec = AttemptSpec {
         account: Some("work".into()),
+        placement: Some(provenant_records::run::CloudPlacement {
+            target: "cloud".into(),
+            provider: "provider".into(),
+            environment: "env".into(),
+            repository: "repo".into(),
+            branch: "branch".into(),
+            model: "model".into(),
+            effort: None,
+            deadline_seconds: 60,
+        }),
         build_heavy: true,
         capabilities: vec!["postgres".into()],
+        write_roots: vec!["/tmp/graph-write".into()],
         ..Default::default()
     };
     let mut lane = node("lane", route("first"));
@@ -526,12 +537,12 @@ fn node_attempt_spec_refuses_what_the_graph_cannot_launch() {
         (
             serde_json::json!({"new_worktree": {"base": "main", "branch": "b"}}),
             None,
-            "graph attempts do not support placement, new_worktree or write_roots",
+            "graph attempts do not support new_worktree",
         ),
         (
-            serde_json::json!({"write_roots": ["/tmp"]}),
+            serde_json::json!({"write_roots": [""]}),
             None,
-            "graph attempts do not support placement, new_worktree or write_roots",
+            "invalid write roots",
         ),
         (
             serde_json::json!({"capabilities": ["postgres"]}),

@@ -1047,8 +1047,11 @@ pub(crate) mod peer_tests {
         let key: graph::AttemptKey = serde_json::from_value(serde_json::json!({"graph_id":"pinned-range","node_id":"review","route_index":0}))?;
         let route = serde_json::from_value(serde_json::json!({"adapter":"fixture","model":"fixture/model"}))?;
         let source_roots = vec![rig.project.to_str().ok_or("source path")?.to_owned()];
+        let write_root = rig.root.join("extra-write");
+        std::fs::create_dir(&write_root)?;
+        let attempt_spec = graph::AttemptSpec { build_heavy: true, write_roots: vec![write_root.to_string_lossy().into_owned()], ..Default::default() };
         let node = || graph::NodeInput {
-            attachments: &[], capabilities: None, capability_sources: None, attempt: None, require_skill_location: false, settlement_retries: None, prior_attempts: &[], family_peers: &[], context: Default::default(),
+            attachments: &[], capabilities: None, capability_sources: None, attempt: Some(&attempt_spec), require_skill_location: false, settlement_retries: None, prior_attempts: &[], family_peers: &[], context: Default::default(),
             read_roots: &source_roots, distinct_from_attempts: &[], require_distinct: false, source_commit: Some(&head),
             review_base: Some(&pinned), title: "review", prompt: "review", required_verdict: None, deadline_seconds: None, inputs_dir: None };
         let first = owner.observe_or_start(&key, node(), &route, graph::AccessMode::ReadOnly, Some(rig.project.to_str().ok_or("source path")?),
@@ -1076,6 +1079,8 @@ pub(crate) mod peer_tests {
         assert_eq!(request.tasks[0].head.as_deref(), Some(head.as_str()));
         assert_eq!(request.tasks[0].access.source_root.as_deref(), Some(rig.project.as_path()));
         assert!(request.tasks[0].access.read_roots.is_empty());
+        assert!(request.tasks[0].build_heavy);
+        assert_eq!(request.tasks[0].access.write_roots, vec![write_root]);
         let scratch = rig.root.join("review-evidence");
         std::fs::create_dir(&scratch)?;
         let directory = provenant_os::fs::Directory::open_anchor(&scratch)?;
@@ -1210,8 +1215,48 @@ pub(crate) mod peer_tests {
                 "timeout_seconds":factory.context.config.limits.graph_timeout_seconds
             }], "concurrency":1, "knobs":["routing.graph_exclude=[\"codex/gpt-6-luna\"]"]
         }))?;
-        let receipt = run_owner.submit_with_access(input, budget, &cancel, Default::default(), None)?;
+        let write_root = rig.root.join("extra-write");
+        std::fs::create_dir(&write_root)?;
+        let grants = provenant_records::run::LaneAccess {
+            write_roots: vec![write_root.clone()],
+            ..Default::default()
+        };
+        let accepted = graph::AttemptSpec { build_heavy: true, ..Default::default() };
+        let receipt = run_owner.submit_with_access(input, budget, &cancel, grants, None, Some(accepted))?;
         let target = receipt.targets.first().ok_or("target")?;
+        // The plain lane and graph owner both lower through the same submission
+        // boundary; compare their durable launch fields, excluding identities.
+        let plain_key: graph::AttemptKey = serde_json::from_value(serde_json::json!({
+            "graph_id":"plain-parity", "node_id":"inspect", "route_index":0
+        }))?;
+        let plain_operation = graph_operation("graph-attempt-operation", &plain_key)?;
+        let session = run_owner.session(&cancel)?;
+        let plain_task = provenant_cli::run::Submitted {
+            attempt: graph::AttemptSpec { build_heavy: true, ..Default::default() },
+            require_skill_location: false, settlement_retry_limit: None, context: None,
+            title: Some("inspect".into()),
+            task_id: provenant_cli::run::derived_task(&plain_operation, 0).map_err(|_| "plain task id")?,
+            prompt: "Review the slice".into(), base: None, pinned_base: None, head: None,
+            route: serde_json::from_value(serde_json::json!({"kind":"model", "provider":"fixture", "model":"fixture/model"}))?,
+            fallback: Vec::new(), provider_timeout: factory.context.config.limits.graph_timeout_seconds,
+            delivery_id: None, deliver: None, worktree: None,
+            access: provenant_records::run::LaneAccess { write_roots: vec![write_root.clone()], ..Default::default() },
+        };
+        let (plain_run, _) = run_owner.with_edge(|edge| provenant_cli::run::submit_with_host(
+            &session, edge, provenant_cli::run::Submission { chair: None, operation_id: plain_operation,
+                tasks: vec![plain_task], concurrency: Some(1), knobs: vec!["routing.graph_exclude=[\"codex/gpt-6-luna\"]".into()] },
+            &run_owner.call(&cancel), None))?;
+        let graph_record = session.store.record(target.attempt, &run_owner.call(&cancel))?;
+        let graph_request = session.store.request(graph_record.run_id, &run_owner.call(&cancel))?;
+        let plain_request = session.store.request(plain_run.run_id, &run_owner.call(&cancel))?;
+        let graph_task = &graph_request.tasks[0];
+        let plain_task = &plain_request.tasks[0];
+        assert_eq!(graph_task.cloud, plain_task.cloud);
+        assert_eq!(graph_task.build_heavy, plain_task.build_heavy);
+        assert_eq!(graph_task.account, plain_task.account);
+        assert_eq!(graph_task.route, plain_task.route);
+        assert_eq!(graph_task.access, plain_task.access);
+        assert_eq!(graph_task.prompt_digest, plain_task.prompt_digest);
         let mut graph_owner = BoundGraphOwner {
             factory: &factory,
             integration_base: None,
@@ -1276,6 +1321,9 @@ pub(crate) mod peer_tests {
             );
             let record = store.record(target.attempt, &run_owner.call(&cancel))?;
             assert!(record.context.is_none());
+            let request = store.request(record.run_id, &run_owner.call(&cancel))?;
+            assert!(request.tasks[0].build_heavy);
+            assert_eq!(request.tasks[0].access.write_roots, vec![write_root]);
         }
         Ok(())
     }
