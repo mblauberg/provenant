@@ -263,9 +263,7 @@ impl RunStore {
         plan: &PreparedLaunch,
         call: &Request<'_>,
     ) -> Result<()> {
-        if self.sealed_requester.is_some()
-            || self.context.state_root.as_path() != self.writer_registry()
-        {
+        if self.context.state_root.as_path() != self.writer_registry() {
             return Ok(());
         }
         WorkIndex::open(self.writer_registry(), call)?.seal(

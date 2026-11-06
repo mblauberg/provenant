@@ -812,22 +812,6 @@ impl RunStore {
             next.resolved_route = Some(route.clone());
             next.applied_route = Some(route.clone());
             next.admission_deadline = Some(ticket.admission_deadline);
-            // A started child is owned by the host's sealed requester, not the
-            // lane actor that wrote its records. The lane's operation keeps its
-            // own actor, which scopes its replay and listing.
-            if let Some(requester) = self.sealed_requester {
-                next.verified_owner = Some(requester);
-                ticket.holder = Some(requester);
-                let mut run = self.run_on(tx, old.run_id)?;
-                if run.actor_id != requester {
-                    run.actor_id = requester;
-                    run.revision = run.revision.checked_add(1).ok_or(RunError::Conflict)?;
-                    tx.execute(
-                        "UPDATE runs SET record=?1 WHERE id=?2",
-                        params![bytes(&run)?, run.run_id.to_string()],
-                    )?;
-                }
-            }
             ticket.generation = next.generation;
             // The provider's host cap may tighten the allowance fixed at submission.
             if runtime_seconds > 0 {

@@ -259,15 +259,12 @@ impl RunStore {
     ) -> TaskRequest {
         let mut task = task.clone();
         if (request.parent.is_some() && request.parent_attempt.is_some())
-            || self.sealed_requester.is_some()
             || self.context.state_root.as_path() != self.writer_registry()
         {
             // A sealed contributor cannot add a capability through a rewritten
             // request. Database access needs a host-validated declaration.
             task.access.database_ipc = false;
-            let bound = self
-                .sealed_parent_network
-                .unwrap_or(NetworkAccess::Provider);
+            let bound = NetworkAccess::Provider;
             let reach = |network| match network {
                 NetworkAccess::Provider => 0,
                 NetworkAccess::Local => 1,
@@ -470,8 +467,6 @@ enum HandOff {
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub enum Started {
     Launched(AttemptId),
-    /// Held child custody is full; the attempt stays Queued for a later scan.
-    Deferred(AttemptId),
     Refused {
         attempt: AttemptId,
         reason: String,
@@ -758,12 +753,6 @@ impl RunStore {
                     .wall_now()
                     .map_err(|_| RunError::Validation("wall clock"))
             };
-            // At the cap the attempt stays Queued: a terminal refusal would spend
-            // the task's only child attempt. Later attempts meet the same cap.
-            if self.sealed_requester.is_some() && self.check_held_capacity(id).is_err() {
-                started.push(Started::Deferred(id));
-                break;
-            }
             let (task_index, task) = request
                 .tasks
                 .iter()

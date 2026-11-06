@@ -43,24 +43,6 @@ impl RunStore {
             call.clock,
         )
         .map_err(|e| local("publication reservation", &e))?;
-        // Clone before acquiring custody: failure leaves no writer reservation.
-        let held = if self.sealed_requester.is_some() {
-            Some((
-                custody::hold(
-                    reservation
-                        .directory()
-                        .try_clone()
-                        .map_err(|e| local("publication reservation", &e))?,
-                    scope,
-                    requester,
-                ),
-                reservation
-                    .custody_metadata()
-                    .map_err(|e| local("publication reservation", &e))?,
-            ))
-        } else {
-            None
-        };
         let writer = plan.confinement.as_mut().and_then(|c| c.writer.as_mut());
         if task.writer.as_ref().map(|w| w.worktree.as_path())
             != writer.as_ref().map(|w| w.worktree.path())
@@ -281,10 +263,6 @@ impl RunStore {
             ),
         };
         let capture = capture_plan(task, runtime_seconds);
-        // Held before launch: an unconfirmed handoff may still have a guardian.
-        if let Some((held, custody)) = held {
-            self.hold_child(held, custody);
-        }
         custody::launch(
             OwnedLaunch {
                 command,
