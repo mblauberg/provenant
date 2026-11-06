@@ -692,21 +692,25 @@ pub(super) fn check_launch_policy(started: &[run::Started]) -> Result<(), Fail> 
         }
         .into());
     }
-    // Promote policy and typed pacing refusals; other preparation refusals
-    // remain in the per-attempt receipt.
-    if let Some((attempt, reason)) = started.iter().find_map(|started| match started {
+    // Report any all-refused batch using its typed diagnostic where available.
+    if let Some((attempt, reason, kind)) = started.iter().find_map(|started| match started {
         run::Started::Refused {
             attempt,
             reason,
-            kind: run::RefusalKind::Policy | run::RefusalKind::PacingReserve,
-        } => Some((attempt, reason)),
+            kind,
+        } => Some((attempt, reason, kind)),
         _ => None,
     }) {
-        return Err(Fail::new(
+        let mut fail = Fail::new(
             Status::Refused,
             ErrorKind::Refused,
             format!("{attempt}: {reason}"),
-        ));
+        );
+        if let Some(mut projection) = kind.diagnostic() {
+            projection.code = ErrorKind::Refused.code().into();
+            fail.projection = Some(Box::new(projection));
+        }
+        return Err(fail);
     }
     Ok(())
 }

@@ -4918,7 +4918,7 @@ esac
 
         // 2. Set up graph with writer node and dependent lens node.
         let graph_id = "writer-output-lens-graph";
-        let document: graph::GraphDocument = serde_json::from_value(serde_json::json!({
+        let mut document: graph::GraphDocument = serde_json::from_value(serde_json::json!({
             "schema_version": 1,
             "graph_id": graph_id,
             "nodes": [
@@ -4940,6 +4940,12 @@ esac
                 }
             ]
         }))?;
+
+        // This fixture creates a current graph; legacy pending executions must
+        // still be drained before the host admits a new dependent attempt.
+        document.extra.insert("template_library".into(), serde_json::to_value(
+            graph::TemplateLibrary::bundled().snapshot(),
+        )?);
 
         let mut journal = graph::FileJournal::open(
             &fixture.roots.state,
@@ -5004,6 +5010,7 @@ esac
 
         // - Lens node was submitted, and its diff base stays node_source (not head_1)
         let lens_progress = &run.checkpoint.nodes[1];
+        assert_ne!(lens_progress.state, graph::NodeState::Blocked, "{lens_progress:?}");
         let lens_attempt_ref = lens_progress
             .attempts
             .first()

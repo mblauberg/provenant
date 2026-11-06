@@ -998,7 +998,7 @@ impl BinaryRunOwner<'_> {
         let session = self.session_with_facts(cancel, facts)?;
         let call = self.call(cancel);
         let submission = self.with_edge(|edge| {
-            provenant_cli::run::submit_with_host(
+            let submitted = provenant_cli::run::submit_with_host(
                 &session,
                 edge,
                 Submission {
@@ -1010,7 +1010,28 @@ impl BinaryRunOwner<'_> {
                 },
                 &call,
                 self.factory.host_launch.as_ref(),
-            )
+            );
+            match submitted {
+                // The CLI reports an all-refused launch batch as an error even
+                // after admitting its terminal preparation records. The graph
+                // must observe those records, including typed fallback evidence;
+                // receipt() still rejects sealed policy refusals and custody.
+                Err(fail) if fail.kind == provenant_run::ErrorKind::Refused => {
+                    match session.store.operation(&operation_id, &call)? {
+                        Some(operation)
+                            if matches!(
+                                operation.state,
+                                provenant_run::OperationState::Accepted
+                                    | provenant_run::OperationState::Terminal
+                            ) =>
+                        {
+                            Ok((session.store.run(operation.run_id, &call)?, Vec::new()))
+                        }
+                        _ => Err(fail),
+                    }
+                }
+                result => result,
+            }
         });
         if submission.is_err()
             && crate::settlement::post_operation_refusal(
