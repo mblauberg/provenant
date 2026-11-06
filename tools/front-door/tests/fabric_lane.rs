@@ -327,6 +327,9 @@ fn lane_run_submits_child_through_parent_relay() -> Result {
     };
     assert_eq!(child.brief, "Parent marker only");
     assert_eq!(child.template, "task");
+    // Relay admission must not write a second run store in the lane.
+    let child_store = rig.state.join("children").join(attempt.to_string());
+    assert_eq!(std::fs::read_dir(child_store)?.count(), 0);
     drop(relay);
     Ok(())
 }
