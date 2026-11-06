@@ -287,6 +287,66 @@ fn success() -> Result {
     Ok(())
 }
 
+/// The same brief is a new task after either terminal outcome, unless the
+/// caller explicitly replays an operation. Keep both runs in one journal store
+/// so an accidentally reused graph ID would return the earlier checkpoint.
+#[test]
+fn rerun_after_success_or_cancellation_launches_unless_operation_is_replayed() -> Result {
+    let template = graph::template::TemplateLibrary::bundled().resolve("task")?;
+    let identity = template.identity.unwrap_or_default();
+    let content = json!({"brief":"do the work"});
+    for cancelled in [false, true] {
+        for operation_id in [None, Some("parity-operation")] {
+            let first_id = identity.graph_id(&content, "first-submission", operation_id)?;
+            let mut h = Harness::new(&first_id, lane(1))?;
+            let first_step = if cancelled {
+                Step::Pending(Some("h/first"))
+            } else {
+                Step::Done(AttemptOutcome::Succeeded, true, "h/first")
+            };
+            let mut p = Provider {
+                script: [first_step].into(),
+                cancelled_settled: true,
+                ..Default::default()
+            };
+            h.advance(&mut p)?;
+            if cancelled {
+                h.cancel(&mut p)?;
+            }
+            let first = h.checkpoint()?;
+            assert_eq!(first.cancelled, cancelled);
+            assert_eq!(p.launches.len(), 1);
+            let calls_before = p.calls.len();
+            let rerun_id = identity.graph_id(&content, "second-submission", operation_id)?;
+            assert_eq!(rerun_id == first_id, operation_id.is_some());
+            h.id = rerun_id.clone();
+            h.document.graph_id = rerun_id;
+            p.script = [Step::Done(AttemptOutcome::Succeeded, true, "h/second")].into();
+            let rerun = h.advance(&mut p)?;
+            let checkpoint = h.checkpoint()?;
+            if operation_id.is_some() {
+                assert_eq!(p.calls.len(), calls_before);
+                assert_eq!(p.launches.len(), 1);
+                assert_eq!(checkpoint.cancelled, cancelled);
+                assert_eq!(checkpoint.nodes[0].state, first.nodes[0].state);
+            } else {
+                assert_eq!(rerun.status, GraphStatus::Complete);
+                assert_eq!(p.launches.len(), 2);
+                assert_ne!(p.launches[0], p.launches[1]);
+                assert!(!checkpoint.cancelled);
+                assert_eq!(checkpoint.nodes[0].state, NodeState::Succeeded);
+                assert_eq!(checkpoint.nodes[0].attempts.len(), 1);
+                assert_same_story(&h.events()?, &checkpoint);
+                let previous = FileJournal::read_checkpoint(&h.state, h.project, &first_id)?
+                    .ok_or("previous checkpoint disappeared")?;
+                assert_eq!(previous.cancelled, cancelled);
+                assert_eq!(previous.nodes[0].state, first.nodes[0].state);
+            }
+        }
+    }
+    Ok(())
+}
+
 #[test]
 fn failure() -> Result {
     let h = Harness::new("parity-failure", lane(2))?;

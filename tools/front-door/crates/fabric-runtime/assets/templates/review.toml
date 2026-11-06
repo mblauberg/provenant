@@ -1,3 +1,4 @@
+identity = "content"
 doc = "Find defects at a pinned head."
 review = "lens"
 brief = """

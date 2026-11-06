@@ -32,8 +32,10 @@ Orient with `provenant status`; collect with `provenant output TARGET`.
 Use `steer` for a message, `stop` for a subtree, `retry` for unfinished work,
 and `edit` for a graph patch. Use `--route junior` by default for implementation slices; raise the tier for design.
 The receipt records the resolved `adapter/model@effort`. Inside a worker, `run --use TEMPLATE` adds a child
-to the same graph, sharing budget, stopping and trace. Any agent may return a
-patch; started attempts stay immutable.
+to the same graph, sharing budget, stopping and trace. Attached live children are
+cancelled when their parent settles, including a successful exit. Use `--wait`
+to collect their completion before exiting, or explicitly detach a child that
+should outlive its parent. Any agent may return a patch; started attempts stay immutable.
 
 Verify commits, paths, checks and routes against output. A synthesis cannot waive
 a gate. Bound repair and independently review its delta.

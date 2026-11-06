@@ -130,6 +130,16 @@ pub struct ChildReceipt {
     pub worktree: Option<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub detached: bool,
+    /// Explain whether the child outlives the calling lane.
+    pub lifecycle_notice: String,
+}
+
+fn child_lifecycle_notice(detached: bool) -> &'static str {
+    if detached {
+        "Detached child: it may continue after the parent settles."
+    } else {
+        "Attached child: live children are cancelled when the parent settles, including a successful exit. Use --wait to collect completion before exiting, or explicitly detach the child."
+    }
 }
 
 /// The graph's child depth: `limits.child_depth` in its document, else 8.
@@ -279,6 +289,7 @@ pub fn replay_child(
         replayed: true,
         worktree,
         detached: request.detached,
+        lifecycle_notice: child_lifecycle_notice(request.detached).into(),
     }))
 }
 
@@ -475,6 +486,7 @@ pub fn admit_child_bound(
         replayed,
         worktree,
         detached: request.detached,
+        lifecycle_notice: child_lifecycle_notice(request.detached).into(),
     })
 }
 

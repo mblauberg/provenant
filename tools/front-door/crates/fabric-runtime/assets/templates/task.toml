@@ -1,3 +1,4 @@
+identity = "fresh"
 doc = "Do the brief."
 brief = "Do the brief and report what changed, with evidence."
 tier = "senior"

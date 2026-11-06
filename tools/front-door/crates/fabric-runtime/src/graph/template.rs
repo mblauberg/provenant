@@ -64,6 +64,44 @@ impl ParameterKind {
     }
 }
 
+/// Identity of a top-level submission, inherited by dotted flavours.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SubmissionIdentity {
+    /// Each invocation starts work, even when its brief is unchanged.
+    #[default]
+    Fresh,
+    /// Equal bound content (including cwd and resolved HEAD) reuses work.
+    Content,
+}
+
+impl SubmissionIdentity {
+    /// An explicit operation ID replays independently of freshness and HEAD.
+    /// The caller supplies bound content and a fresh nonce, never clock time.
+    pub fn graph_id(
+        self,
+        content: &Value,
+        nonce: &str,
+        operation_id: Option<&str>,
+    ) -> Result<String, String> {
+        let identity = if let Some(operation) = operation_id {
+            serde_json::json!({"operation_id": operation})
+        } else {
+            match self {
+                Self::Fresh => serde_json::json!({"content":content,"nonce":nonce}),
+                Self::Content => serde_json::json!({"content":content}),
+            }
+        };
+        let digest =
+            provenant_records::CanonicalV1::record_digest("graph-submission", 1, &identity)
+                .map_err(|error| error.to_string())?;
+        Ok(format!(
+            "g-{}",
+            &provenant_core::hex(digest.as_bytes())[..30]
+        ))
+    }
+}
+
 /// Review protocol selected by a template, inherited by dotted flavours.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -130,6 +168,9 @@ pub(super) fn review_node(node: &PlannedNode) -> bool {
 /// because a typed list field such as `write_scope` may be one `${scope}`.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Template {
+    /// Top-level run identity. Unspecified templates start fresh work.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity: Option<SubmissionIdentity>,
     /// Review output protocol, enforced independently of the brief.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review: Option<ReviewBehaviour>,
@@ -379,6 +420,7 @@ impl Template {
     fn flavour(mut base: Self, own: &Self) -> Self {
         base.extra.extend(own.extra.clone());
         base.review = own.review.or(base.review);
+        base.identity = own.identity.or(base.identity);
         base.name = own.name.clone().or(base.name);
         base.doc = own.doc.clone().or(base.doc);
         base.parameters.extend(own.parameters.clone());
