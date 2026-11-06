@@ -903,6 +903,15 @@ mod diagnostic_projection_tests {
         }));
         let invalid_roots = RunError::Plan(provenant_confinement::PlanError::InvalidRoots);
         assert_eq!(invalid_roots.boundary_class(), BoundaryClass::Authority);
+        assert_eq!(
+            RefusalKind::HandoffAuthority.boundary_class(),
+            BoundaryClass::Authority
+        );
+        assert!(guards.iter().any(|guard| {
+            guard.get("site").and_then(|value| value.as_str())
+                == Some("run/src/launch/hand_off.rs#RunStore::hand_off")
+                && guard.get("boundary").and_then(|value| value.as_str()) == Some("authority")
+        }));
     }
 
     #[test]

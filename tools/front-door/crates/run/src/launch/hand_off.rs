@@ -86,7 +86,9 @@ impl RunStore {
         if task.writer.as_ref().map(|w| w.worktree.as_path())
             != writer.as_ref().map(|w| w.worktree.path())
         {
-            return Err(local("writer confinement", &"does not match the task"));
+            return Err(HandOff::Authority(
+                "writer confinement: does not match the task".into(),
+            ));
         }
         let writer_path = writer
             .as_ref()
@@ -96,7 +98,7 @@ impl RunStore {
                 let (directory, binding) = writer
                     .custody
                     .take()
-                    .ok_or_else(|| local("writer custody", &"missing"))?;
+                    .ok_or_else(|| HandOff::Authority("writer custody: missing".into()))?;
                 self.acquire_writer_fenced(directory, scope, binding, acquire_writer, call)
             }
             // Readers take the same injected acquisition as writers, so a
@@ -135,6 +137,7 @@ impl RunStore {
                         lease.withdraw_unlaunched().map_err(|release| {
                             let cause = match &error {
                                 HandOff::Local(cause)
+                                | HandOff::Authority(cause)
                                 | HandOff::TypedLocal { message: cause, .. } => cause.as_str(),
                                 _ => "launch preparation failed",
                             };
@@ -359,6 +362,50 @@ mod tests {
     use provenant_core::CancelToken;
 
     #[test]
+    fn writer_plan_mismatch_is_an_authority_refusal()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        let store = RunStore::open(&context(temp.path())?, &call)?;
+        let request = input();
+        store.create(&request, &call)?;
+        let record = store.record(request.attempts[0].attempt_id, &call)?;
+        let mut task = request.request.tasks[0].clone();
+        task.writer = Some(provenant_records::run::WriterRequest {
+            extra: Default::default(),
+            project: temp.path().into(),
+            worktree: temp.path().join("writer"),
+        });
+        let plan = PreparedLaunch {
+            argv: vec!["fixture".into()],
+            environment: Vec::new(),
+            stdin: Vec::new(),
+            secret_input: None,
+            cwd: temp.path().into(),
+            route: route(),
+            skipped_routes: Vec::new(),
+            observed_head: None,
+            repository: None,
+            confinement: None,
+        };
+        let result = store.hand_off(
+            &task,
+            plan,
+            provenant_core::ActorId::from_bytes([2; 16]),
+            &|_, _| Ok(Vec::new()),
+            &|_, _, _| panic!("must not acquire custody"),
+            &record,
+            60,
+            &call,
+        );
+        assert!(
+            matches!(result, Err(HandOff::Authority(message)) if message.contains("writer confinement"))
+        );
+        Ok(())
+    }
+
+    #[test]
     fn missing_priority_withdraws_acquired_custody()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
@@ -412,6 +459,7 @@ mod tests {
         );
         match result {
             Err(HandOff::Local(reason)) => assert!(reason.contains("lane priority"), "{reason}"),
+            Err(HandOff::Authority(message)) => panic!("unexpected authority boundary: {message}"),
             Err(HandOff::TypedLocal { message, cause }) => {
                 panic!("unexpected typed refusal {cause:?}: {message}")
             }
@@ -451,6 +499,7 @@ mod tests {
             Err(HandOff::Protected(reason)) => assert!(reason.contains("fixture"), "{reason}"),
             Err(HandOff::Uncertain(reason)) => panic!("uncertain: {reason}"),
             Err(HandOff::Local(reason)) => panic!("local: {reason}"),
+            Err(HandOff::Authority(message)) => panic!("unexpected authority boundary: {message}"),
             Err(HandOff::TypedLocal { message, cause }) => {
                 panic!("unexpected typed refusal {cause:?}: {message}")
             }
@@ -487,6 +536,7 @@ mod tests {
             }
             Err(HandOff::Uncertain(reason)) => panic!("uncertain: {reason}"),
             Err(HandOff::Local(reason)) => panic!("local: {reason}"),
+            Err(HandOff::Authority(message)) => panic!("unexpected authority boundary: {message}"),
             Err(HandOff::TypedLocal { message, cause }) => {
                 panic!("unexpected typed refusal {cause:?}: {message}")
             }

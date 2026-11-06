@@ -567,6 +567,8 @@ pub trait Providers {
 enum HandOff {
     /// Failed before anything was sent to a guardian.
     Local(String),
+    /// A typed authority boundary refused the prepared handoff.
+    Authority(String),
     TypedLocal {
         message: String,
         cause: TerminalCause,
@@ -615,11 +617,33 @@ pub enum RefusalKind {
     InvalidWriteGrantPath,
     WriteGrantsLimit,
     Handoff,
+    HandoffAuthority,
     RetainedImport {
         run: RunId,
         attempt: AttemptId,
         worktree: std::path::PathBuf,
     },
+}
+
+impl RefusalKind {
+    /// The boundary established by this kind alone. Generic preparation and
+    /// handoff errors need their original cause to establish a boundary.
+    pub fn boundary_class(&self) -> provenant_records::diagnostic::BoundaryClass {
+        use provenant_records::diagnostic::BoundaryClass as B;
+        match self {
+            Self::HandoffAuthority | Self::WorktreeBusy | Self::InvalidWriteGrantPath => {
+                B::Authority
+            }
+            Self::RetainedImport { .. } => B::LaneGit,
+            Self::StoredPromptUnreadable => B::Authority,
+            Self::Policy
+            | Self::Preparation
+            | Self::PacingReserve
+            | Self::PriorityUnavailable
+            | Self::WriteGrantsLimit
+            | Self::Handoff => B::None,
+        }
+    }
 }
 
 /// Check a canonical root against state, allowing installed releases for reads.
@@ -1911,6 +1935,7 @@ impl RunStore {
                     // Nothing reached a guardian: the attempt ends here.
                     Err(
                         error @ (HandOff::Local(_)
+                        | HandOff::Authority(_)
                         | HandOff::TypedLocal { .. }
                         | HandOff::Busy
                         | HandOff::RetainedImport { .. }),
@@ -1924,6 +1949,10 @@ impl RunStore {
                             HandOff::Local(error) | HandOff::TypedLocal { message: error, .. } => (
                                 format!("launch preparation failed: {error}"),
                                 RefusalKind::Handoff,
+                            ),
+                            HandOff::Authority(message) => (
+                                format!("launch preparation failed: {message}"),
+                                RefusalKind::HandoffAuthority,
                             ),
                             HandOff::RetainedImport {
                                 run,
