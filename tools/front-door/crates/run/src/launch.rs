@@ -567,8 +567,12 @@ pub trait Providers {
 enum HandOff {
     /// Failed before anything was sent to a guardian.
     Local(String),
-    /// A typed authority boundary refused the prepared handoff.
-    Authority(String),
+    /// A typed boundary refused the prepared handoff.
+    Boundary {
+        message: String,
+        class: provenant_records::diagnostic::BoundaryClass,
+        cause: Option<TerminalCause>,
+    },
     TypedLocal {
         message: String,
         cause: TerminalCause,
@@ -617,7 +621,7 @@ pub enum RefusalKind {
     InvalidWriteGrantPath,
     WriteGrantsLimit,
     Handoff,
-    HandoffAuthority,
+    HandoffBoundary(provenant_records::diagnostic::BoundaryClass),
     RetainedImport {
         run: RunId,
         attempt: AttemptId,
@@ -631,9 +635,8 @@ impl RefusalKind {
     pub fn boundary_class(&self) -> provenant_records::diagnostic::BoundaryClass {
         use provenant_records::diagnostic::BoundaryClass as B;
         match self {
-            Self::HandoffAuthority | Self::WorktreeBusy | Self::InvalidWriteGrantPath => {
-                B::Authority
-            }
+            Self::HandoffBoundary(class) => *class,
+            Self::WorktreeBusy | Self::InvalidWriteGrantPath => B::Authority,
             Self::RetainedImport { .. } => B::LaneGit,
             Self::StoredPromptUnreadable => B::Authority,
             Self::Policy
@@ -1935,13 +1938,14 @@ impl RunStore {
                     // Nothing reached a guardian: the attempt ends here.
                     Err(
                         error @ (HandOff::Local(_)
-                        | HandOff::Authority(_)
+                        | HandOff::Boundary { .. }
                         | HandOff::TypedLocal { .. }
                         | HandOff::Busy
                         | HandOff::RetainedImport { .. }),
                     ) => {
                         let terminal_cause = match &error {
                             HandOff::TypedLocal { cause, .. } => Some(*cause),
+                            HandOff::Boundary { cause, .. } => *cause,
                             _ => None,
                         };
                         let (reason, kind) = match error {
@@ -1950,9 +1954,9 @@ impl RunStore {
                                 format!("launch preparation failed: {error}"),
                                 RefusalKind::Handoff,
                             ),
-                            HandOff::Authority(message) => (
+                            HandOff::Boundary { message, class, .. } => (
                                 format!("launch preparation failed: {message}"),
-                                RefusalKind::HandoffAuthority,
+                                RefusalKind::HandoffBoundary(class),
                             ),
                             HandOff::RetainedImport {
                                 run,

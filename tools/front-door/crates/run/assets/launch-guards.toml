@@ -181,7 +181,7 @@ reason = "Provider preparation combines route eligibility, confinement and opera
 [[guard]]
 site = "run/src/launch/hand_off.rs#RunStore::hand_off"
 boundary = "unclassified"
-reason = "HandOff::Local combines custody and confinement guards with operational setup failures; individual causes need separate classification."
+reason = "HandOff::Local still combines operational setup failures with custody and Git checks that do not yet carry a boundary cause. Typed confinement command failures preserve their boundary."
 
 [[guard]]
 site = "confinement/src/plan.rs#ConfinedPlan::new"

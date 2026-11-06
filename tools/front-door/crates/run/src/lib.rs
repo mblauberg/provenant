@@ -904,7 +904,7 @@ mod diagnostic_projection_tests {
         let invalid_roots = RunError::Plan(provenant_confinement::PlanError::InvalidRoots);
         assert_eq!(invalid_roots.boundary_class(), BoundaryClass::Authority);
         assert_eq!(
-            RefusalKind::HandoffAuthority.boundary_class(),
+            RefusalKind::HandoffBoundary(BoundaryClass::Authority).boundary_class(),
             BoundaryClass::Authority
         );
         assert!(guards.iter().any(|guard| {

@@ -1,5 +1,33 @@
 use super::*;
 
+fn typed_local(phase: &str, error: &RunError) -> HandOff {
+    let cause = match error {
+        RunError::Confinement(
+            provenant_confinement::permissions::PermissionError::BackendNotAvailable(
+                provenant_confinement::permissions::AvailabilityReason::UnsupportedPlatform,
+            ),
+        ) => Some(TerminalCause::UnsupportedPlatform),
+        RunError::DeliveryPrepare {
+            step: "credential helper",
+            ..
+        } => Some(TerminalCause::DeliveryPrepareCredentialHelper),
+        _ => None,
+    };
+    let message = format!("{phase}: {error}");
+    let class = error.boundary_class();
+    if class != provenant_records::diagnostic::BoundaryClass::None {
+        HandOff::Boundary {
+            message,
+            class,
+            cause,
+        }
+    } else if let Some(cause) = cause {
+        HandOff::TypedLocal { message, cause }
+    } else {
+        HandOff::Local(message)
+    }
+}
+
 impl RunStore {
     #[expect(
         clippy::too_many_arguments,
@@ -23,27 +51,6 @@ impl RunStore {
         // Each failure names its phase, so the refusal says what was not ready.
         let local = |phase: &str, error: &dyn std::fmt::Display| {
             HandOff::Local(format!("{phase}: {error}"))
-        };
-        let typed_local = |phase: &str, error: &RunError| {
-            let cause = match error {
-                RunError::Confinement(
-                    provenant_confinement::permissions::PermissionError::BackendNotAvailable(
-                        provenant_confinement::permissions::AvailabilityReason::UnsupportedPlatform,
-                    ),
-                ) => Some(TerminalCause::UnsupportedPlatform),
-                RunError::DeliveryPrepare {
-                    step: "credential helper",
-                    ..
-                } => Some(TerminalCause::DeliveryPrepareCredentialHelper),
-                _ => None,
-            };
-            match cause {
-                Some(cause) => HandOff::TypedLocal {
-                    message: format!("{phase}: {error}"),
-                    cause,
-                },
-                None => local(phase, error),
-            }
         };
         let id = record.attempt_id;
         let scope = Scope {
@@ -86,19 +93,23 @@ impl RunStore {
         if task.writer.as_ref().map(|w| w.worktree.as_path())
             != writer.as_ref().map(|w| w.worktree.path())
         {
-            return Err(HandOff::Authority(
-                "writer confinement: does not match the task".into(),
-            ));
+            return Err(HandOff::Boundary {
+                message: "writer confinement: does not match the task".into(),
+                class: provenant_records::diagnostic::BoundaryClass::Authority,
+                cause: None,
+            });
         }
         let writer_path = writer
             .as_ref()
             .map(|writer| writer.worktree.path().to_path_buf());
         let mut lease = match writer {
             Some(writer) => {
-                let (directory, binding) = writer
-                    .custody
-                    .take()
-                    .ok_or_else(|| HandOff::Authority("writer custody: missing".into()))?;
+                let (directory, binding) =
+                    writer.custody.take().ok_or_else(|| HandOff::Boundary {
+                        message: "writer custody: missing".into(),
+                        class: provenant_records::diagnostic::BoundaryClass::Authority,
+                        cause: None,
+                    })?;
                 self.acquire_writer_fenced(directory, scope, binding, acquire_writer, call)
             }
             // Readers take the same injected acquisition as writers, so a
@@ -137,7 +148,7 @@ impl RunStore {
                         lease.withdraw_unlaunched().map_err(|release| {
                             let cause = match &error {
                                 HandOff::Local(cause)
-                                | HandOff::Authority(cause)
+                                | HandOff::Boundary { message: cause, .. }
                                 | HandOff::TypedLocal { message: cause, .. } => cause.as_str(),
                                 _ => "launch preparation failed",
                             };
@@ -362,6 +373,27 @@ mod tests {
     use provenant_core::CancelToken;
 
     #[test]
+    fn typed_handoff_preserves_boundary_and_terminal_cause() {
+        use provenant_confinement::permissions::{AvailabilityReason, PermissionError};
+        use provenant_records::diagnostic::BoundaryClass;
+        let error = RunError::Confinement(PermissionError::BackendNotAvailable(
+            AvailabilityReason::UnsupportedPlatform,
+        ));
+        assert!(matches!(
+            typed_local("confinement command", &error),
+            HandOff::Boundary {
+                class: BoundaryClass::Authority,
+                cause: Some(TerminalCause::UnsupportedPlatform),
+                ..
+            }
+        ));
+        assert!(matches!(
+            typed_local("Git", &RunError::GitUnavailable),
+            HandOff::Local(_)
+        ));
+    }
+
+    #[test]
     fn writer_plan_mismatch_is_an_authority_refusal()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
@@ -400,7 +432,7 @@ mod tests {
             &call,
         );
         assert!(
-            matches!(result, Err(HandOff::Authority(message)) if message.contains("writer confinement"))
+            matches!(result, Err(HandOff::Boundary { message, class: provenant_records::diagnostic::BoundaryClass::Authority, .. }) if message.contains("writer confinement"))
         );
         Ok(())
     }
@@ -459,7 +491,9 @@ mod tests {
         );
         match result {
             Err(HandOff::Local(reason)) => assert!(reason.contains("lane priority"), "{reason}"),
-            Err(HandOff::Authority(message)) => panic!("unexpected authority boundary: {message}"),
+            Err(HandOff::Boundary { message, class, .. }) => {
+                panic!("unexpected {class:?} boundary: {message}")
+            }
             Err(HandOff::TypedLocal { message, cause }) => {
                 panic!("unexpected typed refusal {cause:?}: {message}")
             }
@@ -499,7 +533,9 @@ mod tests {
             Err(HandOff::Protected(reason)) => assert!(reason.contains("fixture"), "{reason}"),
             Err(HandOff::Uncertain(reason)) => panic!("uncertain: {reason}"),
             Err(HandOff::Local(reason)) => panic!("local: {reason}"),
-            Err(HandOff::Authority(message)) => panic!("unexpected authority boundary: {message}"),
+            Err(HandOff::Boundary { message, class, .. }) => {
+                panic!("unexpected {class:?} boundary: {message}")
+            }
             Err(HandOff::TypedLocal { message, cause }) => {
                 panic!("unexpected typed refusal {cause:?}: {message}")
             }
@@ -536,7 +572,9 @@ mod tests {
             }
             Err(HandOff::Uncertain(reason)) => panic!("uncertain: {reason}"),
             Err(HandOff::Local(reason)) => panic!("local: {reason}"),
-            Err(HandOff::Authority(message)) => panic!("unexpected authority boundary: {message}"),
+            Err(HandOff::Boundary { message, class, .. }) => {
+                panic!("unexpected {class:?} boundary: {message}")
+            }
             Err(HandOff::TypedLocal { message, cause }) => {
                 panic!("unexpected typed refusal {cause:?}: {message}")
             }
