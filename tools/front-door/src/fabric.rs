@@ -2,6 +2,7 @@
 mod graph_human;
 mod graph_inputs;
 mod graph_status;
+mod interface;
 mod unified;
 pub(crate) use unified::{
     GraphCommand, append_graph_status, read_status_rows, target_text, unified_graph_command,
@@ -31,7 +32,6 @@ pub use peer::{hosts, peer};
 pub(crate) use preset_graph::ScratchPreparationError;
 #[allow(unused_imports)]
 pub(crate) use preset_graph::publish_preset_graph;
-pub(crate) use preset_graph::run_preset_graph;
 #[cfg(test)]
 #[allow(unused_imports)] // unused where integration tests include this file
 pub(crate) use preset_graph::{PreparedScratch, retry_scratch_poll, scratch_prepare_error_message};
@@ -297,6 +297,16 @@ pub struct BoundFacade<'a> {
     factory: &'a Factory,
 }
 impl provenant_fabric_mcp::tools::McpFacade for BoundFacade<'_> {
+    fn graph_document(
+        &mut self,
+        input: serde_json::Value,
+        budget: WaitBudget,
+        cancel: &CancelToken,
+    ) -> Result<serde_json::Value, ServiceError> {
+        self.factory
+            .graph_document(input, budget, cancel)
+            .map_err(ServiceError::from)
+    }
     fn add_from_lane(
         &mut self,
         op: &provenant_fabric_runtime::graph::relay::RelayOp,
@@ -1043,7 +1053,7 @@ pub(crate) fn factory(
     factory_mode(globals, workers, false)
 }
 
-fn read_factory(
+pub(crate) fn read_factory(
     globals: &provenant_cli::Globals,
     workers: &'static dyn WorkerObserver,
 ) -> Result<Factory, Box<dyn std::error::Error>> {
@@ -1060,7 +1070,9 @@ fn factory_mode(
         crate::roots::Workspace::Project,
         crate::roots::Product::Required,
     )?;
-    let context = if read_only || provenant_cli::fabric::in_lane() {
+    let context = if read_only {
+        Context::open_inspection(resolved.roots, &resolved.home, &resolved.project)?
+    } else if provenant_cli::fabric::in_lane() {
         Context::open_read_only(resolved.roots, &resolved.home, &resolved.project)?
     } else {
         Context::open(resolved.roots, &resolved.home, &resolved.project)?
@@ -2211,125 +2223,6 @@ fn wait_graph(
             provenant_core::DurationMicros::from_micros(250_000.min(remaining.as_micros())),
             cancel,
         );
-    }
-}
-
-pub fn graph(
-    input: provenant_cli::fabric::Graph,
-    globals: &provenant_cli::Globals,
-    workers: &'static dyn WorkerObserver,
-) -> u8 {
-    use provenant_cli::fabric::Graph;
-    let mut wait_seconds = None;
-    let (command, input) = match input {
-        Graph::Run { document } => (
-            "fabric graph run",
-            GraphInput::Run {
-                extra: Default::default(),
-                document,
-            },
-        ),
-        Graph::Status { id } => (
-            "fabric graph status",
-            GraphInput::Status {
-                extra: Default::default(),
-                id,
-            },
-        ),
-        Graph::Wait { id, wait } => {
-            wait_seconds = Some(wait);
-            (
-                "fabric graph wait",
-                GraphInput::Status {
-                    extra: Default::default(),
-                    id,
-                },
-            )
-        }
-        Graph::Cancel { id, reason } => (
-            "fabric graph cancel",
-            GraphInput::Cancel {
-                extra: Default::default(),
-                id,
-                reason,
-            },
-        ),
-        Graph::Resume { document, extend } => (
-            "fabric graph resume",
-            GraphInput::Resume {
-                extra: Default::default(),
-                document,
-                extend,
-            },
-        ),
-    };
-    let result = (|| -> Result<_, Box<dyn std::error::Error>> {
-        let factory = factory(globals, workers)?;
-        if factory.context.in_lane && !matches!(input, GraphInput::Status { .. }) {
-            return Err(CoordinationError::LaneMutation.into());
-        }
-        let cancel = CancelToken::new();
-        let budget = WaitBudget::cli(factory.clock.mono_now(), 55)?;
-        if let Some(seconds) = wait_seconds {
-            wait_graph(&factory.clock, &factory.backoff, seconds, &cancel, || {
-                factory.graph(input.clone(), budget, &cancel)
-            })
-        } else {
-            Ok(factory.graph(input, budget, &cancel)?)
-        }
-    })();
-    match result {
-        Ok(data) => {
-            // Only the launching commands answer for a blocked launch; status
-            // and cancel report it as ordinary graph state.
-            let launching = matches!(command, "fabric graph run" | "fabric graph resume");
-            let refused = data.checkpoint.nodes.iter().find_map(|node| {
-                (node.advance_error_code.as_deref() == Some("launch_refused"))
-                    .then_some(node.advance_error.as_deref())
-                    .flatten()
-            });
-            if let Some(reason) = refused.filter(|_| launching) {
-                return crate::fail(
-                    command,
-                    provenant_records::Outcome::Refused,
-                    "dispatch_refused",
-                    reason,
-                    globals,
-                );
-            }
-            let mut human = graph_display(&data, command, globals);
-            let waiting = command == "fabric graph wait"
-                && data.status == provenant_fabric_runtime::graph::GraphStatus::Pending;
-            if waiting {
-                human = graph_waiting_human(&data, globals);
-            }
-            crate::emit(&graph_command_result(command, data), globals, &human, false)
-        }
-        Err(error) => {
-            let mut message = error.to_string();
-            let (outcome, code) = if matches!(
-                error.downcast_ref::<CoordinationError>(),
-                Some(CoordinationError::LaneMutation)
-            ) {
-                (
-                    provenant_records::Outcome::Refused,
-                    "lane_coordination_refused",
-                )
-            } else if matches!(
-                error.downcast_ref::<FacadeError>(),
-                Some(FacadeError::NotFound)
-            ) {
-                message = graph_selector_forms();
-                (provenant_records::Outcome::Invalid, "not_found")
-            } else if let Some(error @ FacadeError::DispatchRefused { .. }) =
-                error.downcast_ref::<FacadeError>()
-            {
-                (provenant_records::Outcome::Refused, error.code())
-            } else {
-                (provenant_records::Outcome::Error, "graph_owner")
-            };
-            crate::fail(command, outcome, code, &message, globals)
-        }
     }
 }
 

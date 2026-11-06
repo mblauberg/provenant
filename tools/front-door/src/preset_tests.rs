@@ -2029,14 +2029,7 @@ fn preset_run_binds_skill_requirement_to_task_nodes() {
         "brief.md",
         "--require-skill-location",
     ];
-    let provenant_cli::ParseOutcome::Invocation(invocation) =
-        provenant_cli::parse(args.into_iter().map(Into::into))
-    else {
-        panic!("run arguments")
-    };
-    let provenant_cli::Command::Run(request) = invocation.command else {
-        panic!("run command")
-    };
+    let request = dispatch_fixture(args.into_iter().map(Into::into));
     let mut expanded = expand(&Layers::empty(), "single", "brief", &[]).unwrap();
     expanded.document["nodes"]
         .as_array_mut()
@@ -4150,7 +4143,7 @@ fn the_verifier_route_falls_back_to_senior_when_undefined() {
 
 #[test]
 fn generator_evaluator_writer_inherits_capability_and_explicit_empty_removes_it() {
-    let parsed = provenant_cli::parse(
+    let request = dispatch_fixture(
         [
             "run",
             "--preset",
@@ -4160,12 +4153,6 @@ fn generator_evaluator_writer_inherits_capability_and_explicit_empty_removes_it(
         ]
         .map(std::ffi::OsString::from),
     );
-    let provenant_cli::ParseOutcome::Invocation(invocation) = parsed else {
-        panic!("parse preset")
-    };
-    let provenant_cli::Command::Run(request) = invocation.command else {
-        panic!("run")
-    };
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().canonicalize().unwrap();
     let lane = root.join("lane");
@@ -4233,14 +4220,7 @@ fn preset_capability_origin_explain_matches_golden() {
         if mode == "flag" {
             args.extend(["--capability", "postgres"]);
         }
-        let provenant_cli::ParseOutcome::Invocation(invocation) =
-            provenant_cli::parse(args.into_iter().map(std::ffi::OsString::from))
-        else {
-            panic!("parse preset")
-        };
-        let provenant_cli::Command::Run(request) = invocation.command else {
-            panic!("run")
-        };
+        let request = dispatch_fixture(args.into_iter().map(std::ffi::OsString::from));
         let mut expanded = expand(
             &Layers::empty(),
             "generator-evaluator",
@@ -8134,4 +8114,15 @@ fn review_preserves_legacy_council_structure() {
             }
         }
     }
+}
+
+fn dispatch_fixture(
+    args: impl IntoIterator<Item = std::ffi::OsString>,
+) -> Box<provenant_cli::Dispatch> {
+    #[derive(clap::Parser)]
+    struct Fixture {
+        #[command(flatten)]
+        request: provenant_cli::Dispatch,
+    }
+    Box::new(<Fixture as clap::Parser>::parse_from(args).request)
 }

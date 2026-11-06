@@ -33,7 +33,7 @@ impl Factory {
         )
     }
 
-    fn stop_target(
+    pub(crate) fn stop_target(
         &self,
         target: &GraphTarget,
         reason: Option<String>,
@@ -249,70 +249,19 @@ pub(crate) fn unified_graph_command(
             }
             target.node = Some((*id).to_owned());
         }
-        let cancel = CancelToken::new();
-        let budget = WaitBudget::cli(factory.clock.mono_now(), 55)?;
-        let status = || {
-            factory.graph(
-                GraphInput::Status {
-                    extra: Default::default(),
-                    id: target.graph.clone(),
-                },
-                budget,
-                &cancel,
-            )
-        };
-        let mut timed_out = false;
-        let run = match &command {
-            GraphCommand::Status {
-                wait: Some(seconds),
-            } => {
-                let observed =
-                    wait_graph(&factory.clock, &factory.backoff, *seconds, &cancel, status)?;
-                timed_out =
-                    observed.status == provenant_fabric_runtime::graph::GraphStatus::Pending;
-                observed
+        let mut input = json!({"op":name,"id":selector});
+        match &command {
+            GraphCommand::Status { wait } => {
+                if let Some(seconds) = wait {
+                    input["wait_seconds"] = json!(seconds);
+                }
             }
             GraphCommand::Stop { reason, wait } => {
-                let stopped = factory.stop_target(&target, reason.clone(), budget, &cancel)?;
+                if let Some(reason) = reason {
+                    input["reason"] = json!(reason);
+                }
                 if let Some(seconds) = wait {
-                    let wait_budget = WaitBudget::cli(factory.clock.mono_now(), *seconds)?;
-                    loop {
-                        let observed = if target.node.is_some() {
-                            factory.stop_target(&target, reason.clone(), budget, &cancel)?
-                        } else {
-                            status()?
-                        };
-                        let live = observed
-                            .checkpoint
-                            .nodes
-                            .iter()
-                            .filter(|node| {
-                                matches!(node.state, NodeState::Pending | NodeState::Running)
-                            })
-                            .filter(|node| {
-                                target.node.as_ref().is_none_or(|id| {
-                                    &node.id == id
-                                        || node.extra.get("subtree_cancel").and_then(Value::as_str)
-                                            == Some(id.as_str())
-                                })
-                            })
-                            .flat_map(|node| &node.attempts)
-                            .any(|attempt| attempt.state != AttemptState::Terminal);
-                        let remaining = wait_budget.remaining(factory.clock.mono_now());
-                        if !live || remaining.as_micros() == 0 {
-                            timed_out = live;
-                            break observed;
-                        }
-                        provenant_core::Pause::wait(
-                            &factory.backoff,
-                            provenant_core::DurationMicros::from_micros(
-                                250_000.min(remaining.as_micros()),
-                            ),
-                            &cancel,
-                        );
-                    }
-                } else {
-                    stopped
+                    input["wait_seconds"] = json!(seconds);
                 }
             }
             GraphCommand::Retry {
@@ -323,86 +272,33 @@ pub(crate) fn unified_graph_command(
                 no_fallback,
                 wait,
             } => {
+                if *legacy_prompt || *no_fallback {
+                    return Err(FacadeError::invalid("graph retry accepts --extend, --node and --brief; prompt source and provider continuation options apply only to attempts").into());
+                }
                 if !extend.is_empty() && (node.is_some() || brief.is_some()) {
                     return Err(FacadeError::invalid(
                         "apply --extend separately before redoing a node",
                     )
                     .into());
                 }
-                if *legacy_prompt || *no_fallback {
-                    return Err(FacadeError::invalid("graph retry accepts --extend, --node and --brief; prompt source and provider continuation options apply only to attempts").into());
+                input["extend"] = json!(extend);
+                if let Some(node) = node {
+                    input["node"] = json!(node);
                 }
-                if let Some(id) = node
-                    .or(target.node.as_deref())
-                    .filter(|_| node.is_some() || brief.is_some())
-                {
-                    use provenant_fabric_runtime::graph::{
-                        GraphJournal, patch, template::TemplateLibrary,
-                    };
-                    let mut journal = FileJournal::open(
-                        &factory.context.roots.state,
-                        factory.context.identity.project,
-                        &target.graph,
-                        budget,
-                        &cancel,
-                        &factory.clock,
-                    )
-                    .map_err(graph_journal_error)?;
-                    let execution = FileJournal::execution(
-                        &factory.context.roots.state,
-                        factory.context.identity.project,
-                        &target.graph,
-                    )
-                    .map_err(graph_journal_error)?
-                    .ok_or(FacadeError::NotFound)?;
-                    let mut checkpoint = journal
-                        .load(&target.graph)
-                        .map_err(graph_journal_error)?
-                        .ok_or(FacadeError::NotFound)?;
-                    patch::retry_node(
-                        &mut patch::LiveGraph {
-                            document: &execution.document,
-                            checkpoint: &mut checkpoint,
-                        },
-                        id,
-                        *brief,
-                        &patch::PatchContext {
-                            library: &TemplateLibrary::bundled(),
-                            resolvers: &Default::default(),
-                            limits: &factory.context.config.graph.limits,
-                            scan: &patch::scan_for_secrets,
-                            journal: None,
-                        },
-                    )
-                    .map_err(|e| FacadeError::invalid(e.to_string()))?;
-                    journal.save(&checkpoint).map_err(graph_journal_error)?;
-                } else if brief.is_some() {
-                    return Err(
-                        FacadeError::invalid("--brief requires a node target or --node N").into(),
-                    );
+                if let Some(brief) = brief {
+                    input["brief"] = json!(brief);
                 }
-                let resumed = factory.graph(
-                    GraphInput::Resume {
-                        extra: Default::default(),
-                        document: target.graph.clone().into(),
-                        extend: extend.to_vec(),
-                    },
-                    budget,
-                    &cancel,
-                )?;
                 if let Some(seconds) = wait {
-                    let observed =
-                        wait_graph(&factory.clock, &factory.backoff, *seconds, &cancel, status)?;
-                    timed_out =
-                        observed.status == provenant_fabric_runtime::graph::GraphStatus::Pending;
-                    observed
-                } else {
-                    resumed
+                    input["wait_seconds"] = json!(seconds);
                 }
             }
-            _ => status()?,
-        };
-        let rows = status_rows(&run, &target);
+        }
+        let cancel = CancelToken::new();
+        let wait_seconds = input["wait_seconds"].as_u64().unwrap_or(55).max(55);
+        let budget = WaitBudget::cli(factory.clock.mono_now(), wait_seconds)?;
+        let data = factory.graph_document(input, budget, &cancel)?;
+        let timed_out = data["timed_out"].as_bool().unwrap_or(false);
+        let rows = data["rows"].as_array().ok_or(FacadeError::StateCorrupt)?;
         let human = rows
             .iter()
             .map(|row| {
@@ -414,7 +310,6 @@ pub(crate) fn unified_graph_command(
                 )
             })
             .collect::<String>();
-        let data = json!({"rows":rows,"timed_out":timed_out});
         Ok(Some((data, human, timed_out)))
     })();
     match result {
@@ -620,6 +515,33 @@ pub(crate) fn unified_graph_output(
             Err(error) if missing_graph_context(error.as_ref()) => return Ok(Default::default()),
             Err(error) => return Err(error),
         };
+        if command.trace {
+            let input = json!({"op":"output","id":target_text(&command.attempt.0),"trace":true});
+            let budget = WaitBudget::cli(factory.clock.mono_now(), 55)?;
+            let data = match factory.graph_document(input, budget, &CancelToken::new()) {
+                Ok(data) => data,
+                Err(FacadeError::NotFound) => return Ok(None),
+                Err(error) => return Err(error.into()),
+            };
+            let human = data["events"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(serde_json::to_string)
+                .collect::<Result<Vec<_>, _>>()?
+                .join("\n")
+                + "\n";
+            return Ok(Some(provenant_cli::run::Reply {
+                result: provenant_records::CommandResult::new(
+                    "output",
+                    provenant_records::Outcome::Ok,
+                    data,
+                ),
+                human,
+                summary: None,
+                read_only: true,
+            }));
+        }
         let Some(target) = factory.graph_target(&target_text(&command.attempt.0))? else {
             return Ok(None);
         };
@@ -629,38 +551,6 @@ pub(crate) fn unified_graph_output(
             &target.graph,
         )?
         .ok_or(FacadeError::NotFound)?;
-        if command.trace {
-            let events = FileJournal::read_events(
-                &factory.context.roots.state,
-                factory.context.identity.project,
-                &target.graph,
-            )?;
-            let events = events
-                .into_iter()
-                .filter(|event| {
-                    target.node.as_ref().is_none_or(|node| {
-                        provenant_records::CanonicalV1::record_digest("fabric-graph-event", 1, node)
-                            .is_ok_and(|digest| event.subject == digest.to_string())
-                    })
-                })
-                .collect::<Vec<_>>();
-            let human = events
-                .iter()
-                .map(serde_json::to_string)
-                .collect::<Result<Vec<_>, _>>()?
-                .join("\n")
-                + "\n";
-            return Ok(Some(provenant_cli::run::Reply {
-                result: provenant_records::CommandResult::new(
-                    "output",
-                    provenant_records::Outcome::Ok,
-                    json!({"graph_id": target.graph,"events":events}),
-                ),
-                human,
-                summary: None,
-                read_only: true,
-            }));
-        }
         let references = checkpoint
             .nodes
             .iter()
