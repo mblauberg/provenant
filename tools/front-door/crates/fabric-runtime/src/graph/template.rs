@@ -366,6 +366,34 @@ const BUNDLED: &[(&str, &str)] = &[
         "review.security",
         include_str!("../../assets/templates/review.security.toml"),
     ),
+    (
+        "implement.plan",
+        include_str!("../../assets/templates/implement.plan.toml"),
+    ),
+    (
+        "implement.issue",
+        include_str!("../../assets/templates/implement.issue.toml"),
+    ),
+    (
+        "review.correctness",
+        include_str!("../../assets/templates/review.correctness.toml"),
+    ),
+    (
+        "review.tests",
+        include_str!("../../assets/templates/review.tests.toml"),
+    ),
+    (
+        "review.contract",
+        include_str!("../../assets/templates/review.contract.toml"),
+    ),
+    (
+        "review.design",
+        include_str!("../../assets/templates/review.design.toml"),
+    ),
+    (
+        "review.adversarial",
+        include_str!("../../assets/templates/review.adversarial.toml"),
+    ),
     ("verify", include_str!("../../assets/templates/verify.toml")),
     (
         "synthesise",

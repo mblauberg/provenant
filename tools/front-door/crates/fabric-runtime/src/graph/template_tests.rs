@@ -47,6 +47,9 @@ fn expanded_ids(nodes: Vec<GraphNode>) -> Vec<String> {
 fn every_bundled_template_parses_and_resolves() {
     let library = library();
     let names: Vec<_> = library.names().map(str::to_owned).collect();
+    for name in &names {
+        library.resolve(name).unwrap();
+    }
     for expected in [
         "task",
         "plan",
@@ -55,8 +58,15 @@ fn every_bundled_template_parses_and_resolves() {
         "design",
         "implement",
         "implement.fix",
+        "implement.plan",
+        "implement.issue",
         "review",
         "review.security",
+        "review.correctness",
+        "review.tests",
+        "review.contract",
+        "review.design",
+        "review.adversarial",
         "verify",
         "synthesise",
         "repair",
