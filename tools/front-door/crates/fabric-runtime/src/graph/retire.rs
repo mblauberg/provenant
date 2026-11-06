@@ -82,6 +82,17 @@ pub(super) fn dynamic_subtree(
         }
     }
     checkpoint.nodes.retain(|row| !retired.contains(&row.id));
+    // A settled consumer keeps the container generation it observed; retired
+    // members are no longer graph nodes it can name.
+    for row in &mut checkpoint.nodes {
+        if let Some(snapshots) = row
+            .extra
+            .get_mut("settled_dependency_snapshots")
+            .and_then(Value::as_object_mut)
+        {
+            snapshots.retain(|node, _| !retired.contains(node));
+        }
+    }
     Ok(retired)
 }
 

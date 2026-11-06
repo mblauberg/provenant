@@ -498,18 +498,16 @@ fn dynamic_composite_redo_retires_its_expansion_and_recovers_after_checkpoint_cr
         .collect();
     assert_eq!(slices.len(), 1);
     assert_eq!(slices[0].attempts.len(), 1);
-    let result = checkpoint
-        .nodes
-        .iter()
-        .find(|node| node.id == "work")
-        .unwrap()
-        .outputs
-        .as_ref()
-        .unwrap()
-        .result
-        .as_ref()
-        .unwrap();
-    assert!(result.excerpt.contains("new slice") && !result.excerpt.contains("old slice"));
+    assert_eq!(
+        slices[0].attempts[0].attempt_ref.as_deref(),
+        Some("slice-new")
+    );
+    assert!(
+        slices[0]
+            .previous_attempts
+            .iter()
+            .any(|attempt| attempt.attempt_ref.as_deref() == Some("slice-old"))
+    );
 }
 
 #[test]
@@ -546,15 +544,12 @@ fn dynamic_composite_redo_drops_stale_failed_dependencies_and_launches_once() {
         observations: [
             terminal_from(&slice_fragment("fixed"), "planner-new"),
             done_as("fixed"),
-            done_as("sibling"),
         ]
         .into(),
         ..Default::default()
     };
-    let mut journal = MemoryJournal(Some(checkpoint));
-    let run = advance(&document, &mut owner, &mut journal).unwrap();
-    assert_eq!(run.status, GraphStatus::Complete);
-    assert!(run.checkpoint.successful());
+    let run = advance(&document, &mut owner, &mut MemoryJournal(Some(checkpoint))).unwrap();
+    assert_eq!(state(&run.checkpoint, "work"), Some(NodeState::Succeeded));
     assert_eq!(state(&run.checkpoint, "work--planner--broken"), None);
     assert_eq!(
         owner
@@ -562,8 +557,34 @@ fn dynamic_composite_redo_drops_stale_failed_dependencies_and_launches_once() {
             .iter()
             .map(|(key, _)| key.node_id.as_str())
             .collect::<Vec<_>>(),
-        ["work--planner", "work--planner--fixed", "sibling"]
+        ["work--planner", "work--planner--fixed"]
     );
+    // No live node still waits on the retired, failed slice.
+    let plan = plans::expand(
+        &document,
+        &run.checkpoint.extensions,
+        &run.checkpoint.expansions,
+        &plans::generous(),
+    )
+    .unwrap();
+    assert!(plan.nodes.iter().all(|node| {
+        node.id != "work--planner--broken"
+            && node.dependencies().all(|parent| parent != "work--planner--broken")
+            && !node.after_expansion.iter().any(|parent| parent == "work--planner--broken")
+            && !node.composite_members.iter().any(|member| member == "work--planner--broken")
+    }));
+    // A settled consumer keeps what it observed until it is redone itself.
+    let mut checkpoint = run.checkpoint;
+    retry_id(&document, &mut checkpoint, "sibling", None, &|_| Ok(()), None).unwrap();
+    let mut owner = FakeOwner {
+        observations: [done_as("sibling")].into(),
+        ..Default::default()
+    };
+    let run = advance(&document, &mut owner, &mut MemoryJournal(Some(checkpoint))).unwrap();
+    assert_eq!(run.status, GraphStatus::Complete);
+    assert!(run.checkpoint.successful());
+    assert_eq!(owner.calls.len(), 1);
+    assert_eq!(owner.calls[0].0.node_id, "sibling");
     // The redone container can be redone again, and the reloaded journal
     // replays without relaunching anything.
     let reloaded: GraphCheckpoint =
