@@ -123,8 +123,14 @@ impl Template {
                 check_value(parameter, default)
                     .map_err(|reason| format!("template parameter {name} default {reason}"))?;
             }
-            if parameter.min.as_ref().is_some_and(|value| !value.is_number())
-                || parameter.max.as_ref().is_some_and(|value| !value.is_number())
+            if parameter
+                .min
+                .as_ref()
+                .is_some_and(|value| !value.is_number())
+                || parameter
+                    .max
+                    .as_ref()
+                    .is_some_and(|value| !value.is_number())
             {
                 return Err(format!("template parameter {name} bound must be a number"));
             }
@@ -212,13 +218,10 @@ impl Template {
                     closed_read_roots(template, node)?;
                 }
             }
-            for children in [
-                node.pointer("/composite/nodes"),
-                node.pointer("/loop/body"),
-            ]
-            .into_iter()
-            .flatten()
-            .filter_map(Value::as_array)
+            for children in [node.pointer("/composite/nodes"), node.pointer("/loop/body")]
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_array)
             {
                 for child in children {
                     check_node(template, child)?;
@@ -341,15 +344,33 @@ pub struct TemplateLibrary {
 const BUNDLED: &[(&str, &str)] = &[
     ("task", include_str!("../../assets/templates/task.toml")),
     ("plan", include_str!("../../assets/templates/plan.toml")),
-    ("explore", include_str!("../../assets/templates/explore.toml")),
-    ("research", include_str!("../../assets/templates/research.toml")),
+    (
+        "explore",
+        include_str!("../../assets/templates/explore.toml"),
+    ),
+    (
+        "research",
+        include_str!("../../assets/templates/research.toml"),
+    ),
     ("design", include_str!("../../assets/templates/design.toml")),
-    ("implement", include_str!("../../assets/templates/implement.toml")),
-    ("implement.fix", include_str!("../../assets/templates/implement.fix.toml")),
+    (
+        "implement",
+        include_str!("../../assets/templates/implement.toml"),
+    ),
+    (
+        "implement.fix",
+        include_str!("../../assets/templates/implement.fix.toml"),
+    ),
     ("review", include_str!("../../assets/templates/review.toml")),
-    ("review.security", include_str!("../../assets/templates/review.security.toml")),
+    (
+        "review.security",
+        include_str!("../../assets/templates/review.security.toml"),
+    ),
     ("verify", include_str!("../../assets/templates/verify.toml")),
-    ("synthesise", include_str!("../../assets/templates/synthesise.toml")),
+    (
+        "synthesise",
+        include_str!("../../assets/templates/synthesise.toml"),
+    ),
     ("repair", include_str!("../../assets/templates/repair.toml")),
 ];
 
@@ -374,7 +395,11 @@ impl TemplateLibrary {
         for (name, text) in BUNDLED {
             // Bundled assets are checked by the template tests.
             if let Ok(template) = Template::from_toml(text) {
-                library.entries.entry((*name).into()).or_default().insert(Layer::Bundled, template);
+                library
+                    .entries
+                    .entry((*name).into())
+                    .or_default()
+                    .insert(Layer::Bundled, template);
             }
         }
         library
@@ -384,7 +409,9 @@ impl TemplateLibrary {
         if !valid_template_name(name) {
             return Err(format!("template name {name:?} is invalid"));
         }
-        template.check().map_err(|error| format!("template {name}: {error}"))?;
+        template
+            .check()
+            .map_err(|error| format!("template {name}: {error}"))?;
         self.entries
             .entry(name.into())
             .or_default()
@@ -424,7 +451,11 @@ impl TemplateLibrary {
     }
 
     /// This library with `templates` added at `layer`.
-    pub fn with(&self, layer: Layer, templates: &BTreeMap<String, Template>) -> Result<Self, String> {
+    pub fn with(
+        &self,
+        layer: Layer,
+        templates: &BTreeMap<String, Template>,
+    ) -> Result<Self, String> {
         let mut library = self.clone();
         for (name, template) in templates {
             library.insert(layer, name, template.clone())?;
@@ -541,7 +572,10 @@ impl<'a> Compiler<'a> {
             return self.lower_repeat(node, repeat, stack);
         }
         if let Some(name) = node.remove("use") {
-            let name = name.as_str().ok_or("`use` must name a template")?.to_owned();
+            let name = name
+                .as_str()
+                .ok_or("`use` must name a template")?
+                .to_owned();
             if stack.contains(&name) {
                 return Err(format!(
                     "template {name} uses itself: {} > {name}",
@@ -575,7 +609,15 @@ impl<'a> Compiler<'a> {
         let mut copy = object.clone();
         copy.remove("over");
         let mut boundary = Map::new();
-        for key in ["id", "title", "after", "depends_on", "inputs", "source", "read_roots"] {
+        for key in [
+            "id",
+            "title",
+            "after",
+            "depends_on",
+            "inputs",
+            "source",
+            "read_roots",
+        ] {
             if let Some(value) = copy.remove(key) {
                 let value = if bindings.is_empty() {
                     value
@@ -647,7 +689,10 @@ impl<'a> Compiler<'a> {
         if items.is_empty() || items.len() > MAX_OVER_ITEMS {
             return Err(format!("`over` requires 1..={MAX_OVER_ITEMS} items"));
         }
-        if items.iter().any(|item| item.trim().is_empty() || item.contains('\0')) {
+        if items
+            .iter()
+            .any(|item| item.trim().is_empty() || item.contains('\0'))
+        {
             return Err("`over` items must be non-empty text".into());
         }
         Ok(items)
@@ -672,7 +717,14 @@ impl<'a> Compiler<'a> {
         let repeat: Repeat =
             serde_json::from_value(repeat).map_err(|error| format!("invalid repeat: {error}"))?;
         let mut boundary = Map::new();
-        for key in ["id", "title", "after", "depends_on", "inputs", "skip_without_findings"] {
+        for key in [
+            "id",
+            "title",
+            "after",
+            "depends_on",
+            "inputs",
+            "skip_without_findings",
+        ] {
             if let Some(value) = node.remove(key) {
                 boundary.insert(key.into(), value);
             }
@@ -712,7 +764,10 @@ impl<'a> Compiler<'a> {
             {
                 return Err(format!(
                     "node {} overrides {key}, but template {name} is a composite; set it on its nodes",
-                    overrides.get("id").and_then(Value::as_str).unwrap_or("<unknown>")
+                    overrides
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .unwrap_or("<unknown>")
                 ));
             }
             let mut children = Vec::with_capacity(template.nodes.len());
@@ -753,10 +808,16 @@ impl<'a> Compiler<'a> {
             leaf.insert(key.clone(), interpolate(value, parameters)?);
         }
         if let Some(brief) = &template.brief {
-            leaf.insert("prompt".into(), interpolate(&Value::String(brief.clone()), parameters)?);
+            leaf.insert(
+                "prompt".into(),
+                interpolate(&Value::String(brief.clone()), parameters)?,
+            );
         }
         if let Some(tier) = &template.tier {
-            leaf.insert("tier".into(), interpolate(&Value::String(tier.clone()), parameters)?);
+            leaf.insert(
+                "tier".into(),
+                interpolate(&Value::String(tier.clone()), parameters)?,
+            );
         }
         leaf.insert(
             "access".into(),
@@ -786,9 +847,17 @@ impl<'a> Compiler<'a> {
     }
 
     /// Normalise node spelling and lower nested members.
-    fn finish(&self, mut node: Map<String, Value>, stack: &mut Vec<String>) -> Result<Value, String> {
+    fn finish(
+        &self,
+        mut node: Map<String, Value>,
+        stack: &mut Vec<String>,
+    ) -> Result<Value, String> {
         for pointer in ["composite", "loop"] {
-            let key = if pointer == "composite" { "nodes" } else { "body" };
+            let key = if pointer == "composite" {
+                "nodes"
+            } else {
+                "body"
+            };
             if let Some(members) = node
                 .get_mut(pointer)
                 .and_then(|spec| spec.get_mut(key))
@@ -916,7 +985,11 @@ fn item_id(item: &str, taken: &mut BTreeSet<String>) -> String {
         }
     }
     let base = id.trim_end_matches('-').to_owned();
-    let base = if base.is_empty() { "item".to_owned() } else { base };
+    let base = if base.is_empty() {
+        "item".to_owned()
+    } else {
+        base
+    };
     let mut candidate = base.clone();
     let mut suffix = 2;
     while !taken.insert(candidate.clone()) {

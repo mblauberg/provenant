@@ -38,6 +38,8 @@ mod outputs;
 pub mod patch;
 mod plans;
 pub mod template;
+#[cfg(test)]
+mod template_tests;
 mod validation;
 mod wait_view;
 #[doc(hidden)]

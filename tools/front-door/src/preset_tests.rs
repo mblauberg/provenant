@@ -5271,13 +5271,13 @@ mod planner_front_end {
                     .unwrap();
                 assert!(
                     expansion
-                        .patterns
+                        .uses
                         .iter()
                         .any(|pattern| pattern.name == "lens-correctness-spec")
                 );
                 assert_eq!(
                     expansion
-                        .patterns
+                        .uses
                         .iter()
                         .find(|pattern| pattern.name == "lens-correctness-spec")
                         .unwrap()
@@ -5287,13 +5287,13 @@ mod planner_front_end {
                 if floor {
                     assert!(
                         expansion
-                            .patterns
+                            .uses
                             .iter()
                             .any(|pattern| pattern.name == "lens-security-privacy")
                     );
-                    assert!(expansion.patterns.len() > 1);
+                    assert!(expansion.uses.len() > 1);
                 } else {
-                    assert_eq!(expansion.patterns.len(), 1);
+                    assert_eq!(expansion.uses.len(), 1);
                 }
             } else {
                 assert!(

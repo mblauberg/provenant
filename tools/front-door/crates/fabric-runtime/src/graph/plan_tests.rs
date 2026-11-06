@@ -82,7 +82,7 @@ fn planned_fan_out_survives_checkpoint_json_and_mixed_settlement() {
             })).unwrap());
             "invalid fragment".to_owned()
         } else {
-            doc.nodes[0].plan.as_mut().unwrap().patterns = vec![serde_json::from_value(json!({
+            doc.nodes[0].plan.as_mut().unwrap().templates = vec![serde_json::from_value(json!({
                 "name":"lens", "nodes":[leaves[0]], "exports":[exports[0]]
             })).unwrap()];
             format!("```fragment\n{}\n```", json!({"schema_version":1,"nodes":[],"patterns":
@@ -739,14 +739,13 @@ fn skipped_writer_does_not_connect_separate_checkouts_during_expansion() {
 
 #[test]
 fn planner_prompt_uses_wire_kinds_and_required_field_names() {
-    let mut document = planner(2);
-    document.nodes[0].plan.as_mut().unwrap().kinds = vec![
-        NodeKind::Composite, NodeKind::Plan, NodeKind::Task, NodeKind::Synthesise,
-        NodeKind::Gate, NodeKind::Loop, NodeKind::Decide, NodeKind::Land,
-    ];
+    let document = planner(2);
     let node = &document.nodes[0];
     let prompt = plans::prompt(node);
-    for kind in &node.plan.as_ref().unwrap().kinds {
+    for kind in [
+        NodeKind::Composite, NodeKind::Plan, NodeKind::Task, NodeKind::Synthesise,
+        NodeKind::Gate, NodeKind::Loop, NodeKind::Decide, NodeKind::Land,
+    ] {
         let wire = serde_json::to_value(kind).unwrap();
         assert!(prompt.contains(wire.as_str().unwrap()), "{prompt}");
     }
@@ -759,7 +758,7 @@ fn planner_prompt_uses_wire_kinds_and_required_field_names() {
 #[test]
 fn planner_prompt_names_only_the_nodes_allow_listed_patterns() {
     let mut doc = pattern_planner(4);
-    let parameters = &mut doc.nodes[0].plan.as_mut().unwrap().patterns[0].parameters;
+    let parameters = &mut doc.nodes[0].plan.as_mut().unwrap().templates[0].parameters;
     parameters.get_mut("label").unwrap().default = None;
     parameters.get_mut("retries").unwrap().allowed = vec![json!(1), json!(2)];
     let prompt = plans::prompt(&doc.nodes[0]);
@@ -869,8 +868,8 @@ fn allowed_pattern_instantiation_records_parameters_and_matches_a_static_composi
     assert!(run.checkpoint.successful());
 
     let expansion = &run.checkpoint.expansions[0];
-    assert_eq!(expansion.patterns.len(), 1);
-    let recorded = &expansion.patterns[0];
+    assert_eq!(expansion.uses.len(), 1);
+    let recorded = &expansion.uses[0];
     assert_eq!(recorded.id, "plan--impl");
     assert_eq!(recorded.name, "generator");
     assert_eq!(
@@ -992,9 +991,9 @@ fn assert_pattern_parameter_error(
 #[test]
 fn pattern_parameter_errors_are_refused() {
     let mut missing_required = pattern_planner(4);
-    missing_required.nodes[0].plan.as_mut().unwrap().patterns[0].parameters.get_mut("label").unwrap().default = None;
+    missing_required.nodes[0].plan.as_mut().unwrap().templates[0].parameters.get_mut("label").unwrap().default = None;
     let mut enum_violation = pattern_planner(4);
-    enum_violation.nodes[0].plan.as_mut().unwrap().patterns[0].parameters.get_mut("retries").unwrap().allowed = vec![json!(1)];
+    enum_violation.nodes[0].plan.as_mut().unwrap().templates[0].parameters.get_mut("retries").unwrap().allowed = vec![json!(1)];
 
     for (case, doc, parameters, reason) in [
         ("missing required parameter", missing_required, json!({}), "requires parameter label"),
@@ -1008,9 +1007,9 @@ fn pattern_parameter_errors_are_refused() {
 
 #[test]
 fn pattern_template_authority_and_types_are_validated() {
-    for (field, value) in [("access", json!("${label}")), ("role", json!("${label}")), ("write_scope", json!("${label}"))] {
+    for (field, value) in [("access", json!("${label}")), ("role", json!("${label}")), ("kind", json!("${label}"))] {
         let mut doc = pattern_planner(4);
-        doc.nodes[0].plan.as_mut().unwrap().patterns[0].nodes[0][field] = value;
+        doc.nodes[0].plan.as_mut().unwrap().templates[0].nodes[0][field] = value;
         assert!(plans::validate_spec(&doc.nodes[0]).is_err(), "{field}");
     }
 }
@@ -1023,7 +1022,7 @@ fn nested_pattern_cannot_parameterise_authority() {
         json!({"id":"inner", "access":"read_only", "read_roots":["${label}"], "prompt":"review"}),
     ] {
         let mut doc = pattern_planner(4);
-        let pattern = &mut doc.nodes[0].plan.as_mut().unwrap().patterns[0];
+        let pattern = &mut doc.nodes[0].plan.as_mut().unwrap().templates[0];
         pattern.nodes[1] = json!({"id":"review", "kind":"composite", "access":"read_only",
             "composite":{"nodes":[nested],"exports":[{"node":"inner","outputs":["result"]}]}});
         assert!(plans::validate_spec(&doc.nodes[0]).is_err());
@@ -1033,7 +1032,7 @@ fn nested_pattern_cannot_parameterise_authority() {
 #[test]
 fn nested_pattern_writer_keeps_its_scope_requirement() {
     let mut doc = pattern_planner(4);
-    let pattern = &mut doc.nodes[0].plan.as_mut().unwrap().patterns[0];
+    let pattern = &mut doc.nodes[0].plan.as_mut().unwrap().templates[0];
     pattern.nodes[1] = json!({"id":"review", "kind":"composite", "access":"read_only",
         "depends_on":["write"], "composite":{"nodes":[{"id":"inner", "access":"worktree_write", "prompt":"write", "worktree":"/tmp/w", "write_scope":[], "acceptance_checks":["check"], "route":{"alias":"senior"}}],"exports":[{"node":"inner","outputs":["result"]}]}});
     let instance = json!({"id":"impl","pattern":"generator"});
@@ -1045,22 +1044,12 @@ fn nested_pattern_writer_keeps_its_scope_requirement() {
 #[test]
 fn pattern_required_sample_does_not_violate_bounds_at_admission() {
     let mut doc = pattern_planner(4);
-    let parameters = &mut doc.nodes[0].plan.as_mut().unwrap().patterns[0].parameters;
+    let parameters = &mut doc.nodes[0].plan.as_mut().unwrap().templates[0].parameters;
     let retries = parameters.get_mut("retries").unwrap();
     retries.default = None;
     retries.min = Some(json!(5));
     retries.max = Some(json!(10));
     assert!(plans::validate_spec(&doc.nodes[0]).is_ok());
-}
-
-#[test]
-fn pattern_children_obey_plan_node_and_kind_limits() {
-    let instance = json!({"id":"impl", "pattern":"generator"});
-    let mut doc = pattern_planner(4);
-    doc.nodes[0].plan.as_mut().unwrap().kinds = vec![NodeKind::Gate];
-    let mut owner = fixture_owner(&[&pattern_result(instance)]);
-    let run = advance(&doc, &mut owner, &mut MemoryJournal::default()).unwrap();
-    assert_eq!(run.checkpoint.pause_code.as_deref(), Some("invalid_plan_expansion"));
 }
 
 #[test]
@@ -1309,6 +1298,12 @@ fn nested_plan_rewires_all_consumers_and_keeps_original_digest() {
             attempt.input_cap_source = None;
         }
     }
+    // Every planner fragment is journalled as a patch against its parent.
+    for (index, (expansion, parent)) in comparable.expansions.iter_mut().zip(["plan", "plan--nested"]).enumerate() {
+        let record = expansion.patch.take().unwrap();
+        assert_eq!((record.revision, record.parent.as_deref()), (index as u64 + 1, Some(parent)));
+        assert!(record.digest.starts_with("sha256:"));
+    }
     assert_eq!(comparable, recursive);
     let (base, _) = validate_plan(&doc).unwrap();
     assert_eq!(run.checkpoint.plan_digest, CanonicalV1::record_digest("fabric-graph-plan", 1, &base).unwrap().to_string());
@@ -1498,7 +1493,7 @@ fn disjoint_waves_refuse_overlapping_scopes_unless_a_dependency_orders_them() {
         let mut owner = fixture_owner(&[&[two_instances(one.clone(), second).as_str()][..], &results[..]].concat());
         let run = advance(&doc, &mut owner, &mut MemoryJournal::default()).unwrap();
         assert_eq!(run.status, GraphStatus::Complete, "{:?}", run.checkpoint.pause_reason);
-        assert_eq!(run.checkpoint.expansions[0].patterns.len(), 2);
+        assert_eq!(run.checkpoint.expansions[0].uses.len(), 2);
     }
 
     // Without the switch, overlapping instances keep sharing one checkout.
@@ -1515,9 +1510,8 @@ fn disjoint_waves_refuse_overlapping_scopes_unless_a_dependency_orders_them() {
 fn planner_adds_lenses_omitted_by_a_path_floor() {
     let mut doc = planner(4);
     let spec = doc.nodes[0].plan.as_mut().unwrap();
-    spec.patterns_only = true;
     for name in ["lens-tests", "lens-security-privacy"] {
-        spec.patterns.push(serde_json::from_value(json!({
+        spec.templates.push(serde_json::from_value(json!({
             "name": name,
             "nodes": [{"id":"lens", "access":"read_only", "prompt":"Review", "route":{"alias":"senior"}, "acceptance_checks":["Review"]}],
             "exports":[{"node":"lens", "outputs":["result"]}]
@@ -1534,7 +1528,7 @@ fn planner_adds_lenses_omitted_by_a_path_floor() {
     let run = advance(&doc, &mut owner, &mut journal).unwrap();
     assert_eq!(run.status, GraphStatus::Complete, "{:?}", run.checkpoint.pause_reason);
     let expansion = &run.checkpoint.expansions[0];
-    assert!(expansion.patterns.iter().any(|item| item.name == "lens-security-privacy"));
+    assert!(expansion.uses.iter().any(|item| item.name == "lens-security-privacy"));
     assert!(expansion.extra["floor_warnings"].to_string().contains("security"));
     let mut tampered = serde_json::to_value(journal.0.as_ref().unwrap()).unwrap();
     tampered["expansions"][0]["patterns"].as_array_mut().unwrap().retain(|pattern| pattern["name"] != "lens-security-privacy");
@@ -1548,33 +1542,19 @@ fn planner_adds_lenses_omitted_by_a_path_floor() {
     let output = pattern_result(json!({"id":"security", "pattern":"lens-security-privacy"}));
     let mut owner = fixture_owner(&[&output, "reviewed", "reviewed", "checked"]);
     let run = advance(&doc, &mut owner, &mut MemoryJournal::default()).unwrap();
-    assert!(run.checkpoint.expansions[0].patterns.iter().any(|item| item.name == "lens-tests"));
-}
-
-#[test]
-fn patterns_only_plans_refuse_raw_fragment_nodes() {
-    let mut doc = pattern_planner(8);
-    doc.nodes[0].plan.as_mut().unwrap().patterns_only = true;
-    let raw = format!(
-        "```fragment\n{}\n```",
-        json!({"schema_version":1,"nodes":[slice("a", &["src"])],"patterns":[]})
-    );
-    let mut owner = fixture_owner(&[&raw]);
-    let run = advance(&doc, &mut owner, &mut MemoryJournal::default()).unwrap();
-    assert_eq!(run.status, GraphStatus::Paused);
-    assert_eq!(run.checkpoint.pause_code.as_deref(), Some("invalid_plan_expansion"));
+    assert!(run.checkpoint.expansions[0].uses.iter().any(|item| item.name == "lens-tests"));
 }
 
 #[test]
 fn pattern_routes_may_vary_only_over_a_closed_list() {
     let mut doc = pattern_planner(4);
     {
-        let pattern = &mut doc.nodes[0].plan.as_mut().unwrap().patterns[0];
+        let pattern = &mut doc.nodes[0].plan.as_mut().unwrap().templates[0];
         pattern.nodes[0]["route"] = json!({"alias":"${label}"});
     }
     assert!(plans::validate_spec(&doc.nodes[0]).is_err(), "free text names any route");
     {
-        let parameter = doc.nodes[0].plan.as_mut().unwrap().patterns[0]
+        let parameter = doc.nodes[0].plan.as_mut().unwrap().templates[0]
             .parameters
             .get_mut("label")
             .unwrap();
@@ -1595,10 +1575,10 @@ fn pattern_routes_may_vary_only_over_a_closed_list() {
 #[test]
 fn pattern_read_roots_may_follow_only_a_closed_list() {
     let mut doc = pattern_planner(4);
-    doc.nodes[0].plan.as_mut().unwrap().patterns[0].nodes[0]["read_roots"] = json!(["${label}"]);
+    doc.nodes[0].plan.as_mut().unwrap().templates[0].nodes[0]["read_roots"] = json!(["${label}"]);
     assert!(plans::validate_spec(&doc.nodes[0]).is_err(), "free text names any root");
     {
-        let parameter = doc.nodes[0].plan.as_mut().unwrap().patterns[0]
+        let parameter = doc.nodes[0].plan.as_mut().unwrap().templates[0]
             .parameters
             .get_mut("label")
             .unwrap();
@@ -1612,7 +1592,7 @@ fn pattern_read_roots_may_follow_only_a_closed_list() {
 fn pattern_read_roots_must_be_the_bare_placeholder_over_clean_absolute_values() {
     let closed = |roots: Value, values: &[&str]| {
         let mut doc = pattern_planner(4);
-        let pattern = &mut doc.nodes[0].plan.as_mut().unwrap().patterns[0];
+        let pattern = &mut doc.nodes[0].plan.as_mut().unwrap().templates[0];
         pattern.nodes[0]["read_roots"] = roots;
         let parameter = pattern.parameters.get_mut("label").unwrap();
         parameter.default = Some(json!(values[0]));
@@ -1642,7 +1622,7 @@ fn planned_big_batch_expands_to_its_static_composite_and_records_the_patterns() 
     doc.nodes.retain(|node| node.id == "plan");
     doc.nodes[0].depends_on.clear();
     doc.nodes[0].inputs.clear();
-    let pattern = &mut doc.nodes[0].plan.as_mut().unwrap().patterns[0];
+    let pattern = &mut doc.nodes[0].plan.as_mut().unwrap().templates[0];
     let review = pattern.nodes.iter_mut().find(|node| node["id"] == "review").unwrap();
     let deferred = &mut review["composite"]["nodes"][0];
     deferred["panel_shapes"] = json!({"quick":{"frame":false,"verifiers":0,"synthesis":"reduce"}});
@@ -1684,11 +1664,11 @@ fn planned_big_batch_expands_to_its_static_composite_and_records_the_patterns() 
     assert_eq!(run.status, GraphStatus::Complete, "{:?}", run.checkpoint.pause_reason);
     assert!(run.checkpoint.successful(), "{:?}", run.checkpoint.nodes.iter().filter(|node| node.state != NodeState::Succeeded).map(|node| (&node.id, node.state, &node.advance_error)).collect::<Vec<_>>());
     let expansion = &run.checkpoint.expansions[0];
-    let recorded: Vec<_> = expansion.patterns.iter().map(|p| (p.id.as_str(), p.name.as_str())).collect();
+    let recorded: Vec<_> = expansion.uses.iter().map(|p| (p.id.as_str(), p.name.as_str())).collect();
     assert_eq!(recorded, [("plan--a", "writer-lane"), ("plan--b", "writer-lane"), ("plan--barrier", "wave-barrier"), ("plan--c", "writer-lane")]);
-    assert_eq!(expansion.patterns[0].parameters["budget_seconds"], 1800);
-    assert_eq!(expansion.patterns[0].parameters["route"], "junior");
-    assert_eq!(expansion.patterns[2].parameters, json!({"wave":"one"}));
+    assert_eq!(expansion.uses[0].parameters["budget_seconds"], 1800);
+    assert_eq!(expansion.uses[0].parameters["route"], "junior");
+    assert_eq!(expansion.uses[2].parameters, json!({"wave":"one"}));
 
     // Each lane runs its nested review before its evaluator.
     for lane in ["a", "b", "c"] {
@@ -1732,10 +1712,10 @@ fn planned_scout_swarm_expands_scouts_with_a_question_and_a_route() {
     let run = advance(&doc, &mut owner, &mut MemoryJournal::default()).unwrap();
     assert_eq!(run.status, GraphStatus::Complete, "{:?}", run.checkpoint.pause_reason);
     let expansion = &run.checkpoint.expansions[0];
-    let recorded: Vec<_> = expansion.patterns.iter().map(|p| p.name.as_str()).collect();
+    let recorded: Vec<_> = expansion.uses.iter().map(|p| p.name.as_str()).collect();
     assert_eq!(recorded, ["scout", "scout", "external-scout"]);
-    assert_eq!(expansion.patterns[1].parameters["route"], "senior");
-    assert_eq!(expansion.patterns[0].parameters["route"], "junior");
+    assert_eq!(expansion.uses[1].parameters["route"], "senior");
+    assert_eq!(expansion.uses[0].parameters["route"], "junior");
     // The synthesis reads each scout's evidence as well as the planner's text.
     let expanded = plans::expand(&doc, &[], &run.checkpoint.expansions, &plans::generous()).unwrap();
     let synthesis = expanded.nodes.iter().find(|n| n.id == "synthesis").unwrap();
@@ -1769,7 +1749,7 @@ fn single_planned_review_records_rationale_before_lens() {
     let planner_call = owner.calls.iter().position(|(key, _)| key.node_id == "plan").unwrap();
     let lens_call = owner.calls.iter().position(|(key, _)| key.node_id == "plan--correctness--lens").unwrap();
     assert!(planner_call < lens_call);
-    assert_eq!(run.checkpoint.expansions[0].patterns.len(), 1);
+    assert_eq!(run.checkpoint.expansions[0].uses.len(), 1);
 }
 
 #[test]
@@ -1778,7 +1758,7 @@ fn review_catalogue_binds_every_lens_to_the_pinned_commit() {
     let spec = doc.nodes.iter_mut().find(|node| node.id == "plan").unwrap().plan.as_mut().unwrap();
     let head = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     spec.pin_review_subject(head).unwrap();
-    for pattern in &spec.patterns {
+    for pattern in &spec.templates {
         for lens in &pattern.nodes {
             assert_eq!(lens["source"], json!({"type":"commit", "commit":head}));
         }
@@ -1795,10 +1775,10 @@ fn review_catalogue_binds_every_lens_to_the_pinned_commit() {
 fn review_catalogue_pins_nested_pattern_leaves() {
     let mut doc = planner(1);
     let plan = doc.nodes[0].plan.as_mut().unwrap();
-    plan.patterns.push(serde_json::from_value(json!({"name":"nested","nodes":[{"id":"group","composite":{"nodes":[{"id":"lens","source":{"type":"head","node":"writer"}}],"exports":[{"node":"lens","outputs":["result"]}]}}],"exports":[{"node":"group","outputs":["result"]}]})).unwrap());
+    plan.templates.push(serde_json::from_value(json!({"name":"nested","nodes":[{"id":"group","composite":{"nodes":[{"id":"lens","source":{"type":"head","node":"writer"}}],"exports":[{"node":"lens","outputs":["result"]}]}}],"exports":[{"node":"group","outputs":["result"]}]})).unwrap());
     let head = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     plan.pin_review_subject(head).unwrap();
-    assert_eq!(plan.patterns[0].nodes[0]["composite"]["nodes"][0]["source"], json!({"type":"commit","commit":head}));
+    assert_eq!(plan.templates[0].nodes[0]["composite"]["nodes"][0]["source"], json!({"type":"commit","commit":head}));
 }
 
 #[test]
@@ -1817,9 +1797,9 @@ fn planned_review_expands_only_the_lens_legs_the_catalogue_lists() {
     let run = advance(&doc, &mut owner, &mut MemoryJournal::default()).unwrap();
     assert_eq!(run.status, GraphStatus::Complete, "{:?}", run.checkpoint.pause_reason);
     let expansion = &run.checkpoint.expansions[0];
-    let recorded: Vec<_> = expansion.patterns.iter().map(|p| p.name.as_str()).collect();
+    let recorded: Vec<_> = expansion.uses.iter().map(|p| p.name.as_str()).collect();
     assert_eq!(recorded, ["lens-correctness-spec", "lens-tests"]);
-    assert_eq!(expansion.patterns[0].parameters["tier"], "senior");
+    assert_eq!(expansion.uses[0].parameters["tier"], "senior");
     // The verifier reads the lens findings through the lens legs' exports.
     let expanded = plans::expand(&doc, &[], &run.checkpoint.expansions, &plans::generous()).unwrap();
     let verify = expanded.nodes.iter().find(|n| n.id == "verify").unwrap();

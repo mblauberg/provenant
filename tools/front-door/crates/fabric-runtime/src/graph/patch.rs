@@ -240,7 +240,14 @@ pub fn admit_patch(
         ),
         None => None,
     };
-    match prepare(graph.document, &expanded, graph.checkpoint, parent, patch, context)? {
+    match prepare(
+        graph.document,
+        &expanded,
+        graph.checkpoint,
+        parent,
+        patch,
+        context,
+    )? {
         Prepared::Replayed(revision) => Ok(Admitted {
             revision,
             replayed: true,
@@ -276,7 +283,10 @@ pub fn submit(
     patch: &Patch,
     context: &PatchContext<'_>,
 ) -> Result<GraphDocument, PatchError> {
-    if patch.expected_revision.is_some_and(|revision| revision != 0) {
+    if patch
+        .expected_revision
+        .is_some_and(|revision| revision != 0)
+    {
         return Err(PatchError::new(
             "stale_revision",
             "a new graph is at revision 0",
@@ -337,7 +347,8 @@ pub(super) struct Admission {
 }
 
 fn scan(patch: &Patch, context: &PatchContext<'_>) -> Result<(), PatchError> {
-    let text = serde_json::to_string(patch).map_err(|error| PatchError::invalid(error.to_string()))?;
+    let text =
+        serde_json::to_string(patch).map_err(|error| PatchError::invalid(error.to_string()))?;
     (context.scan)(&text).map_err(|reason| PatchError::new("secret", reason))
 }
 
@@ -398,7 +409,9 @@ pub(super) fn prepare(
         )));
     }
     if patch.nodes.is_empty() && patch.skip.is_empty() && patch.replace.is_empty() {
-        return Err(PatchError::invalid("patch adds, skips and replaces nothing"));
+        return Err(PatchError::invalid(
+            "patch adds, skips and replaces nothing",
+        ));
     }
     scan(patch, context)?;
 
@@ -431,11 +444,22 @@ pub(super) fn prepare(
             catalogue.contains_key(name) && !patch.templates.contains_key(name)
         });
         if let Some(name) = used {
+            // Record the effective parameters, defaults included, so a replay
+            // reads exactly what the compiler bound. A swarm binds per copy.
+            let supplied = raw.get("with").cloned().unwrap_or(Value::Null);
+            let parameters = match raw.get("over") {
+                None => library
+                    .resolve(name)
+                    .and_then(|template| template.bind(name, &supplied))
+                    .map(Value::Object)
+                    .unwrap_or(supplied),
+                Some(_) => supplied,
+            };
             uses.push(TemplateUse {
                 extra: Default::default(),
                 id: node.id.clone(),
                 name: name.to_owned(),
-                parameters: raw.get("with").cloned().unwrap_or(Value::Null),
+                parameters,
                 nodes: Vec::new(),
             });
         }
@@ -488,7 +512,10 @@ pub(super) fn prepare(
         instance.id = id;
     }
     let existing: BTreeSet<&str> = expanded.nodes.iter().map(|node| node.id.as_str()).collect();
-    if let Some(node) = nodes.iter().find(|node| existing.contains(node.id.as_str())) {
+    if let Some(node) = nodes
+        .iter()
+        .find(|node| existing.contains(node.id.as_str()))
+    {
         return Err(PatchError::new(
             "conflict",
             format!("node {} already exists", node.id),
@@ -514,7 +541,10 @@ pub(super) fn prepare(
     for id in &patch.skip {
         unstarted(id)?;
         if !edited.insert(id.clone()) {
-            return Err(PatchError::new("conflict", format!("node {id} is edited twice")));
+            return Err(PatchError::new(
+                "conflict",
+                format!("node {id} is edited twice"),
+            ));
         }
     }
     let mut replaced = Vec::with_capacity(patch.replace.len());
@@ -523,7 +553,10 @@ pub(super) fn prepare(
         let id = node.id.clone();
         unstarted(&id)?;
         if !edited.insert(id.clone()) {
-            return Err(PatchError::new("conflict", format!("node {id} is edited twice")));
+            return Err(PatchError::new(
+                "conflict",
+                format!("node {id} is edited twice"),
+            ));
         }
         let target = expanded
             .nodes
@@ -603,7 +636,8 @@ pub(super) fn prepare(
     }
     let mut expansions = checkpoint.expansions.clone();
     expansions.push(expansion.clone());
-    if let Some(reason) = graph_envelope_reason(source, &expansions, &checkpoint.extensions, &plan) {
+    if let Some(reason) = graph_envelope_reason(source, &expansions, &checkpoint.extensions, &plan)
+    {
         return Err(PatchError::invalid(reason));
     }
     Ok(Prepared::Ready(Box::new(Admission {
