@@ -143,13 +143,7 @@ pub(super) fn prepare_command(
         task.access.source_live,
     )?;
     if isolated {
-        observed_head = Some(
-            task.head
-                .as_deref()
-                .ok_or("graph source head missing")?
-                .parse()
-                .map_err(|_| "invalid graph source head")?,
-        );
+        observed_head = Some(source_head(task)?);
         worktree_gitdir = Some(cwd.join(".git"));
     } else {
         require_source_head(task, observed_head)?;

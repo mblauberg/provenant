@@ -412,6 +412,8 @@ pub(super) enum PrepareError {
     SourceAuthority(String),
     #[error("{0}")]
     DirtyWriter(String),
+    #[error(transparent)]
+    SourceHead(#[from] SourceHeadError),
     #[error("{message}")]
     DependencyPreparation { message: String, configured: bool },
     #[error("{message}")]
@@ -487,6 +489,11 @@ impl PrepareError {
                     fallback_outcome,
                 }
             }
+            Self::SourceHead(error) => {
+                let mut refusal = run::PrepareRefusal::from(error.to_string());
+                refusal.boundary_class = provenant_records::diagnostic::BoundaryClass::Authority;
+                refusal
+            }
             Self::DependencyPreparation {
                 message,
                 configured,
@@ -548,6 +555,10 @@ fn preparation_preserves_typed_boundaries_without_classifying_other_errors() {
     })
     .into_refusal();
     assert_eq!(prompt.boundary_class, BoundaryClass::Authority);
+    for error in [SourceHeadError::Missing, SourceHeadError::Invalid] {
+        let refusal = PrepareError::SourceHead(error).into_refusal();
+        assert_eq!(refusal.boundary_class, BoundaryClass::Authority);
+    }
     let other = PrepareError::Other("TOKEN_SENTINEL".into()).into_refusal();
     assert_eq!(other.boundary_class, BoundaryClass::None);
     for error in [
@@ -646,6 +657,8 @@ pub(super) enum PlanCheckError {
     Other(String),
     #[error(transparent)]
     ReadOnly(#[from] ReadOnlyPlanError),
+    #[error(transparent)]
+    SourceHead(#[from] SourceHeadError),
 }
 
 #[cfg(any(test, feature = "fixture"))]
@@ -2280,20 +2293,10 @@ pub(super) fn prepare_candidates(
             .map_err(PlanCheckError::from)
             .and_then(|mut planned| {
                 if isolated {
-                    planned.1 = Some(
-                        task.head
-                            .as_deref()
-                            .ok_or_else(|| {
-                                PlanCheckError::Other("graph source head missing".into())
-                            })?
-                            .parse()
-                            .map_err(|_| {
-                                PlanCheckError::Other("invalid graph source head".into())
-                            })?,
-                    );
+                    planned.1 = Some(source_head(task)?);
                     planned.3 = Some(cwd.join(".git"));
                 } else {
-                    require_source_head(task, planned.1).map_err(PlanCheckError::Other)?;
+                    require_source_head(task, planned.1)?;
                 }
                 Ok(planned)
             }),
@@ -2303,6 +2306,9 @@ pub(super) fn prepare_candidates(
                 let class = match &error {
                     PlanCheckError::Plan(cause) => cause.boundary_class(),
                     PlanCheckError::ReadOnly(cause) => cause.boundary_class(),
+                    PlanCheckError::SourceHead(_) => {
+                        provenant_records::diagnostic::BoundaryClass::Authority
+                    }
                     PlanCheckError::Other(_) => provenant_records::diagnostic::BoundaryClass::None,
                 };
                 {
@@ -2792,7 +2798,9 @@ pub(super) fn prepare_candidates(
             .filter(|(adapter, _)| reported_plan_errors.contains(*adapter))
             .filter_map(|(_, error)| match error {
                 PlanCheckError::Plan(error) => Some(error),
-                PlanCheckError::Other(_) | PlanCheckError::ReadOnly(_) => None,
+                PlanCheckError::Other(_)
+                | PlanCheckError::ReadOnly(_)
+                | PlanCheckError::SourceHead(_) => None,
             })
             .collect(),
         candidate_boundary,

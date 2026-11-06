@@ -297,21 +297,34 @@ pub(super) fn source_cwd(
     Ok(verified)
 }
 
+#[derive(Debug, thiserror::Error)]
+pub(super) enum SourceHeadError {
+    #[error("graph source head missing")]
+    Missing,
+    #[error("invalid graph source head")]
+    Invalid,
+    #[error("graph source checkout moved from pinned head {0}")]
+    Moved(provenant_core::GitOid),
+}
+
+pub(super) fn source_head(
+    task: &run::TaskRequest,
+) -> Result<provenant_core::GitOid, SourceHeadError> {
+    task.head
+        .as_deref()
+        .ok_or(SourceHeadError::Missing)?
+        .parse()
+        .map_err(|_| SourceHeadError::Invalid)
+}
+
 pub(super) fn require_source_head(
     task: &run::TaskRequest,
     observed: Option<provenant_core::GitOid>,
-) -> Result<(), String> {
+) -> Result<(), SourceHeadError> {
     if task.access.source_root.is_some() && !task.access.source_live {
-        let expected = task
-            .head
-            .as_deref()
-            .ok_or("graph source head missing")?
-            .parse::<provenant_core::GitOid>()
-            .map_err(|_| "invalid graph source head")?;
+        let expected = source_head(task)?;
         if observed != Some(expected) {
-            return Err(format!(
-                "graph source checkout moved from pinned head {expected}"
-            ));
+            return Err(SourceHeadError::Moved(expected));
         }
     }
     Ok(())

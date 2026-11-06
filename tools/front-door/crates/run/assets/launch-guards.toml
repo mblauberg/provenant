@@ -195,6 +195,11 @@ boundary = "authority"
 reason = "A graph-bound task may receive only its own node's input directory, without a redirected path."
 
 [[guard]]
+site = "cli/src/run/provider/confinement.rs#require_source_head"
+boundary = "authority"
+reason = "A pinned graph source must have a valid recorded head and must not move before preparation."
+
+[[guard]]
 site = "cli/src/run/provider/confinement.rs#read_only_plan"
 boundary = "authority"
 reason = "Read-only plans require the selected project binding and a Git repository when the source is pinned."
