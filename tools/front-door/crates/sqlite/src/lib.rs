@@ -197,6 +197,23 @@ pub fn open_read_only_connection(path: &Path) -> rusqlite::Result<Connection> {
     Ok(db)
 }
 
+/// Observe WAL without creating companions, taking SQLite's exclusive lock.
+/// The native main-file descriptor supports locking only: VFS writes, truncation,
+/// file controls and shared-memory creation are refused. Contended stores fail busy.
+pub fn open_locking_read_only_connection(path: &Path) -> rusqlite::Result<Connection> {
+    read_only_vfs::register_locking_reader()?;
+    let db = Connection::open_with_flags_and_vfs(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX
+            | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        "provenant-locking-reader",
+    )?;
+    db.busy_timeout(busy_timeout())?;
+    db.pragma_update(None, "query_only", true)?;
+    db.pragma_update(None, "locking_mode", "EXCLUSIVE")?;
+    Ok(db)
+}
+
 /// Writer-only preparation for a read-only WAL consumer after the last close.
 pub fn retain_read_only_wal(db: &Connection) -> rusqlite::Result<()> {
     read_only_vfs::persist_wal(db)?;

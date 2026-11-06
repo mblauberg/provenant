@@ -1400,11 +1400,6 @@ pub(crate) fn cutover_admission_guard(
     })
 }
 
-#[cfg(test)]
-fn cutover_read_connection(path: &Path) -> rusqlite::Result<rusqlite::Connection> {
-    provenant_fabric_runtime::graph::cutover::read_connection(path)
-}
-
 pub(crate) fn cutover_pending_guard(state: &provenant_core::StateRoot) -> Result<(), String> {
     provenant_fabric_runtime::graph::cutover::pending_guard(state)
 }
@@ -1796,7 +1791,7 @@ mod tests {
     fn cutover_reads_wal_and_closed_databases_without_mutation() -> Result<(), Box<dyn std::error::Error>> {
         const CHILD: &str = "PROVENANT_TEST_CUTOVER_READ";
         if let Some(path) = std::env::var_os(CHILD) {
-            let reader = super::cutover_read_connection(Path::new(&path))?;
+            let reader = provenant_fabric_runtime::graph::cutover::read_connection(Path::new(&path))?;
             assert_eq!(reader.query_row("SELECT COUNT(*) FROM attempts WHERE terminal=0", [], |row| row.get::<_, i64>(0))?, 1);
             return Ok(());
         }
@@ -1811,7 +1806,7 @@ mod tests {
             options.stdout = StreamPolicy::Capture { limit: 65536 };
             options.stderr = StreamPolicy::Capture { limit: 65536 };
             let output = SystemExecutor::new(1)?.execute(options)?;
-            assert_eq!(output.termination, Termination::Exit(0), "{}", String::from_utf8_lossy(&output.stderr.bytes));
+            assert_eq!(output.termination, Termination::Exit(0), "{}{}", String::from_utf8_lossy(&output.stdout.bytes), String::from_utf8_lossy(&output.stderr.bytes));
             assert!(!output.timed_out && !output.cancelled);
             Ok(())
         };
@@ -1835,7 +1830,7 @@ mod tests {
         observe(&path)?;
         assert_eq!(snapshot()?, before);
         std::fs::write(&path, b"not a database")?;
-        assert!(super::cutover_read_connection(&path).is_err());
+        assert!(provenant_fabric_runtime::graph::cutover::read_connection(&path).is_err());
         Ok(())
     }
 

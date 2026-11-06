@@ -121,25 +121,31 @@ pub fn pending_findings(
 pub fn read_connection(path: &Path) -> rusqlite::Result<rusqlite::Connection> {
     let observed = (|| {
         let db = provenant_sqlite::open_read_only_connection(path)?;
-        db.prepare("SELECT project, run, id, record FROM attempts WHERE terminal=0")?;
+        {
+            let mut statement = db.prepare("SELECT 1 FROM attempts LIMIT 1")?;
+            let mut rows = statement.query([])?;
+            rows.next()?;
+        }
         Ok(db)
     })();
     match observed {
         Ok(db) => return Ok(db),
         Err(rusqlite::Error::SqliteFailure(error, _))
-            if error.code == rusqlite::ErrorCode::CannotOpen => {}
+            if error.code == rusqlite::ErrorCode::CannotOpen
+                || matches!(error.extended_code,
+                    rusqlite::ffi::SQLITE_IOERR_LOCK
+                        | rusqlite::ffi::SQLITE_IOERR_SHMOPEN
+                        | rusqlite::ffi::SQLITE_IOERR_SHMMAP) => {}
         Err(error) => return Err(error),
     }
-    let db = rusqlite::Connection::open_with_flags(
-        path,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
-            | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX
-            | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
-    )?;
-    // A WAL-mode database can have no companions after its last writer closes.
-    // An exclusive reader then uses a private WAL index. Unlike immutable=1,
-    // this still reads committed WAL frames and refuses concurrent writers.
-    db.pragma_update(None, "locking_mode", "EXCLUSIVE")?;
+    // A missing WAL index needs an exclusive reader with a lock-capable
+    // descriptor. The VFS still refuses all data writes and sidecar creation.
+    let db = provenant_sqlite::open_locking_read_only_connection(path)?;
+    {
+        let mut statement = db.prepare("SELECT 1 FROM attempts LIMIT 1")?;
+        let mut rows = statement.query([])?;
+        rows.next()?;
+    }
     Ok(db)
 }
 

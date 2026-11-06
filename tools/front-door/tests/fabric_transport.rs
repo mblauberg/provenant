@@ -2179,6 +2179,17 @@ fn peer_dispatch_recovers_receipt_when_probes_fail() -> Result {
         .map(|entry| entry.map(|entry| entry.file_name()))
         .collect::<std::io::Result<_>>()?;
     assert_eq!(after_loss.difference(&existing).count(), 1, "{unknown}");
+    // A lost receipt must remain recoverable after unrelated legacy work appears
+    // at the receiver. Replay observes its sealed operation rather than admitting
+    // a new launch, and must leave that legacy work untouched.
+    let legacy_directory = rig.root.join(
+        "peer-state/fabric/graphs/11111111111111111111111111111111",
+    );
+    std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&legacy_directory)?;
+    let legacy_path = legacy_directory.join("graph-old-pending-fixture.json");
+    let legacy = include_bytes!("fixtures/install/old-pending-checkpoint.json");
+    std::fs::write(&legacy_path, legacy)?;
+    std::fs::set_permissions(&legacy_path, std::fs::Permissions::from_mode(0o600))?;
     rig.env.retain(|(key, _)| key != "PROVENANT_AGENT_LABEL");
     rig.env
         .push(("PROVENANT_AGENT_LABEL".into(), "replacement-runner".into()));
@@ -2200,6 +2211,7 @@ fn peer_dispatch_recovers_receipt_when_probes_fail() -> Result {
         .map(|entry| entry.map(|entry| entry.file_name()))
         .collect::<std::io::Result<_>>()?;
     assert_eq!(replayed, after);
+    assert_eq!(std::fs::read(&legacy_path)?, legacy);
     rig.assert_legacy_unchanged()?;
     cleanup.disarm();
     Ok(())
@@ -3596,7 +3608,7 @@ fn lane_graph_mutations_fail_closed_without_host_submission() -> Result {
             if retry {
                 "confinement_refused"
             } else {
-                "invalid_input"
+                "owner_unavailable"
             },
             "{result}"
         );

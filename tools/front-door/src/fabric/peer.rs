@@ -463,7 +463,26 @@ pub fn peer(
                         }),
                         ..Default::default()
                     };
-                    crate::install::cutover_admission_guard(&context.roots.state)?;
+                    let SubmitInput::Submit { operation_id, .. } = input;
+                    let execution = provenant_run::ExecutionContext {
+                        state_root: context.roots.state.clone(),
+                        project_id: context.identity.project,
+                        actor_id: context.identity.inbox.actor,
+                        read_prompts: false,
+                    };
+                    let call = owner.call(&cancel);
+                    let retained = provenant_run::RunStore::open_read_only(&execution, &call)
+                        .map_err(run_error)?
+                        .map(|store| store.operation(operation_id, &call))
+                        .transpose()
+                        .map_err(run_error)?
+                        .flatten()
+                        .is_some_and(|operation| !matches!(operation.state, provenant_run::OperationState::Prepared));
+                    // Lost receipts replay their sealed request even when unrelated
+                    // old work now needs draining. New operations still refuse.
+                    if !retained {
+                        crate::install::cutover_admission_guard(&context.roots.state)?;
+                    }
                     let mut input = input.clone();
                     let SubmitInput::Submit { tasks, .. } = &mut input;
                     for task in tasks {
