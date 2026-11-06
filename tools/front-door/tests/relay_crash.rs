@@ -143,6 +143,15 @@ fn relay_host_process() -> Result {
         std::thread::park();
     }
 }
+struct SocketCleanup(std::path::PathBuf);
+impl Drop for SocketCleanup {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+        if let Some(parent) = self.0.parent() {
+            let _ = std::fs::remove_dir(parent);
+        }
+    }
+}
 struct Host(Child);
 impl Drop for Host {
     fn drop(&mut self) {
@@ -180,6 +189,7 @@ fn start(rig: &TestRig, attempt: AttemptId, recover: bool) -> Result<Host> {
 fn relay_host_crash_recovers_in_flight_child() -> Result {
     let rig = TestRig::new()?;
     let attempt = AttemptId::from_bytes(provenant_os::fs::entropy_128()?);
+    let _socket = SocketCleanup(provenant_providers::LaneRuntime::fabric_socket(attempt));
     let host = start(&rig, attempt, false)?;
     let request = json!({"op":"add","id":"child","use":"task","brief":"Child work","idempotency_key":"child-once"});
     let send = |request| {
