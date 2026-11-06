@@ -1353,7 +1353,14 @@ fn partial_quota_alias_fixture(writer: bool) -> Result {
         );
     }
     if writer {
-        let created = rig.command(&["worktree", "create", "partial-quota", "--base", "HEAD", "--json"])?;
+        let created = rig.command(&[
+            "worktree",
+            "create",
+            "partial-quota",
+            "--base",
+            "HEAD",
+            "--json",
+        ])?;
         assert_eq!(code(&created), 0, "{created:?}");
     }
     let mut node = json!({
@@ -1369,23 +1376,36 @@ fn partial_quota_alias_fixture(writer: bool) -> Result {
         node["worktree"] = json!(".worktrees/partial-quota");
         node["delivery"] = json!("none");
     }
-    fs::write(rig.project.join("graph.json"), serde_json::to_vec(&json!({
-        "schema_version":2,"graph_id":"partial-quota","nodes":[node]
-    }))?)?;
+    fs::write(
+        rig.project.join("graph.json"),
+        serde_json::to_vec(&json!({
+            "schema_version":2,"graph_id":"partial-quota","nodes":[node]
+        }))?,
+    )?;
     let output = rig.command(&["run", "--file", "graph.json", "--wait=30s", "--json"])?;
     assert_eq!(code(&output), if writer { 1 } else { 0 }, "{output:?}");
     let result: Value = serde_json::from_slice(&output.stdout.bytes)?;
     let node = &result["data"]["checkpoint"]["nodes"][0];
-    let previous = node["previous_attempts"].as_array().ok_or("previous attempts")?;
+    let previous = node["previous_attempts"]
+        .as_array()
+        .ok_or("previous attempts")?;
     let current = node["attempts"].as_array().ok_or("current attempts")?;
     assert_eq!(previous.len(), 1, "{result}");
     assert_eq!(current.len(), 1, "{result}");
     assert_eq!(previous[0]["outcome"], "usage_limited", "{result}");
     assert_eq!(current[0]["key"]["retry_generation"], 1, "{result}");
-    assert_eq!(current[0]["key"]["previous_attempt_ref"], previous[0]["attempt_ref"], "{result}");
+    assert_eq!(
+        current[0]["key"]["previous_attempt_ref"], previous[0]["attempt_ref"],
+        "{result}"
+    );
     let attempt_id = |attempt: &Value| -> Result<String> {
-        Ok(attempt["attempt_ref"].as_str().ok_or("attempt reference")?
-            .rsplit_once('/').ok_or("qualified reference")?.1.to_owned())
+        Ok(attempt["attempt_ref"]
+            .as_str()
+            .ok_or("attempt reference")?
+            .rsplit_once('/')
+            .ok_or("qualified reference")?
+            .1
+            .to_owned())
     };
     let first_id = attempt_id(&previous[0])?;
     let second_id = attempt_id(&current[0])?;
@@ -1394,18 +1414,36 @@ fn partial_quota_alias_fixture(writer: bool) -> Result {
     let lanes: Value = serde_json::from_slice(&status.stdout.bytes)?;
     let rows = lanes["data"]["rows"].as_array().ok_or("rows")?;
     assert_eq!(rows.len(), 2, "{lanes}");
-    let first = rows.iter().find(|row| row["attempt_id"] == first_id).ok_or("first")?;
-    let second = rows.iter().find(|row| row["attempt_id"] == second_id).ok_or("second")?;
+    let first = rows
+        .iter()
+        .find(|row| row["attempt_id"] == first_id)
+        .ok_or("first")?;
+    let second = rows
+        .iter()
+        .find(|row| row["attempt_id"] == second_id)
+        .ok_or("second")?;
     assert_eq!(first["state"], "quota_limited", "{lanes}");
-    assert_eq!(first["usage"]["output_excluding_reasoning"], 2280, "{lanes}");
-    assert_eq!(first["applied_route"]["model"], "codex/gpt-6-luna", "{lanes}");
-    assert_eq!(second["applied_route"]["model"], "codex/gpt-6.1-terra",
-        "spent member must be excluded: {lanes}");
+    assert_eq!(
+        first["usage"]["output_excluding_reasoning"], 2280,
+        "{lanes}"
+    );
+    assert_eq!(
+        first["applied_route"]["model"], "codex/gpt-6-luna",
+        "{lanes}"
+    );
+    assert_eq!(
+        second["applied_route"]["model"], "codex/gpt-6.1-terra",
+        "spent member must be excluded: {lanes}"
+    );
     // The graph owns retry lineage; each provider launch is a separate run.
     assert_ne!(first["run_id"], second["run_id"], "{lanes}");
     assert!(first["superseded_by"].is_null(), "{lanes}");
     assert!(second["retry_of"].is_null(), "{lanes}");
-    assert_eq!(second["state"], if writer { "uncommitted" } else { "succeeded" }, "{lanes}");
+    assert_eq!(
+        second["state"],
+        if writer { "uncommitted" } else { "succeeded" },
+        "{lanes}"
+    );
     cleanup.disarm();
     Ok(())
 }
@@ -1417,7 +1455,6 @@ fn named_route_writer_retries_quota_with_partial_work() -> Result {
 fn named_route_read_only_retries_quota_with_partial_output() -> Result {
     partial_quota_alias_fixture(false)
 }
-
 
 fn codex_capacity_settles_without_quota_refusal() -> Result {
     let message = "Selected model is at capacity. Please try a different model.";

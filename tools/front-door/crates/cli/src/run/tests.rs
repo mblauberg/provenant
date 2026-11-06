@@ -8704,7 +8704,13 @@ fn lane_listing_omits_large_grants_but_id_retains_them() -> Result<(), Box<dyn s
             assert!(rows.iter().all(|row| row.get("write_grants").is_none()));
             assert!(serde_json::to_vec(&listing)?.len() < 1024 * 1024);
 
-            command.id = Some(selected.ok_or("selected lane")?.attempt.ok_or("attempt")?.to_string());
+            command.id = Some(
+                selected
+                    .ok_or("selected lane")?
+                    .attempt
+                    .ok_or("attempt")?
+                    .to_string(),
+            );
             let reply = status::status(command, true, edge);
             assert!(reply.result.error.is_none(), "{:?}", reply.result.error);
             let detail = reply.result.data;
@@ -8781,9 +8787,11 @@ fn lane_detail_and_output_retain_safe_refusal_remedies() -> Result<(), Box<dyn s
                 task: None,
                 attempt: Some(prepared.attempts[0].attempt_id),
             };
-            let crate::ParseOutcome::Invocation(invocation) =
-                crate::parse(["status", "--all"].into_iter().map(std::ffi::OsString::from))
-            else {
+            let crate::ParseOutcome::Invocation(invocation) = crate::parse(
+                ["status", "--all"]
+                    .into_iter()
+                    .map(std::ffi::OsString::from),
+            ) else {
                 return Err("parse lanes failed".into());
             };
             let crate::Command::Status(mut command) = invocation.command else {
@@ -8805,8 +8813,7 @@ fn lane_detail_and_output_retain_safe_refusal_remedies() -> Result<(), Box<dyn s
             for text in [serde_json::to_string(&listing)?, human] {
                 assert!(!text.contains("PROVIDER_SENTINEL"), "{text}");
             }
-            let listing_reply =
-                status::status(command.clone(), false, edge);
+            let listing_reply = status::status(command.clone(), false, edge);
             let listing_summary = listing_reply
                 .summary
                 .as_ref()

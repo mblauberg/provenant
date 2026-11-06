@@ -233,7 +233,7 @@ pub(crate) fn enrich_status_rows(
                 Ok(record) => {
                     let waits = store.lane_waits(std::slice::from_ref(&record), &call);
                     (record, waits)
-                },
+                }
                 // A collected run leaves the retained graph's own row readable.
                 Err(provenant_run::RunError::NotFound) => continue,
                 Err(error) => return Err(run_error(error)),
@@ -269,14 +269,18 @@ pub(crate) fn enrich_status_rows(
             match response {
                 PeerResult::Run { data, .. } => match *data {
                     RunResult::Status {
-                        attempt: record, extra
+                        attempt: record,
+                        extra,
                     } if record.attempt_id == attempt => {
-                        let waits = extra.get("lane_waits").cloned()
+                        let waits = extra
+                            .get("lane_waits")
+                            .cloned()
                             .map(serde_json::from_value)
-                            .transpose().map_err(|_| FacadeError::StateCorrupt)?
+                            .transpose()
+                            .map_err(|_| FacadeError::StateCorrupt)?
                             .unwrap_or_default();
                         (record, waits)
-                    },
+                    }
                     _ => return Err(FacadeError::StateCorrupt),
                 },
                 _ => return Err(FacadeError::StateCorrupt),
@@ -926,23 +930,39 @@ mod tests {
         }))?;
         let sample = "host capacity: disk space: 123 bytes available; gc.free_floor is 456 bytes (source: explicit)";
         let waits = vec![provenant_records::run::LaneWait {
-            extra: Default::default(), attempt_id: attempt.attempt_id,
+            extra: Default::default(),
+            attempt_id: attempt.attempt_id,
             lane_class: provenant_records::run::LaneClass::Writer,
             waiting_for: sample.into(),
         }];
         let mut extra = provenant_records::ExtraFields::default();
         extra.insert("lane_waits".into(), serde_json::to_value(&waits)?);
-        let response = RunResult::Status { extra, attempt: attempt.clone() };
+        let response = RunResult::Status {
+            extra,
+            attempt: attempt.clone(),
+        };
         let decoded: RunResult = serde_json::from_value(serde_json::to_value(response)?)?;
-        let RunResult::Status { attempt: peer_attempt, extra } = decoded else {
+        let RunResult::Status {
+            attempt: peer_attempt,
+            extra,
+        } = decoded
+        else {
             return Err("status response changed kind".into());
         };
         let peer_waits: Vec<provenant_records::run::LaneWait> = serde_json::from_value(
-            extra.get("lane_waits").ok_or("peer disk waits missing")?.clone()
+            extra
+                .get("lane_waits")
+                .ok_or("peer disk waits missing")?
+                .clone(),
         )?;
         for (record, waits) in [(&attempt, &waits), (&peer_attempt, &peer_waits)] {
             let projected = provenant_cli::run::project_lane(
-                record, waits, Path::new("/unused"), &Default::default(), None, false
+                record,
+                waits,
+                Path::new("/unused"),
+                &Default::default(),
+                None,
+                false,
             );
             assert_eq!(projected.waiting_for.as_deref(), Some(sample));
             let reason = projected.reason.ok_or("disk remedy missing")?;
