@@ -61,6 +61,14 @@ fn idle_lane_walks_only_at_the_full_backstop() {
     const { assert!(super::CPU_SAMPLE_INTERVAL_MS == 1_000) };
 }
 
+#[test]
+fn journal_retry_is_prompt_and_does_not_require_a_census() {
+    assert!(!super::journal_retry_due(99, 0, true));
+    assert!(super::journal_retry_due(100, 0, true));
+    assert!(!super::journal_retry_due(100, 0, false));
+    assert!(!super::census_turn_due(100, Some(0), Some(0), false));
+}
+
 #[cfg(all(feature = "fixture", target_os = "macos"))]
 #[test]
 #[allow(clippy::disallowed_methods)]

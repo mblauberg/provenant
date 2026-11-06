@@ -51,6 +51,11 @@ fn census_fallback_notice(fallback: bool, recorded: &mut bool) -> Option<&'stati
 const CENSUS_INTERVAL_MS: u64 = 100;
 const FULL_CENSUS_INTERVAL_MS: u64 = 5_000;
 const EVENT_DRAIN_BACKOFF_MS: u64 = 10;
+const JOURNAL_RETRY_INTERVAL_MS: u64 = 100;
+
+fn journal_retry_due(now: u64, last_attempt: u64, failed: bool) -> bool {
+    failed && now.saturating_sub(last_attempt) >= JOURNAL_RETRY_INTERVAL_MS
+}
 
 fn census_full_due(now: u64, last_full: Option<u64>, event_failure: bool) -> bool {
     event_failure
@@ -319,6 +324,18 @@ pub trait Holder {
 }
 /// Final reservation and immutable exit publication share one storage seam.
 pub trait ExitPublisher {
+    fn tracking(&self, directory: &Directory, bytes: &[u8]) -> Result<Publication> {
+        if bytes.len() as u64 > crate::custody::RECORD_LIMIT {
+            return Err(CustodyError::InvalidRecord);
+        }
+        Ok(directory.atomic_write(
+            OsStr::new("reservation.json"),
+            ".custody-",
+            bytes,
+            PublishMode::Replace,
+        )?)
+    }
+
     fn commit_reservation(&self, directory: &Directory, bytes: &[u8]) -> Result<Publication> {
         Ok(directory.atomic_write(
             OsStr::new("reservation.json"),
@@ -844,6 +861,7 @@ impl Driver<'_> {
         let mut reactor_warning_recorded = false;
         let mut process_watch_unavailable = false;
         let mut census_retry = false;
+        let mut last_journal_attempt_ms = 0;
         let mut cleanup_complete;
         let mut drain_deadline = None;
         let mut cleanup_pending = false;
@@ -1268,6 +1286,11 @@ impl Driver<'_> {
                     census_warning_active = true;
                 }
                 self.persist_tracking(&mut warnings, &mut omitted_warnings);
+                last_journal_attempt_ms = now;
+            } else if journal_retry_due(now, last_journal_attempt_ms, self.journal_warning_active) {
+                // Retry the last tracking state without an expensive census.
+                self.persist_tracking(&mut warnings, &mut omitted_warnings);
+                last_journal_attempt_ms = now;
             }
             // Process checkpoint durability is independent of census cadence.
             if last_observation_ms.is_none_or(|last| now.saturating_sub(last) >= 1_000) {
@@ -1379,6 +1402,13 @@ impl Driver<'_> {
                     last_census_ms
                         .unwrap_or(0)
                         .saturating_add(CENSUS_INTERVAL_MS)
+                        .saturating_sub(wait_now),
+                );
+            }
+            if self.journal_warning_active {
+                wait_ms = wait_ms.min(
+                    last_journal_attempt_ms
+                        .saturating_add(JOURNAL_RETRY_INTERVAL_MS)
                         .saturating_sub(wait_now),
                 );
             }
