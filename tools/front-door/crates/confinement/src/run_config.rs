@@ -699,7 +699,7 @@ writer_writes = []
         write("schema_version = 1\n[domains.run]\nreview_exempt = ['a/']\n")?;
         assert!(RunConfig::review_exempt_at(state.path(), "p").covers(b"a/b"));
         // Other domains are not this reader's business.
-        write("schema_version = 1\n[domains.guard]\ndeny = []\n")?;
+        write("schema_version = 1\n[domains.other]\nfuture = true\n")?;
         assert_eq!(RunConfig::read(state.path())?, RunConfig::default());
         write("schema_version = 1\n[domains.run]\nreview_exempt = ['../x']\n")?;
         assert!(RunConfig::read(state.path()).is_err());

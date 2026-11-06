@@ -355,6 +355,22 @@ Rendered profiles are pinned by
 `crates/providers/src/seatbelt_snapshots.rs::seatbelt_profiles_match_snapshots`.
 The rules below are what every profile must keep.
 
+### Writer tools use confinement
+
+Writer profiles allow process execution and forks, including programs created
+in the checkout, and their own pseudo-terminals. Claude writers bypass native
+permission prompts with the default tool set; OpenCode writers approve tools
+and external directories. Filesystem grants, selected network access, credential
+and keychain denials, shared Git immutability and host-process isolation remain
+in force. Read-only lanes retain their requested tool restrictions.
+- Why: a second tool permission table can refuse ordinary work already
+  authorised by the confinement plan.
+- Test: `crates/confinement/src/permissions/tests/render.rs::writer_programs_keep_filesystem_and_credential_boundaries`;
+  `crates/confinement/tests/lane_git_conformance.rs::lane_git_supports_stash_rebase_and_merge_with_shared_metadata_read_only`;
+  `crates/providers/src/tests.rs::claude_writer_uses_confinement_instead_of_native_tool_permissions`
+- Owner: `crates/confinement/src/permissions/render.rs`, `crates/providers/src/claude.rs`,
+  `crates/providers/src/opencode.rs`
+
 ### Tool requirements and runtime closure
 
 Launch preparation records selected executable requirements and resolves their

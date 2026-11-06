@@ -43,10 +43,6 @@ pub(crate) fn session_collection_deadline(deadline: Instant) -> Instant {
 type Error = Box<dyn std::error::Error>;
 
 #[derive(Deserialize)]
-struct ToolInput {
-    command: String,
-}
-#[derive(Deserialize)]
 struct GuardInput {
     hook_event_name: String,
     tool_name: String,
@@ -179,24 +175,13 @@ fn guard_reply(
     if event.tool_name.is_empty() {
         return Err("hook input rejected: bounded-input error (invalid tool)");
     }
-    if event.tool_name == "Bash" {
-        let Ok(tool) = serde_json::from_value::<ToolInput>(event.tool_input) else {
-            return Err("hook input rejected: bounded-input error (invalid Bash command)");
-        };
-        let policy = guard_policy(globals, &cwd)?;
-        let ctx = provenant_confinement::guard::Context {
-            cwd: &cwd,
-            home: Some(&policy.home),
-            state: Some(&policy.state),
-        };
-        if let Some(remedy) =
-            provenant_confinement::guard::violation(&tool.command, &ctx, &policy.config)
-        {
-            return Err(remedy);
-        }
-        if Instant::now() >= deadline {
-            return Err("hook input rejected: bounded-input error (policy timed out)");
-        }
+    if event.tool_name == "Bash"
+        && !event
+            .tool_input
+            .get("command")
+            .is_some_and(serde_json::Value::is_string)
+    {
+        return Err("hook input rejected: bounded-input error (invalid Bash command)");
     }
     if in_lane {
         return Ok(None);
@@ -459,30 +444,6 @@ fn prepare_answers(
         delivery.last_attempt_at = Some(at);
     }
     Ok(fit_answers(page, event_name, commands))
-}
-/// The `[domains.guard]` rules and the directories they protect. Unreadable
-/// config keeps every rule on, since the rules only refuse irreversible
-/// actions and the alternative is always available.
-struct GuardPolicy {
-    config: provenant_confinement::guard::GuardConfig,
-    home: PathBuf,
-    state: PathBuf,
-}
-fn guard_policy(globals: &Globals, cwd: &Path) -> Result<GuardPolicy, &'static str> {
-    let resolved = crate::roots::resolve(
-        globals,
-        crate::roots::Workspace::At(cwd),
-        crate::roots::Product::Optional,
-    )
-    .map_err(|_| "hook input rejected: bounded-input error (guard policy unavailable)")?;
-    let config = provenant_config::config_show(&resolved.roots, &provenant_cli::domains::SECTIONS)
-        .map(|read| read.domains.guard)
-        .unwrap_or_default();
-    Ok(GuardPolicy {
-        config,
-        home: resolved.home,
-        state: resolved.roots.state.as_path().to_owned(),
-    })
 }
 // Advisory work is abandoned when its real-time host deadline expires.
 #[allow(clippy::disallowed_methods)]
@@ -1362,7 +1323,8 @@ mod answer_delivery_tests {
                         false,
                         Some(Harness::Claude),
                     );
-                    if command == "git status" && field == "session_id" {
+                    if field == "session_id" || matches!(value.as_str(), Some("/tmp/.." | "/tmp/."))
+                    {
                         assert_eq!(result, Ok(None));
                     } else {
                         assert!(result.is_err());
@@ -1377,7 +1339,7 @@ mod answer_delivery_tests {
     }
 
     #[test]
-    fn guard_enforces_policy_for_every_harness() -> Result<(), Error> {
+    fn guard_leaves_shell_policy_to_confinement_for_every_harness() -> Result<(), Error> {
         let temp = tempfile::tempdir()?;
         let globals = Globals {
             state_dir: Some(temp.path().join("state")),
@@ -1396,11 +1358,7 @@ mod answer_delivery_tests {
                     false,
                     client,
                 );
-                if command == "git status" {
-                    assert_eq!(result, Ok(None));
-                } else {
-                    assert!(result.is_err());
-                }
+                assert_eq!(result, Ok(None));
             }
         }
         Ok(())

@@ -12,7 +12,6 @@ pub struct Domains {
     pub quota: provenant_quota::Settings,
     pub routing: provenant_routing::RoutingConfig,
     pub fabric: provenant_fabric_runtime::config::FabricConfig,
-    pub guard: provenant_confinement::guard::GuardConfig,
     #[serde(default)]
     pub run: provenant_confinement::run_config::RunConfig,
     #[serde(default)]
@@ -682,13 +681,12 @@ const LANES_SECTION: DomainSection = DomainSection::new::<LanesSettings>(
     FieldMetadata::new("cloud_targets.{target}.deadline_seconds", "integer"),
 ]);
 
-static ENTRIES: [DomainSection; 9] = [
+static ENTRIES: [DomainSection; 8] = [
     crate::wait::SECTION,
     provenant_providers::accounts::SECTION,
     provenant_quota::SECTION,
     provenant_routing::SECTION,
     provenant_fabric_runtime::config::SECTION,
-    provenant_confinement::guard::SECTION,
     provenant_confinement::run_config::SECTION,
     PR_SECTION,
     LANES_SECTION,
