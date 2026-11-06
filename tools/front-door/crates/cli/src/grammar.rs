@@ -698,6 +698,16 @@ pub struct GraphRunArgs {
     /// Wait for settlement (default 1 hour; use --wait=30m for a duration)
     #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "1h", catalog_duration())]
     pub wait: Option<u64>,
+    /// Raw CLI evidence that a duration after bare `--wait` became the brief.
+    #[arg(skip)]
+    pub bare_wait_value: Option<String>,
+}
+
+impl GraphRunArgs {
+    /// A duration consumed as the positional brief after a bare `--wait`.
+    pub fn ambiguous_wait_brief(&self) -> Option<&str> {
+        self.bare_wait_value.as_deref()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

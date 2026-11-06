@@ -134,7 +134,7 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> ParseOutcome {
     if let Some(error) = duplicate {
         return ParseOutcome::Invalid { error, globals };
     }
-    let invocation = match RawInvocation::from_arg_matches(&matches) {
+    let mut invocation = match RawInvocation::from_arg_matches(&matches) {
         Ok(value) => Invocation {
             globals,
             command: value.command,
@@ -150,6 +150,17 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> ParseOutcome {
             };
         }
     };
+    if let Command::Run(request) = &mut invocation.command
+        && argv
+            .iter()
+            .skip(1)
+            .take_while(|arg| *arg != "--")
+            .any(|arg| arg == "--wait")
+        && let Some(brief) = request.brief.as_deref()
+        && duration_seconds(brief).is_ok()
+    {
+        request.bare_wait_value = Some(brief.to_owned());
+    }
     if let Command::Help { command, all } = &invocation.command {
         let mut expanded = if *all {
             expanded_model()

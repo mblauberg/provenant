@@ -91,6 +91,47 @@ fn invalid_json_is_an_envelope() -> Result {
 }
 
 #[test]
+fn bare_wait_duration_is_warned_and_requires_other_run_input() -> Result {
+    let rig = TestRig::new()?;
+
+    let refused = rig.command(&["run", "--wait", "1s", "--json"])?;
+    assert_eq!(code(&refused), 2);
+    let warning = String::from_utf8_lossy(&refused.stderr.bytes);
+    assert!(warning.contains("warning:") && warning.contains("--wait=1s"), "{warning}");
+    let envelope: serde_json::Value = serde_json::from_slice(&refused.stdout.bytes)?;
+    assert_eq!(envelope["status"], "invalid");
+    assert!(envelope["error"]["message"].as_str().is_some_and(|message| {
+        message.contains("--wait=1s")
+    }));
+
+    let graph = rig.root.join("wait-input.json");
+    std::fs::write(
+        &graph,
+        serde_json::to_vec(&serde_json::json!({
+            "schema_version":1,"graph_id":"bare-wait-input","nodes":[{
+                "id":"accept","kind":"gate","access":"read_only",
+                "condition":{"type":"budget"}
+            }]
+        }))?,
+    )?;
+    let continued = rig.command(&[
+        "run",
+        "--wait",
+        "1s",
+        "--file",
+        graph.to_str().ok_or("graph path")?,
+        "--json",
+    ])?;
+    assert_eq!(code(&continued), 0, "{continued:?}");
+    let warning = String::from_utf8_lossy(&continued.stderr.bytes);
+    assert!(warning.contains("--wait=1s"), "{warning}");
+    let envelope: serde_json::Value = serde_json::from_slice(&continued.stdout.bytes)?;
+    assert_eq!(envelope["status"], "ok");
+    assert_eq!(envelope["data"]["checkpoint"]["graph_id"], "bare-wait-input");
+    Ok(())
+}
+
+#[test]
 fn help_and_version_need_no_roots_and_catalogue_help_drives_every_leaf() -> Result {
     let mut rig = TestRig::new()?.without_state()?;
     rig.env.retain(|(key, _)| {
