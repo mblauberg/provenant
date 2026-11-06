@@ -104,11 +104,32 @@ pub(crate) fn reconcile_refusal_notices(
         if records.is_empty() {
             return Ok(false);
         }
-        for record in records {
-            post_verified_refusal(&record, &context, &store, edge.roots, &call)?;
-        }
+        drain_refusal_page(records, |record| {
+            post_verified_refusal(&record, &context, &store, edge.roots, &call)
+        })?;
     }
     Ok(!store.pending_refusal_notices(1, &call)?.is_empty())
+}
+
+// One unverifiable binding or failed inbox write must not prevent independent
+// notices in the same page from being attempted. Keep the first failure visible
+// so the caller knows recovery is incomplete and can retry the pending rows.
+fn drain_refusal_page<T>(
+    records: impl IntoIterator<Item = T>,
+    mut post: impl FnMut(T) -> Result<(), Error>,
+) -> Result<(), Error> {
+    let mut first_error = None;
+    for record in records {
+        if let Err(error) = post(record)
+            && first_error.is_none()
+        {
+            first_error = Some(error);
+        }
+    }
+    match first_error {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
 }
 
 /// Post a path-free refusal using a stable message ID and frozen record facts.
@@ -477,6 +498,20 @@ mod tests {
     use provenant_records::run::ChairBinding;
     #[allow(unused_imports)]
     use std::cell::RefCell;
+
+    #[test]
+    fn refusal_recovery_attempts_other_notices_after_a_failure() {
+        let mut delivered = Vec::new();
+        let result = drain_refusal_page([1, 2, 3], |item| {
+            if item == 1 {
+                return Err("unverified chair".into());
+            }
+            delivered.push(item);
+            Ok(())
+        });
+        assert_eq!(delivered, [2, 3]);
+        assert_eq!(result.unwrap_err().to_string(), "unverified chair");
+    }
 
     #[test]
     fn seam_runs_reactions_once_before_a_delayed_wait() {
