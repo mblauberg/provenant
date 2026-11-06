@@ -254,14 +254,17 @@ impl Stop {
 
 /// A settled graph or node row already proves its attempts drained, and attempt
 /// rows use a wider vocabulary (`timed_out`, `quota_limited`, ...), so an attempt
-/// decides only when no owner row was selected.
+/// decides only when no owner row was selected. A collected attempt keeps the
+/// checkpoint's `terminal` row, which has no `finished_at`.
 fn graph_rows_terminal(rows: &[Value]) -> bool {
     let mut owners = rows
         .iter()
         .filter(|row| row["kind"] != "attempt")
         .peekable();
     if owners.peek().is_none() {
-        return rows.iter().all(|row| !row["finished_at"].is_null());
+        return rows
+            .iter()
+            .all(|row| !row["finished_at"].is_null() || row["state"] == "terminal");
     }
     owners.all(|row| {
         matches!(
@@ -526,6 +529,7 @@ mod tests {
         ]));
         assert!(graph_rows_terminal(&[attempt("quota_limited", done)]));
         assert!(!graph_rows_terminal(&[attempt("running", Value::Null)]));
+        assert!(graph_rows_terminal(&[attempt("terminal", Value::Null)]));
     }
 
     fn update(target: &str, state: &str, terminal: bool) -> Update {

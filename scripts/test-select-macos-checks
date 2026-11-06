@@ -145,4 +145,15 @@ result=$(run_selector)
 test "$result" = 'run_macos=false
 run_rust=true'
 
+# An executable never takes the prose path, whatever its name.
+git -C "$repo" checkout -q --detach "$common"
+printf '%s\n' '#!/bin/sh' > "$repo/skills/run.md"
+chmod +x "$repo/skills/run.md"
+git -C "$repo" add .
+git -C "$repo" commit -qm 'executable named as Markdown'
+head=$(git -C "$repo" rev-parse HEAD)
+result=$(run_selector)
+test "$result" = 'run_macos=false
+run_rust=true'
+
 echo 'macOS scope selector checks passed'

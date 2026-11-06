@@ -39,7 +39,9 @@ printf 'Changed paths since merge base:\n%s\n' "$changed"
 # Executable or structured skill assets and the native inventory retain Rust
 # and native coverage. Treat renames as deletion plus addition.
 prose_only='^(skills/.*\.md|docs/.*\.md|[^/]+\.md)$'
-if [ -n "$changed" ] && ! printf '%s\n' "$changed" | grep -Evq "$prose_only" && ! printf '%s\n' "$changed" | grep -qx 'docs/runbooks/ci.md'; then
+# A Markdown name proves nothing about an executable or a symlink.
+not_plain=$(git diff --no-renames --raw "$BASE_SHA...$HEAD_SHA" | awk '$2 != "100644" && $2 != "000000"')
+if [ -n "$changed" ] && [ -z "$not_plain" ] && ! printf '%s\n' "$changed" | grep -Evq "$prose_only" && ! printf '%s\n' "$changed" | grep -qx 'docs/runbooks/ci.md'; then
   set_output false false
   exit 0
 fi
