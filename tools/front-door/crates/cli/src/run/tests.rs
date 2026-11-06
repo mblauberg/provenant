@@ -5200,6 +5200,96 @@ fn projected_cli_error_omits_unsafe_source_and_keeps_bounded_fields() {
 }
 
 #[test]
+fn cli_safe_local_facts_are_bounded_and_escape_controls() {
+    use provenant_confinement::worktrees::WorktreeError;
+    use provenant_records::diagnostic::MAX_DIAGNOSTIC_BYTES;
+    for evidence in [
+        "é\u{1b}\nend".to_owned(),
+        format!("é\u{1b}{}", "界".repeat(1024)),
+    ] {
+        let failure = super::Fail::from(provenant_run::RunError::Writer(
+            WorktreeError::CensusUnknown {
+                path: "/fixture/tree".into(),
+                detail: evidence,
+            },
+        ));
+        let reply = super::reply("run", Err(failure));
+        let wire = serde_json::to_value(&reply.result).unwrap();
+        let detail = wire["error"]["detail"].as_str().unwrap();
+        assert!(
+            detail.contains("é\\u{1b}\\n") || detail.contains("é\\u{1b}"),
+            "{detail:?}"
+        );
+        assert!(detail.len() <= MAX_DIAGNOSTIC_BYTES);
+        assert!(!detail.chars().any(char::is_control));
+        assert!(wire["error"]["next"].is_string());
+        let mut human = Vec::new();
+        crate::render::render(
+            &reply.result,
+            crate::render::RenderMode::Human {
+                text: "",
+                summary: None,
+                read_only: false,
+            },
+            &mut human,
+        )
+        .unwrap();
+        let human = String::from_utf8(human).unwrap();
+        assert!(!human.contains('\u{1b}'));
+        assert!(human.contains("é\\u{1b}"));
+    }
+}
+
+#[test]
+fn cli_recorded_remedies_preserve_typed_causes() {
+    use provenant_fabric_runtime::coordination::facade::{DispatchRefusalFact, FacadeError};
+    use provenant_records::diagnostic::{ResourceFact, SettingSource};
+    let cases = [
+        (
+            FacadeError::DispatchRefused {
+                fact: Some(DispatchRefusalFact::DirtyWriter),
+                disk: None,
+                reason: "TOKEN_SENTINEL".into(),
+            },
+            "commit",
+        ),
+        (
+            FacadeError::DispatchRefused {
+                fact: Some(DispatchRefusalFact::Resource(ResourceFact::Disk {
+                    free: 1,
+                    floor: 2,
+                    origin: SettingSource::Configuration,
+                })),
+                disk: None,
+                reason: "TOKEN_SENTINEL".into(),
+            },
+            "free disk space",
+        ),
+        (
+            FacadeError::LaunchUnknown {
+                operation_id: OperationId::parse("dispatch-17").unwrap(),
+            },
+            "dispatch-17",
+        ),
+    ];
+    for (error, condition) in cases {
+        let projection = error.diagnostic();
+        let failure = super::Fail::from(provenant_run::RunError::RecordedRefusal(Box::new(
+            projection.clone(),
+        )));
+        let reply = super::reply("run", Err(failure));
+        let wire = serde_json::to_value(&reply.result).unwrap();
+        assert_eq!(wire["error"]["next"], projection.next.unwrap());
+        let action = wire["error"]["next"].as_str().unwrap();
+        assert!(action.contains(condition), "{wire}");
+        if condition == "dispatch-17" {
+            assert!(action.contains("inspect") && action.contains("same operation ID"));
+        }
+        assert!(!wire.to_string().contains("TOKEN_SENTINEL"));
+    }
+}
+
+#[test]
 fn malformed_claude_result_preserves_provider_error_in_settlement() {
     let route = run::RouteRecord {
         provider: Some("claude".into()),

@@ -345,6 +345,22 @@ fn writer_and_resource_remedies_match_the_typed_owner() {
         (DispatchRefusalFact::DirtyWriter, "commit"),
         (DispatchRefusalFact::CheckedOutWriter, "--worktree"),
         (
+            DispatchRefusalFact::Resource(ResourceFact::Disk {
+                free: 1,
+                floor: 2,
+                origin: SettingSource::Configuration,
+            }),
+            "free disk space",
+        ),
+        (
+            DispatchRefusalFact::Resource(ResourceFact::Processes {
+                used: 9,
+                limit: 10,
+                reserved: 2,
+            }),
+            "process",
+        ),
+        (
             DispatchRefusalFact::Resource(ResourceFact::MemoryPressure {
                 level: PressureLevel::Critical,
                 threshold: PressureThreshold::Critical,
@@ -860,6 +876,37 @@ fn projected_mcp_failure_omits_untrusted_sources_and_bounds_safe_detail() {
         assert!(!detail.chars().any(char::is_control));
         assert!(!error.to_string().contains("TOKEN_SENTINEL"));
         assert!(error["next"].is_string());
+    }
+}
+
+#[test]
+fn mcp_invalid_field_matrix_exposes_only_approved_facts() {
+    use provenant_fabric_runtime::coordination::facade::InvalidInputDetail;
+    for (field, expected) in [
+        ("tasks[0].title".to_owned(), Some("tasks[0].title")),
+        ("tasks[0].TOKEN_SENTINEL\u{1b}".to_owned(), None),
+        (format!("tasks[0].TOKEN_SENTINEL{}", "é".repeat(2048)), None),
+    ] {
+        let wire = ServiceError::Facade(FacadeError::invalid(InvalidInputDetail::FieldTooLarge {
+            field,
+            limit: 17,
+        }))
+        .structured_error();
+        let detail = wire.get("detail").and_then(|value| value.as_str());
+        if let Some(detail) = detail {
+            assert!(detail.len() <= provenant_records::diagnostic::MAX_DIAGNOSTIC_BYTES);
+            assert!(!detail.chars().any(char::is_control));
+        }
+        assert!(!wire.to_string().contains("TOKEN_SENTINEL"));
+        if let Some(field) = expected {
+            assert!(
+                detail.is_some_and(|detail| detail.contains(field) && detail.contains("17")),
+                "{wire}"
+            );
+        } else {
+            assert!(detail.is_none(), "{wire}");
+        }
+        assert!(wire["next"].is_string());
     }
 }
 

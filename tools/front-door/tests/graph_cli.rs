@@ -122,12 +122,47 @@ fn existing_git_worktree_with_spaces_has_a_followable_branch_remedy() -> Result 
         .args(["--write-scope", ".", "--wait=10s"])
         .output()?;
     let followed: Value = serde_json::from_slice(&output.stdout)?;
-    assert!(
-        followed["data"]["checkpoint"]["nodes"]
-            .as_array()
-            .is_some_and(|nodes| nodes.iter().any(|node| !node["writer_binding"].is_null())),
-        "{followed}"
-    );
+    let binding = followed["data"]["checkpoint"]["nodes"]
+        .as_array()
+        .and_then(|nodes| {
+            nodes
+                .iter()
+                .find_map(|node| node["writer_binding"].as_object())
+        })
+        .ok_or_else(|| format!("missing writer binding: {followed}"))?;
+    assert_eq!(binding["worktree"], "[redacted]");
+    let followed_id = followed["data"]["checkpoint"]["graph_id"]
+        .as_str()
+        .ok_or("missing graph id")?;
+    let checkpoint_name = format!("graph-{followed_id}.json");
+    let checkpoint_path = graph_records(&rig.state())?
+        .into_iter()
+        .find(|path| {
+            path.file_name()
+                .is_some_and(|name| name == checkpoint_name.as_str())
+        })
+        .ok_or("missing private checkpoint")?;
+    let mut inputs =
+        provenant_core::RootInputs::new(rig.temp.path().to_path_buf(), rig.root.clone());
+    inputs.state_dir = Some(rig.state());
+    let state = provenant_core::StateRoot::resolve(&inputs, &provenant_os::fs::SystemPathResolver)?;
+    let project = checkpoint_path
+        .parent()
+        .and_then(Path::file_name)
+        .and_then(|name| name.to_str())
+        .ok_or("project id")?
+        .parse()?;
+    let checkpoint = provenant_fabric_runtime::graph::FileJournal::read_checkpoint(
+        &state,
+        project,
+        followed_id,
+    )?
+    .ok_or("checkpoint")?;
+    assert!(checkpoint.nodes.iter().any(|node| {
+        node.writer_binding
+            .as_ref()
+            .is_some_and(|binding| binding.worktree == selected)
+    }));
     Ok(())
 }
 

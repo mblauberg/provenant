@@ -11157,6 +11157,125 @@ fn launch_projection_omits_untrusted_error_sources() {
 }
 
 #[test]
+fn launch_invalid_field_matrix_persists_only_approved_facts() {
+    use crate::coordination::facade::{FacadeError, InvalidInputDetail};
+    for (field, expected) in [
+        ("tasks[0].title".to_owned(), Some("tasks[0].title")),
+        ("tasks[0].TOKEN_SENTINEL\u{1b}".to_owned(), None),
+        (format!("tasks[0].TOKEN_SENTINEL{}", "é".repeat(2048)), None),
+    ] {
+        let mut owner = ErrorLauncher {
+            now: Some(at(0)),
+            errors: [(
+                1,
+                FacadeError::invalid(InvalidInputDetail::FieldTooLarge { field, limit: 17 }),
+            )]
+            .into(),
+            ..Default::default()
+        };
+        let mut journal = MemoryJournal::default();
+        advance(
+            &graph(vec![node("one", route("first"))]),
+            &mut owner,
+            &mut journal,
+        )
+        .unwrap();
+        let reason = journal.0.as_ref().unwrap().nodes[0]
+            .advance_error
+            .as_deref()
+            .unwrap();
+        assert!(!reason.contains("TOKEN_SENTINEL"));
+        assert!(!reason.chars().any(char::is_control));
+        assert!(reason.len() <= MAX_ADVANCE_ERROR_BYTES);
+        if let Some(field) = expected {
+            assert!(reason.contains(field) && reason.contains("17"), "{reason}");
+        }
+        assert!(reason.contains("retry"), "{reason}");
+    }
+}
+
+#[test]
+fn graph_remedies_follow_writer_resource_and_unknown_handoff_causes() {
+    use crate::coordination::facade::{DispatchRefusalFact, FacadeError};
+    use provenant_records::diagnostic::{ResourceFact, SettingSource};
+    let cases = [
+        (
+            FacadeError::DispatchRefused {
+                fact: Some(DispatchRefusalFact::DirtyWriter),
+                disk: None,
+                reason: "TOKEN_SENTINEL".into(),
+            },
+            "commit",
+            false,
+        ),
+        (
+            FacadeError::DispatchRefused {
+                fact: Some(DispatchRefusalFact::Resource(ResourceFact::Disk {
+                    free: 1,
+                    floor: 2,
+                    origin: SettingSource::Configuration,
+                })),
+                disk: None,
+                reason: "TOKEN_SENTINEL".into(),
+            },
+            "free disk space",
+            false,
+        ),
+        (
+            FacadeError::LaunchUnknown {
+                operation_id: provenant_core::OperationId::parse("dispatch-17").unwrap(),
+            },
+            "dispatch-17",
+            true,
+        ),
+    ];
+    for (error, condition, uncertain) in cases {
+        let mut owner = ErrorLauncher {
+            now: Some(at(0)),
+            errors: [(1, error)].into(),
+            ..Default::default()
+        };
+        let mut journal = MemoryJournal::default();
+        advance(
+            &graph(vec![node("one", route("first"))]),
+            &mut owner,
+            &mut journal,
+        )
+        .unwrap();
+        let progress = &journal.0.as_ref().unwrap().nodes[0];
+        let reason = if uncertain {
+            retry_of(journal.0.as_ref().unwrap())
+                .reason
+                .as_deref()
+                .unwrap()
+        } else {
+            progress.advance_error.as_deref().unwrap()
+        };
+        assert!(reason.contains(condition), "{reason}");
+        assert!(!reason.contains("TOKEN_SENTINEL"));
+        if uncertain {
+            assert!(
+                reason.contains("inspect") && reason.contains("same operation ID"),
+                "{reason}"
+            );
+            assert!(!reason.contains("provenant retry"));
+            owner.now = Some(at(6));
+            advance(
+                &graph(vec![node("one", route("first"))]),
+                &mut owner,
+                &mut journal,
+            )
+            .unwrap();
+            assert_eq!(owner.calls.len(), 2);
+            assert_eq!(
+                owner.calls[0], owner.calls[1],
+                "unknown handoff replays the same attempt key"
+            );
+        }
+    }
+}
+
+#[test]
 fn writer_binding_failure_persists_only_the_safe_projection() {
     use crate::coordination::facade::FacadeError;
     let mut writer = node("writer", route("first"));
