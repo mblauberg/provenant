@@ -170,9 +170,6 @@ pub struct AdapterSpec {
     /// Local allowance windows governing models under allowance_prefix.
     pub allowance_windows: &'static [&'static str],
     pub namespaced_models: bool,
-    pub catalogue_models_only: bool,
-    /// Require an exact catalogue entry before starting a run.
-    pub require_catalogue_for_launch: bool,
     pub chair_switch: bool,
     /// The local hook can read pending answer offers for this adapter.
     pub local_offer_reader: bool,
@@ -394,8 +391,6 @@ adapter_specs! { $;
         allowance_prefix: None,
         allowance_windows: &[],
         namespaced_models: false,
-        catalogue_models_only: false,
-        require_catalogue_for_launch: true,
         chair_switch: true,
         local_offer_reader: true,
         cloud_transport: Some(CloudTransport::Claude),
@@ -473,8 +468,6 @@ adapter_specs! { $;
         allowance_prefix: None,
         allowance_windows: &[],
         namespaced_models: false,
-        catalogue_models_only: false,
-        require_catalogue_for_launch: true,
         chair_switch: false,
         local_offer_reader: false,
         cloud_transport: Some(CloudTransport::Codex),
@@ -551,8 +544,6 @@ adapter_specs! { $;
         allowance_prefix: None,
         allowance_windows: &[],
         namespaced_models: false,
-        catalogue_models_only: false,
-        require_catalogue_for_launch: true,
         chair_switch: false,
         local_offer_reader: false,
         cloud_transport: None,
@@ -633,8 +624,6 @@ adapter_specs! { $;
         allowance_prefix: None,
         allowance_windows: &[],
         namespaced_models: false,
-        catalogue_models_only: false,
-        require_catalogue_for_launch: true,
         chair_switch: false,
         local_offer_reader: false,
         cloud_transport: None,
@@ -713,8 +702,6 @@ adapter_specs! { $;
         allowance_prefix: Some("opencode-go/"),
         allowance_windows: &["five_hour", "seven_day", "thirty_day"],
         namespaced_models: true,
-        catalogue_models_only: true,
-        require_catalogue_for_launch: true,
         chair_switch: false,
         local_offer_reader: false,
         cloud_transport: None,
@@ -784,8 +771,6 @@ adapter_specs! { $;
         allowance_prefix: None,
         allowance_windows: &[],
         namespaced_models: false,
-        catalogue_models_only: false,
-        require_catalogue_for_launch: true,
         chair_switch: false,
         local_offer_reader: false,
         cloud_transport: None,
@@ -857,8 +842,6 @@ adapter_specs! { $;
         allowance_prefix: None,
         allowance_windows: &[],
         namespaced_models: false,
-        catalogue_models_only: false,
-        require_catalogue_for_launch: true,
         chair_switch: false,
         local_offer_reader: false,
         cloud_transport: None,
@@ -929,8 +912,6 @@ adapter_specs! { $;
         allowance_prefix: None,
         allowance_windows: &[],
         namespaced_models: false,
-        catalogue_models_only: false,
-        require_catalogue_for_launch: false,
         chair_switch: false,
         local_offer_reader: false,
         cloud_transport: None,
@@ -993,9 +974,6 @@ mod tests {
     #[test]
     fn account_and_session_policies_preserve_adapter_behavior() {
         for spec in ADAPTER_SPECS {
-            if spec.name != "fixture-provider" {
-                assert!(spec.require_catalogue_for_launch, "{}", spec.name);
-            }
             assert_eq!(
                 spec.transcript_account_root,
                 spec.id == Harness::Claude,
