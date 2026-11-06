@@ -1731,3 +1731,24 @@ fn public_retry_of_dynamic_member_recomputes_enclosing_join_without_retiring_the
         .unwrap();
     assert_eq!(planner.attempts[0].attempt_ref.as_deref(), Some("old-plan"));
 }
+
+#[test]
+fn public_retry_preserves_live_spawn_only_children() {
+    let (document, mut checkpoint, _) = settled();
+    let library = template::TemplateLibrary::bundled();
+    let resolvers = Default::default();
+    let limits = plans::generous();
+    let context = patch::PatchContext { library: &library, resolvers: &resolvers, scan: &|_| Ok(()), journal: None, limits: &limits };
+    patch::admit_patch(
+        &mut patch::LiveGraph { document: &document, checkpoint: &mut checkpoint }, Some("work"),
+        &patch::Patch { schema_version: patch::PATCH_SCHEMA_VERSION, nodes: vec![json!({"id":"spawned", "use":"task", "brief":"Independent child"})], ..Default::default() },
+        &context,
+    ).unwrap();
+    let mut owner = FakeOwner { observations: [AttemptObservation::Pending { attempt_ref: Some("live-child".into()) }].into(), ..Default::default() };
+    let mut checkpoint = advance(&document, &mut owner, &mut MemoryJournal(Some(checkpoint))).unwrap().checkpoint;
+    let child = checkpoint.nodes.iter().find(|node| node.id == "work--spawned").unwrap().clone();
+    assert_eq!(child.state, NodeState::Running);
+    patch::retry_node_and_dependants(&mut patch::LiveGraph { document: &document, checkpoint: &mut checkpoint }, "work", None, &context).unwrap();
+    assert_eq!(checkpoint.nodes.iter().find(|node| node.id == child.id), Some(&child));
+    assert!(checkpoint.expansions.iter().all(|expansion| !expansion.retired()));
+}
