@@ -557,7 +557,9 @@ fn lane_cli_and_mcp_share_wait_receipts_and_observation_errors() -> Result {
             RelayOp::Add(child) => {
                 assert_eq!(child.brief, "Observe child");
                 // Admission may outlast the requested observation window.
-                std::thread::sleep(std::time::Duration::from_millis(1100));
+                for _ in 0..22 {
+                    provenant_os::sys::wait_pause(std::time::Duration::from_millis(50));
+                }
                 Ok(json!({"parent_attempt":attempt.to_string(),"revision":2}))
             }
             RelayOp::Wait { .. } => Ok(json!({"waiting":true})),
