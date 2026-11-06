@@ -569,6 +569,7 @@ fn copy_state_classified(
 }
 
 #[test]
+#[allow(clippy::print_stderr, reason = "report an unavailable test fixture")]
 fn retained_state_hard_link_is_an_integrity_refusal() -> Result<(), Box<dyn std::error::Error>> {
     use provenant_records::diagnostic::BoundaryClass;
     let temp = tempfile::tempdir()?;

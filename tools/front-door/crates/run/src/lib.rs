@@ -576,11 +576,12 @@ impl RunError {
                     ))
                     .fact(DiagnosticFact::CredentialGrant { access });
             }
-            Self::Confinement(error) if error.resource_fact().is_some() => {
-                let fact = error.resource_fact().expect("checked resource fact");
-                diagnostic = fact
-                    .project(diagnostic)
-                    .fact(DiagnosticFact::Resource(fact));
+            Self::Confinement(error) => {
+                if let Some(fact) = error.resource_fact() {
+                    diagnostic = fact
+                        .project(diagnostic)
+                        .fact(DiagnosticFact::Resource(fact));
+                }
             }
             Self::WriterProjectMismatch {
                 project, selected, ..

@@ -529,11 +529,9 @@ impl PrepareError {
                     })
                 {
                     let mut classes = plans.iter().map(|error| error.boundary_class());
-                    let first = classes.next().unwrap();
-                    if classes.all(|class| class == first) {
-                        first
-                    } else {
-                        provenant_records::diagnostic::BoundaryClass::None
+                    match classes.next() {
+                        Some(first) if classes.all(|class| class == first) => first,
+                        _ => provenant_records::diagnostic::BoundaryClass::None,
                     }
                 } else {
                     provenant_records::diagnostic::BoundaryClass::None
