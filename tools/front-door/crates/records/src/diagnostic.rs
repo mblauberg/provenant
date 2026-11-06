@@ -123,6 +123,9 @@ pub enum ResourceFact {
         limit: u64,
         origin: SettingSource,
     },
+    DependencyPreparation {
+        configured: bool,
+    },
     MemoryPressure {
         level: PressureLevel,
         threshold: PressureThreshold,
@@ -159,6 +162,9 @@ impl ResourceFact {
             Self::ProfileLimit { bytes, limit, origin } => diagnostic
                 .detail(format!("sandbox profile is {bytes} bytes; domains.run.profile_limit_bytes is {limit} bytes (source: {})", origin.description()))
                 .next("reduce granted roots or adjust domains.run.profile_limit_bytes"),
+            Self::DependencyPreparation { configured } => diagnostic
+                .detail(format!("dependency preparation failed; lanes.prepare_deps=true (source: {})", if *configured { "sealed profile" } else { "shipped default" }))
+                .next("repair dependency preparation or set lanes.prepare_deps=false"),
             Self::MemoryPressure { level, threshold, origin } => diagnostic
                 .detail(format!("host memory pressure is {}; domains.fabric.lanes.memory_pressure_threshold is {} (source: {})", level.name(), threshold.name(), origin.description()))
                 .next("reduce host memory pressure before retrying"),

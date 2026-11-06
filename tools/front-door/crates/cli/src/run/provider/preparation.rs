@@ -180,7 +180,12 @@ pub(super) fn dependency_preparation_refusal(
     enabled: bool,
     profile: &provenant_records::run::HarnessProfile,
 ) -> String {
-    let origin = if profile.knobs.contains_key("lanes.prepare_deps") {
+    let origin = if profile
+        .knobs
+        .get("lanes.prepare_deps")
+        .and_then(serde_json::Value::as_bool)
+        .is_some()
+    {
         format!("sealed profile {}", profile.name)
     } else {
         "compiled default".to_owned()
@@ -408,6 +413,8 @@ pub(super) enum PrepareError {
     #[error("{0}")]
     DirtyWriter(String),
     #[error("{message}")]
+    DependencyPreparation { message: String, configured: bool },
+    #[error("{message}")]
     Candidates {
         message: String,
         plans: Vec<provenant_confinement::PlanError>,
@@ -479,6 +486,18 @@ impl PrepareError {
                     skipped_routes,
                     fallback_outcome,
                 }
+            }
+            Self::DependencyPreparation {
+                message,
+                configured,
+            } => {
+                let mut refusal = run::PrepareRefusal::from(message);
+                refusal.resource = Some(
+                    provenant_records::diagnostic::ResourceFact::DependencyPreparation {
+                        configured,
+                    },
+                );
+                refusal
             }
             Self::ReadOnly(error) => {
                 let boundary_class = error.boundary_class();
@@ -600,6 +619,22 @@ impl From<String> for PrepareError {
 impl From<&str> for PrepareError {
     fn from(message: &str) -> Self {
         Self::Other(message.into())
+    }
+}
+
+#[test]
+fn dependency_preparation_retains_setting_source_without_source_error() {
+    use provenant_records::diagnostic::ResourceFact;
+    for configured in [false, true] {
+        let refusal = PrepareError::DependencyPreparation {
+            message: "TOKEN_SENTINEL".into(),
+            configured,
+        }
+        .into_refusal();
+        assert_eq!(
+            refusal.resource,
+            Some(ResourceFact::DependencyPreparation { configured })
+        );
     }
 }
 
@@ -2625,8 +2660,14 @@ pub(super) fn prepare_candidates(
                         &|| host_dependency_path(cancel),
                         cancel,
                     )
-                    .map_err(|error| {
-                        dependency_preparation_refusal(error, enabled, &task.profile)
+                    .map_err(|error| PrepareError::DependencyPreparation {
+                        message: dependency_preparation_refusal(error, enabled, &task.profile),
+                        configured: task
+                            .profile
+                            .knobs
+                            .get("lanes.prepare_deps")
+                            .and_then(serde_json::Value::as_bool)
+                            .is_some(),
                     })?,
                 )
             }

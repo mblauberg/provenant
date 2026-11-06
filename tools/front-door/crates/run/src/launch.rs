@@ -351,6 +351,37 @@ fn write_grant_limit_diagnostic_names_setting_and_source() {
     }
 }
 
+#[test]
+fn dependency_preparation_diagnostic_names_setting_and_source() {
+    use provenant_records::diagnostic::ResourceFact;
+    for (configured, source) in [(false, "shipped default"), (true, "sealed profile")] {
+        let kind =
+            RefusalKind::PreparationResource(ResourceFact::DependencyPreparation { configured });
+        let diagnostic = kind.diagnostic().unwrap();
+        assert_eq!(diagnostic.code, "REFUSED");
+        let detail = diagnostic.detail.unwrap();
+        assert!(detail.contains("lanes.prepare_deps"));
+        assert!(detail.contains(source));
+        assert!(!detail.contains("TOKEN_SENTINEL"));
+        let inventory = include_str!("../assets/launch-guards.toml")
+            .parse::<toml_edit::DocumentMut>()
+            .unwrap();
+        assert!(
+            inventory["guard"]
+                .as_array_of_tables()
+                .unwrap()
+                .iter()
+                .any(|row| {
+                    row.get("setting").and_then(|v| v.as_str()) == Some("lanes.prepare_deps")
+                        && row.get("boundary").and_then(|v| v.as_str())
+                            == Some("configurable_default")
+                        && row.get("code").and_then(|v| v.as_str())
+                            == Some(diagnostic.code.as_str())
+                })
+        );
+    }
+}
+
 /// Run-owned per-attempt paths. Allocated once, shared by explicit fallback candidates.
 pub struct LaunchPaths {
     pub attempt_id: AttemptId,
@@ -744,6 +775,7 @@ impl RefusalKind {
             ResourceFact::Disk { .. } => ErrorKind::DiskFloor,
             ResourceFact::ArgvPromptLimit { .. } => ErrorKind::Invalid,
             ResourceFact::WriteGrantLimit { .. } => ErrorKind::Limit,
+            ResourceFact::DependencyPreparation { .. } => ErrorKind::Refused,
             ResourceFact::GrantLimit { .. } | ResourceFact::ProfileLimit { .. } => {
                 ErrorKind::Confinement
             }
