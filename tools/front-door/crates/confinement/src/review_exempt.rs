@@ -1,12 +1,16 @@
-//! Repo paths a writer may change without forcing review.
+//! Repo paths ignored when reporting uncommitted writer changes.
 //!
 //! Every implementation touches some paths (release-note fragments, specs,
 //! lock files). The host lists them per project; a committed change to a listed
-//! path never makes a lane `review_required`, and a listed path left uncommitted
-//! never makes it `uncommitted`. Paths that change what the host or an agent
+//! path left uncommitted never makes a lane `uncommitted`. Paths that change what the host or an agent
 //! executes (Git metadata, hooks, provider control roots) can never be listed.
-use crate::quarantine::{is_hard_control, is_instruction_path};
-use std::{collections::BTreeSet, ffi::OsStr, os::unix::ffi::OsStrExt, path::Path};
+use crate::plan::read_only::RESERVED;
+use std::{
+    collections::BTreeSet,
+    ffi::OsStr,
+    os::unix::ffi::OsStrExt,
+    path::{Component, Path},
+};
 
 /// Longest accepted pattern, in bytes.
 pub const MAX_PATTERN_BYTES: usize = 256;
@@ -57,7 +61,7 @@ impl ReviewExempt {
     }
 
     /// Compile validated patterns; an invalid one is skipped, since a
-    /// narrower list only adds review.
+    /// narrower list may report more uncommitted changes.
     pub fn new<S: AsRef<str>>(patterns: &[S]) -> Self {
         let patterns = patterns
             .iter()
@@ -90,7 +94,7 @@ impl ReviewExempt {
     }
 
     /// Whether `path` is a known symlink that a listed pattern would otherwise
-    /// have exempted. Such a path needs review.
+    /// have exempted. Such a path still counts as uncommitted.
     pub fn refuses_symlink(&self, path: &[u8]) -> bool {
         self.symlinks.contains(path) && self.lists(path)
     }
@@ -106,9 +110,7 @@ impl ReviewExempt {
 
     /// Whether `path` (repository-relative bytes) is listed and may be listed.
     /// Names compare without ASCII case, as the platform's file systems do.
-    /// Instruction documents and the `.agents/` tree are exempt only by an
-    /// exact path listing, never through a directory or a bare name, and a
-    /// symlink is never exempt.
+    /// A symlink is never exempt.
     pub fn covers(&self, path: &[u8]) -> bool {
         !self.symlinks.contains(path) && self.lists(path)
     }
@@ -117,12 +119,10 @@ impl ReviewExempt {
         if self.patterns.is_empty() || is_hard_control(Path::new(OsStr::from_bytes(path))) {
             return false;
         }
-        let instruction = is_instruction_path(path);
         self.patterns.iter().any(|pattern| {
             let text = pattern.text.as_bytes();
             match pattern.shape {
                 Shape::Path => path.eq_ignore_ascii_case(text),
-                Shape::Directory | Shape::Name if instruction => false,
                 Shape::Directory => {
                     path.len() > text.len() && path[..text.len()].eq_ignore_ascii_case(text)
                 }
@@ -133,6 +133,38 @@ impl ReviewExempt {
             }
         })
     }
+}
+
+/// Paths excluded from the small-delta review shortcut, including instruction
+/// files and execution controls. This does not restrict writer settlement.
+pub fn is_review_protected_path(path: &[u8]) -> bool {
+    (path.len() > 8 && path[..8].eq_ignore_ascii_case(b".agents/"))
+        || is_hard_control(Path::new(OsStr::from_bytes(path)))
+        || Path::new(OsStr::from_bytes(path)).components().any(|component| {
+            matches!(component, Component::Normal(name) if [b"AGENTS.md".as_slice(), b"HARNESS.md", b"CLAUDE.md", b"GEMINI.md"].iter().any(|doc| name.as_bytes().eq_ignore_ascii_case(doc)))
+        })
+}
+
+pub(crate) fn is_hard_control(path: &Path) -> bool {
+    path.components().any(|component| {
+        let Component::Normal(name) = component else {
+            return true;
+        };
+        [b".git".as_slice(), b".gitattributes", b".gitmodules"]
+            .iter()
+            .any(|control| name.as_bytes().eq_ignore_ascii_case(control))
+    }) || path.components().next().is_some_and(|first| {
+        // Retain execution-control roots, while instruction paths follow the
+        // same uncommitted-change exemptions as other files.
+        let root = first.as_os_str().as_bytes();
+        RESERVED
+            .iter()
+            .filter(|reserved| {
+                ![".agents", "AGENTS.md", "CLAUDE.md", "GEMINI.md"].contains(reserved)
+            })
+            .chain(&[".githooks", "hooks"])
+            .any(|reserved| root.eq_ignore_ascii_case(reserved.as_bytes()))
+    })
 }
 
 #[cfg(test)]
@@ -208,25 +240,25 @@ mod tests {
     }
 
     #[test]
-    fn instruction_documents_need_an_exact_path_listing() {
-        let exempt = defaults();
+    fn instruction_documents_follow_normal_exemptions() {
+        let exempt = ReviewExempt::new(&["AGENTS.md", ".agents/", "docs/"]);
+        assert!(exempt.covers(b"docs/AGENTS.md"));
+        assert!(exempt.covers(b".agents/notes/a.md"));
+        assert!(exempt.covers(b"AGENTS.md"));
+    }
+
+    #[test]
+    fn review_shortcut_still_excludes_instruction_and_control_paths() {
         for path in [
-            "docs/specs/AGENTS.md",
-            "docs/specs/sub/claude.md",
-            "docs/release-notes/next.d/CLAUDE.md",
-            ".agents/x/Cargo.lock",
-            "docs/specs/HARNESS.md",
-            "docs/specs/GEMINI.md",
+            "AGENTS.md",
+            "docs/CLAUDE.md",
+            ".agents/a.md",
+            ".git/config",
+            ".github/ci.yml",
         ] {
-            assert!(!exempt.covers(path.as_bytes()), "{path}");
+            assert!(is_review_protected_path(path.as_bytes()), "{path}");
         }
-        let bare = ReviewExempt::new(&["AGENTS.md", ".agents/", "docs/"]);
-        assert!(!bare.covers(b"docs/AGENTS.md"));
-        assert!(!bare.covers(b".agents/notes/a.md"));
-        let exact = ReviewExempt::new(&["docs/AGENTS.md", ".agents/notes/a.md"]);
-        assert!(exact.covers(b"docs/AGENTS.md"));
-        assert!(exact.covers(b".agents/notes/a.md"));
-        assert!(!exact.covers(b"docs/other/AGENTS.md"));
+        assert!(!is_review_protected_path(b"src/lib.rs"));
     }
 
     #[test]
