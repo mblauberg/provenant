@@ -1953,10 +1953,27 @@ fn path_denial_hint(stderr: &[u8]) -> Option<String> {
     let text = String::from_utf8_lossy(stderr);
     let line = text.lines().find(|line| {
         line.contains('/')
-            && (line.contains("Permission denied") || line.contains("Operation not permitted"))
+            && (line.contains("Permission denied")
+                || line.contains("Operation not permitted")
+                || line.contains("deny(1) file-"))
     })?;
+    let operation = if let Some(operation) = line
+        .split_whitespace()
+        .find(|word| word.starts_with("file-") && line.contains("deny(1)"))
+    {
+        operation
+    } else if line.contains("cannot create") || line.starts_with("touch:") {
+        "create"
+    } else if line.contains("cannot remove") || line.starts_with("rm:") {
+        "remove"
+    } else if line.contains("cannot open") || line.starts_with("cat:") {
+        "read/open"
+    } else {
+        "file access"
+    };
+    let operation = provenant_confinement::redact::bounded_line(operation, 80);
     Some(format!(
-        "Path access was denied; the missing access grant may be for this path (also check filesystem permissions): {}",
+        "OS denied {operation}; path and error (check lane grants and filesystem permissions): {}",
         provenant_confinement::redact::bounded_line(line, 240)
     ))
 }
@@ -2015,6 +2032,15 @@ mod host_clock_tests {
         .expect("path denial");
         assert!(hint.contains("/fixture/path"));
         assert!(!hint.contains("ghp_abcdefghijklmnopqrstuvwxyz0123456789"));
+        let create = path_denial_hint(b"touch: /fixture/repo/file: Operation not permitted").unwrap();
+        assert!(create.contains("denied create"));
+        assert!(create.contains("/fixture/repo/file"));
+        let read = path_denial_hint(b"cat: /fixture/secret: Permission denied").unwrap();
+        assert!(read.contains("denied read/open"));
+        assert!(read.contains("/fixture/secret"));
+        let sandbox = path_denial_hint(b"deny(1) file-write-create /fixture/repo/new").unwrap();
+        assert!(sandbox.contains("denied file-write-create"));
+        assert!(sandbox.contains("/fixture/repo/new"));
     }
 
     #[test]

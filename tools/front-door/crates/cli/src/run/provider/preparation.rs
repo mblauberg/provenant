@@ -1952,6 +1952,15 @@ pub(super) fn prepare_candidates(
             Stdin::Bytes(bytes) => bytes,
             Stdin::Null => Vec::new(),
         };
+        // Resolve gh credentials on the host, where a keychain login is
+        // available. The token travels only in the live launch environment.
+        if writer.is_none()
+            && task.access.network(true) == NetworkAccess::Open
+            && matches!(adapter.id(), "codex" | "claude")
+            && let Ok(gh) = locate("gh")
+        {
+            super::gh_auth::inject(&executor, &gh, &home, cancel, &mut spec.env);
+        }
         return Ok(run::PreparedLaunch {
             skipped_routes: reasons,
             argv: spec.argv,
