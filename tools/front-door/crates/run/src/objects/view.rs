@@ -90,7 +90,7 @@ pub(crate) fn prepare_refs(
 
 pub(crate) struct ObjectSource {
     pub objects: Directory,
-    refs: Directory,
+    pub refs: Directory,
 }
 
 pub(crate) fn merge_head(source: &ObjectSource) -> Result<Vec<u8>> {

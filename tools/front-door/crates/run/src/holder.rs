@@ -370,6 +370,14 @@ impl provenant_supervisor::Holder for RunHolder<'_> {
             })
             .map_err(custody_error)
     }
+    fn budget_warning(
+        &self,
+        _raw: &[u8],
+        _tokens: u64,
+        _budget: u64,
+    ) -> custody::Result<()> {
+        Ok(())
+    }
     fn terminal(
         &self,
         context: &[u8],
@@ -1238,8 +1246,8 @@ impl RunStore {
             });
         }
         // A writer that passed its token budget was stopped by the host: say
-        // so, with the budget and where it came from. Its work stays in the
-        // lane's worktree for a continuation.
+        // so, with the budget and where it came from. Its work ends up
+        // committed on its branch.
         if decoded.outcome == Outcome::TimedOut && exit.stop_reason == Some(StopReason::TokenBudget)
         {
             let budget = crate::launch::token_budget(
@@ -1249,7 +1257,7 @@ impl RunStore {
             );
             let limit = format!(
                 "token budget reached: provider stopped after passing {} tokens (source: {}); \
-                 unfinished work stays in the lane worktree for a continuation",
+                 work committed on its branch",
                 budget.tokens,
                 budget.source.as_str()
             );
@@ -1259,6 +1267,34 @@ impl RunStore {
                 }
                 _ => limit,
             });
+        }
+        let budget = crate::launch::token_budget(
+            task,
+            self.context.state_root.as_path(),
+            &record.project_id.to_string(),
+        );
+        if task.writer.is_some() && budget.tokens > 0 {
+            let provider = record
+                .applied_route
+                .as_ref()
+                .and_then(|r| r.provider.as_deref())
+                .or_else(|| {
+                    record
+                        .observed_route
+                        .as_ref()
+                        .and_then(|r| r.provider.as_deref())
+                });
+            if let Some(p) = provider
+                && !crate::token_budget::enforces(p)
+            {
+                let note = format!(
+                    "token budget is not enforced for provider {p}: live usage is not reported while running"
+                );
+                decoded.reason = Some(match decoded.reason.take() {
+                    Some(existing) => format!("{existing}; {note}"),
+                    None => note,
+                });
+            }
         }
         if cancelled {
             decoded.outcome = Outcome::Cancelled;
@@ -1280,6 +1316,9 @@ impl RunStore {
             } else {
                 crate::prepare_writer(writer, &self.writer_registry, record.project_id).and_then(
                     |writer| {
+                        if exit.stop_reason == Some(StopReason::TokenBudget) {
+                            writer.commit_budget_stop(attempt)?;
+                        }
                         let driver = settlement.as_mut().ok_or(RunError::Contention)?;
                         let cancel = driver.cancellation();
                         crate::settlement::with_cancellation(attempt, exit.scope, &cancel, || {
@@ -2576,6 +2615,122 @@ mod writer_recovery_tests {
             |row| row.get(0),
         )?;
         assert!(!retained);
+        Ok(())
+    }
+
+    #[test]
+    fn writer_token_budget_stop_commits_uncommitted_work_and_publishes_branch()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        use crate::delivery_tests::{PrepareFixture, registered_landed_writer_fixture};
+        let fixture = PrepareFixture::new()?;
+        let execution = registered_landed_writer_fixture(&fixture)?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        let store = RunStore::open(&execution, &call)?;
+        let mut run = input();
+        run.request.tasks[0].writer = Some(fixture.writer.clone());
+        store.create(&run, &call)?;
+        let id = run.attempts[0].attempt_id;
+        store.mark_starting(
+            &store.record(id, &call)?,
+            &route(),
+            &[],
+            &Default::default(),
+            None,
+            &call,
+        )?;
+        let record = store.claim(id, &clock, &call)?.ok_or("not admitted")?;
+        let scope = RunStore::scope(&record);
+        let attempt = store.attempt_dir(run.run_id, id, false)?;
+        let mut launch = crate::prepare_writer(
+            &fixture.writer,
+            execution.state_root.as_path(),
+            execution.project_id,
+        )?;
+        launch.snapshot(execution.state_root.as_path(), &attempt, scope)?;
+        let candidate = store.temporary_path(id, &call)?.join("candidate-0");
+        std::fs::create_dir_all(&candidate)?;
+        let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
+        crate::objects::prepare_bound(
+            &git,
+            launch.worktree.repo(),
+            &attempt,
+            &candidate,
+            launch.branch.as_str(),
+            launch.base,
+        )?;
+        let pin = format!("refs/provenant/import/{}", launch.base);
+        fixture.git(&["update-ref", &pin, &launch.base.to_string()])?;
+        let (directory, binding) = launch.custody.take().ok_or("writer custody")?;
+        let lease = provenant_supervisor::fixture::acquire_writer_with_binding(
+            directory,
+            scope,
+            binding,
+            call.lock_budget(),
+            &cancel,
+            &clock,
+        )?;
+        drop(provenant_supervisor::fixture::bind_writer_attempt(
+            lease, &attempt,
+        )?);
+
+        // Leave an uncommitted file in the lane's worktree.
+        std::fs::write(
+            launch.worktree.repo().root_path().join("budget-work.txt"),
+            "uncommitted work before budget stop\n",
+        )?;
+
+        let mut observed = crate::tests::exit();
+        observed.scope = scope;
+        observed.stop_reason = Some(StopReason::TokenBudget);
+        crate::dispatch_tests::seal_exit(&store, &observed)?;
+        crate::artifacts::seal(
+            &attempt,
+            "launch.json",
+            &crate::db::bytes(
+                &serde_json::json!({"schema_version":1,"scope":scope,"requester":execution.actor_id}),
+            )?,
+            RECORD_LIMIT,
+        )?;
+        let fake = crate::dispatch_tests::Fake::with_observed(
+            Some(route()),
+            Some(Outcome::TimedOut),
+        );
+        let finished = store.finish(
+            id,
+            &attempt,
+            &observed,
+            &fake,
+            &call,
+        )?;
+        let AttemptState::Terminal { outcome, reason, .. } = finished.state else {
+            panic!("attempt must be terminal");
+        };
+        assert_eq!(outcome, Outcome::TimedOut, "reason: {reason:?}");
+        let reason_text = reason.expect("terminal attempt has reason");
+        assert!(
+            reason_text.contains("token budget reached: provider stopped after passing"),
+            "reason: {reason_text}"
+        );
+        assert!(
+            reason_text.contains("work committed on its branch"),
+            "reason: {reason_text}"
+        );
+        // The newly committed file is now published on the lane branch.
+        let published_tip = crate::objects::resolve_ref(
+            &git,
+            launch.worktree.repo(),
+            launch.branch.as_str(),
+        )?;
+        assert_ne!(published_tip, launch.base);
+        let log = crate::objects::command(
+            &git,
+            launch.worktree.repo().common_git_dir(),
+            launch.worktree.repo().root_path(),
+            &["log".into(), "-1".into(), "--pretty=%B".into(), published_tip.to_string().into()],
+            None,
+        )?;
+        assert_eq!(String::from_utf8_lossy(&log).trim(), "stopped on budget");
         Ok(())
     }
 

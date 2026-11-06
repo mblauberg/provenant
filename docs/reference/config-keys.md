@@ -667,7 +667,7 @@ Set the cap in `[domains.quota]`; set prices per account as shown.
       "writer_token_budget": {
         "allowed": "0 or more tokens",
         "default": "500000",
-        "effect": "Tokens a writer attempt may use, from the usage its provider reports, before it is ended with its work committed and pushed for a continuation. 0 turns the budget off. Cached input counts. Only a provider that reports usage while it runs (Claude) can be stopped; for any other the budget is not enforced, and `--explain` says so. Time queued for a build slot does not count towards the wall-clock deadline, up to lanes.slot_wait_seconds in total. The source (run, project, host or default) is shown with the budget.",
+        "effect": "Tokens a writer attempt may use, from the fresh usage its provider reports, before it is ended with its work committed and pushed for a continuation. 0 turns the budget off. Cache reads do not count. Enforced for Claude and Codex from live turn usage; for other providers the budget is not enforced, and launch warnings or receipt notes say so. Time queued for a build slot does not count towards the wall-clock deadline, up to lanes.slot_wait_seconds in total. The source (run, project, host or default) is shown with the budget.",
         "type": "int"
       }
     }

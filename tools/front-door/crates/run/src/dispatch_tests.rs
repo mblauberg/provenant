@@ -2997,13 +2997,13 @@ pub(super) struct Fake {
     network: Cell<Option<NetworkAccess>>,
     refuse: bool,
     policy_task: Option<TaskId>,
-    observed: Option<RouteRecord>,
+    pub(super) observed: Option<RouteRecord>,
     pub(super) decoded: Cell<usize>,
     prepared: Cell<usize>,
     resumed: Cell<Option<AttemptId>>,
     prompt: RefCell<String>,
     /// The outcome a decode reports; success when unset.
-    outcome: Option<Outcome>,
+    pub(super) outcome: Option<Outcome>,
     /// The answer a decode reports, instead of the captured stdout.
     answer: Option<String>,
     /// Partial-finish signals a decode reports.
@@ -3011,6 +3011,16 @@ pub(super) struct Fake {
     /// Report `QuotaLimited` only when this exact sealed stderr arrives.
     quota_stderr: Option<&'static [u8]>,
     assess_empty: bool,
+}
+
+impl Fake {
+    pub(super) fn with_observed(observed: Option<RouteRecord>, outcome: Option<Outcome>) -> Self {
+        Self {
+            observed,
+            outcome,
+            ..Default::default()
+        }
+    }
 }
 
 #[test]

@@ -30,9 +30,10 @@ pub const REGISTRATION: crate::Registration = crate::Registration {
 crate::adapter!(Codex, "codex", prepare);
 
 /// Live token usage for a token budget. `codex exec --json` reports each
-/// turn's usage in its `turn.completed` event; `input_tokens` already holds
-/// the cached reads and writes, so a turn's total is input plus output. Every
-/// turn is a distinct call, so each gets its own key and they add.
+/// turn's usage in its `turn.completed` event; `input_tokens` holds cached
+/// reads and writes, so cache reads (`cached_input_tokens`) are subtracted to
+/// count fresh tokens only. Every turn is a distinct call, so each gets its
+/// own key and they add.
 pub struct LiveUsage;
 static TURNS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 impl provenant_os::capture::FrameDecoder for LiveUsage {
@@ -52,14 +53,20 @@ impl provenant_os::capture::FrameDecoder for LiveUsage {
         true
     }
 }
-/// The token total of a `turn.completed` frame, or `None` for any other frame
-/// or one that does not parse. A bad frame never ends an attempt.
+/// The fresh token total of a `turn.completed` frame, or `None` for any other frame
+/// or one that does not parse. Cache reads are subtracted so only fresh tokens count.
+/// A bad frame never ends an attempt.
 fn live_usage(frame: &[u8]) -> Option<u64> {
     if !frame.windows(14).any(|window| window == b"turn.completed") {
         return None;
     }
     match serde_json::from_slice::<Event>(frame).ok()? {
-        Event::Completed { usage } => Some(usage.input_tokens.saturating_add(usage.output_tokens)),
+        Event::Completed { usage } => {
+            let fresh_input = usage
+                .input_tokens
+                .saturating_sub(usage.cached_input_tokens.unwrap_or(0));
+            Some(fresh_input.saturating_add(usage.output_tokens))
+        }
         _ => None,
     }
 }
@@ -323,12 +330,13 @@ mod live_usage_tests {
     use provenant_os::capture::{FrameDecoder, FrameEvent};
 
     #[test]
-    fn a_completed_turn_reports_its_input_including_cached_and_its_output() {
+    fn a_completed_turn_reports_its_fresh_input_and_output() {
         let turn = br#"{"type":"turn.completed","usage":{"input_tokens":1000,"cached_input_tokens":800,"output_tokens":50}}"#;
         let FrameEvent::Usage { tokens, key } = LiveUsage.decode(turn).unwrap() else {
             panic!("a completed turn reports usage");
         };
-        assert_eq!(tokens, 1050);
+        // 1000 (total input) - 800 (cached) + 50 (output) = 250 fresh tokens.
+        assert_eq!(tokens, 250);
         // Each turn is its own call, so two identical turns both count.
         let FrameEvent::Usage { key: next, .. } = LiveUsage.decode(turn).unwrap() else {
             panic!("a completed turn reports usage");

@@ -15,12 +15,19 @@ pub enum Verdict {
     Unreported,
 }
 
-/// Every token class the provider reported, summed, cached input included.
-/// `None` when it reported none, which is not the same as zero.
+/// Whether `provider` reports live token usage while running, allowing
+/// the guardian to enforce a writer token budget. Claude and Codex enforce it.
+pub fn enforces(provider: &str) -> bool {
+    matches!(provider, "claude" | "codex")
+}
+
+/// Fresh tokens the provider reported, summed. Cache reads do not count:
+/// each call re-reads the whole context, so counting cache reads would
+/// prematurely exhaust the budget. `None` when it reported none, which is
+/// not the same as zero.
 pub fn used(usage: &UsageRecord) -> Option<u64> {
     [
         usage.uncached_input,
-        usage.cache_read,
         usage.cache_write,
         usage.output_excluding_reasoning,
         usage.reasoning,
@@ -33,8 +40,9 @@ pub fn used(usage: &UsageRecord) -> Option<u64> {
     .flatten()
 }
 
-/// Judge `usage` against `budget` tokens. Cached input counts, as the live
-/// figure the guardian stops on does.
+/// Judge `usage` against `budget` tokens. Cache reads do not count:
+/// only fresh tokens count towards the budget, matching the live usage
+/// the guardian stops on.
 pub fn judge(usage: &UsageRecord, budget: u64) -> Verdict {
     if budget == 0 {
         return Verdict::Off;
@@ -62,7 +70,7 @@ mod tests {
     }
 
     #[test]
-    fn cached_input_counts_towards_the_budget() {
+    fn fresh_tokens_count_towards_the_budget_and_cache_reads_are_ignored() {
         let usage = UsageRecord {
             uncached_input: Some(100),
             cache_read: Some(400),
@@ -70,14 +78,17 @@ mod tests {
             output_excluding_reasoning: Some(10),
             ..UsageRecord::default()
         };
-        assert_eq!(used(&usage), Some(560));
+        // 100 (uncached) + 50 (cache write) + 10 (output) = 160.
+        // Cache read (400) is ignored.
+        assert_eq!(used(&usage), Some(160));
         assert_eq!(
-            judge(&usage, 500),
+            judge(&usage, 150),
             Verdict::Over {
-                used: 560,
-                budget: 500
+                used: 160,
+                budget: 150
             }
         );
+        assert_eq!(judge(&usage, 200), Verdict::Within { used: 160 });
     }
 
     #[test]
@@ -103,5 +114,13 @@ mod tests {
             judge(&FakeProvider(vec![None]).report(0), 500_000),
             Verdict::Unreported
         );
+    }
+
+    #[test]
+    fn enforced_providers_are_claude_and_codex() {
+        assert!(enforces("claude"));
+        assert!(enforces("codex"));
+        assert!(!enforces("opencode"));
+        assert!(!enforces("cursor"));
     }
 }

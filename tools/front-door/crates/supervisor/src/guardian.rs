@@ -289,6 +289,11 @@ pub trait Holder {
     fn provider_exited(&self, _context: &[u8], _reason: Option<machine::StopReason>) -> Result<()> {
         Ok(())
     }
+    /// Called when live token usage reaches 90% of the token budget, so the
+    /// lane can be told to commit its work before reaching the budget stop.
+    fn budget_warning(&self, _context: &[u8], _tokens: u64, _budget: u64) -> Result<()> {
+        Ok(())
+    }
     fn terminal(
         &self,
         context: &[u8],
@@ -1019,6 +1024,9 @@ impl Driver<'_> {
                     &mut omitted_warnings,
                     "token budget 90% used",
                 );
+                if let Some(holder) = self.holder {
+                    let _ = holder.budget_warning(&self.holder_context, tokens, plan.token_budget);
+                }
             }
             let over_budget = plan.token_budget > 0
                 && tokens > plan.token_budget

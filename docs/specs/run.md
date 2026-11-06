@@ -786,22 +786,28 @@ The `Status:` line protocol is removed.
 A writer lane is bounded by a token budget, not by the wall clock alone: the
 host `[domains.run] writer_token_budget` (default 500000, 0 for none), replaced
 per project under `[domains.run.projects."PROJECT_ID"]`. The guardian sums the
-tokens the provider reports while the attempt runs, cached input included, one
-figure per provider call. When the sum passes the budget it stops the provider
-with the typed stop `token_budget`, and the attempt settles `timed_out` with a
-reason naming the budget and its source (`project`, `host` or `default`); a
-host setting equal to the default still reports `host`. Unfinished work stays
-in the lane's worktree for a continuation; the host does not commit for it.
-`provenant run --explain` shows the budget, its source and the providers it is
-enforced for. Only a provider whose stream reports usage while it runs can be
-held to it (Claude); for any other the budget is not enforced, and `--explain`
-says so. Time a lane spends queued for a build slot stays off the wall
-deadline, up to `lanes.slot_wait_seconds` (default 7200) in total.
+fresh tokens the provider reports while the attempt runs, one figure per
+provider call; cache reads do not count. When the sum passes the budget it stops
+the provider with the typed stop `token_budget`, and the attempt settles
+`timed_out` with a reason naming the budget and its source (`project`, `host` or
+`default`); a host setting equal to the default still reports `host`. If the
+lane stopped with uncommitted work, the host commits it in the lane's worktree
+with the message `stopped on budget` before publishing the branch. At 90% of the
+budget the lane itself is told, through whatever delivers a steer to a running
+lane, so it can commit first. `provenant run --explain` shows the budget, its
+source and the providers it is enforced for. Claude and Codex enforce the
+budget from live turn usage; for any other provider the budget is not enforced,
+and launch warnings or receipt notes report this. Time a lane spends queued for
+a build slot stays off the wall deadline, up to `lanes.slot_wait_seconds`
+(default 7200) in total.
 - Why: a long writer should stop on what it spends, and a stuck lane must not
   wait or run forever.
 - Test: `crates/supervisor/src/machine.rs::tests::a_token_budget_stop_is_a_typed_stop`;
-  `crates/providers/src/claude.rs::tests::live_usage_counts_each_call_once_with_cached_input`;
+  `crates/providers/src/claude.rs::tests::live_usage_counts_each_call_once_with_fresh_input`;
+  `crates/providers/src/codex.rs::tests::a_completed_turn_reports_its_fresh_input_and_output`;
+  `crates/run/src/token_budget.rs::tests::fresh_tokens_count_towards_the_budget_and_cache_reads_are_ignored`;
   `crates/run/src/token_budget.rs::tests::a_fake_provider_passing_the_budget_ends_the_attempt_and_silence_only_warns`;
+  `crates/run/src/holder.rs::writer_recovery_tests::writer_token_budget_stop_commits_uncommitted_work_and_publishes_branch`;
   `crates/confinement/src/run_config.rs::tests::a_host_setting_equal_to_the_default_still_reports_host`
 - Owner: `crates/supervisor/src/guardian.rs`, `crates/run/src/token_budget.rs`
 

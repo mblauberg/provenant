@@ -58,7 +58,6 @@ fn live_usage(frame: &[u8]) -> Option<(u64, u64)> {
     let tokens = [
         "input_tokens",
         "output_tokens",
-        "cache_read_input_tokens",
         "cache_creation_input_tokens",
     ]
     .into_iter()
@@ -1183,7 +1182,7 @@ mod overload_tests {
     }
 
     #[test]
-    fn live_usage_counts_each_call_once_with_cached_input() {
+    fn live_usage_counts_each_call_once_with_fresh_input() {
         use provenant_os::capture::{FrameDecoder, FrameEvent};
         let frame = |id: &str| {
             format!(
@@ -1196,7 +1195,8 @@ mod overload_tests {
         let FrameEvent::Usage { tokens, .. } = one else {
             panic!("an assistant frame with usage reports it");
         };
-        assert_eq!(tokens, 1115);
+        // 10 (input) + 5 (output) + 100 (cache creation) = 115. Cache reads (1000) do not count.
+        assert_eq!(tokens, 115);
         assert_ne!(one, LiveUsage.decode(frame("b").as_bytes()).unwrap());
         for other in [
             &br#"{"type":"system","subtype":"init","session_id":"s"}"#[..],

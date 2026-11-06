@@ -12,7 +12,7 @@ use provenant_confinement::{
 };
 use provenant_core::{CancelToken, GitOid, ProjectId};
 use provenant_os::{
-    exec::SystemExecutor,
+    exec::{ExecOptions, Executor, SystemExecutor, Termination},
     fs::{Directory, FsError, canonicalize},
 };
 use provenant_supervisor::custody::WriterBinding;
@@ -409,6 +409,99 @@ impl WriterLaunch {
             }
         }
         Ok(paths)
+    }
+
+    /// When a writer lane passes its token budget and stops, commit its
+    /// uncommitted work in the lane's worktree so it ends up committed on its branch.
+    pub(crate) fn commit_budget_stop(&self, attempt: &Directory) -> Result<()> {
+        let repo = self.worktree.repo();
+        let git = provenant_os::git::git_executable().ok_or(RunError::GitUnavailable)?;
+        let source = crate::objects::bound_source(attempt)?;
+
+        let (git_dir, common_dir, obj_dir) = match &source {
+            Some(source) => {
+                let git_dir = source.refs.current_path()?;
+                let obj_dir = source.objects.current_path()?;
+                (git_dir.clone(), git_dir, Some(obj_dir))
+            }
+            None => {
+                let p = repo.private_git_dir().to_path_buf();
+                (p.clone(), p, None)
+            }
+        };
+
+        let mut identity = provenant_os::sys::git_identity(&git, repo.root_path());
+        if !identity.iter().any(|(k, _)| k == "GIT_AUTHOR_NAME") {
+            identity.push(("GIT_AUTHOR_NAME".into(), "provenant".into()));
+            identity.push(("GIT_COMMITTER_NAME".into(), "provenant".into()));
+            identity.push(("GIT_AUTHOR_EMAIL".into(), "provenant@invalid".into()));
+            identity.push(("GIT_COMMITTER_EMAIL".into(), "provenant@invalid".into()));
+        }
+
+        let run_git = |args: &[&str]| -> Result<Vec<u8>> {
+            let mut env = vec![
+                ("PATH".into(), "/usr/bin:/bin".into()),
+                ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
+                ("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()),
+                ("GIT_CONFIG_SYSTEM".into(), "/dev/null".into()),
+                ("GIT_NO_REPLACE_OBJECTS".into(), "1".into()),
+                ("GIT_GRAFT_FILE".into(), "/dev/null".into()),
+                ("GIT_NO_LAZY_FETCH".into(), "1".into()),
+                ("GIT_TERMINAL_PROMPT".into(), "0".into()),
+                ("LC_ALL".into(), "C".into()),
+                ("GIT_DIR".into(), git_dir.as_os_str().to_owned()),
+                ("GIT_COMMON_DIR".into(), common_dir.as_os_str().to_owned()),
+                ("GIT_WORK_TREE".into(), repo.root_path().as_os_str().to_owned()),
+            ];
+            if let Some(obj_dir) = &obj_dir {
+                env.push(("GIT_OBJECT_DIRECTORY".into(), obj_dir.as_os_str().to_owned()));
+            }
+            env.extend(identity.iter().cloned());
+
+            let mut argv = vec![
+                git.as_os_str().to_owned(),
+                "-c".into(),
+                "core.hooksPath=/dev/null".into(),
+                "-c".into(),
+                "core.fsmonitor=false".into(),
+                "-c".into(),
+                "gc.auto=0".into(),
+                "-c".into(),
+                "maintenance.auto=false".into(),
+            ];
+            for arg in args {
+                argv.push(OsString::from(arg));
+            }
+
+            let executor = SystemExecutor::new(1)
+                .map_err(|_| RunError::Validation("initialise executor"))?;
+            let mut options = ExecOptions::new(&argv, repo.root_path(), Duration::from_secs(60));
+            options.env = Some(&env);
+            let output = executor.execute(options).map_err(|error| {
+                RunError::Io(std::io::Error::other(format!("git execution failed: {error}")))
+            })?;
+            if output.termination != Termination::Exit(0) {
+                return Err(RunError::Io(std::io::Error::other(format!(
+                    "git command failed: {}",
+                    String::from_utf8_lossy(&output.stderr.bytes)
+                ))));
+            }
+            Ok(output.stdout.bytes)
+        };
+
+        let status = run_git(&["status", "--porcelain", "-z"])?;
+        if status.is_empty() {
+            return Ok(());
+        }
+
+        run_git(&["add", "-A"])?;
+        let status_after_add = run_git(&["status", "--porcelain", "-z"])?;
+        if status_after_add.is_empty() {
+            return Ok(());
+        }
+
+        run_git(&["commit", "-m", "stopped on budget"])?;
+        Ok(())
     }
 }
 

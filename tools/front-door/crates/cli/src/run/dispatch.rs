@@ -1815,6 +1815,39 @@ pub(super) fn dispatch_inner(
         })
         .collect();
     brief_warnings.extend(capability_warnings);
+    if matches!(command.access.mode(), Mode::WorktreeWrite) {
+        let budget = config
+            .domains
+            .run
+            .writer_token_budget_for(&session.context.project_id.to_string(), None);
+        if budget.tokens > 0 {
+            let enforced: Vec<&str> = provenant_providers::REGISTRY
+                .iter()
+                .filter(|entry| {
+                    entry
+                        .stdout_decoder
+                        .is_some_and(|decoder| decoder.reports_usage())
+                })
+                .map(|entry| entry.adapter.id())
+                .collect();
+            for task in &tasks {
+                let provider = match &task.route {
+                    provenant_records::run::RequestedRoute::Adapter { provider, .. }
+                    | provenant_records::run::RequestedRoute::Model { provider, .. } => {
+                        Some(provider.as_str())
+                    }
+                    _ => None,
+                };
+                if let Some(p) = provider
+                    && !enforced.contains(&p)
+                {
+                    brief_warnings.push(format!(
+                        "token budget is not enforced for provider {p}: live usage is not reported while running"
+                    ));
+                }
+            }
+        }
+    }
     // Admission has its own budget. Start the launch and observation budget
     // only once the run is ready to submit.
     let deadline = command
