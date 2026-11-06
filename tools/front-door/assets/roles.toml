@@ -121,29 +121,6 @@ slices that can land independently. Carry the approved objective and the
 authority into every slice, so each implementer can decide within them.
 """
 
-# The planner node. It runs on the configured planner route (a principal by
-# default) with no fallback tier: an unavailable route degrades the preset to its
-# deterministic defaults instead of choosing a weaker planner.
-[roles."plan.shape"]
-extends = "plan"
-kind = "plan"
-tier = "principal"
-purpose = "shape"
-card = "You shape the graph. You choose its parts from an allow-listed catalogue; you never write code and never widen access."
-prompt = """
-Shape the graph for: ${prompt}
-Host limits: at most ${plan_max_nodes} nodes and pattern instances; a lane's
-budget_seconds is at most ${plan_lane_deadline_seconds}; routes you may assign:
-junior, senior, principal (host routes: ${plan_routes}). Registered writer
-worktrees you may assign: ${plan_worktrees}.
-${plan_guidance}
-Read the evidence from earlier stages and the repository, and look outward
-when a choice depends on current practice. Express the shape only as pattern
-instances. Instances that no depends_on orders are one wave and must write
-disjoint scopes. Explain your choices in two or three sentences before the
-fragment block.
-"""
-
 [roles."plan.wave"]
 extends = "plan"
 kind = "synthesise"
