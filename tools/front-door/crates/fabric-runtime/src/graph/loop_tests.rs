@@ -2057,6 +2057,25 @@ fn later_repair_round_uses_latest_raising_lenses() {
 }
 
 #[test]
+fn risk_or_scope_growth_cannot_pass_the_original_panel() {
+    for field in ["risk_grew", "scope_grew"] {
+        let document = review_repair_document();
+        let initial = repair_finding(false);
+        let expanded = initial
+            .replace("\"design_defect\":false", &format!("\"design_defect\":false,\"{field}\":true"))
+            .replace("VERDICT: FAIL", "VERDICT: PASS");
+        let mut owner = reviews(&[&initial, "fix", &expanded, "principal options"]);
+        let mut journal = MemoryJournal::default();
+        let run = advance(&document, &mut owner, &mut journal).unwrap();
+        let gate = run.checkpoint.nodes.iter().find(|n| n.id == "repair--r1--accepted").unwrap();
+        assert_eq!(gate.state, NodeState::Failed);
+        assert!(gate.gate.as_ref().unwrap().reason.as_deref().unwrap().contains("full panel replan required"));
+        assert_eq!(owner.calls.last().unwrap().0.node_id, "design");
+        assert_eq!(advance(&document, &mut FakeOwner::default(), &mut journal).unwrap().checkpoint, run.checkpoint);
+    }
+}
+
+#[test]
 fn review_repair_exhaustion_runs_principal_instead_of_owner_wait() {
     let document = review_repair_document();
     let initial = repair_finding(false);
