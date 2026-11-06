@@ -2,6 +2,11 @@ use super::*;
 
 /// The main CLI path reuses admission, managed worktrees and bounded waits.
 pub fn run(mut command: Dispatch, edge: &Edge<'_>) -> Reply {
+    if std::env::var_os(run::PARENT_ATTEMPT_ENV).is_some() {
+        return run_in_lane(&command, |op, cancel, within| {
+            crate::fabric::graph_relay::from_lane(op, cancel, within)
+        });
+    }
     if let Err(fail) = require_explicit_target(&command, edge.cwd) {
         return reply("run", Err(fail));
     }
@@ -56,6 +61,122 @@ pub fn run(mut command: Dispatch, edge: &Edge<'_>) -> Reply {
         }
     }
     render_run(dispatch(command, edge), edge)
+}
+
+/// A lane submits a child to its host; it never opens a separate child store.
+fn run_in_lane(
+    command: &Dispatch,
+    send: impl FnOnce(
+        &provenant_fabric_runtime::graph::relay::RelayOp,
+        &CancelToken,
+        Duration,
+    ) -> Result<Value, provenant_fabric_mcp::tools::ServiceError>,
+) -> Reply {
+    let result = (|| {
+        let op = lane_add(command)?;
+        if command.explain {
+            return Ok((
+                serde_json::to_value(&op).map_err(|error| {
+                    Fail::new(Status::Invalid, ErrorKind::Invalid, error.to_string())
+                })?,
+                "Child graph patch (preview)\n".into(),
+            ));
+        }
+        let cancel = CancelToken::new();
+        let value = send(
+            &op,
+            &cancel,
+            Duration::from_secs(command.wait.unwrap_or(55).max(1)),
+        )
+        .map_err(|error| Fail::new(Status::Refused, ErrorKind::Refused, error.to_string()))?;
+        let human = format!(
+            "graph {} node {}\n",
+            value["graph_id"].as_str().unwrap_or("?"),
+            value["node"].as_str().unwrap_or("?")
+        );
+        Ok((value, human))
+    })();
+    reply("run", result)
+}
+
+fn lane_add(command: &Dispatch) -> Result<provenant_fabric_runtime::graph::relay::RelayOp, Fail> {
+    use provenant_fabric_runtime::graph::relay::{ChildRequest, RelayOp};
+    if command.input.manifest.is_some()
+        || command.route.model.is_some()
+        || command.route.effort.is_some()
+        || !command.route.fallback.is_empty()
+        || !command.route.exclude.is_empty()
+        || command.route.confidential
+        || command.route.read_heavy
+        || command.build_heavy
+        || command.require_skill_location
+        || command.deliver.is_some()
+        || command.delivery_id.is_some()
+        || command.task_id.is_some()
+        || command.concurrency.is_some()
+        || !command.knobs.is_empty()
+        || command.head.is_some()
+        || command.base.is_some()
+        || command.admission_timeout.is_some()
+        || command.preset_plan.is_some()
+        || command.fresh
+        || command.account.is_some()
+        || command.host.is_some()
+        || command.placement.is_some()
+        || command.access.worktree.is_some()
+        || command.branch.is_some()
+        || command.worktree_branch.is_some()
+        || !command.access.read_root.is_empty()
+        || !command.access.attach.is_empty()
+        || command.access.network.is_some()
+        || !command.access.capability.is_empty()
+        || !command.access.no_capability.is_empty()
+        || !command.preset_set.is_empty()
+        || command.preset_params_file.is_some()
+    {
+        return Err(Fail::new(
+            Status::Invalid,
+            ErrorKind::Invalid,
+            "child graph launches accept a template, brief, named route, access mode and write scope; other launch controls require a graph patch",
+        ));
+    }
+    let brief = match command.input.prompt_file.as_deref() {
+        Some(path) => read_bounded(path)?,
+        None => read_text(std::io::stdin().lock())?,
+    };
+    run::Service::scan(&brief)
+        .map_err(|error| Fail::new(Status::Refused, ErrorKind::Refused, error.to_string()))?;
+    let template = match command.preset.as_deref().unwrap_or("task") {
+        "single" => "task-once",
+        "scope" => "plan-once",
+        "chain" => "task-chain",
+        "fan-out" => "task-fan-out",
+        "fan-out-synthesise" => "task-fan-out-synthesise",
+        "scout-swarm" => "explore-swarm",
+        "generator-evaluator" => "deliver",
+        "review" => "review-panel",
+        "big-batch" => "batch",
+        "scope-then-run" => "plan-then-deliver",
+        name => name,
+    };
+    let digest = CanonicalV1::file_digest(command.operation_id.as_str().as_bytes()).to_string();
+    Ok(RelayOp::Add(ChildRequest {
+        id: format!("child-{}", &digest[7..39]),
+        template: template.into(),
+        brief,
+        tier: command.route.route.clone(),
+        timeout_seconds: Some(command.provider_timeout),
+        writer: command.access.mode() == Mode::WorktreeWrite,
+        write_scope: command
+            .access
+            .write_root
+            .iter()
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect(),
+        detached: false,
+        idempotency_key: command.operation_id.to_string(),
+        reason: command.title.clone(),
+    }))
 }
 
 // A run that names neither a mode nor a target, from a linked worktree, is the
@@ -3163,4 +3284,72 @@ pub(super) fn check_launch_policy(started: &[run::Started]) -> Result<(), Fail> 
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod graph_launch_tests {
+    use super::*;
+
+    fn command(path: &Path, extra: &[&str]) -> Dispatch {
+        let mut args = vec![
+            "run".into(),
+            "--prompt-file".into(),
+            path.as_os_str().to_owned(),
+        ];
+        args.extend(extra.iter().map(std::ffi::OsString::from));
+        let crate::ParseOutcome::Invocation(invocation) = crate::parse(args) else {
+            panic!("valid run arguments");
+        };
+        let crate::Command::Run(command) = invocation.command else {
+            panic!("run command");
+        };
+        *command
+    }
+
+    #[test]
+    fn lane_run_submits_add_to_the_parent_graph() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("brief");
+        std::fs::write(&path, "Implement the scoped change").unwrap();
+        let command = command(
+            &path,
+            &[
+                "--route",
+                "senior",
+                "--mode",
+                "worktree-write",
+                "--write-root",
+                "src",
+                "--operation-id",
+                "child-test",
+            ],
+        );
+        let result = run_in_lane(&command, |op, _, _| {
+            let provenant_fabric_runtime::graph::relay::RelayOp::Add(child) = op else {
+                panic!("add operation");
+            };
+            assert_eq!(child.template, "task");
+            assert_eq!(child.brief, "Implement the scoped change");
+            assert_eq!(child.tier.as_deref(), Some("senior"));
+            assert!(child.writer);
+            assert_eq!(child.write_scope, ["src"]);
+            assert_eq!(child.idempotency_key, "child-test");
+            Ok(json!({"graph_id":"parent-graph", "node":"parent--child", "revision":2}))
+        });
+        assert!(result.result.error.is_none());
+        assert_eq!(result.result.data["graph_id"], "parent-graph");
+        assert_eq!(result.result.data["revision"], 2);
+    }
+
+    #[test]
+    fn lane_template_uses_the_same_add_path_and_explain_does_not_send() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("brief");
+        std::fs::write(&path, "Map the affected module").unwrap();
+        let command = command(&path, &["--use", "explore", "--explain"]);
+        let result = run_in_lane(&command, |_, _, _| panic!("explain must not send"));
+        assert!(result.result.error.is_none());
+        assert_eq!(result.result.data["op"], "add");
+        assert_eq!(result.result.data["use"], "explore");
+    }
 }

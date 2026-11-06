@@ -694,7 +694,7 @@ pub struct Dispatch {
     #[arg(long)]
     pub cloud_deadline: Option<u64>,
     /// Expand and run a named pipeline preset
-    #[arg(long, catalog_requires = "prompt_file")]
+    #[arg(long, visible_alias = "use", catalog_requires = "prompt_file")]
     pub preset: Option<String>,
     /// Override a preset value (PATH=TOML_VALUE); quote TOML strings; repeatable
     #[arg(long = "set", catalog_requires = "preset")]

@@ -234,6 +234,106 @@ pub fn admit_patch(
     patch: &Patch,
     context: &PatchContext<'_>,
 ) -> Result<Admitted, PatchError> {
+    // Initial nodes live in the immutable source, rather than being copied
+    // into an expansion. They still enter through the same admission gate.
+    if parent.is_none()
+        && graph.document.extra.get("submission_patch") == serde_json::to_value(patch).ok().as_ref()
+    {
+        let digest = patch.digest()?;
+        if let Some(record) = graph
+            .checkpoint
+            .expansions
+            .iter()
+            .filter_map(|e| e.patch.as_ref())
+            .find(|record| record.key == patch.idempotency_key)
+        {
+            return if record.digest == digest {
+                Ok(Admitted {
+                    revision: record.revision,
+                    replayed: true,
+                    added: Vec::new(),
+                })
+            } else {
+                Err(PatchError::new(
+                    "idempotency_conflict",
+                    "submission key changed",
+                ))
+            };
+        }
+        if revision(graph.checkpoint) != 0
+            || graph
+                .checkpoint
+                .nodes
+                .iter()
+                .any(|node| node.state != NodeState::Pending || !node.attempts.is_empty())
+        {
+            return Err(PatchError::new(
+                "started",
+                "initial submission must precede launch",
+            ));
+        }
+        let compiled = submit(&graph.document.graph_id, patch, context)?;
+        if compiled.nodes != graph.document.nodes {
+            return Err(PatchError::invalid("submission differs from bound nodes"));
+        }
+        let uses = patch
+            .nodes
+            .iter()
+            .filter_map(|raw| {
+                Some(TemplateUse {
+                    extra: Default::default(),
+                    id: raw.get("id")?.as_str()?.to_owned(),
+                    name: raw.get("use")?.as_str()?.to_owned(),
+                    parameters: raw.get("with").cloned().unwrap_or(Value::Null),
+                    nodes: graph
+                        .checkpoint
+                        .nodes
+                        .iter()
+                        .filter(|node| {
+                            raw.get("id").and_then(Value::as_str).is_some_and(|id| {
+                                node.id == id || node.id.starts_with(&format!("{id}--"))
+                            })
+                        })
+                        .map(|node| node.id.clone())
+                        .collect(),
+                })
+            })
+            .collect();
+        let mut record = PatchRecord {
+            extra: Default::default(),
+            revision: 1,
+            digest,
+            key: patch.idempotency_key.clone(),
+            parent: None,
+            reason: patch.reason.clone(),
+            skipped: Vec::new(),
+            replaced: Vec::new(),
+            journaled: false,
+        };
+        if let Some(journal) = context.journal {
+            journal(&record).map_err(|reason| PatchError::new("journal", reason))?;
+            record.journaled = true;
+        }
+        graph.checkpoint.expansions.push(Expansion {
+            extra: Default::default(),
+            review: None,
+            source: String::new(),
+            continuation: false,
+            nodes: Vec::new(),
+            uses,
+            patch: Some(record),
+        });
+        return Ok(Admitted {
+            revision: 1,
+            replayed: false,
+            added: graph
+                .checkpoint
+                .nodes
+                .iter()
+                .map(|node| node.id.clone())
+                .collect(),
+        });
+    }
     let expanded = plans::expand(
         graph.document,
         &graph.checkpoint.extensions,
@@ -291,6 +391,94 @@ pub fn admit_patch(
     }
 }
 
+/// Retain the initial mutation alongside the immutable submitted topology.
+/// Host binding has already resolved routes and worktrees. Inline snapshots
+/// keep those effective nodes replayable without consulting mutable layers.
+pub fn submission(
+    document: &mut GraphDocument,
+    key: &str,
+    limits: &crate::config::GraphLimits,
+) -> Result<(), PatchError> {
+    for node in &mut document.nodes {
+        node.extra
+            .entry("template".into())
+            .or_insert_with(|| Value::String("task".into()));
+    }
+    let mut patch = Patch {
+        schema_version: PATCH_SCHEMA_VERSION,
+        expected_revision: Some(0),
+        idempotency_key: Some(key.to_owned()),
+        reason: Some("initial submission".into()),
+        ..Default::default()
+    };
+    let parameters = document
+        .extra
+        .get("provenance")
+        .and_then(|value| value.get("parameters"))
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    for node in &document.nodes {
+        let mut raw = serde_json::to_value(node).map_err(|e| PatchError::invalid(e.to_string()))?;
+        let name = raw
+            .get("template")
+            .and_then(Value::as_str)
+            .unwrap_or("task")
+            .to_owned();
+        let mut template = Template::default();
+        let mut supplied = Map::new();
+        for (name, value) in &parameters {
+            use super::template::{ParameterKind, TemplateParameter};
+            let kind = match value {
+                Value::Null => continue,
+                Value::Bool(_) => ParameterKind::Boolean,
+                Value::Number(number) if number.is_i64() || number.is_u64() => {
+                    ParameterKind::Integer
+                }
+                Value::Number(_) => ParameterKind::Number,
+                Value::String(_) => ParameterKind::String,
+                Value::Array(_) => ParameterKind::List,
+                Value::Object(_) => ParameterKind::Table,
+            };
+            template.parameters.insert(
+                name.clone(),
+                TemplateParameter {
+                    extra: Default::default(),
+                    kind,
+                    default: None,
+                    min: None,
+                    max: None,
+                    allowed: Vec::new(),
+                    doc: None,
+                },
+            );
+            supplied.insert(name.clone(), value.clone());
+        }
+        patch.templates.insert(name.clone(), template);
+        raw["use"] = Value::String(name);
+        raw["with"] = Value::Object(supplied);
+        patch.nodes.push(raw);
+    }
+    let library = TemplateLibrary::bundled();
+    let resolvers = BTreeMap::new();
+    let context = PatchContext {
+        library: &library,
+        resolvers: &resolvers,
+        scan: &scan_for_secrets,
+        journal: None,
+        limits,
+    };
+    let compiled = submit(&document.graph_id, &patch, &context)?;
+    if compiled.nodes != document.nodes {
+        return Err(PatchError::invalid("submission differs from bound nodes"));
+    }
+    document.extra.insert(
+        "submission_patch".into(),
+        serde_json::to_value(patch).map_err(|e| PatchError::invalid(e.to_string()))?,
+    );
+    Ok(())
+}
+
 /// Compile a submitted patch into a new graph document. Submission uses the
 /// same compiler and checks as a running graph's patches.
 pub fn submit(
@@ -298,6 +486,29 @@ pub fn submit(
     patch: &Patch,
     context: &PatchContext<'_>,
 ) -> Result<GraphDocument, PatchError> {
+    if patch.schema_version != PATCH_SCHEMA_VERSION {
+        return Err(PatchError::invalid(format!(
+            "patch requires schema_version {PATCH_SCHEMA_VERSION}"
+        )));
+    }
+    if patch
+        .idempotency_key
+        .as_ref()
+        .is_some_and(|key| key.is_empty() || key.len() > KEY_BYTES || key.contains('\0'))
+    {
+        return Err(PatchError::invalid(format!(
+            "idempotency key must be 1..={KEY_BYTES} bytes"
+        )));
+    }
+    if patch
+        .reason
+        .as_ref()
+        .is_some_and(|reason| reason.len() > REASON_BYTES)
+    {
+        return Err(PatchError::invalid(format!(
+            "patch reason exceeds {REASON_BYTES} bytes"
+        )));
+    }
     if patch
         .expected_revision
         .is_some_and(|revision| revision != 0)

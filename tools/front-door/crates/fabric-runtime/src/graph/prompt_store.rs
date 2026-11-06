@@ -1,9 +1,9 @@
 //! Content-addressed node prompts beside the checkpoint.
 //!
-//! A saved checkpoint carries `prompt_digest` in place of `prompt`. The prompt
+//! A saved checkpoint carries an envelope-owned map of text references. The
 //! bytes live in `graph-<id>.prompt-<hex>` files in the graph directory, so graph
-//! size does not grow with brief size times node count. Checkpoints written
-//! with inline prompts still decode.
+//! size does not grow with brief size times node count. Inline prompts and
+//! older node-local `prompt_digest` references still decode.
 use super::*;
 use serde_json::Value;
 use std::borrow::Cow;
@@ -22,33 +22,62 @@ fn hex(prompt: &[u8]) -> String {
         .to_owned()
 }
 
-fn nodes_mut(value: &mut Value) -> Vec<&mut Value> {
-    let mut found = Vec::new();
-    let Some(root) = value.as_object_mut() else {
-        return found;
-    };
-    for (key, part) in root.iter_mut() {
-        match (key.as_str(), part) {
-            ("execution", Value::Object(execution)) => {
-                if let Some(Value::Object(document)) = execution.get_mut("document")
-                    && let Some(Value::Array(nodes)) = document.get_mut("nodes")
-                {
-                    found.extend(nodes.iter_mut());
+// The envelope owns this map, outside user documents and parameters. JSON
+// pointers identify only the strings we replaced, so user keys such as
+// `brief_digest` remain ordinary data.
+const STORED_TEXT: &str = "stored_text";
+
+fn text_paths(value: &Value, path: &str, found: &mut Vec<String>) {
+    match value {
+        Value::Object(object) => {
+            for (key, value) in object {
+                let escaped = key.replace('~', "~0").replace('/', "~1");
+                let path = format!("{path}/{escaped}");
+                if value.as_str().is_some_and(|text| {
+                    !text.is_empty()
+                        && (matches!(key.as_str(), "prompt" | "brief" | "spec")
+                            || text.len() > 4096)
+                }) {
+                    found.push(path);
+                } else {
+                    text_paths(value, &path, found);
                 }
             }
-            ("checkpoint", Value::Object(checkpoint)) => {
-                if let Some(Value::Array(expansions)) = checkpoint.get_mut("expansions") {
-                    for expansion in expansions {
-                        if let Some(Value::Array(nodes)) = expansion.get_mut("nodes") {
-                            found.extend(nodes.iter_mut());
-                        }
-                    }
-                }
-            }
-            _ => {}
         }
+        Value::Array(array) => {
+            for (index, value) in array.iter().enumerate() {
+                text_paths(value, &format!("{path}/{index}"), found);
+            }
+        }
+        _ => {}
     }
-    found
+}
+
+/// Canonical size after text becomes fixed-width references, without I/O.
+pub(super) fn compacted_len<T: serde::Serialize>(value: &T) -> usize {
+    let Ok(mut value) = serde_json::to_value(value) else {
+        return usize::MAX;
+    };
+    let mut paths = Vec::new();
+    text_paths(&value, "", &mut paths);
+    let mut references = serde_json::Map::new();
+    for path in paths {
+        let Some(text) = value.pointer_mut(&path) else {
+            return usize::MAX;
+        };
+        *text = Value::Null;
+        references.insert(path, Value::String("f".repeat(64)));
+    }
+    let prefix_reserve = references.len().saturating_mul(64);
+    if !references.is_empty() {
+        let Some(object) = value.as_object_mut() else {
+            return usize::MAX;
+        };
+        object.insert(STORED_TEXT.into(), Value::Object(references));
+    }
+    // The actual envelope prefixes these local pointers with execution or
+    // checkpoint paths. Reserve their escaped canonical bytes too.
+    canonical_len(&value).saturating_add(prefix_reserve)
 }
 
 /// The prompt as it is persisted: the same known credential shapes that capture
@@ -70,17 +99,12 @@ pub(super) fn externalise(
     value: &mut Value,
 ) -> Result<(), JournalError> {
     let mut wrote = false;
-    for node in nodes_mut(value) {
-        let Some(object) = node.as_object_mut() else {
-            continue;
-        };
-        let Some(Value::String(prompt)) = object.get("prompt") else {
-            continue;
-        };
-        if prompt.is_empty() {
-            continue;
-        }
-        let prompt = redact(prompt)?;
+    let mut paths = Vec::new();
+    text_paths(value, "", &mut paths);
+    let mut references = serde_json::Map::new();
+    for path in paths {
+        let text = value.pointer_mut(&path).ok_or(JournalError::BadEnvelope)?;
+        let prompt = redact(text.as_str().ok_or(JournalError::BadEnvelope)?)?;
         let digest = hex(prompt.as_bytes());
         let name: OsString = format!("{}{digest}", prefix(id)).into();
         if directory.metadata_at(&name, false).is_err() {
@@ -95,8 +119,15 @@ pub(super) fn externalise(
                 .map_err(JournalError::DurabilityUnconfirmed)?;
             wrote = true;
         }
-        object.remove("prompt");
-        object.insert("prompt_digest".into(), Value::String(digest));
+        *text = Value::Null;
+        references.insert(path, Value::String(digest));
+    }
+    if !references.is_empty() {
+        let root = value.as_object_mut().ok_or(JournalError::BadEnvelope)?;
+        if root.contains_key(STORED_TEXT) {
+            return Err(JournalError::BadEnvelope);
+        }
+        root.insert(STORED_TEXT.into(), Value::Object(references));
     }
     if wrote {
         directory
@@ -113,42 +144,97 @@ pub(super) fn rehydrate<'a>(
     id: &str,
     bytes: &'a [u8],
 ) -> Result<Cow<'a, [u8]>, JournalError> {
-    const MARKER: &[u8] = b"\"prompt_digest\"";
-    if !bytes.windows(MARKER.len()).any(|window| window == MARKER) {
+    const MARKERS: [&[u8]; 2] = [b"\"prompt_digest\"", b"\"stored_text\""];
+    if !MARKERS
+        .iter()
+        .any(|marker| bytes.windows(marker.len()).any(|window| window == *marker))
+    {
         return Ok(Cow::Borrowed(bytes));
     }
     let mut value: Value = serde_json::from_slice(bytes)
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
-    for node in nodes_mut(&mut value) {
-        let Some(object) = node.as_object_mut() else {
-            continue;
-        };
-        let Some(Value::String(digest)) = object.get("prompt_digest") else {
-            continue;
-        };
-        if digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-            return Err(JournalError::BadEnvelope);
+    if let Some(references) = value
+        .as_object_mut()
+        .and_then(|root| root.remove(STORED_TEXT))
+    {
+        let references = references.as_object().ok_or(JournalError::BadEnvelope)?;
+        for (path, digest) in references {
+            let text = value.pointer_mut(path).ok_or(JournalError::BadEnvelope)?;
+            if !text.is_null() {
+                return Err(JournalError::BadEnvelope);
+            }
+            *text = Value::String(read_text(
+                directory,
+                id,
+                digest.as_str().ok_or(JournalError::BadEnvelope)?,
+            )?);
         }
-        let name: OsString = format!("{}{digest}", prefix(id)).into();
-        let prompt = directory
-            .read_stable(&name, MAX_CHECKPOINT_BYTES)
-            .map_err(|error| {
-                if error.is_not_found() {
-                    JournalError::BadEnvelope
+    }
+    // Old writers used node-local `prompt_digest`. Restrict legacy decoding
+    // to schema node locations, never arbitrary parameter tables.
+    for path in ["/execution/document/nodes", "/checkpoint/expansions"] {
+        if let Some(Value::Array(nodes)) = value.pointer_mut(path) {
+            for node in nodes {
+                if path.ends_with("expansions") {
+                    if let Some(Value::Array(nodes)) = node.get_mut("nodes") {
+                        for node in nodes {
+                            restore_legacy_node(directory, id, node)?;
+                        }
+                    }
                 } else {
-                    error.into()
+                    restore_legacy_node(directory, id, node)?;
                 }
-            })?;
-        if hex(&prompt) != *digest {
-            return Err(JournalError::BadDigest);
+            }
         }
-        let prompt = String::from_utf8(prompt).map_err(|_| JournalError::BadEnvelope)?;
-        object.remove("prompt_digest");
-        object.insert("prompt".into(), Value::String(prompt));
     }
     serde_json::to_vec(&value)
         .map(Cow::Owned)
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error).into())
+}
+
+fn read_text(directory: &Directory, id: &str, digest: &str) -> Result<String, JournalError> {
+    if digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(JournalError::BadEnvelope);
+    }
+    let name: OsString = format!("{}{digest}", prefix(id)).into();
+    let prompt = directory
+        .read_stable(&name, MAX_CHECKPOINT_BYTES)
+        .map_err(|error| {
+            if error.is_not_found() {
+                JournalError::BadEnvelope
+            } else {
+                error.into()
+            }
+        })?;
+    if hex(&prompt) != digest {
+        return Err(JournalError::BadDigest);
+    }
+    String::from_utf8(prompt).map_err(|_| JournalError::BadEnvelope)
+}
+
+fn restore_legacy_node(
+    directory: &Directory,
+    id: &str,
+    node: &mut Value,
+) -> Result<(), JournalError> {
+    if let Some(object) = node.as_object_mut() {
+        if let Some(Value::String(digest)) = object.get("prompt_digest") {
+            let prompt = read_text(directory, id, digest)?;
+            object.remove("prompt_digest");
+            object.insert("prompt".into(), Value::String(prompt));
+        }
+        for (container, members) in [("composite", "nodes"), ("loop", "body")] {
+            if let Some(Value::Array(nodes)) = object
+                .get_mut(container)
+                .and_then(|part| part.get_mut(members))
+            {
+                for child in nodes {
+                    restore_legacy_node(directory, id, child)?;
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Remove the graph's prompt blobs. Returns whether any were removed.
@@ -188,7 +274,7 @@ mod tests {
             {"id": "a", "prompt": format!("deploy with {secret} now")}
         ]}}});
         externalise(&directory, "g", &mut value).unwrap();
-        let digest = value["execution"]["document"]["nodes"][0]["prompt_digest"]
+        let digest = value[STORED_TEXT]["/execution/document/nodes/0/prompt"]
             .as_str()
             .unwrap()
             .to_owned();
@@ -204,6 +290,29 @@ mod tests {
         assert_eq!(
             restored["execution"]["document"]["nodes"][0]["prompt"],
             stored
+        );
+    }
+
+    #[test]
+    fn submission_snapshots_and_composite_briefs_share_one_blob() {
+        let temp = tempfile::tempdir().unwrap();
+        let directory = Directory::open_anchor(temp.path()).unwrap();
+        let brief = "work ".repeat(200_000);
+        let original = json!({"execution":{"document":{
+            "nodes":[{"id":"work","composite":{"nodes":[{"id":"child","prompt":brief}]}}],
+            "provenance":{"parameters":{"brief":brief,"brief_digest":"user field","prompt_digest":"another user field","spec":brief}},
+            "submission_patch":{"nodes":[{"id":"work","with":{"brief":brief},
+                "composite":{"nodes":[{"id":"child","prompt":brief}]}}]}
+        }},"checkpoint":{"expansions":[{"patterns":[{"parameters":{"brief":brief}}]}]}});
+        let mut stored = original.clone();
+        externalise(&directory, "snapshots", &mut stored).unwrap();
+        let bytes = serde_json::to_vec(&stored).unwrap();
+        assert!(bytes.len() < 4_096);
+        assert_eq!(directory.entries().unwrap().count(), 1);
+        let restored = rehydrate(&directory, "snapshots", &bytes).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Value>(&restored).unwrap(),
+            original
         );
     }
 }

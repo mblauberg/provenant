@@ -434,3 +434,32 @@ fn unstarted_child_cancellation_survives_checkpoint_reload() {
         NodeState::Skipped
     );
 }
+
+#[test]
+fn child_timeout_is_preserved_in_the_admitted_graph_node() {
+    let (document, mut checkpoint) = live(None);
+    let mut request = child("bounded", "bounded-1");
+    request.timeout_seconds = Some(17);
+    add(&document, &mut checkpoint, "a", &request).unwrap();
+    let expanded = plans::expand(
+        &document,
+        &checkpoint.extensions,
+        &checkpoint.expansions,
+        &plans::generous(),
+    )
+    .unwrap();
+    let node = expanded
+        .nodes
+        .iter()
+        .find(|node| node.id == "a--bounded")
+        .unwrap();
+    assert_eq!(node.deadline_seconds, Some(17));
+    let mut invalid = child("unbounded", "bounded-2");
+    invalid.timeout_seconds = Some(0);
+    assert_eq!(
+        add(&document, &mut checkpoint, "a", &invalid)
+            .unwrap_err()
+            .code,
+        "invalid"
+    );
+}
