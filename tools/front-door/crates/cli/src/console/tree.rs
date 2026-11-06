@@ -246,6 +246,10 @@ mod tests {
         inputs.state_dir = Some(base.join("state"));
         let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
         std::fs::create_dir_all(roots.state.as_path().join("children/old"))?;
+        std::fs::set_permissions(
+            roots.state.as_path(),
+            std::os::unix::fs::PermissionsExt::from_mode(0o700),
+        )?;
         std::fs::write(
             roots.state.as_path().join("children/old/run.sqlite3"),
             b"invalid database",

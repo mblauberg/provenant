@@ -750,7 +750,7 @@ mod tests {
             );
             let bytes = std::fs::read(path.to_path_buf()?)?;
             assert_eq!(
-                serde_json::from_slice::<serde_json::Value>(&bytes)?["summary"],
+                serde_json::from_slice::<serde_json::Value>(&bytes)?["data"],
                 "result"
             );
             assert!(!base.join("state").exists());
