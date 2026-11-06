@@ -466,10 +466,20 @@ pub(crate) fn enrich_status_rows(
             .extend(fields.as_object().ok_or(FacadeError::StateCorrupt)?.clone());
         row["attempt_id"] = reference;
         row["graph_state"] = graph_state;
+        project_attempt_failure(row);
     }
     project_node_waits(rows);
     project_node_failures(rows);
     Ok(())
+}
+
+fn project_attempt_failure(row: &mut Value) {
+    if row["terminal_cause"].is_string() {
+        row["cause_code"] = row["terminal_cause"].clone();
+        if row["reason"].is_string() {
+            row["next"] = row["reason"].clone();
+        }
+    }
 }
 
 /// Surface the latest attempt's typed cause on its failed node as well. The
@@ -1559,6 +1569,9 @@ mod tests {
             json!({"kind":"node", "graph_id":"g", "node_id":"a", "state":"failed", "reason":null, "cause_code":"adapter_unavailable"}),
             json!({"kind":"attempt", "graph_id":"g", "node_id":"a", "graph_state":"terminal", "terminal_cause":"command_unavailable", "reason":"configure the provider command"}),
         ];
+        project_attempt_failure(&mut rows[1]);
+        assert_eq!(rows[1]["cause_code"], "command_unavailable");
+        assert_eq!(rows[1]["next"], "configure the provider command");
         project_node_failures(&mut rows);
         assert_eq!(rows[0]["cause_code"], "command_unavailable");
         assert_eq!(rows[0]["reason"], "configure the provider command");
