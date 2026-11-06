@@ -2561,10 +2561,12 @@ impl run::Providers for PreparedProvider<'_> {
     fn priority(&self, task: &run::TaskRequest) -> Result<u8, String> {
         self.fallback.priority(task)
     }
-    fn check_policy(&self, task: &run::TaskRequest) -> Result<(), String> {
+    fn check_policy(&self, task: &run::TaskRequest) -> Result<(), run::PrepareRefusal> {
         if let Some(ready) = self.ready {
             if ready.task != *task {
-                return Err("prepared continuation task changed".into());
+                let mut refusal = run::PrepareRefusal::from("prepared continuation task changed");
+                refusal.boundary_class = provenant_records::diagnostic::BoundaryClass::Authority;
+                return Err(refusal);
             }
             return Ok(());
         }
@@ -3180,19 +3182,33 @@ pub(super) fn check_launch_policy(started: &[run::Started]) -> Result<(), Fail> 
     }
     // Promote policy and typed pacing refusals; other preparation refusals
     // remain in the per-attempt receipt.
-    if let Some((attempt, reason)) = started.iter().find_map(|started| match started {
+    if let Some((attempt, reason, kind)) = started.iter().find_map(|started| match started {
         run::Started::Refused {
             attempt,
             reason,
-            kind: run::RefusalKind::Policy | run::RefusalKind::PacingReserve,
-        } => Some((attempt, reason)),
+            kind:
+                kind @ (run::RefusalKind::Policy
+                | run::RefusalKind::PolicyBoundary(_)
+                | run::RefusalKind::PolicyResource(_)
+                | run::RefusalKind::PacingReserve),
+        } => Some((attempt, reason, kind)),
         _ => None,
     }) {
-        return Err(Fail::new(
+        let mut fail = Fail::new(
             Status::Refused,
             ErrorKind::Refused,
             format!("{attempt}: {reason}"),
-        ));
+        );
+        if let run::RefusalKind::PolicyResource(fact) = kind
+            && let Some(mut projection) = kind.diagnostic()
+        {
+            projection.code = ErrorKind::Refused.code().into();
+            projection.fact = Some(provenant_records::diagnostic::DiagnosticFact::Resource(
+                *fact,
+            ));
+            fail.projection = Some(Box::new(projection));
+        }
+        return Err(fail);
     }
     Ok(())
 }

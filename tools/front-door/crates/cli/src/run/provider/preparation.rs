@@ -400,6 +400,7 @@ impl PrepareError {
                 note,
             } => run::PrepareRefusal {
                 boundary_class: provenant_records::diagnostic::BoundaryClass::None,
+                resource: None,
                 terminal_cause: Some(cause),
                 terminal_note: note,
                 message,
@@ -440,6 +441,7 @@ impl PrepareError {
                 };
                 run::PrepareRefusal {
                     boundary_class,
+                    resource: None,
                     terminal_cause: None,
                     terminal_note: None,
                     message,

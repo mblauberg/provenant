@@ -1,6 +1,60 @@
 use super::*;
 
 #[test]
+fn disk_policy_refusal_uses_resource_projection() {
+    use provenant_records::diagnostic::{ResourceFact, SettingSource};
+    let refusal = crate::run::disk_policy_refusal(crate::run::DiskCheck::Low {
+        path: "/tmp/example".into(),
+        available: 1,
+        floor: 2,
+        reclaimed: 0,
+        origin: SettingSource::Configuration,
+    });
+    let fact = refusal.resource.expect("disk fact");
+    let kind = run::RefusalKind::PolicyResource(fact);
+    let failure = check_launch_policy(&[run::Started::Refused {
+        attempt: AttemptId::from_bytes([1; 16]),
+        kind,
+        reason: "local path and other source text".into(),
+    }])
+    .expect_err("disk floor must refuse");
+    assert_eq!(failure.kind, ErrorKind::Refused);
+    let diagnostic = failure.projection.expect("resource projection");
+    assert_eq!(diagnostic.code, "REFUSED");
+    assert!(
+        diagnostic
+            .detail
+            .as_deref()
+            .unwrap()
+            .contains("gc.free_floor")
+    );
+    assert!(
+        diagnostic
+            .detail
+            .as_deref()
+            .unwrap()
+            .contains("host configuration")
+    );
+    assert!(diagnostic.next.is_some());
+    assert!(!diagnostic.detail.as_deref().unwrap().contains("local path"));
+    assert!(
+        check_launch_policy(&[
+            run::Started::Refused {
+                attempt: AttemptId::from_bytes([2; 16]),
+                kind: run::RefusalKind::PolicyResource(ResourceFact::Disk {
+                    free: 1,
+                    floor: 2,
+                    origin: SettingSource::Configuration,
+                }),
+                reason: "low disk".into(),
+            },
+            run::Started::Launched(AttemptId::from_bytes([3; 16])),
+        ])
+        .is_ok()
+    );
+}
+
+#[test]
 fn retained_import_refusal_names_worktree_attempt_and_recovery() {
     let run_id = provenant_core::RunId::from_bytes([3; 16]);
     let attempt = AttemptId::from_bytes([4; 16]);

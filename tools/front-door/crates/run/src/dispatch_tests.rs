@@ -3042,6 +3042,7 @@ pub(super) struct Fake {
     network: Cell<Option<NetworkAccess>>,
     refuse: bool,
     policy_task: Option<TaskId>,
+    policy_resource: Option<provenant_records::diagnostic::ResourceFact>,
     pub(super) observed: Option<RouteRecord>,
     pub(super) decoded: Cell<usize>,
     prepared: Cell<usize>,
@@ -3097,6 +3098,56 @@ fn policy_refusal_skips_provider_preparation_and_preserves_sibling_progress() ->
     Ok(())
 }
 
+#[test]
+fn policy_resource_refusal_retains_fact_and_skips_preparation() -> TestResult {
+    use provenant_records::diagnostic::{ResourceFact, SettingSource};
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let request = input();
+    store.create(&request, &call)?;
+    let fact = ResourceFact::Disk {
+        free: 1,
+        floor: 2,
+        origin: SettingSource::Configuration,
+    };
+    let provider = Fake {
+        policy_task: Some(request.request.tasks[0].task_id),
+        policy_resource: Some(fact),
+        ..Default::default()
+    };
+    let started = store.start(request.run_id, &provider, &|_, _| unreachable!(), &call)?;
+    assert!(
+        matches!(started.as_slice(), [Started::Refused { kind: RefusalKind::PolicyResource(actual), .. }] if *actual == fact)
+    );
+    assert_eq!(provider.prepared.get(), 0);
+    let diagnostic = RefusalKind::PolicyResource(fact).diagnostic().unwrap();
+    assert_eq!(diagnostic.code, "DISK_FLOOR");
+    let detail = diagnostic.detail.unwrap();
+    assert!(detail.contains("gc.free_floor"));
+    assert!(detail.contains("host configuration"));
+    let inventory =
+        include_str!("../assets/launch-guards.toml").parse::<toml_edit::DocumentMut>()?;
+    assert!(
+        inventory["guard"]
+            .as_array_of_tables()
+            .unwrap()
+            .iter()
+            .any(|row| {
+                row.get("site").and_then(|v| v.as_str())
+                    == Some("run/src/launch.rs#Providers::check_policy")
+                    && row.get("code").and_then(|v| v.as_str()) == Some(diagnostic.code.as_str())
+                    && row.get("boundary").and_then(|v| v.as_str()) == Some("configurable_default")
+                    && row
+                        .get("setting")
+                        .and_then(|v| v.as_str())
+                        .is_some_and(|setting| detail.contains(setting))
+            })
+    );
+    Ok(())
+}
+
 impl Providers for Fake {
     fn failure_diagnostic(&self, _: &RouteRecord, _: &[u8]) -> Option<String> {
         self.failure_note.clone()
@@ -3134,9 +3185,12 @@ impl Providers for Fake {
         }
         Ok(Default::default())
     }
-    fn check_policy(&self, task: &TaskRequest) -> std::result::Result<(), String> {
+    fn check_policy(&self, task: &TaskRequest) -> std::result::Result<(), crate::PrepareRefusal> {
         if self.policy_task == Some(task.task_id) {
-            return Err("insufficient disk space; run `provenant gc`".into());
+            let mut refusal =
+                crate::PrepareRefusal::from("insufficient disk space; run `provenant gc`");
+            refusal.resource = self.policy_resource;
+            return Err(refusal);
         }
         Ok(())
     }
@@ -8935,6 +8989,7 @@ fn preparation_pacing_refusal_uses_typed_skipped_route_cause() -> TestResult {
         ) -> std::result::Result<PreparedLaunch, crate::PrepareRefusal> {
             Err(crate::PrepareRefusal {
                 boundary_class: provenant_records::diagnostic::BoundaryClass::None,
+                resource: None,
                 terminal_cause: None,
                 terminal_note: None,
                 message: self.message.into(),
@@ -9028,6 +9083,7 @@ fn all_candidates_skipped_for_auth_settle_auth_required() -> TestResult {
         ) -> std::result::Result<PreparedLaunch, crate::PrepareRefusal> {
             Err(crate::PrepareRefusal {
                 boundary_class: provenant_records::diagnostic::BoundaryClass::None,
+                resource: None,
                 terminal_cause: None,
                 terminal_note: None,
                 message: "all candidates require sign-in; run provenant accounts".into(),

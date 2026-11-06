@@ -124,6 +124,7 @@ reason = "A port-block allocation I/O failure warns and continues without a bloc
 [[guard]]
 site = "run/src/launch.rs#Providers::check_policy"
 boundary = "configurable_default"
+code = "DISK_FLOOR"
 setting = "gc.free_floor"
 reason = "Writer launch may refuse when available storage remains below the configured free-space floor after collection."
 

@@ -220,6 +220,8 @@ pub struct Decoded {
 pub struct PrepareRefusal {
     /// Boundary established by the original typed preparation failure, if any.
     pub boundary_class: provenant_records::diagnostic::BoundaryClass,
+    /// A configurable resource threshold that refused this launch, if known.
+    pub resource: Option<provenant_records::diagnostic::ResourceFact>,
     pub terminal_cause: Option<TerminalCause>,
     /// Fixed-form text naming a configured value, never captured output.
     pub terminal_note: Option<String>,
@@ -252,6 +254,7 @@ impl From<String> for PrepareRefusal {
     fn from(message: String) -> Self {
         Self {
             boundary_class: provenant_records::diagnostic::BoundaryClass::None,
+            resource: None,
             message,
             terminal_cause: None,
             terminal_note: None,
@@ -440,9 +443,9 @@ impl RunStore {
         let prompt = output_prompt(&base, &attempt.prompt);
         let plan = providers
             .check_policy(task)
-            .map_err(|message| RunError::Input {
+            .map_err(|refusal| RunError::Input {
                 kind: ErrorKind::ContinuationUnsupported,
-                message,
+                message: refusal.message,
             })
             .and_then(|()| {
                 providers
@@ -538,7 +541,7 @@ pub trait Providers {
     }
     /// Host policy checks before provider preparation. A refusal is task-local;
     /// no provider is prepared and siblings remain eligible to launch.
-    fn check_policy(&self, _task: &TaskRequest) -> std::result::Result<(), String> {
+    fn check_policy(&self, _task: &TaskRequest) -> std::result::Result<(), PrepareRefusal> {
         Ok(())
     }
     /// Prepare one task, trying its fallback routes in order. An error is a
@@ -632,6 +635,8 @@ pub enum Started {
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum RefusalKind {
     Policy,
+    PolicyBoundary(provenant_records::diagnostic::BoundaryClass),
+    PolicyResource(provenant_records::diagnostic::ResourceFact),
     Preparation,
     PreparationBoundary(provenant_records::diagnostic::BoundaryClass),
     PacingReserve,
@@ -654,8 +659,9 @@ impl RefusalKind {
     /// Project an inventoried resource refusal without trusting source text.
     pub fn diagnostic(&self) -> Option<provenant_records::diagnostic::Diagnostic> {
         use provenant_records::diagnostic::{Diagnostic, ResourceFact};
-        let Self::HandoffResource(fact) = self else {
-            return None;
+        let fact = match self {
+            Self::HandoffResource(fact) | Self::PolicyResource(fact) => fact,
+            _ => return None,
         };
         let kind = match fact {
             ResourceFact::Disk { .. } => ErrorKind::DiskFloor,
@@ -671,7 +677,9 @@ impl RefusalKind {
     pub fn boundary_class(&self) -> provenant_records::diagnostic::BoundaryClass {
         use provenant_records::diagnostic::BoundaryClass as B;
         match self {
-            Self::HandoffBoundary(class) | Self::PreparationBoundary(class) => *class,
+            Self::HandoffBoundary(class)
+            | Self::PreparationBoundary(class)
+            | Self::PolicyBoundary(class) => *class,
             Self::WorktreeBusy | Self::InvalidWriteGrantPath => B::Authority,
             Self::RetainedImport { .. } => B::LaneGit,
             Self::StoredPromptUnreadable => B::Authority,
@@ -681,7 +689,8 @@ impl RefusalKind {
             | Self::PriorityUnavailable
             | Self::WriteGrantsLimit
             | Self::Handoff
-            | Self::HandoffResource(_) => B::None,
+            | Self::HandoffResource(_)
+            | Self::PolicyResource(_) => B::None,
         }
     }
 }
@@ -1830,7 +1839,18 @@ impl RunStore {
             let prepared = providers
                 .check_policy(task)
                 .map(|()| priority)
-                .map_err(|reason| (RefusalKind::Policy, Box::new(PrepareRefusal::from(reason))))
+                .map_err(|refusal| {
+                    let kind = if let Some(fact) = refusal.resource {
+                        RefusalKind::PolicyResource(fact)
+                    } else if refusal.boundary_class
+                        != provenant_records::diagnostic::BoundaryClass::None
+                    {
+                        RefusalKind::PolicyBoundary(refusal.boundary_class)
+                    } else {
+                        RefusalKind::Policy
+                    };
+                    (kind, Box::new(refusal))
+                })
                 .and_then(|priority| {
                     providers
                         .prepare(

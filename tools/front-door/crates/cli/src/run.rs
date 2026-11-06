@@ -301,6 +301,25 @@ fn writer_gc_settings(state: &Path) -> provenant_config::GcSettings {
     })
 }
 
+fn disk_policy_refusal(error: DiskCheck) -> run::PrepareRefusal {
+    let resource = match &error {
+        DiskCheck::Low {
+            available,
+            floor,
+            origin,
+            ..
+        } => Some(provenant_records::diagnostic::ResourceFact::Disk {
+            free: *available,
+            floor: *floor,
+            origin: *origin,
+        }),
+        DiskCheck::Unobserved(_) => None,
+    };
+    let mut refusal = run::PrepareRefusal::from(String::from(error));
+    refusal.resource = resource;
+    refusal
+}
+
 impl run::Providers for Registry<'_> {
     fn write_grant_limit(&self) -> run::WriteGrantLimit {
         let Some(roots) = self.roots else {
@@ -455,7 +474,7 @@ impl run::Providers for Registry<'_> {
             .priority;
         Ok(priority.for_lane(task.writer.is_some(), task.build_heavy))
     }
-    fn check_policy(&self, task: &run::TaskRequest) -> Result<(), String> {
+    fn check_policy(&self, task: &run::TaskRequest) -> Result<(), run::PrepareRefusal> {
         let Some(writer) = &task.writer else {
             return Ok(());
         };
@@ -475,7 +494,7 @@ impl run::Providers for Registry<'_> {
             &writer.project,
             home,
         )
-        .map_err(String::from)
+        .map_err(disk_policy_refusal)
     }
 
     fn failure_diagnostic(&self, route: &run::RouteRecord, stderr: &[u8]) -> Option<String> {
