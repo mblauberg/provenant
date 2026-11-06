@@ -689,7 +689,33 @@ fn child_receipt_replay_uses_original_request_after_template_and_parent_changes(
         template: "task-chain".into(),
         ..request
     };
-    let receipt = add(&document, &mut checkpoint, "a", &request).unwrap();
+    let record = std::cell::RefCell::new(None);
+    let journal = |admission: &patch::PatchRecord| {
+        *record.borrow_mut() = Some(admission.clone());
+        Ok(())
+    };
+    let library = template::TemplateLibrary::bundled();
+    let resolvers = Default::default();
+    let limits = plans::generous();
+    let context = patch::PatchContext {
+        library: &library,
+        resolvers: &resolvers,
+        limits: &limits,
+        scan: &|_| Ok(()),
+        journal: Some(&journal),
+    };
+    let receipt = admit_child(
+        &mut patch::LiveGraph {
+            document: &document,
+            checkpoint: &mut checkpoint,
+        },
+        "a",
+        &request,
+        &context,
+    )
+    .unwrap();
+    // Replay also works with the evidence delivered to the durable journal callback.
+    checkpoint.expansions[0].patch = record.into_inner();
     let encoded = serde_json::to_vec(&checkpoint).unwrap();
     let mut checkpoint: GraphCheckpoint = serde_json::from_slice(&encoded).unwrap();
     checkpoint
