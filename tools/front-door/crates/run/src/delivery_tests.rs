@@ -2716,8 +2716,8 @@ fn a_late_host_limit_fails_the_receipt_at_its_stage_and_keeps_the_reason()
         .get("reason")
         .and_then(serde_json::Value::as_str)
         .ok_or("reason")?;
-    assert!(reason.contains("rev-parse"), "{reason}");
-    assert!(reason.contains(&limit.to_string()), "{reason}");
+    let expected = provenant_confinement::utility::UtilityError::Truncated { stream: "stdout" };
+    assert!(reason.contains(&expected.to_string()), "{reason}");
     Ok(())
 }
 

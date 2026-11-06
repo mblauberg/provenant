@@ -1067,7 +1067,7 @@ mod lineage_tests {
                 assert_eq!(std::fs::read(&snapshot)?, legacy);
                 assert!(matches!(
                     store.check_writer_lineage(&record, &launch.worktree, &call),
-                    Err(RunError::Validation(
+                    Err(RunError::WriterLineage(
                         "continuation worktree belongs to another lane"
                     ))
                 ));
@@ -1126,7 +1126,7 @@ mod lineage_tests {
             )?;
             assert!(matches!(
                 store.check_continuation_writer(next.attempt_id, &call),
-                Err(RunError::Validation(
+                Err(RunError::WriterLineage(
                     "continuation worktree belongs to another lane"
                 ))
             ));
@@ -1275,7 +1275,7 @@ mod lineage_tests {
         )?;
         assert!(matches!(
             store.check_continuation_writer(prior, &call),
-            Err(RunError::Validation(
+            Err(RunError::WriterLineage(
                 "continuation worktree has no lane owner"
             ))
         ));
@@ -1288,7 +1288,7 @@ mod lineage_tests {
         )?;
         assert!(matches!(
             store.check_continuation_writer(prior, &call),
-            Err(RunError::Validation(
+            Err(RunError::WriterLineage(
                 "continuation worktree has no lane owner"
             ))
         ));
@@ -1359,7 +1359,7 @@ mod lineage_tests {
             let queued = store.record(first.attempt_id, &call).unwrap();
             assert!(matches!(
                 store.check_writer_lineage(&queued, &tree, &call),
-                Err(RunError::Validation(
+                Err(RunError::WriterLineage(
                     "continuation worktree belongs to another lane"
                 ))
             ));
@@ -1374,13 +1374,13 @@ mod lineage_tests {
         };
         assert!(matches!(
             store.resume(&next, &call),
-            Err(RunError::Validation(
+            Err(RunError::WriterLineage(
                 "continuation worktree belongs to another lane"
             ))
         ));
         assert!(matches!(
             store.resume_fresh(&next, "fixture", &call),
-            Err(RunError::Validation(
+            Err(RunError::WriterLineage(
                 "continuation worktree belongs to another lane"
             ))
         ));
