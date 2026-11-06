@@ -53,8 +53,13 @@ A separate fresh writer attempt repairs qualified review findings; the raising
 lenses re-review the delta. `max_repair_cycles` defaults to three and accepts
 one to three, independently of the CI repair limit. A recurring finding or an
 evidenced design defect escalates early to read-only principal scoping. Proceed
-within approved scope and notify the owner; changed scope and one-way doors
-wait on a `decide` node. If no separate route is available, continue in a fresh
+within approved scope: the principal records `repair_design` booleans
+`within_scope` and `one_way_door` in its findings block. The host notifies the
+owner and bypasses its `decide` wait only for explicit approved scope with no
+one-way door. Changed scope, one-way doors and missing assessments wait on that
+host decision before any continuation writer. Approval retains the original
+literal write authority. A failed replanned panel feeds its qualified findings
+into the remaining repair cycles. If no separate route is available, continue in a fresh
 attempt on the available route with a recorded separation warning.
 
 ## Writer rules

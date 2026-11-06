@@ -2108,7 +2108,7 @@ fn omitted_delta_risk_assessment_cannot_accept_repair() {
 
 #[test]
 fn repair_growth_resolves_and_runs_a_fresh_panel() {
-    for (field, reviewer_passes) in [("risk_grew", true), ("scope_grew", true), ("risk_grew", false), ("host_detected", true), ("assessed_tier", true)] {
+    for (field, reviewer_passes) in [("risk_grew", true), ("scope_grew", true), ("host_detected", true), ("assessed_tier", true)] {
         let mut document = review_repair_document();
         document.context = Some(serde_json::from_value(serde_json::json!({"risk_tier":"substantial"})).unwrap());
         let initial = repair_finding(false);
@@ -2134,6 +2134,47 @@ fn repair_growth_resolves_and_runs_a_fresh_panel() {
         assert_eq!(gate.state == NodeState::Succeeded, reviewer_passes, "gate: {:?}; panels: {:?}", gate.gate, run.checkpoint.nodes.iter().filter(|node| node.id.contains("--panel")).map(|node| (&node.id, node.state, &node.outputs)).collect::<Vec<_>>());
         for (call, source) in owner.calls.iter().zip(&owner.source_commits).filter(|(call, _)| call.0.node_id.contains("--panel--")) {
             assert_eq!(source.as_deref(), Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"), "{}", call.0.node_id);
+        }
+        assert_eq!(advance(&document, &mut FakeOwner::default(), &mut journal).unwrap().checkpoint, run.checkpoint);
+    }
+}
+
+#[test]
+fn failed_replanned_panel_repairs_its_findings_within_cycle_limit() {
+    for limit in [1, 3] {
+        let mut document = review_repair_document();
+        document.nodes[1].loop_body.as_mut().unwrap().max_rounds = limit;
+        document.nodes[1].loop_body.as_mut().unwrap().body[0].inputs.push(serde_json::from_value(serde_json::json!({"node":"previous.check","outputs":["findings"]})).unwrap());
+        let initial = repair_finding(false);
+        let growth = initial.replace("\"design_defect\":false", "\"design_defect\":false,\"risk_grew\":true");
+        let new_finding = initial.replace("F1", "F2").replace("correctness", "security");
+        let pass = "```findings\n{\"schema_version\":1,\"findings\":[]}\n```\nVERDICT: PASS";
+        let mut owner = if limit == 1 {
+            reviews(&[&initial, "fix one", &growth, pass, &new_finding, "principal options"])
+        } else {
+            reviews(&[&initial, "fix one", &growth, pass, &new_finding, "fix two", pass, pass, pass])
+        };
+        owner.repair_panel = Some(vec!["correctness".into(), "security".into()]);
+        for (index, oid) in [(1, 'a'), (5, 'b')] {
+            if let Some(AttemptObservation::Terminal { commit, .. }) = owner.observations.get_mut(index) {
+                *commit = Some(oid.to_string().repeat(40));
+            }
+        }
+        let mut journal = MemoryJournal::default();
+        let run = advance(&document, &mut owner, &mut journal).unwrap();
+        assert_eq!(run.status, GraphStatus::Complete);
+        assert!(run.checkpoint.successful(), "{:?}", run.checkpoint.nodes);
+        let first_gate = run.checkpoint.nodes.iter().find(|node| node.id == "repair--r1--accepted").unwrap();
+        assert_eq!(first_gate.state, NodeState::Failed);
+        if limit == 1 {
+            assert_eq!(owner.calls.last().unwrap().0.node_id, "design");
+            let findings = &run.checkpoint.nodes.iter().find(|node| node.id == "repair").unwrap().outputs.as_ref().unwrap().findings;
+            assert!(findings.iter().any(|finding| finding.id.ends_with("F2") && finding.extra["lens"] == "security"));
+        } else {
+            let writer = owner.calls.iter().position(|call| call.0.node_id == "repair--r2--fix").unwrap();
+            assert!(owner.prompts[writer].contains("F2"), "{}", owner.prompts[writer]);
+            assert!(owner.prompts[writer].contains("security"));
+            assert!(!owner.calls.iter().any(|call| call.0.node_id == "design"));
         }
         assert_eq!(advance(&document, &mut FakeOwner::default(), &mut journal).unwrap().checkpoint, run.checkpoint);
     }
@@ -2258,7 +2299,7 @@ fn compiled_repair_design_continuation_keeps_the_original_writer() {
     };
     let mut owner = reviews(&[
         &finding,
-        "root constraint and approved-scope option",
+        "root constraint and approved-scope option\n```findings\n{\"schema_version\":1,\"findings\":[],\"repair_design\":{\"within_scope\":true,\"one_way_door\":false}}\n```",
         &fragment,
         "fixed",
     ]);
@@ -2437,4 +2478,49 @@ fn pending_repair_cache_and_panel_never_certify_a_redone_fix() {
         assert_eq!(check.outputs, before_check);
         assert!(check.extra.contains_key("settled_dependency_snapshots"));
     }
+}
+
+#[test]
+fn compiled_repair_rechecks_new_panel_lens_after_the_next_fix() {
+    let library = template::TemplateLibrary::bundled();
+    let repair = template::Compiler::new(&library)
+        .compile(&serde_json::json!({
+            "id":"repair","use":"repair",
+            "after":["initial"],
+            "inputs":[{"node":"initial","outputs":["findings","verdict"]}],
+            "repeat":{"until":"accepted","max_rounds":3,"review_repair":true},
+            "with":{"worktree":"/fixture/writer","write_scope":["src"],"lenses":["correctness"]}
+        }))
+        .unwrap();
+    let mut document = review_repair_document();
+    document.nodes.truncate(1);
+    document.nodes.push(repair);
+    document.context = Some(serde_json::from_value(serde_json::json!({"risk_tier":"substantial"})).unwrap());
+    let initial = repair_finding(false);
+    let security = initial.replace("F1", "F2").replace("correctness", "security");
+    let growth = "```findings\n{\"schema_version\":1,\"risk_tier\":\"crucial\",\"findings\":[]}\n```\nVERDICT: PASS";
+    let pass = "```findings\n{\"schema_version\":1,\"risk_tier\":\"substantial\",\"findings\":[]}\n```\nVERDICT: PASS";
+    let mut owner = reviews(&[
+        &initial, "fix one", growth, growth, pass, &security,
+        "fix two", pass, pass, pass, pass,
+    ]);
+    owner.repair_panel = Some(vec!["correctness".into(), "security".into()]);
+    for (index, oid) in [(1, 'a'), (6, 'b')] {
+        if let AttemptObservation::Terminal { commit, .. } = &mut owner.observations[index] {
+            *commit = Some(oid.to_string().repeat(40));
+        }
+    }
+    let mut journal = MemoryJournal::default();
+    let run = advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(run.status, GraphStatus::Complete);
+    assert!(run.checkpoint.successful(), "{:?}", run.checkpoint.nodes.iter().map(|node| (&node.id, node.state, &node.gate, &node.advance_error)).collect::<Vec<_>>());
+    assert_eq!(owner.repair_panel_calls, 2);
+    let sources: Vec<_> = owner.calls.iter().zip(&owner.source_commits)
+        .filter(|(call, _)| call.0.node_id.ends_with("--lenses--security"))
+        .map(|(_, source)| source.clone()).collect();
+    assert_eq!(sources, [Some("a".repeat(40)), Some("b".repeat(40))]);
+    let writer = owner.calls.iter().position(|call| call.0.node_id == "repair--r2--fix").unwrap();
+    assert!(owner.prompts[writer].contains("F2"));
+    assert!(owner.prompts[writer].contains("security"));
+    assert_eq!(advance(&document, &mut FakeOwner::default(), &mut journal).unwrap().checkpoint, run.checkpoint);
 }
