@@ -1622,6 +1622,14 @@ fn upgrade_preflight_preserves_old_checkpoint_and_names_the_drain_step() -> Resu
         fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
     }
     let checkpoint = include_bytes!("fixtures/install/old-pending-checkpoint.json");
+    // Verify the hand-built old envelope itself, without serialising new graph types.
+    let old: serde_json::Value = serde_json::from_slice(checkpoint)?;
+    let seal = provenant_records::CanonicalV1::record_digest(
+        "fabric-graph-checkpoint",
+        2,
+        &(&old["checkpoint"], &old["execution"]),
+    )?;
+    assert_eq!(old["digest"], seal.to_string());
     let path = directory.join("graph-old-pending-fixture.json");
     fs::write(&path, checkpoint)?;
     fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
