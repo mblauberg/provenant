@@ -6258,7 +6258,7 @@ fn alias_skips_known_spent_members_and_refuses_all_with_resets()
         Ok(q)
     };
     let first = spent("codex/gpt-6-luna", 400)?;
-    let readings = [first.clone()];
+    let readings = [spent("codex/gpt-6-luna", 400)?];
     let ctx = RoutingContext {
         availability: &records,
         access: &access,
