@@ -252,7 +252,7 @@ fn repeat_lowers_a_composite_template_to_a_loop() {
     let node = Compiler::new(&bundled)
         .compile(
             &json!({"id": "fix", "use": "repair", "repeat": {"until": "accepted", "max_rounds": 2},
-                         "with": {"worktree": "/fixture/writer", "write_scope": ["src"]}}),
+                         "with": {"worktree": "/fixture/writer", "write_scope": ["src"], "lens": "security"}}),
         )
         .unwrap();
     assert_eq!(node.kind, Some(NodeKind::Loop));
@@ -263,6 +263,9 @@ fn repeat_lowers_a_composite_template_to_a_loop() {
     );
     assert_eq!(body[0].access, AccessMode::WorktreeWrite);
     assert_eq!(body[0].write_scope, ["src"]);
+    assert_eq!(body[0].inputs[0].node, "previous.check");
+    assert!(body[1].prompt.contains("security lens"));
+    assert!(matches!(&body[1].source, Some(SourceBinding::Node { node }) if node == "fix"));
     let ids = expanded_ids(vec![node]);
     assert!(ids.contains(&"fix--r2--accepted".to_owned()), "{ids:?}");
 }
