@@ -66,4 +66,3 @@ fn lower(command: provenant_cli::Review) -> Result<provenant_cli::Dispatch, Stri
     dispatch.fresh = command.fresh;
     Ok(dispatch)
 }
-
