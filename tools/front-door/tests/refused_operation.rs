@@ -128,6 +128,12 @@ fn dirty_writer_refusal_is_durable_visible_and_notified_once() -> Result {
         assert!(!wire.contains("PROMPT_SENTINEL"));
         assert!(!wire.contains(rig.root.to_str().ok_or("fixture root")?));
         let target = format!("operation:{}", refusal.operation_id);
+        let next = diagnostic.next.as_deref().ok_or("recovery action")?;
+        for args in [vec!["status", target.as_str()], vec!["status"]] {
+            let human = rig.command(&args)?;
+            let stdout = std::str::from_utf8(&human.stdout.bytes)?;
+            assert!(stdout.contains(next), "{stdout}");
+        }
         let start = Instant::now();
         let waited = rig.command(&["status", &target, "--wait=30s", "--json"])?;
         assert_eq!(code(&waited), 1, "{waited:?}");
