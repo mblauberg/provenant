@@ -15,4 +15,4 @@ Do not add compatibility shims, legacy readers or fallback paths. Use a temporar
 
 ## How it runs
 
-Use `implement` for a shared seam and `batch` for disjoint modules into one integration branch. Inspect `provenant run --use batch --file BRIEF --explain`, then submit without `--explain`.
+Use `implement` for a shared seam and `batch` for disjoint modules into one integration branch. Inspect `provenant run --use batch --file work.toml --explain`, with worktree and write_scope bindings; submit without `--explain`.

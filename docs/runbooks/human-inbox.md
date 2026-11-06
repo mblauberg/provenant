@@ -356,7 +356,7 @@ deadline has elapsed. Requests without deadlines behave as before.
 `provenant help --all --json` publishes `provider_controls`: one row per adapter
 and launch kind (`lane` or `chair`) with `support` (`live_injection`,
 `mail_only`, `continuation_only` or `unsupported`), the `transport` and a
-`reason`. Each row also lists `stop`, `retry` and `land` with `supported` and
+`reason`. Each row also lists wire actions `cancel`, `resume` and `land` with `supported` and
 a `reason`, so a console can disable what a provider cannot take. The table is
 declared per adapter in `LaunchCapabilities::control`.
 

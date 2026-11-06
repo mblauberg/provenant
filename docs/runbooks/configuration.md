@@ -2,16 +2,16 @@
 Owner: provenant-config
 Anchor: config/harness-knobs.json
 
-Read effective configuration with `provenant config show`. The Rust config
+Use `provenant config schema` for the compact settings, `config schema --all`
+for advanced tuning and `config show` for effective values. The Rust config
 owner reads the selected state root's `config.toml` and validates owner sections.
 Run `provenant config check` to list every warning with its file and key.
 Use `--state-dir /absolute/path` to select an isolated root. Change the
 profile or a knob with `provenant config set profile economy` or
 `provenant config set lanes.max_concurrency 4`; `config unset KNOB` reverts it.
 
-Profiles are `balanced` and `economy`. Override a knob for one run
-through an authorised template document (agents use
-`fabric_run` (`op: submit`)'s `knobs`).
+Profiles are `balanced` and `economy`. Template documents carry per-run
+limits; MCP `fabric_run` uses the same document service.
 
 ## Precedence and stamps
 
@@ -173,8 +173,8 @@ Batch concurrency resolves from the profile by batch class. A batch with any
 batch with none uses `lanes.max_concurrency_read_only` (registry default 16).
 A `lanes.max_concurrency` you set yourself (in `[knobs]` or with `--knob`) also
 caps the read-only default unless you set `lanes.max_concurrency_read_only`
-too; a preset does not. An explicit `--concurrency N` (1 to 16) or Fabric
-`concurrency` wins for either. The `economy` preset sets 4 and 8 respectively.
+too; a profile default does not. Document concurrency overrides the default.
+The `economy` profile sets 4 and 8 respectively.
 
 Batch concurrency is separate from host admission. Each lane has a class, and
 spacing defaults to zero. Set `[domains.fabric.lanes] start_spacing_ms` to
