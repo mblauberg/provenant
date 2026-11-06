@@ -2218,6 +2218,7 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 
 | Argument | Contract |
 |---|---|
+| `--session-stream` | `{"conflicts": ["stats", "wait", "id", "target", "follow"], "defaults": ["false"], "description": "Stream a bounded attempt inventory page for the session collector", "name": "session_stream", "values": ["true", "false"]}` |
 | `--stats` | `{"conflicts": ["wait"], "defaults": ["false"], "description": "Report attempt efficiency without counting composite aggregates", "name": "stats", "values": ["true", "false"]}` |
 | `--by` | `{"defaults": ["template"], "description": "Group efficiency by requested tier or template", "name": "by", "values": ["tier", "template"]}` |
 | `--wait` | `{"bounds": [1, 14400], "conflicts": ["all", "cursor"], "description": "Wait for mixed targets (no value uses domains.wait.timeout_seconds)", "name": "wait"}` |
@@ -2242,6 +2243,7 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
   "groups": [
     {
       "arguments": [
+        "session_stream",
         "stats",
         "by",
         "wait",
