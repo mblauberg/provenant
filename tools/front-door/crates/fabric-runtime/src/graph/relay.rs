@@ -24,6 +24,7 @@ pub const YIELDED_SLOT: &str = "yielded_slot";
 pub(super) const SUBTREE_CANCEL: &str = "subtree_cancel";
 const SEPARATOR: &str = "--";
 const ID_BYTES: usize = 64;
+const REQUEST_DIGEST: &str = "relay_request_digest";
 
 /// A lane's request to add one child to its graph.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -160,6 +161,36 @@ pub fn admit_child_bound(
     let graph_id = graph.document.graph_id.clone();
     let node = format!("{parent}{SEPARATOR}{}", request.id);
     let worktree = request.writer.then(|| child_worktree(&graph_id, &node));
+    let digest = CanonicalV1::record_digest("fabric-relay-child", 1, request)
+        .map_err(|error| invalid(error.to_string()))?
+        .to_string();
+    // Compare the submitted request, before consulting mutable templates or
+    // moving host bindings. Receipt replay must survive either changing.
+    if let Some(expansion) = graph.checkpoint.expansions.iter().find(|expansion| {
+        expansion
+            .patch
+            .as_ref()
+            .is_some_and(|record| record.key.as_deref() == Some(&request.idempotency_key))
+    }) {
+        let record = expansion.patch.as_ref().unwrap();
+        if record.parent.as_deref() != Some(parent)
+            || record.extra.get(REQUEST_DIGEST).and_then(Value::as_str) != Some(digest.as_str())
+        {
+            return Err(PatchError {
+                code: "idempotency_conflict",
+                message: "child idempotency key was used for a different request or parent".into(),
+            });
+        }
+        return Ok(ChildReceipt {
+            graph_id,
+            parent: parent.into(),
+            node,
+            revision: record.revision,
+            replayed: true,
+            worktree,
+            detached: request.detached,
+        });
+    }
     let mut patch = child_patch(request, worktree.as_deref(), context)?;
     if let Some((branch, commit)) = writer_base {
         let node = patch.nodes[0].as_object_mut().unwrap();
@@ -175,35 +206,7 @@ pub fn admit_child_bound(
             serde_json::json!({"type":"commit", "commit":commit}),
         );
     }
-    // A replay is answered before the parent's state is checked, so a retry
-    // after the parent settles still gets its receipt.
-    let replay = graph
-        .checkpoint
-        .expansions
-        .iter()
-        .filter_map(|expansion| expansion.patch.as_ref())
-        .any(|record| record.key.as_deref() == Some(&request.idempotency_key));
-    if replay && writer_base.is_some() {
-        // The parent's head may have advanced since admission. Replay the
-        // captured host binding while still checking the lane's request digest.
-        let expanded = plans::expand(
-            graph.document,
-            &graph.checkpoint.extensions,
-            &graph.checkpoint.expansions,
-            context.limits,
-        )
-        .map_err(invalid)?;
-        if let Some(previous) = expanded.nodes.iter().find(|previous| previous.id == node) {
-            let patch_node = patch.nodes[0].as_object_mut().unwrap();
-            if let Some(delivery) = &previous.delivery {
-                patch_node.insert("delivery".into(), serde_json::to_value(delivery).unwrap());
-            }
-            if let Some(source) = &previous.source {
-                patch_node.insert("source".into(), serde_json::to_value(source).unwrap());
-            }
-        }
-    }
-    if !replay {
+    {
         let progress = graph
             .checkpoint
             .nodes
@@ -227,9 +230,34 @@ pub fn admit_child_bound(
             });
         }
     }
+    // Add replay evidence to the same record before the journal callback runs.
+    let capture = |record: &super::patch::PatchRecord| {
+        let mut record = record.clone();
+        record
+            .extra
+            .insert(REQUEST_DIGEST.into(), digest.clone().into());
+        if let Some(journal) = context.journal {
+            journal(&record)?;
+        }
+        Ok(())
+    };
+    let admission_context = PatchContext {
+        journal: Some(&capture),
+        ..*context
+    };
     let Admitted {
         revision, replayed, ..
-    } = super::patch::admit_patch(graph, Some(parent), &patch, context)?;
+    } = super::patch::admit_patch(graph, Some(parent), &patch, &admission_context)?;
+    let record = graph
+        .checkpoint
+        .expansions
+        .last_mut()
+        .unwrap()
+        .patch
+        .as_mut()
+        .unwrap();
+    record.extra.insert(REQUEST_DIGEST.into(), digest.into());
+    record.journaled = context.journal.is_some();
     Ok(ChildReceipt {
         graph_id,
         parent: parent.to_owned(),
