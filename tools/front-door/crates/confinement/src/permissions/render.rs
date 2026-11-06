@@ -1,5 +1,7 @@
 //! SBPL compilation and rendering.
 
+#[cfg(any(target_os = "macos", test))]
+use super::validation::filtered_native_controls;
 use super::*;
 #[cfg(target_os = "macos")]
 use crate::cache::verify_cache_metadata;
@@ -363,23 +365,6 @@ fn compile_sbpl_impl(
         profile_digest,
         native_controls,
     })
-}
-
-#[cfg(any(target_os = "macos", test))]
-pub(super) fn filtered_native_controls(controls: &[String]) -> Vec<String> {
-    let filtered: Vec<_> = controls
-        .iter()
-        .filter(|control| super::validation::valid_native_control(control))
-        .cloned()
-        .collect();
-    if filtered.len() != controls.len() {
-        use std::io::Write;
-        let _ = writeln!(
-            std::io::stderr().lock(),
-            "warning: invalid native control labels were omitted"
-        );
-    }
-    filtered
 }
 
 /// All path grants and inputs used to render one launch profile.
