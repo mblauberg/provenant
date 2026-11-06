@@ -2536,7 +2536,8 @@ fn a_late_host_limit_fails_the_receipt_at_its_stage_and_keeps_the_reason()
     let git = fixture.root.join("late-limit-git");
     let flag = fixture.root.join("late-limit-enabled");
     let payload = fixture.root.join("late-limit-output");
-    std::fs::write(&payload, vec![b'a'; 16 * 1024 + 1])?;
+    let limit = provenant_os::git::REPO_FACT_SCALAR_LIMIT;
+    std::fs::write(&payload, vec![b'a'; limit + 1])?;
     let real_git = provenant_os::git::git_executable().ok_or("git executable")?;
     fixture.executable(
         &git,
@@ -2570,7 +2571,7 @@ fn a_late_host_limit_fails_the_receipt_at_its_stage_and_keeps_the_reason()
         .and_then(serde_json::Value::as_str)
         .ok_or("reason")?;
     assert!(reason.contains("rev-parse"), "{reason}");
-    assert!(reason.contains("16384"), "{reason}");
+    assert!(reason.contains(&limit.to_string()), "{reason}");
     Ok(())
 }
 
