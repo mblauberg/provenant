@@ -2072,14 +2072,14 @@ fn submit_compiles_a_patch_into_a_new_graph() {
     let patch = host_patch(json!({"schema_version":1, "templates":{"pair":{"nodes":[
             {"id":"one", "use":"task", "brief":"First"}, {"id":"two", "use":"task", "brief":"Second", "after":["one"]}]}},
         "nodes":[{"id":"map", "use":"explore", "over":["src"]}, {"id":"work", "use":"pair", "after":["map"]}]}));
-    let document = patch::submit("submitted", &patch, &context).unwrap();
+    let document = patch::submit("submitted", &patch, &context, None).unwrap();
     assert_eq!(document.nodes.len(), 2);
     assert_eq!(document.nodes[1].kind, Some(NodeKind::Composite));
     let cycle = host_patch(json!({"schema_version":1, "nodes":[
         {"id":"x", "use":"task", "after":["y"]}, {"id":"y", "use":"task", "after":["x"]}]}));
-    assert_eq!(patch::submit("cyclic", &cycle, &context).unwrap_err().code, "cycle");
+    assert_eq!(patch::submit("cyclic", &cycle, &context, None).unwrap_err().code, "cycle");
     let stale = host_patch(json!({"schema_version":1, "expected_revision":3, "nodes":[{"id":"x", "use":"task"}]}));
-    assert_eq!(patch::submit("stale", &stale, &context).unwrap_err().code, "stale_revision");
+    assert_eq!(patch::submit("stale", &stale, &context, None).unwrap_err().code, "stale_revision");
 }
 
 #[test]

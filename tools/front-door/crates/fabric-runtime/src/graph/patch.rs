@@ -282,7 +282,12 @@ fn admit_patch_for_retry(
                 "initial submission must precede launch",
             ));
         }
-        let compiled = submit(&graph.document.graph_id, patch, context)?;
+        let compiled = submit(
+            &graph.document.graph_id,
+            patch,
+            context,
+            graph.document.integration_branch.as_deref(),
+        )?;
         if compiled.nodes != graph.document.nodes {
             return Err(PatchError::invalid("submission differs from bound nodes"));
         }
@@ -723,7 +728,12 @@ pub fn submission(
         journal: None,
         limits,
     };
-    let compiled = submit(&document.graph_id, &patch, &context)?;
+    let compiled = submit(
+        &document.graph_id,
+        &patch,
+        &context,
+        document.integration_branch.as_deref(),
+    )?;
     if compiled.nodes != document.nodes {
         return Err(PatchError::invalid("submission differs from bound nodes"));
     }
@@ -740,6 +750,7 @@ pub fn submit(
     graph_id: &str,
     patch: &Patch,
     context: &PatchContext<'_>,
+    integration_branch: Option<&str>,
 ) -> Result<GraphDocument, PatchError> {
     if patch.schema_version != PATCH_SCHEMA_VERSION {
         return Err(PatchError::invalid(format!(
@@ -797,7 +808,7 @@ pub fn submit(
         context: None,
         extra: Default::default(),
         limits: None,
-        integration_branch: None,
+        integration_branch: integration_branch.map(str::to_owned),
         delivery: None,
         decision_session: None,
         schema_version: 1,

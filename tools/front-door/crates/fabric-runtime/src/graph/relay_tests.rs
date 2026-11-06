@@ -614,10 +614,13 @@ fn writer_child_binds_parent_branch_and_replays_original_source() {
 fn review_panel_child_resolves_host_lenses_preserves_subject_and_replays() {
     let (document, mut checkpoint) = live(None);
     let library = template::TemplateLibrary::bundled();
-    let resolvers = std::collections::BTreeMap::from([(
-        "review-panel".into(),
-        vec!["correctness".into(), "tests".into()],
-    )]);
+    let resolvers = std::collections::BTreeMap::from([
+        ("review-topology".into(), vec!["f1-v1-s1".into()]),
+        ("review-verifiers".into(), vec!["1".into()]),
+        ("review-panel".into(), vec!["correctness".into(), "tests".into()]),
+        ("review-advice-correctness".into(), vec![String::new()]),
+        ("review-advice-tests".into(), vec![String::new()]),
+    ]);
     let limits = plans::generous();
     let context = patch::PatchContext {
         library: &library,

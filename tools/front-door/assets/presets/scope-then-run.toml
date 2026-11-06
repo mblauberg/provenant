@@ -14,47 +14,6 @@ cost = "scouts + 1 scoping attempt + generator-evaluator"
 select_when = "The brief is not yet an approved slice: scope is unclear or acceptance criteria are missing."
 tags = ["research", "write", "review"]
 
-[plan]
-# With --plan on, a principal planner replaces the static scouts stage. It
-# instantiates only these patterns; the scope and run stages still follow.
-replaces = "scout"
-explicit = ["width"]
-# The static scout stage reconciles its scouts in a synthesis; the planned one
-# does it here, ahead of scoping.
-after = [{ id = "synthesis", role = "plan.research" }]
-guidance = """Decide whether to scout at all: when the brief and the spec already answer what the scope stage needs, instantiate no-scout once and say why. Otherwise choose how many scouts to run and give each one distinct question to answer. Use codebase scouts for questions the repository can answer and, when the catalogue offers one, an external scout for questions that need documentation, upstream source or prior art. Prefer the default width unless the brief clearly needs fewer or more, and never repeat a question."""
-
-[[plan.patterns]]
-name = "scout"
-exports = [{ node = "scout", outputs = ["result", "findings"] }]
-nodes = [
-  { id = "scout", role = "scout.codebase", brief = "Your question: ${question}", tier = "${route}", acceptance_checks = ["Answer the question from the repository", "Cite the files and evidence behind each claim"] },
-]
-
-[plan.patterns.parameters]
-question = { type = "string", doc = "The one question this scout answers." }
-route = { type = "string", default = "junior", enum = ["junior", "senior", "principal"], doc = "Route alias for the scout." }
-
-[[plan.patterns]]
-name = "external-scout"
-enabled_by = "external"
-exports = [{ node = "scout", outputs = ["result", "findings"] }]
-nodes = [
-  { id = "scout", role = "scout.external", brief = "Your question: ${question}", acceptance_checks = ["Answer the question from primary sources", "Give each source with its URL and date"] },
-]
-
-[plan.patterns.parameters]
-question = { type = "string", doc = "The one question this external scout researches." }
-
-[[plan.patterns]]
-name = "no-scout"
-exports = [{ node = "note", outputs = ["result", "findings"] }]
-nodes = [
-  { id = "note", tier = "junior", brief = "No scouting is needed because: ${reason}. Write a short note of the facts in the brief that the scoping stage can rely on and what it must still decide.", acceptance_checks = ["State what the scoping stage can rely on", "Name anything still unknown"] },
-]
-
-[plan.patterns.parameters]
-reason = { type = "string", doc = "Why the brief already answers what the scope stage needs." }
 
 [parameters]
 local_check_policy = { type = "string", inherit = true, default = "", doc = "Local check policy inherited by nested presets; empty uses the layered roles library." }

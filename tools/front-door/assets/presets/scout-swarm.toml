@@ -15,34 +15,6 @@ cost = "width junior attempts + 1 senior synthesis"
 select_when = "The scope of a task is unclear and a wide read-only survey is cheaper than guessing."
 tags = ["research", "read-only"]
 
-[plan]
-# With --plan on, a principal planner replaces the static scouts stage. It
-# instantiates only these patterns; the synthesis stage still runs.
-replaces = "scouts"
-explicit = ["width"]
-guidance = """Choose how many scouts to run and give each one distinct question to answer. Use codebase scouts for questions the repository can answer and, when the catalogue offers one, an external scout for questions that need documentation, upstream source or prior art. Prefer the default width unless the brief clearly needs fewer or more, and never repeat a question."""
-
-[[plan.patterns]]
-name = "scout"
-exports = [{ node = "scout", outputs = ["result", "findings"] }]
-nodes = [
-  { id = "scout", role = "scout.codebase", brief = "Your question: ${question}", tier = "${route}", acceptance_checks = ["Answer the question from the repository", "Cite the files and evidence behind each claim"] },
-]
-
-[plan.patterns.parameters]
-question = { type = "string", doc = "The one question this scout answers." }
-route = { type = "string", default = "junior", enum = ["junior", "senior", "principal"], doc = "Route alias for the scout." }
-
-[[plan.patterns]]
-name = "external-scout"
-enabled_by = "external"
-exports = [{ node = "scout", outputs = ["result", "findings"] }]
-nodes = [
-  { id = "scout", role = "scout.external", brief = "Your question: ${question}", acceptance_checks = ["Answer the question from primary sources", "Give each source with its URL and date"] },
-]
-
-[plan.patterns.parameters]
-question = { type = "string", doc = "The one question this external scout researches." }
 
 [parameters]
 width = { type = "integer", default = 4, min = 1, max = 32, doc = "Number of parallel scouts." }
