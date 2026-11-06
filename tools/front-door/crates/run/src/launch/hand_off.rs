@@ -28,6 +28,44 @@ fn typed_local(phase: &str, error: &RunError) -> HandOff {
     }
 }
 
+fn custody_refusal(
+    e: crate::writer::WriterCustodyError,
+    writer_path: Option<std::path::PathBuf>,
+) -> HandOff {
+    match e {
+        crate::writer::WriterCustodyError::Admission(custody::CustodyError::Busy) => HandOff::Busy,
+        crate::writer::WriterCustodyError::Admission(
+            custody::CustodyError::ReservationRetained(error),
+        ) => HandOff::Protected(format!("custody reservation: {error}")),
+        crate::writer::WriterCustodyError::Admission(custody::CustodyError::ImportRetained {
+            run,
+            attempt,
+        }) => HandOff::RetainedImport {
+            run,
+            attempt,
+            worktree: writer_path.unwrap_or_default(),
+        },
+        crate::writer::WriterCustodyError::Admission(
+            error @ (custody::CustodyError::Fenced
+            | custody::CustodyError::UnknownIdentity
+            | custody::CustodyError::InvalidRecord),
+        ) => HandOff::Boundary {
+            message: format!("custody: {error}"),
+            class: provenant_records::diagnostic::BoundaryClass::Authority,
+            cause: None,
+        },
+        crate::writer::WriterCustodyError::Admission(custody::CustodyError::Admission(error)) => {
+            typed_local("custody", &RunError::Admission(error))
+        }
+        crate::writer::WriterCustodyError::Admission(error) => {
+            HandOff::Local(format!("custody: {error}"))
+        }
+        crate::writer::WriterCustodyError::Withdrawal { admission, release } => HandOff::Protected(
+            format!("custody admission: {admission}; custody withdrawal: {release}"),
+        ),
+    }
+}
+
 impl RunStore {
     #[expect(
         clippy::too_many_arguments,
@@ -60,10 +98,10 @@ impl RunStore {
         };
         let directory = || {
             self.attempt_dir(record.run_id, id, false)
-                .map_err(|e| local("attempt directory", &e))
+                .map_err(|e| typed_local("attempt directory", &e))
         };
         let mut holder_context =
-            context(record, requester).map_err(|e| local("launch context", &e))?;
+            context(record, requester).map_err(|e| typed_local("launch context", &e))?;
         let reservation = PublicationReservation::prepare(
             directory()?,
             call.lock_budget(),
@@ -117,27 +155,7 @@ impl RunStore {
             None => acquire_writer(directory()?, scope, custody::WriterBinding::read_only())
                 .map_err(crate::writer::WriterCustodyError::Admission),
         }
-        .map_err(|e| match e {
-            crate::writer::WriterCustodyError::Admission(custody::CustodyError::Busy) => {
-                HandOff::Busy
-            }
-            crate::writer::WriterCustodyError::Admission(
-                custody::CustodyError::ReservationRetained(error),
-            ) => HandOff::Protected(format!("custody reservation: {error}")),
-            crate::writer::WriterCustodyError::Admission(
-                custody::CustodyError::ImportRetained { run, attempt },
-            ) => HandOff::RetainedImport {
-                run,
-                attempt,
-                worktree: writer_path.clone().unwrap_or_default(),
-            },
-            crate::writer::WriterCustodyError::Admission(error) => local("custody", &error),
-            crate::writer::WriterCustodyError::Withdrawal { admission, release } => {
-                HandOff::Protected(format!(
-                    "custody admission: {admission}; custody withdrawal: {release}"
-                ))
-            }
-        })?;
+        .map_err(|error| custody_refusal(error, writer_path))?;
         // Once custody is acquired, every local preparation failure must
         // withdraw it before fallback can consider another candidate.
         macro_rules! local_or_withdraw {
@@ -200,7 +218,7 @@ impl RunStore {
                 local_or_withdraw!(Err::<(), _>(local("attempt", &"changed before handoff")));
             }
             Err(error) => {
-                local_or_withdraw!(Err::<(), _>(local("attempt record", &error)));
+                local_or_withdraw!(Err::<(), _>(typed_local("attempt record", &error)));
             }
         }
         if let Some(deliver) = &task.deliver {
@@ -371,6 +389,39 @@ mod tests {
     use super::*;
     use crate::tests::{call, clock, context, input, route};
     use provenant_core::CancelToken;
+
+    #[test]
+    fn custody_refusals_distinguish_authority_from_operational_failures() {
+        use crate::writer::WriterCustodyError;
+        use provenant_records::diagnostic::BoundaryClass;
+        for error in [
+            custody::CustodyError::Fenced,
+            custody::CustodyError::UnknownIdentity,
+            custody::CustodyError::InvalidRecord,
+        ] {
+            assert!(matches!(
+                custody_refusal(WriterCustodyError::Admission(error), None),
+                HandOff::Boundary {
+                    class: BoundaryClass::Authority,
+                    ..
+                }
+            ));
+        }
+        assert!(matches!(
+            custody_refusal(
+                WriterCustodyError::Admission(custody::CustodyError::Busy),
+                None
+            ),
+            HandOff::Busy
+        ));
+        assert!(matches!(
+            custody_refusal(
+                WriterCustodyError::Admission(custody::CustodyError::Cancelled),
+                None
+            ),
+            HandOff::Local(_)
+        ));
+    }
 
     #[test]
     fn typed_handoff_preserves_boundary_and_terminal_cause() {
