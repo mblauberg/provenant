@@ -762,6 +762,9 @@ impl<'a> Compiler<'a> {
         }
         let repeat: Repeat =
             serde_json::from_value(repeat).map_err(|error| format!("invalid repeat: {error}"))?;
+        let review_repair = repeat.review_repair
+            || (node.get("use").and_then(Value::as_str) == Some("repair")
+                && self.library.layer("repair") == Some(Layer::Bundled));
         let mut boundary = Map::new();
         for key in [
             "id",
@@ -787,7 +790,7 @@ impl<'a> Compiler<'a> {
         spec.insert("body".into(), Value::Array(body));
         spec.insert("until".into(), Value::String(repeat.until));
         spec.insert("max_rounds".into(), repeat.max_rounds.into());
-        if repeat.review_repair {
+        if review_repair {
             if !(1..=3).contains(&repeat.max_rounds) {
                 return Err("review repair cycles must be between 1 and 3".into());
             }
@@ -827,13 +830,18 @@ impl<'a> Compiler<'a> {
             for member in &template.nodes {
                 children.push(self.lower_in(member, parameters, stack)?);
             }
-            if name == "repair" && parameters.get("writer").and_then(Value::as_str) == Some("") {
+            let bundled = self.library.layer(name) == Some(Layer::Bundled);
+            if bundled
+                && name == "repair"
+                && parameters.get("writer").and_then(Value::as_str) == Some("")
+            {
                 // A standalone or integration repair has no PR writer to continue.
                 if let Some(fix) = children.first_mut().and_then(Value::as_object_mut) {
                     fix.remove("continues");
                 }
             }
-            if name == "repair"
+            if bundled
+                && name == "repair"
                 && let Some(branch) = parameters
                     .get("integration_branch")
                     .and_then(Value::as_str)
@@ -841,7 +849,7 @@ impl<'a> Compiler<'a> {
             {
                 children[0]["delivery"] = Value::String(format!("integrate:{branch}"));
             }
-            if name == "review-repair" {
+            if bundled && name == "review-repair" {
                 // Bind a host-authored slice to the same literal write authority.
                 // The read-only continuation planner cannot invent writer authority.
                 let mut fix = children[0]["loop"]["body"][0].clone();
@@ -852,8 +860,19 @@ impl<'a> Compiler<'a> {
                 fix["acceptance_checks"] = serde_json::json!([
                     "Meet the principal's acceptance evidence within the approved scope"
                 ]);
+                let prompt = fix
+                    .as_object_mut()
+                    .ok_or("repair writer must be a node")?
+                    .remove("prompt");
+                let access = fix
+                    .as_object_mut()
+                    .ok_or("repair writer must be a node")?
+                    .remove("access");
+                fix.as_object_mut()
+                    .ok_or("repair writer must be a node")?
+                    .remove("id");
                 children[2]["plan"]["patterns"] = serde_json::json!([{
-                    "name": "repair-slice", "nodes": [fix]
+                    "name": "repair-slice", "brief": prompt, "access": access, "node": fix
                 }]);
                 children[2]["plan"]["wire_exports"] = Value::Bool(true);
                 children[2]["plan"]["resolvers"] =

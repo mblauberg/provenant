@@ -402,8 +402,8 @@ fn delivery_templates_admit_bounded_review_repairs() {
             .unwrap();
         let slice = &continuation.plan.as_ref().unwrap().templates[0];
         assert_eq!(slice.name.as_deref(), Some("repair-slice"));
-        assert_eq!(slice.nodes[0]["write_scope"], json!(["src"]));
-        assert_eq!(slice.nodes[0]["worktree"], "/fixture/writer");
+        assert_eq!(slice.node["write_scope"], json!(["src"]));
+        assert_eq!(slice.node["worktree"], "/fixture/writer");
         if template == "deliver" {
             let accept = expanded
                 .nodes
@@ -442,7 +442,7 @@ fn review_cycle_limit_is_configurable_but_never_above_three() {
     let error = Compiler::new(&bundled)
         .compile(&json!({"id":"repair", "use":"repair",
         "with":{"worktree":"/fixture/writer", "write_scope":["src"]},
-        "repeat":{"until":"accepted", "max_rounds":4, "review_repair":true}}))
+        "repeat":{"until":"accepted", "max_rounds":4}}))
         .unwrap_err();
     assert!(error.contains("between 1 and 3"), "{error}");
 }
