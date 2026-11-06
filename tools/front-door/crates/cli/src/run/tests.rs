@@ -6619,7 +6619,10 @@ fn reviewer_receipts_cover_provenance_and_resolution_evidence()
     record.skipped_routes.push(serde_json::from_value(
         json!({"route":"codex/gpt-6.1-sol","kind":"unavailable","detail":"unavailable"}),
     )?);
-    assert_eq!(reviewer_receipt(&record, false).unwrap().0["resolved_from"], "unknown");
+    assert_eq!(
+        reviewer_receipt(&record, false).unwrap().0["resolved_from"],
+        "unknown"
+    );
     record.applied_route.as_mut().unwrap().model = Some("codex/gpt-6.1-sol".into());
     record.applied_route.as_mut().unwrap().pool_selection = Some(serde_json::from_value(
         json!({"pool":"junior","candidates":[],"roll":0,"total_weight":1,"pick":"codex/gpt-6.1-sol"}),
