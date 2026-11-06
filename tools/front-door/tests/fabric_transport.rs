@@ -2995,10 +2995,6 @@ fn remote_inbox_owner() -> Result {
     Ok(())
 }
 
-
-
-
-
 fn git(rig: &TestRig, cwd: &Path, args: &[&str]) -> Result<String> {
     let mut argv = vec!["-C", cwd.to_str().ok_or("git cwd")?];
     argv.extend_from_slice(args);
