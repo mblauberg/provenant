@@ -197,3 +197,26 @@ fn composite_task_keeps_the_supplied_brief() {
         "Map the graph kernel"
     );
 }
+
+#[test]
+fn composite_review_override_keeps_its_additional_checks() {
+    let mut library = graph::TemplateLibrary::bundled();
+    library
+        .insert_toml(
+            graph::Layer::Repository,
+            "review-panel",
+            r#"
+        nodes = [
+          { id = "lenses", use = "review", over = ["correctness"] },
+          { id = "security", use = "verify", after = ["lenses"] },
+        ]
+    "#,
+        )
+        .unwrap();
+    let panel = Compiler::new(&library)
+        .compile(&json!({"id":"review", "use":"review-panel"}))
+        .unwrap();
+    let children = &panel.composite.unwrap().nodes;
+    assert_eq!(children.len(), 2);
+    assert_eq!(children[1].id, "security");
+}

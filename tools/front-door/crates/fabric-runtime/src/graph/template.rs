@@ -779,7 +779,9 @@ impl<'a> Compiler<'a> {
             for member in &template.nodes {
                 children.push(self.lower_in(member, parameters, stack)?);
             }
-            let single_review = name == "review-panel" && composites::single_review(&mut children);
+            let single_review = name == "review-panel"
+                && self.library.layer(name) == Some(Layer::Bundled)
+                && composites::single_review(&mut children);
             let exports = if single_review {
                 vec![serde_json::json!({"node":"review", "outputs":["result", "findings", "verdict"]})]
             } else if template.exports.is_empty() {

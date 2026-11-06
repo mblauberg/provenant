@@ -96,7 +96,7 @@ min_ok = { type = "integer", default = 1, min = 1 }
 
 [plan-then-deliver]
 nodes = [
-  { id = "plan", use = "plan" },
+  { id = "plan", use = "plan", brief = "Plan: ${brief}" },
   { id = "deliver", use = "deliver", after = ["plan"], inputs = [{ node = "plan", outputs = ["result"] }], with = { brief = "${brief}", worktree = "${worktree}", write_scope = "${write_scope}" } },
 ]
 [plan-then-deliver.parameters]
