@@ -96,7 +96,7 @@ pub fn observe_model(data: &std::path::Path, session: &str) -> Result<String, Pr
         .map_err(|_| ProviderError::UnknownIdentity)?;
     let mut statement = db
         .prepare(
-            "SELECT DISTINCT json_extract(data,'$.model.providerID'), json_extract(data,'$.model.id') \\
+            "SELECT DISTINCT json_extract(data,'$.model.providerID'), json_extract(data,'$.model.id') \
              FROM session_message WHERE session_id=? AND type='assistant' LIMIT 2",
         )
         .map_err(|_| ProviderError::UnknownIdentity)?;
