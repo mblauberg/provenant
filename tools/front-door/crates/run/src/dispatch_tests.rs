@@ -782,7 +782,7 @@ fn host_launches_one_attempt_per_child_task() -> TestResult {
     assert_eq!(started.len(), 2);
     for id in [nested.attempts[0].attempt_id, extra.attempt_id] {
         assert!(started.iter().any(|result| matches!(result,
-            Started::Refused { attempt, reason, kind: RefusalKind::Preparation }
+            Started::Refused { attempt, reason, kind: RefusalKind::PreparationBoundary(provenant_records::diagnostic::BoundaryClass::Authority) }
             if *attempt == id && reason == "child task has more than one attempt"
         )));
         assert_eq!(terminal(&store, id, &call)?, Outcome::Rejected);
@@ -840,7 +840,7 @@ fn host_refuses_extra_child_attempt_without_touching_held_attempt() -> TestResul
         &call,
     )?;
     assert!(matches!(started.as_slice(), [Started::Refused {
-        attempt, kind: RefusalKind::Preparation, ..
+        attempt, kind: RefusalKind::PreparationBoundary(provenant_records::diagnostic::BoundaryClass::Authority), ..
     }] if *attempt == extra.attempt_id));
     assert_eq!(fake.prepared.get(), 0);
     assert_eq!(store.record(id, &call)?, held);
@@ -1120,7 +1120,7 @@ fn host_refuses_invalid_child_rows_added_after_validation_without_aborting_scan(
             "child attempt task missing from request"
         };
         assert!(started.iter().any(|result| matches!(result,
-            Started::Refused { attempt, reason, kind: RefusalKind::Preparation }
+            Started::Refused { attempt, reason, kind: RefusalKind::PreparationBoundary(provenant_records::diagnostic::BoundaryClass::Authority) }
                 if *attempt == extra.attempt_id && reason == expected
         )));
         for attempt in &nested.attempts {
@@ -8934,6 +8934,7 @@ fn preparation_pacing_refusal_uses_typed_skipped_route_cause() -> TestResult {
             _: Option<&AttemptRecord>,
         ) -> std::result::Result<PreparedLaunch, crate::PrepareRefusal> {
             Err(crate::PrepareRefusal {
+                boundary_class: provenant_records::diagnostic::BoundaryClass::None,
                 terminal_cause: None,
                 terminal_note: None,
                 message: self.message.into(),
@@ -9026,6 +9027,7 @@ fn all_candidates_skipped_for_auth_settle_auth_required() -> TestResult {
             _: Option<&AttemptRecord>,
         ) -> std::result::Result<PreparedLaunch, crate::PrepareRefusal> {
             Err(crate::PrepareRefusal {
+                boundary_class: provenant_records::diagnostic::BoundaryClass::None,
                 terminal_cause: None,
                 terminal_note: None,
                 message: "all candidates require sign-in; run provenant accounts".into(),

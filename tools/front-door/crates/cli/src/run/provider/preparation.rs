@@ -389,6 +389,7 @@ impl PrepareError {
                 cause,
                 note,
             } => run::PrepareRefusal {
+                boundary_class: provenant_records::diagnostic::BoundaryClass::None,
                 terminal_cause: Some(cause),
                 terminal_note: note,
                 message,
@@ -405,17 +406,93 @@ impl PrepareError {
                 message,
                 skipped_routes,
                 fallback_outcome,
-                ..
-            } => run::PrepareRefusal {
-                terminal_cause: None,
-                terminal_note: None,
-                message,
-                skipped_routes,
-                fallback_outcome,
-            },
+                plans,
+            } => {
+                // Only classify the aggregate when every refused candidate
+                // has a typed plan failure and all establish the same boundary.
+                let boundary_class = if !plans.is_empty()
+                    && plans.len() == skipped_routes.len()
+                    && skipped_routes.iter().all(|route| {
+                        route.cause
+                            == Some(provenant_records::RouteExclusionReason::DisclosureDenied)
+                    }) {
+                    let mut classes = plans
+                        .into_iter()
+                        .map(|error| run::RunError::Plan(error).boundary_class());
+                    let first = classes.next().unwrap();
+                    if classes.all(|class| class == first) {
+                        first
+                    } else {
+                        provenant_records::diagnostic::BoundaryClass::None
+                    }
+                } else {
+                    provenant_records::diagnostic::BoundaryClass::None
+                };
+                run::PrepareRefusal {
+                    boundary_class,
+                    terminal_cause: None,
+                    terminal_note: None,
+                    message,
+                    skipped_routes,
+                    fallback_outcome,
+                }
+            }
+            Self::Run(error) => {
+                let boundary_class = error.boundary_class();
+                let mut refusal = run::PrepareRefusal::from(error.to_string());
+                refusal.boundary_class = boundary_class;
+                refusal
+            }
+            Self::Prompt(error @ LaunchPromptError::NestedArgvTooLarge { .. }) => {
+                let mut refusal = run::PrepareRefusal::from(error.to_string());
+                refusal.boundary_class = provenant_records::diagnostic::BoundaryClass::Authority;
+                refusal
+            }
             other => other.to_string().into(),
         }
     }
+}
+
+#[cfg(test)]
+#[test]
+fn preparation_preserves_typed_boundaries_without_classifying_other_errors() {
+    use provenant_records::diagnostic::BoundaryClass;
+    let error = run::RunError::Confinement(
+        provenant_confinement::permissions::PermissionError::CredentialRoot,
+    );
+    let refusal = PrepareError::Run(error).into_refusal();
+    assert_eq!(refusal.boundary_class, BoundaryClass::Credentials);
+    let prompt = PrepareError::Prompt(LaunchPromptError::NestedArgvTooLarge {
+        limit: 32,
+        origin: "shipped default",
+    })
+    .into_refusal();
+    assert_eq!(prompt.boundary_class, BoundaryClass::Authority);
+    let other = PrepareError::Other("TOKEN_SENTINEL".into()).into_refusal();
+    assert_eq!(other.boundary_class, BoundaryClass::None);
+    let candidate = || {
+        let mut route = skip("fixture/model", SkipKind::Unavailable, "plan refused");
+        route.set_cause(provenant_records::RouteExclusionReason::DisclosureDenied);
+        route
+    };
+    let aggregate = |skipped_routes| {
+        PrepareError::Candidates {
+            message: "candidate refusal".into(),
+            plans: vec![provenant_confinement::PlanError::InvalidRoots],
+            skipped_routes,
+            fallback_outcome: None,
+        }
+        .into_refusal()
+    };
+    assert_eq!(
+        aggregate(vec![candidate()]).boundary_class,
+        BoundaryClass::Authority
+    );
+    let unrelated = skip("other/model", SkipKind::Unavailable, "not available");
+    assert_eq!(
+        aggregate(vec![candidate(), unrelated]).boundary_class,
+        BoundaryClass::None
+    );
 }
 impl From<String> for PrepareError {
     fn from(message: String) -> Self {

@@ -218,6 +218,8 @@ pub struct Decoded {
 #[derive(Debug, thiserror::Error)]
 #[error("{message}")]
 pub struct PrepareRefusal {
+    /// Boundary established by the original typed preparation failure, if any.
+    pub boundary_class: provenant_records::diagnostic::BoundaryClass,
     pub terminal_cause: Option<TerminalCause>,
     /// Fixed-form text naming a configured value, never captured output.
     pub terminal_note: Option<String>,
@@ -231,6 +233,8 @@ impl PrepareRefusal {
             route.cause == Some(provenant_records::RouteExclusionReason::PacingReserve)
         }) {
             RefusalKind::PacingReserve
+        } else if self.boundary_class != provenant_records::diagnostic::BoundaryClass::None {
+            RefusalKind::PreparationBoundary(self.boundary_class)
         } else {
             RefusalKind::Preparation
         }
@@ -247,6 +251,7 @@ impl PrepareRefusal {
 impl From<String> for PrepareRefusal {
     fn from(message: String) -> Self {
         Self {
+            boundary_class: provenant_records::diagnostic::BoundaryClass::None,
             message,
             terminal_cause: None,
             terminal_note: None,
@@ -259,6 +264,16 @@ impl From<&str> for PrepareRefusal {
     fn from(message: &str) -> Self {
         message.to_owned().into()
     }
+}
+
+#[cfg(test)]
+#[test]
+fn preparation_refusal_retains_its_typed_boundary() {
+    use provenant_records::diagnostic::BoundaryClass;
+    let mut refusal = PrepareRefusal::from("opaque source");
+    assert_eq!(refusal.kind().boundary_class(), BoundaryClass::None);
+    refusal.boundary_class = BoundaryClass::Credentials;
+    assert_eq!(refusal.kind().boundary_class(), BoundaryClass::Credentials);
 }
 /// Run-owned per-attempt paths. Allocated once, shared by explicit fallback candidates.
 pub struct LaunchPaths {
@@ -614,6 +629,7 @@ pub enum Started {
 pub enum RefusalKind {
     Policy,
     Preparation,
+    PreparationBoundary(provenant_records::diagnostic::BoundaryClass),
     PacingReserve,
     WorktreeBusy,
     PriorityUnavailable,
@@ -635,7 +651,7 @@ impl RefusalKind {
     pub fn boundary_class(&self) -> provenant_records::diagnostic::BoundaryClass {
         use provenant_records::diagnostic::BoundaryClass as B;
         match self {
-            Self::HandoffBoundary(class) => *class,
+            Self::HandoffBoundary(class) | Self::PreparationBoundary(class) => *class,
             Self::WorktreeBusy | Self::InvalidWriteGrantPath => B::Authority,
             Self::RetainedImport { .. } => B::LaneGit,
             Self::StoredPromptUnreadable => B::Authority,
@@ -1551,7 +1567,9 @@ impl RunStore {
                     started.push(Started::Refused {
                         attempt: id,
                         reason: child_reason.unwrap_or(reason).into(),
-                        kind: RefusalKind::Preparation,
+                        kind: RefusalKind::PreparationBoundary(
+                            provenant_records::diagnostic::BoundaryClass::Authority,
+                        ),
                     });
                     continue;
                 }
@@ -1607,7 +1625,9 @@ impl RunStore {
                 started.push(Started::Refused {
                     attempt: id,
                     reason: reason.into(),
-                    kind: RefusalKind::Preparation,
+                    kind: RefusalKind::PreparationBoundary(
+                        provenant_records::diagnostic::BoundaryClass::Authority,
+                    ),
                 });
                 continue;
             }

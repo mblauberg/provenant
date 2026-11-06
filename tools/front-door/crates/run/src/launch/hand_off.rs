@@ -166,7 +166,7 @@ impl RunStore {
                 .and_then(|plan| plan.writer.as_ref())
             && let Err(error) = self.check_writer_lineage(record, &writer.worktree, call)
         {
-            local_or_withdraw!(Err::<(), _>(local("writer lineage", &error)));
+            local_or_withdraw!(Err::<(), _>(typed_local("writer lineage", &error)));
         }
         if task.source_head.is_some()
             && let Some(writer) = plan
@@ -231,7 +231,7 @@ impl RunStore {
                 lease.withdraw_unlaunched().map_err(|release| {
                     HandOff::Protected(format!("Git setup: {error}; custody withdrawal: {release}"))
                 })?;
-                return Err(local("Git setup", &error));
+                return Err(typed_local("Git setup", &error));
             }
             // Git setup has finished; cache seeding needs no repository lock.
             let seed_attempt = local_or_withdraw!(directory());
@@ -267,7 +267,7 @@ impl RunStore {
                     writer.snapshot(self.context.state_root.as_path(), &writer_attempt, scope)
                 })
             {
-                local_or_withdraw!(Err::<(), _>(local("lane Git objects", &error)));
+                local_or_withdraw!(Err::<(), _>(typed_local("lane Git objects", &error)));
             }
             match confinement.command(&plan.argv, &id, call.cancel) {
                 Ok(argv) => plan.argv = argv,
@@ -390,6 +390,28 @@ mod tests {
         assert!(matches!(
             typed_local("Git", &RunError::GitUnavailable),
             HandOff::Local(_)
+        ));
+        let credential = RunError::Confinement(PermissionError::CredentialRoot);
+        assert!(matches!(
+            typed_local("Git setup", &credential),
+            HandOff::Boundary {
+                class: BoundaryClass::Credentials,
+                cause: None,
+                ..
+            }
+        ));
+        let retained = RunError::RetainedWriterImport {
+            run: provenant_core::RunId::from_bytes([3; 16]),
+            attempt: provenant_core::AttemptId::from_bytes([4; 16]),
+            worktree: "/tmp/writer".into(),
+        };
+        assert!(matches!(
+            typed_local("lane Git objects", &retained),
+            HandOff::Boundary {
+                class: BoundaryClass::LaneGit,
+                cause: None,
+                ..
+            }
         ));
     }
 
