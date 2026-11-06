@@ -636,7 +636,6 @@ impl BinaryRunOwner<'_> {
                 prompt: task.prompt,
                 title: task.title,
                 route: task.route,
-                fallback: Vec::new(),
                 provider_timeout: task.timeout_seconds,
                 delivery_id: task.delivery_id,
                 deliver: task.deliver,

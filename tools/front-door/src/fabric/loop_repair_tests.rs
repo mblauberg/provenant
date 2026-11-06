@@ -93,7 +93,6 @@ fn loop_round_settlement_retains_lane_owned_noop_worktree() -> Result<(), Box<dy
                     effort: None,
                 },
                 account: None,
-                fallback: vec![],
                 timeout_seconds: 30,
                 delivery_id: None,
                 deliver: None,

@@ -1035,7 +1035,6 @@ fn launch_prompt_refuses_invalid_input_before_account_resolution()
                 effort: None,
             },
             account: None,
-            fallback: vec![],
             authority_digest: provenant_core::Digest::from_bytes([4; 32]),
             writer: None,
             deliver: None,
@@ -1648,7 +1647,6 @@ fn registry_provider_resolves_prepares_and_reports_quota(
             effort: None,
         },
         account: Some(account_key.into()),
-        fallback: vec![],
         authority_digest: Digest::from_bytes([4; 32]),
         writer: None,
         deliver: None,
@@ -1844,7 +1842,6 @@ fn opencode_stale_auth_prepares_with_an_unverified_warning()
             effort: None,
         },
         account: Some("go".into()),
-        fallback: vec![],
         authority_digest: Digest::from_bytes([4; 32]),
         writer: None,
         deliver: None,
@@ -2016,11 +2013,6 @@ fn writer_plan_stages_scratch_in_private_temporary_directory()
             effort: None,
         },
         account: None,
-        fallback: vec![run::RouteRecord {
-            provider: Some("codex".into()),
-            model: Some("codex/gpt-5.3-codex".into()),
-            ..Default::default()
-        }],
         authority_digest: Digest::from_bytes([4; 32]),
         writer: Some(run::WriterRequest {
             extra: Default::default(),
@@ -2222,7 +2214,6 @@ printf 'agy 1.0.0\n'
                 model: "agy/gemini-3.8-flash".into(),
                 effort: None,
             };
-            request.fallback.clear();
             if !write {
                 request.writer = None;
             }
@@ -2832,59 +2823,6 @@ printf 'agy 1.0.0\n'
         provenant_os::exec::Termination::Exit(0)
     );
     assert_eq!(allowed.stdout.bytes, b"forwarded\n");
-    // The preferred provider is updating, so preparation must select the
-    // explicit fallback rather than just omit an unrelated busy adapter.
-    let mut fallback_task = task.clone();
-    let fallback_prompt = "Busy preferred provider fallback";
-    fallback_task.prompt_digest =
-        provenant_records::CanonicalV1::file_digest(fallback_prompt.as_bytes());
-    fallback_task.route = run::RequestedRoute::Model {
-        extra: Default::default(),
-        provider: "codex".into(),
-        model: "codex/gpt-5.3-codex".into(),
-        effort: None,
-    };
-    fallback_task.fallback = vec![run::RouteRecord {
-        provider: Some("cursor".into()),
-        model: Some("cursor/gpt-5.3-codex-low".into()),
-        ..Default::default()
-    }];
-    let fallback_paths = run::LaunchPaths {
-        attempt_id: paths.attempt_id,
-        operation_id: paths.operation_id.clone(),
-        task_index: paths.task_index,
-        lane_depth: paths.lane_depth,
-        run_id: paths.run_id,
-        deadline_unix_ms: paths.deadline_unix_ms,
-        scratch: attempt.join("fallback-scratch"),
-        provider_state: attempt.join("fallback-provider-state"),
-        temporary: attempt.join("fallback-tmp"),
-        temporary_alias: None,
-    };
-    for path in [
-        &fallback_paths.scratch,
-        &fallback_paths.provider_state,
-        &fallback_paths.temporary,
-    ] {
-        std::fs::DirBuilder::new().mode(0o700).create(path)?;
-    }
-    let fallback_launch = prepare_with(
-        &registry,
-        &fallback_task,
-        fallback_prompt,
-        &fallback_paths,
-        None,
-        |adapter| {
-            assert_eq!(adapter, "cursor", "busy preferred provider was probed");
-            Ok(executable.clone())
-        },
-        None,
-    )?;
-    assert_eq!(fallback_launch.route.provider.as_deref(), Some("cursor"));
-    assert_eq!(
-        fallback_launch.route.model.as_deref(),
-        Some("cursor/gpt-5.3-codex-low")
-    );
     // A named pool redraws after an adapter disappears during local preparation.
     // The first two lookups establish availability; the third refuses the first
     // selected member, and the next lookup admits the remaining member.
@@ -2899,7 +2837,6 @@ printf 'agy 1.0.0\n'
         name: "redraw-fixture".into(),
         effort: None,
     };
-    redraw_task.fallback.clear();
     let redraw_prompt = "pool redraw fixture";
     redraw_task.prompt_digest =
         provenant_records::CanonicalV1::file_digest(redraw_prompt.as_bytes());
@@ -2908,12 +2845,12 @@ printf 'agy 1.0.0\n'
         provider_state: attempt.join("redraw-provider-state"),
         temporary: attempt.join("redraw-tmp"),
         temporary_alias: None,
-        attempt_id: fallback_paths.attempt_id,
-        operation_id: fallback_paths.operation_id.clone(),
-        task_index: fallback_paths.task_index,
-        lane_depth: fallback_paths.lane_depth,
-        run_id: fallback_paths.run_id,
-        deadline_unix_ms: fallback_paths.deadline_unix_ms,
+        attempt_id: paths.attempt_id,
+        operation_id: paths.operation_id.clone(),
+        task_index: paths.task_index,
+        lane_depth: paths.lane_depth,
+        run_id: paths.run_id,
+        deadline_unix_ms: paths.deadline_unix_ms,
     };
     for path in [
         &redraw_paths.scratch,
@@ -2961,12 +2898,12 @@ printf 'agy 1.0.0\n'
         provider_state: attempt.join("no-redraw-provider-state"),
         temporary: attempt.join("no-redraw-tmp"),
         temporary_alias: None,
-        attempt_id: fallback_paths.attempt_id,
-        operation_id: fallback_paths.operation_id.clone(),
-        task_index: fallback_paths.task_index,
-        lane_depth: fallback_paths.lane_depth,
-        run_id: fallback_paths.run_id,
-        deadline_unix_ms: fallback_paths.deadline_unix_ms,
+        attempt_id: paths.attempt_id,
+        operation_id: paths.operation_id.clone(),
+        task_index: paths.task_index,
+        lane_depth: paths.lane_depth,
+        run_id: paths.run_id,
+        deadline_unix_ms: paths.deadline_unix_ms,
     };
     for path in [
         &no_retry_paths.scratch,
@@ -3015,7 +2952,7 @@ printf 'agy 1.0.0\n'
         provider_state: attempt.join("review-provider-state"),
         temporary: attempt.join("review-tmp"),
         temporary_alias: None,
-        ..fallback_paths
+        ..redraw_paths
     };
     for path in [
         &review_paths.scratch,
@@ -3415,7 +3352,6 @@ fn writer_continuation_dirty_brief(committed: bool) -> Result<(), Box<dyn std::e
             effort: None,
         },
         account: None,
-        fallback: vec![],
         authority_digest: Digest::from_bytes([23; 32]),
         writer: Some(run::WriterRequest {
             extra: Default::default(),
@@ -3780,7 +3716,7 @@ fn user_sessions_and_pruned_codex_state_remain_resumable() -> Result<(), Box<dyn
                 request: serde_json::from_value(serde_json::json!({
                     "schema_version": 1, "concurrency": 1, "parent": null,
                     "tasks": [{ "task_id": prior.task_id, "prompt_digest": provenant_records::CanonicalV1::file_digest(b""),
-                        "route": prior.requested_route, "fallback": [], "authority_digest": prior.authority_digest,
+                        "route": prior.requested_route, "authority_digest": prior.authority_digest,
                         "provider_timeout_seconds": 20, "delivery_id": null }]
                 }))?,
             };
