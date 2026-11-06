@@ -891,6 +891,13 @@ mod diagnostic_projection_tests {
                 _ => panic!("invalid or incomplete classification {boundary} at {site}"),
             }
         }
+        let guardian = RunError::Admission(AdmissionError::GuardianIdentity);
+        assert_eq!(guardian.boundary_class(), BoundaryClass::Authority);
+        let code = ErrorKind::from(&guardian).code();
+        assert!(guards.iter().any(|guard| {
+            guard.get("code").and_then(|value| value.as_str()) == Some(code)
+                && guard.get("boundary").and_then(|value| value.as_str()) == Some("authority")
+        }));
     }
 
     #[test]

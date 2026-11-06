@@ -159,9 +159,24 @@ boundary = "authority"
 reason = "If the stored prompt cannot be reopened, its bytes cannot be verified against the authorised task and no substitute prompt is launched."
 
 [[guard]]
-site = "run/src/launch.rs#start_inner"
+site = "run/src/launch.rs#RunStore::start_inner"
+boundary = "authority"
+reason = "A child attempt must still belong to the validated request and cannot duplicate a child task when the host reads it for launch."
+
+[[guard]]
+site = "run/src/launch/hand_off.rs#RunStore::hand_off"
+boundary = "lane_git"
+reason = "A retained writer import keeps its worktree fenced until the protected Git state is reconciled."
+
+[[guard]]
+site = "run/src/launch/hand_off.rs#RunStore::hand_off"
+boundary = "authority"
+reason = "A handoff must use the selected worktree and its held custody binding; a busy writer cannot be granted to another attempt."
+
+[[guard]]
+site = "run/src/launch.rs#RunStore::start_inner"
 boundary = "unclassified"
-reason = "Remaining policy, provider preparation and handoff refusals need caller-specific classification."
+reason = "Provider preparation and handoff still combine distinct operational failures and guard refusals into generic kinds; their individual causes need classification."
 
 [[guard]]
 site = "confinement/src/plan.rs#ConfinedPlan::new"
@@ -513,6 +528,12 @@ reason = "Child attempts must be host-derived members of the validated request."
 site = "run/src/launch.rs#RunStore::validate_child"
 boundary = "authority"
 reason = "Child parent, depth, attempts and permitted delegation must match host authority."
+
+[[guard]]
+site = "run/src/admission.rs#RunStore::admit"
+boundary = "authority"
+code = "GUARDIAN_IDENTITY"
+reason = "A guardian and store identity are required to bind a lease to its owner and preserve custody when the host later recovers it."
 
 [[guard]]
 site = "run/src/admission.rs#RunStore::admit"

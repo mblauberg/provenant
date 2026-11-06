@@ -751,6 +751,7 @@ impl ErrorKind {
             | Self::WriterLockBusy
             | Self::WriterUnknown
             | Self::WriterProjectMismatch
+            | Self::GuardianIdentity
             | Self::LaneCoordinationRefused => B::Authority,
             _ => B::None,
         }
