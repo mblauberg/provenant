@@ -2519,24 +2519,28 @@ fn a_version_seven_store_upgrades_on_open_and_can_admit() -> TestResult {
 }
 
 #[test]
-fn a_store_failure_names_its_cause_only_on_the_local_host() {
+fn a_store_failure_omits_source_text_at_every_destination() {
     use provenant_records::diagnostic::Destination;
     let error = RunError::Sqlite(rusqlite::Error::SqliteFailure(
         rusqlite::ffi::Error::new(1),
-        Some("no such table: example".to_owned()),
+        Some("no such table: TOKEN_SENTINEL /private/host\u{1b}".to_owned()),
     ));
-    let local = error.diagnostic(Destination::Local);
-    assert!(
-        local
-            .detail
-            .as_deref()
-            .is_some_and(|detail| detail.contains("no such table"))
-    );
-    let remote = error.diagnostic(Destination::Remote {
-        repository: None,
-        home: None,
-    });
-    assert!(remote.detail.is_none());
+    for destination in [
+        Destination::Local,
+        Destination::Remote {
+            repository: None,
+            home: None,
+        },
+    ] {
+        let diagnostic = error.diagnostic(destination);
+        assert_eq!(diagnostic.code, "IO");
+        assert!(diagnostic.detail.is_none());
+        assert!(diagnostic.next.is_some());
+        let wire = serde_json::to_string(&diagnostic).unwrap();
+        assert!(!wire.contains("TOKEN_SENTINEL"));
+        assert!(!wire.contains("/private/host"));
+        assert!(!wire.chars().any(char::is_control));
+    }
 }
 
 #[test]

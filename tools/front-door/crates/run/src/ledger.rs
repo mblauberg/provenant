@@ -733,7 +733,10 @@ mod tests {
     #[test]
     fn cross_boot_malformed_and_readable_row_removal_release() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("run.sqlite3");
+        // The production reader refuses symlinked path components, including
+        // a host's short TMPDIR alias. Give it the canonical fixture root.
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let path = root.join("run.sqlite3");
         let owner = Connection::open(&path).unwrap();
         owner.execute_batch("CREATE TABLE admission (attempt TEXT); INSERT INTO admission VALUES ('old'), ('live');").unwrap();
         let db = Connection::open_in_memory().unwrap();
@@ -745,7 +748,7 @@ mod tests {
             _ => panic!("current guardian unavailable"),
         };
         let guardian = serde_json::to_string(&live).unwrap();
-        let store = dir.path().as_os_str().as_bytes();
+        let store = root.as_os_str().as_bytes();
         let owner_id = store_identity(&path).unwrap();
         db.execute(
             "INSERT INTO leases VALUES ('old','p',?1,'writer','old boot',?2,?3)",
