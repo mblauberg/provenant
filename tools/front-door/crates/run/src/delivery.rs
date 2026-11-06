@@ -1977,16 +1977,47 @@ pub(super) fn coalesced_origin_refresh(
     refresh: impl FnOnce() -> Result<()>,
 ) -> Result<()> {
     use provenant_core::{Clock, WaitBudget};
-    use provenant_os::{clock::SystemClock, fs::LockMode};
+    use provenant_os::clock::SystemClock;
     let clock = SystemClock::new();
-    let _fetch = common.lock(
-        OsStr::new("provenant-lane-origin-refresh.lock"),
-        LockMode::Exclusive,
+    coalesced_origin_refresh_with_budget(
+        common,
+        requested,
+        cancel,
         WaitBudget::cli(clock.mono_now(), 60)
             .map_err(|error| prepare_error("origin refresh", error))?,
+        refresh,
+    )
+}
+
+pub(super) fn coalesced_origin_refresh_with_budget(
+    common: &Directory,
+    requested: &OriginRefreshRequest,
+    cancel: &provenant_core::CancelToken,
+    lock_budget: provenant_core::WaitBudget,
+    refresh: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    use provenant_os::{
+        clock::SystemClock,
+        fs::{FsError, LockMode},
+    };
+    let _fetch = match common.lock(
+        OsStr::new("provenant-lane-origin-refresh.lock"),
+        LockMode::Exclusive,
+        lock_budget,
         cancel,
-        &clock,
-    )?;
+        &SystemClock::new(),
+    ) {
+        Ok(lock) => lock,
+        Err(FsError::LockTimeout { .. }) => {
+            use std::io::Write;
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "warning: origin refresh is still busy; launching with existing tracking refs"
+            );
+            return Ok(());
+        }
+        Err(error) => return Err(error.into()),
+    };
     let latest = origin_refresh_completion(common)?;
     if latest
         .as_ref()

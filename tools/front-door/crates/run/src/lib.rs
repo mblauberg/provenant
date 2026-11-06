@@ -384,8 +384,6 @@ pub enum RunError {
     WorktreeMissing(std::path::PathBuf),
     #[error("worktree {0} is not listed by Git; run `git worktree list --porcelain`")]
     WorktreeUnregistered(std::path::PathBuf),
-    #[error("writer Git ref lock {} already exists; check for a running Git process, then remove the stale lock before retrying", .0.display())]
-    WriterRefLocked(std::path::PathBuf),
     #[error("writer import retained for worktree {}, run {run}, attempt {attempt}", worktree.display())]
     RetainedWriterImport {
         worktree: std::path::PathBuf,

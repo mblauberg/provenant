@@ -797,7 +797,7 @@ fn prepare_writer_git(
         let config_lock = worktree.repo().common_dir().lock(
             OsStr::new("provenant-lane-setup.lock"),
             LockMode::Exclusive,
-            WaitBudget::cli(clock.mono_now(), 5)
+            WaitBudget::cli(clock.mono_now(), 60)
                 .map_err(error("set writer config lock budget", None))?,
             cancel,
             &clock,

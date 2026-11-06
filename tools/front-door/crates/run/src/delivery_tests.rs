@@ -1172,6 +1172,36 @@ fn overlapping_origin_requests_share_a_fetch_even_when_it_starts_later()
     Ok(())
 }
 
+// Medium: a real contended fetch lock with an exhausted wait budget.
+#[test]
+fn origin_refresh_lock_timeout_allows_launch_but_fetch_failure_is_reported()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    use provenant_core::{Clock, WaitBudget};
+    use provenant_os::{clock::SystemClock, fs::LockMode};
+    let temp = tempfile::tempdir()?;
+    let common = Directory::open_anchor(temp.path())?;
+    let held = common.try_lock(
+        std::ffi::OsStr::new("provenant-lane-origin-refresh.lock"),
+        LockMode::Exclusive,
+    )?;
+    let requested = OriginRefreshRequest::capture()?;
+    let cancel = CancelToken::new();
+    let immediate = || WaitBudget::nonblocking(SystemClock::new().mono_now());
+    coalesced_origin_refresh_with_budget(&common, &requested, &cancel, immediate(), || {
+        panic!("busy refresh should use existing tracking refs")
+    })?;
+    drop(held);
+    let error =
+        coalesced_origin_refresh_with_budget(&common, &requested, &cancel, immediate(), || {
+            Err(prepare_error("fetch", "remote unavailable"))
+        })
+        .expect_err("a failed fetch must retain its error");
+    assert!(
+        matches!(error, RunError::DeliveryPrepare { step: "fetch", reason } if reason == "remote unavailable")
+    );
+    Ok(())
+}
+
 // Medium: an external Git client holds a real tracking-ref lock.
 #[test]
 fn origin_refresh_ref_collision_does_not_refuse_launch_or_hide_transport_failure()
