@@ -137,8 +137,8 @@ fn dispatch(rig: &TestRig, mode: &str) -> Result<PathBuf> {
     let value: serde_json::Value = serde_json::from_str(&stdout)
         .map_err(|error| format!("{error}: stdout={stdout} stderr={stderr}"))?;
     // Codex's fixture protocol carries no observed answering model, so the
-    // lane settles as failed. The proof below shows the confined process
-    // finished its work, without waiving Run's identity gate.
+    // lane settles as failed. Check the provider's exit code independently
+    // of that outcome, as compose-proof precedes its final protocol output.
     let attempt_ref = value["data"]["checkpoint"]["nodes"][0]["attempts"][0]["attempt_ref"]
         .as_str()
         .ok_or_else(|| format!("no attempt: stdout={stdout} stderr={stderr}"))?;
@@ -148,6 +148,14 @@ fn dispatch(rig: &TestRig, mode: &str) -> Result<PathBuf> {
         .map(|run| run.path().join("attempts").join(attempt))
         .find(|path| path.is_dir())
         .ok_or_else(|| format!("no attempt directory: stdout={stdout}"))?;
+    let record = attempt_record(rig, &attempt)?;
+    assert_eq!(
+        record["state"]["exit_code"],
+        serde_json::json!(0),
+        "provider must exit successfully: state={} stderr={}",
+        record["state"],
+        capture(&attempt.join("stderr.log")).unwrap_or_default()
+    );
     let proof =
         fs::read(attempt.join("provider-state/candidate-0/compose-proof")).map_err(|error| {
             format!(
@@ -157,6 +165,20 @@ fn dispatch(rig: &TestRig, mode: &str) -> Result<PathBuf> {
         })?;
     assert_eq!(proof, b"proved");
     Ok(attempt)
+}
+
+fn attempt_record(rig: &TestRig, attempt: &Path) -> Result<serde_json::Value> {
+    let db = rusqlite::Connection::open(rig.state.join("run.sqlite3"))?;
+    let raw: Vec<u8> = db.query_row(
+        "SELECT record FROM attempts WHERE id=?1",
+        [attempt
+            .file_name()
+            .ok_or("attempt name")?
+            .to_str()
+            .ok_or("attempt id")?],
+        |row| row.get(0),
+    )?;
+    Ok(serde_json::from_slice(&raw)?)
 }
 
 fn capture(path: &Path) -> Result<String> {
@@ -192,17 +214,7 @@ pub(crate) fn read_only_dispatch_applies_bound_git_and_project_writes() -> Resul
             cargo,
             serde_json::json!({"status": "skipped", "reason": "read_only_lane"})
         );
-        let db = rusqlite::Connection::open(rig.state.join("run.sqlite3"))?;
-        let raw: Vec<u8> = db.query_row(
-            "SELECT record FROM attempts WHERE id=?1",
-            [attempt
-                .file_name()
-                .ok_or("attempt name")?
-                .to_str()
-                .ok_or("attempt id")?],
-            |row| row.get(0),
-        )?;
-        let record: serde_json::Value = serde_json::from_slice(&raw)?;
+        let record = attempt_record(&rig, &attempt)?;
         let expected: &[&str] = if configured {
             &[".agent-run/locks"]
         } else {

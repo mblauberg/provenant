@@ -1,6 +1,76 @@
 use super::*;
 use provenant_fabric_runtime::graph::AttemptKey;
 
+// Medium: retained receiver checkpoints, without provider processes.
+#[test]
+fn submission_cancellation_drains_only_attached_work() -> TestResult {
+    use provenant_fabric_runtime::graph::GraphJournal;
+    if host_test(
+        "fabric::peer_tests::peer_graph_tests::cancellation_tests::submission_cancellation_drains_only_attached_work",
+    )? {
+        return Ok(());
+    }
+    let (rig, factory) = receiver()?;
+    let cancel = CancelToken::new();
+    let actor = factory.context.identity.inbox.actor;
+    let operation: provenant_core::OperationId = "detached-cancel".parse()?;
+    let digest =
+        provenant_records::CanonicalV1::record_digest("peer-subgraph", 1, &(actor, &operation))?;
+    let graph = format!("peer-{}", &provenant_core::hex(digest.as_bytes())[..48]);
+    let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
+    let mut checkpoint: graph::GraphCheckpoint = serde_json::from_value(json!({
+        "schema_version":1, "graph_id":graph, "plan_digest":"digest", "cancelled":true,
+        "nodes":[
+            {"id":"parent", "state":"skipped", "worktree":null, "attempts":[]},
+            {"id":"parent--child", "state":"running", "worktree":null, "attempts":[]}
+        ]
+    }))?;
+    for state in [graph::NodeState::Pending, graph::NodeState::Running] {
+        checkpoint.nodes[1].state = state;
+        for marker in [
+            None,
+            Some(json!(false)),
+            Some(json!("true")),
+            Some(json!(true)),
+        ] {
+            let key = "detached_from_graph_cancel";
+            checkpoint.nodes[1].extra.remove(key);
+            if let Some(value) = marker.clone() {
+                checkpoint.nodes[1].extra.insert(key.into(), value);
+            }
+            let mut journal = FileJournal::open(
+                &factory.context.roots.state,
+                factory.context.identity.project,
+                &graph,
+                budget,
+                &cancel,
+                &factory.clock,
+            )?;
+            journal.bind(graph::GraphExecution {
+                extra: Default::default(),
+                integration_base: None,
+                review_base: None,
+                directory: rig.project.clone(),
+                document: serde_json::from_value(json!({
+                    "schema_version":1, "graph_id":graph,
+                    "nodes":[{"id":"parent", "prompt":"work", "access":"read_only",
+                        "route":{"alias":"senior"}}]
+                }))?,
+            })?;
+            journal.save(&checkpoint)?;
+            drop(journal);
+            assert_eq!(
+                super::super::super::peer::peer_cancel_submission(
+                    &factory, actor, &operation, false, budget, &cancel,
+                )?,
+                marker == Some(json!(true)),
+                "state={state:?}, detached marker={marker:?}"
+            );
+        }
+    }
+    Ok(())
+}
+
 #[test]
 fn lost_peer_reply_cancellation_survives_reconnect_and_stops_receiver_subtree() -> TestResult {
     if host_test(

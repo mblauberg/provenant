@@ -1346,15 +1346,17 @@ pub(crate) fn peer_cancel_submission(
     } else {
         checkpoint
     };
-    // A settled node is the graph owner's proof that every admitted attempt
-    // and its custody have drained, including children of a terminal parent.
+    // Settled attached nodes prove that their attempts and custody have drained,
+    // including children of a terminal parent. Receiver cancellation deliberately
+    // preserves nodes marked by graph::relay::DETACHED_FROM_GRAPH_CANCEL.
     Ok(checkpoint.cancelled
         && checkpoint.nodes.iter().all(|node| {
-            !matches!(
-                node.state,
-                provenant_fabric_runtime::graph::NodeState::Pending
-                    | provenant_fabric_runtime::graph::NodeState::Running
-            )
+            node.extra.get("detached_from_graph_cancel") == Some(&serde_json::Value::Bool(true))
+                || !matches!(
+                    node.state,
+                    provenant_fabric_runtime::graph::NodeState::Pending
+                        | provenant_fabric_runtime::graph::NodeState::Running
+                )
         }))
 }
 
