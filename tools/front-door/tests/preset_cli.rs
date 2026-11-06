@@ -217,6 +217,28 @@ fn template_show_resolves_user_repository_and_inline_layers() -> Result {
 }
 
 #[test]
+fn every_bundled_template_is_listed_shown_and_explained() -> Result {
+    let rig = GraphProject::new()?;
+    let (output, value) = rig.run(&["templates"])?;
+    assert!(output.status.success(), "{value}");
+    let listed = value["data"]["templates"].as_array().ok_or("templates")?;
+    assert!(!listed.is_empty());
+    for entry in listed {
+        let name = entry["name"].as_str().ok_or("template name")?;
+        let (output, shown) = rig.run(&["templates", name])?;
+        assert!(output.status.success(), "{name}: {shown}");
+        assert_eq!(shown["data"]["templates"][0], *entry, "{name}");
+        let mut args = vec!["run", "--use", name, "--explain"];
+        if name == "review-repair" {
+            args.extend(["--set", "write_scope=['.']"]);
+        }
+        let (output, explained) = rig.run(&args)?;
+        assert!(output.status.success(), "{name}: {explained}");
+    }
+    Ok(())
+}
+
+#[test]
 fn invalid_template_documents_are_refused_by_list_and_show() -> Result {
     let rig = GraphProject::new()?;
     let repo = rig.project.join(".provenant/templates");
