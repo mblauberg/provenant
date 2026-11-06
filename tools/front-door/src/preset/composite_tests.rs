@@ -248,3 +248,216 @@ fn composite_review_override_keeps_its_additional_checks() {
     assert_eq!(children.len(), 2);
     assert_eq!(children[1].id, "security");
 }
+
+#[test]
+fn production_selection_uses_composites_parameters_and_host_panel_routes() {
+    let mut layers = Layers::empty();
+    layers.review = Some(Box::new(|query| {
+        assert_eq!(query.risk, Some("substantial"));
+        Ok(super::super::panel::ShapeHint {
+            name: "host-panel".into(),
+            source: "fixture".into(),
+            default_lenses: vec!["correctness".into(), "tests".into()],
+            slots: vec!["principal".into(), "junior".into()],
+            ..Default::default()
+        })
+    }));
+    let params = vec![("risk_tier".into(), json!("substantial"))];
+    let review = expand_for_run(&layers, "review", "Review this brief", &params, &[]).unwrap();
+    let lenses = &review.document["nodes"][0]["composite"]["nodes"][0]["composite"]["nodes"];
+    assert_eq!(lenses[0]["id"], "correctness");
+    assert_eq!(lenses[0]["route"]["alias"], "principal");
+    assert_eq!(lenses[1]["route"]["alias"], "junior");
+    assert!(
+        lenses[0]["prompt"]
+            .as_str()
+            .unwrap()
+            .contains("Review this brief")
+    );
+    let mut params = params;
+    params.push((
+        "lanes".into(),
+        json!([
+            {"name":"core", "worktree":"/repo/core", "scope":["src/core"], "tier":"junior"},
+            {"name":"api", "worktree":"/repo/api", "scope":["src/api"], "tier":"principal"}
+        ]),
+    ));
+    let batch = expand_for_run(
+        &layers,
+        "big-batch",
+        "Implement this brief",
+        &params,
+        &["parameters.integration_branch=\"batch/production\"".into()],
+    )
+    .unwrap();
+    assert_eq!(batch.document["integration_branch"], "batch/production");
+    let members = &batch.document["nodes"][0]["composite"]["nodes"][0]["composite"]["nodes"];
+    assert_eq!(members[0]["worktree"], "/repo/core");
+    assert_eq!(members[0]["route"]["alias"], "junior");
+    let panel = &batch.document["nodes"][0]["composite"]["nodes"][1]["composite"]["nodes"][0]["composite"]
+        ["nodes"];
+    assert_eq!(panel[0]["route"]["alias"], "principal");
+    assert_eq!(panel[1]["route"]["alias"], "junior");
+}
+
+#[test]
+fn production_plain_run_is_one_task_node() {
+    let expansion = expand_for_run(&Layers::empty(), "single", "Do the task", &[], &[]).unwrap();
+    assert_eq!(expansion.document["nodes"][0]["prompt"], "Do the task");
+    assert!(expansion.document["nodes"][0].get("composite").is_none());
+    assert_eq!(expansion.document["provenance"]["template"], "task");
+}
+
+#[test]
+fn production_plain_run_keeps_route_access_and_attempt_controls() {
+    let parsed = provenant_cli::parse(
+        [
+            "run",
+            "--prompt-file",
+            "brief.txt",
+            "--model",
+            "codex/gpt-5.4",
+            "--effort",
+            "high",
+            "--account",
+            "work",
+            "--mode",
+            "worktree-write",
+            "--worktree",
+            "/repo/writer",
+            "--write-root",
+            "/repo/build",
+            "--provider-timeout",
+            "120",
+            "--build-heavy",
+            "--title",
+            "Task title",
+        ]
+        .into_iter()
+        .map(Into::into),
+    );
+    let provenant_cli::ParseOutcome::Invocation(invocation) = parsed else {
+        panic!("parse failed: {parsed:?}");
+    };
+    let provenant_cli::Command::Run(request) = invocation.command else {
+        panic!("not run");
+    };
+    let mut expansion =
+        expand_for_run(&Layers::empty(), "single", "Do the task", &[], &[]).unwrap();
+    super::super::bind_plain_run(&mut expansion, &request).unwrap();
+    let node = &expansion.document["nodes"][0];
+    assert_eq!(node["route"]["model"], "codex/gpt-5.4");
+    assert_eq!(node["route"]["effort"], "high");
+    assert_eq!(node["access"], "worktree_write");
+    assert_eq!(node["worktree"], "/repo/writer");
+    assert_eq!(node["deadline_seconds"], 120);
+    assert_eq!(node["attempt"]["account"], "work");
+    assert_eq!(node["attempt"]["write_roots"][0], "/repo/build");
+    assert_eq!(node["attempt"]["build_heavy"], true);
+}
+
+#[test]
+fn production_graph_identity_tracks_operation_not_brief() {
+    let request = |key: &str| {
+        let parsed = provenant_cli::parse(
+            ["run", "--prompt-file", "brief", "--operation-id", key]
+                .into_iter()
+                .map(Into::into),
+        );
+        let provenant_cli::ParseOutcome::Invocation(invocation) = parsed else {
+            panic!("invalid run");
+        };
+        let provenant_cli::Command::Run(request) = invocation.command else {
+            panic!("not run");
+        };
+        request
+    };
+    let temp = tempfile::tempdir().unwrap();
+    let directory = temp.path().canonicalize().unwrap();
+    let policy = ReadRoots::new(vec![directory.clone()], &[]);
+    let bind = |brief: &str, key: &str| {
+        let mut expansion = expand_for_run(&Layers::empty(), "single", brief, &[], &[]).unwrap();
+        super::super::bind_run_context(
+            &mut expansion,
+            &request(key),
+            &directory,
+            &policy,
+            &[],
+            "explicit",
+            None,
+        )
+        .unwrap();
+        expansion.document
+    };
+    let first = bind("first brief", "test-first");
+    assert_eq!(
+        first["graph_id"],
+        bind("changed brief", "test-first")["graph_id"]
+    );
+    assert_ne!(
+        first["graph_id"],
+        bind("first brief", "test-second")["graph_id"]
+    );
+    assert_eq!(first["provenance"]["operation_id"], "test-first");
+}
+
+#[test]
+fn production_selection_refuses_unknown_explicit_parameters() {
+    assert!(
+        expand_for_run(
+            &Layers::empty(),
+            "single",
+            "brief",
+            &[],
+            &["parameters.breif='typo'".into()]
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn production_writer_leaf_binds_before_admission_and_keeps_template_attempt() {
+    let mut layers = Layers::empty();
+    layers.default_worktree = Some(PathBuf::from("/repo/writer"));
+    let mut library = graph::TemplateLibrary::bundled();
+    library
+        .insert_toml(
+            graph::Layer::Repository,
+            "custom-writer",
+            r#"
+brief = "Write"
+tier = "senior"
+access = "worktree_write"
+[node.attempt]
+account = "template-account"
+build_heavy = true
+"#,
+        )
+        .unwrap();
+    layers.templates = Some(library);
+    let mut expansion = expand_for_run(
+        &layers,
+        "custom-writer",
+        "Approved brief",
+        &[],
+        &["parameters.write_scope=['src/api']".into()],
+    )
+    .unwrap();
+    let parsed = provenant_cli::parse(
+        ["run", "--use", "custom-writer", "--prompt-file", "brief"]
+            .into_iter()
+            .map(Into::into),
+    );
+    let provenant_cli::ParseOutcome::Invocation(invocation) = parsed else {
+        panic!("invalid run");
+    };
+    let provenant_cli::Command::Run(request) = invocation.command else {
+        panic!("not run");
+    };
+    super::super::bind_plain_run(&mut expansion, &request).unwrap();
+    let node = &expansion.document["nodes"][0];
+    assert_eq!(node["worktree"], "/repo/writer");
+    assert_eq!(node["write_scope"], json!(["src/api"]));
+    assert_eq!(node["attempt"]["account"], "template-account");
+    assert_eq!(node["attempt"]["build_heavy"], true);
+}

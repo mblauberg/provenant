@@ -287,8 +287,8 @@ pub(super) fn checkpoint_bound(
     let fixed = [
         ENVELOPE_KEYS_BYTES,
         DIRECTORY_BYTES,
-        canonical_len(document),
-        canonical_len(&skeleton),
+        prompt_store::compacted_len(document),
+        prompt_store::compacted_len(&skeleton),
         // instance ID, ask actor, PR URL, integration pin, pause reason and plan digest
         64 + HOST_ID_BYTES
             + OUTPUT_FIELD_BYTES

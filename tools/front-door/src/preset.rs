@@ -742,7 +742,11 @@ pub(super) fn dispatch_parameters(
     kind: Option<&str>,
     file_params: &[(String, Value)],
 ) -> Result<RequestBindings, String> {
-    let (bindings, warnings) = request_bindings(layers, name, risk, kind)?;
+    let (bindings, warnings) = if layers.entries.contains_key(name) {
+        request_bindings(layers, name, risk, kind)?
+    } else {
+        (Vec::new(), Vec::new())
+    };
     let mut values = selected.into_iter().collect::<Vec<_>>();
     for (key, value) in bindings.into_iter().chain(file_params.iter().cloned()) {
         if let Some(existing) = values.iter_mut().find(|(name, _)| name == &key) {
@@ -3828,6 +3832,137 @@ fn replace_path(text: &str, from: &str, to: &str) -> String {
 }
 
 /// Bind CLI context before hashing, explaining or retaining the executed graph.
+/// Bind controls formerly carried by the separate plain-lane launch path.
+fn bind_plain_run(
+    expansion: &mut Expansion,
+    request: &provenant_cli::Dispatch,
+) -> Result<(), String> {
+    if request.branch.is_some() || request.worktree_branch.is_some() || request.host.is_some() {
+        return Err(
+            "graph runs need an existing --worktree; create the worktree before submission".into(),
+        );
+    }
+    if !request.knobs.is_empty()
+        || request.route.confidential
+        || request.route.read_heavy
+        || request.admission_timeout.is_some()
+        || request.head.is_some()
+        || request.base.is_some()
+    {
+        return Err(
+            "this run control has no graph representation; use graph template controls".into(),
+        );
+    }
+    if expansion.document["nodes"][0].get("composite").is_some() {
+        if request.route.model.is_some()
+            || request.route.route.is_some()
+            || request.route.effort.is_some()
+            || !request.route.fallback.is_empty()
+            || request.account.is_some()
+            || request.title.is_some()
+            || request.deliver.is_some()
+            || !request.access.write_root.is_empty()
+            || request.access.mode.is_some()
+            || request.placement.is_some()
+        {
+            return Err(
+                "set route, account, title, delivery and write roots on the composite's leaf nodes"
+                    .into(),
+            );
+        }
+        visit_nodes(
+            expansion.document["nodes"]
+                .as_array_mut()
+                .ok_or("missing nodes")?,
+            &mut |node| {
+                if node.get("composite").is_none()
+                    && !matches!(node["kind"].as_str(), Some("gate" | "land" | "decide"))
+                {
+                    node["deadline_seconds"] = json!(request.provider_timeout);
+                    if request.build_heavy {
+                        node["attempt"]["build_heavy"] = json!(true);
+                    }
+                }
+                Ok(())
+            },
+        )?;
+        return Ok(());
+    }
+    let node = &mut expansion.document["nodes"][0];
+    node["deadline_seconds"] = json!(request.provider_timeout);
+    if let Some(title) = &request.title {
+        node["title"] = json!(title);
+    }
+    if let Some(delivery) = &request.deliver {
+        node["delivery"] = json!(delivery);
+    }
+    let node = &mut expansion.document["nodes"][0];
+    let route = |model: &str| -> Result<Value, String> {
+        let (adapter, _) = model.split_once('/').ok_or("model needs ADAPTER/ID")?;
+        Ok(json!({"adapter":adapter, "model":model, "effort":request.route.effort}))
+    };
+    if let Some(model) = &request.route.model {
+        node["route"] = route(&model.0)?;
+    } else if let Some(name) = &request.route.route {
+        node["route"] = if let Some((adapter, name)) = name.split_once('/') {
+            json!({"adapter":adapter, "name":name, "effort":request.route.effort})
+        } else {
+            json!({"alias":name, "effort":request.route.effort})
+        };
+    } else if let Some(effort) = &request.route.effort {
+        node["route"]["effort"] = json!(effort);
+    }
+    if !request.route.fallback.is_empty() {
+        let mut routes = vec![
+            node.as_object_mut()
+                .ok_or("missing task node")?
+                .remove("route")
+                .ok_or("missing route")?,
+        ];
+        for model in &request.route.fallback {
+            routes.push(route(&model.0)?);
+        }
+        node["routes"] = json!(routes);
+    }
+    if request.access.mode == Some(provenant_cli::Mode::ReadOnly)
+        && node["access"] == "worktree_write"
+    {
+        return Err("template requires writer access; choose a read-only template".into());
+    }
+    if request.access.mode() == provenant_cli::Mode::WorktreeWrite {
+        node["access"] = json!("worktree_write");
+        node["worktree"] = json!(
+            request
+                .access
+                .worktree
+                .as_ref()
+                .ok_or("writer graph run needs --worktree")?
+        );
+        if node
+            .get("write_scope")
+            .and_then(Value::as_array)
+            .is_none_or(Vec::is_empty)
+        {
+            node["write_scope"] = json!(["."]);
+        }
+    }
+    if request.account.is_some() || request.build_heavy || !request.access.write_root.is_empty() {
+        if node.get("attempt").is_none() {
+            node["attempt"] = json!({});
+        }
+        if let Some(account) = &request.account {
+            node["attempt"]["account"] = json!(account);
+        }
+        if request.build_heavy {
+            node["attempt"]["build_heavy"] = json!(true);
+        }
+        if !request.access.write_root.is_empty() {
+            node["attempt"]["write_roots"] = json!(request.access.write_root);
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn bind_run_context(
     expansion: &mut Expansion,
     request: &provenant_cli::Dispatch,
@@ -4114,33 +4249,10 @@ pub(crate) fn bind_run_context(
         composites::ensure_integration_branch(directory, branch)?;
     }
     expansion.document["graph_id"] = json!("");
-    // An integration source resolves at run time, so fold the current head into
-    // the identity: a moved branch must never reuse a completed graph.
-    let mut identity = serde_json::to_vec(&expansion.document).map_err(|e| e.to_string())?;
-    let mut integration = false;
-    visit_nodes(
-        expansion.document["nodes"]
-            .as_array_mut()
-            .ok_or("missing graph nodes")?,
-        &mut |node| {
-            integration |=
-                node.pointer("/source/type").and_then(Value::as_str) == Some("integration");
-            Ok(())
-        },
-    )?;
-    if integration && let Some(branch) = expansion.document["integration_branch"].as_str() {
-        let reference = match branch.strip_prefix("origin/") {
-            Some(branch) => format!("refs/remotes/origin/{branch}"),
-            None => format!("refs/heads/{branch}"),
-        };
-        let git =
-            provenant_os::git::git_executable().ok_or("Git unavailable for source binding")?;
-        // An absent branch has no head to fold in; the graph owner refuses it later.
-        let head = provenant_run::resolve_git_base(&git, directory, &reference)
-            .map(|oid| oid.to_string())
-            .unwrap_or_else(|_| "absent".into());
-        identity.extend_from_slice(format!("\nintegration-head:{head}").as_bytes());
-    }
+    // Caller identity selects the graph; changing its content under the same
+    // operation is a journal conflict, never a second launch.
+    expansion.document["provenance"]["operation_id"] = json!(request.operation_id);
+    let mut identity = request.operation_id.to_string().into_bytes();
     // `--fresh` makes this run a new graph even when its inputs are unchanged,
     // for example to rerun after a cancel.
     if request.fresh {
@@ -5006,8 +5118,11 @@ pub(crate) fn run_with_review(
             size: Some(size.into()),
             ready: Some(ready),
         };
-        let mut selection =
-            crate::preset_select::select(Some(&rules_path), &context, request.preset.as_deref())?;
+        let mut selection = crate::preset_select::select(
+            Some(&rules_path),
+            &context,
+            Some(request.preset.as_deref().unwrap_or("single")),
+        )?;
         let roots = crate::roots::resolve(
             globals,
             crate::roots::Workspace::Project,
@@ -5102,7 +5217,7 @@ pub(crate) fn run_with_review(
                         request.task_kind.as_deref(),
                         &file_params,
                     )?;
-                    expand_with(
+                    composites::expand_for_run(
                         &layers,
                         &chosen.preset,
                         prompt,
@@ -5172,7 +5287,41 @@ pub(crate) fn run_with_review(
                     path == "parameters.subject" || path.starts_with("parameters.subject.")
                 })
             });
-        let mut expansion = expand_with(&layers, name, prompt, &params, &request.preset_set)?;
+        let mut expansion =
+            composites::expand_for_run(&layers, name, prompt, &params, &request.preset_set)?;
+        bind_plain_run(&mut expansion, &request)?;
+        if let Some(placement) = &request.placement {
+            if placement != "local" {
+                let target_name = placement
+                    .strip_prefix("cloud:")
+                    .ok_or("placement must be local or cloud:NAME")?;
+                if request.access.mode() == provenant_cli::Mode::WorktreeWrite
+                    || request.deliver.is_some()
+                {
+                    return Err(
+                        "cloud verification cannot hold writer or delivery authority".into(),
+                    );
+                }
+                let target = config
+                    .domains
+                    .lanes
+                    .cloud_targets
+                    .get(target_name)
+                    .ok_or_else(|| format!("cloud target {target_name} is not configured"))?;
+                expansion.document["nodes"][0]["attempt"]["placement"] = json!({
+                    "target":target_name,
+                    "provider":request.cloud_provider.as_ref().unwrap_or(&target.provider),
+                    "environment":request.cloud_environment.as_ref().unwrap_or(&target.environment),
+                    "repository":request.cloud_repository.as_ref().unwrap_or(&target.repository),
+                    "branch":request.cloud_branch.as_ref().unwrap_or(&target.branch),
+                    "model":request.cloud_model.clone().or_else(|| request.route.model.as_ref()
+                        .map(|model| model.0.split_once('/').map_or(model.0.as_str(), |(_, name)| name).to_owned()))
+                        .unwrap_or_else(|| target.model.clone()),
+                    "effort":request.cloud_effort.clone().or_else(|| request.route.effort.clone()).or_else(|| target.effort.clone()),
+                    "deadline_seconds":request.cloud_deadline.unwrap_or(target.deadline_seconds),
+                });
+            }
+        }
         if let Some(risk) = &request.risk_tier {
             expansion.document["context"]["risk_tier"] = json!(risk);
         }
@@ -5182,7 +5331,10 @@ pub(crate) fn run_with_review(
         expansion.warnings.extend(binding_warnings);
         expansion.document["provenance"]["warnings"] = json!(expansion.warnings);
         let mut spec = None;
-        let (preset_config, _) = layers.resolve(name)?;
+        let preset_config = layers
+            .resolve(name)
+            .map(|(config, _)| config)
+            .unwrap_or_else(|_| json!({}));
         let advice_parameter = tracker_advice_parameter(&preset_config);
         if let Some(parameter) = advice_parameter.filter(|_| !request.explain) {
             spec = params

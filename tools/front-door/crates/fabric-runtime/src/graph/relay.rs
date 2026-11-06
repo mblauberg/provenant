@@ -36,6 +36,9 @@ pub struct ChildRequest {
     pub brief: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tier: Option<String>,
+    /// Preserve the caller's provider-process limit when adding the graph node.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_seconds: Option<u64>,
     /// A writer child gets its own worktree.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub writer: bool,
@@ -141,7 +144,7 @@ pub fn admit_child(
     let graph_id = graph.document.graph_id.clone();
     let node = format!("{parent}{SEPARATOR}{}", request.id);
     let worktree = request.writer.then(|| child_worktree(&graph_id, &node));
-    let patch = child_patch(request, worktree.as_deref())?;
+    let patch = child_patch(request, worktree.as_deref(), context)?;
     // A replay is answered before the parent's state is checked, so a retry
     // after the parent settles still gets its receipt.
     let replay = graph
@@ -188,13 +191,20 @@ pub fn admit_child(
     })
 }
 
-fn child_patch(request: &ChildRequest, worktree: Option<&str>) -> Result<Patch, PatchError> {
+fn child_patch(
+    request: &ChildRequest,
+    worktree: Option<&str>,
+    context: &PatchContext<'_>,
+) -> Result<Patch, PatchError> {
     let mut node = Map::new();
     node.insert("id".into(), request.id.clone().into());
     node.insert("use".into(), request.template.clone().into());
     node.insert("brief".into(), request.brief.clone().into());
     if let Some(tier) = &request.tier {
         node.insert("tier".into(), tier.clone().into());
+    }
+    if let Some(seconds) = request.timeout_seconds {
+        node.insert("deadline_seconds".into(), seconds.into());
     }
     if let Some(worktree) = worktree {
         node.insert("access".into(), "worktree_write".into());
@@ -211,6 +221,43 @@ fn child_patch(request: &ChildRequest, worktree: Option<&str>) -> Result<Patch, 
     if request.detached {
         node.insert(DETACHED.into(), true.into());
     }
+    if let Ok(template) = context.library.resolve(&request.template)
+        && template.is_composite()
+    {
+        if request.writer {
+            return Err(PatchError {
+                code: "invalid",
+                message: "writer composite children require explicit per-node work bindings".into(),
+            });
+        }
+        if !template.parameters.contains_key("brief") && !request.brief.is_empty() {
+            return Err(PatchError {
+                code: "invalid",
+                message: "composite child template must declare a brief parameter".into(),
+            });
+        }
+        node.remove("brief");
+        node.remove("tier");
+        if template.parameters.contains_key("brief") {
+            node.insert("with".into(), serde_json::json!({"brief": request.brief}));
+        }
+        let compiler = Compiler {
+            library: context.library,
+            resolvers: context.resolvers,
+        };
+        let mut compiled = compiler
+            .lower(&Value::Object(node.clone()))
+            .map_err(|message| PatchError {
+                code: "invalid",
+                message,
+            })?;
+        inherit_child_controls(&mut compiled, request);
+        // Keep `use` and its effective parameters for admission evidence. The
+        // compiled members override the template's default members on admission.
+        if let Some(composite) = compiled.get("composite") {
+            node.insert("composite".into(), composite.clone());
+        }
+    }
     Ok(Patch {
         schema_version: PATCH_SCHEMA_VERSION,
         idempotency_key: Some(request.idempotency_key.clone()),
@@ -218,6 +265,37 @@ fn child_patch(request: &ChildRequest, worktree: Option<&str>) -> Result<Patch, 
         nodes: vec![Value::Object(node)],
         ..Default::default()
     })
+}
+
+/// A launch limit applies to the provider processes, including those below
+/// composite and loop boundaries. Containers do not launch a provider process.
+fn inherit_child_controls(node: &mut Value, request: &ChildRequest) {
+    let mut boundary = false;
+    for pointer in ["/composite/nodes", "/loop/body"] {
+        if let Some(children) = node.pointer_mut(pointer).and_then(Value::as_array_mut) {
+            boundary = true;
+            for child in children {
+                inherit_child_controls(child, request);
+            }
+        }
+    }
+    if boundary {
+        return;
+    }
+    if let Some(seconds) = request.timeout_seconds {
+        node["deadline_seconds"] = seconds.into();
+    }
+    // Deterministic actions retain their executor and access policy.
+    if node.get("kind").is_none()
+        || matches!(node["kind"].as_str(), Some("task" | "plan" | "synthesise"))
+    {
+        if let Some(tier) = &request.tier {
+            node["route"] = serde_json::json!({"alias": tier});
+            if let Some(object) = node.as_object_mut() {
+                object.remove("routes");
+            }
+        }
+    }
 }
 
 /// Mark or clear a parent as waiting on its children. A waiting parent does

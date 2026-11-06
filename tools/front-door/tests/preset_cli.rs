@@ -2439,149 +2439,6 @@ fn preset_show_roles_lists_the_library_with_origins() -> Result<(), Box<dyn std:
     Ok(())
 }
 
-/// A route-less ready prompt selects a preset by rules. An explicit network
-/// restriction reaches every graph lane it submits, and single-lane flags the
-/// graph cannot apply are refused before selection.
-#[test]
-fn automatic_preset_selection_submits_network_off_and_refuses_lane_only_flags()
--> Result<(), Box<dyn std::error::Error>> {
-    let temp = tempfile::tempdir()?;
-    let project = temp.path().join("project");
-    std::fs::create_dir(&project)?;
-    for args in [
-        vec!["init", "-q"],
-        vec!["commit", "--allow-empty", "-qm", "seed"],
-    ] {
-        let output = provenant_os::fixture::git_command()
-            .current_dir(&project)
-            .args(args)
-            .output()?;
-        assert!(output.status.success());
-    }
-    let presets = project.join(".provenant/presets");
-    std::fs::create_dir_all(&presets)?;
-    std::fs::write(
-        project.join(".provenant/preset-rules.toml"),
-        "[select]\ndefault = { preset = 'probe' }\n",
-    )?;
-    std::fs::write(
-        presets.join("probe.toml"),
-        "stages = [{ id = 'task', tier = { adapter = 'fixture', model = 'fixture/model' } }]\n",
-    )?;
-    let prompt = project.join("ready.md");
-    std::fs::write(
-        &prompt,
-        "Acceptance criteria are explicit. Surface: the run command. Risk tier: low. \
-         Verification uses cargo test. Design decision is settled.\n",
-    )?;
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let state = temp.path().join("state");
-    let run = |extra: &[&str]| {
-        fixture_cli()
-            .current_dir(&project)
-            .env("PROVENANT_ROOT", &root)
-            .env("XDG_CONFIG_HOME", temp.path().join("config"))
-            .args(["--json", "--state-dir"])
-            .arg(&state)
-            .args(["run", "--prompt-file"])
-            .arg(&prompt)
-            .args(extra)
-            .output()
-    };
-    // Flags that choose a model, route or manifest bypass automatic selection;
-    // all other independently usable incompatible flags reach this boundary.
-    for args in [
-        vec!["--effort", "high"],
-        vec!["--account", "fixture"],
-        vec!["--fallback", "codex/model"],
-        vec!["--mode", "read-only"],
-        vec!["--worktree-branch", "topic"],
-        vec!["--host", "peer"],
-        vec!["--deliver", "none"],
-        vec!["--write-root", "/tmp"],
-        vec!["--knob", "test=value"],
-        vec!["--delivery-id", "11111111111111111111111111111111"],
-        vec!["--head", "1111111111111111111111111111111111111111"],
-        vec!["--base", "main"],
-        vec!["--title", "title"],
-        vec!["--build-heavy"],
-        vec!["--read-heavy"],
-        vec!["--confidential"],
-        vec!["--provider-timeout", "3600"],
-        vec!["--operation-id", "chosen"],
-        vec!["--branch", "topic", "--host", "peer", "--base", "main"],
-    ] {
-        let automatic = run(&args)?;
-        let result: serde_json::Value = serde_json::from_slice(&automatic.stdout)?;
-        assert_eq!(result["error"]["code"], "preset", "{args:?}: {result}");
-        assert!(
-            result["error"]["message"]
-                .as_str()
-                .is_some_and(|s| s.contains(args[0])),
-            "{args:?}: {result}"
-        );
-        let mut explicit_args = vec!["--preset", "probe"];
-        explicit_args.extend(&args);
-        let explicit = run(&explicit_args)?;
-        assert!(!explicit.status.success(), "{args:?}");
-        let result: serde_json::Value = serde_json::from_slice(&explicit.stdout)?;
-        assert_eq!(result["status"], "invalid", "{args:?}: {result}");
-    }
-    let stdin = fixture_cli()
-        .current_dir(&project)
-        .env("PROVENANT_ROOT", &root)
-        .env("XDG_CONFIG_HOME", temp.path().join("config"))
-        .args(["--json", "--state-dir"])
-        .arg(&state)
-        .args(["run", "--prompt-stdin"])
-        .output()?;
-    let result: serde_json::Value = serde_json::from_slice(&stdin.stdout)?;
-    assert_eq!(result["error"]["code"], "preset", "{result}");
-    assert!(
-        result["error"]["message"]
-            .as_str()
-            .is_some_and(|s| s.contains("--prompt-stdin")),
-        "{result}"
-    );
-    let refused = run(&["--account", "fixture", "--effort", "high"])?;
-    assert!(!refused.status.success());
-    let refused: serde_json::Value = serde_json::from_slice(&refused.stdout)?;
-    assert_eq!(refused["status"], "invalid", "{refused}");
-    assert_eq!(refused["error"]["code"], "preset", "{refused}");
-    assert!(
-        refused["error"]["message"]
-            .as_str()
-            .is_some_and(|message| message.contains("--effort, --account")),
-        "{refused}"
-    );
-    assert!(
-        refused["error"]["repair"]
-            .as_str()
-            .is_some_and(|repair| repair.contains("--model or --route")),
-        "{refused}"
-    );
-    assert!(!state.join("runs").exists());
-
-    let output = run(&["--network", "off", "--wait", "5s"])?;
-    let result: serde_json::Value = serde_json::from_slice(&output.stdout)?;
-    let document = result["data"]["document"]
-        .as_str()
-        .ok_or_else(|| format!("retained document: {result}"))?;
-    let document: serde_json::Value = serde_json::from_slice(&std::fs::read(document)?)?;
-    assert_eq!(document["network"], "off");
-    let mut submitted = Vec::new();
-    for run in std::fs::read_dir(state.join("runs"))? {
-        let request: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(run?.path().join("request.json"))?)?;
-        for task in request["tasks"].as_array().ok_or("tasks")? {
-            submitted.push(task["access"]["network"].clone());
-        }
-    }
-    // `--network off` keeps only the provider's own endpoints.
-    assert_eq!(submitted, [serde_json::json!("provider")], "{result}");
-    Ok(())
-}
-
 /// `run --exclude` on an automatically selected graph is refused when a
 /// selector is unknown, and otherwise binds the list to the graph so every
 /// node's task carries it as the graph's exclusion knob.
@@ -4094,5 +3951,109 @@ fn preset_bound_path_is_not_a_secret_but_prompt_is() -> Result<(), Box<dyn std::
             }
         }
     }
+    Ok(())
+}
+
+#[test]
+fn production_run_uses_template_composites_and_leaf_controls()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()?;
+    let project = temp.path().join("project");
+    std::fs::create_dir(&project)?;
+    for args in [
+        vec!["init", "-b", "main"],
+        vec![
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.org",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "initial",
+        ],
+    ] {
+        let output = Command::new(provenant_os::git::git_executable().ok_or("Git missing")?)
+            .current_dir(&project)
+            .args(args)
+            .output()?;
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let prompt = temp.path().join("brief");
+    std::fs::write(&prompt, "Keep this production brief")?;
+    let run = |args: &[&str]| -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+        let output = fixture_cli()
+            .current_dir(&project)
+            .env("PROVENANT_ROOT", &root)
+            .env("XDG_CONFIG_HOME", temp.path().join("config"))
+            .args(["--json", "--state-dir"])
+            .arg(temp.path().join("state"))
+            .args(["run", "--prompt-file"])
+            .arg(&prompt)
+            .arg("--explain")
+            .args(args)
+            .output()?;
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let result: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+        Ok(result["data"]["graph"].clone())
+    };
+    let plain = run(&[
+        "--model",
+        "codex/gpt-5.4",
+        "--effort",
+        "high",
+        "--network",
+        "off",
+    ])?;
+    assert_eq!(plain["nodes"][0]["route"]["model"], "codex/gpt-5.4");
+    assert_eq!(plain["nodes"][0]["prompt"], "Keep this production brief");
+    assert!(plain["nodes"][0].get("composite").is_none());
+    assert_eq!(plain["network"], "off");
+    let leaf = run(&["--use", "explore", "--route", "junior"])?;
+    assert_eq!(leaf["nodes"][0]["route"]["alias"], "junior");
+    assert_eq!(leaf["nodes"][0]["prompt"], "Keep this production brief");
+    let review = run(&[
+        "--use",
+        "review",
+        "--set",
+        "parameters.review_shape='quick'",
+    ])?;
+    assert_eq!(review["provenance"]["template"], "review-panel");
+    let review_nodes = &review["nodes"][0]["composite"]["nodes"];
+    let lens = if review_nodes[0].get("composite").is_some() {
+        &review_nodes[0]["composite"]["nodes"][0]
+    } else {
+        &review_nodes[0]
+    };
+    assert_eq!(lens["route"]["alias"], "junior");
+    let lanes = format!(
+        "parameters.lanes=[{{name='core',worktree='{}',scope=['src'],tier='senior'}}]",
+        project.display()
+    );
+    let batch = run(&[
+        "--use",
+        "big-batch",
+        "--set",
+        &lanes,
+        "--set",
+        "parameters.review_shape='quick'",
+    ])?;
+    assert_eq!(batch["provenance"]["template"], "batch");
+    let members = &batch["nodes"][0]["composite"]["nodes"][0]["composite"]["nodes"];
+    assert_eq!(members[0]["id"], "core");
+    assert_eq!(members[0]["route"]["alias"], "senior");
+    assert_eq!(members[0]["delivery"], "integrate:batch/graph");
     Ok(())
 }

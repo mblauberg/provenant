@@ -549,9 +549,11 @@ fn build_model(passive: bool, advanced: bool) -> clap::Command {
             );
         }
         if matches!(path.as_str(), "provenant dispatch" | "provenant run") {
-            command = command.mut_arg("preset", |arg| {
-                arg.conflicts_with_all(PRESET_INCOMPATIBLE.iter().copied())
-            });
+            if path == "provenant dispatch" {
+                command = command.mut_arg("preset", |arg| {
+                    arg.conflicts_with_all(PRESET_INCOMPATIBLE.iter().copied())
+                });
+            }
             command = command
                 .mut_arg("model", |arg| {
                     if path == "provenant dispatch" {
@@ -764,7 +766,7 @@ fn validate(inv: &Invocation) -> Result<(), CliError> {
                 && access.worktree.is_some()
                 && dispatch.branch.is_none()
                 && dispatch.worktree_branch.is_none();
-            if dispatch.preset.is_none()
+            if matches!(inv.command, Command::Dispatch(_))
                 && (access.mode() == Mode::WorktreeWrite) != writer_target
                 && !explicit_reader_target
             {
@@ -1213,7 +1215,7 @@ mod tests {
     #[test]
     fn preset_compatibility_table_matches_clap_conflicts() {
         let model = expanded_model();
-        for command in ["run", "dispatch"] {
+        for command in ["dispatch"] {
             let command = model.find_subcommand(command).unwrap();
             let preset = command
                 .get_arguments()
@@ -1243,7 +1245,7 @@ mod tests {
         ]);
     }
     #[test]
-    fn automatic_preset_tracks_explicit_incompatible_flags() {
+    fn graph_run_accepts_launch_controls_with_a_template() {
         for (flag, value) in [
             ("--provider-timeout", "3600"),
             ("--mode", "read-only"),
@@ -1257,7 +1259,7 @@ mod tests {
                     .any(|item| item == flag),
                 "{flag}"
             );
-            invalid(&[
+            valid(&[
                 "run",
                 "--prompt-file",
                 "brief.md",
@@ -1902,7 +1904,7 @@ mod tests {
         invalid(&["disk", "report", "--dry-run"]);
     }
     #[test]
-    fn preset_arguments_require_run_and_prompt_and_reject_dispatch_options() {
+    fn template_arguments_require_run_and_prompt() {
         valid(&[
             "run",
             "--preset",
@@ -1940,7 +1942,7 @@ mod tests {
         ]);
         invalid(&["run", "--preset", "single"]);
         valid(&["run", "--prompt-file", "brief", "--explain"]);
-        invalid(&[
+        valid(&[
             "run",
             "--preset",
             "single",
@@ -1959,36 +1961,12 @@ mod tests {
             "--set",
             "parameters.route=utility",
         ]);
-        for flag in [
-            vec!["--prompt-stdin"],
-            vec!["--manifest", "m"],
-            vec!["--model", "codex/model"],
-            vec!["--route", "senior"],
-            vec!["--effort", "high"],
-            vec!["--account", "account"],
-            vec!["--fallback", "codex/model"],
-            vec!["--mode", "read-only"],
-            vec!["--branch", "branch"],
-            vec!["--worktree-branch", "branch"],
-            vec!["--host", "host"],
-            vec!["--deliver", "none"],
-            vec!["--write-root", "dir"],
-            vec!["--knob", "x=y"],
-            vec!["--delivery-id", "0123456789abcdef0123456789abcdef"],
-            vec!["--head", "abc"],
-            vec!["--base", "main"],
-            vec!["--title", "title"],
-            vec!["--build-heavy"],
-            vec!["--confidential"],
-            vec!["--provider-timeout", "1"],
-            vec!["--operation-id", "id"],
-        ] {
-            let mut args = vec!["run", "--preset", "single", "--prompt-file", "brief"];
-            args.extend(flag.iter().copied());
-            assert!(
-                matches!(parsed(&args), ParseOutcome::Invalid { .. }),
-                "accepted {flag:?}"
-            );
+        for input in [["--prompt-stdin", ""], ["--manifest", "tasks.json"]] {
+            let mut args = vec!["run", "--use", "task", "--prompt-file", "brief", input[0]];
+            if !input[1].is_empty() {
+                args.push(input[1]);
+            }
+            invalid(&args);
         }
     }
     #[test]
