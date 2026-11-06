@@ -81,7 +81,7 @@ for the first graph-cutover upgrade, run the new `install.sh --upgrade` without
 
 ```sh
 # Use the new release's installer directly for the first graph cutover.
-sh /absolute/path/to/new-release/scripts/install.sh --upgrade
+sh /absolute/path/to/new-release/install.sh --upgrade
 ```
 
 Do not use the already-installed `provenant upgrade` for this first cutover;

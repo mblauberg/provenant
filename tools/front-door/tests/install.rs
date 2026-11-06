@@ -1633,7 +1633,12 @@ fn upgrade_preflight_preserves_old_checkpoint_and_names_the_drain_step() -> Resu
     let path = directory.join("graph-old-pending-fixture.json");
     fs::write(&path, checkpoint)?;
     fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
-    let result = rig.command(&["install", "--upgrade-preflight"])?;
+    let result = rig.command(&[
+        "install",
+        "--source",
+        rig.root.to_str().ok_or("fixture source")?,
+        "--upgrade-preflight",
+    ])?;
     assert_eq!(code(&result), 2, "{result:?}");
     let output = String::from_utf8(result.stdout.bytes)?;
     assert!(output.contains(&format!(
