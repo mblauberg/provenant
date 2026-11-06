@@ -17,6 +17,7 @@ fn composite_expansion_uses_the_selected_template_layers() {
     let mut library = TemplateLibrary::bundled();
     let template = |brief: &str| Template {
         brief: Some(brief.into()),
+        tier: Some("senior".into()),
         ..Default::default()
     };
     library
