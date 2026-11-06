@@ -1678,7 +1678,7 @@ pub struct Status {
     /// Stream transitions until all targets are terminal or the wait expires
     #[arg(long, catalog_requires = "wait")]
     pub follow: bool,
-    /// Show this run, task, attempt or graph ID, including settled records
+    /// Show a run, task, attempt or graph ID, or operation:ID for a refusal
     pub id: Option<String>,
     /// Maximum full records per page
     #[arg(long, hide = true, default_value = "50", catalog_u64_range = 1..=100)]

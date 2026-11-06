@@ -1050,6 +1050,24 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
             reply
         }),
         Command::Review(cmd) => review::run(cmd, globals, process.workers()),
+        Command::Status(cmd)
+            if cmd.wait.is_some()
+                && cmd.target.is_empty()
+                && cmd
+                    .id
+                    .as_deref()
+                    .is_some_and(|id| id.starts_with("operation:")) =>
+        {
+            run_edge(&inv.leaf, globals, |edge| {
+                let mut reply = provenant_cli::run::status(cmd, globals.json, edge);
+                if reply.result.error.is_none() {
+                    reply.result.status = provenant_records::Outcome::Failed;
+                    reply.result.data["condition_met"] = serde_json::json!(true);
+                    reply.result.data["timed_out"] = serde_json::json!(false);
+                }
+                reply
+            })
+        }
         Command::Status(cmd) if cmd.wait.is_some() => status_wait::run(cmd, globals),
         Command::Status(cmd) => run_edge(&inv.leaf, globals, |edge| {
             provenant_cli::run::status(cmd, globals.json, edge)

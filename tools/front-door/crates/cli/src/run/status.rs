@@ -9,6 +9,24 @@ pub fn status(command: crate::Status, _json_output: bool, edge: &Edge<'_>) -> Re
             let clock = SystemClock::new();
             let cancel = CancelToken::new();
             let call = request(&clock, &cancel)?;
+            if let Some(id) = command
+                .id
+                .as_deref()
+                .and_then(|id| id.strip_prefix("operation:"))
+            {
+                let id = OperationId::parse(id).map_err(|error| {
+                    Fail::new(Status::Invalid, ErrorKind::Invalid, error.to_string())
+                })?;
+                let (_, store) = open_read_only(edge, &call)?;
+                let record = store
+                    .as_ref()
+                    .map(|store| store.operation(&id, &call))
+                    .transpose()?
+                    .flatten()
+                    .filter(|record| record.state == run::OperationState::Refused)
+                    .ok_or(run::RunError::NotFound)?;
+                return render_refused_operation(record);
+            }
             if let Some(graph_id) = command.id.as_deref().filter(|id| graph_identifier(id))
                 && let Some((data, human)) = paused_graph_status(edge, &call, graph_id)?
             {
@@ -209,6 +227,51 @@ pub fn status(command: crate::Status, _json_output: bool, edge: &Edge<'_>) -> Re
     out.summary = summary;
     out.read_only = true;
     out
+}
+
+fn render_refused_operation(record: run::OperationRecord) -> Result<(Value, String), Fail> {
+    let diagnostic = record
+        .refusal
+        .as_ref()
+        .ok_or(run::RunError::Validation("refusal diagnostic missing"))?;
+    if record.refused_at.is_none() {
+        return Err(run::RunError::Validation("refusal time missing").into());
+    }
+    let mut human = format!(
+        "operation {} refused: {}\n",
+        record.operation_id,
+        plain_text(&diagnostic.code, 1024)
+    );
+    if let Some(detail) = &diagnostic.detail {
+        human.push_str(&format!("{}\n", plain_text(detail, 1024)));
+    }
+    Ok((json!({"operation": record}), human))
+}
+
+#[cfg(test)]
+mod refused_operation_tests {
+    use super::*;
+
+    #[test]
+    fn targeted_refusal_reports_the_stored_diagnostic() {
+        let record: run::OperationRecord = serde_json::from_value(json!({
+            "schema_version":1,
+            "project_id":"11111111111111111111111111111111",
+            "actor_id":"22222222222222222222222222222222",
+            "operation_id":"fixture-op",
+            "kind":"dispatch",
+            "request_digest":format!("sha256:{}", "ab".repeat(32)),
+            "run_id":"33333333333333333333333333333333",
+            "state":"refused",
+            "refusal":{"code":"UNSUPPORTED","detail":"not supported"},
+            "refused_at":"2026-10-29T00:00:00.000000Z"
+        }))
+        .unwrap();
+        let (data, human) = render_refused_operation(record).unwrap();
+        assert_eq!(data["operation"]["refusal"]["code"], "UNSUPPORTED");
+        assert!(human.contains("fixture-op"));
+        assert!(human.contains("not supported"));
+    }
 }
 
 /// Refused dispatches have no attempt; render their durable operation records

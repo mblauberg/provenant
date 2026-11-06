@@ -338,6 +338,12 @@ is repeatable; explicit prefixes disambiguate lanes, graphs and PR numbers.
 `land:N` observes PR N only: it grants no merge authority. Use `land N --wait`
 when a merge is authorised.
 
+For a stored refused operation, use `provenant status operation:OPERATION_ID`
+to inspect its diagnostic. `provenant status operation:OPERATION_ID --wait`
+returns immediately with exit 1. This form observes one operation and does not
+combine with `--target`. Unsupported adapter capabilities refused by the run
+service have such a record; other pre-admission refusals may not yet have one.
+
 The default `--until any` returns on the first observed semantic transition,
 or immediately for a terminal target.
 An initially running lane selection does not count its older settled attempts.
