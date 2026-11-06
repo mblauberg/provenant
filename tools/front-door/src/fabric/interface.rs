@@ -1138,6 +1138,10 @@ mod tests {
             review_base: None,
             integration_base: None,
         })?;
+        let mut reserved = checkpoint.clone();
+        reserved.nodes[1].attempts[0].attempt_ref = None;
+        reserved.nodes[1].previous_attempts.clear();
+        journal.save(&reserved)?;
         journal.save(&checkpoint)?;
         drop(journal);
         let stats = factory.graph_document(
