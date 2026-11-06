@@ -563,6 +563,20 @@ mod tests {
         assert!(detail.contains("max_project_lanes"));
         assert!(detail.contains("shipped default"));
         assert!(projection.next.unwrap().contains("max_project_lanes"));
+        let settings = provenant_config::LaneBuildSettings {
+            max_lanes: Some(HOST_ACTIVE),
+            max_project_lanes: Some(10),
+            ..Default::default()
+        };
+        let configured = LaneCaps::of(&settings);
+        // Isolate the configured project cap before filling the host cap,
+        // which takes precedence when both limits are reached.
+        let hit = cap_hit(&db, project, LaneClass::ReadOnly, configured)
+            .unwrap()
+            .unwrap();
+        assert_eq!(hit.kind, LaneLimit::ProjectTotal);
+        assert_eq!(hit.limit, 10);
+        assert_eq!(hit.origin, SettingSource::Configuration);
         let other = ProjectId::from_bytes([2; 16]);
         for index in PROJECT_ACTIVE..HOST_ACTIVE {
             db.execute(
@@ -576,18 +590,6 @@ mod tests {
             .unwrap();
         assert_eq!(hit.kind, LaneLimit::HostTotal);
         assert_eq!(hit.limit, HOST_ACTIVE);
-        let settings = provenant_config::LaneBuildSettings {
-            max_lanes: Some(HOST_ACTIVE),
-            max_project_lanes: Some(10),
-            ..Default::default()
-        };
-        let configured = LaneCaps::of(&settings);
-        let hit = cap_hit(&db, project, LaneClass::ReadOnly, configured)
-            .unwrap()
-            .unwrap();
-        assert_eq!(hit.kind, LaneLimit::ProjectTotal);
-        assert_eq!(hit.limit, 10);
-        assert_eq!(hit.origin, SettingSource::Configuration);
         let hit = cap_hit(&db, third, LaneClass::ReadOnly, configured)
             .unwrap()
             .unwrap();

@@ -5111,9 +5111,8 @@ fn opencode_free_pool_cools_second_model() -> Result {
             pools: &pools,
         }
         .check(&second),
-        Err(provenant_quota::QuotaError::Refused(
-            "free tier exhausted; use a paid route or wait for its allowance reset"
-        ))
+        Err(provenant_quota::QuotaError::Refused(reason))
+            if reason == provenant_quota::AccountBlock::FreeTierRefusal.repair()
     ));
     Ok(())
 }
@@ -5177,9 +5176,8 @@ fn opencode_free_reset_cools_pool_until_reset_and_restores() -> Result {
         for route in [&first, &second] {
             assert!(matches!(
                 admit(route, at),
-                Err(provenant_quota::QuotaError::Refused(
-                    "free tier exhausted; use a paid route or wait for its allowance reset"
-                ))
+                Err(provenant_quota::QuotaError::Refused(reason))
+                    if reason == provenant_quota::AccountBlock::FreeTierRefusal.repair()
             ));
         }
     }
@@ -5289,9 +5287,8 @@ fn agy_individual_quota_cools_model_until_reset() -> Result {
     for at in [now, now + 3600, resets - 1] {
         assert!(matches!(
             admit(&route, at),
-            Err(provenant_quota::QuotaError::Refused(
-                "scoped provider refusal"
-            ))
+            Err(provenant_quota::QuotaError::Refused(reason))
+                if reason == provenant_quota::AccountBlock::ScopedRefusal.repair()
         ));
     }
     admit(&route, resets)?;
