@@ -1306,8 +1306,6 @@ struct PresetOwner {
     launched: Vec<String>,
     planner_fragment: Option<String>,
     fail_planner: bool,
-    deferred_shape: Option<String>,
-    deferred_paths: Vec<String>,
     allow_land: bool,
     lands: usize,
     ci_head: Option<String>,
@@ -1369,18 +1367,6 @@ impl provenant_fabric_runtime::graph::AttemptOwner for PresetOwner {
         ))
     }
 
-    fn ci_status(&mut self) -> Option<&mut dyn provenant_fabric_runtime::graph::CiStatus> {
-        if self.deferred_shape.is_some() {
-            Some(self)
-        } else {
-            None
-        }
-    }
-    fn wall_now(&self) -> Option<provenant_core::WallTime> {
-        self.deferred_shape.as_ref()?;
-        provenant_core::WallTime::from_micros(1_000_000).ok()
-    }
-
     fn land(
         &mut self,
         request: provenant_fabric_runtime::graph::LandRequest<'_>,
@@ -1403,26 +1389,6 @@ impl provenant_fabric_runtime::graph::AttemptOwner for PresetOwner {
                 reason: "fixture".into(),
             })
         }
-    }
-
-    fn resolve_review(
-        &mut self,
-        node: &provenant_fabric_runtime::graph::GraphNode,
-        subject: &str,
-    ) -> Result<
-        provenant_fabric_runtime::graph::Expansion,
-        provenant_fabric_runtime::graph::ReviewResolveError,
-    > {
-        let shape = self
-            .deferred_shape
-            .as_deref()
-            .ok_or(provenant_fabric_runtime::graph::ReviewResolveError::Unsupported)?;
-        crate::fabric::fixture_review_expansion_with_paths(
-            node,
-            subject,
-            shape,
-            &self.deferred_paths,
-        )
     }
 
     fn integration_head(&mut self) -> Result<Option<String>, Self::Error> {
@@ -2554,23 +2520,6 @@ fn shapes() -> super::preset::ShapeSelector {
                 .iter()
                 .map(|(_, lens)| (*lens).to_owned())
                 .collect(),
-            max_panel_stages: 3,
-            max_verifiers: 1,
-            panel_shapes: [
-                (
-                    "quick".to_owned(),
-                    json!({"frame":false,"verifiers":0,"synthesis":"reduce"}),
-                ),
-                (
-                    "standard".to_owned(),
-                    json!({"frame":true,"verifiers":1,"synthesis":"model"}),
-                ),
-                (
-                    "deep".to_owned(),
-                    json!({"frame":true,"verifiers":1,"synthesis":"model"}),
-                ),
-            ]
-            .into(),
             plan: provenant_routing::ReviewConfig::default().lens_plan(query.kind, &[], false),
             ..Default::default()
         })
@@ -4960,108 +4909,31 @@ fn real_selector(directory: &str) -> Layers {
 }
 
 #[test]
-fn deliver_carries_size_kind_and_shape_to_the_deferred_panel() {
+fn a_review_of_an_unpinned_subject_expands_without_a_deferred_node() {
     let layers = real_selector("/nonexistent");
-    let document = expand(
-        &layers,
-        "deliver",
-        "brief",
-        &[
-            "parameters.worktree='/repo/w'".into(),
-            "parameters.size='medium'".into(),
-            "parameters.kind='refactor'".into(),
-            "parameters.review_shape='quick'".into(),
-        ],
-    )
-    .unwrap()
-    .document;
-    let panel = &document["nodes"][2]["composite"]["nodes"][0];
-    assert_eq!(panel["kind"], "plan");
-    assert_eq!(panel["review"]["size"], "medium");
-    assert_eq!(panel["review"]["kind"], "refactor");
-    assert_eq!(panel["review"]["shape"], "quick");
-}
-
-/// A review of a head or node subject with no size or shape cannot be measured
-/// until the subject is pinned, so expansion emits one deferred node for the
-/// host to resolve and measures nothing itself.
-#[test]
-fn a_head_subject_review_defers_its_size_to_the_pinned_commit() {
-    let layers = real_selector("/nonexistent");
-    let expanded = expand(
-        &layers,
-        "deliver",
-        "brief",
-        &[
-            "parameters.worktree='/repo/w'".into(),
-            "parameters.base='main'".into(),
-        ],
-    )
-    .unwrap();
-    let document = &expanded.document;
-    assert_eq!(document["schema_version"], 2);
-    assert_eq!(document["review_base"], "main");
-    // No expansion-time git read: nothing to degrade, nothing to warn about.
-    assert!(expanded.warnings.is_empty(), "{:?}", expanded.warnings);
-    let review = &document["nodes"][2]["composite"]["nodes"];
-    assert_eq!(review.as_array().unwrap().len(), 1);
-    let lenses = &review[0];
-    assert_eq!(lenses["id"], "lenses");
-    assert_eq!(lenses["kind"], "plan");
-    assert_eq!(lenses["review"]["worktree"], "/repo/w");
-    assert!(lenses["review"]["max_nodes"].as_u64().unwrap() > 12);
-    assert_eq!(lenses["source"]["type"], "head");
-    assert!(lenses["panel_templates"]["frame"].is_object());
-    assert!(lenses["panel_templates"]["verifier"].is_object());
-    assert!(lenses["panel_templates"]["synthesis"].is_object());
-    assert_eq!(lenses["read_roots"], json!(["/repo/w"]));
-    assert!(lenses.get("composite").is_none());
-    let templates = lenses["lens_templates"].as_object().unwrap();
-    assert!(templates.contains_key("correctness-spec") && templates.contains_key("adversarial"));
-    for lens in lenses["review"]["lenses"].as_array().unwrap() {
-        assert!(templates.contains_key(lens["name"].as_str().unwrap()));
+    // Every review stage lowers to ordinary lens nodes; none is left for the
+    // host to resolve at launch, whatever size or shape the caller names.
+    fn has_review_field(value: &Value) -> bool {
+        match value {
+            Value::Object(map) => map.contains_key("review") || map.values().any(has_review_field),
+            Value::Array(items) => items.iter().any(has_review_field),
+            _ => false,
+        }
     }
-    let template = &templates["tests"];
-    assert_eq!(template["access"], "read_only");
-    assert_eq!(template["role"], "lens.tests");
-    for stripped in ["route", "routes", "depends_on", "inputs", "read_roots"] {
-        assert!(template.get(stripped).is_none(), "{stripped}");
-    }
-    // The writer keeps one route; read-only members repeat their alias.
-    assert!(document["nodes"][0].get("routes").is_none());
-    assert_eq!(document["nodes"][0]["route"]["alias"], "senior");
-    assert_eq!(
-        lenses["panel_templates"]["frame"]["routes"]
-            .as_array()
-            .unwrap()
-            .len(),
-        2
-    );
-    let document: provenant_fabric_runtime::graph::GraphDocument =
-        serde_json::from_value(document.clone()).unwrap();
-    assert_eq!(document.review_base.as_deref(), Some("main"));
-}
-
-#[test]
-fn explicit_size_and_shape_still_defer_unpinned_subjects() {
-    let layers = real_selector("/nonexistent");
-    let deliver = |extra: &str| {
-        expand(
+    for extra in [
+        "parameters.size='small'",
+        "parameters.review_shape='quick'",
+        "parameters.kind='docs'",
+    ] {
+        let document = expand(
             &layers,
             "deliver",
             "brief",
             &["parameters.worktree='/repo/w'".into(), extra.into()],
         )
         .unwrap()
-        .document
-    };
-    for extra in ["parameters.size='small'", "parameters.review_shape='quick'"] {
-        let document = deliver(extra);
-        assert_eq!(document["schema_version"], 2, "{extra}");
-        assert_eq!(
-            document["nodes"][2]["composite"]["nodes"][0]["kind"],
-            "plan"
-        );
+        .document;
+        assert!(!has_review_field(&document["nodes"]), "{extra}");
     }
     // The default council reviews a commit, which is already pinned.
     let document = expand(
@@ -5438,195 +5310,6 @@ fn every_bundled_preset_document_passes_graph_admission() {
     assert!(checked >= 20, "{checked} documents checked");
 }
 
-/// The lenses of a generator-evaluator judge what the writer commits, so the
-/// panel is resolved after the writer runs even though the preset's own subject
-/// is a commit.
-#[test]
-fn a_generator_review_defers_its_size_until_the_writer_has_run() {
-    let layers = real_selector("/nonexistent");
-    let document = expand(
-        &layers,
-        "generator-evaluator",
-        "brief",
-        &["parameters.worktree='/repo/lane'".into()],
-    )
-    .unwrap()
-    .document;
-    assert_eq!(document["schema_version"], 2);
-    let lens = document["nodes"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|node| node["id"] == "lens")
-        .unwrap();
-    let deferred = &lens["composite"]["nodes"][0];
-    assert_eq!(deferred["kind"], "plan");
-    assert_eq!(deferred["source"]["type"], "node");
-    assert_eq!(deferred["source"]["node"], "implement");
-    assert!(
-        deferred["review"]["lenses"].as_array().unwrap().is_empty(),
-        "{deferred}"
-    );
-    assert!(deferred["lens_templates"].is_object());
-    let custom = expand(
-        &layers,
-        "generator-evaluator",
-        "brief",
-        &[
-            "parameters.worktree='/repo/lane'".into(),
-            "parameters.lenses=[{name='tests',tier='',when=''}]".into(),
-        ],
-    )
-    .unwrap()
-    .document;
-    let lens = custom["nodes"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|node| node["id"] == "lens")
-        .unwrap();
-    assert_eq!(
-        lens["composite"]["nodes"][0]["review"]["lenses"][0]["name"],
-        "tests"
-    );
-    let sized = expand(
-        &layers,
-        "generator-evaluator",
-        "brief",
-        &[
-            "parameters.worktree='/repo/lane'".into(),
-            "parameters.size='small'".into(),
-        ],
-    )
-    .unwrap()
-    .document;
-    assert_eq!(sized["schema_version"], 2);
-    let group = sized["nodes"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|node| node["id"] == "lens")
-        .unwrap();
-    let nodes = group["composite"]["nodes"].as_array().unwrap();
-    assert!(
-        nodes
-            .iter()
-            .any(|node| node["kind"] == "plan" && node["review"]["size"] == "small")
-    );
-}
-
-#[test]
-fn deferred_review_rebinds_stored_template_fields() {
-    use provenant_fabric_runtime::graph::{GraphNode, SourceBinding};
-
-    let expansion = expand(
-        &real_selector("/nonexistent"),
-        "deliver",
-        "brief",
-        &["parameters.worktree='/repo/w'".into()],
-    )
-    .unwrap();
-    let mut node: GraphNode =
-        serde_json::from_value(expansion.document["nodes"][2]["composite"]["nodes"][0].clone())
-            .unwrap();
-    let frame = &mut node.extra.get_mut("panel_templates").unwrap()["frame"];
-    for field in ["id", "source", "read_roots", "depends_on", "inputs"] {
-        frame[field] = json!(false);
-    }
-
-    let subject = "0123456789abcdef0123456789abcdef01234567";
-    let expanded = crate::fabric::fixture_review_expansion(&node, subject, "standard").unwrap();
-    let frame = expanded
-        .nodes
-        .iter()
-        .find(|n| n.id.ends_with("--f"))
-        .unwrap();
-    assert!(matches!(&frame.source, Some(SourceBinding::Commit { commit }) if commit == subject));
-    assert_eq!(frame.read_roots, node.read_roots);
-    assert_eq!(frame.depends_on, node.depends_on);
-    assert_eq!(frame.inputs, node.inputs);
-}
-
-#[test]
-fn deliver_deferred_review_runs_the_resolved_shape_on_the_writer_commit() {
-    use provenant_fabric_runtime::graph::{GraphDocument, advance_with_budget};
-    let layers = real_selector("/nonexistent");
-    for shape in ["quick", "standard", "protected"] {
-        let mut expansion = expand(
-            &layers,
-            "deliver",
-            "brief",
-            &[
-                "parameters.worktree='/repo/lane'".into(),
-                format!("parameters.land={}", usize::from(shape == "quick")),
-                "parameters.land_tier='routine'".into(),
-                "parameters.checks=['ci']".into(),
-            ],
-        )
-        .unwrap();
-        pin_fixture_sources(&mut expansion.document);
-        let document: GraphDocument = serde_json::from_value(expansion.document).unwrap();
-        let config = provenant_fabric_runtime::config::GraphConfig::default();
-        let mut owner = PresetOwner {
-            deferred_shape: Some(if shape == "protected" { "quick" } else { shape }.into()),
-            deferred_paths: if shape == "protected" {
-                vec!["src/credentials.rs".into()]
-            } else {
-                vec![]
-            },
-            allow_land: shape == "quick",
-            ..Default::default()
-        };
-        let run = advance_with_budget(
-            &document,
-            &mut owner,
-            &mut PresetJournal::default(),
-            &config.limits,
-            &config.budget,
-        )
-        .unwrap();
-        assert!(run.checkpoint.successful(), "{:#?}", run.checkpoint.nodes);
-        let attempts: Vec<_> = owner
-            .launched
-            .iter()
-            .filter(|id| id.contains("--r--"))
-            .collect();
-        if shape == "quick" {
-            assert_eq!(attempts.len(), 1, "{attempts:?}");
-            assert_eq!(owner.lands, 1);
-        } else {
-            if shape == "standard" {
-                assert_eq!(attempts.len(), 8, "{attempts:?}");
-            } else {
-                assert!(attempts.len() > 8, "{attempts:?}");
-            }
-            assert!(attempts[0].ends_with("--f"));
-            assert!(attempts[attempts.len() - 2].ends_with("--v-1"));
-            assert!(attempts[attempts.len() - 1].ends_with("--s"));
-        }
-        let writer = run
-            .checkpoint
-            .nodes
-            .iter()
-            .find(|node| node.id == "write")
-            .unwrap()
-            .outputs
-            .as_ref()
-            .unwrap()
-            .commit
-            .as_ref()
-            .unwrap();
-        for progress in run
-            .checkpoint
-            .nodes
-            .iter()
-            .filter(|node| node.id.contains("--r--") && !node.attempts.is_empty())
-        {
-            assert_eq!(progress.source_commit.as_ref(), Some(writer));
-        }
-    }
-}
-
 #[test]
 fn crucial_generator_reaches_evaluator_after_review() {
     use provenant_fabric_runtime::graph::{GraphDocument, advance_with_budget};
@@ -5645,10 +5328,7 @@ fn crucial_generator_reaches_evaluator_after_review() {
     pin_fixture_sources(&mut expansion.document);
     let document: GraphDocument = serde_json::from_value(expansion.document).unwrap();
     let config = provenant_fabric_runtime::config::GraphConfig::default();
-    let mut owner = PresetOwner {
-        deferred_shape: Some("deep".into()),
-        ..Default::default()
-    };
+    let mut owner = PresetOwner::default();
     let run = advance_with_budget(
         &document,
         &mut owner,
@@ -6107,9 +5787,9 @@ fn tracker_advice_is_declared_by_parameter() {
 }
 
 #[test]
-fn review_lens_selection_is_declared_on_the_stage() {
+fn the_lenses_list_is_the_review_panel_and_narrows_by_trigger() {
     let mut layers = Layers::empty();
-    layers.insert("test", "declared-selection", "stages=[{id='selected',for_each='${choices}',review_lenses=true,prompt='selected'},{id='ordinary',for_each='${choices}',prompt='ordinary'}]\n[parameters]\nchoices=[{name='always'},{name='conditional',when='security'}]\n").unwrap();
+    layers.insert("test", "declared-selection", "stages=[{id='selected',for_each='${lenses}',prompt='selected'},{id='ordinary',for_each='${choices}',prompt='ordinary'}]\n[parameters]\nlenses=[{name='always'},{name='conditional',when='security'}]\nchoices=[{name='always'},{name='conditional',when='security'}]\n").unwrap();
     let expanded = expand(&layers, "declared-selection", "brief", &[]).unwrap();
     let nodes = expanded.document["nodes"].as_array().unwrap();
     assert!(

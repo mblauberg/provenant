@@ -22,9 +22,6 @@ pub(super) fn human_for_test(data: &Value, full: bool) -> String {
     presentation::human(data, full)
 }
 
-#[path = "preset_plan.rs"]
-pub mod planner;
-
 pub mod composites;
 mod panel;
 pub(crate) use crate::graph_support::{
@@ -60,7 +57,7 @@ pub struct Layers {
     /// snapshot retain the ordinary fresh lookup.
     command_worktrees: Option<Vec<PathBuf>>,
     used_shapes: std::cell::RefCell<BTreeSet<String>>,
-    /// Bases of the deferred reviews this expansion emitted; a graph has one.
+    /// Bases of the review stages this expansion emitted; a graph has one.
     review_bases: std::cell::RefCell<BTreeSet<String>>,
     /// The role library: bundled roles, then user and repository `roles.toml`.
     pub roles: RoleLibrary,
@@ -79,9 +76,6 @@ pub struct Layers {
     repo_files: BTreeSet<String>,
     /// Resolve without repository layers, for the landing floor.
     exclude_repo: std::cell::Cell<bool>,
-    /// The planner front-end's host inputs. `None` never plans.
-    pub plan: Option<planner::PlanContext>,
-    delegated_plan_stage: std::cell::RefCell<Option<String>>,
 }
 
 #[derive(Debug)]
@@ -704,8 +698,10 @@ pub(super) fn tracker_advice_parameter(config: &Value) -> Option<&str> {
         })
 }
 
-fn selects_review_lenses(entry: &Value) -> bool {
-    entry.get("review_lenses").and_then(Value::as_bool) == Some(true)
+/// The stage fans out over the `lenses` parameter, which is the review panel:
+/// the same list the host's `@review-panel` resolver narrows at launch.
+fn selects_review_panel(entry: &Value) -> bool {
+    entry.get("for_each").and_then(Value::as_str) == Some("${lenses}")
 }
 
 fn merge(
@@ -1150,7 +1146,6 @@ pub fn expand_with(
     layers.substitutions.borrow_mut().clear();
     layers.warnings.borrow_mut().clear();
     layers.spec_contexts.borrow_mut().clear();
-    layers.delegated_plan_stage.borrow_mut().take();
     let mut repo_files = Vec::new();
     let (mut config, mut origins) = layers.resolve_inner(name, &mut Vec::new(), &mut repo_files)?;
     for (key, value) in params {
@@ -1182,7 +1177,6 @@ pub fn expand_with(
         )
         .map_err(|error| format!("{error}; valid parameter and slot paths: {valid}"))?;
     }
-    apply_shape_stages(layers, name, &mut config, &origins, prompt)?;
     let mut nodes = Vec::new();
     build(
         layers,
@@ -1199,7 +1193,6 @@ pub fn expand_with(
     // Request bindings affect how inputs reach parameters, not the graph itself.
     origins.retain(|path, _| {
         !path.ends_with("$scope_read_only")
-            && !path.split('.').any(|part| part == "shape_stages")
             && !((path.ends_with(".bind")
                 || path.ends_with(".tracker_advice")
                 || path.ends_with(".inherit")
@@ -2179,7 +2172,6 @@ fn build_stages(
                 "decision_session",
                 "retry",
                 "pattern",
-                "shape_stages",
             ]
             .contains(&key.as_str())
         })
@@ -2208,262 +2200,13 @@ fn build_stages(
         scope,
     };
     let start = nodes.len();
-    let mut stage_entries = config.get("stages").cloned().ok_or("missing stages")?;
-    let explicit_verifiers = builder
-        .origins
-        .get("parameters.verifiers")
-        .is_some_and(|origin| !builder.layers.is_initial_origin(name, "verifiers", origin));
-    let verifier_override = explicit_verifiers
-        .then(|| builder.parameters.get("verifiers").and_then(Value::as_u64))
-        .flatten();
-    let deferred_shape = builder.defers_review_size();
-    if deferred_shape
-        && let Some(verifier) = config
-            .pointer("/shape_stages/verifier")
-            .and_then(Value::as_str)
-        && let Some(stage) = stage_entries
-            .as_array_mut()
-            .and_then(|stages| stages.iter_mut().find(|stage| stage["id"] == verifier))
-    {
-        stage["count"] = json!(1);
-    }
-    let mut ends = builder.sequence(&stage_entries, "", deps, nodes, 0)?;
-    if let Some(stages) = config.get("shape_stages").and_then(Value::as_object) {
-        let id = |key: &str| stages.get(key).and_then(Value::as_str).unwrap_or("");
-        let (frame, panel, verifier, synthesis) =
-            (id("frame"), id("panel"), id("verifier"), id("synthesis"));
-        if let Some(position) = nodes[start..]
-            .iter()
-            .position(|node| node["id"] == panel && node.get("review").is_some())
-            .map(|position| start + position)
-        {
-            let frame_node = nodes[start..]
-                .iter()
-                .find(|node| node["id"] == frame)
-                .cloned()
-                .ok_or("deferred review frame missing")?;
-            let verifier_node = nodes[start..]
-                .iter()
-                .find(|node| node["id"] == verifier)
-                .cloned();
-            let synthesis_node = nodes[start..]
-                .iter()
-                .find(|node| node["id"] == synthesis)
-                .cloned()
-                .ok_or("deferred review synthesis missing")?;
-            let node = &mut nodes[position];
-            node["panel_templates"] = json!({"frame": frame_node, "verifier": verifier_node, "synthesis": synthesis_node});
-            let mut roots = node
-                .get("read_roots")
-                .and_then(Value::as_array)
-                .cloned()
-                .unwrap_or_default();
-            for template in [
-                Some(&frame_node),
-                verifier_node.as_ref(),
-                Some(&synthesis_node),
-            ]
-            .into_iter()
-            .flatten()
-            {
-                for root in template
-                    .get("read_roots")
-                    .and_then(Value::as_array)
-                    .into_iter()
-                    .flatten()
-                {
-                    if !roots.contains(root) {
-                        roots.push(root.clone());
-                    }
-                }
-            }
-            if !roots.is_empty() {
-                node["read_roots"] = json!(roots);
-            }
-            if let Some(count) = verifier_override {
-                node["panel_verifiers"] = json!(count);
-            }
-            for key in ["source", "depends_on", "inputs"] {
-                if let Some(value) = frame_node.get(key) {
-                    node[key] = value.clone();
-                } else {
-                    node.as_object_mut()
-                        .ok_or("deferred review must be a table")?
-                        .remove(key);
-                }
-            }
-            // The original bound covers the lens group and its candidates.
-            // The outer boundary and all possible shape stages also count.
-            let hint = builder
-                .shape_hint(true)?
-                .ok_or("deferred review needs shape configuration")?;
-            node["panel_shapes"] = json!(hint.panel_shapes);
-            node["panel_max_verifiers"] = json!(
-                hint.max_verifiers
-                    .max(verifier_override.unwrap_or(0) as usize)
-            );
-            let stages = hint
-                .max_panel_stages
-                .max(verifier_override.unwrap_or(0) as usize + 2);
-            if let Some(max) = node["review"]["max_nodes"].as_u64() {
-                node["review"]["max_nodes"] =
-                    json!(max.saturating_add(stages as u64).saturating_add(1));
-            }
-            let children = nodes.split_off(start);
-            nodes.extend(children.into_iter().filter(|node| {
-                node["id"] != frame && node["id"] != verifier && node["id"] != synthesis
-            }));
-            ends = vec![panel.to_owned()];
-        }
-    }
+    let stage_entries = config.get("stages").cloned().ok_or("missing stages")?;
+    let ends = builder.sequence(&stage_entries, "", deps, nodes, 0)?;
     if let Some(retry) = config.get("retry") {
         let retry = interpolate(retry, &builder.parameters, prompt, 1)?;
         inherit_preset_retry(&mut nodes[start..], &retry);
     }
     Ok(ends)
-}
-
-/// Apply a resolved review shape to the stage names declared by a preset.
-/// Writer-sourced subjects are left for launch-time resolution.
-fn apply_shape_stages(
-    layers: &Layers,
-    name: &str,
-    config: &mut Value,
-    origins: &BTreeMap<String, String>,
-    prompt: &str,
-) -> Result<(), String> {
-    let Some(declaration) = config.get("shape_stages").cloned() else {
-        return Ok(());
-    };
-    let declaration = declaration
-        .as_object()
-        .ok_or("shape_stages must be a table")?;
-    if declaration
-        .keys()
-        .any(|key| !["frame", "panel", "verifier", "synthesis"].contains(&key.as_str()))
-    {
-        return Err("shape_stages has an unknown field".into());
-    }
-    let stage = |key: &str| -> Result<String, String> {
-        declaration
-            .get(key)
-            .and_then(Value::as_str)
-            .filter(|value| !value.is_empty())
-            .map(str::to_owned)
-            .ok_or_else(|| format!("shape_stages needs {key}"))
-    };
-    let frame = stage("frame")?;
-    let panel = stage("panel")?;
-    let verifier = stage("verifier")?;
-    let synthesis = stage("synthesis")?;
-    if [&frame, &panel, &verifier, &synthesis]
-        .into_iter()
-        .collect::<std::collections::BTreeSet<_>>()
-        .len()
-        != 4
-    {
-        return Err("shape_stages must name distinct stages".into());
-    }
-    let parameters = flatten_parameters(
-        name,
-        config.get("parameters").unwrap_or(&json!({})),
-        "",
-        origins,
-    )?;
-    let subject = parameters
-        .get("subject")
-        .cloned()
-        .ok_or("shape_stages needs a subject")?;
-    if layers.review.is_some()
-        && matches!(
-            subject.get("type").and_then(Value::as_str),
-            Some("head" | "node")
-        )
-    {
-        config["exports"] =
-            json!([{ "node": panel, "outputs": ["result", "findings", "verdict", "commit"] }]);
-        return Ok(());
-    }
-    let declared_verifiers = parameters
-        .get("verifiers")
-        .and_then(Value::as_u64)
-        .unwrap_or(0);
-    let (mut stack, mut local, mut files) = (Vec::new(), origins.clone(), Vec::new());
-    let builder = StageBuilder {
-        layers,
-        name,
-        prompt,
-        parameters,
-        roles: config.get("roles"),
-        stack: &mut stack,
-        origins: &mut local,
-        repo_files: &mut files,
-        scope: "",
-    };
-    let Some(shape) = builder.shape_hint(false)? else {
-        return Ok(());
-    };
-    let explicit_verifiers = origins
-        .get("parameters.verifiers")
-        .is_some_and(|origin| !layers.is_initial_origin(name, "verifiers", origin));
-    let stages = config
-        .get_mut("stages")
-        .and_then(Value::as_array_mut)
-        .ok_or("shape_stages needs stages")?;
-    for id in [&frame, &panel, &verifier, &synthesis] {
-        if stages
-            .iter()
-            .filter(|stage| stage.get("id").and_then(Value::as_str) == Some(id.as_str()))
-            .count()
-            != 1
-        {
-            return Err(format!("shape_stages needs exactly one stage {id}"));
-        }
-    }
-    if !shape.frame {
-        stages.retain(|stage| stage.get("id").and_then(Value::as_str) != Some(frame.as_str()));
-        for id in [&panel, &verifier, &synthesis] {
-            if let Some(stage) = stages
-                .iter_mut()
-                .find(|stage| stage.get("id").and_then(Value::as_str) == Some(id.as_str()))
-            {
-                stage["source"] = subject.clone();
-            }
-        }
-    }
-    if !explicit_verifiers
-        && let Some(stage) = stages
-            .iter_mut()
-            .find(|stage| stage.get("id").and_then(Value::as_str) == Some(verifier.as_str()))
-    {
-        stage["count"] = json!(shape.verifiers);
-    }
-    if shape.synthesis == provenant_routing::ReviewSynthesis::Reduce {
-        stages.retain(|stage| stage.get("id").and_then(Value::as_str) != Some(synthesis.as_str()));
-        let stage = stages
-            .iter_mut()
-            .find(|stage| stage.get("id").and_then(Value::as_str) == Some(panel.as_str()))
-            .ok_or("missing review panel")?;
-        stage["reduce_verdict"] = json!(true);
-        stage["export_first"] = json!(["commit"]);
-        let mut exports =
-            vec![json!({ "node": panel, "outputs": ["result", "findings", "verdict", "commit"] })];
-        let verifier_count = if explicit_verifiers {
-            declared_verifiers
-        } else {
-            shape.verifiers as u64
-        };
-        if verifier_count > 0 {
-            let id = if verifier_count == 1 {
-                verifier.clone()
-            } else {
-                format!("{verifier}-{verifier_count}")
-            };
-            exports.push(json!({"node": id, "outputs": ["result", "findings"]}));
-        }
-        config["exports"] = json!(exports);
-    }
-    Ok(())
 }
 
 // Preserve the nearest preset default on lowered leaves, including composite
@@ -2567,15 +2310,6 @@ impl StageBuilder<'_> {
         }
         if object.contains_key("export_first") && !object.contains_key("parallel") {
             return Err("export_first requires a parallel group".into());
-        }
-        if object
-            .get("review_lenses")
-            .is_some_and(|flag| !flag.is_boolean())
-        {
-            return Err("review_lenses must be a boolean".into());
-        }
-        if selects_review_lenses(entry) && !object.contains_key("for_each") {
-            return Err("review_lenses requires for_each".into());
         }
         // A list can replace a counted stage when it contains explicit items.
         if let Some(list) = object.get("for_each_if_nonempty") {
@@ -2714,7 +2448,7 @@ impl StageBuilder<'_> {
             }
             match interpolate(list, &self.parameters, self.prompt, 1)? {
                 Value::Array(list) => {
-                    let list = if selects_review_lenses(entry) {
+                    let list = if selects_review_panel(entry) {
                         self.select_items(list)?
                     } else {
                         list
@@ -2776,7 +2510,6 @@ impl StageBuilder<'_> {
             let mut object = object.clone();
             object.remove("count");
             object.remove("for_each");
-            object.remove("review_lenses");
             if object.get("min_successful").is_some_and(|value| {
                 interpolate(value, &self.parameters, self.prompt, 1)
                     .is_ok_and(|value| value.is_null())
@@ -2932,7 +2665,6 @@ impl StageBuilder<'_> {
                         )?;
                     }
                 }
-                apply_shape_stages(self.layers, child, &mut config, &local, self.prompt)?;
                 if let Some(roles) = object.remove("roles") {
                     let roles = interpolate_inner(
                         &roles,
@@ -2987,15 +2719,8 @@ impl StageBuilder<'_> {
                     .as_array()
                     .filter(|entries| !entries.is_empty())
                     .ok_or("parallel must be a nonempty array")?;
-                if let Some(deferred) =
-                    self.deferred_review(&id, entries, &object, deps, &outputs, depth, nodes)?
+                self.note_review_base(entries);
                 {
-                    object.remove("min_successful");
-                    object.remove("reduce_verdict");
-                    object.remove("export_first");
-                    object.remove("exports");
-                    (deferred, true)
-                } else {
                     let mut children = Vec::new();
                     let mut ends = Vec::new();
                     for (position, entry) in entries.iter().enumerate() {
@@ -3073,7 +2798,7 @@ impl StageBuilder<'_> {
                     false,
                 )
             };
-            if selects_review_lenses(entry)
+            if selects_review_panel(entry)
                 && !decorate_wrapper
                 && let Some(group) = item.as_ref().and_then(|item| item.get("family_group"))
             {
@@ -3586,19 +3311,6 @@ pub(crate) fn bind_run_context(
                 }
             }
 
-            // A deferred review measures in the bound worktree unless it names one.
-            if let Some(worktree) = &request.access.worktree
-                && node.get("review").is_some_and(Value::is_object)
-                && node["review"]["worktree"]
-                    .as_str()
-                    .is_none_or(str::is_empty)
-            {
-                node["review"]["worktree"] = json!(if worktree.is_absolute() {
-                    worktree.clone()
-                } else {
-                    directory.join(worktree)
-                });
-            }
             if writer
                 && node
                     .get("worktree")

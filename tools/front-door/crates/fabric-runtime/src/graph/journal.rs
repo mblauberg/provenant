@@ -1064,7 +1064,7 @@ fn decode_verified_checkpoint(
             .checkpoint
             .expansions
             .iter()
-            .any(|expansion| expansion.review.is_some() || nodes_have_v2(&expansion.nodes));
+            .any(|expansion| nodes_have_v2(&expansion.nodes));
     // Matches validate_schema: version 2 may omit every v2 field.
     if !matches!(document.schema_version, 1 | 2)
         || document.schema_version < u64::from(minimum_schema_version(document))
