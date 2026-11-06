@@ -593,6 +593,46 @@ fn carry_forward_slot_reservation(directory: &Directory) -> Result<()> {
     Ok(())
 }
 
+/// Carry slot-root reservations forward at the recovery boundary. A busy or
+/// unreadable slot stays in place and is reported by the subsequent listing.
+pub fn cutover_writer_reservations(
+    directory: &Directory,
+    cancel: &CancelToken,
+    clock: &dyn Clock,
+) -> Result<()> {
+    for (index, name) in directory.entries()?.enumerate() {
+        if index >= 10_000 {
+            return Err(CustodyError::InvalidRecord);
+        }
+        let name = name?;
+        let migrate = || -> Result<()> {
+            if directory.metadata_at(&name, false)?.kind != provenant_os::fs::FileKind::Directory {
+                return Ok(());
+            }
+            let slot = directory.open_verified_directory(&name)?;
+            match slot.metadata_at(OsStr::new("reservation.json"), false) {
+                Ok(_) => {}
+                Err(error) if error.is_not_found() => return Ok(()),
+                Err(error) => return Err(error.into()),
+            }
+            let _lease = lock_writer_exclusion(
+                &slot,
+                WaitBudget::nonblocking(clock.mono_now()),
+                cancel,
+                clock,
+            )?;
+            carry_forward_slot_reservation(&slot)
+        };
+        // Do not let one retained or busy slot hide other reservations.
+        // The read-only listing reports the slot that could not be carried.
+        let _ = migrate();
+        if cancel.is_cancelled() {
+            return Err(CustodyError::Cancelled);
+        }
+    }
+    Ok(())
+}
+
 /// A carried fence remains exclusive until its owner settles and clears it.
 fn ensure_no_exclusive_reservation(directory: &Directory) -> Result<()> {
     for (index, name) in directory.entries()?.enumerate() {
@@ -1887,33 +1927,10 @@ pub fn list_writer_reservations(directory: &Directory) -> Result<ReservationList
                 let attempt = attempt?;
                 if attempt == OsStr::new("reservation.json") {
                     let path = PathBuf::from(&name).join(&attempt);
-                    // Discovery is read-only. Recovery takes the writer lock and
-                    // performs the durable cutover before using this evidence.
-                    let record = (|| -> Result<Reservation> {
-                        let record: Reservation =
-                            read_record(&slot, "reservation.json", RECORD_LIMIT)?;
-                        record.validate()?;
-                        let anchor = slot.metadata()?;
-                        if record.reservation_inode != anchor.inode
-                            || (record.reservation_device != anchor.device
-                                && record.attempt_device != Some(record.reservation_device))
-                        {
-                            return Err(CustodyError::InvalidRecord);
-                        }
-                        Ok(record)
-                    })();
-                    match record {
-                        Ok(record) => listing.reservations.push(WriterReservation {
-                            scope: record.scope,
-                            reservation: path,
-                        }),
-                        Err(error) => listing.issues.push(ReservationIssue {
-                            reservation: path,
-                            reason: format!(
-                                "slot-root writer reservation requires reconciliation: {error}"
-                            ),
-                        }),
-                    }
+                    listing.issues.push(ReservationIssue {
+                        reservation: path,
+                        reason: "slot-root writer reservation requires reconciliation".into(),
+                    });
                     continue;
                 }
                 let path = PathBuf::from(&name).join(&attempt).join("reservation.json");

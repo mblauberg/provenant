@@ -152,13 +152,20 @@ fn slot_reservation_cutover_preserves_anchor_and_unknown_fields() -> TestResult 
 }
 
 #[test]
-fn slot_reservation_listing_discovers_recovery_before_cutover() -> TestResult {
+fn reconciliation_carries_slot_reservation_before_listing() -> TestResult {
     let root = tempfile::tempdir()?;
     let path = root.path().join("writer");
     std::fs::create_dir(&path)?;
     let slot = Directory::open_anchor(&path)?;
     publish_reservation(&slot, &legacy_reservation(scope(), &slot.metadata()?))?;
-    let listing = list_writer_reservations(&Directory::open_anchor(root.path())?)?;
+    let registry = Directory::open_anchor(root.path())?;
+    let before = list_writer_reservations(&registry)?;
+    assert!(before.reservations.is_empty());
+    assert_eq!(before.issues.len(), 1);
+    assert!(path.join("reservation.json").exists());
+    let clock = SystemClock;
+    cutover_writer_reservations(&registry, &CancelToken::new(), &clock)?;
+    let listing = list_writer_reservations(&registry)?;
     assert!(listing.issues.is_empty());
     let fence = listing
         .reservations
@@ -169,8 +176,7 @@ fn slot_reservation_listing_discovers_recovery_before_cutover() -> TestResult {
         fence.custody_directory(),
         Some(std::path::Path::new("writer"))
     );
-    assert!(path.join("reservation.json").exists());
-    let clock = SystemClock;
+    assert!(!path.join("reservation.json").exists());
     let recovery = acquire_recovery(
         Directory::open_anchor(&root.path().join(fence.custody_directory().unwrap()))?,
         fence.scope,

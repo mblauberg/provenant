@@ -1958,6 +1958,24 @@ impl crate::RunStore {
     pub fn writer_fences(&self) -> Result<Vec<WriterFence>> {
         Ok(self.writer_fence_listing()?.reservations)
     }
+    /// Perform the one-way custody cutover before a recovery scan.
+    pub(crate) fn cutover_writer_reservations(&self, call: &crate::Request<'_>) -> Result<()> {
+        let path = self
+            .writer_registry
+            .join("worktrees")
+            .join(self.context.project_id.to_string());
+        let directory = match Directory::open_anchor(&path) {
+            Ok(directory) => directory,
+            Err(error) if error.is_not_found() => return Ok(()),
+            Err(error) => return Err(error.into()),
+        };
+        provenant_supervisor::custody::cutover_writer_reservations(
+            &directory,
+            call.cancel,
+            call.clock,
+        )
+        .map_err(error("cut over writer reservations", Some(&path)))
+    }
     pub fn writer_fence_listing(
         &self,
     ) -> Result<provenant_supervisor::custody::ReservationListing> {
