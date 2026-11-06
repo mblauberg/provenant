@@ -890,7 +890,31 @@ fn prepare_writer_git(
             .parent()
             .ok_or(RunError::Validation("writer ref has no parent"))?,
     );
-    let directory = Directory::open_anchor(&parent)?;
+    // Packed refs need not have a loose-ref parent. Walk from the held common
+    // directory without following links and create missing components while
+    // the setup lock is held.
+    let mut directory = repo.common_dir().try_clone()?;
+    for component in ref_path
+        .parent()
+        .ok_or(RunError::Validation("writer ref has no parent"))?
+        .components()
+    {
+        let std::path::Component::Normal(name) = component else {
+            return Err(RunError::Validation("invalid writer ref parent"));
+        };
+        directory = match directory.open_directory(name) {
+            Ok(child) => child,
+            Err(failure) if failure.is_not_found() => {
+                match directory.mkdir(name, 0o777) {
+                    Ok(()) => {}
+                    Err(failure) if failure.is_exists() => {}
+                    Err(failure) => return Err(failure.into()),
+                }
+                directory.open_directory(name)?
+            }
+            Err(failure) => return Err(failure.into()),
+        };
+    }
     let name = ref_path
         .file_name()
         .ok_or(RunError::Validation("writer ref has no name"))?;
@@ -1411,21 +1435,25 @@ mod cargo_setup_tests {
             "worktree",
             "add",
             "-qb",
-            "feature/nested",
+            "chore/x",
             lane.to_str().ok_or("lane path")?,
         ])?;
         run(&[
             "worktree",
             "add",
             "-qb",
-            "feature/second",
+            "chore/second",
             second_lane.to_str().ok_or("second lane path")?,
         ])?;
         run(&["pack-refs", "--all"])?;
-        let reference = "refs/heads/feature/nested";
+        let reference = "refs/heads/chore/x";
         let expected = run(&["rev-parse", reference])?;
         assert!(!git_dir.join(reference).exists());
-        std::fs::create_dir_all(git_dir.join("refs/heads/feature"))?;
+        let ref_parent = git_dir.join("refs/heads/chore");
+        if ref_parent.exists() {
+            std::fs::remove_dir(&ref_parent)?;
+        }
+        assert!(!ref_parent.exists());
         let utility = runtime(&state)?;
         let executor = SystemExecutor::new(1)?;
         let cancel = CancelToken::new();
@@ -1518,7 +1546,7 @@ mod cargo_setup_tests {
         let second_tree = provenant_confinement::verify_worktree(&repo, &second_lane)?;
         let mut second = WriterLaunch {
             worktree: second_tree,
-            branch: GitRefName::new("refs/heads/feature/second")?,
+            branch: GitRefName::new("refs/heads/chore/second")?,
             base: GitOid::parse(&expected)?,
             custody: None,
             review_exempt: Default::default(),
@@ -1689,20 +1717,20 @@ mod cargo_setup_tests {
             format!("{expected} {reference}")
         );
         assert_eq!(
-            run(&["config", "--local", "--get", "branch.feature/nested.remote"])?,
+            run(&["config", "--local", "--get", "branch.chore/x.remote"])?,
             "origin"
         );
         assert_eq!(
-            run(&["config", "--local", "--get", "branch.feature/nested.merge"])?,
+            run(&["config", "--local", "--get", "branch.chore/x.merge"])?,
             reference
         );
         assert_eq!(
-            run(&["config", "--local", "--get", "branch.feature/second.remote"])?,
+            run(&["config", "--local", "--get", "branch.chore/second.remote"])?,
             "origin"
         );
         assert_eq!(
-            run(&["config", "--local", "--get", "branch.feature/second.merge"])?,
-            "refs/heads/feature/second"
+            run(&["config", "--local", "--get", "branch.chore/second.merge"])?,
+            "refs/heads/chore/second"
         );
         run(&[
             "remote",
@@ -1712,7 +1740,7 @@ mod cargo_setup_tests {
         ])?;
         let target = root.join("reflog-target");
         std::fs::write(&target, b"untouched")?;
-        let reflog = git_dir.join("logs/refs/remotes/origin/feature/nested");
+        let reflog = git_dir.join("logs/refs/remotes/origin/chore/x");
         std::fs::create_dir_all(reflog.parent().ok_or("reflog parent")?)?;
         std::os::unix::fs::symlink(&target, &reflog)?;
         let failure = prepare_writer_git(
@@ -1747,7 +1775,7 @@ mod cargo_setup_tests {
         assert_eq!(std::fs::read(&target)?, b"untouched");
         std::fs::remove_file(parent)?;
         std::fs::create_dir_all(parent)?;
-        let tracking_lock = git_dir.join("refs/remotes/origin/feature/nested.lock");
+        let tracking_lock = git_dir.join("refs/remotes/origin/chore/x.lock");
         std::fs::create_dir_all(tracking_lock.parent().ok_or("tracking lock parent")?)?;
         std::fs::write(&tracking_lock, b"held")?;
         let failure = prepare_writer_git(
@@ -1769,7 +1797,7 @@ mod cargo_setup_tests {
         assert_eq!(std::fs::read(&tracking_lock)?, b"held");
         std::fs::remove_file(&tracking_lock)?;
         run(&["remote", "remove", "origin"])?;
-        let stale = git_dir.join("refs/heads/feature/nested.lock");
+        let stale = git_dir.join("refs/heads/chore/x.lock");
         std::fs::write(&stale, b"held")?;
         let failure = prepare_writer_git(
             &mut writer,

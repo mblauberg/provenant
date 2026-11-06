@@ -1177,6 +1177,7 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
             provenant_cli::run::prices_refresh(cmd, edge)
         }),
         Command::Telemetry(provenant_cli::Telemetry::Ingest(cmd)) => usage::ingest(&cmd, globals),
+        Command::Native(cmd) => usage::native(cmd, globals),
         Command::Telemetry(provenant_cli::Telemetry::Mileage(cmd)) => {
             run_edge(&inv.leaf, globals, |edge| {
                 provenant_cli::mileage::run(cmd, edge)

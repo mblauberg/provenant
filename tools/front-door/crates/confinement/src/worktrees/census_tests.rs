@@ -2326,6 +2326,9 @@ mod narrowing {
         }
         let scripted = Scripted {
             cwd: match scripted.cwd {
+                CwdObservation::Path(path) if path.as_path() == std::path::Path::new("inside") => {
+                    CwdObservation::Path(root.clone())
+                }
                 CwdObservation::Path(_) => CwdObservation::Path(base.clone()),
                 other => other,
             },
@@ -2535,27 +2538,52 @@ mod narrowing {
     }
 
     #[test]
-    fn refused_descriptors_on_a_non_system_image_stay_unknown_with_pid_and_reason()
-    -> Result<(), Box<dyn Error>> {
-        let (state, detail, audit) = observe(
-            path_scripted(gap(OccupancyGap::DescriptorsDenied), None),
-            false,
-        )?;
-        assert_eq!(state, WorkerState::Unknown);
-        assert!(
-            detail.starts_with("process 200: occupancy incomplete: descriptors unreadable (EPERM)")
-        );
-        // An incomplete occupancy is not an image-policy rejection.
-        assert!(audit.is_empty());
+    fn descriptor_gaps_outside_roots_are_excused_with_a_detail() -> Result<(), Box<dyn Error>> {
+        for gap_kind in [
+            OccupancyGap::DescriptorsDenied,
+            OccupancyGap::DescriptorsUnavailable,
+            OccupancyGap::Churn,
+            OccupancyGap::LimitExceeded,
+        ] {
+            let (state, detail, audit) = observe(path_scripted(gap(gap_kind), None), false)?;
+            assert_eq!(state, WorkerState::Free, "{gap_kind:?}");
+            assert!(
+                detail.contains(&format!(
+                    "occupancy incomplete (excused): {}",
+                    gap_kind.describe()
+                )),
+                "{detail}"
+            );
+            assert!(audit.is_empty());
+
+            let (state, _, _) = observe(
+                Scripted {
+                    cwd: CwdObservation::Unsupported,
+                    occupancy: gap(gap_kind),
+                    sealed: None,
+                    kernel_thread: false,
+                },
+                false,
+            )?;
+            assert_eq!(state, WorkerState::Unknown, "{gap_kind:?}");
+            let (state, _, _) = observe(
+                Scripted {
+                    cwd: CwdObservation::Path(PathBuf::from("inside")),
+                    occupancy: gap(gap_kind),
+                    sealed: None,
+                    kernel_thread: false,
+                },
+                false,
+            )?;
+            assert_eq!(state, WorkerState::Live, "{gap_kind:?}");
+        }
         Ok(())
     }
 
     #[test]
-    fn other_gaps_are_never_excused_even_for_a_sealed_system_image() -> Result<(), Box<dyn Error>> {
+    fn other_gaps_are_not_excused_for_an_outside_cwd() -> Result<(), Box<dyn Error>> {
         for gap_kind in [
             OccupancyGap::ExecutableUnavailable,
-            OccupancyGap::DescriptorsUnavailable,
-            OccupancyGap::LimitExceeded,
             OccupancyGap::Unobserved,
         ] {
             let (state, detail, _) = observe(path_scripted(gap(gap_kind), SYSTEM), false)?;
@@ -2565,22 +2593,6 @@ mod narrowing {
                 "{detail}"
             );
         }
-        Ok(())
-    }
-
-    #[test]
-    fn refused_descriptors_with_an_unreadable_cwd_are_not_excused() -> Result<(), Box<dyn Error>> {
-        // The cwd is unknown, so the outside-cwd condition is unmet.
-        let (state, _, _) = observe(
-            Scripted {
-                cwd: CwdObservation::Unsupported,
-                occupancy: gap(OccupancyGap::DescriptorsDenied),
-                sealed: SYSTEM,
-                kernel_thread: false,
-            },
-            false,
-        )?;
-        assert_eq!(state, WorkerState::Unknown);
         Ok(())
     }
 
