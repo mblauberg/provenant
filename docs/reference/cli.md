@@ -2247,7 +2247,7 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 |---|---|
 | `--session-stream` | `{"conflicts": ["stats", "wait", "id", "target", "follow"], "defaults": ["false"], "description": "Stream a bounded attempt inventory page for the session collector", "name": "session_stream", "values": ["true", "false"]}` |
 | `--stats` | `{"conflicts": ["wait"], "defaults": ["false"], "description": "Report attempt efficiency without counting composite aggregates", "name": "stats", "values": ["true", "false"]}` |
-| `--by` | `{"defaults": ["template"], "description": "Group efficiency by requested tier or template", "name": "by", "values": ["tier", "template"]}` |
+| `--by` | `{"defaults": ["template"], "description": "Group efficiency by node, requested tier or template", "name": "by", "values": ["node", "tier", "template"]}` |
 | `--wait` | `{"bounds": [1, 14400], "conflicts": ["all", "cursor"], "description": "Wait for mixed targets (no value uses domains.wait.timeout_seconds)", "name": "wait"}` |
 | `--target` | `{"description": "Observe lane:ID, graph:ID, pr:NUMBER or land:NUMBER (repeatable; land only observes)", "name": "target", "repeatable": true, "requires": ["wait"]}` |
 | `--until` | `{"defaults": ["any"], "description": "Return on any transition or when all targets are terminal", "name": "until", "requires": ["wait"], "values": ["any", "all"]}` |

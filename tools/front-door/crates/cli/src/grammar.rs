@@ -1603,8 +1603,8 @@ pub(crate) fn duration_seconds(value: &str) -> Result<u64, &'static str> {
 pub struct GraphStats {
     /// Graph ID, node or attempt selector
     pub id: Option<String>,
-    /// Group efficiency by requested tier or template
-    #[arg(long, value_parser = ["tier", "template"], default_value = "template")]
+    /// Group efficiency by node, requested tier or template
+    #[arg(long, value_parser = ["node", "tier", "template"], default_value = "template")]
     pub by: String,
 }
 
@@ -1616,8 +1616,8 @@ pub struct Status {
     /// Report attempt efficiency without counting composite aggregates
     #[arg(long, conflicts_with = "wait")]
     pub stats: bool,
-    /// Group efficiency by requested tier or template
-    #[arg(long, requires = "stats", value_parser = ["tier", "template"], default_value = "template")]
+    /// Group efficiency by node, requested tier or template
+    #[arg(long, requires = "stats", value_parser = ["node", "tier", "template"], default_value = "template")]
     pub by: String,
     /// Wait for mixed targets (no value uses domains.wait.timeout_seconds)
     #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "configured", catalog_status_wait(), conflicts_with_all = ["all", "cursor"])]

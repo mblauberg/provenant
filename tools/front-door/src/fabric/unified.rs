@@ -139,7 +139,7 @@ fn row(
     reason: Option<&str>,
 ) -> Value {
     let reason = reason.map(|text| provenant_fabric_runtime::hosts::plain_text(text, 1024));
-    json!({"id":id,"kind":kind,"graph_id":target.graph,"node_id":node,"attempt_id":attempt,"state":state,"reason":reason})
+    json!({"id":id,"kind":kind,"graph_id":target.graph,"node_id":node,"attempt_id":attempt,"state":state,"reason":reason,"cause_code":null,"outcome":null,"next":null})
 }
 
 pub(crate) fn status_rows(run: &GraphRun, target: &GraphTarget) -> Vec<Value> {
@@ -194,7 +194,123 @@ pub(crate) fn status_rows(run: &GraphRun, target: &GraphTarget) -> Vec<Value> {
             ));
         }
     }
+    for row in &mut rows {
+        let node = row["node_id"]
+            .as_str()
+            .and_then(|id| run.checkpoint.nodes.iter().find(|node| node.id == id));
+        let attempt = node.and_then(|node| {
+            if row["kind"] == "node" {
+                node.recorded_attempts().next_back()
+            } else {
+                node.recorded_attempts()
+                    .find(|attempt| attempt.attempt_ref.as_deref() == row["attempt_id"].as_str())
+            }
+        });
+        row["outcome"] = if row["kind"] == "graph" {
+            json!(run.outcome)
+        } else {
+            json!(attempt.and_then(|attempt| attempt.outcome))
+        };
+        row["cause_code"] = json!(node.and_then(|node| node.advance_error_code.as_deref()));
+        if row["cause_code"].is_null() && !row["outcome"].is_null() {
+            row["cause_code"] = row["outcome"].clone();
+        }
+        if row["cause_code"].is_null() {
+            row["cause_code"] = json!(node.and_then(|node| {
+                if node.gate.as_ref().is_some_and(|gate| !gate.passed) {
+                    Some("gate_failed")
+                } else if node.state == provenant_fabric_runtime::graph::NodeState::Blocked {
+                    Some("dependency_blocked")
+                } else {
+                    node.loop_pause_code.as_deref()
+                }
+            }));
+        }
+        let state = row["state"].as_str().unwrap_or("");
+        let selection = node.map_or_else(
+            || target.graph.clone(),
+            |node| format!("{}/{}", target.graph, node.id),
+        );
+        let failed_outcome = row["outcome"]
+            .as_str()
+            .is_some_and(|outcome| outcome != "succeeded");
+        row["next"] = json!(match state {
+            "terminal" | "complete" if failed_outcome => format!("provenant retry {selection}"),
+            "failed" | "blocked" | "paused" => format!("provenant retry {selection}"),
+            "pending" | "running" | "starting" | "unresolved" =>
+                format!("provenant status {selection} --wait"),
+            _ => format!("provenant output {selection}"),
+        });
+    }
     rows
+}
+
+/// A bounded reading for agents, with failed work before healthy history.
+/// Reserve the final command before filling the body so truncation cannot hide it.
+pub(crate) fn render_graph_status(rows: &[Value]) -> String {
+    fn text(value: &Value, limit: usize) -> String {
+        let mut text =
+            provenant_fabric_runtime::hosts::plain_text(value.as_str().unwrap_or(""), limit);
+        let mut end = limit.min(text.len());
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        text.truncate(end);
+        text
+    }
+    let priority = |row: &&Value| {
+        // Attempt rows include immutable failures from earlier retries. Current
+        // node and graph states decide what needs action now.
+        if row["kind"] == "attempt" {
+            return 4;
+        }
+        match row["state"].as_str() {
+            Some("failed" | "blocked" | "paused" | "unresolved") => 0,
+            Some("complete")
+                if row["outcome"]
+                    .as_str()
+                    .is_some_and(|outcome| outcome != "succeeded") =>
+            {
+                1
+            }
+            Some("pending" | "running" | "starting") => 2,
+            _ => 3,
+        }
+    };
+    let mut ordered: Vec<_> = rows.iter().collect();
+    ordered.sort_by_key(priority);
+    let next = ordered
+        .first()
+        .map(|row| text(&row["next"], 384))
+        .unwrap_or_default();
+    let footer = format!("next: {next}\n");
+    let limit = 2048usize.saturating_sub(footer.len() + 32);
+    let mut human = String::new();
+    for (index, row) in ordered.iter().enumerate() {
+        let mut line = format!(
+            "{} {} {}",
+            text(&row["kind"], 16),
+            text(&row["id"], 160),
+            text(&row["state"], 32)
+        );
+        if !row["outcome"].is_null() {
+            line.push_str(&format!(" outcome={}", text(&row["outcome"], 48)));
+        }
+        if !row["cause_code"].is_null() {
+            line.push_str(&format!(" cause={}", text(&row["cause_code"], 80)));
+        }
+        if !row["reason"].is_null() {
+            line.push_str(&format!(": {}", text(&row["reason"], 240)));
+        }
+        line.push('\n');
+        if human.len() + line.len() > limit {
+            human.push_str(&format!("{} more rows\n", ordered.len() - index));
+            break;
+        }
+        human.push_str(&line);
+    }
+    human.push_str(&footer);
+    human
 }
 
 /// Enrich graph attempt rows from identity-checked host records. Checkpoint
@@ -419,17 +535,7 @@ pub(crate) fn unified_graph_command(
         let data = factory.graph_document(input, budget, &cancel)?;
         let timed_out = data["timed_out"].as_bool().unwrap_or(false);
         let rows = data["rows"].as_array().ok_or(FacadeError::StateCorrupt)?;
-        let human = rows
-            .iter()
-            .map(|row| {
-                format!(
-                    "{} {} {}\n",
-                    row["kind"].as_str().unwrap_or(""),
-                    row["id"].as_str().unwrap_or(""),
-                    row["state"].as_str().unwrap_or("")
-                )
-            })
-            .collect::<String>();
+        let human = render_graph_status(rows);
         Ok(Some((data, human, timed_out)))
     })();
     match result {
@@ -1000,6 +1106,45 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0]["kind"], "attempt");
         assert_eq!(rows[0]["node_id"], "parent");
+    }
+
+    #[test]
+    fn graph_status_reading_keeps_failure_cause_and_command_within_budget() {
+        let mut checkpoint = checkpoint("g");
+        checkpoint.nodes[0].state = NodeState::Failed;
+        checkpoint.nodes[0].advance_error_code = Some("AUTH_REQUIRED".into());
+        checkpoint.nodes[0].advance_error =
+            Some(format!("credentials unavailable {}", "界".repeat(4096)));
+        let target = GraphTarget {
+            graph: "g".into(),
+            node: None,
+            attempt: None,
+        };
+        let rows = status_rows(&graph_snapshot(checkpoint), &target);
+        let mut many = rows.clone();
+        for _ in 0..100 {
+            many.extend(rows.clone());
+        }
+        let reading = render_graph_status(&many);
+        assert!(reading.len() <= 2048);
+        assert!(reading.starts_with("node g/parent failed"));
+        assert!(reading.contains("AUTH_REQUIRED"));
+        assert!(reading.ends_with("next: provenant retry g/parent\n"));
+        assert!(reading.contains("more rows"));
+        assert_eq!(rows[1]["cause_code"], "AUTH_REQUIRED");
+        assert_eq!(rows[1]["next"], "provenant retry g/parent");
+    }
+
+    #[test]
+    fn recovered_attempt_failure_does_not_recommend_retrying_successful_work() {
+        let rows = vec![
+            json!({"kind":"graph","id":"g","state":"complete","outcome":"succeeded","next":"provenant output g"}),
+            json!({"kind":"node","id":"g/a","state":"succeeded","next":"provenant output g/a"}),
+            json!({"kind":"attempt","id":"old","state":"terminal","outcome":"task_failed","next":"provenant retry g/a"}),
+        ];
+        let reading = render_graph_status(&rows);
+        assert!(reading.starts_with("graph g complete"));
+        assert!(reading.ends_with("next: provenant output g\n"));
     }
 
     #[test]

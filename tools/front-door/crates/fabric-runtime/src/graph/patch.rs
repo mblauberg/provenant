@@ -672,7 +672,7 @@ pub fn submission(
     for node in &mut document.nodes {
         node.extra
             .entry("template".into())
-            .or_insert_with(|| Value::String("task".into()));
+            .or_insert_with(|| Value::String("raw".into()));
     }
     let mut patch = Patch {
         schema_version: PATCH_SCHEMA_VERSION,
@@ -693,7 +693,7 @@ pub fn submission(
         let name = raw
             .get("template")
             .and_then(Value::as_str)
-            .unwrap_or("task")
+            .unwrap_or("raw")
             .to_owned();
         let mut template = Template::default();
         let mut supplied = Map::new();
