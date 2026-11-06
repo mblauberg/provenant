@@ -814,7 +814,9 @@ impl<'a> Compiler<'a> {
                 && self.library.layer(name) == Some(Layer::Bundled)
                 && composites::single_review(&mut children);
             let exports = if single_review {
-                vec![serde_json::json!({"node":"review", "outputs":["result", "findings", "verdict"]})]
+                vec![
+                    serde_json::json!({"node":"review", "outputs":["result", "findings", "verdict"]}),
+                ]
             } else if template.exports.is_empty() {
                 default_exports(&children)
             } else {
