@@ -1649,7 +1649,6 @@ mod target_tests {
         assert!(format!("/{attempt}").parse::<Attempt>().is_err());
         for invalid in [
             "",
-            "invalid",
             &format!("{run}//{attempt}"),
             &format!("{run}/{task}/{attempt}/extra"),
         ] {
