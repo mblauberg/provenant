@@ -8893,6 +8893,100 @@ fn resolved_named_route_survives_launch_admission() -> TestResult {
 }
 
 #[test]
+fn preparation_pacing_refusal_uses_typed_skipped_route_cause() -> TestResult {
+    use provenant_records::RouteExclusionReason;
+    struct Excluded {
+        cause: Option<RouteExclusionReason>,
+        message: &'static str,
+    }
+    impl Providers for Excluded {
+        fn prepare(
+            &self,
+            _: &TaskRequest,
+            _: &str,
+            _: &LaunchPaths,
+            _: Option<&AttemptRecord>,
+        ) -> std::result::Result<PreparedLaunch, crate::PrepareRefusal> {
+            Err(crate::PrepareRefusal {
+                message: self.message.into(),
+                fallback_outcome: None,
+                skipped_routes: [
+                    Some(RouteExclusionReason::UnknownAvailability),
+                    self.cause.clone(),
+                ]
+                .into_iter()
+                .enumerate()
+                .map(|(index, cause)| SkippedRoute {
+                    extra: Default::default(),
+                    route: format!("codex/example-{index}"),
+                    kind: SkipKind::Unavailable,
+                    cause,
+                    detail: "opaque candidate detail".into(),
+                })
+                .collect(),
+            })
+        }
+        fn decode(
+            &self,
+            _: &RouteRecord,
+            _: &[u8],
+            _: &ExitObservation,
+            _: &std::path::Path,
+        ) -> std::result::Result<Decoded, String> {
+            unreachable!()
+        }
+    }
+    for (cause, message, expected_kind) in [
+        (
+            Some(RouteExclusionReason::PacingReserve),
+            "opaque preparation refusal",
+            RefusalKind::PacingReserve,
+        ),
+        (
+            Some(RouteExclusionReason::UnknownAvailability),
+            "opaque preparation refusal",
+            RefusalKind::Preparation,
+        ),
+        (
+            None,
+            "codex/example: PacingReserve",
+            RefusalKind::Preparation,
+        ),
+    ] {
+        let temp = tempfile::tempdir()?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        let store = RunStore::open(&context(temp.path())?, &call)?;
+        let run = input();
+        let id = run.attempts[0].attempt_id;
+        store.create(&run, &call)?;
+        let started = store.start(
+            run.run_id,
+            &Excluded {
+                cause: cause.clone(),
+                message,
+            },
+            &|_, _| unreachable!(),
+            &call,
+        )?;
+        assert!(matches!(
+            started.as_slice(),
+            [Started::Refused { attempt, kind, reason }]
+                if *attempt == id && *kind == expected_kind && reason == message
+        ));
+        assert_eq!(terminal(&store, id, &call)?, Outcome::Rejected);
+        let record = store.record(id, &call)?;
+        assert_eq!(record.provider_launched, Some(false));
+        assert_eq!(record.skipped_routes[1].cause, cause);
+        assert_eq!(
+            record.terminal_evidence,
+            Some(provenant_records::run::TerminalEvidence::PreLaunchRefusal)
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn all_candidates_skipped_for_auth_settle_auth_required() -> TestResult {
     struct SignedOut(bool);
     impl Providers for SignedOut {

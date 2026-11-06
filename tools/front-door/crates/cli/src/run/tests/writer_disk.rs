@@ -82,29 +82,29 @@ fn policy_refusal_preserves_uncertain_sibling_handoff() -> Result<(), String> {
         }])
         .map_err(|error| error.message)?;
     }
-    // Production classifies a pacing-held route as a preparation refusal whose
-    // reason is the routing exclusion detail.
-    let held = provenant_routing::exclusion_detail(
-        &provenant_records::RouteExclusionReason::PacingReserve,
-    );
-    let error = check_launch_policy(&[run::Started::Refused {
+    // The typed cause promotes pacing without interpreting candidate prose.
+    let pacing = || run::Started::Refused {
         attempt: AttemptId::from_bytes([4; 16]),
-        kind: run::RefusalKind::Preparation,
-        reason: format!("codex/model: {held}"),
-    }])
-    .err()
-    .ok_or("pacing-held preparation refusal was ignored")?;
+        kind: run::RefusalKind::PacingReserve,
+        reason: "opaque candidate refusal".into(),
+    };
+    let error = check_launch_policy(&[pacing()])
+        .err()
+        .ok_or("pacing-held preparation refusal was ignored")?;
     assert_eq!(error.status, Status::Refused);
-    assert!(error.message.contains("PacingReserve"));
+    assert_eq!(error.kind, ErrorKind::Refused);
+    assert!(error.message.contains("opaque candidate refusal"));
     // Let the existing unknown-handoff handling retain the full receipt.
-    check_launch_policy(&[
-        refused(),
-        run::Started::Unknown {
-            attempt: AttemptId::from_bytes([2; 16]),
-            error: "handoff unconfirmed".into(),
-        },
-    ])
-    .map_err(|error| error.message)?;
+    for refusal in [refused(), pacing()] {
+        check_launch_policy(&[
+            refusal,
+            run::Started::Unknown {
+                attempt: AttemptId::from_bytes([2; 16]),
+                error: "handoff unconfirmed".into(),
+            },
+        ])
+        .map_err(|error| error.message)?;
+    }
     Ok(())
 }
 

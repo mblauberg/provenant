@@ -1724,7 +1724,8 @@ stages = [
             assert!(!output.status.success(), "{case}, explain={explain}");
             let result: serde_json::Value = serde_json::from_slice(&output.stdout)?;
             assert_eq!(
-                result["error"]["message"], reason.to_string(),
+                result["error"]["message"],
+                reason.to_string(),
                 "{case}, explain={explain}"
             );
         }

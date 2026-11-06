@@ -752,7 +752,7 @@ mod stale_readiness_tests {
     }
 
     #[test]
-    fn stale_reprobe_rechecks_routing_and_access_guards() {
+    fn refreshed_selected_route_rechecks_routing_and_access_guards() {
         use provenant_routing::{
             AccessContext, Catalogue, Fallback, ModelId, RouteChoice, RouteRequest, RoutingConfig,
             RoutingContext,
@@ -809,43 +809,29 @@ mod stale_readiness_tests {
             };
             provenant_routing::resolve(&request, &context).unwrap()
         };
+        // Availability expiry is advisory; it does not override current route guards.
         let route = resolve(std::slice::from_ref(&stale), &access);
         assert!(matches!(
             route.readiness,
-            provenant_records::RouteReadiness::Unavailable {
-                reason: provenant_records::RouteExclusionReason::StaleAvailability,
-                ..
-            }
+            provenant_records::RouteReadiness::Ready { .. }
         ));
-        let mut records = vec![stale.clone()];
-        let ready = retry_stale_selected(
-            &mut records,
-            &route,
-            30,
-            catalogue.revision(),
-            || Ok(fresh.clone()),
-            |records| Some(resolve(records, &access)),
-        )
-        .unwrap()
-        .unwrap();
+        assert!(stale_observation_index(&route, &[stale], 30, catalogue.revision()).is_none());
+        let ready = same_selected_ready(&route, resolve(std::slice::from_ref(&fresh), &access))
+            .expect("same selected account remains eligible");
+        assert_eq!(ready.account_key, route.account_key);
         assert!(matches!(
             ready.readiness,
             provenant_records::RouteReadiness::Ready { .. }
         ));
-        assert_eq!(ready.account_key, route.account_key);
-
-        let mut records = vec![stale.clone()];
-        let denied = retry_stale_selected(
-            &mut records,
-            &route,
-            30,
-            catalogue.revision(),
-            || Ok(fresh),
-            |records| Some(resolve(records, &[])),
-        )
-        .unwrap();
-        assert!(denied.is_none());
-        assert_eq!(records[0], stale);
+        let denied = resolve(std::slice::from_ref(&fresh), &[]);
+        assert!(matches!(
+            denied.readiness,
+            provenant_records::RouteReadiness::Unavailable {
+                reason: provenant_records::RouteExclusionReason::DisclosureDenied,
+                ..
+            }
+        ));
+        assert!(same_selected_ready(&route, denied).is_none());
     }
 }
 

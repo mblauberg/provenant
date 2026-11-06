@@ -4959,11 +4959,12 @@ fn lanes_render_retry_lineage() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(
         human,
         format!(
-            "{}/{}/{} failed → retrying ({}) unresolved\n{}/{}/{} queued (retry of {}) unresolved\n",
+            "{}/{}/{} failed → retrying ({}) unresolved ({})\n{}/{}/{} queued (retry of {}) unresolved\n",
             failed.run_id,
             failed.task_id,
             failed.attempt_id,
             retry.attempt_id,
+            run::Outcome::Failed.diagnostic_reason(),
             retry.run_id,
             retry.task_id,
             retry.attempt_id,
@@ -4996,7 +4997,16 @@ fn lanes_give_a_settled_lane_its_settlement_reason() -> Result<(), Box<dyn std::
     )?;
     let (data, _) =
         render_lanes_without_cooldowns(&[failed, queued], &[], None, Path::new("/state"));
-    assert_eq!(data["lanes"][0]["settlement"]["reason"], "provider failed");
+    assert_eq!(
+        data["lanes"][0]["settlement"]["reason"],
+        run::Outcome::Failed.diagnostic_reason()
+    );
+    assert!(
+        !data["lanes"][0]["settlement"]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("provider failed")
+    );
     assert_eq!(data["lanes"][1]["settlement"], Value::Null);
     assert_eq!(data["lanes"][1]["reason"], Value::Null);
     Ok(())
@@ -5030,12 +5040,15 @@ fn lanes_distinguish_exhausted_continuations_from_a_retry() -> Result<(), Box<dy
         &successors,
     );
     assert_eq!(data["lanes"][0]["superseded_by"], json!(next));
+    assert_eq!(data["lanes"][1]["state"], "failed");
+    assert!(data["lanes"][1]["superseded_by"].is_null());
     assert_eq!(
         data["lanes"][1]["reason"],
-        "model reported unfinished work; continuations exhausted"
+        run::Outcome::Failed.diagnostic_reason()
     );
     assert!(human.contains("retrying"));
-    assert!(human.contains("continuations exhausted"));
+    assert!(!human.contains("model reported unfinished work"));
+    assert!(!human.contains("continuations exhausted"));
     Ok(())
 }
 
@@ -5184,14 +5197,19 @@ fn render_lanes_omits_account_when_unresolved() -> Result<(), Box<dyn std::error
             "{}/{}/{} rejected unresolved ({reason})\n",
             RunId::from_bytes([2; 16]),
             TaskId::from_bytes([4; 16]),
-            AttemptId::from_bytes([1; 16])
+            AttemptId::from_bytes([1; 16]),
+            reason = run::Outcome::Rejected.diagnostic_reason(),
         )
     );
     assert!(!human.contains("account="));
     assert!(data["lanes"][0].get("title").is_none());
     assert!(data["lanes"][0]["account"].is_null());
     assert_eq!(data["lanes"][0]["state"], "rejected");
-    assert_eq!(data["lanes"][0]["reason"], json!(reason));
+    assert_eq!(
+        data["lanes"][0]["reason"],
+        json!(run::Outcome::Rejected.diagnostic_reason())
+    );
+    assert!(!human.contains(reason));
     assert!(data["lanes"][0]["applied_route"].is_null());
     Ok(())
 }
@@ -5545,7 +5563,8 @@ fn render_lanes_surfaces_provider_silence_while_running() -> Result<(), Box<dyn 
     Ok(())
 }
 #[test]
-fn render_lanes_shows_uncommitted_with_its_dirty_paths() -> Result<(), Box<dyn std::error::Error>> {
+fn render_lanes_reports_uncommitted_without_echoing_dirty_path_prose()
+-> Result<(), Box<dyn std::error::Error>> {
     let reason = "writer left uncommitted edits and no new commit: src/a.rs, b.txt";
     let now = WallTime::from_micros(100)?;
     let lane: run::AttemptRecord = serde_json::from_value(json!({
@@ -5580,11 +5599,20 @@ fn render_lanes_shows_uncommitted_with_its_dirty_paths() -> Result<(), Box<dyn s
     assert_eq!(settled(&lane.state), (true, false));
     let (data, human) = render_lanes_without_cooldowns(&[lane], &[], None, Path::new("/state"));
     assert!(
-        human.contains(&format!(" uncommitted unresolved ({reason})\n")),
+        human.contains(&format!(
+            " uncommitted unresolved ({})\n",
+            run::Outcome::Uncommitted.diagnostic_reason()
+        )),
         "{human}"
     );
     assert_eq!(data["lanes"][0]["state"], "uncommitted");
-    assert_eq!(data["lanes"][0]["reason"], json!(reason));
+    assert_eq!(
+        data["lanes"][0]["reason"],
+        json!(run::Outcome::Uncommitted.diagnostic_reason())
+    );
+    assert!(!human.contains("src/a.rs"));
+    assert!(!human.contains("b.txt"));
+    assert!(!serde_json::to_string(&data)?.contains(reason));
     Ok(())
 }
 #[test]

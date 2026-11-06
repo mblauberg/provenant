@@ -4826,11 +4826,12 @@ mod route_tests {
             reason,
             provenant_records::RouteExclusionReason::ProviderRefused
         );
-        // The unavailable reason keeps the repair text, not a debug name.
-        assert_eq!(
-            provenant_routing::exclusion_detail(&reason),
-            "scoped provider refusal"
-        );
+        // The unavailable reason retains the typed owner's cause and repair.
+        let diagnostic = reason.diagnostic("REFUSED");
+        let detail = provenant_routing::exclusion_detail(&reason);
+        assert!(detail.contains(diagnostic.detail.as_deref().ok_or("cause detail")?));
+        assert!(detail.contains(diagnostic.next.as_deref().ok_or("cause action")?));
+        assert!(!detail.contains("ProviderRefused"));
         Ok(())
     }
 

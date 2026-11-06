@@ -93,7 +93,7 @@ fn lane_cap_refusal_retains_the_setting_through_both_adapters() {
         let projection = decoded.diagnostic();
         assert!(projection.detail.as_deref().unwrap().contains("max_project_writer_lanes"));
         assert!(projection.detail.as_deref().unwrap().contains("host configuration"));
-        assert!(projection.next.as_deref().unwrap().contains("writer lane"));
+        assert!(projection.next.as_deref().unwrap().contains("max_project_writer_lanes"));
     }
 }
 
@@ -1437,7 +1437,11 @@ pub(crate) mod peer_tests {
         let second = serde_json::to_value(&page.items[0])?;
         assert_ne!(second["attempt_id"], row["attempt_id"]);
         assert_eq!(second["state"], "cancelled");
-        assert_eq!(second["reason"], "fixture");
+        assert_eq!(
+            second["reason"],
+            provenant_records::run::Outcome::Cancelled.diagnostic_reason()
+        );
+        assert!(!second["reason"].as_str().unwrap().contains("fixture"));
         assert!(second["finished_at"].is_string());
         let status = owner.run(
             RunInput::Status {
