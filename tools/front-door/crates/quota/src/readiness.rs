@@ -283,7 +283,17 @@ impl ReadinessFile {
                 route: ACCOUNT_ROUTE.into(),
                 ..scope.clone()
             });
-            if account.state == ReadinessState::Unavailable {
+            if account.state == ReadinessState::Unavailable
+                || (account.observed_scope.is_some()
+                    && matches!(
+                        account.reason,
+                        Some(
+                            ReadinessReason::SignedOut
+                                | ReadinessReason::LoginExpired
+                                | ReadinessReason::AccountMismatch
+                        )
+                    ))
+            {
                 return account;
             }
         }

@@ -118,7 +118,7 @@ fn launch_command_allows_only_the_attempts_own_mach_name() -> Result<(), Permiss
 
 #[cfg(target_os = "macos")]
 #[test]
-fn read_only_profile_reads_verified_git_and_only_writes_project_exceptions()
+fn worktree_access_read_only_profile_limits_checkout_writes()
 -> Result<(), Box<dyn std::error::Error>> {
     use crate::plan::{CodexPolicy, ConfinedPlan, ExtensionPolicy, PlanRequest, ReadOnlyPolicy};
     use crate::utility::{GitMutation, execute_git_mutation};
@@ -258,6 +258,37 @@ fn read_only_profile_reads_verified_git_and_only_writes_project_exceptions()
     }
     .compile(plan.permissions(), &profile, &anchors)?;
     let source = String::from_utf8(compiled.profile)?;
+    let mut strict_permissions = plan.permissions().clone();
+    strict_permissions.read_only = None;
+    strict_permissions.read_roots.clear();
+    let strict = ConfinedPlan::new(
+        PlanRequest {
+            scope: WorkScope::Project(binding.project_id()),
+            permissions: strict_permissions,
+            codex: CodexPolicy::Clean,
+            extensions: ExtensionPolicy::Deny,
+            agy_state: None,
+        }
+        .with_live_read_only_repo(&repo, &binding)?,
+    )?;
+    let strict_profile = MacOsSandboxBackend {
+        ready: true,
+        limits: ProfileLimits::default(),
+    }
+    .compile(strict.permissions(), &profile, &anchors)?;
+    let strict_source = String::from_utf8(strict_profile.profile)?;
+    assert!(strict_source.contains(&format!(
+        "(deny file-write* (subpath \"{}\"))",
+        root.display()
+    )));
+    assert!(!strict_source.contains(&format!(
+        "(allow file-write* (subpath \"{}\"))",
+        root.display()
+    )));
+    assert!(!strict_source.contains(&format!(
+        "(allow file-write* (subpath \"{}\"))",
+        root.join(".agent-run/locks").display()
+    )));
     let git = binding.common_dir();
     assert!(repo.0.private_git_dir().starts_with(git));
     assert!(source.contains(&format!(

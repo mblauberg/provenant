@@ -25,6 +25,8 @@ type LaunchSpecLookup<'a> = &'a dyn Fn(&str) -> Option<provenant_records::Adapte
 pub struct RoutingContext<'a> {
     /// Preview-only account policy selection. It never supplies availability.
     pub policy_account_hint: Option<&'a str>,
+    /// Risk and task stratum, when supplied by the dispatch.
+    pub choice_context: Option<(&'a str, &'a str)>,
     pub catalogue: &'a Catalogue,
     pub config: &'a RoutingConfig,
     pub registry: &'a [Registration],
@@ -37,7 +39,7 @@ pub struct RoutingContext<'a> {
     pub quota_policies: &'a [provenant_quota::QuotaPolicy],
     /// Readiness lookup supplied by the composition edge, called with the
     /// scope and `now` in unix seconds. Routing performs no I/O; `None` reads
-    /// every route as unknown. Only an `unavailable` verdict excludes a route.
+    /// every route as unknown. Current positive authentication evidence also excludes a route.
     pub readiness: Option<ReadinessLookup<'a>>,
     /// Fixture-only capability facts; production always uses the adapter table.
     #[cfg(test)]
@@ -1028,7 +1030,12 @@ fn account_reason<'q>(
     access: Option<&AccessContext<'_>>,
     context: &'q RoutingContext<'_>,
 ) -> (Option<RouteExclusionReason>, Option<&'q QuotaObservation>) {
-    let mut reason = availability_reason(Some(availability), context);
+    let mut reason = availability_reason(Some(availability), context).filter(|r| {
+        !matches!(
+            r,
+            RouteExclusionReason::StaleAvailability | RouteExclusionReason::UnknownAvailability
+        )
+    });
     if reason.is_none() && access.is_none_or(|a| a.disclosure_ref.is_empty()) {
         reason = Some(RouteExclusionReason::DisclosureDenied);
     }
@@ -1042,6 +1049,12 @@ fn account_reason<'q>(
     }
     if reason.is_none() {
         reason = readiness_reason(model, availability, context);
+    }
+    if reason.is_none()
+        && latest_reading(model, availability, context, true)
+            .is_some_and(|q| q.snapshot.status == QuotaStatus::AuthRequired)
+    {
+        reason = Some(RouteExclusionReason::AuthRequired);
     }
     // Explicit exact IDs use the executable/account preflight too. The provider
     // owns model availability; named routes and pools require catalogue entries.
@@ -1064,8 +1077,6 @@ fn account_reason<'q>(
             && !context.config.allow_unknown_partial_headroom
         {
             Some(RouteExclusionReason::UnknownPartialHeadroom)
-        } else if q.snapshot.status == QuotaStatus::AuthRequired {
-            Some(RouteExclusionReason::AuthRequired)
         } else {
             None
         };
@@ -1108,6 +1119,12 @@ pub fn exclusion_detail(reason: &RouteExclusionReason) -> String {
         return block.repair().to_owned();
     }
     match reason {
+        RouteExclusionReason::Exhausted => {
+            "exhausted; wait for the quota reset or select another account".to_owned()
+        }
+        RouteExclusionReason::AuthRequired => {
+            "authentication required; sign in to the selected account".to_owned()
+        }
         RouteExclusionReason::LoginExpired => {
             "login expired; check the selected account with `provenant quota`".to_owned()
         }
@@ -1161,13 +1178,96 @@ fn readiness_reason(
                 },
                 now,
             );
+            if read.observed_scope.is_some()
+                && read.observed_unix_seconds.is_some_and(|at| at <= now)
+                && read.expires_unix_seconds.is_some_and(|expiry| expiry > now)
+            {
+                match read.reason {
+                    Some(provenant_quota::ReadinessReason::SignedOut) => {
+                        return Some(RouteExclusionReason::AuthRequired);
+                    }
+                    Some(provenant_quota::ReadinessReason::LoginExpired) => {
+                        return Some(RouteExclusionReason::LoginExpired);
+                    }
+                    Some(provenant_quota::ReadinessReason::AccountMismatch) => {
+                        return Some(RouteExclusionReason::AccountMismatch);
+                    }
+                    _ => {}
+                }
+            }
             if read.state != provenant_quota::ReadinessState::Unavailable {
                 return None;
             }
             match read.project() {
+                RouteReadiness::Unavailable {
+                    reason:
+                        RouteExclusionReason::UnknownAvailability
+                        | RouteExclusionReason::StaleAvailability
+                        | RouteExclusionReason::AuthRequired
+                        | RouteExclusionReason::LoginExpired,
+                    ..
+                } => None,
                 RouteReadiness::Unavailable { reason, .. } => Some(reason),
                 _ => None,
             }
+        })
+}
+
+fn uncertainty(
+    model: &ModelId,
+    availability: &AvailabilityRecord,
+    context: &RoutingContext<'_>,
+) -> Option<String> {
+    if let Some(reason) = availability_reason(Some(availability), context)
+        && matches!(
+            reason,
+            RouteExclusionReason::StaleAvailability | RouteExclusionReason::UnknownAvailability
+        )
+    {
+        return Some(format!("{reason:?}"));
+    }
+    if latest_reading(model, availability, context, true)
+        .is_some_and(|q| q.snapshot.status == QuotaStatus::Unknown)
+    {
+        return Some("unknown quota".into());
+    }
+    if latest_reading(model, availability, context, false).is_some()
+        && latest_reading(model, availability, context, true).is_none()
+    {
+        return Some("stale quota".into());
+    }
+    let lookup = context.readiness?;
+    let account_key = availability.account_key.as_ref()?;
+    std::iter::once(format!("{}/{}", model.adapter(), model.model()))
+        .chain(context.catalogue.admission_pools(model))
+        .enumerate()
+        .find_map(|(index, route)| {
+            let read = lookup(
+                &provenant_quota::ReadinessScope {
+                    host: provenant_quota::LOCAL_HOST.into(),
+                    adapter: model.adapter().into(),
+                    account_key: account_key.clone(),
+                    route,
+                },
+                context.now_seconds(),
+            );
+            if read.observed_scope.is_none()
+                && latest_reading(model, availability, context, true).is_some()
+            {
+                return None;
+            }
+            ((index == 0 && read.state == provenant_quota::ReadinessState::Unknown)
+                || matches!(
+                    read.project(),
+                    RouteReadiness::Unavailable {
+                        reason: RouteExclusionReason::UnknownAvailability
+                            | RouteExclusionReason::StaleAvailability
+                            | RouteExclusionReason::AuthRequired
+                            | RouteExclusionReason::LoginExpired,
+                        ..
+                    }
+                ) && (index == 0 || read.observed_scope.is_some()))
+            .then(|| format!("{:?}", read.reason))
         })
 }
 /// The account's latest reading for this model, only a fresh one when
@@ -1421,6 +1521,8 @@ fn candidate(
                 reason,
                 (
                     !spent,
+                    uncertainty(model, a, context).is_none_or(|why| why == "stale quota"),
+                    latest_reading(model, a, context, true).is_some(),
                     !avoid_cooling || !cooling(model, a.account_key.as_deref(), context),
                     !standby,
                     headroom,
@@ -1448,17 +1550,45 @@ fn candidate(
             reason,
         },
         (None, Some(a)) => RouteReadiness::Ready {
-            extra: Default::default(),
+            extra: uncertainty(model, a, context)
+                .map(|reason| {
+                    [("availability_warning".into(), serde_json::json!(reason))]
+                        .into_iter()
+                        .collect()
+                })
+                .unwrap_or_default(),
             availability_ref: a.fixture_ref.clone(),
-            expires_unix_seconds: a.expires_unix_seconds,
+            // A stale observation is not renewed; this bounds the lifetime of
+            // the routing decision that permits a launch despite uncertainty.
+            expires_unix_seconds: if a.expires_unix_seconds <= context.now_seconds() {
+                context.now_seconds().saturating_add(60)
+            } else {
+                a.expires_unix_seconds
+            },
         },
         _ => RouteReadiness::Unavailable {
             extra: Default::default(),
             reason: RouteExclusionReason::UnknownAvailability,
         },
     };
+    let mut extra = provenant_records::ExtraFields::default();
+    if evaluated.iter().all(|(_, reason, _)| reason.is_some()) && !evaluated.is_empty() {
+        let details: Vec<_> = evaluated
+            .iter()
+            .filter_map(|(account, reason, _)| {
+                reason.as_ref().map(|reason| {
+                    format!(
+                        "{}: {}; inspect `provenant quota --full`",
+                        account.account_key.as_deref().unwrap_or("unknown account"),
+                        exclusion_detail(reason)
+                    )
+                })
+            })
+            .collect();
+        extra.insert("account_exclusions".into(), serde_json::json!(details));
+    }
     Ok(RouteAlternative {
-        extra: Default::default(),
+        extra,
         adapter: model.adapter().into(),
         model: model.model().into(),
         effort: effort.map(str::to_owned),
@@ -1563,7 +1693,7 @@ pub fn resolve_for_account_with_seed_excluding(
         rules,
     };
     if let AccountSelection::Known(account) = account {
-        let adapters: BTreeSet<&str> = match &request.choice {
+        let mut adapters: BTreeSet<&str> = match &request.choice {
             RouteChoice::Model(model) => [model.adapter()].into_iter().collect(),
             RouteChoice::NamedRoute(name) => {
                 let name = name.as_str();
@@ -1582,6 +1712,13 @@ pub fn resolve_for_account_with_seed_excluding(
                 }
             }
         };
+        if let Some(model) = context.choice_context.and_then(|(risk, kind)| {
+            context
+                .config
+                .preferred_model(request, risk, kind, context.now)
+        }) {
+            adapters.insert(model.adapter());
+        }
         let availability: Vec<_> = context
             .availability
             .iter()
@@ -1699,7 +1836,55 @@ fn resolve_inner(
         }
         RouteChoice::NamedRoute(name) => {
             let name = name.as_str();
-            if let Some(pool) = effective_pool(context, name) {
+            let preference = context.choice_context.and_then(|(risk, kind)| {
+                context
+                    .config
+                    .preferred_model(request, risk, kind, context.now)
+            });
+            let mut pool = effective_pool(context, name);
+            if let Some(model) = preference
+                .filter(|model| refuse_unlisted_opencode(model, context.catalogue).is_ok())
+            {
+                if pool.is_none() {
+                    pool = context
+                        .config
+                        .routes
+                        .get(name)
+                        .filter(|route| context.catalogue.model(&route.model).is_some())
+                        .map(|route| {
+                            vec![RoutePoolMember {
+                                model: route.model.clone(),
+                                weight: 100,
+                                effort: route.effort.clone(),
+                                efforts: context
+                                    .catalogue
+                                    .model(&route.model)
+                                    .map(|m| m.efforts.clone())
+                                    .unwrap_or_default(),
+                                free: false,
+                            }]
+                        });
+                }
+                if let Some(members) = &mut pool
+                    && !members.iter().any(|member| member.model == *model)
+                {
+                    members.push(RoutePoolMember {
+                        model: model.clone(),
+                        weight: 0,
+                        effort: None,
+                        efforts: context
+                            .catalogue
+                            .model(model)
+                            .map(|entry| entry.efforts.clone())
+                            .unwrap_or_default(),
+                        free: context
+                            .catalogue
+                            .model(model)
+                            .is_some_and(|entry| entry.free),
+                    });
+                }
+            }
+            if let Some(pool) = pool {
                 let selected = select_pool(name, &pool, request, context, seed, excluded_members)?;
                 (selected.route, Some(selected.receipt))
             } else {
@@ -1799,7 +1984,7 @@ fn resolve_inner(
         })
         .collect();
     Ok(ResolvedRoute {
-        extra: Default::default(),
+        extra: primary.extra,
         adapter: primary.adapter,
         model: primary.model,
         effort: primary.effort,
@@ -2224,6 +2409,28 @@ fn select_pool(
         }
         Err(error) => return Err(error),
     };
+    let preference = context.choice_context.and_then(|(risk, kind)| {
+        context
+            .config
+            .preferred_model(request, risk, kind, context.now)
+    });
+    let preferred_index = preference.and_then(|model| {
+        classified
+            .weighted
+            .iter()
+            .map(|(index, _)| *index)
+            .chain(classified.zero_ready.iter().copied())
+            .find(|index| members[*index].model == *model)
+    });
+    let draw = if let Some(index) = preferred_index {
+        PoolDraw {
+            index,
+            roll: 0,
+            total_weight: 0,
+        }
+    } else {
+        draw
+    };
     let route = classified
         .routes
         .get(draw.index)
@@ -2240,7 +2447,9 @@ fn select_pool(
         }
         .into(),
     );
-    let rule = if draw.total_weight > 0 {
+    let rule = if preferred_index.is_some() {
+        "model_choice_override"
+    } else if draw.total_weight > 0 {
         "weighted_draw"
     } else if classified.first_zero_ready == Some(draw.index) {
         "first_zero_weight_ready"

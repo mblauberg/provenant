@@ -1916,14 +1916,19 @@ fn structured_error_outranks_claimed_success_but_quota_prose_is_text() -> Result
 
 #[test]
 fn registry_has_unique_ids_and_matching_quota_sources() -> Result<(), Box<dyn std::error::Error>> {
+    assert_eq!(
+        REGISTRY.iter().map(|r| r.adapter.id()).collect::<Vec<_>>(),
+        ["codex", "claude", "cursor", "agy", "opencode", "command"]
+    );
     let ids: std::collections::BTreeSet<_> = REGISTRY.iter().map(|r| r.adapter.id()).collect();
     assert_eq!(ids.len(), REGISTRY.len(), "duplicate adapter id");
     assert_eq!(
         ids,
         provenant_records::ADAPTER_SPECS
             .iter()
-            // Host-native entries delegate to an existing registered provider.
+            // Host-native delegates; the feature-gated fixture is injected by its test.
             .filter(|spec| spec.id != provenant_records::Harness::HostNative)
+            .filter(|spec| spec.name != "fixture-provider")
             .map(|spec| spec.name)
             .collect()
     );
@@ -2393,6 +2398,7 @@ pub(super) fn fixture_input<'a>(
 ) -> PrepareInput<'a> {
     let executable = std::path::Path::new("/opt/homebrew/Cellar/provider/1.0/bin/provider");
     PrepareInput {
+        images: &[],
         command: None,
         route,
         confined,
@@ -2464,6 +2470,117 @@ fn spilled_prompts_reach_argv_adapters_with_file_read_permissions() -> Result<()
             }
         }
     }
+    Ok(())
+}
+
+#[test]
+fn image_attachments_reach_codex_and_claude() -> Result<(), ProviderError> {
+    let images = vec![
+        Path::new("/outside/first image.png").to_owned(),
+        Path::new("/outside/second.png").to_owned(),
+    ];
+    let prompt = Prompt::new("Describe the images".into());
+    let token = fixture_token();
+    for id in ["codex", "claude"] {
+        let plan = fixture_access_plan(Access::ReadOnly, (id == "codex").then_some("login"), false);
+        let mut route = route(id, "fixture-model");
+        route.account_key = None;
+        let mut input = fixture_input(
+            &route,
+            &plan,
+            &prompt,
+            Path::new("/fixture/repo"),
+            (id == "claude").then_some(&token),
+        );
+        input.images = &images;
+        let adapter = REGISTRY
+            .iter()
+            .find(|entry| entry.adapter.id() == id)
+            .unwrap()
+            .adapter;
+        let spec = adapter.prepare(input)?;
+        if id == "codex" {
+            for image in &images {
+                assert!(
+                    spec.argv
+                        .windows(2)
+                        .any(|pair| pair[0] == "--image" && pair[1] == image.as_os_str())
+                );
+            }
+        } else {
+            let Stdin::Bytes(bytes) = spec.stdin else {
+                panic!("expected prompt on stdin")
+            };
+            let text = String::from_utf8(bytes).unwrap();
+            for image in &images {
+                assert!(text.contains(&image.display().to_string()));
+            }
+            assert!(!text.contains("/outside/sibling.png"));
+            assert!(
+                !spec
+                    .argv
+                    .windows(2)
+                    .any(|pair| pair[0] == "--add-dir" && pair[1] == "/outside")
+            );
+            let settings_path = &spec.argv[spec
+                .argv
+                .iter()
+                .position(|arg| arg == "--settings")
+                .unwrap()
+                + 1];
+            let settings = spec
+                .setup
+                .iter()
+                .find_map(|step| match step {
+                    SetupStep::WriteFile { path, bytes } if path.as_os_str() == settings_path => {
+                        Some(bytes)
+                    }
+                    _ => None,
+                })
+                .unwrap();
+            let settings: serde_json::Value = serde_json::from_slice(settings).unwrap();
+            let rules = settings["permissions"]["allow"].as_array().unwrap();
+            assert!(rules.contains(&serde_json::json!(r"Read(//outside/first\ image.png)")));
+            assert!(rules.contains(&serde_json::json!("Read(//outside/second.png)")));
+            assert!(!rules.contains(&serde_json::json!("Read(//outside/sibling.png)")));
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn claude_write_images_do_not_enable_unrestricted_read() -> Result<(), ProviderError> {
+    let images = vec![Path::new("/outside/image.png").to_owned()];
+    let prompt = Prompt::new("Describe the image".into());
+    let token = fixture_token();
+    let plan = fixture_access_plan(Access::WorktreeWrite, None, false);
+    let mut route = route("claude", "fixture-model");
+    route.account_key = None;
+    let mut input = fixture_input(
+        &route,
+        &plan,
+        &prompt,
+        Path::new("/fixture/repo"),
+        Some(&token),
+    );
+    input.images = &images;
+    let spec = REGISTRY
+        .iter()
+        .find(|entry| entry.adapter.id() == "claude")
+        .unwrap()
+        .adapter
+        .prepare(input)?;
+    let allowed = spec
+        .argv
+        .iter()
+        .position(|arg| arg == "--allowedTools")
+        .unwrap();
+    assert!(
+        !spec.argv[allowed + 1]
+            .to_string_lossy()
+            .split(',')
+            .any(|tool| tool == "Read")
+    );
     Ok(())
 }
 

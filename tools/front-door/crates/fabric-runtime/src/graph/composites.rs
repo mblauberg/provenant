@@ -11,6 +11,9 @@ pub struct CompositeSpec {
     /// their count. Absent, a failed member blocks the composite.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub min_successful: Option<usize>,
+    /// Reduce successful exporting members' verdicts using the worst outcome.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub reduce_verdict: bool,
     pub nodes: Vec<GraphNode>,
     pub exports: Vec<GraphInput>,
 }
@@ -21,7 +24,8 @@ pub(super) fn expand(
     limits: &crate::config::GraphLimits,
 ) -> Result<GraphDocument, String> {
     let mut expanded = document.clone();
-    let (max_depth, max_nodes) = (limits.expansion_depth, limits.nodes);
+    let depth_bound = limits.expansion_depth_bound();
+    let nodes_bound = crate::config::GraphLimits::composite_nodes_bound(limits.nodes);
     expanded.nodes = children(
         &document.nodes,
         "",
@@ -30,15 +34,16 @@ pub(super) fn expand(
         &[],
         None,
         &[],
+        &[],
         false,
         0,
-        max_depth,
-        max_nodes,
+        &depth_bound,
+        &nodes_bound,
     )?;
     if expanded.nodes.iter().any(|node| node.composite.is_some())
-        && expanded.nodes.len() > max_nodes
+        && let Some(reason) = nodes_bound.refusal(expanded.nodes.len())
     {
-        return Err(format!("composite expansion exceeds {max_nodes} nodes"));
+        return Err(reason);
     }
     Ok(expanded)
 }
@@ -81,13 +86,14 @@ fn children(
     inputs: &[GraphInput],
     source: Option<&SourceBinding>,
     read_roots: &[String],
+    attachments: &[String],
     require_skill_location: bool,
     depth: usize,
-    max_depth: usize,
-    max_nodes: usize,
+    depth_bound: &crate::config::GraphBound<'_>,
+    nodes_bound: &crate::config::GraphBound<'_>,
 ) -> Result<Vec<GraphNode>, String> {
-    if depth > max_depth {
-        return Err("composite expansion depth exceeds the limit".into());
+    if let Some(reason) = depth_bound.refusal(depth) {
+        return Err(reason);
     }
     let mut locals = BTreeSet::new();
     for node in nodes {
@@ -212,6 +218,11 @@ fn children(
                 node.read_roots.push(root.clone());
             }
         }
+        for path in attachments {
+            if !node.attachments.contains(path) {
+                node.attachments.push(path.clone());
+            }
+        }
         if let Some(spec) = &mut node.loop_body {
             for child in &spec.body {
                 if child.id.starts_with("previous.") {
@@ -235,10 +246,11 @@ fn children(
                 &[],
                 None,
                 &[],
+                &node.attachments,
                 node.require_skill_location,
                 depth,
-                max_depth,
-                max_nodes,
+                depth_bound,
+                nodes_bound,
             )?;
         }
         if (node.kind == Some(NodeKind::Composite)) != node.composite.is_some() {
@@ -301,10 +313,11 @@ fn children(
                 &node.inputs,
                 node.source.as_ref(),
                 &node.read_roots,
+                &node.attachments,
                 node.require_skill_location,
                 depth + 1,
-                max_depth,
-                max_nodes,
+                depth_bound,
+                nodes_bound,
             )?;
             node.composite_members = spec
                 .nodes
@@ -315,8 +328,10 @@ fn children(
             node.inputs.clear();
             node.source = None;
             node.read_roots.clear();
+            node.attachments.clear();
             node.composite = Some(CompositeSpec {
                 min_successful: spec.min_successful,
+                reduce_verdict: spec.reduce_verdict,
                 nodes: Vec::new(),
                 exports: spec
                     .exports
@@ -330,8 +345,8 @@ fn children(
             expanded.extend(body);
         }
         expanded.push(node);
-        if composite_bound && expanded.len() > max_nodes {
-            return Err(format!("composite expansion exceeds {max_nodes} nodes"));
+        if composite_bound && let Some(reason) = nodes_bound.refusal(expanded.len()) {
+            return Err(reason);
         }
     }
     Ok(expanded)
@@ -362,7 +377,8 @@ fn outputs(
     let mut finding_members = Vec::new();
     let mut truncation_header = None;
     let mut inherited_notices = Vec::new();
-    let partial = spec.min_successful.is_some();
+    let mut family_notices = Vec::new();
+    let partial = spec.min_successful.is_some() || spec.reduce_verdict;
     let unavailable = unavailable_with_wording(spec, checkpoint, positions, legacy);
     let finding_exports: Vec<_> = spec
         .exports
@@ -382,10 +398,6 @@ fn outputs(
             })
         }));
     }
-    selected.warnings = unavailable
-        .iter()
-        .map(|entry| bounded(&format!("unavailable {entry}"), WARNING_BYTES))
-        .collect();
     for export in &spec.exports {
         let member = &checkpoint.nodes[positions[&export.node]];
         // A partial composite exports only members that succeeded: a failed
@@ -396,6 +408,35 @@ fn outputs(
         let Some(source) = member.outputs.as_ref() else {
             continue;
         };
+        if member
+            .separation
+            .as_ref()
+            .is_some_and(|separation| separation.outcome == SeparationOutcome::Unavailable)
+        {
+            let notice = bounded(
+                &format!(
+                    "{}: no separate model family was available; this review is not cross-family evidence",
+                    export.node
+                ),
+                WARNING_BYTES,
+            );
+            if selected.warnings.len() < MAX_WARNINGS {
+                selected.warnings.push(notice.clone());
+            }
+            family_notices.push(notice);
+        }
+        for warning in source
+            .warnings
+            .iter()
+            .filter(|warning| warning.contains("malformed finding:"))
+        {
+            if selected.warnings.len() < MAX_WARNINGS {
+                selected.warnings.push(bounded(
+                    &format!("{}: {warning}", export.node),
+                    WARNING_BYTES,
+                ));
+            }
+        }
         for kind in &export.outputs {
             match kind {
                 OutputKind::Result => {
@@ -445,6 +486,44 @@ fn outputs(
                 OutputKind::Remaining => selected.remaining = source.remaining.clone(),
             }
         }
+    }
+    for entry in &unavailable {
+        if selected.warnings.len() < MAX_WARNINGS {
+            selected
+                .warnings
+                .push(bounded(&format!("unavailable {entry}"), WARNING_BYTES));
+        }
+    }
+    if spec.reduce_verdict {
+        use provenant_records::workflow::ReviewVerdict;
+        let rank = |verdict| match verdict {
+            ReviewVerdict::Approve => 0,
+            ReviewVerdict::ApproveWithNits => 1,
+            ReviewVerdict::Inconclusive => 2,
+            ReviewVerdict::RequestChanges => 3,
+        };
+        let verdict = exporting_members(spec, positions)
+            .into_iter()
+            .map(|index| &checkpoint.nodes[index])
+            .filter(|member| member.state == NodeState::Succeeded)
+            .map(|member| {
+                member
+                    .outputs
+                    .as_ref()
+                    .and_then(|output| {
+                        if output.verdict_error.is_some() {
+                            return None;
+                        }
+                        output
+                            .verdict
+                            .as_deref()
+                            .and_then(ReviewVerdict::from_token)
+                    })
+                    .unwrap_or(ReviewVerdict::Inconclusive)
+            })
+            .max_by_key(|verdict| rank(*verdict));
+        selected.verdict = verdict.map(|verdict| format!("VERDICT: {}", verdict.as_token()));
+        selected.verdict_error = None;
     }
     if selected
         .findings
@@ -527,7 +606,7 @@ fn outputs(
             })
         }
     };
-    if !unavailable.is_empty() || truncation_header.is_some() {
+    if !unavailable.is_empty() || truncation_header.is_some() || !family_notices.is_empty() {
         // The unavailable list leads and is bounded on its own, so a long
         // review body can never truncate it away.
         let mut headers = Vec::new();
@@ -538,6 +617,9 @@ fn outputs(
         };
         if let Some(notice) = truncation_header {
             headers.push(notice);
+        }
+        if !family_notices.is_empty() {
+            headers.push(family_notices.join("\n"));
         }
         if !unavailable.is_empty() {
             headers.push(format!(
@@ -682,13 +764,17 @@ fn unavailable_with_wording(
     positions: &BTreeMap<String, usize>,
     legacy: bool,
 ) -> Vec<String> {
-    if spec.min_successful.is_none() {
+    if spec.min_successful.is_none() && !spec.reduce_verdict {
         return Vec::new();
     }
     exporting_members(spec, positions)
         .into_iter()
         .map(|member| &checkpoint.nodes[member])
-        .filter(|progress| progress.state == NodeState::Failed)
+        .filter(|progress| {
+            progress.state == NodeState::Failed
+                || (spec.reduce_verdict
+                    && matches!(progress.state, NodeState::Blocked | NodeState::Skipped))
+        })
         .map(|progress| {
             let reason = progress.advance_error.as_deref().unwrap_or_else(|| {
                 match progress.attempts.last().and_then(|a| a.outcome.as_ref()) {
@@ -718,7 +804,11 @@ fn coverage_shortfall_with_wording(
     legacy: bool,
 ) -> Option<String> {
     let members = exporting_members(spec, positions);
-    let minimum = spec.min_successful?.min(members.len());
+    let minimum = if spec.reduce_verdict {
+        spec.min_successful.unwrap_or(members.len()).max(1)
+    } else {
+        spec.min_successful?.min(members.len())
+    };
     let succeeded = members
         .iter()
         .filter(|member| checkpoint.nodes[**member].state == NodeState::Succeeded)
@@ -788,7 +878,7 @@ fn state(
     if node
         .composite
         .as_ref()
-        .is_some_and(|spec| spec.min_successful.is_some())
+        .is_some_and(|spec| spec.min_successful.is_some() || spec.reduce_verdict)
     {
         // The group's own dependencies decide first; the rules below judge
         // its members, whose failures are the point of a partial group.
@@ -827,9 +917,13 @@ fn state(
                 NodeState::Pending
             };
         }
-        if members
-            .iter()
-            .any(|state| matches!(state, NodeState::Blocked | NodeState::Skipped))
+        if !node
+            .composite
+            .as_ref()
+            .is_some_and(|spec| spec.reduce_verdict)
+            && members
+                .iter()
+                .any(|state| matches!(state, NodeState::Blocked | NodeState::Skipped))
         {
             return NodeState::Blocked;
         }

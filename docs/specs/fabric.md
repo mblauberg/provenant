@@ -329,7 +329,7 @@ The graph runtime owns static admission for presets, raw documents and planner
 fragments. It validates schema capability, the configured structural limits,
 the expanded plan, the worst-case checkpoint envelope and selected output
 kinds before submission. Recovery uses the same schema-capability predicate.
-For composites, the declared exports are the static public capability; admission
+For composites, the declared exports and any reduced verdict are the static public capability; admission
 checks consumers against that contract and validates export references and
 selector shapes. Whether a selected member actually made an output available is
 runtime evidence and remains visible in the composite settlement.
@@ -358,8 +358,10 @@ it is never resolved again from the current checkout. Checkpoint and envelope ve
 requires a read-only plan node with a source and no ordinary plan specification.
 Older hosts reject version 2 and require an upgrade.
 
-A deferred review resolves after its subject is pinned. The host returns a
-read-only composite expansion; the runtime validates and journals it before
+A deferred review resolves after its subject is pinned. The host builds the
+whole selected panel as a read-only composite expansion: any frame, lenses,
+verifiers and synthesis or reduction use that same commit. The runtime checks
+its shape and read roots against the admitted node and journals it before
 running its members. Resume replays the journal without resolving again. The
 host supplies the models of previous attempts and the families of accepted
 attempts so alias retries can avoid a refused model and grouped lenses can
@@ -449,6 +451,9 @@ inside text insert scalar values. Unknown parameters and unresolved bindings
 are rejected. Stage IDs form local dependency and export names; expansion
 namespaces nested children. Child presets have their own parameters and roles;
 an entry's `parameters` and `roles` tables override that child's defaults.
+Typed parameters may declare `bind = "risk_tier"` or `bind = "kind"` to
+receive the corresponding request flag. An unbound request flag warns and is
+dropped; parameter files and dispatch overrides retain their precedence.
 
 Composite nodes retain their children, expose declared outputs and report
 one grouped status. Their internal attempts and evidence remain available in
@@ -461,15 +466,19 @@ output kinds. Composites use no provider attempt of their own. An entry can
 declare `loop = { stages = [...], until = "accept", max_rounds = 2 }` to reuse
 roles and presets inside bounded repair. Existing `loop.body` configuration
 also remains available. Planner fragments do not resolve named presets.
+Parallel groups may declare `min_successful`, `zero_minimum`, `reduce_verdict`
+and `export_first` on the group; the [preset runbook](../runbooks/presets.md#composition-rules)
+describes their accepted values.
+Preset compilation uses the runtime's composite expansion and loop count when
+it checks the host depth and node bounds, so admission checks the same graph.
 
-Bundled `scout-swarm`, `generator-evaluator`, `review-council`, `big-batch`,
+Bundled `scout-swarm`, `generator-evaluator`, `review`, `big-batch`,
 `scope-then-run` and `deliver` express scouting, implementation with
 evaluating lenses, combined review, a full batch, scouting and scoping before
 a run, and delivery through CI to land respectively. Scouts use junior tiers and remain read-only;
 implementation uses senior tiers; the end-of-batch refactor uses principal.
-The `generator-evaluator` default lenses are correctness-spec and simplicity;
-add `tests` or `design-fit-reuse` through its `lenses` list to challenge test
-quality and reuse. Junior reviews on senior or principal work are
+The `generator-evaluator` uses the `review` shape and lens defaults; an
+explicit `lenses` list replaces the default selection. Junior reviews on senior or principal work are
 advisory. Counted acceptance reviews must meet the author's tier under
 `HARNESS.md`; add principal coverage for high-risk areas and principal-authored
 refactors. Synthesis reconciles evidence rather than taking a majority vote.
@@ -482,7 +491,7 @@ gate's findings (check names with log excerpts), the writer's `result` and
 `remaining` handoff items in every round and the previous repair's, never a
 transcript,
 followed by the CI gate again. The composite
-succeeds on either path. A `review-council` then reviews a `head` source
+succeeds on either path. A `review` then reviews a `head` source
 binding to the writer, so it judges the newest repaired head; a verdict gate
 and a `land` node merge that head under the host's tier policy. No model runs
 while a gate is pending. `max_iterations` bounds the rounds; exhaustion raises
@@ -599,6 +608,12 @@ the host's `[domains.fabric.graph] allowed_read_roots` list. A planner
 fragment may not add `read_roots`, change `source` or change `role` relative
 to its planner node.
 
+Agent nodes may also declare `attachments`, a list of image file paths. Paths
+are canonicalised and granted read-only as individual files. Claude receives
+paths in its prompt and Codex receives image arguments. Other adapters warn
+about `image_input` and retain the read grant. A planner fragment cannot add
+attachments beyond its planner node's list.
+
 A graph document may set a top-level `network` of `"on"` or `"off"`. Every
 node lane the graph launches receives that network reach; without it, lanes
 default to open network. `run --network` binds it into a preset graph, with an
@@ -683,6 +698,12 @@ retain their usual failure semantics. Disposition validation still applies.
 A partial composite waits for its members to settle, exports the successful
 members and names unavailable members in its result. A blocked node reports
 its blocking upstream node and state in status.
+
+A composite may declare `reduce_verdict = true`. It computes a verdict without
+an attempt from its successful exporting members: request changes is worse than
+inconclusive, then approve with nits, then approve. A missing or invalid verdict
+is inconclusive. The composite fails its coverage minimum when no member succeeds,
+even if its configured minimum is zero.
 
 A node may declare `dispositions`, a list of allowed values. At settlement its
 findings block must parse and every finding must carry a `disposition` from
@@ -1090,7 +1111,9 @@ outside the writer's chain, never a gate, loop, decision or land output such
 as CI's `PASS`, and judged the head
 through its pinned `source` commit or, without one, as the newest head of the
 writer's chain upstream of it. A composite input has no subject of its own, so
-it resolves to the member that exported its verdict, recursively: a council
+it resolves to the member that exported its verdict, recursively. A reduced
+verdict instead requires every successful exporting member to be a read-only
+reviewer of the pinned head. A council
 pinned to an earlier head never vouches for a later one that merely precedes
 its boundary. Otherwise the node fails without calling the
 host and names the heads that were reviewed, so a failed gate whose `on_fail`
@@ -1299,7 +1322,7 @@ member node id at each composite boundary. An overlong qualified id fails the
 composite. If the combined export exceeds the count or byte limit, the composite
 keeps a severity-ranked subset, reserving each member's strongest finding when
 all such reservations fit. Severity ranks critical/blocking/P0, high/P1,
-medium/P2, low/P3, then informational/P4; unrecognised labels rank last.
+medium/P2, low/P3, then informational/P4; unreadable labels are treated as blocking.
 A warning gives the dropped count, members and available attempt references; the composite result also carries the
 notice. Downstream input listings identify the staged paths for those member results. When materialisation is capped or its listing is too long, an input index
 names the graph and every source, status, path, attempt reference and finding ID prefix. A member with findings
@@ -1350,9 +1373,12 @@ limited to 1024 bytes each; a block with an overlong field is invalid. Missing
 or invalid findings produce an empty list and, when a result exists, a warning,
 not a node failure. The final findings block in the tail window takes
 precedence; if it is absent, the final block in the head window is used. An
-invalid final block yields an empty list and a bounded warning naming the first
-failing entry (index and id when available) and field. Nodes requiring findings
-or dispositions include that diagnostic in their settlement failure.
+invalid final block yields an empty list and a bounded warning. Malformed entries
+are reported with their index and field: entries without a usable identity are
+dropped, while malformed fields on identifiable entries are cleared. An unknown
+severity is treated as blocking, and an unreadable status as open. These warnings reach composite outputs and
+consumers of findings. Nodes requiring findings or dispositions include a block
+failure in their settlement diagnostic.
 The separate `required_verdict` contract checks for its exact line across the
 complete redacted stream. Writers can also provide a branch or commit.
 
@@ -1701,7 +1727,7 @@ publication ref at that same head. A different marker, a different ref head or
 a symbolic ref refuses. Alternatively,
 the graph uses its existing remote integration branch, and opens one PR. Its body
 contains bounded commit messages, run and attempt IDs, gate decisions and skipped nodes.
-Graph review-council attempts render as the same `Independent review` rows used
+Graph review attempts render as the same `Independent review` rows used
 by `pr open`, with each review role, model family and recorded verdict. The rows
 include lens, verification and synthesis attempts, including retries, while
 subject-framing tasks remain ordinary node evidence. The checkpoint

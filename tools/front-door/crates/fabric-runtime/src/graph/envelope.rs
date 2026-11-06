@@ -21,12 +21,39 @@ const UNKNOWN_USAGE_TEXT_BYTES: usize = 64;
 pub(super) const REFUSAL_CODE_BYTES: usize = 64;
 /// Space for a deferred review node's expanded progress and serialized record.
 /// A prospective expansion is also checked against this reservation.
-const REVIEW_NODE_RESERVE: usize = 64 * 1024;
+const REVIEW_NODE_RESERVE: usize = 40 * 1024;
 const REVIEW_RECORD_RESERVE: usize = 256 * 1024;
 
 fn deferred_review_bound(node: &PlannedNode, review: &ReviewSpec) -> usize {
     let templates = node.extra.get("lens_templates").map_or(0, canonical_len);
-    let inherited = canonical_len(&(&node.depends_on, &node.inputs, &node.read_roots));
+    let panel_templates = node
+        .extra
+        .get("panel_templates")
+        .and_then(serde_json::Value::as_object);
+    let panel_bytes = panel_templates.map_or(0, |templates| {
+        let one = |key: &str| {
+            templates
+                .get(key)
+                .filter(|value| !value.is_null())
+                .map_or(0, canonical_len)
+        };
+        let verifiers = node
+            .extra
+            .get("panel_max_verifiers")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|count| usize::try_from(count).ok())
+            .unwrap_or(review.max_nodes)
+            .min(review.max_nodes);
+        one("frame")
+            .saturating_add(one("synthesis"))
+            .saturating_add(one("verifier").saturating_mul(verifiers))
+    });
+    let inherited = canonical_len(&(
+        &node.depends_on,
+        &node.inputs,
+        &node.read_roots,
+        &node.attachments,
+    ));
     // A custom lens can have a disposition projection or CI evidence larger
     // than an ordinary review leaf. Reserve those declared additions too.
     let template_extra = node
@@ -90,6 +117,67 @@ fn deferred_review_bound(node: &PlannedNode, review: &ReviewSpec) -> usize {
         .saturating_mul(REVIEW_NODE_RESERVE)
         .saturating_add(REVIEW_RECORD_RESERVE)
         .saturating_add(templates.saturating_mul(2))
+        // A planned review persists the captured catalogue in the review
+        // expansion and again in the planner's bounded fragment and fallback.
+        .saturating_add(
+            node.extra
+                .get("review_planner")
+                .map_or(0, |planner| canonical_len(planner).saturating_mul(4)),
+        )
+        .saturating_add(if node.extra.contains_key("review_planner") {
+            fn pattern_nodes(node: &serde_json::Value) -> usize {
+                1_usize.saturating_add(
+                    node.pointer("/composite/nodes")
+                        .and_then(serde_json::Value::as_array)
+                        .map_or(0, |children| {
+                            children.iter().fold(0_usize, |total, child| {
+                                total.saturating_add(pattern_nodes(child))
+                            })
+                        }),
+                )
+            }
+            let model_nodes = node
+                .extra
+                .get("review_planner")
+                .and_then(|planner| planner.get("max_nodes"))
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|n| usize::try_from(n).ok())
+                .unwrap_or(review.max_nodes);
+            let pattern_width = node
+                .extra
+                .get("review_planner")
+                .and_then(|planner| planner.pointer("/catalogue/patterns"))
+                .and_then(serde_json::Value::as_array)
+                .into_iter()
+                .flatten()
+                .map(|pattern| {
+                    1_usize.saturating_add(
+                        pattern
+                            .get("nodes")
+                            .and_then(serde_json::Value::as_array)
+                            .map_or(0, |nodes| {
+                                nodes.iter().fold(0_usize, |total, node| {
+                                    total.saturating_add(pattern_nodes(node))
+                                })
+                            }),
+                    )
+                })
+                .max()
+                .unwrap_or(2);
+            model_nodes
+                .saturating_add(review.max_nodes)
+                .saturating_mul(pattern_width)
+                .saturating_mul(REVIEW_NODE_RESERVE)
+        } else {
+            0
+        })
+        // Verifier templates can be instantiated more than once.
+        .saturating_add(panel_bytes.saturating_mul(2))
+        .saturating_add(if panel_templates.is_some() {
+            DISPOSITION_FINDINGS_BYTES + COMPOSITE_EXCERPT_BYTES
+        } else {
+            0
+        })
         .saturating_add(template_extra)
         .saturating_add(route_extra)
         // Explicit lens tiers can carry route lists copied into both the

@@ -51,6 +51,7 @@ mod preset_tests;
 mod process_tree;
 mod provider_retention;
 mod release_smoke;
+mod review;
 mod roots;
 mod settlement;
 mod status_wait;
@@ -851,6 +852,20 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
             tick::gc_worker(globals, process.workers())
         }
         Command::Internal(provenant_cli::Internal::TickSeed) => tick::seed_worker(globals),
+        Command::Internal(provenant_cli::Internal::Launch {
+            run,
+            provider_lease_wait,
+        }) => {
+            let receipt_globals = provenant_cli::Globals {
+                json: true,
+                full: globals.full,
+                state_dir: globals.state_dir.clone(),
+                project: globals.project.clone(),
+            };
+            run_edge(&inv.leaf, &receipt_globals, |edge| {
+                provenant_cli::run::launch_worker(run, provider_lease_wait, edge)
+            })
+        }
         Command::Internal(provenant_cli::Internal::ProviderUpdates) => {
             match roots::resolve(globals, Workspace::Project, Product::Required) {
                 Ok(resolved) => match provenant_cli::provider_updates::housekeep(
@@ -1042,9 +1057,7 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
             }
             reply
         }),
-        Command::Review(cmd) => run_edge(&inv.leaf, globals, |edge| {
-            provenant_cli::run::review(cmd, edge)
-        }),
+        Command::Review(cmd) => review::run(cmd, globals, process.workers()),
         Command::Status(cmd) if cmd.wait.is_some() => status_wait::run(cmd, globals),
         Command::Status(cmd) => run_edge(&inv.leaf, globals, |edge| {
             provenant_cli::run::status(cmd, globals.json, edge)

@@ -73,7 +73,11 @@ launches at its inherited priority and the reason is recorded as a warning.
 When run from a linked Git worktree with no `--mode` and no target
 (`--worktree`, `--branch` or `--worktree-branch`), `run` refuses with `REFUSED`
 and names both repairs: `--worktree <path>` for a writer, or `--mode read-only`
-for a reader.
+for a reader. To read another registered checkout, pass both `--mode read-only`
+and `--worktree PATH`. Readers use that checkout without acquiring its writer
+lease, including while a writer holds it. The checkout and its Git metadata
+remain read-only even when the project configures ordinary read-only write
+exceptions. Explicit write roots must not overlap the checkout.
 
 Read-only lanes can run offline Cargo tests, including doc-tests, using their
 private `CARGO_TARGET_DIR` under lane scratch; they may execute files they
@@ -95,7 +99,7 @@ by anything other than our own link owned by the same user is left alone and
 the lane uses the real path. Terminal commit, unreserved reconciliation and
 retention unlink the alias (never recursively) when they remove `tmp`.
 
-The receipt names the worktree. `--worktree PATH` uses an existing checkout
+The receipt names the worktree. For writers, `--worktree PATH` uses an existing checkout
 without taking over its lifecycle. A missing branch name creates an owned
 checkout; for an absolute path or a path below `.worktrees/`, use
 `--branch BRANCH` to create it. Git's worktree inventory establishes membership,

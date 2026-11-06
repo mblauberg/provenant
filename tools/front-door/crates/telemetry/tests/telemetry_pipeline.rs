@@ -214,6 +214,73 @@ fn ranking_rows(
 }
 
 #[test]
+fn model_suggestion_contains_expiring_config_row() -> Result {
+    let now: jiff::Timestamp = "2026-02-01T00:00:00Z".parse()?;
+    let mut rows = ranking_rows(20, "efficient", 10, 0, 1_000_000, false);
+    rows.extend(ranking_rows(20, "noisy", 20, 80, 100_000_000, true));
+    for row in &mut rows {
+        row.evidence.model = Some(
+            if row.evidence.pattern.as_deref() == Some("efficient") {
+                "codex/gpt-6-luna"
+            } else {
+                "codex/gpt-6.1-sol"
+            }
+            .into(),
+        );
+    }
+    let report = Outcomes {
+        ci_coverage_from: None,
+        skipped_ci_runs: 0,
+        window_days: 14,
+        ci: "measured",
+        unattributed_rows: 0,
+        rows,
+    };
+    let ranking = suggest::rank(&report, 20, 14, now)?;
+    let suggestion = ranking
+        .suggestions
+        .iter()
+        .find(|s| s.dimension == "model")
+        .ok_or("missing model suggestion")?;
+    let row = suggestion.accept.as_ref().ok_or("missing acceptance")?;
+    let parsed: toml_edit::DocumentMut = row.parse()?;
+    let row = &parsed["model_choices"][0];
+    assert_eq!(row["preferred"].as_str(), Some("codex/gpt-6-luna"));
+    assert_eq!(row["expires"].as_str(), Some(suggestion.expires.as_str()));
+    assert_eq!(row["risk_tier"].as_str(), Some("low"));
+    assert_eq!(row["task_kind"].as_str(), Some("repair"));
+    Ok(())
+}
+
+#[test]
+fn pattern_and_lens_suggestions_remain_advisory() -> Result {
+    let now: jiff::Timestamp = "2026-02-01T00:00:00Z".parse()?;
+    let mut rows = ranking_rows(20, "efficient", 10, 0, 1_000_000, false);
+    rows.extend(ranking_rows(20, "noisy", 20, 80, 100_000_000, true));
+    for row in &mut rows {
+        row.evidence.lens = row.evidence.pattern.clone();
+    }
+    let report = Outcomes {
+        ci_coverage_from: None,
+        skipped_ci_runs: 0,
+        window_days: 14,
+        ci: "measured",
+        unattributed_rows: 0,
+        rows,
+    };
+    let ranking = suggest::rank(&report, 20, 14, now)?;
+    for dimension in ["pattern", "lens"] {
+        let suggestion = ranking
+            .suggestions
+            .iter()
+            .find(|s| s.dimension == dimension)
+            .ok_or("missing suggestion")?;
+        assert!(suggestion.accept.is_none());
+    }
+    Ok(())
+}
+
+#[test]
 fn ranking_uses_verified_value_strata_minimum_and_expiry() -> Result {
     let now: jiff::Timestamp = "2026-02-01T00:00:00Z".parse()?;
     let mut rows = ranking_rows(20, "efficient", 10, 0, 1_000_000, false);

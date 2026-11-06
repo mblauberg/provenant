@@ -1016,6 +1016,33 @@ fn pattern_template_authority_and_types_are_validated() {
 }
 
 #[test]
+fn nested_pattern_cannot_parameterise_authority() {
+    for nested in [
+        json!({"id":"inner", "access":"${label}", "prompt":"review"}),
+        json!({"id":"inner", "access":"read_only", "role":"${label}", "prompt":"review"}),
+        json!({"id":"inner", "access":"read_only", "read_roots":["${label}"], "prompt":"review"}),
+    ] {
+        let mut doc = pattern_planner(4);
+        let pattern = &mut doc.nodes[0].plan.as_mut().unwrap().patterns[0];
+        pattern.nodes[1] = json!({"id":"review", "kind":"composite", "access":"read_only",
+            "composite":{"nodes":[nested],"exports":[{"node":"inner","outputs":["result"]}]}});
+        assert!(plans::validate_spec(&doc.nodes[0]).is_err());
+    }
+}
+
+#[test]
+fn nested_pattern_writer_keeps_its_scope_requirement() {
+    let mut doc = pattern_planner(4);
+    let pattern = &mut doc.nodes[0].plan.as_mut().unwrap().patterns[0];
+    pattern.nodes[1] = json!({"id":"review", "kind":"composite", "access":"read_only",
+        "depends_on":["write"], "composite":{"nodes":[{"id":"inner", "access":"worktree_write", "prompt":"write", "worktree":"/tmp/w", "write_scope":[], "acceptance_checks":["check"], "route":{"alias":"senior"}}],"exports":[{"node":"inner","outputs":["result"]}]}});
+    let instance = json!({"id":"impl","pattern":"generator"});
+    let mut owner = fixture_owner(&[&pattern_result(instance)]);
+    let run = advance(&doc, &mut owner, &mut MemoryJournal::default()).unwrap();
+    assert_eq!(run.checkpoint.pause_code.as_deref(), Some("invalid_plan_expansion"));
+}
+
+#[test]
 fn pattern_required_sample_does_not_violate_bounds_at_admission() {
     let mut doc = pattern_planner(4);
     let parameters = &mut doc.nodes[0].plan.as_mut().unwrap().patterns[0].parameters;
@@ -1485,6 +1512,46 @@ fn disjoint_waves_refuse_overlapping_scopes_unless_a_dependency_orders_them() {
 }
 
 #[test]
+fn planner_adds_lenses_omitted_by_a_path_floor() {
+    let mut doc = planner(4);
+    let spec = doc.nodes[0].plan.as_mut().unwrap();
+    spec.patterns_only = true;
+    for name in ["lens-tests", "lens-security-privacy"] {
+        spec.patterns.push(serde_json::from_value(json!({
+            "name": name,
+            "nodes": [{"id":"lens", "access":"read_only", "prompt":"Review", "route":{"alias":"senior"}, "acceptance_checks":["Review"]}],
+            "exports":[{"node":"lens", "outputs":["result"]}]
+        })).unwrap());
+    }
+    spec.extra.insert("required_floor_patterns".into(), json!(["lens-security-privacy"]));
+    spec.extra.insert("floor_classes".into(), json!(["security"]));
+    spec.extra.insert("floor_candidate_patterns".into(), json!(["lens-tests", "lens-security-privacy"]));
+    spec.extra.insert("floor_min_reviewers".into(), json!(2));
+    spec.extra.insert("model_max_nodes".into(), json!(3));
+    let output = pattern_result(json!({"id":"tests", "pattern":"lens-tests"}));
+    let mut owner = fixture_owner(&[&output, "reviewed", "reviewed", "checked"]);
+    let mut journal = MemoryJournal::default();
+    let run = advance(&doc, &mut owner, &mut journal).unwrap();
+    assert_eq!(run.status, GraphStatus::Complete, "{:?}", run.checkpoint.pause_reason);
+    let expansion = &run.checkpoint.expansions[0];
+    assert!(expansion.patterns.iter().any(|item| item.name == "lens-security-privacy"));
+    assert!(expansion.extra["floor_warnings"].to_string().contains("security"));
+    let mut tampered = serde_json::to_value(journal.0.as_ref().unwrap()).unwrap();
+    tampered["expansions"][0]["patterns"].as_array_mut().unwrap().retain(|pattern| pattern["name"] != "lens-security-privacy");
+    let mut bad_journal = MemoryJournal(Some(serde_json::from_value(tampered).unwrap()));
+    let error = advance(&doc, &mut fixture_owner(&[]), &mut bad_journal).unwrap_err();
+    assert_eq!(error.code(), "bad_checkpoint");
+    let mut replay = fixture_owner(&[]);
+    let restored = advance(&doc, &mut replay, &mut journal).unwrap();
+    assert_eq!(restored.status, GraphStatus::Complete);
+    assert!(replay.calls.is_empty());
+    let output = pattern_result(json!({"id":"security", "pattern":"lens-security-privacy"}));
+    let mut owner = fixture_owner(&[&output, "reviewed", "reviewed", "checked"]);
+    let run = advance(&doc, &mut owner, &mut MemoryJournal::default()).unwrap();
+    assert!(run.checkpoint.expansions[0].patterns.iter().any(|item| item.name == "lens-tests"));
+}
+
+#[test]
 fn patterns_only_plans_refuse_raw_fragment_nodes() {
     let mut doc = pattern_planner(8);
     doc.nodes[0].plan.as_mut().unwrap().patterns_only = true;
@@ -1575,6 +1642,11 @@ fn planned_big_batch_expands_to_its_static_composite_and_records_the_patterns() 
     doc.nodes.retain(|node| node.id == "plan");
     doc.nodes[0].depends_on.clear();
     doc.nodes[0].inputs.clear();
+    let pattern = &mut doc.nodes[0].plan.as_mut().unwrap().patterns[0];
+    let review = pattern.nodes.iter_mut().find(|node| node["id"] == "review").unwrap();
+    let deferred = &mut review["composite"]["nodes"][0];
+    deferred["panel_shapes"] = json!({"quick":{"frame":false,"verifiers":0,"synthesis":"reduce"}});
+    deferred["review"]["min_successful"] = json!(1);
     doc.nodes.push(serde_json::from_value(json!({
         "id":"after", "access":"read_only", "prompt":"Check all slices",
         "depends_on":["plan"], "route":{"alias":"senior"}
@@ -1598,10 +1670,19 @@ fn planned_big_batch_expands_to_its_static_composite_and_records_the_patterns() 
     let fragment = format!("```fragment\n{}\n```", json!({"schema_version":1,"nodes":[],"patterns":instances}));
     // Every lane runs a writer, two lens legs and an evaluator, then the barrier and consumer.
     let mut results = vec![fragment.as_str()];
-    results.extend(std::iter::repeat_n("done\nVERDICT: PASS", 40));
+    results.extend(std::iter::repeat_n("done\n```findings\n{\"schema_version\":1,\"findings\":[]}\n```\nVERDICT: PASS", 40));
     let mut owner = fixture_owner(&results);
+    owner.simple_review = true;
+    for observation in owner.observations.iter_mut().skip(1) {
+        if let AttemptObservation::Terminal { commit, branch, attempt_ref, .. } = observation {
+            *commit = Some("1".repeat(40));
+            *branch = Some("batch/graph".into());
+            *attempt_ref = Some("fixture/review".into());
+        }
+    }
     let run = advance(&doc, &mut owner, &mut MemoryJournal::default()).unwrap();
     assert_eq!(run.status, GraphStatus::Complete, "{:?}", run.checkpoint.pause_reason);
+    assert!(run.checkpoint.successful(), "{:?}", run.checkpoint.nodes.iter().filter(|node| node.state != NodeState::Succeeded).map(|node| (&node.id, node.state, &node.advance_error)).collect::<Vec<_>>());
     let expansion = &run.checkpoint.expansions[0];
     let recorded: Vec<_> = expansion.patterns.iter().map(|p| (p.id.as_str(), p.name.as_str())).collect();
     assert_eq!(recorded, [("plan--a", "writer-lane"), ("plan--b", "writer-lane"), ("plan--barrier", "wave-barrier"), ("plan--c", "writer-lane")]);
@@ -1609,25 +1690,13 @@ fn planned_big_batch_expands_to_its_static_composite_and_records_the_patterns() 
     assert_eq!(expansion.patterns[0].parameters["route"], "junior");
     assert_eq!(expansion.patterns[2].parameters, json!({"wave":"one"}));
 
-    // The lane contains a writer, two review legs and an evaluator.
-    let planned: Vec<Value> = expansion.nodes.iter().filter(|n| n.id.starts_with("plan--a--")).map(|n| serde_json::to_value(n).unwrap()).collect();
-    for id in ["implement", "lens-correctness-spec", "lens-simplicity", "evaluate"] {
-        assert!(planned.iter().any(|node| node["id"] == format!("plan--a--{id}")));
+    // Each lane runs its nested review before its evaluator.
+    for lane in ["a", "b", "c"] {
+        let review = format!("plan--{lane}--review--lenses");
+        let evaluate = format!("plan--{lane}--evaluate");
+        assert!(run.checkpoint.expansions.iter().any(|item| item.source == review));
+        assert!(owner.calls.iter().any(|(key, _)| key.node_id == evaluate));
     }
-    let writer = planned.iter().find(|node| node["id"] == "plan--a--implement").unwrap();
-    assert_eq!(writer["access"], "worktree_write");
-    assert_eq!(writer["worktree"], "/repo/lane1");
-    for id in ["lens-correctness-spec", "lens-simplicity"] {
-        let lens = planned.iter().find(|node| node["id"] == format!("plan--a--{id}")).unwrap();
-        assert_eq!(lens["access"], "read_only");
-        assert_eq!(lens["source"]["node"], "plan--a--implement");
-        assert!(lens["depends_on"].as_array().unwrap().contains(&json!("plan--a--implement")));
-    }
-    // The evaluator waits for the lens legs and the writer, as the static one does.
-    let evaluate = planned.iter().find(|n| n["id"] == "plan--a--evaluate").unwrap();
-    assert_eq!(evaluate["depends_on"], json!(["plan--a--lens-correctness-spec", "plan--a--lens-simplicity", "plan--a--implement"]));
-    // A lane's exports carry the evaluator's verdict for the barrier and later waves.
-    assert!(expansion.patterns[0].nodes.iter().any(|id| id == "plan--a--evaluate"));
 }
 
 /// A preset planner with a static fallback refuses an invalid fragment by
@@ -1686,8 +1755,55 @@ fn planned_scout_swarm_expands_scouts_with_a_question_and_a_route() {
 }
 
 #[test]
-fn planned_review_council_expands_only_the_lens_legs_the_catalogue_lists() {
-    let doc = planned_fixture("review-council");
+fn single_planned_review_records_rationale_before_lens() {
+    let doc = planned_fixture("review");
+    let fragment = pattern_result(json!({"id":"correctness", "pattern":"lens-correctness-spec", "parameters":{"tier":"senior"}}));
+    let output = format!("The change needs a correctness review.\n{fragment}");
+    let mut results = vec!["framed", output.as_str()];
+    results.extend(std::iter::repeat_n("done\nVERDICT: PASS", 12));
+    let mut owner = fixture_owner(&results);
+    let run = advance(&doc, &mut owner, &mut MemoryJournal::default()).unwrap();
+    assert_eq!(run.status, GraphStatus::Complete, "{:?}", run.checkpoint.pause_reason);
+    let planner = run.checkpoint.nodes.iter().find(|node| node.id == "plan").unwrap();
+    assert!(planner.outputs.as_ref().unwrap().result.as_ref().unwrap().excerpt.contains("The change needs a correctness review."));
+    let planner_call = owner.calls.iter().position(|(key, _)| key.node_id == "plan").unwrap();
+    let lens_call = owner.calls.iter().position(|(key, _)| key.node_id == "plan--correctness--lens").unwrap();
+    assert!(planner_call < lens_call);
+    assert_eq!(run.checkpoint.expansions[0].patterns.len(), 1);
+}
+
+#[test]
+fn review_catalogue_binds_every_lens_to_the_pinned_commit() {
+    let mut doc = planned_fixture("review");
+    let spec = doc.nodes.iter_mut().find(|node| node.id == "plan").unwrap().plan.as_mut().unwrap();
+    let head = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    spec.pin_review_subject(head).unwrap();
+    for pattern in &spec.patterns {
+        for lens in &pattern.nodes {
+            assert_eq!(lens["source"], json!({"type":"commit", "commit":head}));
+        }
+    }
+    let output = pattern_result(json!({"id":"correctness", "pattern":"lens-correctness-spec"}));
+    let mut owner = fixture_owner(&["framed", &output, "done\nVERDICT: PASS", "done\nVERDICT: PASS", "done\nVERDICT: PASS"]);
+    let run = advance(&doc, &mut owner, &mut MemoryJournal::default()).unwrap();
+    assert_eq!(run.status, GraphStatus::Complete, "{:?}", run.checkpoint.pause_reason);
+    let lens = run.checkpoint.expansions[0].nodes.iter().find(|node| node.id == "plan--correctness--lens").unwrap();
+    assert_eq!(lens.source, Some(SourceBinding::Commit { commit: head.into() }));
+}
+
+#[test]
+fn review_catalogue_pins_nested_pattern_leaves() {
+    let mut doc = planner(1);
+    let plan = doc.nodes[0].plan.as_mut().unwrap();
+    plan.patterns.push(serde_json::from_value(json!({"name":"nested","nodes":[{"id":"group","composite":{"nodes":[{"id":"lens","source":{"type":"head","node":"writer"}}],"exports":[{"node":"lens","outputs":["result"]}]}}],"exports":[{"node":"group","outputs":["result"]}]})).unwrap());
+    let head = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    plan.pin_review_subject(head).unwrap();
+    assert_eq!(plan.patterns[0].nodes[0]["composite"]["nodes"][0]["source"], json!({"type":"commit","commit":head}));
+}
+
+#[test]
+fn planned_review_expands_only_the_lens_legs_the_catalogue_lists() {
+    let doc = planned_fixture("review");
     let leg = |lens: &str, tier: &str| {
         json!({"id":lens, "pattern":format!("lens-{lens}"), "parameters":{"tier":tier}})
     };

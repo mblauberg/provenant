@@ -96,16 +96,17 @@ pub(super) fn make_outputs_with_upstream(
                     WARNING_BYTES,
                 ));
             }
-            if let Some(first) = skipped.first() {
-                let warning = if skipped.len() > 1 {
-                    format!(
-                        "{first}; {} more unknown identities skipped",
-                        skipped.len() - 1
-                    )
-                } else {
-                    first.clone()
-                };
-                warnings.push(bounded(&warning, WARNING_BYTES));
+            let available = MAX_WARNINGS.saturating_sub(warnings.len());
+            let named = if skipped.len() > available {
+                available.saturating_sub(1)
+            } else {
+                available
+            };
+            for warning in skipped.iter().take(named) {
+                warnings.push(bounded(warning, WARNING_BYTES));
+            }
+            if skipped.len() > named && available > 0 {
+                warnings.push(format!("{} more finding warnings", skipped.len() - named));
             }
             findings
         })
@@ -186,7 +187,6 @@ pub(super) fn make_outputs_with_upstream(
     }
 }
 
-/// Parse entries individually so the first failure retains its identity and field.
 /// Whether `id` names `finding` in another form: a suffix of its qualified
 /// id, the qualified form of its short id, or the finding it carries forward.
 fn names_finding(finding: &Finding, id: &str) -> bool {
@@ -203,6 +203,7 @@ fn names_finding(finding: &Finding, id: &str) -> bool {
             == Some(id)
 }
 
+/// Parse entries individually, preserving usable evidence when a field is malformed.
 fn parse_findings(
     block: &str,
     upstream: &[Finding],
@@ -247,21 +248,35 @@ fn parse_findings(
             bounded(id.unwrap_or("unknown"), 128)
         );
         let fail = |field: &str, reason: &str| format!("{label} field {field}: {reason}");
-        let mut entry = entry
-            .as_object()
-            .cloned()
-            .ok_or_else(|| fail("findings", "expected object"))?;
+        let Some(mut entry) = entry.as_object().cloned() else {
+            skipped.push(format!(
+                "malformed finding: {}",
+                fail("findings", "expected object")
+            ));
+            continue;
+        };
         if let Some(key) = key {
             if entry.get("id").is_some_and(|id| id.as_str() != Some(key)) {
-                return Err(fail("id", "does not match object key"));
+                skipped.push(format!(
+                    "malformed finding: {}",
+                    fail("id", "does not match object key")
+                ));
+                continue;
             }
             entry.insert("id".into(), key.clone().into());
         }
-        let id = entry
+        let Some(id) = entry
             .get("id")
             .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| fail("id", "expected string"))?
-            .to_owned();
+            .filter(|id| !id.trim().is_empty())
+            .map(str::to_owned)
+        else {
+            skipped.push(format!(
+                "malformed finding: {}",
+                fail("id", "expected non-empty string")
+            ));
+            continue;
+        };
         // Prefer an exact identity; only aliases require a unique suffix.
         let source = if let Some(exact) = upstream.iter().find(|finding| finding.id == id) {
             Some(exact)
@@ -303,7 +318,14 @@ fn parse_findings(
                     serde_json::Value::String(value) if value.len() <= OUTPUT_FIELD_BYTES => {}
                     serde_json::Value::String(_) => return Err(fail(field, "exceeds byte cap")),
                     serde_json::Value::Null if matches!(field, "disposition" | "reason") => {}
-                    _ => return Err(fail(field, "expected string")),
+                    _ if field != "id" => {
+                        skipped.push(format!(
+                            "malformed finding: {}",
+                            fail(field, "expected string")
+                        ));
+                        entry.remove(field);
+                    }
+                    _ => unreachable!("id is checked above"),
                 }
             }
         }
@@ -311,7 +333,44 @@ fn parse_findings(
             .get("line")
             .is_some_and(|line| !line.is_null() && line.as_u64().is_none())
         {
-            return Err(fail("line", "expected non-negative integer or null"));
+            skipped.push(format!(
+                "malformed finding: {}",
+                fail("line", "expected non-negative integer or null")
+            ));
+            entry.remove("line");
+        }
+        if entry
+            .get("severity")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|severity| {
+                !matches!(
+                    severity.to_ascii_lowercase().as_str(),
+                    "critical"
+                        | "blocker"
+                        | "blocking"
+                        | "p0"
+                        | "high"
+                        | "error"
+                        | "p1"
+                        | "medium"
+                        | "moderate"
+                        | "should-fix"
+                        | "p2"
+                        | "low"
+                        | "warning"
+                        | "p3"
+                        | "info"
+                        | "informational"
+                        | "note"
+                        | "p4"
+                )
+            })
+        {
+            skipped.push(format!(
+                "malformed finding: {}",
+                fail("severity", "unrecognised value")
+            ));
+            entry.insert("severity".into(), "blocking".into());
         }
         let mut explicit_extensions = entry.clone();
         for field in [
@@ -358,6 +417,27 @@ fn parse_findings(
                     if field != "disposition" && field != "reason" && field != "propagates" {
                         entry.insert(field.clone(), value.clone());
                     }
+                }
+            }
+            for field in ["severity", "file", "summary", "status"] {
+                if !entry.contains_key(field) {
+                    let field_label = format!("{label} field {field}:");
+                    if !skipped.iter().any(|warning| warning.contains(&field_label)) {
+                        skipped.push(format!(
+                            "malformed finding: {}",
+                            fail(field, "missing string")
+                        ));
+                    }
+                    // Unknown severity must retain blocking priority during compaction.
+                    entry.insert(
+                        field.into(),
+                        match field {
+                            "severity" => "blocking",
+                            "status" => "open",
+                            _ => "",
+                        }
+                        .into(),
+                    );
                 }
             }
             for field in [
@@ -440,8 +520,12 @@ fn parse_findings(
     if upstream.is_empty() && size > cap {
         return Err("field findings: exceeds canonical byte cap".into());
     }
-    if findings.is_empty() && !skipped.is_empty() {
-        return Err(skipped.remove(0));
+    if findings.is_empty()
+        && let Some(warning) = skipped
+            .iter()
+            .find(|warning| !warning.starts_with("malformed finding:"))
+    {
+        return Err(warning.clone());
     }
     Ok((findings, skipped, trimmed))
 }
@@ -1059,12 +1143,13 @@ pub(super) fn render_input(
         } else {
             Vec::new()
         };
-        if !input.outputs.contains(&OutputKind::Result) {
-            for warning in outputs
-                .warnings
-                .iter()
-                .filter(|w| w.starts_with("unavailable "))
-            {
+        let show_unavailable = !input.outputs.contains(&OutputKind::Result);
+        let show_malformed = input.outputs.contains(&OutputKind::Findings);
+        if show_unavailable || show_malformed {
+            for warning in outputs.warnings.iter().filter(|w| {
+                (show_unavailable && w.starts_with("unavailable "))
+                    || (show_malformed && w.contains("malformed finding:"))
+            }) {
                 let section = format!(
                     "{} warning: {}\n",
                     input.node,

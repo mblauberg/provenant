@@ -1,10 +1,10 @@
 Graph <id>
 Admission: {"status":"admitted"}
-Inspection: {"dependency_depth":9,"edges":19,"limit_reason":null,"max_attempts":15,"nodes":13,"prompt_bytes":9462}
+Inspection: {"dependency_depth":10,"edges":21,"limit_reason":null,"max_attempts":15,"nodes":14,"prompt_bytes":9684}
 tier mix: junior 0 / senior 1 / principal 0
 Warning: writer tier mix is inverted; consider whether lower tiers fit the work.
 Preset selection: scope-then-run (override)
-Review shape: standard (default; size=pending (measured at review launch); kind=unknown; risk=unknown)
+Review shape: standard (default; floors=pending; size=pending (measured at review launch); kind=unknown; risk=unknown)
 plan: off -> off (planning turned off)
 Pending "planner_authority": "Planner authority is checked when the plan runs."
 Pending "route_readiness": "Route readiness and quota are checked before launch."
@@ -42,10 +42,12 @@ run  role=- tier=- family=any kind=composite access=read_only worktree=-
     write_scope: ["."]
     source: {"commit":"<commit>","type":"commit"}
     acceptance_checks: ["Run targeted tests and required static checks","Commit the completed slice"]
-  lens  role=- tier=- family=any kind=plan access=read_only worktree=-
-    read_roots: ["<project>"]
-    source: {"node":"implement","type":"node"}
+  lens  role=- tier=- family=any kind=composite access=read_only worktree=-
     inputs: [{"node":"implement","outputs":["result"]}]
+    lenses  role=- tier=- family=any kind=plan access=read_only worktree=-
+      read_roots: ["<project>","<root>/skills"]
+      source: {"node":"implement","type":"node"}
+    exports: [{"node":"lenses","outputs":["result","findings","verdict","commit"]}]
   evaluate  role=review.evaluator tier=senior family=any kind=synthesise access=read_only worktree=-
     read_roots: ["<project>"]
     source: {"node":"implement","type":"node"}
@@ -64,9 +66,13 @@ Roles:
   lens.simplicity  origin=bundled digest=<digest>
   lens.tests  origin=bundled digest=<digest>
   plan.research  origin=bundled digest=<digest>
+  plan.review  origin=bundled digest=<digest>
   plan.scope  origin=bundled digest=<digest>
   review.evaluator  origin=bundled digest=<digest>
+  review.synthesis  origin=bundled digest=<digest>
+  review.verify  origin=bundled digest=<digest>
   scout.codebase  origin=bundled digest=<digest>
   scout.external  origin=bundled digest=<digest>
   write.implement  origin=bundled digest=<digest>
 Substituted external: web -> junior (route web is not defined in the routing configuration)
+Substituted verify: verifier -> senior (route verifier is not defined in the routing configuration)

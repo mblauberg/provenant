@@ -220,6 +220,54 @@ impl RunStore {
                     });
                 }
             };
+            // Cache seeding can walk and sync a large registry. Release the
+            // repository lock during that work, then revalidate Git under a
+            // fresh lock before constructing the confined command and launch.
+            let seed_attempt = local_or_withdraw!(directory());
+            // A lock, not an assertion: observers stop reporting this phase if
+            // the launcher dies. Failing to take it only loses the report.
+            let seeding = seed_attempt
+                .lock(
+                    std::ffi::OsStr::new(crate::writer::SEED_WAIT_LOCK),
+                    provenant_os::fs::LockMode::Exclusive,
+                    call.lock_budget(),
+                    call.cancel,
+                    call.clock,
+                )
+                .ok();
+            seed_without_setup_lock(&mut _git_setup_lock, || {
+                #[cfg(feature = "fixture")]
+                hold_seed_for_fixture();
+                confinement.seed_cargo(&plan.environment, &seed_attempt);
+            });
+            drop(seeding);
+            _git_setup_lock = match retry_setup_lock(
+                record.retry_of.is_some(),
+                |budget| {
+                    confinement.prepare_git(
+                        &writer_attempt,
+                        call.cancel,
+                        record.retry_of.map(|_| budget),
+                    )
+                },
+                || call.check(),
+            ) {
+                Ok(lock) => lock,
+                Err(error) => {
+                    lease.withdraw_unlaunched().map_err(|release| {
+                        HandOff::Protected(format!(
+                            "Git setup: {error}; custody withdrawal: {release}"
+                        ))
+                    })?;
+                    return Err(match error {
+                        RunError::SetupLockTimeout { seconds } => {
+                            HandOff::SetupLockTimeout(seconds)
+                        }
+                        error => local("Git setup", &error),
+                    });
+                }
+            };
+            let writer_attempt = local_or_withdraw!(directory());
             if let Some(writer) = &confinement.writer
                 && let Err(error) = crate::objects::prepare_bound(
                     &local_or_withdraw!(
@@ -238,13 +286,7 @@ impl RunStore {
             {
                 local_or_withdraw!(Err::<(), _>(local("lane Git objects", &error)));
             }
-            match confinement.command(
-                &plan.argv,
-                &plan.environment,
-                &id,
-                call.cancel,
-                &local_or_withdraw!(directory()),
-            ) {
+            match confinement.command(&plan.argv, &id, call.cancel) {
                 Ok(argv) => plan.argv = argv,
                 Err(error) => {
                     local_or_withdraw!(Err::<(), _>(local("confinement command", &error)));
@@ -310,6 +352,32 @@ impl RunStore {
         .map_err(|failure| HandOff::Uncertain(failure.error.to_string()))?;
         Ok(())
     }
+}
+
+// The seed can be slow, while the lock protects shared Git state. The caller
+// must reacquire it and revalidate Git after this function returns.
+pub(crate) fn seed_without_setup_lock<T>(lock: &mut Option<T>, seed: impl FnOnce()) {
+    drop(lock.take());
+    seed();
+}
+
+/// Integration fixtures can hold the actual handoff at the seed boundary.
+#[cfg(feature = "fixture")]
+#[allow(clippy::disallowed_methods)]
+fn hold_seed_for_fixture() {
+    let Some(directory) = std::env::var_os("PROVENANT_FIXTURE_HOLD_SEED") else {
+        return;
+    };
+    let directory = std::path::Path::new(&directory);
+    if std::fs::write(directory.join("entered"), b"entered").is_err() {
+        return;
+    }
+    let _ = provenant_test_support::wait_for(
+        "seed preparation release",
+        std::time::Duration::from_secs(30),
+        || !directory.join("hold").exists(),
+        |released| *released,
+    );
 }
 
 #[cfg(test)]

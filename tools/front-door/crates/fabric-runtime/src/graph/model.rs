@@ -177,6 +177,10 @@ pub struct ReviewSpec {
     #[serde(default)]
     pub lenses: Vec<ReviewLens>,
     pub min_successful: Option<usize>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub reduce_verdict: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub export_first: Vec<OutputKind>,
     pub max_nodes: usize,
 }
 
@@ -216,7 +220,7 @@ impl PartialEq for TopologyPresence {
 }
 impl Eq for TopologyPresence {}
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GraphNode {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review: Option<ReviewSpec>,
@@ -246,6 +250,8 @@ pub struct GraphNode {
     pub dispositions: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub read_roots: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<String>,
     /// Explicit node capability set; absent inherits the writer project default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capabilities: Option<Vec<String>>,
@@ -318,6 +324,18 @@ pub struct GraphNode {
 }
 
 impl GraphNode {
+    /// Construct a composite boundary with the same defaults as a decoded node.
+    pub fn composite(id: String, depends_on: Vec<String>, spec: CompositeSpec) -> Self {
+        Self {
+            id,
+            kind: Some(NodeKind::Composite),
+            access: AccessMode::ReadOnly,
+            depends_on,
+            composite: Some(spec),
+            ..Self::default()
+        }
+    }
+
     pub(super) fn dependencies(&self) -> impl Iterator<Item = &String> {
         self.depends_on.iter().chain(
             self.after_expansion
@@ -336,7 +354,36 @@ impl GraphNode {
     }
 }
 
+pub(super) fn expansion_safety_limits(
+    limits: &crate::config::GraphLimits,
+) -> crate::config::GraphLimits {
+    crate::config::GraphLimits {
+        nodes: limits.composite_expansion_safety_nodes(),
+        // Composite nesting is itself governed by the host's configured
+        // expansion depth. Only the construction guard uses a safety floor.
+        expansion_depth: limits.expansion_depth,
+        edges: usize::MAX,
+        routes_per_node: u16::MAX as usize,
+        node_prompt_bytes: usize::MAX,
+        graph_prompt_bytes: usize::MAX,
+        ..limits.clone()
+    }
+}
+
 impl GraphDocument {
+    /// Check nested composite structure with the same expansion safety bounds
+    /// used by graph admission, without starting a graph.
+    pub fn check_composites(&self, limits: &crate::config::GraphLimits) -> Result<(), String> {
+        let expansion_limits = expansion_safety_limits(limits);
+        let expanded = composites::expand(self, &expansion_limits)?;
+        loops::check_expanded_ids(&expanded, &[])?;
+        let count = loops::expanded_node_count(&expanded, &[])?;
+        if let Some(reason) = limits.nodes_bound().refusal(count) {
+            return Err(reason);
+        }
+        Ok(())
+    }
+
     /// Host preflight sees the same bounded static composite/loop expansion as
     /// the scheduler. Planner additions are checked separately before admission.
     /// A plan whose worst-case checkpoint would not fit is refused here, naming
@@ -358,15 +405,7 @@ impl GraphDocument {
     /// is suitable for bounded display and typed projection by the front door.
     pub fn admit(&self, limits: &crate::config::GraphLimits) -> Result<(), String> {
         validate_schema(self).map_err(String::from)?;
-        let expansion_limits = crate::config::GraphLimits {
-            nodes: limits.nodes.max(16_384),
-            expansion_depth: limits.expansion_depth.max(64),
-            edges: usize::MAX,
-            routes_per_node: u16::MAX as usize,
-            node_prompt_bytes: usize::MAX,
-            graph_prompt_bytes: usize::MAX,
-            ..limits.clone()
-        };
+        let expansion_limits = expansion_safety_limits(limits);
         let expanded = loops::expand(self, &[], &expansion_limits)?;
         let (plan, _) = validate_flat_plan(&expanded, &expansion_limits).map_err(String::from)?;
         if let Some(reason) = structural_limit_reason(&expanded, &plan, limits) {
@@ -380,15 +419,7 @@ impl GraphDocument {
 
     pub fn inspect(&self, limits: &crate::config::GraphLimits) -> Result<GraphInspection, String> {
         validate_schema(self).map_err(String::from)?;
-        let inspect_limits = crate::config::GraphLimits {
-            nodes: limits.nodes.max(16_384),
-            expansion_depth: limits.expansion_depth.max(64),
-            edges: usize::MAX,
-            routes_per_node: u16::MAX as usize,
-            node_prompt_bytes: usize::MAX,
-            graph_prompt_bytes: usize::MAX,
-            ..limits.clone()
-        };
+        let inspect_limits = expansion_safety_limits(limits);
         let expanded = loops::expand(self, &[], &inspect_limits)?;
         let generous = crate::config::GraphLimits {
             nodes: usize::MAX,
@@ -1206,6 +1237,7 @@ pub struct NodeInput<'a> {
     pub family_peers: &'a [String],
     pub context: provenant_records::run::WorkContext,
     pub read_roots: &'a [String],
+    pub attachments: &'a [String],
     pub capabilities: Option<&'a [String]>,
     pub capability_sources: Option<&'a serde_json::Value>,
     /// Attempts of the source writer whose model families must be avoided.

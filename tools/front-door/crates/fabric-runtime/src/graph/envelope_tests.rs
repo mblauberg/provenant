@@ -1256,3 +1256,57 @@ fn review_reservation_includes_declared_large_template_outputs() {
     assert!(reason.contains("graph checkpoint could reach"), "{reason}");
     assert!(reason.contains("split the graph"), "{reason}");
 }
+
+#[test]
+fn whole_review_reservation_covers_frame_verifier_and_synthesis() {
+    let subject = "1".repeat(40);
+    let templates: serde_json::Map<String, serde_json::Value> = (0..10).map(|index| (format!("lens-{index}"), json!({
+        "id":format!("lens-{index}"), "access":"read_only", "prompt":"review", "routes":[{"alias":"senior"},{"alias":"senior"}]
+    }))).collect();
+    let frame = json!({"id":"frame", "access":"read_only", "prompt":"frame", "routes":[{"alias":"senior"},{"alias":"senior"}]});
+    let verify = json!({"id":"verify", "access":"read_only", "prompt":"verify", "routes":[{"alias":"senior"},{"alias":"senior"}]});
+    let synth = json!({"id":"synthesis", "kind":"synthesise", "access":"read_only", "prompt":"synthesis", "dispositions":["accepted","rejected","deferred"], "routes":[{"alias":"senior"},{"alias":"senior"}]});
+    let document: GraphDocument = serde_json::from_value(json!({"schema_version":2,"graph_id":"whole-reservation","nodes":[{
+        "id":"review","kind":"plan","access":"read_only","prompt":"review","source":{"type":"commit","commit":subject},
+        "review":{"shape":null,"risk_tier":null,"kind":null,"size":null,"lenses":[],"min_successful":1,"max_nodes":15},
+        "lens_templates":templates,"panel_templates":{"frame":frame,"verifier":verify,"synthesis":synth},
+        "panel_max_verifiers":1,"panel_shapes":{"standard":{"frame":true,"verifiers":1,"synthesis":"model"}}
+    }]})).unwrap();
+    let mut expanded = plans::expand(&document, &[], &[], &crate::config::GraphLimits::default()).unwrap();
+    let plan = validate_flat_plan(&expanded, &plans::generous()).unwrap().0;
+    let before = graph_envelope_bound(&document, &[], &[], &plan);
+    let mut nodes = vec![json!({"id":"review--r","kind":"composite","access":"read_only","composite":{"nodes":[],"exports":[{"node":"review--r--s","outputs":["result","findings","verdict","commit"]}]}}),
+        json!({"id":"review--r--f","access":"read_only","prompt":"frame","source":{"type":"commit","commit":subject},"routes":[{"alias":"senior"},{"alias":"senior"}]}),
+        json!({"id":"review--r--p","kind":"composite","access":"read_only","depends_on":["review--r--f"],"composite":{"min_successful":1,"nodes":[],"exports":(0..10).map(|index| json!({"node":format!("review--r--p--lens-{index}"),"outputs":["result","findings"]})).collect::<Vec<_>>()}})];
+    for index in 0..10 { nodes.push(json!({"id":format!("review--r--p--lens-{index}"),"access":"read_only","prompt":"review","depends_on":["review--r--f"],"inputs":[{"node":"review--r--f","outputs":["result"]}],"source":{"type":"commit","commit":subject},"routes":[{"alias":"senior"},{"alias":"senior"}]})); }
+    nodes.push(json!({"id":"review--r--v-1","access":"read_only","prompt":"verify","depends_on":["review--r--p"],"inputs":[{"node":"review--r--p","outputs":["result","findings"]}],"source":{"type":"commit","commit":subject},"routes":[{"alias":"senior"},{"alias":"senior"}]}));
+    nodes.push(json!({"id":"review--r--s","kind":"synthesise","access":"read_only","prompt":"synthesis","dispositions":["accepted","rejected","deferred"],"depends_on":["review--r--p","review--r--v-1"],"inputs":[{"node":"review--r--p","outputs":["result","findings"]},{"node":"review--r--v-1","outputs":["result","findings"]}],"source":{"type":"commit","commit":subject},"routes":[{"alias":"senior"},{"alias":"senior"}]}));
+    let addition: Expansion = serde_json::from_value(json!({"source":"review","continuation":false,"patterns":[],"review":{"subject":subject,"base":"2".repeat(40),"measured_size":"large","shape":"standard","source":"fixture"},"nodes":nodes})).unwrap();
+    plans::validate_review_addition(&expanded, &addition).unwrap();
+    let mut missing_frame = addition.clone();
+    missing_frame.nodes.iter_mut().find(|node| node.id.ends_with("--lens-0")).unwrap().depends_on.clear();
+    assert!(plans::validate_review_addition(&expanded, &missing_frame).is_err());
+    plans::append(&mut expanded, &addition);
+    let plan = validate_flat_plan(&expanded, &plans::generous()).unwrap().0;
+    let after = graph_envelope_bound(&document, &[addition], &[], &plan);
+    assert!(after <= before, "review expansion grew {before} to {after}");
+}
+
+#[test]
+fn routing_stratum_flows_from_graph_to_nodes() {
+    let mut document = mixed();
+    document.context = Some(provenant_records::run::WorkContext {
+        risk_tier: Some("substantial".into()),
+        task_kind: Some("repair".into()),
+        ..Default::default()
+    });
+    document.nodes[1].context = Some(provenant_records::run::WorkContext {
+        task_kind: Some("review".into()),
+        ..Default::default()
+    });
+    let plan = planned(&document);
+    let node = plan.nodes.iter().find(|node| node.id == "review").unwrap();
+    let context = node_context(&plan, node);
+    assert_eq!(context.risk_tier.as_deref(), Some("substantial"));
+    assert_eq!(context.task_kind.as_deref(), Some("review"));
+}

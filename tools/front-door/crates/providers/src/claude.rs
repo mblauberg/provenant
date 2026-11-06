@@ -603,7 +603,7 @@ fn prepare(
         // added directories, even where the seatbelt profile would allow them.
         // A root that holds the working directory still reaches beyond it.
         for root in &plan.read_roots {
-            if !root.path.starts_with(input.cwd) {
+            if !root.path.starts_with(input.cwd) && !input.images.contains(&root.path) {
                 argv.extend(["--add-dir".into(), root.path.as_os_str().to_owned()]);
             }
         }
@@ -619,8 +619,10 @@ fn prepare(
     let package = package_grant(input.executable, &mut package_omissions);
     let scratch = &plan.scratch.path;
     // Scrub mode forces default permissions, regardless of --permission-mode.
-    let allowed_tools = if shell {
+    let allowed_tools = if shell && input.images.is_empty() {
         "Read,Grep,Glob,Edit,Write,Bash,Skill,mcp__fabric__*"
+    } else if shell {
+        "Grep,Glob,Edit,Write,Bash,Skill,mcp__fabric__*"
     } else {
         "Bash,Skill,mcp__fabric__*"
     };
@@ -629,7 +631,57 @@ fn prepare(
     } else {
         allowed_tools.to_owned()
     };
-    let mut setup = input.provenant.claude(scratch, &mut argv, &allowed_tools)?;
+    let mut image_rules = input
+        .images
+        .iter()
+        .map(|image| {
+            let path = image.to_str().ok_or(ProviderError::InvalidPath)?;
+            if !image.is_absolute() {
+                return Err(ProviderError::InvalidPath);
+            }
+            // Read rules use gitignore patterns; escape metacharacters in filenames.
+            let escaped: String = path
+                .chars()
+                .flat_map(|c| {
+                    if matches!(c, '*' | '?' | '[' | ']' | '\\' | ' ') {
+                        vec!['\\', c]
+                    } else {
+                        vec![c]
+                    }
+                })
+                .collect();
+            Ok(format!("Read(/{escaped})"))
+        })
+        .collect::<Result<Vec<_>, ProviderError>>()?;
+    if shell && !input.images.is_empty() {
+        // Keep reads of the lane's other roots approved without a blanket Read
+        // rule, which would also approve siblings of an attached image.
+        for root in &plan.read_roots {
+            if input.images.contains(&root.path) {
+                continue;
+            }
+            let path = root.path.to_str().ok_or(ProviderError::InvalidPath)?;
+            let escaped: String = path
+                .chars()
+                .flat_map(|c| {
+                    if matches!(c, '*' | '?' | '[' | ']' | '\\' | ' ') {
+                        vec!['\\', c]
+                    } else {
+                        vec![c]
+                    }
+                })
+                .collect();
+            let suffix = if root.scope == provenant_confinement::permissions::PathScope::Subtree {
+                "/**"
+            } else {
+                ""
+            };
+            image_rules.push(format!("Read(/{escaped}{suffix})"));
+        }
+    }
+    let mut setup = input
+        .provenant
+        .claude(scratch, &mut argv, &allowed_tools, &image_rules)?;
 
     let toolchain = shell || web;
     let path = crate::launch::tool_search_path(input.home, toolchain);
@@ -703,10 +755,17 @@ fn prepare(
             &mut env,
         );
     }
+    let mut prompt = input.prompt.text().to_owned();
+    if !input.images.is_empty() {
+        prompt.push_str("\n\nAttached images:\n");
+        for image in input.images {
+            prompt.push_str(&format!("- {}\n", image.display()));
+        }
+    }
     let mut spec = LaunchSpec {
         argv,
         env,
-        stdin: Stdin::Bytes(input.prompt.text().as_bytes().to_vec()),
+        stdin: Stdin::Bytes(prompt.into_bytes()),
         secret_input: Some(provenant_os::exec::SecretInput {
             descriptor_env: "CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR".into(),
             bytes: token.access.as_bytes().to_vec(),

@@ -1,0 +1,18 @@
+# Shared conservative review path exclusions. Patterns are repository-relative;
+# ** crosses directory boundaries. These defaults cover policy, security,
+# build, dependency and configuration surfaces.
+patterns = [
+  "**/GLOBAL-AGENTS.md", "**/SKILL.md",
+  "**/.github/**", "**/.gitlab/**", "**/.circleci/**", "**/.config/**",
+  "**/security/**", "**/credentials/**", "**/auth/**", "**/policy/**",
+  "**/*security*", "**/*credential*", "**/*auth*", "**/*policy*",
+  "**/Cargo.toml", "**/Cargo.lock", "**/package.json", "**/package-lock.json",
+  "**/yarn.lock", "**/pnpm-lock.yaml", "**/Gemfile*", "**/go.mod", "**/go.sum",
+  "**/requirements*.txt", "**/requirements*.in", "**/Pipfile*", "**/poetry.lock",
+  "**/setup.py", "**/Makefile", "**/CMakeLists.txt", "**/meson.build",
+  "**/WORKSPACE*", "**/BUILD", "**/BUILD.bazel", "**/Justfile",
+  "**/Dockerfile*", "**/*.toml", "**/*.yaml", "**/*.yml", "**/*.json",
+  "**/*.ini", "**/*.cfg", "**/*.conf", "**/*.xml", "**/*.properties",
+  "**/*.gradle", "**/*config*", "**/.*rc", "**/*.lock", "**/.env*",
+  "**/.gitignore", "**/build.rs", "**/build.gradle*",
+]

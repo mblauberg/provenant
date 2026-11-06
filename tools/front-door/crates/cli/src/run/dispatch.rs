@@ -6,6 +6,7 @@ pub fn run(mut command: Dispatch, edge: &Edge<'_>) -> Reply {
         return reply("run", Err(fail));
     }
     if command.host.is_none()
+        && !matches!(command.access.mode, Some(Mode::ReadOnly))
         && let Some(path) = &command.access.worktree
     {
         let absolute = if path.is_absolute() {
@@ -474,9 +475,8 @@ pub(crate) fn pool_effort_refusal(
         .flatten()
 }
 
-/// Refuse a model the catalogue does not record, or an effort its recorded
-/// model does not take, before any run record exists. A typo gets the nearest
-/// recorded IDs. Routing applies the same rules, but only after launch prep.
+/// Check catalogue requirements and recorded effort controls before a run
+/// record exists. A typo gets the nearest recorded IDs.
 pub(super) fn catalogued(model: &str, effort: Option<&str>) -> Result<(), Fail> {
     let Ok(id) = ModelId::parse(model) else {
         return Ok(());
@@ -484,9 +484,11 @@ pub(super) fn catalogued(model: &str, effort: Option<&str>) -> Result<(), Fail> 
     let catalogue = provenant_routing::Catalogue::bundled()
         .map_err(|error| Fail::new(Status::Error, ErrorKind::Config, error.to_string()))?;
     let Some(entry) = catalogue.model(&id) else {
-        // A registry-only adapter has no built-in catalogue to consult.
-        // Routing checks that its identity is actually registered.
-        if provenant_records::AdapterSpec::get(id.adapter()).is_none() {
+        // Adapters can accept model names without a bundled catalogue entry.
+        // Routing still checks that the adapter is registered.
+        if provenant_records::AdapterSpec::get(id.adapter())
+            .is_none_or(|spec| !spec.require_catalogue_for_launch)
+        {
             return Ok(());
         }
         let nearest = catalogue.nearest_models(&id);
@@ -646,6 +648,10 @@ pub(super) fn check_flag_capabilities_with_writes(
     Ok(())
 }
 
+/// The shortest admission window a caller's `--wait` can impose.
+/// `--admission-timeout` and `[domains.run] admission_seconds` can set less.
+const ADMISSION_WAIT_FLOOR_SECONDS: u64 = 60;
+
 enum WorktreeAdmissionError {
     Own(worktree::OwnWorktreeError),
     Run(run::RunError),
@@ -695,6 +701,7 @@ impl From<WorktreeAdmissionError> for Fail {
     }
 }
 
+#[allow(clippy::disallowed_methods)] // The caller's wait is a real deadline.
 pub(super) fn dispatch_inner(
     mut command: Dispatch,
     edge: &Edge<'_>,
@@ -1007,6 +1014,9 @@ pub(super) fn dispatch_inner(
             &session,
             &call,
             workers,
+            command
+                .wait
+                .and_then(|seconds| Instant::now().checked_add(Duration::from_secs(seconds))),
             &capability_sources,
         )? {
             return Ok(replayed);
@@ -1026,6 +1036,7 @@ pub(super) fn dispatch_inner(
     } else {
         worktree_access(
             matches!(command.access.mode(), Mode::WorktreeWrite) && command.branch.is_none(),
+            matches!(command.access.mode, Some(Mode::ReadOnly)),
             command.access.worktree.as_deref(),
         )?;
         None
@@ -1054,6 +1065,16 @@ pub(super) fn dispatch_inner(
             }
             new_worktree = Some(remote::new_worktree(&command)?);
         }
+    }
+    if command.host.is_some()
+        && matches!(command.access.mode, Some(Mode::ReadOnly))
+        && command.access.worktree.is_some()
+    {
+        return Err(Fail::new(
+            Status::Invalid,
+            ErrorKind::WorktreeNotApplicable,
+            "--worktree names a local checkout and cannot be used with a peer --host",
+        ));
     }
     if command.branch.is_some() && new_worktree.is_none() {
         return Err(Fail::new(
@@ -1263,6 +1284,13 @@ pub(super) fn dispatch_inner(
             if !fallback.is_empty() {
                 return unsupported("route fallback with --host");
             }
+            if !lane_access.attachments.is_empty() {
+                use std::io::Write;
+                let _ = writeln!(
+                    std::io::stderr().lock(),
+                    "warning: remote transport cannot provide image_input or attachment read grants"
+                );
+            }
             if lane_access.network.is_some()
                 || !lane_access.read_roots.is_empty()
                 || !lane_access.write_roots.is_empty()
@@ -1386,12 +1414,15 @@ pub(super) fn dispatch_inner(
         })?;
 
     let initial_deadline = if let Some(wait_seconds) = command.wait {
-        let wait_deadline = DurationMicros::from_seconds(wait_seconds)
-            .ok()
-            .and_then(|duration| now_wall.checked_add(duration).ok())
-            .ok_or_else(|| {
-                Fail::new(Status::Invalid, ErrorKind::Invalid, "invalid wait timeout")
-            })?;
+        // Waiting to observe a lane is not a reason to give up on admitting it:
+        // creating another worktree holds the repository lock for many seconds.
+        let wait_deadline =
+            DurationMicros::from_seconds(wait_seconds.max(ADMISSION_WAIT_FLOOR_SECONDS))
+                .ok()
+                .and_then(|duration| now_wall.checked_add(duration).ok())
+                .ok_or_else(|| {
+                    Fail::new(Status::Invalid, ErrorKind::Invalid, "invalid wait timeout")
+                })?;
         initial_deadline.min(wait_deadline)
     } else {
         initial_deadline
@@ -1423,7 +1454,30 @@ pub(super) fn dispatch_inner(
 
     // Preflight is complete: create or claim the owned tree, then admit.
     let mut pinned_base = None;
-    let worktree = if owned.is_some() || command.access.worktree.is_some() {
+    let live_reader =
+        matches!(command.access.mode, Some(Mode::ReadOnly)) && command.access.worktree.is_some();
+    let worktree = if live_reader {
+        let path = command.access.worktree.as_deref().ok_or_else(|| {
+            Fail::new(
+                Status::Invalid,
+                ErrorKind::WorktreeRequired,
+                "reader worktree missing",
+            )
+        })?;
+        let source = run::resolve_reader_source(edge.roots.state.as_path(), edge.cwd, path)?;
+        let directory = provenant_os::fs::Directory::open_anchor(&source)
+            .map_err(|error| Fail::new(Status::Error, ErrorKind::Io, error.to_string()))?;
+        let metadata = directory
+            .metadata()
+            .map_err(|error| Fail::new(Status::Error, ErrorKind::Io, error.to_string()))?;
+        lane_access.source_root = Some(source.clone());
+        lane_access.source_live = true;
+        lane_access.source_identity = Some(run::SourceIdentity {
+            device: metadata.device,
+            inode: metadata.inode,
+        });
+        Some(json!({"path": source, "owned": false, "mode": "read-only"}))
+    } else if owned.is_some() || command.access.worktree.is_some() {
         let backoff = provenant_core::retry::Backoff::new(
             Duration::from_millis(100),
             2,
@@ -1663,6 +1717,16 @@ pub(super) fn dispatch_inner(
                 if network.is_some() {
                     access.network = network;
                 }
+                let mut context = context;
+                if command.risk_tier.is_some() || command.task_kind.is_some() {
+                    let labels = context.get_or_insert_with(Default::default);
+                    if labels.risk_tier.is_none() {
+                        labels.risk_tier = command.risk_tier.clone();
+                    }
+                    if labels.task_kind.is_none() {
+                        labels.task_kind = command.task_kind.clone();
+                    }
+                }
                 Submitted {
                     cloud: cloud.clone(),
                     require_skill_location,
@@ -1681,7 +1745,11 @@ pub(super) fn dispatch_inner(
                     provider_timeout: command.provider_timeout,
                     delivery_id,
                     deliver,
-                    worktree: command.access.worktree.clone(),
+                    worktree: if live_reader {
+                        None
+                    } else {
+                        command.access.worktree.clone()
+                    },
                     access,
                 }
             },
@@ -1717,6 +1785,11 @@ pub(super) fn dispatch_inner(
         })
         .collect();
     brief_warnings.extend(capability_warnings);
+    // Admission has its own budget. Start the launch and observation budget
+    // only once the run is ready to submit.
+    let deadline = command
+        .wait
+        .and_then(|seconds| Instant::now().checked_add(Duration::from_secs(seconds)));
     let (record, started) = submit_with_host_and_wait(
         &session,
         edge,
@@ -1729,7 +1802,7 @@ pub(super) fn dispatch_inner(
         },
         &call,
         None,
-        command.wait,
+        deadline,
     )?;
     let mut cloud_jobs = Vec::new();
     if let Some(placement) = cloud.as_ref() {
@@ -1821,7 +1894,11 @@ pub(super) fn dispatch_inner(
         &session,
         &record,
         &started,
-        if cloud.is_some() { None } else { command.wait },
+        if cloud.is_some() {
+            None
+        } else {
+            deadline.map(|end| end.saturating_duration_since(Instant::now()))
+        },
         edge,
         &call,
     )?;
@@ -2047,12 +2124,14 @@ pub(super) fn worktree_was_pruned(receipt: &Value, path: &Path) -> bool {
                 .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
 }
 
+#[allow(clippy::disallowed_methods)] // The caller's wait is a real deadline.
 pub(super) fn replay_owned_dispatch(
     command: &Dispatch,
     edge: &Edge<'_>,
     session: &Session,
     call: &run::Request<'_>,
     workers: &dyn provenant_confinement::worktrees::WorkerObserver,
+    deadline: Option<Instant>,
     capability_sources: &[Value],
 ) -> Result<Option<(Value, String, bool)>, Fail> {
     let Some(operation) = session.store.operation(&command.operation_id, call)? else {
@@ -2165,8 +2244,24 @@ pub(super) fn replay_owned_dispatch(
         return Err(run::RunError::OperationConflict.into());
     }
     let run = session.store.run(operation.run_id, call)?;
-    let started = launch(session, run.run_id, edge, call)?;
-    let (mut data, human, timed_out) = report(session, &run, &started, command.wait, edge, call)?;
+    let started = match deadline {
+        Some(end) => launch_with_deadline(
+            session,
+            &run,
+            edge,
+            call,
+            end.saturating_duration_since(Instant::now()),
+        )?,
+        None => launch(session, run.run_id, edge, call)?,
+    };
+    let (mut data, human, timed_out) = report(
+        session,
+        &run,
+        &started,
+        deadline.map(|end| end.saturating_duration_since(Instant::now())),
+        edge,
+        call,
+    )?;
     data["worktree"] = json!({"path": writer.worktree, "branch": branch, "owned":true});
     if let Some(settlement) = settlement {
         data["worktree_settlement"] = settlement;
@@ -2272,6 +2367,100 @@ pub fn launch(
     call: &run::Request<'_>,
 ) -> Result<Vec<run::Started>, Fail> {
     launch_prepared(session, run, edge, call, None)
+}
+
+/// The detached launcher's entry point. It reopens the admitted run and uses
+/// the ordinary host launch path, including writer custody and guardian handoff.
+pub fn launch_worker(id: RunId, provider_lease_wait: Option<u64>, edge: &Edge<'_>) -> Reply {
+    let outcome = (|| {
+        let clock = SystemClock::new();
+        let cancel = CancelToken::new();
+        let call = request(&clock, &cancel)?;
+        let session = open(edge, &call)?;
+        let started =
+            launch_prepared_with_wait(&session, id, edge, &call, None, provider_lease_wait)?;
+        Ok((json!({"started": started}), String::new()))
+    })();
+    reply("internal launch", outcome)
+}
+
+/// A waited caller gives launch to a separately reaped process, so returning
+/// cannot drop a writer lease while preparation is still in progress.
+pub(super) fn launch_with_deadline(
+    session: &Session,
+    record: &run::RunRecord,
+    edge: &Edge<'_>,
+    call: &run::Request<'_>,
+    wait: Duration,
+) -> Result<Vec<run::Started>, Fail> {
+    let executable = std::env::current_exe()
+        .map_err(|error| Fail::new(Status::Error, ErrorKind::Io, error.to_string()))?;
+    let argv = vec![
+        executable.into_os_string(),
+        "--state-dir".into(),
+        edge.roots.state.as_path().as_os_str().into(),
+        "internal".into(),
+        "launch".into(),
+        record.run_id.to_string().into(),
+        // The caller's wait also bounds a wait for an updating provider.
+        "--provider-lease-wait".into(),
+        wait.as_secs().max(1).to_string().into(),
+    ];
+    // Process startup and each admitted task need a usable receipt window
+    // even when the requested observation wait is very short.
+    let task_seconds = u64::try_from(record.task_ids.len()).unwrap_or(u64::MAX);
+    let preparation_budget =
+        Duration::from_secs(5_u64.saturating_add(task_seconds.saturating_sub(1)));
+    let result =
+        provenant_os::exec::detached_receipt(&argv, edge.cwd, wait.max(preparation_budget));
+    // Unit tests run inside a test harness, which cannot re-execute itself as
+    // the CLI. End-to-end tests exercise the actual worker process.
+    #[cfg(test)]
+    if matches!(result, Err(provenant_os::exec::ExecError::TestHarness)) {
+        return launch_prepared(session, record.run_id, edge, call, None);
+    }
+    let _ = (session, call);
+    let receipt =
+        result.map_err(|error| Fail::new(Status::Error, ErrorKind::Io, error.to_string()))?;
+    let unknown = || {
+        Fail::new(
+            Status::Error,
+            ErrorKind::LaunchUnknown,
+            format!(
+                "launch preparation: outcome unknown; rerun with --operation-id {} to recover the receipt",
+                record.operation_id
+            ),
+        )
+    };
+    // The worker holds custody and keeps preparing after this wait ends, so a
+    // launch that outlasts the wait is a lane still waiting, not a failure. The
+    // caller reports the lane's current phase from the store.
+    let Some(receipt) = receipt else {
+        return Ok(Vec::new());
+    };
+    let value: Value = serde_json::from_slice(&receipt).map_err(|_| unknown())?;
+    if let Some(error) = value.get("error").filter(|error| !error.is_null()) {
+        let kind = error["code"]
+            .as_str()
+            .and_then(|code| {
+                ErrorKind::ALL
+                    .iter()
+                    .copied()
+                    .find(|kind| kind.code() == code)
+            })
+            .unwrap_or(ErrorKind::Io);
+        let status = match kind.category() {
+            "invalid" => Status::Invalid,
+            "refused" => Status::Refused,
+            _ => Status::Error,
+        };
+        return Err(Fail::new(
+            status,
+            kind,
+            error["message"].as_str().unwrap_or("launch worker failed"),
+        ));
+    }
+    serde_json::from_value(value["data"]["started"].clone()).map_err(|_| unknown())
 }
 
 pub(super) fn launch_prepared(

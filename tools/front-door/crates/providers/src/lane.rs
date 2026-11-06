@@ -411,6 +411,7 @@ impl LaneRuntime<'_> {
         scratch: &Path,
         argv: &mut Vec<OsString>,
         allowed_tools: &str,
+        image_rules: &[String],
     ) -> Result<Vec<SetupStep>, ProviderError> {
         let mcp = match self.mcp(Harness::Claude) {
             Ok(entry) => serde_json::json!({"mcpServers": {"fabric": entry}}),
@@ -426,6 +427,9 @@ impl LaneRuntime<'_> {
         let mut settings = provenant_config::claude_lane_settings(self.executable, self.state)
             .map_err(|_| ProviderError::UnsupportedPolicy)?;
         settings["attribution"] = serde_json::json!({"commit": "", "pr": ""});
+        if !image_rules.is_empty() {
+            settings["permissions"]["allow"] = serde_json::json!(image_rules);
+        }
         let mut steps = Vec::new();
         for (flag, name, value) in [
             ("--mcp-config", "provenant-mcp.json", mcp),

@@ -389,6 +389,7 @@ fn nested_result_policy_uses_a_reliable_route_without_broadening_authority()
         },
         &RoutingContext {
             policy_account_hint: None,
+            choice_context: None,
             catalogue: &catalogue,
             config: &config,
             registry: REGISTRY,
@@ -1411,6 +1412,23 @@ fn an_account_mismatch_is_cleared_only_by_a_check_that_names_the_account() {
 #[test]
 fn registry_only_provider_resolves_prepares_and_reports_quota()
 -> Result<(), Box<dyn std::error::Error>> {
+    let spec = provenant_records::AdapterSpec::get("fixture-provider")
+        .ok_or("fixture AdapterSpec is missing")?;
+    assert!(spec.local_login);
+    assert_eq!(spec.local_account, ("fixture", "work"));
+    registry_provider_resolves_prepares_and_reports_quota("fixture-provider", "work")
+}
+
+#[test]
+fn registry_spec_drives_local_provider_preparation_and_quota()
+-> Result<(), Box<dyn std::error::Error>> {
+    registry_provider_resolves_prepares_and_reports_quota("cursor", "local")
+}
+
+fn registry_provider_resolves_prepares_and_reports_quota(
+    adapter_name: &'static str,
+    account_key: &'static str,
+) -> Result<(), Box<dyn std::error::Error>> {
     use provenant_core::{AttemptId, CancelToken, Digest, OperationId, RunId, TaskId};
     use provenant_os::exec::SystemExecutor;
     use provenant_providers::{
@@ -1419,10 +1437,10 @@ fn registry_only_provider_resolves_prepares_and_reports_quota()
     };
     use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 
-    struct Fixture;
+    struct Fixture(&'static str);
     impl Adapter for Fixture {
         fn id(&self) -> &'static str {
-            "fixture-provider"
+            self.0
         }
         fn account(
             &self,
@@ -1431,8 +1449,14 @@ fn registry_only_provider_resolves_prepares_and_reports_quota()
             Ok(provenant_providers::AccountDetection::Unknown)
         }
         fn prepare(&self, input: PrepareInput<'_>) -> Result<LaunchSpec, ProviderError> {
-            let account = input.account.ok_or(ProviderError::UnknownIdentity)?;
-            account.validate_route(input.route)?;
+            if self.0 == "cursor" {
+                assert!(
+                    input.account.is_none(),
+                    "local login must not pin an account"
+                );
+                return provenant_providers::cursor::Cursor.prepare(input);
+            }
+            assert!(input.account.is_none(), "fixture uses its local login");
             let mut command_route = input.route.clone();
             command_route.adapter = "command".into();
             command_route.model.clear();
@@ -1487,7 +1511,7 @@ fn registry_only_provider_resolves_prepares_and_reports_quota()
     }
     impl provenant_quota::QuotaSource for Fixture {
         fn adapter_id(&self) -> &'static str {
-            "fixture-provider"
+            self.0
         }
         fn probe(
             &self,
@@ -1518,15 +1542,15 @@ fn registry_only_provider_resolves_prepares_and_reports_quota()
             })
         }
     }
-    struct Effects(std::cell::Cell<u32>);
+    struct Effects(std::cell::Cell<u32>, &'static str, &'static str);
     impl provenant_quota::QuotaEffects for Effects {
         fn accounts(
             &self,
         ) -> Result<Vec<provenant_quota::AccountScope>, provenant_quota::QuotaError> {
             Ok(vec![provenant_quota::AccountScope {
-                adapter: "fixture-provider".into(),
-                account_key: "work".into(),
-                label: "work".into(),
+                adapter: self.1.into(),
+                account_key: self.2.into(),
+                label: self.2.into(),
             }])
         }
         fn capture(
@@ -1543,12 +1567,18 @@ fn registry_only_provider_resolves_prepares_and_reports_quota()
             })
         }
     }
-    static ADAPTER: Fixture = Fixture;
+    static FIXTURE: Fixture = Fixture("fixture-provider");
+    static LOCAL: Fixture = Fixture("cursor");
+    let adapter = if adapter_name == LOCAL.0 {
+        &LOCAL
+    } else {
+        &FIXTURE
+    };
     let providers = [provenant_providers::Registration {
-        adapter: &ADAPTER,
-        quota_source: Some(&ADAPTER),
+        adapter,
+        quota_source: Some(adapter),
         quota: provenant_quota::QuotaPolicy {
-            adapter: "fixture-provider",
+            adapter: adapter_name,
             timer_seconds: 300,
             panel_seconds: 120,
             probe_seconds: 10,
@@ -1567,15 +1597,6 @@ fn registry_only_provider_resolves_prepares_and_reports_quota()
     for path in [&home, &state, &project, &assets, &git_home] {
         std::fs::DirBuilder::new().mode(0o700).create(path)?;
     }
-    let account_dir = home.join("fixture-account");
-    std::fs::create_dir(&account_dir)?;
-    std::fs::write(
-        state.join("config.toml"),
-        format!(
-            "schema_version=1\n[domains.accounts.entries.work]\nadapter='fixture-provider'\nlabel='work'\nkey='work'\ndirectory={:?}\n",
-            account_dir.to_str().ok_or("account path")?
-        ),
-    )?;
     let executor = SystemExecutor::new(1)?;
     let git = init_fixture_repository(&executor, &project, &git_home)?;
     let roots = provenant_core::RootInputs {
@@ -1583,11 +1604,11 @@ fn registry_only_provider_resolves_prepares_and_reports_quota()
         ..provenant_core::RootInputs::new(home.clone(), project.clone())
     }
     .resolve(&provenant_os::fs::SystemPathResolver)?;
-    let effects = Effects(std::cell::Cell::new(0));
+    let effects = Effects(std::cell::Cell::new(0), adapter_name, account_key);
     let report = crate::quota::execute(
         &crate::quota::Quota::Tick {
             adapter: crate::quota::Filter {
-                adapter: Some("fixture-provider".into()),
+                adapter: Some(adapter_name.into()),
             },
             trigger: crate::quota::Trigger::Manual,
             power: crate::quota::Power::Ac,
@@ -1601,7 +1622,7 @@ fn registry_only_provider_resolves_prepares_and_reports_quota()
         report
             .accounts
             .iter()
-            .any(|row| row.account.adapter == "fixture-provider"
+            .any(|row| row.account.adapter == adapter_name
                 && row.status == provenant_quota::QuotaStatus::Available)
     );
     let utility = provenant_confinement::UtilityRuntime::new(&git, &git_home)?;
@@ -1616,7 +1637,7 @@ fn registry_only_provider_resolves_prepares_and_reports_quota()
         &roots,
         provenant_config::ProjectLocation::new(repo.common_git_dir())?,
     )?;
-    let executable = assets.join("fixture-provider");
+    let executable = assets.join(adapter_name);
     std::fs::write(&executable, b"#!/bin/sh\nprintf 'fixture 1.0\\n'\n")?;
     std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700))?;
     let run_id = RunId::from_bytes([2; 16]);
@@ -1641,7 +1662,37 @@ fn registry_only_provider_resolves_prepares_and_reports_quota()
             .create(path)?;
     }
     let prompt = "fixture prompt";
-    assert!(super::super::catalogued("fixture-provider/test", None).is_ok());
+    let model = if adapter_name == "cursor" {
+        "cursor/grok-4.7".to_owned()
+    } else {
+        format!("{adapter_name}/test")
+    };
+    let readiness_dir = state.join("readiness").join(account_key);
+    std::fs::create_dir_all(&readiness_dir)?;
+    let stale = provenant_quota::ReadinessFile {
+        schema_version: 1,
+        login: None,
+        records: vec![provenant_quota::RouteReadiness {
+            schema_version: 1,
+            scope: provenant_quota::ReadinessScope {
+                host: provenant_quota::LOCAL_HOST.into(),
+                adapter: adapter_name.into(),
+                account_key: account_key.into(),
+                route: model.clone(),
+            },
+            state: provenant_quota::ReadinessState::Ready,
+            reason: None,
+            observed_unix_seconds: 1,
+            expires_unix_seconds: 2,
+            reset_unix_seconds: None,
+            evidence_ref: Some("fixture".into()),
+        }],
+    };
+    std::fs::write(
+        readiness_dir.join(format!("{adapter_name}.json")),
+        serde_json::to_vec(&stale)?,
+    )?;
+    assert!(super::super::catalogued(&model, None).is_ok());
     let task = run::TaskRequest {
         cloud: None,
         context: None,
@@ -1657,11 +1708,11 @@ fn registry_only_provider_resolves_prepares_and_reports_quota()
         prompt_digest: provenant_records::CanonicalV1::file_digest(prompt.as_bytes()),
         route: run::RequestedRoute::Model {
             extra: Default::default(),
-            provider: "fixture-provider".into(),
-            model: "fixture-provider/test".into(),
+            provider: adapter_name.into(),
+            model,
             effort: None,
         },
-        account: Some("work".into()),
+        account: Some(account_key.into()),
         fallback: vec![],
         authority_digest: Digest::from_bytes([4; 32]),
         writer: None,
@@ -1688,7 +1739,7 @@ fn registry_only_provider_resolves_prepares_and_reports_quota()
         &paths,
         None,
         &|name| {
-            if name == "fixture-provider" {
+            if name == adapter_name {
                 Ok(executable.clone())
             } else {
                 Err("unavailable".into())
@@ -1698,9 +1749,17 @@ fn registry_only_provider_resolves_prepares_and_reports_quota()
         false,
         None,
     )?;
-    assert_eq!(prepared.route.provider.as_deref(), Some("fixture-provider"));
-    assert_eq!(prepared.route.account_key.as_deref(), Some("work"));
+    assert_eq!(prepared.route.provider.as_deref(), Some(adapter_name));
+    assert_eq!(prepared.route.account_key.as_deref(), Some(account_key));
     assert!(!prepared.argv.is_empty());
+    assert!(
+        prepared
+            .route
+            .extra
+            .get("availability_warning")
+            .and_then(|v| v.as_str())
+            .is_some_and(|v| v.contains("Stale"))
+    );
     Ok(())
 }
 
@@ -2562,10 +2621,12 @@ printf 'agy 1.0.0\n'
         home.join(".codex"),
     )?;
     let codex_prompt = provenant_providers::Prompt::new("grants".into());
+    let images = vec![PathBuf::from("/outside/shot.png")];
     let codex_runtime = assets.join("provenant");
     let mut codex = provenant_providers::Adapter::prepare(
         &provenant_providers::codex::Codex,
         provenant_providers::PrepareInput {
+            images: &images,
             command: None,
             route: &codex_route,
             confined: &confinement.plan,
@@ -2594,6 +2655,12 @@ printf 'agy 1.0.0\n'
             },
         },
     )?;
+    assert!(
+        codex
+            .argv
+            .windows(2)
+            .any(|pair| pair == ["--image", "/outside/shot.png"])
+    );
     assert!(
         codex.env.iter().any(|(key, _)| key == "CARGO_TARGET_DIR"),
         "the lane builds into its own target"
@@ -3769,6 +3836,7 @@ fn read_only_plan_runs_host_git_with_a_private_home_outside_the_child_store()
         &git,
         request,
         false,
+        false,
     );
     assert!(result.is_err());
 
@@ -4053,6 +4121,7 @@ fn user_sessions_and_pruned_codex_state_remain_resumable() -> Result<(), Box<dyn
                 home.join(".codex"),
             )?;
             let launch = Codex.prepare(PrepareInput {
+                images: &[],
                 command: None,
                 route: &route,
                 confined: &plan,
@@ -4619,6 +4688,128 @@ fn explicit_write_root_keeps_read_only_git_authority() -> Result<(), Box<dyn std
     )?;
     assert!(matches!(request.permissions.mode, AccessMode::ReadOnly));
     assert_eq!(request.permissions.write_roots[0].path, write);
+    Ok(())
+}
+
+#[test]
+fn codex_attachment_argv_contains_image_flag() -> Result<(), Box<dyn std::error::Error>> {
+    use provenant_providers::Adapter;
+    let image = PathBuf::from("/outside/shot.png");
+    let access = run::LaneAccess {
+        attachments: vec![image.clone()],
+        ..Default::default()
+    };
+    let plan = ConfinedPlan::new(confinement_request(
+        ProjectId::parse("0123456789abcdef0123456789abcdef")?,
+        ConfinementRoots {
+            cwd: Path::new("/project"),
+            home: Path::new("/home/user"),
+            scratch: Path::new("/tmp/scratch"),
+            private_state: Path::new("/state/private"),
+            assets: Path::new("/release"),
+            prompt_file: None,
+        },
+        None,
+        &access,
+        &Default::default(),
+        "codex",
+        false,
+    )?)?;
+    let route = provenant_records::ResolvedRoute {
+        extra: Default::default(),
+        adapter: "codex".into(),
+        model: "fixture".into(),
+        effort: None,
+        catalogue_revision: "fixture".into(),
+        account_key: None,
+        host: "local".into(),
+        alternatives: Default::default(),
+        exclusions: Vec::new(),
+        eligibility: provenant_records::RouteEligibility::Eligible,
+        readiness: provenant_records::RouteReadiness::Ready {
+            extra: Default::default(),
+            availability_ref: "fixture".into(),
+            expires_unix_seconds: 100,
+        },
+        confidentiality: provenant_records::RouteConfidentiality {
+            extra: Default::default(),
+            evidence_ref: "fixture".into(),
+        },
+        pool_selection: None,
+    };
+    let prompt = Prompt::new("describe".into());
+    let launch = provenant_providers::codex::Codex.prepare(PrepareInput {
+        images: &access.attachments,
+        command: None,
+        route: &route,
+        confined: &plan,
+        prompt: &prompt,
+        continuation: None,
+        grant_digest: "fixture",
+        executable: Path::new("/opt/homebrew/Cellar/codex/fixture/bin/codex"),
+        home: Path::new("/home/user"),
+        user: "fixture".as_ref(),
+        host_var: &|_| None,
+        skill_stage_max_bytes: 0,
+        account: None,
+        token: None,
+        cwd: Path::new("/project"),
+        git_context: false,
+        nonce: [0; 16],
+        provenant: LaneRuntime {
+            executable: Path::new("/fixture/provenant/bin/provenant"),
+            git: Path::new("/usr/bin/git"),
+            state: Path::new("/state"),
+            child_state: Path::new("/state/children"),
+            home: Path::new("/home/user"),
+            depth: 1,
+            attempt: provenant_core::AttemptId::from_bytes([7; 16]),
+            assets: Path::new("/release"),
+        },
+    })?;
+    assert!(
+        launch
+            .argv
+            .windows(2)
+            .any(|pair| pair == ["--image", "/outside/shot.png"])
+    );
+    Ok(())
+}
+
+#[test]
+fn attachment_read_grant_is_exact() -> Result<(), Box<dyn std::error::Error>> {
+    let image = PathBuf::from("/outside/image.png");
+    let access = run::LaneAccess {
+        attachments: vec![image.clone()],
+        ..Default::default()
+    };
+    let request = confinement_request(
+        ProjectId::parse("0123456789abcdef0123456789abcdef")?,
+        ConfinementRoots {
+            cwd: Path::new("/project"),
+            home: Path::new("/home/user"),
+            scratch: Path::new("/tmp/scratch"),
+            private_state: Path::new("/state/private"),
+            assets: Path::new("/release"),
+            prompt_file: None,
+        },
+        None,
+        &access,
+        &Default::default(),
+        "cursor",
+        false,
+    )?;
+    assert!(request.permissions.read_roots.contains(&PathGrant {
+        path: image,
+        scope: PathScope::Exact
+    }));
+    assert!(
+        !request
+            .permissions
+            .read_roots
+            .iter()
+            .any(|grant| grant.path == Path::new("/outside"))
+    );
     Ok(())
 }
 

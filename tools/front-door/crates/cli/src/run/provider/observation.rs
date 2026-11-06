@@ -336,7 +336,7 @@ pub(super) fn with_alternative(
     alternative: &RouteAlternative,
 ) -> ResolvedRoute {
     ResolvedRoute {
-        extra: Default::default(),
+        extra: alternative.extra.clone(),
         adapter: alternative.adapter.clone(),
         model: alternative.model.clone(),
         effort: alternative.effort.clone(),

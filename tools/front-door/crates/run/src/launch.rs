@@ -517,7 +517,7 @@ enum HandOff {
     /// The guardian may have received the launch.
     Uncertain(String),
 }
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub enum Started {
     Launched(AttemptId),
     /// Held child custody is full, or a policy retry's launch time has not
@@ -539,7 +539,7 @@ pub enum Started {
         error: String,
     },
 }
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum RefusalKind {
     Policy,
     Preparation,
@@ -605,9 +605,12 @@ fn child_access_within_impl(
         ));
     }
     // A child cannot select a different host-bound graph source.
-    if (child.access.source_root.is_some() || child.access.source_identity.is_some())
+    if (child.access.source_root.is_some()
+        || child.access.source_identity.is_some()
+        || child.access.source_live)
         && (child.access.source_root != parent.access.source_root
-            || child.access.source_identity != parent.access.source_identity)
+            || child.access.source_identity != parent.access.source_identity
+            || child.access.source_live != parent.access.source_live)
     {
         return Err(RunError::Validation(
             "child graph source exceeds parent access",
@@ -683,6 +686,22 @@ fn child_access_within_impl(
                 .is_some_and(|root| granted.iter().any(|parent| root.starts_with(parent)))
         })
     };
+    // A parent file grant authorises only that file; directory grants cover descendants.
+    for attachment in &child.access.attachments {
+        let canonical = provenant_os::fs::canonicalize(attachment)
+            .ok()
+            .filter(|path| path == attachment && path.is_file())
+            .filter(|path| access_root_allowed(path, &state, true))
+            .filter(|path| !provenant_confinement::refuses_lane_root(path, true, home));
+        if !canonical.is_some_and(|path| {
+            parent.access.attachments.contains(&path)
+                || reads.iter().any(|root| path.starts_with(root))
+        }) {
+            return Err(RunError::Validation(
+                "child attachment exceeds parent access",
+            ));
+        }
+    }
     if !within(&child.access.write_roots, &writes, false)
         || !within(&child.access.read_roots, &reads, true)
     {
@@ -695,6 +714,28 @@ fn child_access_within_impl(
 mod release_root_tests {
     use super::*;
     use std::path::Path;
+
+    #[test]
+    fn child_attachment_must_be_covered_by_parent()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = std::fs::canonicalize(temp.path())?;
+        let state = tempfile::tempdir()?;
+        let state = std::fs::canonicalize(state.path())?.join("state");
+        let first = root.join("first.png");
+        let second = root.join("second.png");
+        std::fs::write(&first, b"first")?;
+        std::fs::write(&second, b"second")?;
+        let mut parent = crate::tests::input().request.tasks.remove(0);
+        parent.access.attachments = vec![first.clone()];
+        let mut child = parent.clone();
+        assert!(child_access_within(&parent, &child, &state, None).is_ok());
+        child.access.attachments = vec![second.clone()];
+        assert!(child_access_within(&parent, &child, &state, None).is_err());
+        parent.access.read_roots.push(root.clone());
+        assert!(child_access_within(&parent, &child, &state, None).is_ok());
+        Ok(())
+    }
 
     /// A read root in a Codex standalone release passes the shared entry
     /// exception; a write root there stays refused.
@@ -2073,4 +2114,4 @@ mod retry_pin_tests {
     }
 }
 
-mod hand_off;
+pub(crate) mod hand_off;

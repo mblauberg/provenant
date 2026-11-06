@@ -573,6 +573,7 @@ fn build_model(passive: bool, advanced: bool) -> clap::Command {
                         "worktree",
                         "deliver",
                         "read_root",
+                        "attach",
                         "write_root",
                     ])
                 });
@@ -756,15 +757,19 @@ fn validate(inv: &Invocation) -> Result<(), CliError> {
             }
             let access = &dispatch.access;
             route_valid(&dispatch.route)?;
+            let writer_target = access.worktree.is_some()
+                || dispatch.branch.is_some()
+                || dispatch.worktree_branch.is_some();
+            let explicit_reader_target = matches!(access.mode, Some(Mode::ReadOnly))
+                && access.worktree.is_some()
+                && dispatch.branch.is_none()
+                && dispatch.worktree_branch.is_none();
             if dispatch.preset.is_none()
-                && (access.mode() == Mode::WorktreeWrite)
-                    != (access.worktree.is_some()
-                        || dispatch.branch.is_some()
-                        || dispatch.worktree_branch.is_some())
+                && (access.mode() == Mode::WorktreeWrite) != writer_target
+                && !explicit_reader_target
             {
                 return invalid(
-                    "--worktree, --worktree-branch, or a peer writer's --branch, is required with, and only valid \
-                     for, --mode worktree-write",
+                    "a writer needs --worktree, --worktree-branch, or a peer --branch; a reader may name --worktree with --mode read-only",
                 );
             }
             if access.mode() == Mode::WorktreeWrite && !dispatch.route.fallback.is_empty() {
@@ -776,7 +781,8 @@ fn validate(inv: &Invocation) -> Result<(), CliError> {
             {
                 return invalid("--concurrency requires --manifest or --preset");
             }
-            if access.read_root.len() > 32
+            if access.attach.len() > 32
+                || access.read_root.len() > 32
                 || access.write_root.len() > 32
                 || access.capability.len() > 16
                 || access.no_capability.len() > 16
@@ -1131,6 +1137,7 @@ mod tests {
         for (path, name, bounds) in [
             ("provenant run", "fallback", (0, 2)),
             ("provenant run", "read_root", (0, 32)),
+            ("provenant run", "attach", (0, 32)),
             ("provenant run", "write_root", (0, 32)),
             ("provenant run", "capability", (0, 16)),
             ("provenant cancel", "reason", (0, 256)),
@@ -1662,10 +1669,10 @@ mod tests {
     }
 
     #[test]
-    fn explicit_read_only_mode_is_not_promoted_to_a_writer_by_a_target() {
+    fn worktree_access_explicit_read_only_is_not_promoted_to_a_writer() {
         // Regression: `--mode read-only --worktree` was rewritten to
         // worktree-write, so a read-only-policy model was refused as a write.
-        invalid(&[
+        let reader = valid(&[
             "run",
             "--model",
             "agy/gemini-3.8-flash",
@@ -1676,6 +1683,10 @@ mod tests {
             "--prompt-file",
             "p.md",
         ]);
+        let Command::Run(request) = reader.command else {
+            panic!("run")
+        };
+        assert_eq!(request.access.mode(), Mode::ReadOnly);
         let inv = valid(&[
             "run",
             "--model",
@@ -2014,6 +2025,10 @@ mod tests {
             "/fixture/source",
             "--read-root",
             "/fixture/other",
+            "--attach",
+            "/fixture/first.png",
+            "--attach",
+            "/fixture/second.png",
             "--wait",
             "30m",
             "--concurrency",
@@ -2030,6 +2045,13 @@ mod tests {
             Some(std::path::PathBuf::from("/fixture/writer"))
         );
         assert_eq!(request.access.read_root.len(), 2);
+        assert_eq!(
+            request.access.attach,
+            [
+                std::path::PathBuf::from("/fixture/first.png"),
+                std::path::PathBuf::from("/fixture/second.png")
+            ]
+        );
         for concurrency in ["0", "17"] {
             invalid(&[
                 "run",
@@ -2107,7 +2129,7 @@ mod tests {
     fn pool_effort_is_refused_only_when_no_member_takes_it() {
         assert!(run::pool_effort_refusal(&["cursor", "codex"], "high").is_none());
         assert!(run::pool_effort_refusal(&["cursor"], "high").is_some());
-        assert!(run::pool_effort_refusal(&["cursor", "fixture-provider"], "high").is_none());
+        assert!(run::pool_effort_refusal(&["cursor", "unregistered-provider"], "high").is_none());
         assert!(run::pool_effort_refusal(&[], "high").is_none());
     }
     #[test]

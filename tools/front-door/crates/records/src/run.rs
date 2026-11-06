@@ -159,6 +159,10 @@ pub struct WorkContext {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub work_item: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub risk_tier: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub graph_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub node_id: Option<String>,
@@ -186,6 +190,8 @@ impl WorkContext {
     pub fn valid(&self) -> bool {
         [
             &self.work_item,
+            &self.risk_tier,
+            &self.task_kind,
             &self.graph_id,
             &self.node_id,
             &self.preset,
@@ -290,6 +296,9 @@ pub struct LaneAccess {
     pub database_ipc: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub read_roots: Vec<std::path::PathBuf>,
+    /// Canonical image files explicitly supplied to this lane.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<std::path::PathBuf>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub write_roots: Vec<std::path::PathBuf>,
     /// A graph node's materialised upstream results, read-only. The host
@@ -300,6 +309,9 @@ pub struct LaneAccess {
     /// Host-verified graph source checkout for a read-only launch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_root: Option<std::path::PathBuf>,
+    /// Use the verified source checkout directly, without a writer lease.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub source_live: bool,
     /// Filesystem identity of the bound source directory at admission.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_identity: Option<SourceIdentity>,

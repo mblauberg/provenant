@@ -27,7 +27,7 @@ fn select(parameters: Value, list: Vec<Value>, caller_supplied: bool) -> Vec<Val
     }
     StageBuilder {
         layers: &layers,
-        name: "review-council",
+        name: "review",
         prompt: "",
         parameters,
         roles: None,
@@ -136,9 +136,12 @@ fn review_spec_states_only_what_the_stage_sets() {
     layers.review = Some(selector(review));
     let spec = |parameters: Value| {
         let (mut stack, mut origins, mut repo_files) = (Vec::new(), BTreeMap::new(), Vec::new());
+        if parameters.get("lenses").is_some() {
+            origins.insert("parameters.lenses".into(), "cli".into());
+        }
         StageBuilder {
             layers: &layers,
-            name: "review-council",
+            name: "review",
             prompt: "",
             parameters,
             roles: None,
@@ -147,7 +150,11 @@ fn review_spec_states_only_what_the_stage_sets() {
             repo_files: &mut repo_files,
             scope: "",
         }
-        .review_spec()
+        .review_spec(
+            json!({"min_successful":"${min_reviews}", "reduce_verdict":true, "export_first":["commit"]})
+                .as_object()
+                .unwrap(),
+        )
         .map(|spec| serde_json::to_value(spec).unwrap())
         .unwrap()
     };
@@ -167,11 +174,13 @@ fn review_spec_states_only_what_the_stage_sets() {
     // The host measures an unset size at launch; no placeholder is recorded as an override.
     assert!(spec_json["size"].is_null());
     assert_eq!(spec_json["min_successful"], 2);
+    assert_eq!(spec_json["reduce_verdict"], true);
+    assert_eq!(spec_json["export_first"], json!(["commit"]));
     assert_eq!(spec_json["lenses"][0]["tier"], table);
     assert!(spec_json["lenses"][1]["tier"].is_null());
     assert_eq!(spec_json["lenses"][1]["when"], "security");
-    // The root, test-marker lens and a possible changed-path lens are budgeted.
-    assert_eq!(spec_json["max_nodes"], 5);
+    // The reservation includes the root and potential path-floor additions.
+    assert!(spec_json["max_nodes"].as_u64().unwrap() >= 5);
 
     let sized = spec(json!({"size": "large", "min_reviews": 2}));
     assert_eq!(sized["size"], "large");
@@ -189,7 +198,7 @@ fn unknown_size_reads_pending_only_when_launch_measures_it() {
 }
 
 #[test]
-fn default_preset_scans_test_paths_without_changing_shape_selection() {
+fn default_preset_uses_configured_path_shape_and_test_lens() {
     let mut review = ReviewConfig::default();
     review
         .select
@@ -214,14 +223,14 @@ fn default_preset_scans_test_paths_without_changing_shape_selection() {
         ..Default::default()
     })
     .unwrap();
-    assert_eq!(hint.name, "quick");
+    assert_eq!(hint.name, "deep");
     assert!(
         hint.source.contains("by_paths:**/tests/**"),
         "{}",
         hint.source
     );
     assert!(hint.source.contains("test-marker"), "{}", hint.source);
-    assert_eq!(hint.plan.add, ["tests"]);
+    assert!(hint.plan.add.iter().any(|lens| lens == "tests"));
 }
 
 #[test]
@@ -234,5 +243,165 @@ fn plan_additions_are_included_once_even_when_lenses_are_caller_supplied() {
             serde_json::json!({"name": "review"}),
             serde_json::json!({"name": "tests"})
         ]
+    );
+}
+
+#[test]
+fn explicit_selection_range_uses_its_own_tip_for_paths_and_size() {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    let seen = Rc::new(RefCell::new(Vec::<Vec<String>>::new()));
+    let captured = seen.clone();
+    let selector = review_selector_with_git(
+        ReviewConfig::default(),
+        PathBuf::from("/repo"),
+        None,
+        Box::new(move |_, args| {
+            captured
+                .borrow_mut()
+                .push(args.iter().map(|arg| (*arg).to_owned()).collect());
+            Ok(match args[0] {
+                "diff" if args.contains(&"--name-only") => "src/tests/a.rs\0".into(),
+                "diff" if args.contains(&"--numstat") => "1\t0\tsrc/tests/a.rs\n".into(),
+                _ => String::new(),
+            })
+        }),
+    );
+    let hint = selector(&ShapeQuery {
+        range: Some("main..other"),
+        head: Some("reviewed"),
+        ..Default::default()
+    })
+    .unwrap();
+    assert!(hint.plan.change_add.iter().any(|lens| lens == "tests"));
+    let calls = seen.borrow();
+    assert!(
+        calls
+            .iter()
+            .any(|args| args.iter().any(|arg| arg == "main..other"))
+    );
+    assert!(
+        calls
+            .iter()
+            .any(|args| args == &["merge-base", "main", "other"])
+    );
+}
+
+#[test]
+fn selector_explains_protected_floor_and_pending_subject() {
+    let selector = review_selector_with_git(
+        ReviewConfig::default(),
+        PathBuf::from("/repo"),
+        None,
+        Box::new(|_, args| {
+            Ok(match args[0] {
+                "symbolic-ref" | "rev-parse" => "main\n".into(),
+                "diff" if args.contains(&"--name-only") => "src/credential_store.rs\0".into(),
+                _ => String::new(),
+            })
+        }),
+    );
+    let hint = selector(&ShapeQuery {
+        shape: Some("quick"),
+        ..Default::default()
+    })
+    .unwrap();
+    assert_eq!(hint.name, "deep");
+    assert!(hint.source.contains("security"));
+    assert!(
+        hint.warnings
+            .iter()
+            .any(|warning| warning.contains("security"))
+    );
+    assert!(
+        hint.required_floor_lenses
+            .contains(&"security-privacy".into())
+    );
+    let pending = selector(&ShapeQuery {
+        shape: Some("quick"),
+        defer: true,
+        ..Default::default()
+    })
+    .unwrap();
+    assert!(pending.source.contains("floors=pending"));
+}
+
+#[test]
+fn caller_lenses_cannot_lower_a_protected_floor() {
+    let mut layers = Layers::empty();
+    layers.review = Some(review_selector_with_git(
+        ReviewConfig::default(),
+        PathBuf::from("/repo"),
+        None,
+        Box::new(|_, args| {
+            Ok(match args[0] {
+                "symbolic-ref" | "rev-parse" => "main\n".into(),
+                "diff" if args.contains(&"--name-only") => "src/credentials.rs\0".into(),
+                _ => String::new(),
+            })
+        }),
+    ));
+    let (mut stack, mut repo_files) = (Vec::new(), Vec::new());
+    let mut origins = BTreeMap::new();
+    origins.insert("parameters.lenses".to_owned(), "cli".to_owned());
+    let builder = StageBuilder {
+        layers: &layers,
+        name: "review",
+        prompt: "",
+        parameters: json!({"review_shape":"quick"}),
+        roles: None,
+        stack: &mut stack,
+        origins: &mut origins,
+        repo_files: &mut repo_files,
+        scope: "",
+    };
+    let selected = builder
+        .select_items(vec![json!({"name":"tests","tier":"","when":""})])
+        .unwrap();
+    assert!(selected.len() >= 8);
+    assert!(
+        selected
+            .iter()
+            .any(|item| item["name"] == "security-privacy")
+    );
+    assert!(
+        layers
+            .warnings
+            .borrow()
+            .iter()
+            .any(|warning| warning.contains("security"))
+    );
+}
+
+#[test]
+fn unreadable_paths_raise_resolved_review_and_explain() {
+    let selector = review_selector_with_git(
+        ReviewConfig::default(),
+        PathBuf::from("/repo"),
+        None,
+        Box::new(|_, args| {
+            if args.contains(&"--name-only") {
+                Err("diff failed".into())
+            } else {
+                Ok("main\n".into())
+            }
+        }),
+    );
+    let hint = selector(&ShapeQuery {
+        shape: Some("quick"),
+        base: Some("main"),
+        ..Default::default()
+    })
+    .unwrap();
+    assert_eq!(hint.name, "deep");
+    assert!(hint.source.contains("unreadable"));
+    assert!(
+        hint.warnings
+            .iter()
+            .any(|w| w.contains("highest configured floor"))
+    );
+    assert!(
+        hint.required_floor_lenses
+            .contains(&"security-privacy".into())
     );
 }

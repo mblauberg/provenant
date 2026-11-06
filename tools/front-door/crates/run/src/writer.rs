@@ -34,6 +34,8 @@ pub(crate) enum WriterCustodyError {
 }
 
 pub(crate) const SETUP_WAIT_LOCK: &str = "setup-wait.lock";
+/// Held while the writer's Cargo cache is seeded, so observers can name the phase.
+pub(crate) const SEED_WAIT_LOCK: &str = "seed-wait.lock";
 
 // Serialise queue changes separately from the long-lived setup lock. Each
 // ticket is itself locked, so a killed waiter can be discarded by its peers.
@@ -687,36 +689,9 @@ impl LaunchConfinement {
         )
         .map(Some)
     }
-    pub(crate) fn command(
-        &self,
-        argv: &[OsString],
-        environment: &[(OsString, OsString)],
-        attempt: &provenant_core::AttemptId,
-        cancel: &CancelToken,
-        attempt_dir: &Directory,
-    ) -> Result<Vec<OsString>> {
-        let executor =
-            SystemExecutor::new(1).map_err(error("initialise writer system executor", None))?;
-        let limits = launch_resource_limits(&self.state_root);
-        let backend = system_backend_with_limits(
-            &BackendContext {
-                executor: &executor,
-                cancel,
-                #[cfg(target_os = "macos")]
-                env: &[],
-            },
-            limits.limits,
-        )
-        .map_err(RunError::Confinement)?;
+    /// Prepare the private Cargo caches while writer custody is held.
+    pub(crate) fn seed_cargo(&self, environment: &[(OsString, OsString)], attempt_dir: &Directory) {
         let writer = self.writer.as_ref().map(|w| (&w.worktree, &w.branch));
-        // Run holds writer custody here: create the derived ref parents and the
-        // private lane cache before they are anchored.
-        if let (Some((worktree, branch)), AccessMode::WorktreeWrite(authority)) =
-            (writer, &self.plan.permissions().mode)
-        {
-            prepare_writer_directories(worktree, branch, authority, &self.home)
-                .map_err(RunError::Confinement)?;
-        }
         let outcome = match &self.plan.permissions().mode {
             AccessMode::WorktreeWrite(authority) => crate::cargo_seed::seed_registry(
                 self.cargo_registry_seed,
@@ -793,6 +768,40 @@ impl LaunchConfinement {
                 std::io::stderr().lock(),
                 "warning: could not record Cargo target setup: {error}"
             );
+        }
+    }
+    pub(crate) fn command(
+        &self,
+        argv: &[OsString],
+        attempt: &provenant_core::AttemptId,
+        cancel: &CancelToken,
+    ) -> Result<Vec<OsString>> {
+        let executor =
+            SystemExecutor::new(1).map_err(error("initialise writer system executor", None))?;
+        let config = provenant_confinement::run_config::RunConfig::read(&self.state_root)
+            .map_err(error("read launch resource limits", None))?;
+        let limits = ProfileLimits {
+            grant_limit: config.grant_limit,
+            profile_limit_bytes: config.profile_limit_bytes,
+        };
+        let backend = system_backend_with_limits(
+            &BackendContext {
+                executor: &executor,
+                cancel,
+                #[cfg(target_os = "macos")]
+                env: &[],
+            },
+            limits,
+        )
+        .map_err(RunError::Confinement)?;
+        let writer = self.writer.as_ref().map(|w| (&w.worktree, &w.branch));
+        // Run holds writer custody here: create the derived ref parents and the
+        // private lane cache before they are anchored.
+        if let (Some((worktree, branch)), AccessMode::WorktreeWrite(authority)) =
+            (writer, &self.plan.permissions().mode)
+        {
+            prepare_writer_directories(worktree, branch, authority, &self.home)
+                .map_err(RunError::Confinement)?;
         }
         let directories = required_anchors(self.plan.permissions(), &self.profile, writer)
             .into_iter()
@@ -1609,6 +1618,62 @@ mod cargo_setup_tests {
                 .map_err(|_| "second preparation panicked".to_owned())??;
             Ok::<(), String>(())
         })?;
+        // Hold a real seed in its clone callback while another writer runs
+        // Git setup. The handoff helper releases the actual repository lock.
+        let cache = root.join("held-seed-cache");
+        std::fs::create_dir(&cache)?;
+        std::thread::scope(
+            |scope| -> std::result::Result<(), Box<dyn std::error::Error>> {
+                let held = prepare_writer_git(
+                    &mut writer,
+                    &state,
+                    &root,
+                    None,
+                    None,
+                    &CancelToken::new(),
+                    None,
+                )?;
+                let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+                let (release_tx, release_rx) = std::sync::mpsc::channel();
+                let root_ref = &root;
+                let cache_ref = &cache;
+                let seed = scope.spawn(move || {
+                    let mut lock = Some(held);
+                    crate::launch::hand_off::seed_without_setup_lock(&mut lock, || {
+                        crate::cargo_seed::seed_with(root_ref, cache_ref, |_, _| {
+                            entered_tx.send(()).unwrap();
+                            provenant_test_support::wait_for(
+                                "release seed",
+                                Duration::from_secs(30),
+                                || release_rx.try_recv().is_ok(),
+                                |ready| *ready,
+                            )
+                            .unwrap();
+                            Ok(())
+                        });
+                    });
+                });
+                provenant_test_support::wait_for(
+                    "seed entered",
+                    Duration::from_secs(30),
+                    || entered_rx.try_recv().is_ok(),
+                    |ready| *ready,
+                )?;
+                let result = prepare_writer_git(
+                    &mut second,
+                    &state,
+                    &root,
+                    None,
+                    None,
+                    &CancelToken::new(),
+                    None,
+                );
+                release_tx.send(())?;
+                result.map(drop)?;
+                seed.join().map_err(|_| "seed panicked")?;
+                Ok(())
+            },
+        )?;
         // A busy repository lock honours the configured bound and identifies
         // the setting that controls it, without changing the lock's inode.
         std::fs::write(

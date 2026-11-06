@@ -1,18 +1,19 @@
 [package]
 name = "provenant-run"
-version = "1.6.5"
+version = "1.6.6"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish = false
 
 [features]
-fixture = []
+fixture = ["dep:provenant-test-support"]
 
 [lints]
 workspace = true
 
 [dependencies]
+provenant-test-support = { path = "../test-support", optional = true }
 provenant-os = { workspace = true }
 provenant-confinement = { workspace = true }
 provenant-core = { workspace = true }

@@ -441,7 +441,7 @@ fn remote_landing_push_preserves_definitive_store_refusal() -> Result {
     assert_eq!(response["result"]["data"]["error"]["code"], "stale_fence");
     assert_ne!(
         response["result"]["data"]["error"]["code"],
-        "launch_unknown"
+        "LAUNCH_UNKNOWN"
     );
     rig.assert_legacy_unchanged()
 }
@@ -1066,7 +1066,10 @@ fn graph_persists_auth_and_usage_refusals_before_fallback() -> Result {
         match scenario {
             "authority" => assert!(reason.contains("single regular file"), "{reason}"),
             "refresh" => assert!(reason.contains("stored credential JSON"), "{reason}"),
-            "quota" => assert!(reason.contains("Exhausted"), "{reason}"),
+            "quota" => assert!(
+                reason.to_ascii_lowercase().contains("exhausted"),
+                "{reason}"
+            ),
             _ => unreachable!(),
         }
         cleanup.disarm();
@@ -1860,7 +1863,7 @@ fn run_status_and_wait_read_the_owner_store_and_event_pull_deduplicates() -> Res
     );
 
     for (returned, expected) in [
-        ("local-stop", "launch_unknown"),
+        ("local-stop", "LAUNCH_UNKNOWN"),
         ("unrelated", "state_corrupt"),
     ] {
         response.result = provenant_fabric_runtime::hosts::PeerResult::Error {
@@ -2289,7 +2292,7 @@ fn run_status_and_wait_read_the_owner_store_and_event_pull_deduplicates() -> Res
                 },
                 extra: Default::default(),
             },
-            Some("launch_unknown"),
+            Some("LAUNCH_UNKNOWN"),
         ),
     ];
     for (reply, expected) in replies {
@@ -2316,7 +2319,7 @@ fn run_status_and_wait_read_the_owner_store_and_event_pull_deduplicates() -> Res
             if let Some(expected) = expected {
                 assert_ne!(status, 0, "{op}: {result}");
                 assert_eq!(result["error"]["code"], expected, "{op}: {result}");
-                if expected == "launch_unknown" {
+                if expected == "LAUNCH_UNKNOWN" {
                     assert_eq!(result["data"]["operation_id"], "landing-local");
                 }
                 if expected == "QUEUE_FULL" {
@@ -3206,7 +3209,7 @@ fn inbox_all_projects_reads_and_answers_through_peers() -> Result {
         ],
     )?;
     assert_ne!(status, 0);
-    assert_eq!(close["error"]["code"], "owner_local_only");
+    assert_eq!(close["error"]["code"], "OWNER_LOCAL_ONLY");
     Ok(())
 }
 
@@ -3576,11 +3579,11 @@ fn remote_inbox_owner() -> Result {
     for (input, expected) in [
         (
             json!({"op":"close","id":other,"state":"withdrawn","reason":"forged","expect_revision":1,"operation_id":"forged-close"}),
-            "owner_local_only",
+            "OWNER_LOCAL_ONLY",
         ),
         (
             json!({"op":"acknowledge","id":id,"answer_id":answer_id,"session":"chair-a","operation_id":"forged-ack"}),
-            "owner_local_only",
+            "OWNER_LOCAL_ONLY",
         ),
         (
             json!({"op":"ask","session":"chair-a","request":{"kind":"question","title":"Forged","body":"No","blocking":false,"options":[],"recommended_option_id":null,"proceeding_with":null},"operation_id":"forged-ask"}),
@@ -3637,7 +3640,7 @@ fn remote_inbox_owner() -> Result {
         ],
     )?;
     assert_ne!(status, 0);
-    assert_eq!(close["error"]["code"], "owner_local_only");
+    assert_eq!(close["error"]["code"], "OWNER_LOCAL_ONLY");
     let (status, ack) = json_command(
         &rig,
         &[
@@ -3654,7 +3657,7 @@ fn remote_inbox_owner() -> Result {
         ],
     )?;
     assert_ne!(status, 0);
-    assert_eq!(ack["error"]["code"], "owner_local_only");
+    assert_eq!(ack["error"]["code"], "OWNER_LOCAL_ONLY");
     let (status, shown) = json_command(&rig, &["inbox", &qualified, "--json"])?;
     assert_eq!(status, 0, "{shown}");
     assert_eq!(
@@ -4007,6 +4010,74 @@ fn peer_terminal_missing_output_is_not_found() -> Result {
     );
     rig.assert_legacy_unchanged()?;
     cleanup.disarm();
+    Ok(())
+}
+
+#[test]
+fn peer_dispatch_recovers_receipt_when_probes_fail() -> Result {
+    let mut rig = TestRig::new()?;
+    let peer = loopback_peer(&mut rig)?;
+    let ssh = rig.root.join("ssh");
+    let real = rig.root.join("ssh-real");
+    std::fs::rename(&ssh, &real)?;
+    let lost = rig.root.join("lost-submit");
+    std::fs::write(
+        &ssh,
+        format!(
+            "#!/bin/sh\nrequest=$(cat)\ncase \"$request\" in\n  *'\"action\":\"health\"'*) exit 1;;\n  *'\"action\":\"submit\"'*) if [ -f '{}' ]; then printf '%s\\n' \"$request\" | '{}' >/dev/null; rm '{}'; exit 1; fi;;\nesac\nprintf '%s\\n' \"$request\" | '{}'\n",
+            lost.display(),
+            real.display(),
+            lost.display(),
+            real.display()
+        ),
+    )?;
+    std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o700))?;
+    let prompt = rig.root.join("prompt.txt");
+    std::fs::write(&prompt, "fixture")?;
+    let prompt = prompt.to_str().ok_or("prompt")?;
+    let dispatch = |operation| {
+        json_command(
+            &rig,
+            &[
+                "dispatch",
+                "--host",
+                "workshop",
+                "--mode",
+                "read-only",
+                "--model",
+                "codex/gpt-6-luna",
+                "--operation-id",
+                operation,
+                "--prompt-file",
+                prompt,
+                "--json",
+            ],
+        )
+    };
+    let (status, success) = dispatch("probe-failure-success")?;
+    assert_eq!(status, 0, "{success}");
+    assert_eq!(success["data"]["host"], peer.to_string());
+    let runs = rig.root.join("peer-state/runs");
+    let existing: std::collections::HashSet<_> = std::fs::read_dir(&runs)?
+        .map(|entry| entry.map(|entry| entry.file_name()))
+        .collect::<std::io::Result<_>>()?;
+    std::fs::write(&lost, "")?;
+    let (status, unknown) = dispatch("probe-failure-retry")?;
+    assert_ne!(status, 0, "{unknown}");
+    assert_eq!(unknown["error"]["code"], "LAUNCH_UNKNOWN", "{unknown}");
+    let after_loss: std::collections::HashSet<_> = std::fs::read_dir(&runs)?
+        .map(|entry| entry.map(|entry| entry.file_name()))
+        .collect::<std::io::Result<_>>()?;
+    let created: Vec<_> = after_loss.difference(&existing).collect();
+    assert_eq!(created.len(), 1);
+    let (status, recovered) = dispatch("probe-failure-retry")?;
+    assert_eq!(status, 0, "{recovered}");
+    assert_eq!(recovered["data"]["host"], peer.to_string());
+    assert_eq!(recovered["data"]["operation_id"], "probe-failure-retry");
+    assert_eq!(recovered["data"]["run_id"].as_str(), created[0].to_str());
+    let (status, replay) = dispatch("probe-failure-retry")?;
+    assert_eq!(status, 0, "{replay}");
+    assert_eq!(replay["data"]["run_id"], recovered["data"]["run_id"]);
     Ok(())
 }
 
@@ -4761,6 +4832,58 @@ fn peer_writer_reports_delivery_prepare_failure() -> Result {
 }
 
 #[test]
+#[allow(clippy::disallowed_methods)] // Exercise the real wait deadline.
+fn peer_dispatch_wait_bounds_unanswered_submission() -> Result {
+    let mut rig = TestRig::new()?;
+    let _peer = loopback_peer(&mut rig)?;
+    std::fs::write(
+        rig.root.join("ssh"),
+        "#!/bin/sh\nexec /usr/bin/tail -f /dev/null\n",
+    )?;
+    let prompt = rig.root.join("prompt.txt");
+    std::fs::write(&prompt, "fixture")?;
+    let start = std::time::Instant::now();
+    let (status, result) = json_command(
+        &rig,
+        &[
+            "dispatch",
+            "--host",
+            "workshop",
+            "--mode",
+            "read-only",
+            "--model",
+            "codex/gpt-6-luna",
+            "--operation-id",
+            "held-submit",
+            "--prompt-file",
+            prompt.to_str().ok_or("prompt")?,
+            "--wait",
+            "1s",
+            "--json",
+        ],
+    )?;
+    assert_ne!(status, 0, "{result}");
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(6),
+        "{result}"
+    );
+    assert_eq!(result["error"]["code"], "LAUNCH_UNKNOWN", "{result}");
+    assert!(
+        result["error"]["message"]
+            .as_str()
+            .is_some_and(|s| s.contains("launch preparation")),
+        "{result}"
+    );
+    assert!(
+        result["error"]["message"]
+            .as_str()
+            .is_some_and(|s| s.contains("held-submit")),
+        "{result}"
+    );
+    Ok(())
+}
+
+#[test]
 fn peer_writer_creates_its_worktree_from_a_pushed_base() -> Result {
     let mut rig = TestRig::new()?;
     let cleanup = rig.process_cleanup();
@@ -4821,6 +4944,28 @@ fn peer_writer_creates_its_worktree_from_a_pushed_base() -> Result {
             ],
         )
     };
+    // A disk-floor refusal happens after the peer creates the worktree but
+    // before the run starts. A new operation can reuse the same branch.
+    let peer_config = rig.root.join("peer-state/config.toml");
+    let config = std::fs::read_to_string(&peer_config)?;
+    std::fs::write(
+        &peer_config,
+        config.replace("free_floor='1B'", "free_floor='18446744073709551615B'"),
+    )?;
+    let (status, refused) = dispatch("peer-floor-refused", "floor-retry", "origin/main")?;
+    assert_ne!(status, 0, "{refused}");
+    assert_eq!(refused["error"]["code"], "REFUSED", "{refused}");
+    assert!(
+        refused["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("insufficient disk space")),
+        "{refused}"
+    );
+    std::fs::write(&peer_config, &config)?;
+    let (status, retry) = dispatch("peer-floor-retry", "floor-retry", "origin/main")?;
+    assert_eq!(status, 0, "{retry}");
+    assert_eq!(retry["data"]["worktree"]["branch"], "floor-retry");
+
     let (status, placed) = dispatch("peer-writer", "peer/writer", "origin/main")?;
     assert_eq!(
         status,
@@ -4869,9 +5014,12 @@ fn peer_writer_creates_its_worktree_from_a_pushed_base() -> Result {
     assert_ne!(adopted["data"]["run_id"], run.as_str());
     assert_eq!(adopted["data"]["worktree"], *worktree);
     git(&rig, path, &["commit", "-q", "--allow-empty", "-m", "work"])?;
+    let committed = git(&rig, path, &["rev-parse", "HEAD"])?;
     let (status, taken) = dispatch("peer-writer-again", "peer/writer", "origin/main")?;
     assert_ne!(status, 0);
     assert_eq!(taken["error"]["code"], "BRANCH_EXISTS", "{taken}");
+    assert!(taken.to_string().contains("was kept"), "{taken}");
+    assert_eq!(git(&rig, path, &["rev-parse", "HEAD"])?, committed);
     let (status, unreachable) = dispatch("peer-writer-local", "peer/local", &unpushed)?;
     assert_ne!(status, 0);
     assert_eq!(

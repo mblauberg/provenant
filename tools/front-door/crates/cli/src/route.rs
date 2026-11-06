@@ -75,7 +75,7 @@ pub enum RouteOverrideCommand {
     Clear(OverrideClear),
 }
 #[derive(Debug, Args)]
-#[command(group(clap::ArgGroup::new("scope").required(true).args(["account", "provider", "all"])))]
+#[command(group(clap::ArgGroup::new("scope").args(["account", "provider", "all"])))]
 pub struct OverrideSet {
     /// Apply the override to this account (label, entry or adapter/key).
     #[arg(long)]
@@ -87,8 +87,15 @@ pub struct OverrideSet {
     #[arg(long)]
     pub all: bool,
     /// Pacing policy while the override is active.
-    #[arg(long)]
-    pub policy: PacingChoice,
+    #[arg(long, required_unless_present = "model")]
+    pub policy: Option<PacingChoice>,
+    /// Exact preferred model for a risk/task stratum.
+    #[arg(long, conflicts_with_all = ["account", "provider", "all", "policy", "starts", "window", "tz"], requires_all = ["risk_tier", "task_kind", "until"])]
+    pub model: Option<Model>,
+    #[arg(long, requires = "model")]
+    pub risk_tier: Option<String>,
+    #[arg(long, requires = "model")]
+    pub task_kind: Option<String>,
     /// First active instant: an RFC 3339 timestamp or a duration from now (e.g. 30m).
     #[arg(long)]
     pub starts: Option<String>,
@@ -112,6 +119,11 @@ pub struct OverrideClear {
     /// Clear only this provider's override.
     #[arg(long, conflicts_with = "account")]
     pub provider: Option<String>,
+    /// Revoke the model preference for a risk and task stratum.
+    #[arg(long, requires = "task_kind", conflicts_with_all = ["account", "provider"])]
+    pub risk_tier: Option<String>,
+    #[arg(long, requires = "risk_tier", conflicts_with_all = ["account", "provider"])]
+    pub task_kind: Option<String>,
 }
 #[derive(Debug, Args)]
 pub struct RouteListRequest {
@@ -631,6 +643,20 @@ pub struct OverrideRow {
     pub remaining_seconds: Option<i64>,
 }
 impl OverrideRow {
+    fn model_choice(row: &provenant_routing::ModelChoiceOverride, now: WallTime) -> Self {
+        let schedule = provenant_routing::Schedule {
+            expires: row.expires,
+            ..Default::default()
+        };
+        Self {
+            kind: "model_choice",
+            scope: format!("{} {} {}", row.dimension, row.risk_tier, row.task_kind),
+            value: row.preferred.as_str().into(),
+            active: schedule.active(now),
+            remaining_seconds: schedule.remaining(now),
+            schedule,
+        }
+    }
     fn model_exclusion(row: &provenant_routing::ModelExclusion, now: WallTime) -> Self {
         Self {
             kind: "model_exclusion",
@@ -1203,6 +1229,7 @@ fn with_context<T>(
     action(
         &RoutingContext {
             policy_account_hint: None,
+            choice_context: None,
             catalogue: &catalogue,
             config: &config,
             registry,
@@ -1273,6 +1300,7 @@ pub(crate) fn resolve_dispatch(
         excluded_families,
         rules,
         &[],
+        None,
     )
 }
 
@@ -1289,6 +1317,7 @@ pub(crate) fn resolve_dispatch_rejecting(
     excluded_families: Option<(&[String], bool, &[String])>,
     rules: &[provenant_routing::ExclusionRule],
     rejected: &[ModelId],
+    choice_context: Option<(&str, &str)>,
 ) -> Result<provenant_records::ResolvedRoute, DispatchError> {
     let catalogue = Catalogue::bundled()?;
     let (excluded_families, required, preferred) = match excluded_families {
@@ -1328,6 +1357,7 @@ pub(crate) fn resolve_dispatch_rejecting(
         host,
         &with_rejected(&combined),
         rules,
+        choice_context,
     );
     // The unused families have no member to take: none is eligible, or the one
     // chosen is blocked by persisted account evidence (mismatch or refusal). A
@@ -1356,6 +1386,7 @@ pub(crate) fn resolve_dispatch_rejecting(
             host,
             &with_rejected(&excluded),
             rules,
+            choice_context,
         );
         match (relaxed, selected) {
             // Keep the preferred-stage route when relaxing would only trade one
@@ -1393,6 +1424,7 @@ pub(crate) fn resolve_dispatch_rejecting(
             host,
             rejected,
             rules,
+            choice_context,
         );
         match (relaxed, selected) {
             // Relaxing must not trade a spent route for another one.
@@ -1450,6 +1482,7 @@ fn resolve_dispatch_excluding(
     host: &str,
     initial_exclusions: &[ModelId],
     rules: &[provenant_routing::ExclusionRule],
+    choice_context: Option<(&str, &str)>,
 ) -> Result<provenant_records::ResolvedRoute, EdgeError> {
     let mut requested_models = Vec::new();
     if let RouteChoice::Model(model) = &request.choice {
@@ -1467,6 +1500,11 @@ fn resolve_dispatch_excluding(
         &requested_models,
         true,
         |context, records, policies, _| {
+            let scoped = RoutingContext {
+                choice_context,
+                ..*context
+            };
+            let context = &scoped;
             let mut excluded_members = initial_exclusions.to_vec();
             let mut refusals = Vec::new();
             // Resolution already skips persisted mismatch and refusals, so this
@@ -2120,7 +2158,100 @@ fn same_scope(
     recorded.as_deref() == account && row.provider.as_deref() == provider
 }
 
+fn set_model_choice(
+    roots: &Roots,
+    request: &OverrideSet,
+    model: &Model,
+    now: WallTime,
+) -> Result<Data, EdgeError> {
+    let risk = request
+        .risk_tier
+        .as_deref()
+        .ok_or(EdgeError::Pacing("--risk-tier is required"))?;
+    let task = request
+        .task_kind
+        .as_deref()
+        .ok_or(EdgeError::Pacing("--task-kind is required"))?;
+    let expires = request
+        .until
+        .as_deref()
+        .and_then(|value| instant(value, now))
+        .filter(|end| *end > now)
+        .ok_or(EdgeError::Pacing("--until must be a future expiry"))?;
+    let row = provenant_routing::ModelChoiceOverride {
+        dimension: "model".into(),
+        risk_tier: risk.into(),
+        task_kind: task.into(),
+        preferred: ModelId::parse(&model.0)?,
+        expires: Some(expires),
+    };
+    let mut validation = provenant_routing::RoutingConfig::default();
+    validation.model_choices.push(row.clone());
+    if !provenant_config::DomainConfig::validate(&validation).is_empty() {
+        return Err(EdgeError::Pacing("invalid risk tier or task kind"));
+    }
+    let mut removed = Vec::new();
+    edit_config(roots, |document| {
+        let routing = routing_table(document)?;
+        let rows = match routing.remove("model_choices") {
+            None => Vec::new(),
+            Some(toml_edit::Item::Value(toml_edit::Value::Array(values))) => values
+                .into_iter()
+                .map(|v| match v {
+                    toml_edit::Value::InlineTable(t) => Ok(t),
+                    _ => Err("model_choices must be an array of tables"),
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+            Some(toml_edit::Item::ArrayOfTables(values)) => values
+                .into_iter()
+                .map(toml_edit::Table::into_inline_table)
+                .collect(),
+            _ => return Err("model_choices must be an array of tables"),
+        };
+        let mut kept = toml_edit::Array::new();
+        for value in rows {
+            let decoded = toml_edit::de::from_document::<provenant_routing::ModelChoiceOverride>(
+                toml_edit::DocumentMut::from(value.clone().into_table()),
+            )
+            .ok();
+            if let Some(existing) = decoded
+                && existing.dimension == row.dimension
+                && existing.risk_tier == row.risk_tier
+                && existing.task_kind == row.task_kind
+            {
+                removed.push(existing);
+            } else {
+                kept.push(value);
+            }
+        }
+        let mut value = toml_edit::InlineTable::new();
+        value.insert("dimension", row.dimension.as_str().into());
+        value.insert("risk_tier", row.risk_tier.as_str().into());
+        value.insert("task_kind", row.task_kind.as_str().into());
+        value.insert("preferred", row.preferred.as_str().into());
+        value.insert("expires", expires.to_string().into());
+        kept.push(value);
+        routing.insert("model_choices", toml_edit::Item::Value(kept.into()));
+        Ok(())
+    })?;
+    Ok(Data::Overrides(Box::new(OverrideReport {
+        notes: exclusion_notes(roots)?,
+        recorded: Some(OverrideRow::model_choice(&row, now)),
+        cleared: removed
+            .iter()
+            .map(|item| OverrideRow::model_choice(item, now))
+            .collect(),
+        overrides: list_overrides(roots, now)?,
+    })))
+}
+
 fn set_override(roots: &Roots, request: &OverrideSet, now: WallTime) -> Result<Data, EdgeError> {
+    if let Some(model) = &request.model {
+        return set_model_choice(roots, request, model, now);
+    }
+    if !request.all && request.account.is_none() && request.provider.is_none() {
+        return Err(EdgeError::Pacing("a pacing scope is required"));
+    }
     if let Some(provider) = &request.provider {
         known_provider(provider)?;
     }
@@ -2174,7 +2305,10 @@ fn set_override(roots: &Roots, request: &OverrideSet, now: WallTime) -> Result<D
     let recorded = provenant_routing::PacingOverride {
         account,
         provider: request.provider.clone(),
-        policy: request.policy.into(),
+        policy: request
+            .policy
+            .ok_or(EdgeError::Pacing("--policy is required"))?
+            .into(),
         schedule,
     };
     let removed = rewrite_overrides(
@@ -2201,11 +2335,70 @@ fn set_override(roots: &Roots, request: &OverrideSet, now: WallTime) -> Result<D
     })))
 }
 
+fn clear_model_choice(
+    roots: &Roots,
+    risk: &str,
+    task: &str,
+    now: WallTime,
+) -> Result<Data, EdgeError> {
+    let mut removed = Vec::new();
+    edit_config(roots, |document| {
+        let routing = routing_table(document)?;
+        let rows = match routing.remove("model_choices") {
+            None => Vec::new(),
+            Some(toml_edit::Item::Value(toml_edit::Value::Array(values))) => values
+                .into_iter()
+                .map(|v| match v {
+                    toml_edit::Value::InlineTable(t) => Ok(t),
+                    _ => Err("model_choices must be an array of tables"),
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+            Some(toml_edit::Item::ArrayOfTables(values)) => values
+                .into_iter()
+                .map(toml_edit::Table::into_inline_table)
+                .collect(),
+            _ => return Err("model_choices must be an array of tables"),
+        };
+        let mut kept = toml_edit::Array::new();
+        for value in rows {
+            let decoded = toml_edit::de::from_document::<provenant_routing::ModelChoiceOverride>(
+                toml_edit::DocumentMut::from(value.clone().into_table()),
+            )
+            .ok();
+            if let Some(existing) = decoded
+                && existing.dimension == "model"
+                && existing.risk_tier == risk
+                && existing.task_kind == task
+            {
+                removed.push(existing);
+            } else {
+                kept.push(value);
+            }
+        }
+        if !kept.is_empty() {
+            routing.insert("model_choices", toml_edit::Item::Value(kept.into()));
+        }
+        Ok(())
+    })?;
+    Ok(Data::Overrides(Box::new(OverrideReport {
+        notes: exclusion_notes(roots)?,
+        recorded: None,
+        cleared: removed
+            .iter()
+            .map(|row| OverrideRow::model_choice(row, now))
+            .collect(),
+        overrides: list_overrides(roots, now)?,
+    })))
+}
+
 fn clear_override(
     roots: &Roots,
     request: &OverrideClear,
     now: WallTime,
 ) -> Result<Data, EdgeError> {
+    if let (Some(risk), Some(task)) = (&request.risk_tier, &request.task_kind) {
+        return clear_model_choice(roots, risk, task, now);
+    }
     let settings = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)?
         .domains
         .accounts;
@@ -2261,6 +2454,12 @@ fn list_overrides(roots: &Roots, now: WallTime) -> Result<Vec<OverrideRow>, Edge
         .iter()
         .map(|row| OverrideRow::pacing(row, now))
         .collect();
+    overrides.extend(
+        config
+            .model_choices
+            .iter()
+            .map(|row| OverrideRow::model_choice(row, now)),
+    );
     overrides.extend(
         config
             .model_exclusions
@@ -3457,6 +3656,7 @@ mod route_tests {
             )
         };
         let before = resolve(&available)?;
+        // Current recorded sign-out evidence excludes until a healthy probe clears it.
         assert!(matches!(
             before.readiness,
             provenant_records::RouteReadiness::Unavailable {
@@ -3555,6 +3755,7 @@ mod route_tests {
                 &[],
             )
         };
+        // Current recorded sign-out evidence excludes until a login probe clears it.
         assert!(matches!(
             resolve(&available)?.readiness,
             provenant_records::RouteReadiness::Unavailable {
@@ -3626,6 +3827,7 @@ mod route_tests {
             None,
             &[],
         )?;
+        // Another account's probe does not clear this account's current sign-out.
         assert!(matches!(
             zen_result.readiness,
             provenant_records::RouteReadiness::Unavailable {
@@ -3851,6 +4053,117 @@ mod route_tests {
     }
 
     #[test]
+    fn override_grammar_accepts_model_and_pacing_forms() {
+        use clap::Parser;
+        #[derive(Parser, Debug)]
+        struct Command {
+            #[command(subcommand)]
+            route: super::Route,
+        }
+        for args in [
+            vec![
+                "test",
+                "override",
+                "set",
+                "--model",
+                "codex/gpt-6-luna",
+                "--risk-tier",
+                "substantial",
+                "--task-kind",
+                "repair",
+                "--until",
+                "1h",
+            ],
+            vec![
+                "test",
+                "override",
+                "set",
+                "--provider",
+                "codex",
+                "--policy",
+                "pace",
+            ],
+            vec![
+                "test",
+                "override",
+                "clear",
+                "--risk-tier",
+                "substantial",
+                "--task-kind",
+                "repair",
+            ],
+        ] {
+            let parsed = Command::try_parse_from(args).expect("valid override command");
+            assert!(matches!(parsed.route, super::Route::Override(_)));
+        }
+        assert!(
+            Command::try_parse_from([
+                "test",
+                "override",
+                "set",
+                "--model",
+                "codex/gpt-6-luna",
+                "--risk-tier",
+                "substantial",
+                "--task-kind",
+                "repair"
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn model_override_set_and_clear_preserve_expiry_and_pacing() -> Result<(), Box<dyn Error>> {
+        struct Resolver;
+        impl provenant_core::PathResolver for Resolver {
+            fn resolve_existing_ancestor(
+                &self,
+                path: &std::path::Path,
+            ) -> std::io::Result<std::path::PathBuf> {
+                Ok(path.into())
+            }
+        }
+        let temp = tempfile::tempdir()?;
+        let mut inputs =
+            provenant_core::RootInputs::new(temp.path().join("home"), temp.path().join("checkout"));
+        inputs.state_dir = Some(temp.path().join("state"));
+        let roots = inputs.resolve(&Resolver)?;
+        std::fs::create_dir_all(roots.state.as_path())?;
+        let path = roots.state.as_path().join("config.toml");
+        std::fs::write(
+            &path,
+            "schema_version=1\n[domains.routing]\npacing_overrides=[{provider='codex',policy='off'}]\n",
+        )?;
+        let now = provenant_core::WallTime::from_unix_seconds(100)?;
+        let request = super::OverrideSet {
+            account: None,
+            provider: None,
+            all: false,
+            policy: None,
+            model: Some(super::Model("codex/gpt-6-luna".into())),
+            risk_tier: Some("substantial".into()),
+            task_kind: Some("repair".into()),
+            starts: None,
+            until: Some("1h".into()),
+            window: vec![],
+            tz: None,
+        };
+        super::set_override(&roots, &request, now)?;
+        let config = provenant_config::read_with_domains(&roots, &crate::domains::SECTIONS)?;
+        assert_eq!(config.domains.routing.model_choices.len(), 1);
+        assert_eq!(
+            config.domains.routing.model_choices[0].expires,
+            Some(provenant_core::WallTime::from_unix_seconds(3700)?)
+        );
+        assert_eq!(config.domains.routing.pacing_overrides.len(), 1);
+        super::clear_model_choice(&roots, "substantial", "repair", now)?;
+        let config = provenant_config::read_with_domains(&roots, &crate::domains::SECTIONS)?;
+        assert!(config.domains.routing.model_choices.is_empty());
+        assert_eq!(config.domains.routing.pacing_overrides.len(), 1);
+        Ok(())
+    }
+
+    #[test]
     fn override_set_replaces_its_scope_and_prunes_expired_rows() -> Result<(), Box<dyn Error>> {
         use super::{OverrideSet, PacingChoice};
         use std::path::Path;
@@ -3881,7 +4194,10 @@ mod route_tests {
                 account: None,
                 provider: Some("codex".into()),
                 all: false,
-                policy: PacingChoice::Max,
+                policy: Some(PacingChoice::Max),
+                model: None,
+                risk_tier: None,
+                task_kind: None,
                 starts: None,
                 until: Some("1h".into()),
                 window: vec!["mon-fri@23-7".into()],

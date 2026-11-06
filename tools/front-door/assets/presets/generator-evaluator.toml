@@ -1,9 +1,7 @@
 stages = [
   { id = "implement", role = "write.implement", tier = "${writer}" },
-  { id = "lens", min_successful = "${min_lenses}", parallel = [
-    { id = "lens", for_each = "${lenses}", role = "lens.${item.name}", require_findings = true, outputs = ["result", "commit"] },
-  ], source = { type = "node", node = "implement" } },
-  { id = "evaluate", role = "review.evaluator", outputs = ["findings"], source = { type = "node", node = "implement" } },
+  { id = "lens", preset = "review", parameters = { subject = { type = "node", node = "implement" }, worktree = "${worktree}", base = "${base}", spec = "${spec}", spec_max_bytes = "${spec_max_bytes}", risk_tier = "${risk_tier}", review_shape = "${review_shape}", kind = "${kind}", size = "${size}", risk_tags = "${risk_tags}", min_reviews = "${min_lenses}" } },
+  { id = "evaluate", role = "review.evaluator", tier = "${evaluator}", outputs = ["findings"], source = { type = "node", node = "implement" } },
 ]
 exports = [
   { node = "implement", outputs = ["branch", "commit"] },
@@ -19,23 +17,20 @@ select_when = "An approved slice has a spec and a registered writer worktree."
 tags = ["write", "review"]
 
 [parameters]
-local_check_policy = { type = "string", default = "", doc = "Local check policy inherited by nested presets; empty uses the layered roles library." }
+local_check_policy = { type = "string", inherit = true, default = "", doc = "Local check policy inherited by nested presets; empty uses the layered roles library." }
 worktree = { type = "string", default = "", doc = "Registered writer worktree." }
 scope = { type = "list", default = ["."], doc = "Literal relative paths the writer may change." }
-subject = { type = "table", default = { type = "commit", commit = "HEAD" }, doc = "Source the writer starts from." }
+subject = { type = "table", inherit = true, default = { type = "commit", commit = "HEAD" }, doc = "Source the writer starts from." }
 delivery = { type = "string", default = "none", doc = "Delivery mode for the writer commit." }
 base = { type = "string", default = "", doc = "Diff reference the slice is measured from." }
 spec_max_bytes = { type = "integer", default = 16384, min = 1, max = 65536, doc = "Maximum bytes of a file spec included in each review brief." }
 spec = { type = "string", default = "", doc = "Issue number or file holding the acceptance criteria." }
-risk_tier = { type = "string", default = "", doc = "Risk tier that selects the review shape." }
+risk_tier = { type = "string", inherit = true, bind = "risk_tier", default = "", doc = "Risk tier that selects the review shape." }
 review_shape = { type = "string", default = "", doc = "Explicit review shape override." }
-kind = { type = "string", default = "", doc = "Change kind that scales the lens panel: refactor, docs. Empty uses the task kind." }
+kind = { type = "string", bind = "kind", default = "", doc = "Change kind that scales the lens panel: refactor, docs. Empty uses the task kind." }
 size = { type = "string", default = "", doc = "Review size override (small, medium, large). Empty defers the choice: the host measures the pinned reviewed commit against base when the review starts, so the panel fits the work actually written; pass a size to fix it now." }
-min_lenses = { type = "integer", default = 0, min = 0, max = 32, doc = "Minimum settled lenses; 0 means all but one, at least one." }
+min_lenses = { type = "integer", default = 0, min = 0, max = 32, doc = "Minimum settled lenses; 0 uses the risk-tier review minimum, at least one." }
 writer = { type = "string", default = "", doc = "Writer route alias; empty uses the role tier (senior by default)." }
 evaluator = { type = "string", default = "senior", doc = "Routing tier for the evaluator that reconciles the lens findings." }
 risk_tags = { type = "list", default = [], doc = "Tags that trigger conditional lenses." }
-lenses = [
-  { name = "correctness-spec", tier = "", when = "" },
-  { name = "simplicity", tier = "", when = "" },
-]
+lenses = { type = "list", default = [], doc = "Optional lens overrides; empty uses the review shape and its defaults." }

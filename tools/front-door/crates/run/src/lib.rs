@@ -69,7 +69,7 @@ pub use launch::{
     access_root_allowed, capture_plan, concurrency,
 };
 pub use overview::{OverviewAttempt, OverviewState, RunOverview};
-pub use plan::{isolated_read_only_plan, read_only_plan};
+pub use plan::{isolated_read_only_plan, live_read_only_plan, read_only_plan};
 pub use retention::{
     AttemptLogRemoval, AttemptTmpRemoval, ProviderStateGc, ProviderStateIssue, TOMBSTONE,
 };

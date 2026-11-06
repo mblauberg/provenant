@@ -487,7 +487,7 @@ impl provenant_fabric_mcp::tools::McpFacade for BoundFacade<'_> {
             InboxInput::Close { .. } | InboxInput::Acknowledge { .. }
         ) {
             return Err(error(
-                "owner_local_only",
+                "OWNER_LOCAL_ONLY",
                 format!(
                     "inbox owner {host}: run this operation on the owner host or from the owning chair session"
                 ),
@@ -518,14 +518,14 @@ impl provenant_fabric_mcp::tools::McpFacade for BoundFacade<'_> {
                 ..
             }) => Err(error(&code, message)),
             Ok(_) => Err(error(
-                "unsupported_owner",
+                "UNSUPPORTED_OWNER",
                 "peer does not support inbox operations".into(),
             )),
             Err(failure) => {
                 let code = match failure.error {
                     FacadeError::LaunchUnknown { .. } => "ambiguous_outcome",
                     FacadeError::PeerVersion | FacadeError::PeerProtocolMismatch { .. } => {
-                        "unsupported_owner"
+                        "UNSUPPORTED_OWNER"
                     }
                     _ => "owner_unavailable",
                 };
@@ -613,7 +613,7 @@ fn cli_failure(stdout: &[u8], stderr: &[u8]) -> ServiceError {
     }
     let stderr = String::from_utf8_lossy(stderr);
     ServiceError::Cli {
-        code: "cli_failed".into(),
+        code: "CLI_FAILED".into(),
         message: stderr
             .lines()
             .next()
@@ -1427,7 +1427,7 @@ pub fn landing(
             );
             result.error = Some(provenant_records::CommandError {
                 diagnostic: None,
-                code: "launch_unknown".into(),
+                code: "LAUNCH_UNKNOWN".into(),
                 message: "push outcome requires remote reconciliation".into(),
                 cause: None,
                 repair: Some(
@@ -2302,6 +2302,7 @@ impl BinaryRunOwner<'_> {
         for (index, task) in tasks.into_iter().enumerate() {
             worktree_access(
                 task.access == provenant_fabric_runtime::graph::AccessMode::WorktreeWrite,
+                false,
                 task.worktree.as_deref().map(Path::new),
             )
             .map_err(fail_error)?;
@@ -3320,49 +3321,6 @@ fn graph_inbox_close(
     }
 }
 
-/// Close the loop requests a checkpoint from before node asks raised under
-/// `actor`, by their original inbox operation. Only cancel does this; such a
-/// checkpoint is never migrated.
-fn graph_legacy_loop_close(
-    service: &provenant_fabric_runtime::inbox::InboxService<'_>,
-    checkpoint: &provenant_fabric_runtime::graph::GraphCheckpoint,
-    actor: provenant_core::ActorId,
-    cancel: &CancelToken,
-) -> Result<(), FacadeError> {
-    let Some(instance_id) = checkpoint.instance_id.as_deref() else {
-        return Ok(());
-    };
-    let asks = provenant_fabric_runtime::graph::legacy_loop_asks(checkpoint);
-    for ask in asks.iter().filter(|ask| ask.actor == actor.to_string()) {
-        let digest = provenant_records::CanonicalV1::record_digest(
-            "graph-loop-inbox",
-            1,
-            &(
-                checkpoint.graph_id.as_str(),
-                instance_id,
-                ask.node_id.as_str(),
-                ask.rounds,
-                ask.session.as_str(),
-            ),
-        )
-        .map_err(|_| FacadeError::StateCorrupt)?;
-        let operation = provenant_core::OperationId::parse(&format!(
-            "loop-{}",
-            provenant_core::hex(digest.as_bytes())
-        ))
-        .map_err(|_| FacadeError::StateCorrupt)?;
-        graph_inbox_close(
-            service,
-            &ask.session,
-            &operation,
-            actor,
-            &format!("close legacy loop ask {}", ask.node_id),
-            cancel,
-        )?;
-    }
-    Ok(())
-}
-
 fn load_graph_prices(assets: &std::path::Path) -> Result<provenant_telemetry::PriceTable, String> {
     let path = assets.join("config/telemetry-prices.toml");
     let text =
@@ -3418,14 +3376,25 @@ fn graph_attempt_usage(
 fn decode_graph_document(
     bytes: &[u8],
 ) -> Result<provenant_fabric_runtime::graph::GraphDocument, FacadeError> {
-    let value: serde_json::Value =
-        provenant_records::decode(bytes, provenant_records::Limits::default())
-            .map_err(|_| FacadeError::invalid("graph document is not a valid record"))?;
-    match value
-        .get("schema_version")
+    #[derive(serde::Deserialize)]
+    struct Header {
+        schema_version: Option<serde_json::Value>,
+    }
+    // Check the version before decoding the graph, so a future schema can
+    // request an upgrade even when its node fields are unknown to this reader.
+    let limits = provenant_records::Limits {
+        max_bytes: provenant_fabric_runtime::config::GraphLimits::document_bytes_bound()
+            .maximum_u64(),
+        ..Default::default()
+    };
+    let header: Header = provenant_records::decode(bytes, limits)
+        .map_err(|_| FacadeError::invalid("graph document is not a valid record"))?;
+    match header
+        .schema_version
+        .as_ref()
         .and_then(serde_json::Value::as_u64)
     {
-        Some(1 | 2) => serde_json::from_value(value)
+        Some(1 | 2) => provenant_records::decode(bytes, limits)
             .map_err(|error| FacadeError::invalid(format!("graph document: {error}"))),
         Some(version) if version > 2 => Err(FacadeError::UpgradeRequired {
             reader_release: env!("CARGO_PKG_VERSION").into(),
@@ -4385,7 +4354,85 @@ struct ReviewMeasure {
     directory: PathBuf,
     subject: provenant_core::GitOid,
     base: provenant_core::GitOid,
+    base_known: bool,
     measured: provenant_routing::Measured,
+}
+
+#[cfg(test)]
+#[allow(
+    dead_code,
+    reason = "the worktree driver includes test helpers without libtest functions"
+)]
+pub(crate) fn fixture_review_expansion(
+    node: &provenant_fabric_runtime::graph::GraphNode,
+    subject: &str,
+    shape: &str,
+) -> Result<
+    provenant_fabric_runtime::graph::Expansion,
+    provenant_fabric_runtime::graph::ReviewResolveError,
+> {
+    fixture_review_expansion_with_paths(node, subject, shape, &[])
+}
+
+#[cfg(test)]
+pub(crate) fn fixture_review_expansion_with_paths(
+    node: &provenant_fabric_runtime::graph::GraphNode,
+    subject: &str,
+    shape: &str,
+    paths: &[String],
+) -> Result<
+    provenant_fabric_runtime::graph::Expansion,
+    provenant_fabric_runtime::graph::ReviewResolveError,
+> {
+    use provenant_fabric_runtime::graph::ReviewResolveError;
+    let routing = provenant_routing::RoutingConfig::default();
+    let panel = routing
+        .review
+        .resolve_panel(
+            &provenant_routing::ReviewRequest {
+                shape: Some(shape.into()),
+                ..Default::default()
+            },
+            None,
+            paths,
+            false,
+        )
+        .map_err(ReviewResolveError::Failed)?;
+    let subject = provenant_core::GitOid::parse(subject)
+        .map_err(|error| ReviewResolveError::Failed(error.to_string()))?;
+    let base = node
+        .extra
+        .get("review_base")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|value| provenant_core::GitOid::parse(value).ok())
+        .unwrap_or(subject);
+    let measure = ReviewMeasure {
+        routing,
+        directory: PathBuf::new(),
+        subject,
+        base,
+        base_known: true,
+        measured: provenant_routing::Measured {
+            size: Some("small"),
+            warning: None,
+        },
+    };
+    let floors = measure.routing.review.path_floors(paths);
+    let floor_min = if floors.tier.is_some() {
+        measure
+            .routing
+            .review
+            .select_shape(Some(shape), None, None, paths, None)
+            .map_err(ReviewResolveError::Failed)?
+            .shape
+            .reviewers
+            .iter()
+            .map(|row| row.count)
+            .sum()
+    } else {
+        0
+    };
+    BoundGraphOwner::review_expansion(node, &measure, &panel, &floors, floor_min, "fixture".into())
 }
 
 impl BoundGraphOwner<'_> {
@@ -4427,7 +4474,7 @@ impl BoundGraphOwner<'_> {
         let subject = provenant_core::GitOid::parse(subject).map_err(|error| {
             ReviewResolveError::Failed(format!("invalid pinned review subject: {error}"))
         })?;
-        let base = node
+        let resolved_base = node
             .extra
             .get("review_base")
             .and_then(serde_json::Value::as_str)
@@ -4435,8 +4482,10 @@ impl BoundGraphOwner<'_> {
             .or_else(|| {
                 self.integration_base
                     .and_then(|bases| bases.review.or(bases.integration))
-            })
-            .unwrap_or(subject);
+            });
+        // The checkpoint's review resolution requires a commit, but the
+        // fallback must not pretend an unresolved base describes an empty diff.
+        let base = resolved_base.unwrap_or(subject);
         let directory = spec.worktree.as_deref().map_or_else(
             || self.factory.cwd.clone(),
             |path| self.factory.cwd.join(path),
@@ -4446,17 +4495,25 @@ impl BoundGraphOwner<'_> {
                 .map_err(|error| {
                     ReviewResolveError::Failed(format!("read review configuration: {error}"))
                 })?;
-        let measured = routing.review.size.measure(
-            spec.kind.as_deref(),
-            &base.to_string(),
-            &subject.to_string(),
-            &mut |args| self.review_git(&directory, args),
-        );
+        let measured = if resolved_base.is_some() {
+            routing.review.size.measure(
+                spec.kind.as_deref(),
+                &base.to_string(),
+                &subject.to_string(),
+                &mut |args| self.review_git(&directory, args),
+            )
+        } else {
+            provenant_routing::Measured {
+                size: None,
+                warning: Some("no review base was resolved; size unknown".into()),
+            }
+        };
         Ok(ReviewMeasure {
             routing,
             directory,
             subject,
             base,
+            base_known: resolved_base.is_some(),
             measured,
         })
     }
@@ -4469,13 +4526,16 @@ impl BoundGraphOwner<'_> {
         node: &provenant_fabric_runtime::graph::GraphNode,
         measure: &ReviewMeasure,
         panel: &provenant_routing::PanelResolution,
+        floors: &provenant_routing::AppliedFloors,
+        floor_min: usize,
         source: String,
     ) -> Result<
         provenant_fabric_runtime::graph::Expansion,
         provenant_fabric_runtime::graph::ReviewResolveError,
     > {
         use provenant_fabric_runtime::graph::{
-            Expansion, GraphNode, ReviewResolution, ReviewResolveError,
+            CompositeSpec, Expansion, GraphInput, GraphNode, OutputKind, ReviewResolution,
+            ReviewResolveError, SourceBinding,
         };
         let failed = |message: String| ReviewResolveError::Failed(message);
         let spec = node
@@ -4487,7 +4547,11 @@ impl BoundGraphOwner<'_> {
             .get("lens_templates")
             .and_then(serde_json::Value::as_object)
             .ok_or_else(|| failed("deferred review carries no lens templates".into()))?;
-        let root_id = format!("{}--review", node.id);
+        let root_id = format!("{}--r", node.id);
+        let panel_templates = node.extra.get("panel_templates").and_then(serde_json::Value::as_object)
+            .ok_or_else(|| failed("deferred review carries no panel templates; finish old reviews before upgrading".into()))?;
+        let lens_id = format!("{root_id}--p");
+        let frame_id = format!("{root_id}--f");
         let subject = measure.subject.to_string();
         let mut members: Vec<GraphNode> = Vec::new();
         for slot in &panel.slots {
@@ -4511,14 +4575,27 @@ impl BoundGraphOwner<'_> {
             map.insert(key.into(), route);
             map.insert(
                 "id".into(),
-                serde_json::json!(format!("{root_id}--{local}")),
+                serde_json::json!(format!("{lens_id}--{local}")),
             );
-            map.insert("depends_on".into(), serde_json::json!(node.depends_on));
-            if !node.inputs.is_empty() {
+            let lens_deps = if panel.frame {
+                vec![frame_id.clone()]
+            } else {
+                node.depends_on.clone()
+            };
+            map.insert("depends_on".into(), serde_json::json!(lens_deps));
+            if panel.frame {
+                map.insert(
+                    "inputs".into(),
+                    serde_json::json!([{"node":frame_id,"outputs":["result"]}]),
+                );
+            } else if !node.inputs.is_empty() {
                 map.insert("inputs".into(), serde_json::json!(node.inputs));
             }
             if !node.read_roots.is_empty() {
                 map.insert("read_roots".into(), serde_json::json!(node.read_roots));
+            }
+            if !node.attachments.is_empty() {
+                map.insert("attachments".into(), serde_json::json!(node.attachments));
             }
             if node.require_skill_location {
                 map.insert("require_skill_location".into(), serde_json::json!(true));
@@ -4543,7 +4620,137 @@ impl BoundGraphOwner<'_> {
         if members.is_empty() {
             return Err(failed("the review panel selected no lenses".into()));
         }
-        if members.len() + 1 > spec.max_nodes {
+        if let Some(captured) = node.extra.get("review_planner") {
+            let catalogue = captured
+                .pointer("/catalogue/patterns")
+                .and_then(serde_json::Value::as_array)
+                .ok_or_else(|| failed("deferred review lacks its planner catalogue".into()))?;
+            let mut patterns = Vec::new();
+            for slot in &panel.slots {
+                let name = format!("lens-{}", slot.lens);
+                let mut pattern = catalogue
+                    .iter()
+                    .find(|pattern| pattern["name"] == name)
+                    .cloned()
+                    .ok_or_else(|| failed(format!("review catalogue lacks {name}")))?;
+                if let Some(tier) = slot.tier.as_str() {
+                    pattern["parameters"]["tier"]["default"] = serde_json::json!(tier);
+                    if let Some(allowed) = pattern["parameters"]["tier"]["enum"].as_array_mut()
+                        && !allowed.iter().any(|value| value == tier)
+                    {
+                        allowed.push(serde_json::json!(tier));
+                    }
+                }
+                if slot.distinct_families {
+                    for leaf in pattern["nodes"].as_array_mut().into_iter().flatten() {
+                        leaf["family_group"] =
+                            serde_json::json!(crate::preset::format_family_group(slot.group_index));
+                    }
+                }
+                if let Some(base) = node.extra.get("review_base") {
+                    for leaf in pattern["nodes"].as_array_mut().into_iter().flatten() {
+                        leaf["review_base"] = base.clone();
+                    }
+                }
+                patterns.push(pattern);
+            }
+            let mut fallback_members = members.clone();
+            let prefix = format!("{lens_id}--");
+            let mut fallback_exports = Vec::new();
+            for (index, member) in fallback_members.iter_mut().enumerate() {
+                if !member.id.starts_with(&prefix) {
+                    return Err(failed("invalid lens identity".into()));
+                }
+                member.id = format!("l{}", index + 1);
+                member.depends_on.clear();
+                member.inputs.clear();
+                if let Some(base) = node.extra.get("review_base") {
+                    member.extra.insert("review_base".into(), base.clone());
+                }
+                let outputs = if index == 0 {
+                    serde_json::json!(["result", "findings", "commit"])
+                } else {
+                    serde_json::json!(["result", "findings"])
+                };
+                fallback_exports.push(serde_json::json!({"node":member.id,"outputs":outputs}));
+            }
+            let minimum = spec.min_successful.map(|n| {
+                if n == 0 {
+                    members.len().saturating_sub(1).max(1)
+                } else {
+                    n
+                }
+            });
+            let required: Vec<_> = floors
+                .lenses
+                .iter()
+                .map(|name| format!("lens-{name}"))
+                .collect();
+            let candidates: Vec<String> = patterns
+                .iter()
+                .filter_map(|pattern| pattern["name"].as_str().map(str::to_owned))
+                .collect();
+            let floor_count = floor_min.max(minimum.unwrap_or(0));
+            let reserve = required.len().max(floor_count) as u64;
+            let max_nodes = captured
+                .get("max_nodes")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(24)
+                .min(512_u64.saturating_sub(reserve))
+                .max(1);
+            let mut plan: provenant_fabric_runtime::graph::PlanSpec = serde_json::from_value(serde_json::json!({
+                "kinds":["task","synthesise"], "max_nodes":max_nodes.saturating_add(reserve),
+                "model_max_nodes":max_nodes, "patterns_only":true, "wire_exports":true,
+                "patterns":patterns, "floor_candidate_patterns":candidates,
+                "required_floor_patterns":required, "floor_min_reviewers":floor_count,
+                "floor_classes":floors.classes,
+                "planned_review":true, "review_min_successful":minimum,
+                "fallback": {"nodes":[{"id":"static", "kind":"composite", "access":"read_only",
+                    "composite":{"nodes":fallback_members,"exports":fallback_exports,"min_successful":minimum,
+                        "reduce_verdict": true}}],
+                    "exports":[{"node":"static","outputs":["result","findings","verdict","commit"]}]}
+            })).map_err(|error| failed(format!("invalid review planner: {error}")))?;
+            plan.pin_review_subject(&subject).map_err(failed)?;
+            let mut template = captured
+                .get("template")
+                .cloned()
+                .ok_or_else(|| failed("deferred review lacks its planner template".into()))?;
+            template["id"] = serde_json::json!(format!("{lens_id}--plan"));
+            template["source"] = serde_json::json!({"type":"commit","commit":subject});
+            template["depends_on"] = serde_json::json!(if panel.frame {
+                vec![frame_id.clone()]
+            } else {
+                node.depends_on.clone()
+            });
+            template["inputs"] = if panel.frame {
+                serde_json::json!([{"node":frame_id,"outputs":["result"]}])
+            } else {
+                serde_json::json!(node.inputs)
+            };
+            template["read_roots"] = serde_json::json!(node.read_roots);
+            template["plan"] =
+                serde_json::to_value(plan).map_err(|error| failed(error.to_string()))?;
+            members = vec![
+                serde_json::from_value(template)
+                    .map_err(|error| failed(format!("invalid review planner node: {error}")))?,
+            ];
+        }
+        let verifiers = node
+            .extra
+            .get("panel_verifiers")
+            .and_then(serde_json::Value::as_u64)
+            .map_or(panel.verifiers, |count| {
+                usize::try_from(count).unwrap_or(usize::MAX)
+            });
+        if verifiers > 32 {
+            return Err(failed("review verifier count exceeds 32".into()));
+        }
+        let total = members.len()
+            + 2
+            + usize::from(panel.frame)
+            + verifiers
+            + usize::from(panel.synthesis == provenant_routing::ReviewSynthesis::Model);
+        if total > spec.max_nodes {
             return Err(failed(format!(
                 "the review panel selected {} lenses; the review allows {}",
                 members.len(),
@@ -4552,22 +4759,177 @@ impl BoundGraphOwner<'_> {
         }
         let exports: Vec<_> = members
             .iter()
-            .map(|member| serde_json::json!({"node": member.id, "outputs": ["result", "findings"]}))
+            .enumerate()
+            .map(|(index, member)| {
+                let mut outputs = vec![OutputKind::Result, OutputKind::Findings];
+                if node.extra.contains_key("review_planner") {
+                    outputs.push(OutputKind::Verdict);
+                    outputs.push(OutputKind::Commit);
+                }
+                if index == 0 {
+                    if panel.synthesis == provenant_routing::ReviewSynthesis::Reduce
+                        && !outputs.contains(&OutputKind::Commit)
+                    {
+                        outputs.push(OutputKind::Commit);
+                    }
+                    for output in &spec.export_first {
+                        if !outputs.contains(output) {
+                            outputs.push(*output);
+                        }
+                    }
+                }
+                GraphInput {
+                    extra: Default::default(),
+                    node: member.id.clone(),
+                    outputs,
+                    required_outputs: Vec::new(),
+                }
+            })
             .collect();
-        let root: GraphNode = serde_json::from_value(serde_json::json!({
-            "id": root_id,
-            "kind": "composite",
-            "access": "read_only",
-            "depends_on": node.depends_on,
-            "composite": {
-                "min_successful": spec.min_successful.map(|n| if n == 0 { members.len().saturating_sub(1).max(1) } else { n }),
-                "nodes": [],
-                "exports": exports,
+        let reduction = panel.synthesis == provenant_routing::ReviewSynthesis::Reduce;
+        let lens_deps = if panel.frame {
+            vec![frame_id.clone()]
+        } else {
+            node.depends_on.clone()
+        };
+        let min_successful = if node.extra.contains_key("review_planner") {
+            Some(1)
+        } else {
+            spec.min_successful.map(|n| {
+                if n == 0 {
+                    members.len().saturating_sub(1).max(1)
+                } else {
+                    n
+                }
+            })
+        };
+        let lens_group = GraphNode::composite(
+            lens_id.clone(),
+            lens_deps,
+            CompositeSpec {
+                min_successful,
+                reduce_verdict: reduction,
+                nodes: Vec::new(),
+                exports,
             },
-        }))
-        .map_err(|error| failed(format!("review composite does not lower: {error}")))?;
+        );
+        let template = |key: &str,
+                        id: &str,
+                        deps: Vec<String>,
+                        inputs: Vec<GraphInput>|
+         -> Result<GraphNode, ReviewResolveError> {
+            let mut value = panel_templates
+                .get(key)
+                .cloned()
+                .filter(|value| !value.is_null())
+                .ok_or_else(|| failed(format!("deferred review lacks {key} template")))?;
+            let map = value
+                .as_object_mut()
+                .ok_or_else(|| failed(format!("invalid {key} template")))?;
+            map.insert("id".into(), serde_json::Value::String(id.into()));
+            // These fields are supplied by the pinned execution, so template
+            // values must not affect decoding or survive the binding.
+            for field in [
+                "source",
+                "read_roots",
+                "attachments",
+                "depends_on",
+                "inputs",
+            ] {
+                map.remove(field);
+            }
+            let mut result: GraphNode = serde_json::from_value(value)
+                .map_err(|error| failed(format!("review {key} does not lower: {error}")))?;
+            result.source = Some(SourceBinding::Commit {
+                commit: subject.clone(),
+            });
+            result.read_roots = node.read_roots.clone();
+            result.attachments = node.attachments.clone();
+            result.depends_on = deps;
+            result.inputs = inputs;
+            Ok(result)
+        };
+        let selected = |id: String, outputs: Vec<OutputKind>| GraphInput {
+            extra: Default::default(),
+            node: id,
+            outputs,
+            required_outputs: Vec::new(),
+        };
+        let mut children = Vec::new();
+        if panel.frame {
+            children.push(template(
+                "frame",
+                &frame_id,
+                node.depends_on.clone(),
+                node.inputs.clone(),
+            )?);
+        }
+        children.push(lens_group);
+        children.extend(members);
+        let mut previous = lens_id.clone();
+        for index in 0..verifiers {
+            let id = format!("{root_id}--v-{}", index + 1);
+            let inputs = vec![selected(
+                previous.clone(),
+                vec![OutputKind::Result, OutputKind::Findings],
+            )];
+            children.push(template("verifier", &id, vec![previous], inputs)?);
+            previous = id;
+        }
+        let verifier_output = (reduction && previous != lens_id).then(|| previous.clone());
+        let output = if reduction {
+            lens_id.clone()
+        } else {
+            let id = format!("{root_id}--s");
+            let mut inputs = vec![selected(
+                lens_id.clone(),
+                vec![OutputKind::Result, OutputKind::Findings],
+            )];
+            if previous != lens_id {
+                inputs.push(selected(
+                    previous.clone(),
+                    vec![OutputKind::Result, OutputKind::Findings],
+                ));
+            }
+            let deps = if previous == lens_id {
+                vec![lens_id.clone()]
+            } else {
+                vec![lens_id.clone(), previous]
+            };
+            children.push(template("synthesis", &id, deps, inputs)?);
+            id
+        };
+        let mut root_exports = vec![GraphInput {
+            extra: Default::default(),
+            node: output,
+            outputs: vec![
+                OutputKind::Result,
+                OutputKind::Findings,
+                OutputKind::Verdict,
+                OutputKind::Commit,
+            ],
+            required_outputs: Vec::new(),
+        }];
+        if let Some(verifier) = verifier_output {
+            root_exports.push(GraphInput {
+                extra: Default::default(),
+                node: verifier,
+                outputs: vec![OutputKind::Result, OutputKind::Findings],
+                required_outputs: Vec::new(),
+            });
+        }
+        let root = GraphNode::composite(
+            root_id,
+            node.depends_on.clone(),
+            CompositeSpec {
+                min_successful: None,
+                reduce_verdict: false,
+                nodes: Vec::new(),
+                exports: root_exports,
+            },
+        );
         let mut nodes = vec![root];
-        nodes.extend(members);
+        nodes.extend(children);
         Ok(Expansion {
             review: Some(ReviewResolution {
                 subject: measure.subject,
@@ -4782,10 +5144,13 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             .review
             .as_ref()
             .ok_or_else(|| ReviewResolveError::Failed("missing review specification".into()))?;
-        // Changed paths and test markers add lenses; a failed read only costs
-        // those additions, and the reason is recorded with the resolution.
+        // An unreadable path list must retain every potentially applicable floor.
         let mut warnings: Vec<String> = measure.measured.warning.iter().cloned().collect();
         let (mut paths, mut marker) = (Vec::new(), false);
+        let mut paths_unreadable = !measure.base_known;
+        if paths_unreadable {
+            warnings.push("cannot resolve review base; applying highest configured floor and all required floor lenses".into());
+        }
         let range = format!("{}...{}", measure.base, measure.subject);
         if measure.base != measure.subject {
             match self.review_git(
@@ -4799,7 +5164,10 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                         .map(str::to_owned)
                         .collect();
                 }
-                Err(error) => warnings.push(format!("cannot read changed paths: {error}")),
+                Err(error) => {
+                    paths_unreadable = true;
+                    warnings.push(format!("cannot read changed paths: {error}; applying highest configured floor and all required floor lenses"));
+                }
             }
             match self.review_git(
                 &measure.directory,
@@ -4825,11 +5193,52 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                 })
                 .collect(),
         };
-        let panel = measure
-            .routing
-            .review
+        let fallback;
+        let review = if paths_unreadable {
+            let (config, unknown_paths) = measure.routing.review.unreadable_paths();
+            paths = unknown_paths;
+            fallback = config;
+            &fallback
+        } else {
+            &measure.routing.review
+        };
+        let mut panel = review
             .resolve_panel(&request, measure.measured.size, &paths, marker)
             .map_err(ReviewResolveError::Failed)?;
+        // A graph retains the stage configuration it was lowered with. The
+        // launch still chooses the shape from the pinned subject.
+        if let Some(shape) = node
+            .extra
+            .get("panel_shapes")
+            .and_then(|shapes| shapes.get(&panel.shape))
+        {
+            panel.frame = shape
+                .get("frame")
+                .and_then(serde_json::Value::as_bool)
+                .ok_or_else(|| {
+                    ReviewResolveError::Failed("invalid deferred review frame".into())
+                })?;
+            panel.verifiers = shape
+                .get("verifiers")
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|n| usize::try_from(n).ok())
+                .ok_or_else(|| {
+                    ReviewResolveError::Failed("invalid deferred verifier count".into())
+                })?;
+            panel.synthesis =
+                serde_json::from_value(shape.get("synthesis").cloned().unwrap_or_default())
+                    .map_err(|error| {
+                        ReviewResolveError::Failed(format!("invalid deferred synthesis: {error}"))
+                    })?;
+        }
+        let floors = review.path_floors(&paths);
+        if !floors.classes.is_empty() {
+            warnings.push(format!(
+                "review path floors applied: {}; required lenses: {}",
+                floors.classes.join(", "),
+                floors.lenses.join(", ")
+            ));
+        }
         let mut source = format!(
             "{}; size={}; kind={}; risk={}",
             panel.source,
@@ -4851,7 +5260,25 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
         if !warnings.is_empty() {
             source.push_str(&format!("; warnings={}", warnings.join(" | ")));
         }
-        Self::review_expansion(node, &measure, &panel, source)
+        let floor_min = if floors.tier.is_some() {
+            review
+                .select_shape(
+                    spec.shape.as_deref(),
+                    spec.risk_tier.as_deref(),
+                    spec.kind.as_deref(),
+                    &paths,
+                    spec.size.as_deref().or(measure.measured.size),
+                )
+                .map_err(ReviewResolveError::Failed)?
+                .shape
+                .reviewers
+                .iter()
+                .map(|row| row.count)
+                .sum()
+        } else {
+            0
+        };
+        Self::review_expansion(node, &measure, &panel, &floors, floor_min, source)
     }
 
     fn attempt_models(&mut self, attempts: &[String]) -> Result<Vec<String>, Self::Error> {
@@ -4943,10 +5370,15 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             }))
     }
 
-    fn equal_review_range(&mut self, reference: &str) -> Result<bool, Self::Error> {
+    fn review_range(
+        &mut self,
+        reference: &str,
+        explicit_base: bool,
+    ) -> Result<provenant_fabric_runtime::graph::ReviewRange, Self::Error> {
+        use provenant_fabric_runtime::graph::ReviewRange;
         let (host, attempt) = reference.split_once('/').ok_or(FacadeError::StateCorrupt)?;
         if host != self.factory.context.identity.host.to_string() {
-            return Ok(false);
+            return Ok(ReviewRange::Unknown);
         }
         let owner = BinaryRunOwner {
             factory: self.factory,
@@ -4968,11 +5400,20 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             .iter()
             .find(|task| task.task_id == record.task_id)
             .ok_or(FacadeError::StateCorrupt)?;
-        Ok(task
-            .base
-            .as_ref()
-            .zip(task.head.as_ref())
-            .is_some_and(|(base, head)| base == head))
+        if !explicit_base
+            && self
+                .integration_base
+                .is_none_or(|bases| bases.review.is_none() && bases.integration.is_none())
+        {
+            return Ok(ReviewRange::NoBase);
+        }
+        Ok(match task.base.as_ref().zip(task.head.as_ref()) {
+            Some((base, head)) => ReviewRange::Resolved {
+                base: base.clone(),
+                head: head.clone(),
+            },
+            None => ReviewRange::Unknown,
+        })
     }
     fn respect_ci_wake(&self) -> bool {
         self.tick
@@ -5783,6 +6224,18 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                 capabilities.retain(|name| seen.insert(name.clone()));
                 let mut grants = provenant_cli::run::lane_access(
                     &provenant_cli::Access {
+                        attach: node
+                            .attachments
+                            .iter()
+                            .map(|path| {
+                                let path = Path::new(path);
+                                if path.is_absolute() {
+                                    path.to_owned()
+                                } else {
+                                    self.factory.cwd.join(path)
+                                }
+                            })
+                            .collect(),
                         mode: Some(provenant_cli::Mode::ReadOnly),
                         worktree: None,
                         read_root: node
@@ -6204,8 +6657,23 @@ impl Factory {
             return Err(FacadeError::ConfinementRefused);
         }
         let bytes = provenant_os::fs::FileHandle::open_source(&path)
-            .and_then(|mut file| file.read_bounded(8_388_608))
-            .map_err(|_| FacadeError::io("access graph journal"))?;
+            .and_then(|mut file| {
+                file.read_bounded(
+                    provenant_fabric_runtime::config::GraphLimits::document_bytes_bound()
+                        .maximum_u64(),
+                )
+            })
+            .map_err(|error| match error {
+                provenant_os::fs::FsError::TooLarge { .. } => {
+                    let bound =
+                        provenant_fabric_runtime::config::GraphLimits::document_bytes_bound();
+                    FacadeError::invalid(format!(
+                        "limits.{}={} reached; set by {}",
+                        bound.name, bound.maximum, bound.owner
+                    ))
+                }
+                _ => FacadeError::io("access graph journal"),
+            })?;
         let document = decode_graph_document(&bytes)?;
         Ok((document, path, bytes))
     }
@@ -6302,11 +6770,13 @@ impl Factory {
         let prefix = hash.to_ascii_lowercase();
         let mut found = Vec::new();
         for name in graphs.entries()?.flatten() {
-            if let Ok(bytes) = graphs.read_bounded(&name, 8_388_608)
-                && provenant_records::CanonicalV1::file_digest(&bytes)
-                    .to_string()
-                    .strip_prefix("sha256:")
-                    .is_some_and(|digest| digest.starts_with(&prefix))
+            if let Ok(bytes) = graphs.read_bounded(
+                &name,
+                provenant_fabric_runtime::config::GraphLimits::document_bytes_bound().maximum_u64(),
+            ) && provenant_records::CanonicalV1::file_digest(&bytes)
+                .to_string()
+                .strip_prefix("sha256:")
+                .is_some_and(|digest| digest.starts_with(&prefix))
                 && let Ok(document) = decode_graph_document(&bytes)
             {
                 found.push(document);
@@ -6601,9 +7071,6 @@ impl Factory {
                     } else if checkpoint.asks.iter().any(|ask| !ask.closed) {
                         first_error.get_or_insert(FacadeError::StateCorrupt);
                     }
-                    if let Err(error) = self.close_legacy_loop_asks(checkpoint, cancel) {
-                        first_error.get_or_insert(error);
-                    }
                     if let Some(error) = first_error {
                         return Err(Box::new(error));
                     }
@@ -6895,40 +7362,6 @@ fn graph_selector_forms() -> String {
 }
 
 impl Factory {
-    /// Close the inbox requests of a checkpoint from before node asks, one
-    /// inbox actor at a time.
-    fn close_legacy_loop_asks(
-        &self,
-        checkpoint: &provenant_fabric_runtime::graph::GraphCheckpoint,
-        cancel: &CancelToken,
-    ) -> Result<(), FacadeError> {
-        if checkpoint.instance_id.is_none() {
-            return Ok(());
-        }
-        let actors: std::collections::BTreeSet<_> =
-            provenant_fabric_runtime::graph::legacy_loop_asks(checkpoint)
-                .into_iter()
-                .map(|ask| ask.actor)
-                .collect();
-        for actor in actors {
-            let mut identity = self.context.identity.clone();
-            identity.inbox.actor = actor.parse().map_err(|_| FacadeError::StateCorrupt)?;
-            let service = provenant_fabric_runtime::inbox::InboxService::open(
-                &self.context.roots.state,
-                &identity,
-                &self.clock,
-                cancel,
-            )
-            .map_err(|error| FacadeError::DispatchRefused {
-                fact: None,
-                disk: None,
-                reason: format!("close legacy loop asks: {error}"),
-            })?;
-            graph_legacy_loop_close(&service, checkpoint, identity.inbox.actor, cancel)?;
-        }
-        Ok(())
-    }
-
     /// Cancel one live graph attempt. A missing checkpoint reference (a crash
     /// between acceptance and the save) is recovered from the stable operation ID.
     fn cancel_graph_attempt(

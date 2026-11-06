@@ -82,7 +82,11 @@ pub(crate) fn publish_preset_graph(
             if metadata.uid != provenant_os::fs::effective_uid()
                 || metadata.mode & 0o077 != 0
                 || metadata.links != 1
-                || dir.read_stable(OsStr::new(&filename), 8_388_608)? != bytes
+                || dir.read_stable(
+                    OsStr::new(&filename),
+                    provenant_fabric_runtime::config::GraphLimits::document_bytes_bound()
+                        .maximum_u64(),
+                )? != bytes
             {
                 return Err(
                     "existing preset graph is not private or does not match its content hash"
@@ -141,6 +145,7 @@ pub(crate) fn run_preset_graph(
     warnings: &[String],
     globals: &provenant_cli::Globals,
     workers: &'static dyn WorkerObserver,
+    review: bool,
 ) -> u8 {
     use provenant_fabric_runtime::graph::GraphStatus;
     use provenant_records::Outcome;
@@ -262,10 +267,18 @@ pub(crate) fn run_preset_graph(
                 status_command.push_str(&format!(" --project {}", shell_path(project)));
             }
             status_command.push_str(&format!(" fabric graph status {graph_id}"));
+            let verdict = if review {
+                document_model_verdict(&document, &run.checkpoint)
+            } else {
+                None
+            };
             let outcome = match run.status {
                 GraphStatus::Complete
                     if run.outcome
-                        != Some(provenant_fabric_runtime::graph::GraphOutcome::Failed) =>
+                        != Some(provenant_fabric_runtime::graph::GraphOutcome::Failed)
+                        && (!review
+                            || verdict
+                                == Some(provenant_records::workflow::ReviewVerdict::Approve)) =>
                 {
                     Outcome::Ok
                 }
@@ -302,17 +315,45 @@ pub(crate) fn run_preset_graph(
                 human.push_str(&result.excerpt);
                 human.push('\n');
             }
+            let reviewers = if review {
+                match review_rows(globals, workers, &run.checkpoint) {
+                    Ok(rows) => Some(rows),
+                    Err(error) => {
+                        return crate::fail(
+                            "review",
+                            Outcome::Error,
+                            "review_rows",
+                            &error.to_string(),
+                            globals,
+                        );
+                    }
+                }
+            } else {
+                None
+            };
             let mut data = serde_json::json!({"graph":run,"graph_id":graph_id,"status_command":status_command,"document":document,"continue":continuation});
+            if let Some(rows) = reviewers {
+                data["reviewers"] = serde_json::json!(rows);
+            }
             if !warnings.is_empty() {
                 data["warnings"] = serde_json::json!(warnings);
             }
             human.push_str(&provenant_cli::run::warnings_text(&data));
-            crate::emit(
-                &provenant_records::CommandResult::new("run", outcome, data),
+            let code = crate::emit(
+                &provenant_records::CommandResult::new(
+                    if review { "review" } else { "run" },
+                    outcome,
+                    data,
+                ),
                 globals,
                 &human,
                 false,
-            )
+            );
+            if review && run.status == GraphStatus::Pending {
+                124
+            } else {
+                code
+            }
         }
         Err(error) => crate::fail_with_repair(
             "run",
@@ -326,6 +367,117 @@ pub(crate) fn run_preset_graph(
             globals,
         ),
     }
+}
+
+/// Project the lens members of the retained graph in both waiting and final views.
+fn review_rows(
+    globals: &provenant_cli::Globals,
+    workers: &'static dyn WorkerObserver,
+    checkpoint: &provenant_fabric_runtime::graph::GraphCheckpoint,
+) -> Result<Vec<serde_json::Value>, Box<dyn std::error::Error>> {
+    let factory = factory(globals, workers)?;
+    let cancel = CancelToken::new();
+    let members = checkpoint
+        .nodes
+        .iter()
+        .find(|node| node.id == "lenses")
+        .map(|node| node.children.as_slice())
+        .unwrap_or_default();
+    members
+        .iter()
+        .filter_map(|id| checkpoint.nodes.iter().find(|node| &node.id == id))
+        .map(|node| {
+            let attempt = node.attempts.last();
+            let (run_id, applied_route) = if let Some(attempt) = attempt {
+                let owner = BinaryRunOwner {
+                    factory: &factory,
+                    allow_remote: false,
+                    actor: Some(attempt.launch_actor.parse()?),
+                    chair: None,
+                };
+                let store = owner.store(&cancel)?;
+                let call = owner.call(&cancel);
+                let operation = graph_operation("graph-attempt-operation", &attempt.key)?;
+                let operation_run = store
+                    .operation(&operation, &call)
+                    .map_err(run_error)?
+                    .map(|op| op.run_id);
+                if let Some(reference) = attempt.attempt_ref.as_deref() {
+                    let (host, id) = reference
+                        .split_once('/')
+                        .ok_or("invalid graph attempt reference")?;
+                    let target = AttemptTarget {
+                        extra: Default::default(),
+                        host: Some(host.parse()?),
+                        attempt: id.parse()?,
+                    };
+                    let budget = WaitBudget::cli(factory.clock.mono_now(), 55)?;
+                    let record = owner.snapshot(target, budget, &cancel)?;
+                    (Some(record.run_id), record.applied_route)
+                } else {
+                    (operation_run, None)
+                }
+            } else {
+                (None, None)
+            };
+            Ok(serde_json::json!({
+                "node_id": node.id,
+                "lens": node.id.strip_prefix("lenses--lens-"),
+                "run_id": run_id,
+                "state": node.state,
+                "attempt_ref": attempt.and_then(|a| a.attempt_ref.as_deref()),
+                "substitution": review_substitution(node),
+                "separation": node.separation,
+                "verdict": node.outputs.as_ref().and_then(review_verdict),
+                "applied_route": applied_route,
+                "result": node.outputs.as_ref().and_then(|o| o.result.as_ref()),
+            }))
+        })
+        .collect()
+}
+
+fn review_substitution(node: &provenant_fabric_runtime::graph::NodeProgress) -> bool {
+    node.attempts.iter().any(|a| a.review_substitution)
+        || node.separation.as_ref().is_some_and(|separation| {
+            separation.outcome == provenant_fabric_runtime::graph::SeparationOutcome::Unavailable
+        })
+}
+
+fn document_model_verdict(
+    document: &std::path::Path,
+    checkpoint: &provenant_fabric_runtime::graph::GraphCheckpoint,
+) -> Option<provenant_records::workflow::ReviewVerdict> {
+    let bytes = std::fs::read(document).ok()?;
+    let document: provenant_fabric_runtime::graph::GraphDocument =
+        serde_json::from_slice(&bytes).ok()?;
+    let last = document
+        .nodes
+        .iter()
+        .find(|node| {
+            node.composite
+                .as_ref()
+                .is_some_and(|group| group.reduce_verdict)
+        })
+        .or_else(|| document.nodes.last())?;
+    let outputs = checkpoint
+        .nodes
+        .iter()
+        .find(|node| node.id == last.id)?
+        .outputs
+        .as_ref()?;
+    review_verdict(outputs)
+}
+
+fn review_verdict(
+    outputs: &provenant_fabric_runtime::graph::NodeOutputs,
+) -> Option<provenant_records::workflow::ReviewVerdict> {
+    if outputs.verdict_error.is_some() {
+        return None;
+    }
+    outputs
+        .verdict
+        .as_deref()
+        .and_then(provenant_records::workflow::ReviewVerdict::from_token)
 }
 
 fn graph_is_pending(factory: &Factory, graph_id: &str) -> bool {
@@ -378,6 +530,43 @@ pub(super) fn shell_path(path: &std::path::Path) -> String {
 mod tests {
     use super::{private_graph_directory_refusal, retry_collected_document};
     use std::path::Path;
+
+    #[test]
+    fn review_row_marks_unavailable_family_as_substitution() {
+        let mut node: provenant_fabric_runtime::graph::NodeProgress = serde_json::from_value(serde_json::json!({
+            "id":"lenses--lens-tests", "state":"succeeded", "worktree":null, "attempts":[],
+            "separation":{"strength":"prefer", "excluded":["openai"], "applied":"openai", "outcome":"unavailable"}
+        })).unwrap();
+        assert!(super::review_substitution(&node));
+        node.separation.as_mut().unwrap().outcome =
+            provenant_fabric_runtime::graph::SeparationOutcome::Separated;
+        assert!(!super::review_substitution(&node));
+    }
+
+    #[test]
+    fn review_exit_evidence_requires_a_valid_approval() {
+        use provenant_records::workflow::ReviewVerdict;
+        let outputs = |verdict: Option<&str>, error: Option<&str>| {
+            serde_json::from_value(serde_json::json!({
+                "schema_version":2, "result":null, "verdict":verdict, "verdict_error":error,
+                "findings":[], "branch":null, "commit":null, "warnings":[]
+            }))
+            .unwrap()
+        };
+        assert_eq!(
+            super::review_verdict(&outputs(Some("VERDICT: PASS"), None)),
+            Some(ReviewVerdict::Approve)
+        );
+        assert_eq!(
+            super::review_verdict(&outputs(Some("VERDICT: FAIL"), None)),
+            Some(ReviewVerdict::RequestChanges)
+        );
+        assert_eq!(super::review_verdict(&outputs(None, None)), None);
+        assert_eq!(
+            super::review_verdict(&outputs(Some("VERDICT: PASS"), Some("invalid"))),
+            None
+        );
+    }
 
     #[test]
     fn collected_preset_document_is_republished_before_retry()
