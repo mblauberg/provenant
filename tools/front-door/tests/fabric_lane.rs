@@ -492,15 +492,30 @@ fn lane_cli_and_mcp_compile_rich_child_launches_without_local_submission() -> Re
     host(&rig, &["fabric", "identity", "--json"])?;
     host(&rig, &["fabric", "task", "list", "--json"])?;
     lane_environment(&mut rig, AttemptId::from_bytes([78; 16]))?;
-    let preview = host(&rig, &[
-        "run", "Fix ${item}", "--use", "implement", "--over", "one,two",
-        "--detached", "--explain", "--json",
-    ])?;
+    let preview = host(
+        &rig,
+        &[
+            "run",
+            "Fix ${item}",
+            "--use",
+            "implement",
+            "--over",
+            "one,two",
+            "--detached",
+            "--explain",
+            "--json",
+        ],
+    )?;
     assert_eq!(preview["data"]["detached"], true);
     let children = preview["data"]["launch"]["node"]["composite"]["nodes"]
-        .as_array().ok_or("CLI compiled fanout")?;
+        .as_array()
+        .ok_or("CLI compiled fanout")?;
     assert_eq!(children.len(), 2);
-    assert!(children.iter().all(|child| child["access"] == "worktree_write"));
+    assert!(
+        children
+            .iter()
+            .all(|child| child["access"] == "worktree_write")
+    );
     let arguments = json!({"op":"run", "document":{
         "parameters":{"subject":{"type":"string"}},
         "brief":"Inspect ${subject}", "tier":"junior", "access":"read_only",

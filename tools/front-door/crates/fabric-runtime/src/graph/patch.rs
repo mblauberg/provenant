@@ -481,8 +481,7 @@ fn retry_node_scope(
                 && (node.id == id || !id.starts_with(&format!("{}--", node.id)))
                 && (node.plan.is_some()
                     || graph.checkpoint.expansions.iter().any(|expansion| {
-                        expansion.source == node.id
-                            && expansion.closes_producer()
+                        expansion.source == node.id && expansion.closes_producer()
                     }))
     };
     let prefix = format!("{id}--");

@@ -123,7 +123,8 @@ impl Factory {
         budget: WaitBudget,
         cancel: &CancelToken,
     ) -> Result<Value, FacadeError> {
-        let request = provenant_fabric_runtime::graph::relay::RelayOp::Add(self.child_request(input)?);
+        let request =
+            provenant_fabric_runtime::graph::relay::RelayOp::Add(self.child_request(input)?);
         if input["explain"] == true {
             return encode(request);
         }
@@ -156,17 +157,28 @@ impl Factory {
             return Err(invalid());
         }
         // Distinct calls create distinct children; callers opt into replay with a key.
-        let idempotency_key = match input.get("idempotency_key").or_else(|| raw.and_then(|document| document.get("idempotency_key"))) {
-            Some(value) => value.as_str().filter(|key| !key.is_empty() && key.len() <= 200)
-                .ok_or_else(invalid)?.to_owned(),
-            None => provenant_core::hex(&provenant_os::fs::entropy_128()
-                .map_err(|_| FacadeError::StateCorrupt)?),
+        let idempotency_key = match input
+            .get("idempotency_key")
+            .or_else(|| raw.and_then(|document| document.get("idempotency_key")))
+        {
+            Some(value) => value
+                .as_str()
+                .filter(|key| !key.is_empty() && key.len() <= 200)
+                .ok_or_else(invalid)?
+                .to_owned(),
+            None => provenant_core::hex(
+                &provenant_os::fs::entropy_128().map_err(|_| FacadeError::StateCorrupt)?,
+            ),
         };
-        let digest = provenant_records::CanonicalV1::file_digest(idempotency_key.as_bytes()).to_string();
+        let digest =
+            provenant_records::CanonicalV1::file_digest(idempotency_key.as_bytes()).to_string();
         let key = format!("child-{}", &digest[7..39]);
-        let detached = input.get("detached")
+        let detached = input
+            .get("detached")
             .or_else(|| raw.and_then(|document| document.get("detached")))
-            .map(|value| value.as_bool().ok_or_else(invalid)).transpose()?.unwrap_or(false);
+            .map(|value| value.as_bool().ok_or_else(invalid))
+            .transpose()?
+            .unwrap_or(false);
         // These controls belong to the relay envelope, not the template schema.
         let mut launch_document = raw.cloned();
         if let Some(fields) = launch_document.as_mut().and_then(Value::as_object_mut) {
@@ -1521,7 +1533,10 @@ mod tests {
         let input = json!({"op":"run", "use":"implement", "brief":"Fix the parser", "idempotency_key":"parser-launch"});
         let first = factory.child_request(&input)?;
         let unkeyed = json!({"op":"run", "use":"implement", "brief":"Fix the parser"});
-        assert_ne!(factory.child_request(&unkeyed)?.id, factory.child_request(&unkeyed)?.id);
+        assert_ne!(
+            factory.child_request(&unkeyed)?.id,
+            factory.child_request(&unkeyed)?.id
+        );
         assert!(first.writer);
         assert_eq!(
             first.launch.as_ref().unwrap().node["access"],
@@ -1545,7 +1560,10 @@ mod tests {
             "write_scope":["src"], "detached":true}))?;
         let node = &controlled.launch.as_ref().unwrap().node;
         assert_eq!(node["worktree"], ".worktrees/fix-child");
-        assert_eq!(node["attempt"]["new_worktree"], json!({"branch":"fix/child", "base":"HEAD"}));
+        assert_eq!(
+            node["attempt"]["new_worktree"],
+            json!({"branch":"fix/child", "base":"HEAD"})
+        );
         assert_eq!(controlled.write_scope, ["src"]);
         assert!(controlled.detached);
         let nested = json!({"op":"run", "document":{"use":"implement", "brief":"Nested replay",

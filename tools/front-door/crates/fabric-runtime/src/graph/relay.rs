@@ -801,10 +801,13 @@ pub(super) fn settle_subtrees<R: AttemptOwner, J: GraphJournal>(
                 .iter()
                 .any(|node| node.id == parent && node.state == NodeState::Succeeded);
             let logical = logical_parent(checkpoint, &parent);
-            if succeeded && checkpoint.nodes.iter().any(|node| {
-                node.id != parent && !node.state.settled()
-                    && logical_parent(checkpoint, &node.id) == logical
-            }) {
+            if succeeded
+                && checkpoint.nodes.iter().any(|node| {
+                    node.id != parent
+                        && !node.state.settled()
+                        && logical_parent(checkpoint, &node.id) == logical
+                })
+            {
                 // An honest-stop continuation owns the same logical children.
                 // Its predecessor settling must not cancel inherited work.
                 continue;
@@ -812,25 +815,26 @@ pub(super) fn settle_subtrees<R: AttemptOwner, J: GraphJournal>(
             if succeeded {
                 // Final patches deliberately schedule work after their producer
                 // completes. Only live relay children share the process lifetime.
-                let children: Vec<String> = checkpoint
-                    .expansions
-                    .iter()
-                    .filter(|expansion| {
-                        expansion.patch.as_ref().is_some_and(|record| {
-                            record.parent.as_deref().is_some_and(|source| logical_parent(checkpoint, source) == logical)
-                                && record.extra.contains_key(REQUEST_DIGEST)
+                let children: Vec<String> =
+                    checkpoint
+                        .expansions
+                        .iter()
+                        .filter(|expansion| {
+                            expansion.patch.as_ref().is_some_and(|record| {
+                                record.parent.as_deref().is_some_and(|source| {
+                                    logical_parent(checkpoint, source) == logical
+                                }) && record.extra.contains_key(REQUEST_DIGEST)
+                            })
                         })
-                    })
-                    .flat_map(|expansion| expansion.nodes.iter())
-                    .filter(|node| {
-                        node.extra.get(DETACHED) != Some(&Value::Bool(true))
-                            && checkpoint
-                                .nodes
-                                .iter()
-                                .any(|progress| progress.id == node.id && !progress.state.settled())
-                    })
-                    .map(|node| node.id.clone())
-                    .collect();
+                        .flat_map(|expansion| expansion.nodes.iter())
+                        .filter(|node| {
+                            node.extra.get(DETACHED) != Some(&Value::Bool(true))
+                                && checkpoint.nodes.iter().any(|progress| {
+                                    progress.id == node.id && !progress.state.settled()
+                                })
+                        })
+                        .map(|node| node.id.clone())
+                        .collect();
                 for child in children {
                     super::cancel_node_subtree(
                         document,
