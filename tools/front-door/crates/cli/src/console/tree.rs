@@ -158,7 +158,6 @@ pub(super) fn read_inner(
                     attempt,
                     &[],
                     state.as_path(),
-                    &Default::default(),
                     clock.wall_now().ok(),
                     false,
                 );

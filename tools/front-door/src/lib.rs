@@ -34,38 +34,6 @@ mod overflow;
 mod pr;
 #[cfg(test)]
 mod pr_land_tests;
-#[cfg(test)]
-#[allow(
-    dead_code,
-    reason = "the custom worktree driver includes these legacy test fixtures without libtest"
-)]
-mod preset;
-#[cfg(test)]
-#[allow(
-    dead_code,
-    unused_imports,
-    reason = "the custom worktree test driver includes this library without the test harness"
-)]
-mod preset_deliver_tests;
-#[cfg(test)]
-#[allow(
-    dead_code,
-    reason = "the custom worktree driver includes these legacy test fixtures without libtest"
-)]
-mod preset_roles;
-#[cfg(test)]
-#[allow(
-    dead_code,
-    reason = "the custom worktree driver includes these legacy test fixtures without libtest"
-)]
-mod preset_select;
-#[cfg(test)]
-#[allow(
-    dead_code,
-    unused_imports,
-    reason = "the custom worktree test driver includes this library without the test harness"
-)]
-mod preset_tests;
 mod process_tree;
 mod provider_retention;
 mod release_smoke;
@@ -1077,9 +1045,13 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
             ) {
                 return code;
             }
-            run_edge(&inv.leaf, globals, |edge| {
-                provenant_cli::run::cancel(cmd, edge)
-            })
+            fail(
+                &inv.leaf,
+                Outcome::Refused,
+                "GRAPH_REQUIRED",
+                "retained non-graph lanes are read-only",
+                globals,
+            )
         }
         Command::Retry(cmd) => {
             if let Some(code) = fabric::unified_graph_command(
@@ -1097,9 +1069,13 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
             ) {
                 return code;
             }
-            run_edge(&inv.leaf, globals, |edge| {
-                provenant_cli::run::resume(cmd, edge)
-            })
+            fail(
+                &inv.leaf,
+                Outcome::Refused,
+                "GRAPH_REQUIRED",
+                "retained non-graph lanes are read-only",
+                globals,
+            )
         }
         Command::Lane(cmd) => run_edge(&inv.leaf, globals, |edge| {
             let mut reply = provenant_cli::run::lane(cmd, edge);

@@ -197,14 +197,13 @@ pub(super) fn cancel_inner(mut command: Cancel, edge: &Edge<'_>) -> Reply {
                     .map(|id| session.service().status(id, &call))
                     .collect::<Result<Vec<_>, _>>()?;
                 let waits = session.store.lane_waits(&lanes, &call);
-                let successors = Default::default();
-                let (rendered, _) = render_lanes_with_lineage(
+
+                let (rendered, _) = render_lanes(
                     &lanes,
                     &waits,
                     None,
                     session.context.state_root.as_path(),
                     None,
-                    &successors,
                 );
                 data["lanes"] = rendered["lanes"].clone();
             }

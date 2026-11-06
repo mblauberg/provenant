@@ -147,7 +147,7 @@ fn modern_tools_list_publishes_only_supported_output_schemas() {
 }
 
 #[test]
-fn legacy_tools_list_omits_modern_output_schemas() {
+fn both_protocol_eras_publish_the_same_tool_contract() {
     let mut protocol = Protocol::default();
     let Action::Reply(initialized) = protocol.receive(
         br#"{"jsonrpc":"2.0","id":"initialize","method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"fixture","version":"1"}}}"#,
@@ -162,8 +162,7 @@ fn legacy_tools_list_omits_modern_output_schemas() {
         panic!("expected legacy tool catalogue")
     };
     let tools = reply["result"]["tools"].as_array().expect("tools array");
-    assert_eq!(tools.len(), 5);
-    assert!(tools.iter().all(|tool| tool.get("outputSchema").is_none()));
+    assert_eq!(tools, crate::tools::catalogue());
 }
 
 #[test]
@@ -325,112 +324,6 @@ fn unknown_argument_names_the_lone_near_match() {
     assert_eq!(
         error["message"],
         "Invalid argument at arguments.op; did you mean 'summary_show'?"
-    );
-}
-
-#[test]
-fn unknown_argument_keys_do_not_enter_diagnostics() {
-    for key in [
-        "TOKEN_SENTINEL/private/host\u{1b}".to_owned(),
-        format!("TOKEN_SENTINEL{}", "é".repeat(2048)),
-    ] {
-        let mut arguments = serde_json::Map::new();
-        arguments.insert("op".into(), json!("summary_show"));
-        arguments.insert(key, json!(true));
-        let request = json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{
-            "_meta":{VERSION:MODERN,CAPABILITIES:{}},"name":"fabric_chair",
-            "arguments":arguments
-        }});
-        let Action::Reply(reply) =
-            Protocol::default().receive(&serde_json::to_vec(&request).unwrap())
-        else {
-            panic!()
-        };
-        let detail = &reply["result"]["structuredContent"];
-        assert_eq!(detail["code"], "invalid_input");
-        assert_eq!(detail["path"], "arguments.<unknown>");
-        let wire = serde_json::to_string(detail).unwrap();
-        assert!(!wire.contains("TOKEN_SENTINEL"));
-        assert!(!wire.contains("/private/host"));
-        assert!(!wire.chars().any(char::is_control));
-        assert!(wire.len() < 4096);
-        assert!(detail["hint"].is_string());
-
-        let mut task = json!({"prompt":"work", "route":{"kind":"named","name":"utility"}, "timeout_seconds":1});
-        task.as_object_mut()
-            .unwrap()
-            .insert("TOKEN_SENTINEL/private/host\u{1b}".into(), json!(true));
-        let request = json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{
-            "_meta":{VERSION:MODERN,CAPABILITIES:{}},"name":"fabric_run",
-            "arguments":{"op":"submit","tasks":[task]}
-        }});
-        let Action::Reply(reply) =
-            Protocol::default().receive(&serde_json::to_vec(&request).unwrap())
-        else {
-            panic!()
-        };
-        let detail = &reply["result"]["structuredContent"];
-        assert_eq!(detail["path"], "arguments.tasks[0].<unknown>");
-        let wire = serde_json::to_string(detail).unwrap();
-        assert!(!wire.contains("TOKEN_SENTINEL"));
-        assert!(!wire.contains("/private/host"));
-    }
-}
-
-#[test]
-fn oversized_run_prompt_reports_field_and_byte_limit_without_source() {
-    let request = json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{
-        "_meta":{VERSION:MODERN,CAPABILITIES:{}},"name":"fabric_run",
-        "arguments":{"op":"submit","tasks":[{
-            "prompt":format!("TOKEN_SENTINEL{}", "é".repeat(40000)),
-            "route":{"kind":"named","name":"utility"}, "timeout_seconds":1
-        }]}
-    }});
-    let Action::Reply(reply) = Protocol::default().receive(&serde_json::to_vec(&request).unwrap())
-    else {
-        panic!()
-    };
-    let detail = &reply["result"]["structuredContent"];
-    assert_eq!(detail["code"], "invalid_input");
-    assert_eq!(detail["path"], "arguments.tasks[0].prompt");
-    let message = detail["message"].as_str().unwrap();
-    assert!(message.contains("65536"));
-    assert!(message.contains("UTF-8 bytes"));
-    assert!(detail["hint"].is_string());
-    assert!(
-        !serde_json::to_string(detail)
-            .unwrap()
-            .contains("TOKEN_SENTINEL")
-    );
-}
-
-#[test]
-fn typed_run_validation_projects_field_and_reason() {
-    let request = json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{
-        "_meta":{VERSION:MODERN,CAPABILITIES:{}},"name":"fabric_run",
-        "arguments":{"op":"submit","tasks":[{
-            "title":"TOKEN_SENTINEL\u{1b}", "prompt":"work",
-            "route":{"kind":"named","name":"utility"}, "timeout_seconds":1
-        }]}
-    }});
-    let Action::Reply(reply) = Protocol::default().receive(&serde_json::to_vec(&request).unwrap())
-    else {
-        panic!()
-    };
-    let detail = &reply["result"]["structuredContent"];
-    assert_eq!(detail["code"], "invalid_input");
-    assert_eq!(detail["path"], "arguments.tasks[0].title");
-    assert!(
-        detail["detail"]
-            .as_str()
-            .unwrap()
-            .contains("control characters")
-    );
-    assert!(detail["next"].is_string());
-    assert!(
-        !serde_json::to_string(detail)
-            .unwrap()
-            .contains("TOKEN_SENTINEL")
     );
 }
 

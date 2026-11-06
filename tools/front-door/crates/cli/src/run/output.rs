@@ -361,12 +361,11 @@ fn output_read(
     let waits = session
         .store
         .lane_waits(std::slice::from_ref(&record), call);
-    let successors = Default::default();
+
     let projected = project_lane(
         &record,
         &waits,
         session.context.state_root.as_path(),
-        &successors,
         call.clock.wall_now().ok(),
         true,
     );

@@ -1013,6 +1013,27 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
         ))
     }
 
+    fn provision_writer_worktree(
+        &mut self,
+        path: &str,
+        branch: &str,
+        base: &str,
+    ) -> Result<Option<provenant_fabric_runtime::graph::WriterWorktreeBinding>, Self::Error> {
+        provenant_cli::fabric::graph_relay::provision_writer(
+            &self.factory.context,
+            path,
+            branch,
+            base,
+            self.cancel,
+        )
+        .map_err(|error| FacadeError::DispatchRefused {
+            fact: None,
+            disk: None,
+            reason: error.to_string(),
+        })?;
+        self.bind_writer_worktree(path)
+    }
+
     fn bound_graph_bases(
         &self,
     ) -> (
@@ -2232,6 +2253,9 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                 attempt.account = route.account.clone().or(attempt.account);
                 attempt
             });
+            // The graph checkpoint owns worktree provisioning; submission receives
+            // the resolved checkout, never a second request to create it.
+            attempt.new_worktree = None;
             // These fields have already been resolved into the sealed access grants.
             attempt.write_roots.clear();
             attempt.capabilities.clear();

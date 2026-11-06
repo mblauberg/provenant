@@ -877,14 +877,43 @@ fn constraints(path: &str) -> Vec<String> {
 #[allow(clippy::panic)]
 mod tests {
     use super::*;
-    #[derive(clap::Parser)]
-    struct DispatchFixture {
-        #[command(flatten)]
-        request: Dispatch,
-    }
-    fn dispatch_fixture(words: &[&str]) -> Dispatch {
-        use clap::Parser;
-        DispatchFixture::try_parse_from(words).unwrap().request
+    #[test]
+    fn run_accepts_writer_branch_base_and_named_route() {
+        let invocation = valid(&[
+            "run",
+            "Fix parser",
+            "--mode",
+            "worktree-write",
+            "--branch",
+            "fix/parser",
+            "--base",
+            "origin/main",
+            "--route",
+            "senior",
+            "--write-scope",
+            "src",
+        ]);
+        let Command::Run(request) = invocation.command else {
+            panic!("expected run");
+        };
+        assert_eq!(request.brief.as_deref(), Some("Fix parser"));
+        assert_eq!(request.branch.as_deref(), Some("fix/parser"));
+        assert_eq!(request.base.as_deref(), Some("origin/main"));
+        assert_eq!(request.tier.as_deref(), Some("senior"));
+        assert_eq!(request.write_scope, vec!["src"]);
+        valid(&["run", "Fix parser", "--worktree", ".worktrees/fix-parser"]);
+        invalid(&["run", "Fix parser", "--branch", "fix/parser"]);
+        invalid(&["run", "Fix parser", "--base", "HEAD"]);
+        invalid(&[
+            "run",
+            "Fix parser",
+            "--branch",
+            "fix/parser",
+            "--base",
+            "HEAD",
+            "--worktree",
+            ".",
+        ]);
     }
 
     #[test]
@@ -1580,59 +1609,6 @@ mod tests {
         invalid(&["disk", "delete"]);
         invalid(&["disk", "report", "--force"]);
         invalid(&["disk", "report", "--dry-run"]);
-    }
-    #[test]
-    fn run_refuses_adapter_unsupported_flags_before_side_effects() {
-        // Models are catalogued, so an effort is refused only by the adapter
-        // (cursor) or by the catalogue entry, which records no effort (opencode).
-        for (model, effort, refused) in [
-            ("claude/claude-sonnet-5-5", "high", false),
-            ("codex/gpt-6-luna", "high", false),
-            ("agy/gemini-3.8-flash", "high", false),
-            ("opencode/opencode-go/glm-5.3-flash", "high", true),
-            ("cursor/gpt-5.3-codex-low", "high", true),
-        ] {
-            let request = dispatch_fixture(&[
-                "fixture",
-                "--prompt-stdin",
-                "--model",
-                model,
-                "--effort",
-                effort,
-                "--worktree-branch",
-                "feat/x",
-            ]);
-            let result = run::check_flag_capabilities(&request, None);
-            assert_eq!(result.is_err(), refused, "{model}");
-            if let Err(fail) = result {
-                assert_eq!(fail.kind.code(), "UNSUPPORTED", "{model}");
-            }
-        }
-    }
-    #[test]
-    fn manifest_task_is_refused_before_any_launch_side_effect() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("tasks.json");
-        let write = |model: &str| {
-            std::fs::write(
-                &path,
-                format!(
-                    r#"{{"schema_version":1,"tasks":[{{"prompt":"p","route":{{"kind":"model","provider":"cursor","model":"{model}","effort":"high"}}}}]}}"#
-                ),
-            )
-            .unwrap();
-        };
-        write("cursor/m");
-        let request = dispatch_fixture(&["fixture", "--manifest", path.to_str().unwrap()]);
-        let fail = run::check_flag_capabilities(&request, None).unwrap_err();
-        assert_eq!(fail.kind.code(), "UNSUPPORTED");
-    }
-    #[test]
-    fn pool_effort_is_refused_only_when_no_member_takes_it() {
-        assert!(run::pool_effort_refusal(&["cursor", "codex"], "high").is_none());
-        assert!(run::pool_effort_refusal(&["cursor"], "high").is_some());
-        assert!(run::pool_effort_refusal(&["cursor", "unregistered-provider"], "high").is_none());
-        assert!(run::pool_effort_refusal(&[], "high").is_none());
     }
     #[test]
     fn control_commands_require_piped_text_and_a_channel() {

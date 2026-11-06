@@ -38,7 +38,6 @@ struct FakeOwner {
     quota_redraw: bool,
     retry_limit: Option<u8>,
     input_cap_source: Option<InputCapSource>,
-    retry_used: u64,
     retry_budgets: Vec<Option<u8>>,
     deliveries: usize,
     delivery_effects: usize,
@@ -67,6 +66,7 @@ struct FakeOwner {
     ),
     implicit_head: Option<String>,
     implicit_bindings: usize,
+    provisions: Vec<(String, String, String)>,
     source_commits: Vec<Option<String>>,
     resolved_review_base: Option<String>,
     review_base_resolutions: usize,
@@ -153,10 +153,6 @@ impl AttemptOwner for FakeOwner {
     ) -> Result<Option<(u8, String)>, Self::Error> {
         Ok(self.retry_limit.map(|limit| (limit, "host_config".into())))
     }
-    fn retry_successors(&mut self, _: &str) -> Result<u64, Self::Error> {
-        Ok(self.retry_used)
-    }
-
     fn quota_alias_redraw(&mut self, _: &AttemptKey, _: &str) -> Result<bool, Self::Error> {
         Ok(self.quota_redraw)
     }
@@ -217,6 +213,17 @@ impl AttemptOwner for FakeOwner {
             },
             head: self.implicit_head.clone().unwrap_or_else(|| "a".repeat(40)),
         }))
+    }
+    fn provision_writer_worktree(
+        &mut self,
+        path: &str,
+        branch: &str,
+        base: &str,
+    ) -> Result<Option<WriterWorktreeBinding>, Self::Error> {
+        self.provisions
+            .push((path.into(), branch.into(), base.into()));
+        self.implicit_head = Some(base.into());
+        self.bind_writer_worktree(path)
     }
     fn bound_graph_bases(
         &self,
@@ -544,7 +551,7 @@ fn node_attempt_spec_refuses_what_the_graph_cannot_launch() {
         (
             serde_json::json!({"new_worktree": {"base": "main", "branch": "b"}}),
             None,
-            "graph attempts do not support new_worktree",
+            "new worktree requires a writer",
         ),
         (
             serde_json::json!({"write_roots": [""]}),
@@ -10092,13 +10099,13 @@ fn advisory_composite_failure_preserves_cause_and_launches_dependant() {
 }
 
 #[test]
-fn cumulative_allowance_counts_run_successors_and_survives_observation_replay() {
+fn cumulative_allowance_counts_graph_attempts_and_survives_observation_replay() {
     let mut lane = node("lane", route("first"));
     lane.route = None;
     lane.routes = Some(vec![route("first"), route("second"), route("third")]);
     let document = graph(vec![lane]);
     let mut owner = FakeOwner {
-        retry_limit: Some(2),
+        retry_limit: Some(1),
         observations: [AttemptObservation::Pending {
             attempt_ref: Some("first".into()),
         }]
@@ -10107,22 +10114,25 @@ fn cumulative_allowance_counts_run_successors_and_survives_observation_replay() 
     };
     let mut journal = MemoryJournal::default();
     advance(&document, &mut owner, &mut journal).unwrap();
-    assert_eq!(owner.retry_budgets, vec![Some(2)]);
+    assert_eq!(owner.retry_budgets, vec![Some(1)]);
     owner.retry_limit = Some(9); // Host changes cannot renew an admitted node.
-    owner.retry_used = 2;
     let mut refused = terminal(AttemptOutcome::UsageLimited);
     if let AttemptObservation::Terminal { attempt_ref, .. } = &mut refused {
         *attempt_ref = Some("first".into());
     }
     owner.observations.push_back(refused);
+    owner
+        .observations
+        .push_back(terminal(AttemptOutcome::UsageLimited));
     let run = advance(&document, &mut owner, &mut journal).unwrap();
     assert_eq!(run.checkpoint.nodes[0].state, NodeState::Failed);
-    assert_eq!(run.checkpoint.nodes[0].attempts.len(), 1);
-    assert_eq!(run.checkpoint.nodes[0].extra["retry"]["retries"], 2);
-    assert_eq!(owner.calls.len(), 2); // Same-key observation, no second route.
+    assert_eq!(run.checkpoint.nodes[0].attempts.len(), 2);
+    assert_eq!(run.checkpoint.nodes[0].extra["retry"]["retries"], 1);
+    assert_eq!(owner.calls.len(), 3); // One observation replay and one allowed route switch.
+    assert_eq!(owner.retry_budgets, vec![Some(1), Some(1), Some(0)]);
     assert_eq!(owner.calls[0].0, owner.calls[1].0);
     advance(&document, &mut owner, &mut journal).unwrap();
-    assert_eq!(owner.calls.len(), 2);
+    assert_eq!(owner.calls.len(), 3);
 }
 
 #[test]
@@ -11340,4 +11350,106 @@ fn template_review_admission_rejects_expanded_ids_over_the_limit() {
             .unwrap(),
     ];
     assert!(boundary.admit(&Default::default()).is_err());
+}
+
+#[test]
+fn writer_provision_recovery_keeps_the_checkpointed_base() {
+    struct CrashJournal {
+        checkpoint: Option<GraphCheckpoint>,
+        fail_binding_save: bool,
+    }
+    impl GraphJournal for CrashJournal {
+        type Error = NoObservation;
+        fn load(&mut self, _: &str) -> Result<Option<GraphCheckpoint>, Self::Error> {
+            Ok(self.checkpoint.clone())
+        }
+        fn save(&mut self, checkpoint: &GraphCheckpoint) -> Result<(), Self::Error> {
+            if self.fail_binding_save
+                && checkpoint
+                    .nodes
+                    .iter()
+                    .any(|node| node.writer_binding.is_some())
+            {
+                self.fail_binding_save = false;
+                return Err(NoObservation);
+            }
+            self.checkpoint = Some(checkpoint.clone());
+            Ok(())
+        }
+    }
+    let mut writer = node("writer", route("first"));
+    writer.access = AccessMode::WorktreeWrite;
+    writer.worktree = Some(".worktrees/topic-fix".into());
+    writer.attempt = Some(
+        serde_json::from_value(serde_json::json!({
+            "new_worktree":{"branch":"topic/fix","base":"main"}
+        }))
+        .unwrap(),
+    );
+    let mut document = graph(vec![writer]);
+    document.schema_version = 2;
+    let pinned = "a".repeat(40);
+    let mut owner = FakeOwner {
+        resolved_review_base: Some(pinned.clone()),
+        observations: [terminal(AttemptOutcome::Succeeded)].into(),
+        ..Default::default()
+    };
+    let mut journal = CrashJournal {
+        checkpoint: None,
+        fail_binding_save: true,
+    };
+    assert!(matches!(
+        advance(&document, &mut owner, &mut journal),
+        Err(GraphError::Journal(_))
+    ));
+    let checkpoint = journal.checkpoint.as_ref().unwrap();
+    assert_eq!(checkpoint.nodes[0].extra["new_worktree_base"], pinned);
+    assert!(checkpoint.nodes[0].writer_binding.is_none());
+    assert_eq!(owner.provisions.len(), 1);
+    owner.resolved_review_base = Some("b".repeat(40));
+    let recovered = advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(recovered.checkpoint.nodes[0].state, NodeState::Succeeded);
+    assert_eq!(owner.provisions[1].2, pinned);
+    assert_eq!(owner.review_base_resolutions, 1);
+}
+
+#[test]
+fn new_worktree_authority_requires_matching_writer_location_and_safe_refs() {
+    for (worktree, branch, base) in [
+        (".worktrees/other", "topic/fix", "main"),
+        (".worktrees/-bad", "-bad", "main"),
+        (".worktrees/topic-fix", "topic/fix", "--bad"),
+        (".worktrees/topic-fix", "topic/fix", ""),
+        (".worktrees/..-escape", "../escape", "main"),
+    ] {
+        let mut writer = node("writer", route("first"));
+        writer.access = AccessMode::WorktreeWrite;
+        writer.worktree = Some(worktree.into());
+        writer.attempt = Some(
+            serde_json::from_value(serde_json::json!({
+                "new_worktree":{"branch":branch,"base":base}
+            }))
+            .unwrap(),
+        );
+        assert_eq!(
+            validate_plan(&graph(vec![writer])).unwrap_err(),
+            "invalid new worktree binding"
+        );
+    }
+    let mut writer = node("writer", route("first"));
+    writer.access = AccessMode::WorktreeWrite;
+    writer.worktree = Some(".worktrees/topic-fix".into());
+    writer.attempt = Some(
+        serde_json::from_value(serde_json::json!({
+            "new_worktree":{"branch":"topic/fix","base":"main"}
+        }))
+        .unwrap(),
+    );
+    writer.source = Some(SourceBinding::Commit {
+        commit: "a".repeat(40),
+    });
+    assert_eq!(
+        validate_plan(&graph(vec![writer])).unwrap_err(),
+        "new worktree cannot override a source binding"
+    );
 }

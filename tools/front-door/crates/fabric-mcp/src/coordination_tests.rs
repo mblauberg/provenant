@@ -68,7 +68,7 @@ impl Clock for SharedClock {
 
 struct FakeFacade;
 
-struct SubmitFacade {
+struct WaitFacade {
     fail_first: bool,
     large_wait: bool,
     expire_run: bool,
@@ -78,9 +78,8 @@ struct SubmitFacade {
     budgets: Vec<u64>,
     reads: Vec<u64>,
 }
-impl F3Facade for SubmitFacade {
+impl F3Facade for WaitFacade {
     type Identity = Value;
-    type Submit = Value;
     type Run = Value;
     type Hosts = Value;
     fn identity(
@@ -90,18 +89,6 @@ impl F3Facade for SubmitFacade {
         _: &CancelToken,
     ) -> Result<Value, FacadeError> {
         Ok(json!({}))
-    }
-    fn submit(
-        &mut self,
-        _: SubmitInput,
-        budget: WaitBudget,
-        _: &CancelToken,
-    ) -> Result<Value, FacadeError> {
-        self.budgets
-            .push(budget.remaining(MonoTime::from_micros(0)).as_micros());
-        Ok(
-            json!({"operation_id":"op", "targets":[{"attempt":"11111111111111111111111111111111"},{"attempt":"22222222222222222222222222222222"}]}),
-        )
     }
     fn run(
         &mut self,
@@ -173,112 +160,6 @@ impl F3Facade for SubmitFacade {
 }
 
 #[test]
-fn submit_wait_merges_outputs_and_uses_independent_budgets() -> Result<(), Box<dyn Error>> {
-    let temp = tempfile::tempdir()?;
-    let base = temp.path().canonicalize()?;
-    let mut inputs = RootInputs::new(base.join("home"), base.join("checkout"));
-    inputs.state_dir = Some(base.join("state"));
-    let root = inputs.resolve(&Resolver)?.state;
-    let clock = TestClock::new(
-        WallTime::from_micros(2_000_000_000_000_000)?,
-        MonoTime::from_micros(0),
-    );
-    let coordination = CoordinationService::open(
-        &root,
-        ProjectId::from_bytes([1; 16]),
-        ActorId::from_bytes([2; 16]),
-        &clock,
-        &ThreadPause,
-        &CancelToken::new(),
-    )?;
-    let facade = SubmitFacade {
-        fail_first: true,
-        large_wait: false,
-        expire_run: false,
-        run_unsatisfied: false,
-        run_io: false,
-        clock: None,
-        budgets: vec![],
-        reads: vec![],
-    };
-    let mut service = Service::new(coordination, facade, &clock);
-    let response = ToolCall::parse("fabric_run", json!({"op":"submit","wait_seconds":1,"tasks":[{"prompt":"work","route":{"kind":"named","name":"utility"},"timeout_seconds":1}]}))?.execute(&mut service, &CancelToken::new())?.structured_content;
-    assert_eq!(
-        service.facade.budgets,
-        vec![crate::MAX_WAIT_SECONDS * 1_000_000, 1_000_000]
-    );
-    assert_eq!(response["receipt"]["operation_id"], "op");
-    assert_eq!(response["wait"]["timed_out"], false);
-    assert_eq!(response["outputs"].as_array().unwrap().len(), 2);
-    assert_eq!(response["outputs"][0]["error"]["code"], "io");
-    assert!(!response.to_string().contains("/private/host"));
-    assert_eq!(response["outputs"][1]["bytes"]["data"], "ok", "{response}");
-    let limits = provenant_fabric_runtime::config::Limits {
-        body_bytes: 65536,
-        input_frame_bytes: 65536,
-        json_depth: 64,
-        page_rows: 20,
-        output_lines: 100,
-        output_bytes: 16384,
-        result_bytes: 3000,
-        lease_seconds: 300,
-        peer_seconds: 30,
-        graph_timeout_seconds: 14400,
-        store_busy_timeout_ms: 30_000,
-    };
-    service = service.with_limits(limits);
-    service.facade.fail_first = false;
-    service.facade.reads.clear();
-    let request = || {
-        ToolCall::parse(
-            "fabric_run",
-            json!({"op":"submit","wait_seconds":1,"tasks":[{"prompt":"work","route":{"kind":"named","name":"utility"},"timeout_seconds":1}]}),
-        )
-    };
-    let response = request()?
-        .execute(&mut service, &CancelToken::new())?
-        .structured_content;
-    assert_eq!(response["outputs"].as_array().unwrap().len(), 2);
-    assert!(
-        service
-            .facade
-            .reads
-            .iter()
-            .all(|bytes| *bytes > 0 && *bytes < 1500)
-    );
-    assert!(serde_json::to_vec(&response)?.len() <= 3000);
-    service.facade.run_io = true;
-    let failed_wait = request()?
-        .execute(&mut service, &CancelToken::new())?
-        .structured_content;
-    assert_eq!(failed_wait["observation_error"]["code"], "io");
-    assert!(!failed_wait.to_string().contains("/private/host"));
-    service.facade.run_io = false;
-    service.facade.large_wait = true;
-    let response = request()?
-        .execute(&mut service, &CancelToken::new())?
-        .structured_content;
-    assert_eq!(response["receipt"]["operation_id"], "op");
-    assert!(response.get("wait").is_none());
-    assert!(response.get("outputs").is_none());
-    assert!(response["continuation"].as_str().is_some());
-    service.facade.run_unsatisfied = true;
-    service.facade.large_wait = false;
-    service.facade.reads.clear();
-    let response = request()?
-        .execute(&mut service, &CancelToken::new())?
-        .structured_content;
-    assert!(response.get("outputs").is_none(), "{response}");
-    assert!(response["continuation"].is_string(), "{response}");
-    assert_eq!(
-        response["reason"],
-        "provider silent; lane attempt-1 is still running"
-    );
-    assert_eq!(response["wait"]["satisfied"], false);
-    Ok(())
-}
-
-#[test]
 fn wait_that_expires_before_observation_reports_timed_out() -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
     let base = temp.path().canonicalize()?;
@@ -297,7 +178,7 @@ fn wait_that_expires_before_observation_reports_timed_out() -> Result<(), Box<dy
         &ThreadPause,
         &CancelToken::new(),
     )?;
-    let facade = SubmitFacade {
+    let facade = WaitFacade {
         fail_first: false,
         large_wait: false,
         expire_run: true,
@@ -322,7 +203,6 @@ fn wait_that_expires_before_observation_reports_timed_out() -> Result<(), Box<dy
 
 impl F3Facade for FakeFacade {
     type Identity = Fact;
-    type Submit = Fact;
     type Run = Fact;
     type Hosts = Fact;
     // An existing Codex attempt has no live path, so steering gets an ordinary receipt.
@@ -362,14 +242,6 @@ impl F3Facade for FakeFacade {
         _: &CancelToken,
     ) -> Result<Fact, FacadeError> {
         Ok(Fact { state: "identity" })
-    }
-    fn submit(
-        &mut self,
-        _: SubmitInput,
-        _: WaitBudget,
-        _: &CancelToken,
-    ) -> Result<Fact, FacadeError> {
-        Ok(Fact { state: "accepted" })
     }
     fn run(&mut self, _: RunInput, _: WaitBudget, _: &CancelToken) -> Result<Fact, FacadeError> {
         Ok(Fact { state: "unknown" })
@@ -441,10 +313,11 @@ fn graph_documents_reach_the_shared_owner_unchanged() -> Result<(), Box<dyn Erro
     let status = json!({"op":"status","id":"g-test","wait_seconds":1});
     assert_eq!(call(&mut service, "fabric_run", status.clone())?, status);
     let child_request = json!({"op":"run","brief":"inspect parser","use":"explore","tier":"junior","wait_seconds":1});
-    assert_eq!(
-        call(&mut service, "fabric_run", child_request.clone())?,
-        child_request
-    );
+    let child = call(&mut service, "fabric_run", child_request)?;
+    assert_eq!(child["op"], "add");
+    assert_eq!(child["use"], "explore");
+    assert_eq!(child["brief"], "inspect parser");
+    assert_eq!(child["tier"], "junior");
     service = service.with_lane_restrictions(false);
     for request in [
         json!({"op":"run","document":{"id":"graph","nodes":[{"id":"inspect","use":"task","brief":"inspect parser"}],"templates":{"local":{"brief":"local"}}}}),
@@ -553,7 +426,7 @@ fn five_tools_reach_the_real_store_through_runtime_and_keep_fences_scoped()
 }
 
 use crate::test_facade::local_inbox_owner;
-local_inbox_owner!(SubmitFacade);
+local_inbox_owner!(WaitFacade);
 impl McpFacade for FakeFacade {
     fn graph_document(
         &mut self,
@@ -619,9 +492,8 @@ fn lane_run_submission_adds_graph_children_instead_of_attempts() -> Result<(), B
     )?;
     let mut service = Service::new(coordination, FakeFacade, &clock).with_lane_restrictions(true);
     let input = json!({
-        "op":"submit", "operation_id":"child-launch", "wait_seconds":1,
-        "tasks":[{"prompt":"implement the child", "access":"worktree_write",
-            "route":{"kind":"named","name":"senior"}, "timeout_seconds":60}]
+        "op":"run", "idempotency_key":"child-run", "wait_seconds":1, "brief":"implement the child", "tier":"senior",
+        "document":{"id":"task", "use":"task", "access":"worktree_write"}
     });
     let invoke = |service: &mut Service<'_, FakeFacade>| -> Result<Value, Box<dyn Error>> {
         Ok(ToolCall::parse("fabric_run", input.clone())?
@@ -637,56 +509,38 @@ fn lane_run_submission_adds_graph_children_instead_of_attempts() -> Result<(), B
     let timed_out = ToolCall::parse("fabric_run", timed_out)?
         .execute(&mut service, &CancelToken::new())?
         .structured_content;
-    assert_eq!(timed_out["children"], first["children"]);
+    assert_eq!(timed_out["idempotency_key"], first["idempotency_key"]);
     assert!(timed_out.get("observation_error").is_some());
     let mut no_wait = input.clone();
     no_wait
         .as_object_mut()
         .ok_or("submission object")?
         .remove("wait_seconds");
-    let no_wait_input = serde_json::from_value(no_wait)?;
-    let no_wait = ToolCall::Submit(no_wait_input)
+    let no_wait = ToolCall::parse("fabric_run", no_wait)?
         .execute(&mut service, &CancelToken::new())?
         .structured_content;
-    assert_eq!(no_wait["children"], first["children"]);
+    assert_eq!(no_wait["idempotency_key"], first["idempotency_key"]);
     assert!(no_wait.get("wait").is_none());
     assert!(no_wait.get("observation_error").is_none());
-    assert_eq!(first["children"][0]["op"], "add");
-    assert_eq!(first["children"][0]["use"], "task");
-    assert_eq!(first["children"][0]["tier"], "senior");
-    assert_eq!(first["children"][0]["brief"], "implement the child");
-    assert_eq!(first["children"][0]["writer"], true);
-    assert_eq!(first["children"][0]["timeout_seconds"], 60);
+    assert_eq!(first["op"], "add");
+    assert_eq!(first["use"], "task");
+    assert_eq!(first["tier"], "senior");
+    assert_eq!(first["brief"], "implement the child");
+    assert_eq!(first["writer"], true);
     assert!(
-        !first["children"][0]["idempotency_key"]
+        !first["idempotency_key"]
             .as_str()
             .ok_or("missing key")?
             .is_empty()
     );
     assert!(first.get("targets").is_none());
-    let mut unsupported = input.clone();
-    unsupported["tasks"][0]["route"] = json!({"kind":"model","provider":"codex","model":"model"});
-    let error = ToolCall::parse("fabric_run", unsupported)?
-        .execute(&mut service, &CancelToken::new())
-        .err()
-        .ok_or("unsupported child fell through to legacy submit")?;
-    assert_eq!(error.code(), "invalid_input");
-    for (field, value) in [
-        ("unsupported", json!("do not discard")),
-        ("capability_sources", json!({"postgres":"flag"})),
-    ] {
+    for field in ["worktree", "branch", "base", "nodes", "templates"] {
         let mut unsupported = input.clone();
-        unsupported["tasks"][0][field] = value;
-        // Shared peer records retain extension fields; even a typed caller
-        // bypassing strict MCP parsing cannot silently discard them.
-        unsupported
-            .as_object_mut()
-            .ok_or("submission object")?
-            .remove("wait_seconds");
-        let error = ToolCall::Submit(serde_json::from_value(unsupported)?)
+        unsupported["document"][field] = json!("unsupported");
+        let error = ToolCall::parse("fabric_run", unsupported)?
             .execute(&mut service, &CancelToken::new())
             .err()
-            .ok_or("unsupported task field was discarded")?;
+            .ok_or("unsupported launch accepted")?;
         assert_eq!(error.code(), "invalid_input");
     }
     Ok(())

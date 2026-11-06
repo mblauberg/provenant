@@ -2761,29 +2761,7 @@ fn execute(command: &Route, roots: &Roots, now: WallTime) -> Result<Data, EdgeEr
         }
     }
 }
-/// Preview a dispatch's route without launching: the pick, each pool candidate
-/// and every exclusion that removed one, with its source.
-pub(crate) fn explain_dispatch(
-    request: &RouteRequest,
-    roots: &Roots,
-) -> Result<(serde_json::Value, String), EdgeError> {
-    let now = SystemClock::new().wall_now()?;
-    let query = RouteResolve {
-        writes: false,
-        account: None,
-        name: None,
-        request: request.clone(),
-    };
-    let data = execute(&Route::Resolve(query), roots, now)?;
-    let Data::Resolved(preview) = &data else {
-        return Err(RoutingError::Catalogue.into());
-    };
-    let text = resolved_text(preview);
-    Ok((
-        serde_json::to_value(&data).map_err(|_| RoutingError::Catalogue)?,
-        text,
-    ))
-}
+
 /// Whether the account's reading says a window is spent and has not reset.
 /// Admission gates only models with a quota pool; native providers surface a
 /// spent allowance as an exhausted snapshot, which a preview reads directly.
@@ -2798,12 +2776,6 @@ fn spent(record: &provenant_quota::AccountRecord, now: i64) -> bool {
     })
 }
 
-/// Why a route alias cannot serve work now, resolved the way dispatch resolves
-/// it: the configured pool, the exclusions (flags and configuration), and the
-/// cached account evidence and quota routing already holds. `None` means a
-/// member can run, or readiness is only known once a provider is probed at
-/// dispatch. A planner never falls through to a weaker route, so the preset
-/// front-end degrades on a `Some`.
 pub fn route_blocked(alias: &str, exclude: &[String], roots: &Roots) -> Option<String> {
     let query = RouteResolve {
         writes: false,
@@ -3929,7 +3901,31 @@ mod route_tests {
             fallback: vec![],
             exclude: vec!["claude".into()],
         };
-        let (data, text) = super::explain_dispatch(&request, &roots)?;
+        use super::{
+            Clock, Data, EdgeError, Roots, Route, RouteResolve, RoutingError, SystemClock, execute,
+            resolved_text,
+        };
+        let preview = |request: &super::RouteRequest, roots: &Roots| {
+            let query = RouteResolve {
+                writes: false,
+                account: None,
+                name: None,
+                request: request.clone(),
+            };
+            let data = execute(
+                &Route::Resolve(query),
+                roots,
+                SystemClock::new().wall_now()?,
+            )?;
+            let Data::Resolved(preview) = &data else {
+                return Err(EdgeError::from(RoutingError::Catalogue));
+            };
+            Ok::<_, EdgeError>((
+                serde_json::to_value(&data).map_err(|_| RoutingError::Catalogue)?,
+                resolved_text(preview),
+            ))
+        };
+        let (data, text) = preview(&request, &roots)?;
         assert_ne!(data["adapter"], "claude");
         assert_eq!(data["allow_unknown_partial_headroom"]["value"], false);
         assert_eq!(data["allow_unknown_partial_headroom"]["source"], "default");
@@ -3937,7 +3933,7 @@ mod route_tests {
             roots.state.as_path().join("config.toml"),
             "schema_version=1\n[knobs]\n'routing.allow_unknown_partial_headroom'=true\n",
         )?;
-        let (override_data, override_text) = super::explain_dispatch(&request, &roots)?;
+        let (override_data, override_text) = preview(&request, &roots)?;
         assert_eq!(
             override_data["allow_unknown_partial_headroom"]["value"],
             true
@@ -3957,9 +3953,7 @@ mod route_tests {
                 .to_vec(),
             ..request
         };
-        let message = super::explain_dispatch(&all, &roots)
-            .unwrap_err()
-            .to_string();
+        let message = preview(&all, &roots).unwrap_err().to_string();
         assert!(message.contains("excluded by flag: provider"), "{message}");
         Ok(())
     }
