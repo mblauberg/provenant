@@ -81,17 +81,14 @@ fn grows_review(finding: &Finding) -> bool {
 
 /// Construct the host patch that reviews the repaired commit through a fresh
 /// resolver result. The patch is idempotent per repair round.
-pub(super) fn panel_patch(parent: &str, commit: &str, revision: u64, schema: u64) -> patch::Patch {
-    let mut panel = serde_json::json!({
+pub(super) fn panel_patch(parent: &str, commit: &str, revision: u64) -> patch::Patch {
+    let panel = serde_json::json!({
         "id": "panel", "use": "review", "over": "@review-panel",
         "with": {"lens": "${item}"}, "after": [parent],
         "inputs": [{"node": parent, "outputs": ["findings"]}],
         "source": {"type": "commit", "commit": commit}, "require_findings": true,
         "distinct_from": "dependencies", "distinct_strength": "prefer"
     });
-    if schema >= 2 {
-        panel["family_group"] = "repair-panel".into();
-    }
     patch::Patch {
         schema_version: patch::PATCH_SCHEMA_VERSION,
         expected_revision: Some(revision),
@@ -349,10 +346,9 @@ mod tests {
     }
 
     #[test]
-    fn replanned_panel_prefers_separate_families() {
-        let patch = panel_patch("review", &"a".repeat(40), 2, 2);
+    fn replanned_panel_prefers_separation_from_dependencies() {
+        let patch = panel_patch("review", &"a".repeat(40), 2);
         assert_eq!(patch.nodes[0]["over"], "@review-panel");
-        assert_eq!(patch.nodes[0]["family_group"], "repair-panel");
         assert_eq!(patch.nodes[0]["distinct_strength"], "prefer");
     }
 }

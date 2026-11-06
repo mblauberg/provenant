@@ -689,10 +689,33 @@ impl<'a> Compiler<'a> {
         }
         let mut ids = BTreeSet::new();
         let mut children = Vec::with_capacity(items.len());
-        for item in &items {
+        let panel_routes = if over.as_str() == Some("@review-panel")
+            && copy.get("use").and_then(Value::as_str) == Some("review")
+        {
+            self.resolvers.get("review-panel-routes")
+        } else {
+            None
+        };
+        if panel_routes.is_some_and(|routes| routes.len() != items.len()) {
+            return Err("review panel routes do not match its lenses".into());
+        }
+        for (index, item) in items.iter().enumerate() {
             let mut scoped = bindings.clone();
             scoped.insert(ITEM.into(), Value::String(item.clone()));
             let mut member = copy.clone();
+            if let Some(routes) = panel_routes {
+                let fields: Map<String, Value> = serde_json::from_str(&routes[index])
+                    .map_err(|_| "invalid review panel route")?;
+                if fields
+                    .keys()
+                    .any(|key| !matches!(key.as_str(), "route" | "routes" | "family_group"))
+                    || fields.contains_key("route") == fields.contains_key("routes")
+                {
+                    return Err("invalid review panel route fields".into());
+                }
+                member.remove("family_group");
+                member.extend(fields);
+            }
             member.insert("id".into(), Value::String(item_id(item, &mut ids)));
             children.push(self.lower_in(&Value::Object(member), &scoped, stack)?);
         }

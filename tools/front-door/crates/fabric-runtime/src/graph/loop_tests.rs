@@ -2099,6 +2099,10 @@ fn repair_growth_resolves_and_runs_a_fresh_panel() {
         assert_eq!(owner.repair_panel_calls, 1);
         assert_eq!(owner.repair_growth_calls, 1);
         assert_eq!(owner.calls.iter().filter(|call| call.0.node_id.contains("--panel--")).count(), 2, "calls: {:?}; gate: {:?}", owner.calls, run.checkpoint.nodes.iter().find(|node| node.id == "repair--r1--accepted"));
+        for (lens, expected) in [("correctness", "senior"), ("security", "principal")] {
+            let call = owner.calls.iter().find(|call| call.0.node_id.ends_with(&format!("--panel--{lens}"))).unwrap();
+            assert_eq!(call.1.alias.as_deref(), Some(expected));
+        }
         let gate = run.checkpoint.nodes.iter().find(|node| node.id == "repair--r1--accepted").unwrap();
         assert_eq!(gate.state == NodeState::Succeeded, reviewer_passes);
         for (call, source) in owner.calls.iter().zip(&owner.source_commits).filter(|(call, _)| call.0.node_id.contains("--panel--")) {

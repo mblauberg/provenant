@@ -293,7 +293,7 @@ pub trait AttemptOwner {
         &mut self,
         _document: &GraphDocument,
         _subject: &str,
-    ) -> Result<Vec<String>, String> {
+    ) -> Result<Vec<RepairPanelSlot>, String> {
         Err("host cannot resolve @review-panel for the repaired head".into())
     }
 
@@ -486,6 +486,14 @@ pub trait AttemptOwner {
         worktree: Option<&str>,
         replay: Replay<'_>,
     ) -> Result<AttemptObservation, Self::Error>;
+}
+
+/// Host-selected lens and routing fields for a repair review slot.
+#[derive(Clone, Debug)]
+pub struct RepairPanelSlot {
+    pub lens: String,
+    pub route: serde_json::Value,
+    pub family_group: Option<String>,
 }
 
 /// The file journal persists every state transition atomically. Its held lock
@@ -1767,11 +1775,30 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                                 commit
                                     .parse::<provenant_core::GitOid>()
                                     .map_err(|e| e.to_string())?;
-                                let lenses = owner.resolve_repair_panel(document, &commit)?;
-                                let resolvers = std::collections::BTreeMap::from([(
-                                    "review-panel".into(),
-                                    lenses,
-                                )]);
+                                let slots = owner.resolve_repair_panel(document, &commit)?;
+                                let mut routes = Vec::with_capacity(slots.len());
+                                let mut lenses = Vec::with_capacity(slots.len());
+                                for slot in slots {
+                                    lenses.push(slot.lens);
+                                    let mut fields = slot
+                                        .route
+                                        .as_object()
+                                        .cloned()
+                                        .ok_or("invalid panel route")?;
+                                    if document.schema_version >= 2
+                                        && let Some(group) = slot.family_group
+                                    {
+                                        fields.insert("family_group".into(), group.into());
+                                    }
+                                    routes.push(
+                                        serde_json::to_string(&fields)
+                                            .map_err(|error| error.to_string())?,
+                                    );
+                                }
+                                let resolvers = std::collections::BTreeMap::from([
+                                    ("review-panel".into(), lenses),
+                                    ("review-panel-routes".into(), routes),
+                                ]);
                                 let library = template::TemplateLibrary::bundled();
                                 let context = patch::PatchContext {
                                     library: &library,
@@ -1785,7 +1812,6 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                                     &parent,
                                     &commit,
                                     patch::revision(&prospective),
-                                    document.schema_version,
                                 );
                                 patch::admit_patch(
                                     &mut patch::LiveGraph {
