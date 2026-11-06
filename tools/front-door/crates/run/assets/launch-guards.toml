@@ -163,6 +163,27 @@ boundary = "warning"
 reason = "A port-block allocation I/O failure warns and continues without a block; stale port-block environment variables are removed."
 
 [[guard]]
+site = "routing/src/resolve.rs#pacing_reserve_window"
+boundary = "configurable_default"
+code = "REFUSED"
+setting = "domains.routing.pacing_reserve"
+reason = "An adapter reserve defaults to shipped values and can be configured; the refusal reports its effective percentage and source."
+
+[[guard]]
+site = "routing/src/resolve.rs#pacing_reserve_window"
+boundary = "configurable_default"
+code = "REFUSED"
+setting = "domains.routing.pacing.accounts"
+reason = "An account pacing profile can override the reserve for its selected window."
+
+[[guard]]
+site = "routing/src/resolve.rs#pacing_reserve_window"
+boundary = "configurable_default"
+code = "REFUSED"
+setting = "domains.routing.pacing.free"
+reason = "A free-pool pacing profile can override the reserve for its selected window."
+
+[[guard]]
 site = "run/src/launch.rs#Providers::check_policy"
 boundary = "configurable_default"
 code = "DISK_FLOOR"

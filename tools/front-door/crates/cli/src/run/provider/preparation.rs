@@ -43,6 +43,41 @@ fn attach_candidate_guard_facts(
     Ok(())
 }
 
+fn resolve_pacing_source(
+    fact: provenant_records::diagnostic::ResourceFact,
+    adapter: &str,
+    origins: &std::collections::BTreeMap<String, provenant_config::Origin>,
+) -> provenant_records::diagnostic::ResourceFact {
+    use provenant_records::diagnostic::{PacingReserveSetting, PacingSettingSource, ResourceFact};
+    let ResourceFact::PacingReserve {
+        percent,
+        setting,
+        origin: PacingSettingSource::Unresolved,
+    } = fact
+    else {
+        return fact;
+    };
+    let field = match setting {
+        PacingReserveSetting::AdapterFiveHour => "five_hour_percent",
+        PacingReserveSetting::AdapterSevenDay => "seven_day_percent",
+        _ => return fact,
+    };
+    let key = format!("domains.routing.pacing_reserve.{adapter}.{field}");
+    let origin = if matches!(
+        origins.get(&key),
+        Some(provenant_config::Origin::User { .. })
+    ) {
+        PacingSettingSource::Configuration
+    } else {
+        PacingSettingSource::ShippedDefault
+    };
+    ResourceFact::PacingReserve {
+        percent,
+        setting,
+        origin,
+    }
+}
+
 pub(super) fn image_input_warning(adapter: &str, attachments: &[PathBuf]) -> Option<String> {
     (!attachments.is_empty()
         && !AdapterSpec::get(adapter).is_some_and(|spec| spec.launch.image_input))
@@ -2219,6 +2254,21 @@ pub(super) fn prepare_candidates(
                 if class != provenant_records::diagnostic::BoundaryClass::None {
                     reason_boundaries.insert(reasons.len(), class);
                 }
+            }
+            if matches!(
+                reason,
+                provenant_records::RouteExclusionReason::PacingReserve
+            ) && let Some(fact) = route.extra.get("pacing_reserve_fact").and_then(|value| {
+                serde_json::from_value::<provenant_records::diagnostic::ResourceFact>(value.clone())
+                    .ok()
+            }) && matches!(
+                fact,
+                provenant_records::diagnostic::ResourceFact::PacingReserve { .. }
+            ) {
+                reason_resources.insert(
+                    reasons.len(),
+                    resolve_pacing_source(fact, &route.adapter, &config.origins),
+                );
             }
             let mut skipped = skip(&label, SkipKind::Unavailable, detail);
             skipped.set_cause(reason.clone());

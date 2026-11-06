@@ -234,10 +234,18 @@ pub struct PrepareRefusal {
 }
 impl PrepareRefusal {
     fn kind(&self) -> RefusalKind {
-        if self.skipped_routes.iter().any(|route| {
+        if let Some(route) = self.skipped_routes.iter().find(|route| {
             route.cause == Some(provenant_records::RouteExclusionReason::PacingReserve)
         }) {
-            RefusalKind::PacingReserve
+            match route.extra.get("guard_resource").and_then(|value| {
+                serde_json::from_value::<provenant_records::diagnostic::ResourceFact>(value.clone())
+                    .ok()
+            }) {
+                Some(fact @ provenant_records::diagnostic::ResourceFact::PacingReserve { .. }) => {
+                    RefusalKind::PacingReserveResource(fact)
+                }
+                _ => RefusalKind::PacingReserve,
+            }
         } else if let Some(fact) = self.resource {
             RefusalKind::PreparationResource(fact)
         } else if self.boundary_class != provenant_records::diagnostic::BoundaryClass::None {
@@ -420,6 +428,34 @@ fn lane_port_limit_diagnostic_matches_inventory() {
                 })
         );
     }
+}
+
+#[test]
+fn pacing_refusal_retains_the_selected_reserve_fact() {
+    use provenant_records::diagnostic::{PacingReserveSetting, PacingSettingSource, ResourceFact};
+    let fact = ResourceFact::PacingReserve {
+        percent: 15,
+        setting: PacingReserveSetting::AdapterFiveHour,
+        origin: PacingSettingSource::ShippedDefault,
+    };
+    let mut skipped = SkippedRoute {
+        extra: Default::default(),
+        route: "fixture/model".into(),
+        kind: SkipKind::Unavailable,
+        cause: Some(provenant_records::RouteExclusionReason::PacingReserve),
+        detail: "opaque source".into(),
+    };
+    skipped.set_guard_facts(None, Some(fact)).unwrap();
+    let mut refusal = PrepareRefusal::from("opaque source");
+    refusal.skipped_routes.push(skipped);
+    let kind = refusal.kind();
+    assert!(matches!(kind, RefusalKind::PacingReserveResource(value) if value == fact));
+    let diagnostic = kind.diagnostic().unwrap();
+    assert_eq!(diagnostic.code, "REFUSED");
+    let detail = diagnostic.detail.unwrap();
+    assert!(detail.contains("domains.routing.pacing_reserve"));
+    assert!(detail.contains("shipped default"));
+    assert!(!detail.contains("opaque source"));
 }
 
 /// Run-owned per-attempt paths. Allocated once, shared by explicit fallback candidates.
@@ -785,6 +821,7 @@ pub enum RefusalKind {
     PreparationBoundary(provenant_records::diagnostic::BoundaryClass),
     PreparationResource(provenant_records::diagnostic::ResourceFact),
     PacingReserve,
+    PacingReserveResource(provenant_records::diagnostic::ResourceFact),
     WorktreeBusy,
     PriorityUnavailable,
     StoredPromptUnreadable,
@@ -808,16 +845,17 @@ impl RefusalKind {
             Self::HandoffResource(fact)
             | Self::PolicyResource(fact)
             | Self::PreparationResource(fact)
-            | Self::WriteGrantsLimit(fact) => fact,
+            | Self::WriteGrantsLimit(fact)
+            | Self::PacingReserveResource(fact) => fact,
             _ => return None,
         };
         let kind = match fact {
             ResourceFact::Disk { .. } => ErrorKind::DiskFloor,
             ResourceFact::ArgvPromptLimit { .. } => ErrorKind::Invalid,
             ResourceFact::WriteGrantLimit { .. } => ErrorKind::Limit,
-            ResourceFact::DependencyPreparation { .. } | ResourceFact::LanePorts { .. } => {
-                ErrorKind::Refused
-            }
+            ResourceFact::DependencyPreparation { .. }
+            | ResourceFact::LanePorts { .. }
+            | ResourceFact::PacingReserve { .. } => ErrorKind::Refused,
             ResourceFact::GrantLimit { .. } | ResourceFact::ProfileLimit { .. } => {
                 ErrorKind::Confinement
             }
@@ -842,6 +880,7 @@ impl RefusalKind {
             Self::Policy
             | Self::Preparation
             | Self::PacingReserve
+            | Self::PacingReserveResource(_)
             | Self::PriorityUnavailable
             | Self::WriteGrantsLimit(_)
             | Self::Handoff

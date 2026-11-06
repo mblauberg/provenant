@@ -3190,7 +3190,8 @@ pub(super) fn check_launch_policy(started: &[run::Started]) -> Result<(), Fail> 
                 kind @ (run::RefusalKind::Policy
                 | run::RefusalKind::PolicyBoundary(_)
                 | run::RefusalKind::PolicyResource(_)
-                | run::RefusalKind::PacingReserve),
+                | run::RefusalKind::PacingReserve
+                | run::RefusalKind::PacingReserveResource(_)),
         } => Some((attempt, reason, kind)),
         _ => None,
     }) {
@@ -3199,7 +3200,8 @@ pub(super) fn check_launch_policy(started: &[run::Started]) -> Result<(), Fail> 
             ErrorKind::Refused,
             format!("{attempt}: {reason}"),
         );
-        if let run::RefusalKind::PolicyResource(fact) = kind
+        if let run::RefusalKind::PolicyResource(fact)
+        | run::RefusalKind::PacingReserveResource(fact) = kind
             && let Some(mut projection) = kind.diagnostic()
         {
             projection.code = ErrorKind::Refused.code().into();

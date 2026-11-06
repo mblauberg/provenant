@@ -940,8 +940,8 @@ mod diagnostic_projection_tests {
     #[test]
     fn every_inventoried_configurable_refusal_has_a_safe_setting_and_source() {
         use provenant_records::diagnostic::{
-            LaneLimit, PortSettingSource, PressureLevel, PressureThreshold, ResourceFact,
-            SettingSource,
+            LaneLimit, PacingReserveSetting, PacingSettingSource, PortSettingSource, PressureLevel,
+            PressureThreshold, ResourceFact, SettingSource,
         };
         let configured = SettingSource::Configuration;
         let mut examples = vec![
@@ -1010,6 +1010,21 @@ mod diagnostic_projection_tests {
                 "operating system",
             ),
         ];
+        for setting in [
+            PacingReserveSetting::AdapterFiveHour,
+            PacingReserveSetting::AdapterSevenDay,
+            PacingReserveSetting::Account,
+            PacingReserveSetting::Free,
+        ] {
+            examples.push((
+                ResourceFact::PacingReserve {
+                    percent: 15,
+                    setting,
+                    origin: PacingSettingSource::Configuration,
+                },
+                "host configuration",
+            ));
+        }
         for lane_limit in [
             LaneLimit::HostWriters,
             LaneLimit::ProjectWriters,
