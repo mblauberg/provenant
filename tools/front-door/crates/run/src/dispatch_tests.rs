@@ -4241,6 +4241,8 @@ fn admission_holds_run_concurrency_spacing_floors_and_deadline() -> TestResult {
     // A one-second window from the queued time, 100 microseconds, so the
     // starved wait pauses on the virtual clock until the deadline.
     store.set_admission_policy(AdmissionPolicy {
+        startup_spacing_ms: 20_000,
+        read_only_spacing_ms: 2_000,
         admission_seconds: 1,
         ..AdmissionPolicy::default()
     });
@@ -9258,7 +9260,12 @@ fn a_version_1_upgrade_refuses_when_the_host_clock_cannot_be_read() -> TestResul
     let temp = tempfile::tempdir()?;
     let (host, cancel) = (Stepped::up(100_000), CancelToken::new());
     let call = stepped_call(&host, &cancel);
-    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let mut store = RunStore::open(&context(temp.path())?, &call)?;
+    store.set_admission_policy(AdmissionPolicy {
+        startup_spacing_ms: 20_000,
+        read_only_spacing_ms: 2_000,
+        ..AdmissionPolicy::default()
+    });
     version_1_start(&store, &host, 5_000)?;
     let writer = starting(&store, &lane(103, true), &call)?;
     *host.boot_readable.lock().unwrap() = false;
@@ -9284,7 +9291,12 @@ fn a_version_2_ledger_that_kept_wall_milliseconds_starts_every_class_free() -> T
     let temp = tempfile::tempdir()?;
     let (host, cancel) = (Stepped::up(100_000), CancelToken::new());
     let call = stepped_call(&host, &cancel);
-    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let mut store = RunStore::open(&context(temp.path())?, &call)?;
+    store.set_admission_policy(AdmissionPolicy {
+        startup_spacing_ms: 20_000,
+        read_only_spacing_ms: 2_000,
+        ..AdmissionPolicy::default()
+    });
     old_ledger(
         &store,
         "CREATE TABLE leases (
