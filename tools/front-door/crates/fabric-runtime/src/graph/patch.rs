@@ -766,13 +766,12 @@ pub fn submission(
         .and_then(Value::as_object)
         .cloned()
         .unwrap_or_default();
-    for node in &document.nodes {
+    for (index, node) in document.nodes.iter().enumerate() {
         let mut raw = serde_json::to_value(node).map_err(|e| PatchError::invalid(e.to_string()))?;
-        let name = raw
-            .get("template")
-            .and_then(Value::as_str)
-            .unwrap_or("raw")
-            .to_owned();
+        // Snapshot compiled nodes without inheriting dotted template behaviour
+        // a second time. The raw `template` field retains their provenance.
+        let original = raw.get("template").and_then(Value::as_str).unwrap_or("raw");
+        let name = if original.contains('.') { format!("submission-node-{index}") } else { original.to_owned() };
         let mut template = Template::default();
         let mut supplied = Map::new();
         for (name, value) in &parameters {

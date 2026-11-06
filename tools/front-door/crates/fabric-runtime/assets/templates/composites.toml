@@ -115,6 +115,7 @@ worktree = { type = "string", default = "" }
 write_scope = { type = "list", default = [] }
 
 [deliver]
+identity = "content"
 exports = [
   { node = "implement", outputs = ["branch", "commit"] },
   { node = "review", outputs = ["result", "findings", "verdict"] },

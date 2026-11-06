@@ -49,7 +49,9 @@ pub fn serve(
             "this attempt is not a running graph node",
         )
     };
-    let graph_id = FileJournal::pending_graph_ids(state, project)
+    // Settled checkpoints retain admitted child receipts after their pending
+    // marker disappears. Only the replay path below may act as a settled node.
+    let graph_id = FileJournal::graph_ids(state, project)
         .map_err(journal_error)?
         .into_iter()
         .find(|id| {
@@ -1143,6 +1145,94 @@ mod provisioning_tests {
             ])?,
             source
         );
+        Ok(())
+    }
+
+    #[test]
+    fn lost_child_receipt_replays_after_graph_settlement()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_fabric_runtime::graph::{
+            AttemptState, GraphCheckpoint, GraphExecution, NodeState,
+        };
+        for terminal in [NodeState::Succeeded, NodeState::Skipped] {
+            let root = tempfile::tempdir()?;
+            let home = root.path().join("home");
+            let project = home.join("project");
+            std::fs::create_dir_all(&project)?;
+            for args in [
+                vec!["init", "-q"],
+                vec!["commit", "--allow-empty", "-qm", "base"],
+            ] {
+                let output = provenant_os::fixture::git_command()
+                    .current_dir(&project)
+                    .args(args)
+                    .output()?;
+                assert!(output.status.success());
+            }
+            let mut inputs = provenant_core::RootInputs::new(home.clone(), project.clone());
+            inputs.state_dir = Some(root.path().join("state"));
+            let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+            let context = Context::open(roots, &home, &project)?;
+            let cancel = CancelToken::new();
+            let clock = provenant_os::clock::SystemClock::new();
+            let budget = WaitBudget::cli(clock.mono_now(), 5)?;
+            let reference = format!("{}/caller", context.identity.host);
+            let checkpoint: GraphCheckpoint = serde_json::from_value(json!({
+                "schema_version":1,"graph_id":"g-lost-receipt","plan_digest":"fixture",
+                "nodes":[{"id":"parent","state":"running","worktree":null,"attempts":[{
+                    "launched":true,"key":{"graph_id":"g-lost-receipt","node_id":"parent","route_index":0},
+                    "route":{"alias":"senior"},"state":"running","attempt_ref":reference,
+                    "outcome":null,"launch_actor":"fixture"
+                }]}]
+            }))?;
+            let open = || FileJournal::open(
+                &context.roots.state, context.identity.project, "g-lost-receipt",
+                budget, &cancel, &clock,
+            );
+            {
+                let mut journal = open()?;
+                journal.bind(GraphExecution {
+                    review_base: None,
+                    extra: Default::default(),
+                    integration_base: None,
+                    directory: project.clone(),
+                    document: serde_json::from_value(json!({
+                        "schema_version":1,"graph_id":"g-lost-receipt",
+                        "nodes":[{"id":"parent","access":"read_only","prompt":"Go","route":{"alias":"senior"}}]
+                    }))?,
+                })?;
+                journal.save(&checkpoint)?;
+            }
+            let request = json!({"op":"add","id":"child","use":"task","brief":"Read", "idempotency_key":"lost-reply"});
+            let receipt = serve(&context, "caller", request.clone(), budget, &cancel, &clock)?;
+            let settled = {
+                let mut journal = open()?;
+                let mut checkpoint = journal.load("g-lost-receipt")?.ok_or("checkpoint")?;
+                for node in &mut checkpoint.nodes {
+                    node.state = terminal;
+                    for attempt in &mut node.attempts {
+                        attempt.state = AttemptState::Terminal;
+                    }
+                }
+                checkpoint.cancelled = terminal == NodeState::Skipped;
+                journal.save(&checkpoint)?;
+                checkpoint
+            };
+            assert!(FileJournal::pending_graph_ids(&context.roots.state, context.identity.project)?.is_empty());
+            let replay = serve(&context, "caller", request.clone(), budget, &cancel, &clock)?;
+            assert_eq!(replay["node"], receipt["node"]);
+            assert_eq!(replay["revision"], receipt["revision"]);
+            assert_eq!(replay["replayed"], true);
+            assert_eq!(open()?.load("g-lost-receipt")?, Some(settled));
+            let mut changed = request.clone();
+            changed["brief"] = json!("Different");
+            assert!(matches!(serve(&context, "caller", changed, budget, &cancel, &clock),
+                Err(ServiceError::Cli { code, .. }) if code == "idempotency_conflict"));
+            let mut fresh = request;
+            fresh["idempotency_key"] = json!("new-request");
+            assert!(matches!(serve(&context, "caller", fresh, budget, &cancel, &clock),
+                Err(ServiceError::Cli { code, .. }) if code == "graph_relay_unavailable"));
+        }
         Ok(())
     }
 

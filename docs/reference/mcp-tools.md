@@ -686,6 +686,10 @@ Source: `tools/front-door/crates/fabric-mcp/tests/fixtures/all-tool-schemas.json
           "op": {
             "const": "run"
           },
+          "operation_id": {
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+            "type": "string"
+          },
           "over": {
             "anyOf": [
               {

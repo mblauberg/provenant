@@ -411,7 +411,7 @@ fn result_limit_preserves_mutation_receipts_and_rejects_oversized_observations()
 fn graph_documents_use_the_run_interface_and_paths_are_rejected() {
     for arguments in [
         json!({"op":"run","document":{"id":"test","nodes":[]}}),
-        json!({"op":"run","brief":"Inspect the parser","use":"explore"}),
+        json!({"op":"run","brief":"Inspect the parser","use":"explore","operation_id":"retry-run"}),
         json!({"op":"edit","id":"test","patch":{"nodes":[]}}),
         json!({"op":"status","id":"test","stats":true,"by":"tier","wait_seconds":1}),
         json!({"op":"status","stats":true,"by":"template"}),

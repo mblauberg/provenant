@@ -78,6 +78,14 @@ checks still apply to the delivered head.
 
 ## Composition rules
 
+Top-level runs use the template's `identity` policy, inherited by dotted
+flavours. `identity = "fresh"` (the default, including `task`) starts a new graph
+for every invocation. `identity = "content"` (`review` and `deliver`) reuses equal
+submissions, including the template library, resolved panel, working directory
+and resolved Git HEAD. A new commit therefore starts a new review. An explicit
+`operation_id` on a run document replays that operation; an explicit `graph_id`
+continues to select that graph. Use a new operation ID for new work.
+
 A template is TOML with parameters and either a leaf brief, tier, access and
 outputs, or `nodes`. A composite is a template with nodes; a dotted name such
 as `review.security` is a flavour. Layers are bundled, user, repository and
