@@ -1682,8 +1682,7 @@ mod tests {
         let lane = LaneRuntime {
             executable: Path::new("/fixture/provenant"),
             git: Path::new("/fixture/git"),
-            state: Path::new("/fixture/state"),
-            child_state: &bad,
+            state: &bad,
             home: Path::new("/fixture/home"),
             depth: 1,
             attempt: AttemptId::from_bytes([1; 16]),

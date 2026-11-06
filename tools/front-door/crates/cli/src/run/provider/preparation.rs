@@ -2357,7 +2357,6 @@ mod user_skills_tests {
                             executable: &executable,
                             git: &executable,
                             state: &root,
-                            child_state: &root,
                             home: &home,
                             depth: 1,
                             attempt: AttemptId::from_bytes([7; 16]),
