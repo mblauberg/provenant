@@ -1183,11 +1183,11 @@ mod tests {
         valid(&["run", "--file", "work.toml", "--explain"]);
         invalid(&["run", "--preset", "task"]);
         valid(&["stats", "--by", "tier"]);
-        invalid(&["stats", "--by", "node"]);
+        valid(&["stats", "--by", "node"]);
         valid(&["status", "--stats", "--by", "tier"]);
         valid(&["status", "--stats", "--by", "template"]);
         invalid(&["status", "--by", "tier"]);
-        invalid(&["status", "--stats", "--by", "node"]);
+        valid(&["status", "--stats", "--by", "node"]);
         valid(&["templates"]);
         valid(&["templates", "review.security", "--file", "inline.toml"]);
         valid(&["edit", "example", "--file", "patch.toml"]);
