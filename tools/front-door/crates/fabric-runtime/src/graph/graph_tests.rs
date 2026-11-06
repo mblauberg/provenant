@@ -11394,19 +11394,25 @@ fn typed_delta_verifier_can_falsify_a_previously_upheld_finding() {
         ..Default::default()
     };
     let document = graph(vec![node("prior", route("fixture")), verify]);
-    let run = advance(
-        &document,
-        &mut owner,
-        &mut MemoryJournal::default(),
-    )
-    .unwrap();
+    let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
     let output = run.checkpoint.nodes[1].outputs.as_ref().unwrap();
     assert_eq!(run.checkpoint.nodes[1].state, NodeState::Succeeded);
     assert_eq!(output.findings[0].extra["verification"], "falsified");
     assert_eq!(output.findings[0].extra["propagates"], "prior:F1");
     assert_eq!(output.verdict.as_deref(), Some("VERDICT: PASS"));
     let (plan, _) = validate_plan(&document).unwrap();
-    assert!(review_verification_error(&plan.nodes[1], &[], &[], &[(output.findings[0].id.clone(), "member:0".into())], output).is_none());
+    assert!(
+        review_verification_error(
+            &plan.nodes[1],
+            &[],
+            &[],
+            &[(output.findings[0].id.clone(), "member:0".into())],
+            output
+        )
+        .is_none()
+    );
     // An overflow proof owns completeness for these known upstream identities.
-    assert!(review_verification_error(&plan.nodes[1], &output.findings, &[], &[], output).is_none());
+    assert!(
+        review_verification_error(&plan.nodes[1], &output.findings, &[], &[], output).is_none()
+    );
 }
