@@ -2562,7 +2562,10 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         // Persist placement before the launch can lose its reply.
                         // Recovery must not treat an absent local operation as
                         // proof that a configured peer accepted nothing.
-                        extra: node.attempt.as_ref().and_then(|spec| spec.host.as_ref())
+                        extra: node
+                            .attempt
+                            .as_ref()
+                            .and_then(|spec| spec.host.as_ref())
                             .map(|host| [("placement_host".into(), serde_json::json!(host))].into())
                             .unwrap_or_default(),
                         review_substitution,

@@ -544,7 +544,10 @@ fn node_attempt_spec_reaches_the_launch() {
         &mut MemoryJournal::default(),
     )
     .unwrap();
-    assert_eq!(run.checkpoint.nodes[0].attempts[0].extra["placement_host"], "workshop");
+    assert_eq!(
+        run.checkpoint.nodes[0].attempts[0].extra["placement_host"],
+        "workshop"
+    );
     assert_eq!(owner.attempt_specs, vec![Some(spec)]);
     assert_eq!(owner.capabilities, vec![Some(vec!["postgres".into()])]);
 

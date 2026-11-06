@@ -238,10 +238,9 @@ pub(crate) fn facade_error_for_kind(kind: provenant_run::ErrorKind) -> FacadeErr
             access: "requested".into(),
         },
         E::LaneDepth => FacadeError::LaneDepth,
-        E::LaneContext
-        | E::ParentAttempt
-        | E::Invalid
-        | E::WorktreeRequired => FacadeError::InvalidInput { detail: None },
+        E::LaneContext | E::ParentAttempt | E::Invalid | E::WorktreeRequired => {
+            FacadeError::InvalidInput { detail: None }
+        }
         E::WorktreeNotApplicable => FacadeError::WorktreeNotApplicable,
         E::UnknownHost => FacadeError::UnknownHost,
         E::WorktreeMissing => FacadeError::WorktreeMissing,
@@ -615,25 +614,65 @@ impl BinaryRunOwner<'_> {
             // request digest below still rejects any change to its launch inputs.
         }
         if let Some(host) = host.filter(|host| *host != self.factory.context.identity.host) {
-            if !self.allow_remote || tasks.iter().any(|task| task.access != provenant_fabric_runtime::graph::AccessMode::ReadOnly || task.worktree.is_some() || task.new_worktree.is_some()) {
+            if !self.allow_remote
+                || tasks.iter().any(|task| {
+                    task.access != provenant_fabric_runtime::graph::AccessMode::ReadOnly
+                        || task.worktree.is_some()
+                        || task.new_worktree.is_some()
+                })
+            {
                 return Err(FacadeError::ConfinementRefused { resource: None });
             }
             // Filesystem grants belong to this machine. The peer binds its own
             // source checkout and never accepts caller-supplied absolute paths.
-            if !access.attachments.is_empty() || !access.read_roots.is_empty() || !access.write_roots.is_empty() || access.database_ipc || access.inputs_root.is_some() || access.source_live {
+            if !access.attachments.is_empty()
+                || !access.read_roots.is_empty()
+                || !access.write_roots.is_empty()
+                || access.database_ipc
+                || access.inputs_root.is_some()
+                || access.source_live
+            {
                 return Err(FacadeError::ConfinementRefused { resource: None });
             }
             let mut attempt = attempt.unwrap_or_default();
             attempt.host = None;
             let mut extra = provenant_records::ExtraFields::default();
-            extra.insert("graph_launch_actor".into(), serde_json::json!(self.actor.unwrap_or(self.factory.context.identity.inbox.actor)));
-            extra.insert("graph_attempt".into(), serde_json::to_value(attempt).map_err(|_| FacadeError::StateCorrupt)?);
-            extra.insert("graph_retry_limit".into(), serde_json::json!(settlement_retry_limit));
-            extra.insert("graph_network".into(), serde_json::to_value(access.network).map_err(|_| FacadeError::StateCorrupt)?);
-            let input = SubmitInput::Submit { extra: Default::default(), operation_id: operation_id.clone(), tasks, concurrency, knobs, host: None };
+            extra.insert(
+                "graph_launch_actor".into(),
+                serde_json::json!(
+                    self.actor
+                        .unwrap_or(self.factory.context.identity.inbox.actor)
+                ),
+            );
+            extra.insert(
+                "graph_attempt".into(),
+                serde_json::to_value(attempt).map_err(|_| FacadeError::StateCorrupt)?,
+            );
+            extra.insert(
+                "graph_retry_limit".into(),
+                serde_json::json!(settlement_retry_limit),
+            );
+            extra.insert(
+                "graph_network".into(),
+                serde_json::to_value(access.network).map_err(|_| FacadeError::StateCorrupt)?,
+            );
+            let input = SubmitInput::Submit {
+                extra: Default::default(),
+                operation_id: operation_id.clone(),
+                tasks,
+                concurrency,
+                knobs,
+                host: None,
+            };
             return match self.peer(host, PeerAction::Submit { extra, input }, budget, cancel)? {
-                PeerResult::Submitted { data, .. } if data.operation_id == operation_id && data.worktree.is_none()
-                    && !data.targets.is_empty() && data.targets.iter().all(|target| target.host == Some(host)) => Ok(data),
+                PeerResult::Submitted { data, .. }
+                    if data.operation_id == operation_id
+                        && data.worktree.is_none()
+                        && !data.targets.is_empty()
+                        && data.targets.iter().all(|target| target.host == Some(host)) =>
+                {
+                    Ok(data)
+                }
                 _ => Err(FacadeError::StateCorrupt),
             };
         }

@@ -475,20 +475,20 @@ impl Context {
         let agent = if let PeerAction::Submit { extra, .. } = &action {
             match extra.get("graph_launch_actor") {
                 Some(value) => {
-                    let actor = value.as_str().and_then(|value| value.parse::<provenant_core::ActorId>().ok())
-                        .ok_or_else(|| PeerFailure::from(FacadeError::InvalidInput { detail: None }))?;
+                    let actor = value
+                        .as_str()
+                        .and_then(|value| value.parse::<provenant_core::ActorId>().ok())
+                        .ok_or_else(|| {
+                            PeerFailure::from(FacadeError::InvalidInput { detail: None })
+                        })?;
                     format!("graph-{actor}")
                 }
                 None => self.identity.inbox.agent.clone(),
             }
-        } else { self.identity.inbox.agent.clone() };
-        let request = PeerRequest::new(
-            host,
-            self.identity.host,
-            agent,
-            project,
-            action,
-        );
+        } else {
+            self.identity.inbox.agent.clone()
+        };
+        let request = PeerRequest::new(host, self.identity.host, agent, project, action);
         let executable =
             discover_ssh_executable(self.config.ssh_executable.as_deref()).map_err(|_| {
                 PeerFailure::new(FacadeError::HomeUnavailable, "no usable ssh executable")

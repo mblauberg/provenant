@@ -164,7 +164,9 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> ParseOutcome {
             };
         }
         if scope == "provenant run" && !all {
-            *selected = selected.clone().mut_arg("operation_id", |arg| arg.hide(true));
+            *selected = selected
+                .clone()
+                .mut_arg("operation_id", |arg| arg.hide(true));
         }
         return ParseOutcome::Help {
             text: if command.is_empty() && !all {
@@ -1185,10 +1187,24 @@ mod tests {
 
     #[test]
     fn run_operation_identity_is_an_advanced_option() {
-        for (args, expected) in [(vec!["help", "run"], false), (vec!["help", "run", "--all"], true)] {
-            let ParseOutcome::Help { catalog, .. } = parsed(&args) else { panic!("help"); };
-            let run = catalog.commands.iter().find(|command| command.command == "provenant run").unwrap();
-            assert_eq!(run.arguments.iter().any(|argument| argument.name == "operation_id"), expected);
+        for (args, expected) in [
+            (vec!["help", "run"], false),
+            (vec!["help", "run", "--all"], true),
+        ] {
+            let ParseOutcome::Help { catalog, .. } = parsed(&args) else {
+                panic!("help");
+            };
+            let run = catalog
+                .commands
+                .iter()
+                .find(|command| command.command == "provenant run")
+                .unwrap();
+            assert_eq!(
+                run.arguments
+                    .iter()
+                    .any(|argument| argument.name == "operation_id"),
+                expected
+            );
         }
     }
 
@@ -1233,9 +1249,26 @@ mod tests {
         valid(&["status", "--stats", "--by", "node"]);
         valid(&["config", "schema", "--all"]);
         valid(&["run", "--tier", "junior"]);
-        valid(&["run", "--model", "codex/gpt-6-luna", "--effort", "high", "--account", "work", "--host", "workshop", "--operation-id", "planned-run"]);
+        valid(&[
+            "run",
+            "--model",
+            "codex/gpt-6-luna",
+            "--effort",
+            "high",
+            "--account",
+            "work",
+            "--host",
+            "workshop",
+            "--operation-id",
+            "planned-run",
+        ]);
         invalid(&["run", "--model", "codex/gpt-6-luna", "--tier", "junior"]);
-        for flag in ["--deliver", "--build-heavy", "--confidential", "--provider-timeout"] {
+        for flag in [
+            "--deliver",
+            "--build-heavy",
+            "--confidential",
+            "--provider-timeout",
+        ] {
             invalid(&["run", flag, "example"]);
         }
         invalid(&["run", "--tier", "senior", "--route", "junior"]);
@@ -1243,12 +1276,7 @@ mod tests {
         valid(&["templates", "review.security", "--file", "inline.toml"]);
         valid(&["edit", "example", "--file", "patch.toml"]);
         invalid(&["edit", "example"]);
-        for flag in [
-            "--preset",
-            "--prompt-file",
-            "--manifest",
-            "--plan",
-        ] {
+        for flag in ["--preset", "--prompt-file", "--manifest", "--plan"] {
             invalid(&["run", flag, "example"]);
         }
     }
@@ -1269,7 +1297,19 @@ mod tests {
                 .is_some_and(|text| !text.is_empty())
         );
         for name in [
-            "brief", "template", "tier", "model", "effort", "account", "host", "operation_id", "over", "set", "file", "explain", "wait",
+            "brief",
+            "template",
+            "tier",
+            "model",
+            "effort",
+            "account",
+            "host",
+            "operation_id",
+            "over",
+            "set",
+            "file",
+            "explain",
+            "wait",
         ] {
             assert!(
                 run.arguments.iter().any(|argument| argument.name == name),

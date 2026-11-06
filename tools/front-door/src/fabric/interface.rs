@@ -27,25 +27,44 @@ fn launch_input(input: &Value) -> Result<Value, FacadeError> {
     let mut input = input.clone();
     let invalid = || FacadeError::invalid(InvalidInputDetail::Field("attempt".into()));
     let mut attempt = input.get("attempt").cloned().unwrap_or_else(|| json!({}));
-    if !attempt.is_object() { return Err(invalid()); }
+    if !attempt.is_object() {
+        return Err(invalid());
+    }
     if let Some(settings) = input.get_mut("set").and_then(Value::as_object_mut) {
         if let Some(value) = settings.remove("attempt") {
-            attempt.as_object_mut().ok_or_else(invalid)?.extend(value.as_object().ok_or_else(invalid)?.clone());
+            attempt
+                .as_object_mut()
+                .ok_or_else(invalid)?
+                .extend(value.as_object().ok_or_else(invalid)?.clone());
         }
-        let keys: Vec<_> = settings.keys().filter(|key| key.starts_with("attempt.")).cloned().collect();
+        let keys: Vec<_> = settings
+            .keys()
+            .filter(|key| key.starts_with("attempt."))
+            .cloned()
+            .collect();
         for key in keys {
             let value = settings.remove(&key).ok_or_else(invalid)?;
             attempt[&key[8..]] = value;
         }
     }
     for field in ["host", "account"] {
-        if let Some(value) = input.get(field).filter(|value| !value.is_null()) { attempt[field] = value.clone(); }
+        if let Some(value) = input.get(field).filter(|value| !value.is_null()) {
+            attempt[field] = value.clone();
+        }
     }
-    let typed: provenant_fabric_runtime::graph::AttemptSpec = serde_json::from_value(attempt.clone()).map_err(|_| invalid())?;
-    if typed.provider_timeout == Some(0) || typed.host.as_ref().is_some_and(|host| host.is_empty()) { return Err(invalid()); }
+    let typed: provenant_fabric_runtime::graph::AttemptSpec =
+        serde_json::from_value(attempt.clone()).map_err(|_| invalid())?;
+    if typed.provider_timeout == Some(0) || typed.host.as_ref().is_some_and(|host| host.is_empty())
+    {
+        return Err(invalid());
+    }
     input["attempt"] = attempt;
     if let Some(value) = input.get("operation_id").filter(|value| !value.is_null()) {
-        value.as_str().ok_or_else(invalid)?.parse::<provenant_core::OperationId>().map_err(|_| invalid())?;
+        value
+            .as_str()
+            .ok_or_else(invalid)?
+            .parse::<provenant_core::OperationId>()
+            .map_err(|_| invalid())?;
     }
     Ok(input)
 }
@@ -55,17 +74,36 @@ fn override_launch(
     input: &Value,
 ) -> Result<(), FacadeError> {
     if let Some(composite) = &mut node.composite {
-        for child in &mut composite.nodes { override_launch(child, input)?; }
+        for child in &mut composite.nodes {
+            override_launch(child, input)?;
+        }
     } else if let Some(body) = &mut node.loop_body {
-        for child in &mut body.body { override_launch(child, input)?; }
-    } else if !matches!(node.kind, Some(provenant_fabric_runtime::graph::NodeKind::Gate | provenant_fabric_runtime::graph::NodeKind::Decide | provenant_fabric_runtime::graph::NodeKind::Land)) {
+        for child in &mut body.body {
+            override_launch(child, input)?;
+        }
+    } else if !matches!(
+        node.kind,
+        Some(
+            provenant_fabric_runtime::graph::NodeKind::Gate
+                | provenant_fabric_runtime::graph::NodeKind::Decide
+                | provenant_fabric_runtime::graph::NodeKind::Land
+        )
+    ) {
         let invalid = || FacadeError::invalid(InvalidInputDetail::Field("route".into()));
         if let Some(model) = input.get("model").filter(|value| !value.is_null()) {
-            let model = provenant_routing::ModelId::parse(model.as_str().ok_or_else(invalid)?).map_err(|_| invalid())?;
-            node.route = Some(serde_json::from_value(json!({"adapter":model.adapter(), "model":model.as_str()})).map_err(|_| invalid())?);
+            let model = provenant_routing::ModelId::parse(model.as_str().ok_or_else(invalid)?)
+                .map_err(|_| invalid())?;
+            node.route = Some(
+                serde_json::from_value(json!({"adapter":model.adapter(), "model":model.as_str()}))
+                    .map_err(|_| invalid())?,
+            );
             node.routes = None;
         }
-        for route in node.route.iter_mut().chain(node.routes.iter_mut().flatten()) {
+        for route in node
+            .route
+            .iter_mut()
+            .chain(node.routes.iter_mut().flatten())
+        {
             if let Some(effort) = input.get("effort").filter(|value| !value.is_null()) {
                 route.effort = Some(effort.as_str().ok_or_else(invalid)?.into());
             }
@@ -73,14 +111,22 @@ fn override_launch(
                 route.account = Some(account.as_str().ok_or_else(invalid)?.into());
             }
         }
-        if input["attempt"].as_object().is_some_and(|fields| !fields.is_empty()) {
+        if input["attempt"]
+            .as_object()
+            .is_some_and(|fields| !fields.is_empty())
+        {
             let mut attempt = encode(node.attempt.clone().unwrap_or_default())?;
-            attempt.as_object_mut().ok_or_else(invalid)?.extend(input["attempt"].as_object().ok_or_else(invalid)?.clone());
+            attempt
+                .as_object_mut()
+                .ok_or_else(invalid)?
+                .extend(input["attempt"].as_object().ok_or_else(invalid)?.clone());
             node.attempt = Some(serde_json::from_value(attempt).map_err(|_| invalid())?);
         }
     }
     if let Some(fallback) = node.plan.as_mut().and_then(|plan| plan.fallback.as_mut()) {
-        for child in &mut fallback.nodes { override_launch(child, input)?; }
+        for child in &mut fallback.nodes {
+            override_launch(child, input)?;
+        }
     }
     Ok(())
 }
@@ -154,24 +200,51 @@ fn bind_launch_controls(input: &Value, node: &mut Value, cwd: &Path) -> Result<(
 }
 
 impl Factory {
-    fn validate_host_placement(&self, node: &provenant_fabric_runtime::graph::GraphNode) -> Result<(), FacadeError> {
-        if let Some(name) = node.attempt.as_ref().and_then(|attempt| attempt.host.as_deref()) {
+    fn validate_host_placement(
+        &self,
+        node: &provenant_fabric_runtime::graph::GraphNode,
+    ) -> Result<(), FacadeError> {
+        if let Some(name) = node
+            .attempt
+            .as_ref()
+            .and_then(|attempt| attempt.host.as_deref())
+        {
             let local = self.context.identity.host;
-            let host = if matches!(name, "local" | "localhost") || name.parse::<provenant_core::HostId>().is_ok_and(|host| host == local) {
+            let host = if matches!(name, "local" | "localhost")
+                || name
+                    .parse::<provenant_core::HostId>()
+                    .is_ok_and(|host| host == local)
+            {
                 local
-            } else { self.context.peer_host(name).ok_or(FacadeError::UnknownHost)? };
-            if host != local && (node.access != provenant_fabric_runtime::graph::AccessMode::ReadOnly || node.worktree.is_some() || node.attempt.as_ref().is_some_and(|attempt| attempt.placement.is_some() || attempt.new_worktree.is_some())) {
+            } else {
+                self.context
+                    .peer_host(name)
+                    .ok_or(FacadeError::UnknownHost)?
+            };
+            if host != local
+                && (node.access != provenant_fabric_runtime::graph::AccessMode::ReadOnly
+                    || node.worktree.is_some()
+                    || node.attempt.as_ref().is_some_and(|attempt| {
+                        attempt.placement.is_some() || attempt.new_worktree.is_some()
+                    }))
+            {
                 return Err(FacadeError::WorktreeNotApplicable);
             }
         }
         if let Some(composite) = &node.composite {
-            for child in &composite.nodes { self.validate_host_placement(child)?; }
+            for child in &composite.nodes {
+                self.validate_host_placement(child)?;
+            }
         }
         if let Some(body) = &node.loop_body {
-            for child in &body.body { self.validate_host_placement(child)?; }
+            for child in &body.body {
+                self.validate_host_placement(child)?;
+            }
         }
         if let Some(fallback) = node.plan.as_ref().and_then(|plan| plan.fallback.as_ref()) {
-            for child in &fallback.nodes { self.validate_host_placement(child)?; }
+            for child in &fallback.nodes {
+                self.validate_host_placement(child)?;
+            }
         }
         Ok(())
     }
@@ -661,10 +734,21 @@ impl Factory {
         let digest =
             provenant_records::CanonicalV1::record_digest("graph-submission", 1, &identity)
                 .map_err(|_| FacadeError::StateCorrupt)?;
-        let generated_id = if let Some(operation) = input.get("operation_id").filter(|value| !value.is_null()) {
-            let operation: provenant_core::OperationId = operation.as_str().ok_or_else(|| FacadeError::invalid(InvalidInputDetail::Field("operation_id".into())))?.parse().map_err(|_| FacadeError::invalid(InvalidInputDetail::Field("operation_id".into())))?;
-            format!("g-{operation}")
-        } else { format!("g-{}", &provenant_core::hex(digest.as_bytes())[..30]) };
+        let generated_id =
+            if let Some(operation) = input.get("operation_id").filter(|value| !value.is_null()) {
+                let operation: provenant_core::OperationId = operation
+                    .as_str()
+                    .ok_or_else(|| {
+                        FacadeError::invalid(InvalidInputDetail::Field("operation_id".into()))
+                    })?
+                    .parse()
+                    .map_err(|_| {
+                        FacadeError::invalid(InvalidInputDetail::Field("operation_id".into()))
+                    })?;
+                format!("g-{operation}")
+            } else {
+                format!("g-{}", &provenant_core::hex(digest.as_bytes())[..30])
+            };
         let id = raw
             .and_then(|document| document.get("graph_id"))
             .and_then(Value::as_str)
@@ -843,7 +927,10 @@ impl Factory {
                 override_tier(node, &route);
             }
         }
-        for node in &mut document.nodes { override_launch(node, input)?; self.validate_host_placement(node)?; }
+        for node in &mut document.nodes {
+            override_launch(node, input)?;
+            self.validate_host_placement(node)?;
+        }
         let mut bound = encode(&document)?;
         self.confine_nodes(&mut bound)?;
         document = serde_json::from_value(bound)
@@ -1423,7 +1510,11 @@ mod tests {
         assert_eq!(first.idempotency_key, "child-op");
         assert_eq!(first.id, replay.id);
         assert_eq!(first.launch, replay.launch);
-        assert!(factory.child_request(&json!({"op":"run", "operation_id":"invalid op"})).is_err());
+        assert!(
+            factory
+                .child_request(&json!({"op":"run", "operation_id":"invalid op"}))
+                .is_err()
+        );
         Ok(())
     }
 
@@ -1455,11 +1546,17 @@ mod tests {
             assert_eq!(attempt.provider_timeout, Some(42));
         }
         // A host supplied only through --set must survive parameter extraction too.
-        for settings in [json!({"attempt.host":"local"}), json!({"attempt":{"host":"local"}})] {
+        for settings in [
+            json!({"attempt.host":"local"}),
+            json!({"attempt":{"host":"local"}}),
+        ] {
             let input = json!({"op":"run", "brief":"Inspect", "set":settings, "explain":true});
             let response = factory.graph_document(input.clone(), budget, &cancel)?;
             assert_eq!(response["document"]["nodes"][0]["attempt"]["host"], "local");
-            let child = factory.child_request(&input)?.launch.ok_or("child launch missing")?;
+            let child = factory
+                .child_request(&input)?
+                .launch
+                .ok_or("child launch missing")?;
             assert_eq!(child.node["attempt"]["host"], "local");
         }
         Ok(())
@@ -1483,25 +1580,42 @@ mod tests {
             json!({"attempt.provider_timeout":1.5}),
         ] {
             let input = json!({"op":"run", "brief":"Inspect", "set":settings, "explain":true});
-            assert!(matches!(
-                factory.graph_document(input.clone(), budget, &cancel),
-                Err(FacadeError::InvalidInput { .. })
-            ), "graph accepted {settings}");
-            assert!(matches!(
-                factory.child_request(&input),
-                Err(FacadeError::InvalidInput { .. })
-            ), "child accepted {settings}");
+            assert!(
+                matches!(
+                    factory.graph_document(input.clone(), budget, &cancel),
+                    Err(FacadeError::InvalidInput { .. })
+                ),
+                "graph accepted {settings}"
+            );
+            assert!(
+                matches!(
+                    factory.child_request(&input),
+                    Err(FacadeError::InvalidInput { .. })
+                ),
+                "child accepted {settings}"
+            );
         }
         assert!(!rig.project.join(".provenant/scratch/graphs").exists());
-        assert!(FileJournal::graph_ids(&factory.context.roots.state, factory.context.identity.project)?.is_empty());
+        assert!(
+            FileJournal::graph_ids(
+                &factory.context.roots.state,
+                factory.context.identity.project
+            )?
+            .is_empty()
+        );
         Ok(())
     }
 
     #[test]
     fn composite_graph_and_child_apply_route_and_attempt_controls_to_every_leaf() -> Result {
-        fn assert_leaves(node: &provenant_fabric_runtime::graph::GraphNode, leaves: &mut usize) -> Result {
+        fn assert_leaves(
+            node: &provenant_fabric_runtime::graph::GraphNode,
+            leaves: &mut usize,
+        ) -> Result {
             if let Some(composite) = &node.composite {
-                for child in &composite.nodes { assert_leaves(child, leaves)?; }
+                for child in &composite.nodes {
+                    assert_leaves(child, leaves)?;
+                }
                 return Ok(());
             }
             *leaves += 1;
@@ -1536,9 +1650,14 @@ mod tests {
         let response = factory.graph_document(input.clone(), budget, &cancel)?;
         let document: GraphDocument = serde_json::from_value(response["document"].clone())?;
         let mut graph_leaves = 0;
-        for node in &document.nodes { assert_leaves(node, &mut graph_leaves)?; }
+        for node in &document.nodes {
+            assert_leaves(node, &mut graph_leaves)?;
+        }
         assert_eq!(graph_leaves, 2);
-        let child = factory.child_request(&input)?.launch.ok_or("child launch missing")?;
+        let child = factory
+            .child_request(&input)?
+            .launch
+            .ok_or("child launch missing")?;
         let child: provenant_fabric_runtime::graph::GraphNode = serde_json::from_value(child.node)?;
         let mut child_leaves = 0;
         assert_leaves(&child, &mut child_leaves)?;

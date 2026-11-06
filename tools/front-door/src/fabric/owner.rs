@@ -480,8 +480,17 @@ pub(crate) fn graph_result_warning(error: &provenant_run::RunError) -> &'static 
 }
 
 impl BoundGraphOwner<'_> {
-    fn uncertain_peer_placement(&self, attempt: &provenant_fabric_runtime::graph::GraphAttempt) -> bool {
-        let Some(name) = attempt.extra.get("placement_host").and_then(serde_json::Value::as_str) else { return false; };
+    fn uncertain_peer_placement(
+        &self,
+        attempt: &provenant_fabric_runtime::graph::GraphAttempt,
+    ) -> bool {
+        let Some(name) = attempt
+            .extra
+            .get("placement_host")
+            .and_then(serde_json::Value::as_str)
+        else {
+            return false;
+        };
         let local = self.factory.context.identity.host;
         !matches!(name, "local" | "localhost")
             && !name.parse::<provenant_core::HostId>().is_ok_and(|host| host == local)
@@ -1641,7 +1650,9 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
         &mut self,
         attempt: &provenant_fabric_runtime::graph::GraphAttempt,
     ) -> Result<bool, Self::Error> {
-        if attempt.attempt_ref.is_some() { return Ok(true); }
+        if attempt.attempt_ref.is_some() {
+            return Ok(true);
+        }
         let owner = BinaryRunOwner {
             factory: self.factory,
             allow_remote: true,
@@ -1666,17 +1677,31 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
         &mut self,
         attempt: &provenant_fabric_runtime::graph::GraphAttempt,
     ) -> Result<bool, Self::Error> {
-        if attempt.attempt_ref.is_some() { return Ok(false); }
-        let owner = BinaryRunOwner { factory: self.factory, allow_remote: true, actor: Some(attempt.launch_actor.parse().map_err(|_| FacadeError::StateCorrupt)?), chair: None };
+        if attempt.attempt_ref.is_some() {
+            return Ok(false);
+        }
+        let owner = BinaryRunOwner {
+            factory: self.factory,
+            allow_remote: true,
+            actor: Some(
+                attempt
+                    .launch_actor
+                    .parse()
+                    .map_err(|_| FacadeError::StateCorrupt)?,
+            ),
+            chair: None,
+        };
         let operation = graph_operation("graph-attempt-operation", &attempt.key)?;
         let store = owner.store(self.cancel)?;
         let call = owner.call(self.cancel);
         // An absent local operation proves nothing about a peer submission;
         // local prelaunch refusals keep their existing cancellation semantics.
-        Ok(match store.operation(&operation, &call).map_err(run_error)? {
-            Some(operation) => operation.state == provenant_run::OperationState::Prepared,
-            None => !self.uncertain_peer_placement(attempt),
-        })
+        Ok(
+            match store.operation(&operation, &call).map_err(run_error)? {
+                Some(operation) => operation.state == provenant_run::OperationState::Prepared,
+                None => !self.uncertain_peer_placement(attempt),
+            },
+        )
     }
 
     fn observe_or_start(
@@ -1689,17 +1714,31 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
         replay: provenant_fabric_runtime::graph::Replay<'_>,
     ) -> Result<provenant_fabric_runtime::graph::AttemptObservation, Self::Error> {
         use provenant_fabric_runtime::graph::{AttemptObservation, AttemptOutcome};
-        let host = node.attempt.and_then(|spec| spec.host.as_deref()).map(|name| {
-            let local = self.factory.context.identity.host;
-            if matches!(name, "local" | "localhost") || name.parse::<provenant_core::HostId>().is_ok_and(|host| host == local) {
-                Ok(local)
-            } else {
-                self.factory.context.peer_host(name).ok_or(FacadeError::UnknownHost)
-            }
-        }).transpose()?;
+        let host = node
+            .attempt
+            .and_then(|spec| spec.host.as_deref())
+            .map(|name| {
+                let local = self.factory.context.identity.host;
+                if matches!(name, "local" | "localhost")
+                    || name
+                        .parse::<provenant_core::HostId>()
+                        .is_ok_and(|host| host == local)
+                {
+                    Ok(local)
+                } else {
+                    self.factory
+                        .context
+                        .peer_host(name)
+                        .ok_or(FacadeError::UnknownHost)
+                }
+            })
+            .transpose()?;
         if host.is_some_and(|host| host != self.factory.context.identity.host)
             && (access != provenant_fabric_runtime::graph::AccessMode::ReadOnly
-                || node.attempt.is_some_and(|spec| spec.placement.is_some() || spec.new_worktree.is_some())) {
+                || node
+                    .attempt
+                    .is_some_and(|spec| spec.placement.is_some() || spec.new_worktree.is_some()))
+        {
             return Err(FacadeError::WorktreeNotApplicable);
         }
         if node
@@ -1912,7 +1951,12 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                                 placement: task.cloud.clone(),
                                 account: task.account.clone(),
                                 build_heavy: task.build_heavy,
-                                confidential: task.profile.extra.get("confidential").and_then(serde_json::Value::as_bool).unwrap_or(false),
+                                confidential: task
+                                    .profile
+                                    .extra
+                                    .get("confidential")
+                                    .and_then(serde_json::Value::as_bool)
+                                    .unwrap_or(false),
                                 provider_timeout: Some(task.provider_timeout_seconds),
                                 ..Default::default()
                             });
@@ -2492,13 +2536,20 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
         use provenant_records::run::{AttemptState, Outcome};
         match attempt.state {
             AttemptState::Terminal { outcome, .. } => {
-                let remote = target.host.is_some_and(|host| host != self.factory.context.identity.host);
+                let remote = target
+                    .host
+                    .is_some_and(|host| host != self.factory.context.identity.host);
                 let store = owner.store(self.cancel)?;
                 let call = owner.call(self.cancel);
                 let custody = if remote {
-                    attempt.extra.get("graph_custody_released").and_then(serde_json::Value::as_bool)
+                    attempt
+                        .extra
+                        .get("graph_custody_released")
+                        .and_then(serde_json::Value::as_bool)
                         .ok_or(provenant_run::RunError::NotFound)
-                } else { store.custody_released(&attempt, &call) };
+                } else {
+                    store.custody_released(&attempt, &call)
+                };
                 match custody {
                     Ok(true) => {}
                     Ok(false) => {
@@ -2512,9 +2563,13 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                         });
                     }
                 }
-                let pickup = if remote { None } else { store
-                    .delivered(attempt.attempt_id, &call)
-                    .map_err(run_error)? };
+                let pickup = if remote {
+                    None
+                } else {
+                    store
+                        .delivered(attempt.attempt_id, &call)
+                        .map_err(run_error)?
+                };
                 let effective_delivery = pickup
                     .as_ref()
                     .map(|(_, receipt)| receipt)
@@ -2524,19 +2579,29 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                     || outcome == Outcome::Succeeded
                 {
                     let captured = if remote {
-                        remote_graph_result(&mut owner, &target, node.required_verdict, self.budget, self.cancel)
-                            .map_err(|_| provenant_run::RunError::NotFound)
-                    } else { store.stream_result(attempt.attempt_id, &call, node.required_verdict) };
+                        remote_graph_result(
+                            &mut owner,
+                            &target,
+                            node.required_verdict,
+                            self.budget,
+                            self.cancel,
+                        )
+                        .map_err(|_| provenant_run::RunError::NotFound)
+                    } else {
+                        store.stream_result(attempt.attempt_id, &call, node.required_verdict)
+                    };
                     match captured {
                         Ok(mut result) => {
                             if remote && let Some(artifact) = &attempt.result {
                                 // Output pages prove the redacted stream. Graph evidence
                                 // still identifies the peer's sealed original artifact.
                                 result.digest = artifact.digest.to_string();
-                                result.source_truncated = artifact.bytes > provenant_records::result_capture::ResultCapture::HEAD_BYTES as u64;
+                                result.source_truncated = artifact.bytes
+                                    > provenant_records::result_capture::ResultCapture::HEAD_BYTES
+                                        as u64;
                             }
                             (Some(Box::new(result)), None)
-                        },
+                        }
                         Err(error) => (None, Some(graph_result_warning(&error).to_owned())),
                     }
                 } else {
@@ -2842,14 +2907,30 @@ mod journal_error_tests {
 /// Stream the result through the existing authenticated, bounded output API.
 /// The serving host verifies each artifact read; capture remains on the chair.
 fn remote_graph_result(
-    owner: &mut BinaryRunOwner<'_>, target: &AttemptTarget,
-    required: Option<&str>, budget: WaitBudget, cancel: &CancelToken,
+    owner: &mut BinaryRunOwner<'_>,
+    target: &AttemptTarget,
+    required: Option<&str>,
+    budget: WaitBudget,
+    cancel: &CancelToken,
 ) -> Result<provenant_records::result_capture::CapturedResult, FacadeError> {
-    capture_graph_output(target, required, |offset| owner.output(OutputInput::Read { extra: Default::default(), target: target.clone(), part: OutputPart::Result, offset, max_bytes: provenant_records::run::OUTPUT_LIMIT }, budget, cancel))
+    capture_graph_output(target, required, |offset| {
+        owner.output(
+            OutputInput::Read {
+                extra: Default::default(),
+                target: target.clone(),
+                part: OutputPart::Result,
+                offset,
+                max_bytes: provenant_records::run::OUTPUT_LIMIT,
+            },
+            budget,
+            cancel,
+        )
+    })
 }
 
 fn capture_graph_output(
-    target: &AttemptTarget, required: Option<&str>,
+    target: &AttemptTarget,
+    required: Option<&str>,
     mut read: impl FnMut(u64) -> Result<OutputResult, FacadeError>,
 ) -> Result<provenant_records::result_capture::CapturedResult, FacadeError> {
     let mut capture = provenant_records::result_capture::ResultCapture::new(required);
@@ -2857,20 +2938,55 @@ fn capture_graph_output(
     let mut expected_digest = None;
     loop {
         let response = read(offset)?;
-        let OutputResult::Chunk { target: observed, part: OutputPart::Result, offset: observed_offset, next_offset, eof, digest, bytes, .. } = response else { return Err(FacadeError::StateCorrupt); };
-        if observed != *target || observed_offset != offset || next_offset < offset || next_offset > provenant_records::run::RESULT_LIMIT || expected_digest.is_some_and(|expected| expected != digest) {
+        let OutputResult::Chunk {
+            target: observed,
+            part: OutputPart::Result,
+            offset: observed_offset,
+            next_offset,
+            eof,
+            digest,
+            bytes,
+            ..
+        } = response
+        else {
+            return Err(FacadeError::StateCorrupt);
+        };
+        if observed != *target
+            || observed_offset != offset
+            || next_offset < offset
+            || next_offset > provenant_records::run::RESULT_LIMIT
+            || expected_digest.is_some_and(|expected| expected != digest)
+        {
             return Err(FacadeError::StateCorrupt);
         }
         expected_digest = Some(digest);
-        let bytes = match bytes { OutputBytes::Utf8(text) => text.into_bytes(), OutputBytes::Base64(encoded) => provenant_fabric_runtime::handoff::decode_base64(&encoded).ok_or(FacadeError::StateCorrupt)? };
-        if next_offset - offset != bytes.len() as u64 || (!eof && next_offset == offset) { return Err(FacadeError::StateCorrupt); }
+        let bytes = match bytes {
+            OutputBytes::Utf8(text) => text.into_bytes(),
+            OutputBytes::Base64(encoded) => {
+                provenant_fabric_runtime::handoff::decode_base64(&encoded)
+                    .ok_or(FacadeError::StateCorrupt)?
+            }
+        };
+        if next_offset - offset != bytes.len() as u64 || (!eof && next_offset == offset) {
+            return Err(FacadeError::StateCorrupt);
+        }
         capture.push(&bytes);
         offset = next_offset;
         if eof {
             let mut result = capture.finish();
-            if result.digest != digest.to_string() { return Err(FacadeError::StateCorrupt); }
-            result.source_truncated = offset > provenant_records::result_capture::ResultCapture::HEAD_BYTES as u64;
-            result.handoff = result.handoff.and_then(|handoff| handoff.map(|handoff| provenant_run::sanitise_handoff(&handoff).map_err(|_| "handoff sanitisation failed")).transpose());
+            if result.digest != digest.to_string() {
+                return Err(FacadeError::StateCorrupt);
+            }
+            result.source_truncated =
+                offset > provenant_records::result_capture::ResultCapture::HEAD_BYTES as u64;
+            result.handoff = result.handoff.and_then(|handoff| {
+                handoff
+                    .map(|handoff| {
+                        provenant_run::sanitise_handoff(&handoff)
+                            .map_err(|_| "handoff sanitisation failed")
+                    })
+                    .transpose()
+            });
             return Ok(result);
         }
     }
@@ -2878,31 +2994,70 @@ fn capture_graph_output(
 
 #[cfg(test)]
 mod peer_capture_tests {
-    #[allow(unused_imports, reason = "the custom worktree driver includes this module without libtest")]
+    #[allow(
+        unused_imports,
+        reason = "the custom worktree driver includes this module without libtest"
+    )]
     use super::*;
     #[test]
-    fn peer_result_capture_pages_the_complete_stream_and_checks_each_chunk() -> Result<(), Box<dyn std::error::Error>> {
-        let target = AttemptTarget { extra: Default::default(), host: Some(provenant_core::HostId::from_bytes([1;16])), attempt: provenant_core::AttemptId::from_bytes([2;16]) };
+    fn peer_result_capture_pages_the_complete_stream_and_checks_each_chunk()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let target = AttemptTarget {
+            extra: Default::default(),
+            host: Some(provenant_core::HostId::from_bytes([1; 16])),
+            attempt: provenant_core::AttemptId::from_bytes([2; 16]),
+        };
         let text = "x".repeat(130_000) + "\nVERDICT: PASS\n";
-        let digest = provenant_core::Digest::from_bytes(*provenant_records::CanonicalV1::file_digest(text.as_bytes()).bytes());
+        let digest = provenant_core::Digest::from_bytes(
+            *provenant_records::CanonicalV1::file_digest(text.as_bytes()).bytes(),
+        );
         let chunk = |offset: u64| {
             let end = (offset + provenant_records::run::OUTPUT_LIMIT).min(text.len() as u64);
-            OutputResult::Chunk { extra: Default::default(), target: target.clone(), part: OutputPart::Result, state: "succeeded".into(), reason: None, offset, next_offset: end, eof: end == text.len() as u64, digest, bytes: OutputBytes::Utf8(text[offset as usize..end as usize].into()) }
+            OutputResult::Chunk {
+                extra: Default::default(),
+                target: target.clone(),
+                part: OutputPart::Result,
+                state: "succeeded".into(),
+                reason: None,
+                offset,
+                next_offset: end,
+                eof: end == text.len() as u64,
+                digest,
+                bytes: OutputBytes::Utf8(text[offset as usize..end as usize].into()),
+            }
         };
         let mut pages = 0;
-        let result = capture_graph_output(&target, Some("VERDICT: PASS"), |offset| { pages += 1; Ok(chunk(offset)) })?;
+        let result = capture_graph_output(&target, Some("VERDICT: PASS"), |offset| {
+            pages += 1;
+            Ok(chunk(offset))
+        })?;
         assert_eq!(pages, 2);
         assert!(result.matched_required);
         assert_eq!(result.verdict.as_deref(), Some("VERDICT: PASS"));
         assert_eq!(result.digest, digest.to_string());
-        for malformed in [0,1,2,3] {
-            assert!(matches!(capture_graph_output(&target, None, |offset| {
-                let mut response = chunk(offset);
-                if let OutputResult::Chunk { target, offset: start, next_offset, digest, .. } = &mut response {
-                    match malformed { 0 => target.attempt = provenant_core::AttemptId::from_bytes([9;16]), 1 => *start += 1, 2 => *next_offset = offset, _ => *digest = provenant_core::Digest::from_bytes([9;32]) }
-                }
-                Ok(response)
-            }), Err(FacadeError::StateCorrupt)));
+        for malformed in [0, 1, 2, 3] {
+            assert!(matches!(
+                capture_graph_output(&target, None, |offset| {
+                    let mut response = chunk(offset);
+                    if let OutputResult::Chunk {
+                        target,
+                        offset: start,
+                        next_offset,
+                        digest,
+                        ..
+                    } = &mut response
+                    {
+                        match malformed {
+                            0 => target.attempt = provenant_core::AttemptId::from_bytes([9; 16]),
+                            1 => *start += 1,
+                            2 => *next_offset = offset,
+                            _ => *digest = provenant_core::Digest::from_bytes([9; 32]),
+                        }
+                    }
+                    Ok(response)
+                }),
+                Err(FacadeError::StateCorrupt)
+            ));
         }
         Ok(())
     }
