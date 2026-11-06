@@ -71,9 +71,7 @@ pub(super) fn compacted_len<T: serde::Serialize>(value: &T) -> usize {
     // The longest enclosing pointer is the immutable execution document;
     // checkpoint pointers use the shorter `/checkpoint` prefix. Both prefixes
     // contain only ASCII characters that canonical JSON leaves unescaped.
-    let prefix_reserve = references
-        .len()
-        .saturating_mul("/execution/document".len());
+    let prefix_reserve = references.len().saturating_mul("/execution/document".len());
     if !references.is_empty() {
         let Some(object) = value.as_object_mut() else {
             return usize::MAX;

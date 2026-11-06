@@ -1483,7 +1483,7 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
         let mut expected = Vec::new();
         for (index, member) in plan.nodes.iter().enumerate() {
             if review_panel_contains(expansion, member, plan, &positions) {
-                for attempt in &checkpoint.nodes[index].attempts {
+                for attempt in checkpoint.nodes[index].recorded_attempts() {
                     if attempt.review_substitution {
                         expected.push(ReviewSubstitution {
                             member: member.id.clone(),

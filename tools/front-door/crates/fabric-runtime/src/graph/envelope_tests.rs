@@ -289,6 +289,7 @@ fn filled_checkpoint(document: &GraphDocument, plan: &PlannedGraph) -> GraphChec
                 } else {
                     filled_outputs(node.composite.is_some(), plans::writer(node))
                 }),
+                previous_attempts: Vec::new(),
                 attempts: node
                     .routes
                     .iter()
