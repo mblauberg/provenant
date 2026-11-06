@@ -725,3 +725,86 @@ fn steer_graph_and_node_refuse_ambiguous_live_attempts_before_reading_stdin() ->
     }
     Ok(())
 }
+
+#[test]
+fn graph_status_cli_renders_bounded_input_refusals() -> Result {
+    use provenant_core::{CancelToken, Clock, RootInputs, StateRoot, WaitBudget};
+    use provenant_fabric_runtime::coordination::facade::{FacadeError, InvalidInputDetail};
+    use provenant_fabric_runtime::graph::{FileJournal, GraphJournal, NodeState};
+    let rig = GraphProject::new()?;
+    let path = rig.document(&json!({"schema_version":1,"graph_id":"input-refusal","nodes":[{"id":"accept","kind":"gate","access":"read_only","condition":{"type":"budget"}}]}))?;
+    let output = rig
+        .command()
+        .args(["run", "--file"])
+        .arg(path)
+        .arg("--wait=10s")
+        .output()?;
+    assert!(output.status.success(), "{output:?}");
+    let checkpoint_path = graph_records(&rig.state())?
+        .into_iter()
+        .find(|path| {
+            path.file_name()
+                .is_some_and(|name| name == "graph-input-refusal.json")
+        })
+        .ok_or("checkpoint")?;
+    let mut inputs = RootInputs::new(rig.temp.path().to_path_buf(), rig.root.clone());
+    inputs.state_dir = Some(rig.state());
+    let state = StateRoot::resolve(&inputs, &provenant_os::fs::SystemPathResolver)?;
+    let project = checkpoint_path
+        .parent()
+        .and_then(Path::file_name)
+        .and_then(|name| name.to_str())
+        .ok_or("project id")?
+        .parse()?;
+    let execution = FileJournal::execution(&state, project, "input-refusal")?.ok_or("execution")?;
+    let mut checkpoint =
+        FileJournal::read_checkpoint(&state, project, "input-refusal")?.ok_or("checkpoint")?;
+    let clock = provenant_os::clock::SystemClock::new();
+    let cancel = CancelToken::new();
+    for (fact, reason) in [
+        (InvalidInputDetail::InputTooLarge, "1 MiB"),
+        (InvalidInputDetail::InputUnreadable, "unreadable"),
+    ] {
+        let projection = FacadeError::invalid(fact).diagnostic();
+        checkpoint.nodes[0].state = NodeState::Failed;
+        checkpoint.nodes[0].advance_error_code = Some("launch_refused".into());
+        checkpoint.nodes[0].advance_error = Some(format!(
+            "node accept: [{}] {}; {}",
+            projection.code,
+            projection.detail.unwrap(),
+            projection.next.unwrap()
+        ));
+        let mut journal = FileJournal::open(
+            &state,
+            project,
+            "input-refusal",
+            WaitBudget::cli(clock.mono_now(), 5)?,
+            &cancel,
+            &clock,
+        )?;
+        journal.bind(execution.clone())?;
+        journal.save(&checkpoint)?;
+        drop(journal);
+        let (_, machine) = rig.run(&["status", "input-refusal"])?;
+        let encoded = machine.to_string();
+        assert!(
+            encoded.contains("input") && encoded.contains(reason),
+            "{encoded}"
+        );
+        assert!(!encoded.contains("PROMPT_SENTINEL"));
+        let mut human = fixture_cli();
+        let output = human
+            .current_dir(&rig.project)
+            .env("PROVENANT_ROOT", &rig.root)
+            .env("XDG_CONFIG_HOME", rig.temp.path().join("config"))
+            .arg("--state-dir")
+            .arg(rig.state())
+            .args(["status", "input-refusal", "--full"])
+            .output()?;
+        assert!(output.status.success(), "{output:?}");
+        let text = String::from_utf8(output.stdout)?;
+        assert!(text.contains("input") && text.contains(reason), "{text}");
+        assert!(!text.contains("PROMPT_SENTINEL"));
+    }
+    Ok(())
+}
