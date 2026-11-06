@@ -105,6 +105,55 @@ fn chair_session_start_ingests_the_session_as_chair() -> Result {
     Ok(())
 }
 
+#[test]
+fn chair_stop_ingests_new_usage() -> Result {
+    let rig = TestRig::new()?;
+    let config = rig.root.join("claude");
+    register_account(&rig, "claude", "current", "current", &config)?;
+    write_session(&config, "chair-session", "m1", 45)?;
+    let input = serde_json::to_vec(&json!({
+        "hook_event_name":"Stop", "session_id":"chair-session", "cwd":rig.project
+    }))?;
+    let invoke = || {
+        rig.execute(
+            Path::new(env!("CARGO_BIN_EXE_provenant")),
+            &[
+                "--state-dir",
+                rig.state.to_str().ok_or("state")?,
+                "hook",
+                "claude",
+                "chair-stop",
+            ],
+            Some(&input),
+        )
+    };
+    assert_eq!(code(&invoke()?), 0);
+    use std::io::Write;
+    let transcript = config.join("projects/-fixture/chair-session.jsonl");
+    fs::OpenOptions::new()
+        .append(true)
+        .open(transcript)?
+        .write_all(message("m2", 60).as_bytes())?;
+    let subagents = config.join("projects/-fixture/chair-session/subagents");
+    fs::create_dir_all(&subagents)?;
+    fs::write(subagents.join("agent-a.jsonl"), message("m3", 20))?;
+    assert_eq!(code(&invoke()?), 0);
+    let rows: Vec<Value> = fs::read_to_string(rig.state.join("ingest.jsonl"))?
+        .lines()
+        .map(serde_json::from_str)
+        .collect::<std::result::Result<_, _>>()?;
+    assert_eq!(rows.len(), 3);
+    assert!(
+        rows.iter()
+            .any(|row| row["message"] == "m2" && row["output"] == 60)
+    );
+    assert!(
+        rows.iter()
+            .any(|row| row["message"] == "m3" && row["source"] == "subagent")
+    );
+    Ok(())
+}
+
 fn rig() -> Result<TestRig> {
     let rig = TestRig::new()?;
     std::fs::create_dir_all(rig.project.join("config"))?;
@@ -261,4 +310,71 @@ fn route_stats_human_output_matches_golden() -> Result {
     let human = String::from_utf8(output.stdout.bytes)?;
     assert!(human.contains("codex/gpt-6-luna@low"), "{human}");
     route_stats_golden(&human)
+}
+
+#[test]
+fn native_attempt_is_visible_in_status_and_linked_usage() -> Result {
+    let rig = rig()?;
+    let config = rig.root.join("claude");
+    register_account(&rig, "claude", "current", "current", &config)?;
+    write_session(&config, "chair-session", "chair", 1)?;
+    let subagents = config.join("projects/-fixture/chair-session/subagents");
+    fs::create_dir_all(&subagents)?;
+    fs::write(subagents.join("agent-a.jsonl"), message("linked", 45))?;
+    fs::write(subagents.join("agent-b.jsonl"), message("unlinked", 30))?;
+    let start = rig.command(&[
+        "native",
+        "start",
+        "--id",
+        "tool-1",
+        "--session",
+        "chair-session",
+        "--alias",
+        "reviewer",
+        "--model",
+        "claude-opus-5-5",
+        "--effort",
+        "high",
+        "--json",
+    ])?;
+    assert_eq!(code(&start), 0, "{start:?}");
+    let end = rig.command(&[
+        "native",
+        "end",
+        "--id",
+        "tool-1",
+        "--session",
+        "chair-session",
+        "--agent",
+        "a",
+        "--settlement",
+        "succeeded",
+        "--json",
+    ])?;
+    assert_eq!(code(&end), 0, "{end:?}");
+    let status = rig.command(&["status", "--json"])?;
+    assert_eq!(code(&status), 0, "{status:?}");
+    let status: Value = serde_json::from_slice(&status.stdout.bytes)?;
+    assert_eq!(status["data"]["native_attempts"][0]["alias"], "reviewer");
+    assert_eq!(
+        status["data"]["native_attempts"][0]["model"],
+        "claude-opus-5-5"
+    );
+    let stats = rig.command(&["telemetry", "stats", "--json"])?;
+    assert_eq!(code(&stats), 0, "{stats:?}");
+    let stats: Value = serde_json::from_slice(&stats.stdout.bytes)?;
+    assert_eq!(
+        stats["data"]["native_subagents"]["attempts"][0]["attempt"]["alias"],
+        "reviewer"
+    );
+    assert_eq!(
+        stats["data"]["native_subagents"]["attempts"][0]["buckets"][4],
+        45
+    );
+    assert_eq!(
+        stats["data"]["native_subagents"]["unlinked"][0]["buckets"][4],
+        30
+    );
+    assert!(!fs::read_to_string(rig.state.join("native-attempts.json"))?.contains("PRIVATE"));
+    Ok(())
 }

@@ -1,9 +1,2 @@
 # Add entries only for tests with an open issue and remove them in the fixing PR.
 # Expiry is limited to 30 days from the day the CI check runs.
-
-[[test]]
-package = "provenant-run"
-name = "delivery_tests::terminal_resumes_after_branch_publication_before_its_phase_checkpoint"
-issue = "#2501"
-owner = "mblauberg"
-expires = 2026-11-30

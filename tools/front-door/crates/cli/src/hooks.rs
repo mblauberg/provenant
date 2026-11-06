@@ -26,6 +26,7 @@ pub const PRE_COMPACT: &str = "pre-compact";
 pub const COMPACT: &str = "compact";
 pub const CHAIR_PROMPT: &str = "chair-prompt";
 pub const CHAIR_START: &str = "chair-start";
+pub const CHAIR_STOP: &str = "chair-stop";
 pub const SESSION_START: &str = "session-start";
 pub const STOP: &str = "stop";
 pub const WORKTREE_CREATE: &str = "worktree-create";
@@ -39,6 +40,7 @@ pub enum Handler {
     PrePush,
     ChairPrompt,
     ChairStart,
+    ChairStop,
     SessionStart,
     Stop,
     WorktreeCreate,
@@ -144,6 +146,17 @@ pub static HOOK_SPECS: &[HookSpec] = &[
         handler: Handler::WorktreeRemove,
         fixture: None,
     },
+    HookSpec {
+        registration: HookRegistration {
+            harness: Some(Harness::Claude),
+            event: "Stop",
+            matcher: None,
+            timeout: Some(5),
+            command: &["hook", "claude", CHAIR_STOP],
+        },
+        handler: Handler::ChairStop,
+        fixture: None,
+    },
 ];
 impl Hook {
     pub fn spec(&self) -> &'static HookSpec {
@@ -154,6 +167,7 @@ impl Hook {
             Self::Git(GitHook::PrePush { .. }) => 3,
             Self::Claude(ClaudeHook::ChairPrompt) => 4,
             Self::Claude(ClaudeHook::ChairStart) => 5,
+            Self::Claude(ClaudeHook::ChairStop) => 10,
             Self::Claude(ClaudeHook::SessionStart) => 6,
             Self::Claude(ClaudeHook::Stop) => 7,
             Self::Claude(ClaudeHook::WorktreeCreate) => 8,
