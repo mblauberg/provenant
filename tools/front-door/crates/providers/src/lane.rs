@@ -209,7 +209,31 @@ impl crate::LaunchSpec {
     }
 }
 
-fn git_wrapper(git: &Path, options: &GitWrapper) -> Result<Vec<u8>, ProviderError> {
+/// The helper directory the host's `git` reports for itself. Apple's
+/// `/usr/bin/git` is a shim that finds it through the active developer
+/// directory, which a confined lane cannot consult, so the launcher pins it.
+/// `None` when Git cannot say, in which case Git resolves it as before.
+pub(crate) fn host_exec_path(git: &Path) -> Option<PathBuf> {
+    use std::os::unix::ffi::OsStrExt;
+    let output = std::process::Command::new(git)
+        .arg("--exec-path")
+        .env_remove("GIT_EXEC_PATH")
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    let text = output.stdout.strip_suffix(b"\n").unwrap_or(&output.stdout);
+    let path = Path::new(std::ffi::OsStr::from_bytes(text));
+    (output.status.success() && path.is_absolute() && path.is_dir() && !text.contains(&0))
+        .then(|| path.to_owned())
+}
+
+/// Git configuration that answers a GitHub HTTPS credential request from the
+/// lane's own `GH_TOKEN`, read by the helper at run time. The value is never
+/// written to the launcher or to any argument.
+const TOKEN_HELPER: &str = "!f() { test \"$1\" = get && test -n \"$GH_TOKEN\" && printf 'username=x-access-token\\npassword=%s\\n' \"$GH_TOKEN\"; }; f";
+
+pub(crate) fn git_wrapper(git: &Path, options: &GitWrapper) -> Result<Vec<u8>, ProviderError> {
     use std::os::unix::ffi::OsStrExt;
     let git = git.as_os_str().as_bytes();
     if git.contains(&0) {
@@ -221,6 +245,25 @@ fn git_wrapper(git: &Path, options: &GitWrapper) -> Result<Vec<u8>, ProviderErro
         if let Some(bound) = &options.bound {
             bytes.extend_from_slice(bound_exports(bound)?.as_bytes());
         }
+    }
+    // Environment configuration keeps the arguments the lane passed untouched.
+    // A host with no `gh` login yields no answer and Git falls through.
+    bytes.extend_from_slice(
+        format!(
+            "GIT_CONFIG_COUNT=1\nGIT_CONFIG_KEY_0=credential.https://github.com.helper\nGIT_CONFIG_VALUE_0={}\nexport GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0\n",
+            shell_quote(TOKEN_HELPER)
+        )
+        .as_bytes(),
+    );
+    if let Some(exec_path) = host_exec_path(Path::new(std::ffi::OsStr::from_bytes(git))) {
+        let exec_path = exec_path.to_str().ok_or(ProviderError::InvalidPath)?;
+        bytes.extend_from_slice(
+            format!(
+                "GIT_EXEC_PATH={}\nexport GIT_EXEC_PATH\n",
+                shell_quote(exec_path)
+            )
+            .as_bytes(),
+        );
     }
     bytes.extend_from_slice(b"exec '");
     for byte in git {
@@ -236,6 +279,7 @@ fn git_wrapper(git: &Path, options: &GitWrapper) -> Result<Vec<u8>, ProviderErro
         .as_deref()
         .map(|value| format!(" -c {value}"))
         .unwrap_or_default();
+
     bytes.extend_from_slice(format!("{include} \"$@\"\n").as_bytes());
     Ok(bytes)
 }
@@ -702,6 +746,27 @@ const UNBOUND: [&str; 9] = [
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wrapper_pins_the_hosts_exec_path_and_answers_credentials_from_the_token() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let core = dir.path().join("dev/libexec/git-core");
+        std::fs::create_dir_all(&core).unwrap();
+        let git = dir.path().join("git");
+        std::fs::write(&git, format!("#!/bin/sh\necho '{}'\n", core.display())).unwrap();
+        std::fs::set_permissions(&git, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let text = String::from_utf8(git_wrapper(&git, &GitWrapper::default()).unwrap()).unwrap();
+        assert!(text.contains(&format!("GIT_EXEC_PATH='{}'", core.display())));
+        assert!(text.contains("GIT_CONFIG_KEY_0=credential.https://github.com.helper"));
+        assert!(!text.contains("secret"));
+        let missing = git_wrapper(Path::new("/fixture/git"), &GitWrapper::default()).unwrap();
+        assert!(
+            !String::from_utf8(missing)
+                .unwrap()
+                .contains("GIT_EXEC_PATH")
+        );
+    }
 
     #[test]
     fn unencodable_git_path_warns_but_bound_writer_still_refuses() {

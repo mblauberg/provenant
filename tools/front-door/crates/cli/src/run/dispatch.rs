@@ -378,10 +378,13 @@ pub(super) fn dispatch_with_workers(
                         .into_iter()
                         .find(|tree| tree.path == path)
                         .ok_or(worktrees::WorktreeError::NotFound)?;
-                    if info.dirty != worktrees::WorktreeCondition::Clean
-                        || !info.occupancy.is_available()
-                    {
+                    // Name the actual refusal: a clean tree that is merely
+                    // occupied must not be reported as edited.
+                    if info.dirty != worktrees::WorktreeCondition::Clean {
                         return Err(worktrees::WorktreeError::Dirty(String::new()));
+                    }
+                    if !info.occupancy.is_available() {
+                        return Err(worktrees::WorktreeError::LiveWriter);
                     }
                     let tree = provenant_confinement::verify_worktree(context.repo, &path)?;
                     if worktrees::load_owner(&tree)?.is_none_or(|owner| {
