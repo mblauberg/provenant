@@ -1,5 +1,5 @@
 //! Production CLI dispatch against a fake Codex executable, never live credentials.
-use super::worktree_tests::support::{Result, TestRig, code};
+use super::worktree_tests::support::{Result, TestRig};
 use super::worktree_tests::{git, ok, repository, writer_backend_available, writer_context};
 use std::{
     fs,
