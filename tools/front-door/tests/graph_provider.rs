@@ -2376,12 +2376,13 @@ fn run_graph_provider(rig: &TestRig, graph_id: &str, node: Value) -> Result<Valu
         "--json",
     ])?;
     let response: Value = serde_json::from_slice(&out.stdout.bytes)?;
-    let outcome: provenant_records::Outcome = serde_json::from_value(response["status"].clone())?;
-    assert_eq!(
-        code(&out),
-        i32::from(provenant_cli::exit_status(&outcome)),
-        "{response}"
-    );
+    let expected_exit = match response["status"].as_str() {
+        Some("ok" | "waiting") => 0,
+        Some("failed" | "refused") => 1,
+        Some("cancelled") => 130,
+        other => return Err(format!("unexpected graph response status {other:?}: {response}").into()),
+    };
+    assert_eq!(code(&out), expected_exit, "{response}");
     assert!(response["error"].is_null(), "{response}");
     assert!(response["data"]["checkpoint"].is_object(), "{response}");
     let reference = response["data"]["checkpoint"]["nodes"][0]["attempts"][0]["attempt_ref"]

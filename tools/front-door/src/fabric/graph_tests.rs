@@ -1847,3 +1847,68 @@ mod retry_allowance_tests {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod provisioned_writer_submission_tests {
+    use super::*;
+    use provenant_fabric_runtime::graph::{self, GraphJournal};
+    use provenant_confinement::worktrees::{Occupancy, WorkerObserver};
+
+    struct Free;
+    impl WorkerObserver for Free {
+        fn observe_roots(&self, roots: &[PathBuf]) -> std::collections::BTreeMap<PathBuf, Occupancy> {
+            roots.iter().cloned().map(|root| (root, Occupancy::Available)).collect()
+        }
+    }
+    #[derive(Default)]
+    struct Journal(Option<graph::GraphCheckpoint>);
+    impl GraphJournal for Journal {
+        type Error = std::convert::Infallible;
+        fn load(&mut self, _: &str) -> Result<Option<graph::GraphCheckpoint>, Self::Error> { Ok(self.0.clone()) }
+        fn save(&mut self, checkpoint: &graph::GraphCheckpoint) -> Result<(), Self::Error> { self.0 = Some(checkpoint.clone()); Ok(()) }
+    }
+
+    #[test]
+    fn provisioned_graph_writer_reaches_the_sealed_attempt_request() -> Result<(), Box<dyn std::error::Error>> {
+        if super::peer_tests::host_test("fabric::provisioned_writer_submission_tests::provisioned_graph_writer_reaches_the_sealed_attempt_request")? { return Ok(()); }
+        let rig = crate::worktree_tests::repository()?;
+        let head = crate::worktree_tests::git(&rig, &["rev-parse", "HEAD"])?;
+        let roots = crate::roots::child(&rig.home, &rig.project, rig.state.clone())?;
+        let factory = Factory {
+            context: Context::open(roots, &rig.home, &rig.project)?, project_attribution: false,
+            clock: SystemClock, backoff: ThreadPause, executor: SystemExecutor::new(1)?,
+            home: rig.home.clone(), cwd: rig.project.clone(), assets: rig.project.clone(),
+            host_launch: None, mcp_project: None, workers: &Free,
+        };
+        let document: graph::GraphDocument = serde_json::from_value(serde_json::json!({
+            "schema_version":2, "graph_id":"provision-and-seal", "nodes":[{
+                "id":"writer", "access":"worktree_write", "worktree":".worktrees/topic-fix",
+                "attempt":{"new_worktree":{"branch":"topic/fix","base":"HEAD"}},
+                "prompt":"repair the parser", "route":{"adapter":"fixture","model":"fixture/model"}
+            }]
+        }))?;
+        let cancel = CancelToken::new();
+        let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
+        let mut owner = BoundGraphOwner { factory: &factory, integration_base: None, integration_branch: None,
+            network: None, capability_overrides: Default::default(), exclude: Vec::new(), budget,
+            cancel: &cancel, prices: None, tick: false };
+        let mut journal = Journal::default();
+        // Persist the real sealed attempt without launching a provider process.
+        let result = provenant_cli::run::with_deferred_provider_launch(|| graph::advance(&document, &mut owner, &mut journal))?;
+        let progress = &result.checkpoint.nodes[0];
+        assert_eq!(progress.source_commit.as_deref(), Some(head.as_str()));
+        let attempt = progress.attempts.first().ok_or("graph attempt missing")?;
+        let reference = attempt.attempt_ref.as_deref().ok_or("sealed attempt reference missing")?;
+        let (_, id) = reference.split_once('/').ok_or("attempt reference")?;
+        let binary = BinaryRunOwner { factory: &factory, allow_remote: false, actor: None, chair: None };
+        let store = binary.store(&cancel)?;
+        let call = binary.call(&cancel);
+        let record = store.record(id.parse()?, &call)?;
+        let request = store.request(record.run_id, &call)?;
+        let task = request.tasks.first().ok_or("sealed task missing")?;
+        assert_eq!(task.writer.as_ref().ok_or("sealed writer missing")?.worktree, rig.project.join(".worktrees/topic-fix"));
+        assert_eq!(task.context.as_ref().and_then(|context| context.graph_id.as_deref()), Some("provision-and-seal"));
+        assert_eq!(task.head.as_deref(), Some(head.as_str()));
+        Ok(())
+    }
+}

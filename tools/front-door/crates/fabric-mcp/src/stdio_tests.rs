@@ -326,9 +326,6 @@ fn schema_tools_report_errors_in_text_in_both_protocol_eras() {
     for modern in [false, true] {
         let gate = Arc::new(Gate::default());
         gate.release();
-        gate.state.lock().unwrap().submit_error = Some(FacadeError::LaunchUnknown {
-            operation_id: provenant_core::OperationId::parse("unknown-launch-17").unwrap(),
-        });
         let server = Server::start(FakeFactory::new(gate), false);
         if modern {
             server.send_bytes(include_bytes!(
@@ -1085,7 +1082,6 @@ struct GateState {
     panic_in_open: bool,
     run_cancel_calls: usize,
     output_bytes: Vec<u8>,
-    submit_error: Option<FacadeError>,
     run_error: Option<FacadeError>,
     spend_run_budget: bool,
     tokens: Vec<CancelToken>,
@@ -1235,7 +1231,6 @@ struct Fact {
 struct FakeFacade(Arc<Gate>, SharedClock);
 impl F3Facade for FakeFacade {
     type Identity = Fact;
-    type Submit = Fact;
     type Run = Fact;
     type Hosts = Fact;
     fn identity(
@@ -1247,17 +1242,6 @@ impl F3Facade for FakeFacade {
         self.0.maybe_panic();
         self.0.hold(cancel);
         Err(FacadeError::NotFound)
-    }
-    fn submit(
-        &mut self,
-        _: SubmitInput,
-        _: WaitBudget,
-        _: &CancelToken,
-    ) -> Result<Fact, FacadeError> {
-        if let Some(error) = &self.0.state.lock().unwrap().submit_error {
-            return Err(error.clone());
-        }
-        Ok(Fact { state: "accepted" })
     }
     fn run(
         &mut self,

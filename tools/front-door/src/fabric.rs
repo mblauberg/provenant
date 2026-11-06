@@ -45,7 +45,7 @@ use provenant_fabric_mcp::{
     tools::{Service, ServiceError},
 };
 use provenant_fabric_runtime::runs::{
-    AttemptPage, RunCapabilities, RunEventsPage, RunResult, SubmissionReceipt,
+    AttemptPage, RunCapabilities, RunEventsPage, RunResult,
 };
 use provenant_fabric_runtime::{
     coordination::{facade::*, *},
@@ -684,7 +684,6 @@ impl F3Facade for BoundFacade<'_> {
         self.factory.pull_events(budget, cancel)
     }
     type Identity = Identity;
-    type Submit = SubmissionReceipt;
     type Run = RunResult;
     type Hosts = Vec<HostHealth>;
     fn identity(
@@ -697,16 +696,6 @@ impl F3Facade for BoundFacade<'_> {
             return Err(FacadeError::Cancelled);
         }
         Ok(self.factory.context.identity.clone())
-    }
-    fn submit(
-        &mut self,
-        _input: SubmitInput,
-        _budget: WaitBudget,
-        _cancel: &CancelToken,
-    ) -> Result<SubmissionReceipt, FacadeError> {
-        Err(FacadeError::invalid(InvalidInputDetail::Field(
-            "submit".into(),
-        )))
     }
     fn run(
         &mut self,

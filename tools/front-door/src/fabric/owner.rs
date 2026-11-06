@@ -2208,6 +2208,9 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                 attempt.account = route.account.clone().or(attempt.account);
                 attempt
             });
+            // The graph checkpoint owns worktree provisioning; submission receives
+            // the resolved checkout, never a second request to create it.
+            attempt.new_worktree = None;
             // These fields have already been resolved into the sealed access grants.
             attempt.write_roots.clear();
             attempt.capabilities.clear();

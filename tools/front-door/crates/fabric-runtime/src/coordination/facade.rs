@@ -1449,7 +1449,6 @@ pub trait F3Facade {
         Ok(EventCoverage::default())
     }
     type Identity: Serialize;
-    type Submit: Serialize;
     type Run: Serialize;
     type Hosts: Serialize;
 
@@ -1459,12 +1458,6 @@ pub trait F3Facade {
         budget: WaitBudget,
         cancel: &CancelToken,
     ) -> Result<Self::Identity, FacadeError>;
-    fn submit(
-        &mut self,
-        input: SubmitInput,
-        budget: WaitBudget,
-        cancel: &CancelToken,
-    ) -> Result<Self::Submit, FacadeError>;
     fn run(
         &mut self,
         input: RunInput,

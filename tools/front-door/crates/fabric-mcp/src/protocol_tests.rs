@@ -147,7 +147,7 @@ fn modern_tools_list_publishes_only_supported_output_schemas() {
 }
 
 #[test]
-fn legacy_tools_list_omits_modern_output_schemas() {
+fn both_protocol_eras_publish_the_same_tool_contract() {
     let mut protocol = Protocol::default();
     let Action::Reply(initialized) = protocol.receive(
         br#"{"jsonrpc":"2.0","id":"initialize","method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"fixture","version":"1"}}}"#,
@@ -162,8 +162,7 @@ fn legacy_tools_list_omits_modern_output_schemas() {
         panic!("expected legacy tool catalogue")
     };
     let tools = reply["result"]["tools"].as_array().expect("tools array");
-    assert_eq!(tools.len(), 5);
-    assert!(tools.iter().all(|tool| tool.get("outputSchema").is_none()));
+    assert_eq!(tools, crate::tools::catalogue());
 }
 
 #[test]

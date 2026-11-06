@@ -68,7 +68,7 @@ impl Clock for SharedClock {
 
 struct FakeFacade;
 
-struct SubmitFacade {
+struct WaitFacade {
     fail_first: bool,
     large_wait: bool,
     expire_run: bool,
@@ -78,9 +78,8 @@ struct SubmitFacade {
     budgets: Vec<u64>,
     reads: Vec<u64>,
 }
-impl F3Facade for SubmitFacade {
+impl F3Facade for WaitFacade {
     type Identity = Value;
-    type Submit = Value;
     type Run = Value;
     type Hosts = Value;
     fn identity(
@@ -90,18 +89,6 @@ impl F3Facade for SubmitFacade {
         _: &CancelToken,
     ) -> Result<Value, FacadeError> {
         Ok(json!({}))
-    }
-    fn submit(
-        &mut self,
-        _: SubmitInput,
-        budget: WaitBudget,
-        _: &CancelToken,
-    ) -> Result<Value, FacadeError> {
-        self.budgets
-            .push(budget.remaining(MonoTime::from_micros(0)).as_micros());
-        Ok(
-            json!({"operation_id":"op", "targets":[{"attempt":"11111111111111111111111111111111"},{"attempt":"22222222222222222222222222222222"}]}),
-        )
     }
     fn run(
         &mut self,
@@ -191,7 +178,7 @@ fn wait_that_expires_before_observation_reports_timed_out() -> Result<(), Box<dy
         &ThreadPause,
         &CancelToken::new(),
     )?;
-    let facade = SubmitFacade {
+    let facade = WaitFacade {
         fail_first: false,
         large_wait: false,
         expire_run: true,
@@ -216,7 +203,6 @@ fn wait_that_expires_before_observation_reports_timed_out() -> Result<(), Box<dy
 
 impl F3Facade for FakeFacade {
     type Identity = Fact;
-    type Submit = Fact;
     type Run = Fact;
     type Hosts = Fact;
     // An existing Codex attempt has no live path, so steering gets an ordinary receipt.
@@ -256,14 +242,6 @@ impl F3Facade for FakeFacade {
         _: &CancelToken,
     ) -> Result<Fact, FacadeError> {
         Ok(Fact { state: "identity" })
-    }
-    fn submit(
-        &mut self,
-        _: SubmitInput,
-        _: WaitBudget,
-        _: &CancelToken,
-    ) -> Result<Fact, FacadeError> {
-        Ok(Fact { state: "accepted" })
     }
     fn run(&mut self, _: RunInput, _: WaitBudget, _: &CancelToken) -> Result<Fact, FacadeError> {
         Ok(Fact { state: "unknown" })
@@ -335,10 +313,11 @@ fn graph_documents_reach_the_shared_owner_unchanged() -> Result<(), Box<dyn Erro
     let status = json!({"op":"status","id":"g-test","wait_seconds":1});
     assert_eq!(call(&mut service, "fabric_run", status.clone())?, status);
     let child_request = json!({"op":"run","brief":"inspect parser","use":"explore","tier":"junior","wait_seconds":1});
-    assert_eq!(
-        call(&mut service, "fabric_run", child_request.clone())?,
-        child_request
-    );
+    let child = call(&mut service, "fabric_run", child_request)?;
+    assert_eq!(child["op"], "add");
+    assert_eq!(child["use"], "explore");
+    assert_eq!(child["brief"], "inspect parser");
+    assert_eq!(child["tier"], "junior");
     service = service.with_lane_restrictions(false);
     for request in [
         json!({"op":"run","document":{"id":"graph","nodes":[{"id":"inspect","use":"task","brief":"inspect parser"}],"templates":{"local":{"brief":"local"}}}}),
@@ -447,7 +426,7 @@ fn five_tools_reach_the_real_store_through_runtime_and_keep_fences_scoped()
 }
 
 use crate::test_facade::local_inbox_owner;
-local_inbox_owner!(SubmitFacade);
+local_inbox_owner!(WaitFacade);
 impl McpFacade for FakeFacade {
     fn graph_document(
         &mut self,

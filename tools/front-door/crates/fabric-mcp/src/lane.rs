@@ -858,10 +858,7 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let invalid = Request {
             tool: "fabric_run".into(),
-            arguments: serde_json::json!({"op":"submit","tasks":[{
-                "title":"TOKEN_SENTINEL\u{1b}", "prompt":"work",
-                "route":{"kind":"named","name":"utility"}, "timeout_seconds":1
-            }]}),
+            arguments: serde_json::json!({"op":"run", "brief":false}),
         };
         let (mut client, mut server) = UnixStream::pair()?;
         thread::scope(|scope| {
@@ -876,13 +873,7 @@ mod tests {
             let error = exchange(&mut client, &invalid, &CancelToken::new()).unwrap_err();
             let value = error.structured_error();
             assert_eq!(value["code"], "invalid_input");
-            assert!(value["detail"].as_str().unwrap().contains("tasks[0].title"));
-            assert!(
-                value["detail"]
-                    .as_str()
-                    .unwrap()
-                    .contains("control characters")
-            );
+            assert!(value["detail"].as_str().unwrap().contains("arguments.brief"));
             assert!(!value.to_string().contains("TOKEN_SENTINEL"));
             serving.join().unwrap().unwrap();
         });
