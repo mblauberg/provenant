@@ -5029,6 +5029,8 @@ fn budget_commit_uses_bounded_git_without_running_hooks()
     use std::os::unix::fs::PermissionsExt;
     let fixture = PrepareFixture::new()?;
     let sentinel = fixture.root.join("hook-ran");
+    let hooks = fixture.writer.project.join(".git/hooks");
+    fixture.git(&["config", "core.hooksPath", hooks.to_str().ok_or("hook path")?])?;
     fixture.terminal_via_inner("origin", None, false, false, true, || {
         std::fs::write(fixture.writer.worktree.join("budget.txt"), "saved\n")?;
         let hook = fixture.writer.project.join(".git/hooks/pre-commit");

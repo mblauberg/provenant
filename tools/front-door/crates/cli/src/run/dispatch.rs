@@ -1834,7 +1834,7 @@ pub(super) fn dispatch_inner(
                     && !enforced.contains(&p)
                 {
                     brief_warnings.push(format!(
-                        "token budget is not enforced for provider {p}: live usage is not reported while running"
+                        "token budget is not enforced for provider {p}: mid-turn usage is not reported"
                     ));
                 }
             }

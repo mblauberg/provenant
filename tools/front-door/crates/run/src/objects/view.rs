@@ -194,6 +194,17 @@ pub(crate) fn merge_objects(source: &ObjectSource, repo: &VerifiedRepo) -> Resul
     Ok(objects)
 }
 
+pub(crate) fn set_private_tip(source: &ObjectSource, branch: &str, tip: GitOid) -> Result<()> {
+    let (parent, leaf) = branch.rsplit_once('/').ok_or_else(invalid)?;
+    let mut held = source.refs.try_clone()?;
+    for component in parent.split('/') {
+        held = directory(&held, OsStr::new(component))?;
+    }
+    held.atomic_write(OsStr::new(leaf), ".budget-", format!("{tip}\n").as_bytes(), PublishMode::Replace)?
+        .require_durable()?;
+    Ok(())
+}
+
 pub(crate) fn private_tip(source: &ObjectSource, branch: &str) -> Result<GitOid> {
     let head = source.refs.read_stable(OsStr::new("HEAD"), 1024)?;
     if std::str::from_utf8(&head).map(str::trim).ok() != Some(format!("ref: {branch}").as_str()) {

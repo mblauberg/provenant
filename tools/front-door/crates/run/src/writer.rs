@@ -303,45 +303,47 @@ impl WriterLaunch {
     fn commit_budget_stop(&self, attempt: &Directory) -> Result<&'static str> {
         let repo = self.worktree.repo();
         let git = provenant_os::git::git_executable().ok_or(RunError::GitUnavailable)?;
-        let source = crate::objects::bound_source(attempt)?;
-        let git_dir = match &source {
-            Some(source) => source.refs.current_path()?,
-            None => repo.private_git_dir().to_path_buf(),
-        };
-        let objects = source.as_ref().map(|s| s.objects.current_path()).transpose()?;
-        let run_git = |args: &[&str]| {
-            let argv = [OsString::from("--work-tree"), repo.root_path().into()].into_iter()
-                .chain(args.iter().map(OsString::from)).collect::<Vec<_>>();
-            crate::objects::execute_bounded(
-                &git, &git_dir, repo.root_path(), &argv, None,
-                crate::objects::Execution {
-                    object_directory: objects.as_deref(),
-                    ..Default::default()
-                },
-            )
-        };
-        let head = run_git(&["symbolic-ref", "HEAD"])?;
-        if head != format!("{}\n", self.branch.as_str()).as_bytes() {
-            return Err(RunError::WriterHeadNotLaneBranch);
-        }
+        let source = crate::objects::bound_source(attempt)?
+            .ok_or(RunError::Validation("budget commit needs private Git state"))?;
+        let tip = crate::objects::private_tip(&source, self.branch.as_str())?;
         // Never stage away conflict stages or finish a merge on the lane's
         // behalf. The existing stopped-merge import restores this state.
-        let directory = source.as_ref().map(|s| &s.refs).unwrap_or(repo.private_dir());
-        let merging = match directory.read_stable(OsStr::new("MERGE_HEAD"), 1024 * 1024) {
-            Ok(_) => true,
-            Err(error) if error.is_not_found() => false,
+        match source.refs.read_stable(OsStr::new("MERGE_HEAD"), 1024 * 1024) {
+            Ok(_) => return Ok("budget commit skipped: in-progress merge preserved for stopped-merge handling"),
+            Err(error) if error.is_not_found() => {},
             Err(error) => return Err(error.into()),
-        };
-        if merging || !run_git(&["ls-files", "--unmerged", "-z"])?.is_empty() {
-            return Ok("budget commit skipped: in-progress merge preserved for stopped-merge handling");
         }
-        if run_git(&["status", "--porcelain", "-z"])?.is_empty() {
-            return Ok("budget stop: worktree already clean");
-        }
-        run_git(&["add", "-A"])?;
-        run_git(&["-c", "user.name=provenant", "-c", "user.email=provenant@invalid",
-            "-c", "commit.gpgsign=false", "commit", "-m", "stopped on budget"])?;
-        Ok("work committed on its branch")
+        let objects = source.objects.current_path()?;
+        let index = source.refs.current_path()?.join("index");
+        crate::objects::with_clean_view(&git, repo, tip, None, |_, path| {
+            let run_git = |args: &[&str]| {
+                let argv = [OsString::from("--work-tree"), repo.root_path().into()].into_iter()
+                    .chain(args.iter().map(OsString::from)).collect::<Vec<_>>();
+                crate::objects::execute_bounded(
+                    &git, path, repo.root_path(), &argv, None,
+                    crate::objects::Execution {
+                        object_directory: Some(&objects), index_file: Some(&index),
+                        ..Default::default()
+                    },
+                )
+            };
+            run_git(&["update-ref", "HEAD", &tip.to_string()])?;
+            if !run_git(&["ls-files", "--unmerged", "-z"])?.is_empty() {
+                return Ok("budget commit skipped: in-progress merge preserved for stopped-merge handling");
+            }
+            if run_git(&["status", "--porcelain", "-z"])?.is_empty() {
+                return Ok("budget stop: worktree already clean");
+            }
+            run_git(&["add", "-A"])?;
+            run_git(&["-c", "user.name=provenant", "-c", "user.email=provenant@invalid",
+                "-c", "commit.gpgsign=false", "commit", "-m", "stopped on budget"])?;
+            let bytes = run_git(&["rev-parse", "HEAD"])?;
+            let head = GitOid::parse(std::str::from_utf8(&bytes)
+                .map_err(|_| RunError::Validation("budget commit head"))?.trim())
+                .map_err(|_| RunError::Validation("budget commit head"))?;
+            crate::objects::set_private_tip(&source, self.branch.as_str(), head)?;
+            Ok("work committed on its branch")
+        })
     }
 }
 
