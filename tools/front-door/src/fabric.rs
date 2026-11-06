@@ -2065,6 +2065,87 @@ impl Factory {
                 .is_some_and(|(host, _)| host != self.context.identity.host.to_string())
     }
 
+    /// Address a receiver-owned graph even when its launch reply was lost.
+    fn cancel_peer_submission(
+        &self,
+        attempt: &provenant_fabric_runtime::graph::GraphAttempt,
+        stop: bool,
+        budget: WaitBudget,
+        cancel: &CancelToken,
+    ) -> Result<Option<bool>, FacadeError> {
+        let host = if let Some(reference) = attempt.attempt_ref.as_deref() {
+            Some(
+                reference
+                    .split_once('/')
+                    .ok_or(FacadeError::StateCorrupt)?
+                    .0
+                    .parse()
+                    .map_err(|_| FacadeError::StateCorrupt)?,
+            )
+        } else if let Some(host) = attempt
+            .extra
+            .get("placement_host_id")
+            .and_then(serde_json::Value::as_str)
+        {
+            Some(host.parse().map_err(|_| FacadeError::StateCorrupt)?)
+        } else if let Some(name) = attempt
+            .extra
+            .get("placement_host")
+            .and_then(serde_json::Value::as_str)
+        {
+            let local = self.context.identity.host;
+            Some(
+                if matches!(name, "local" | "localhost")
+                    || name
+                        .parse::<provenant_core::HostId>()
+                        .is_ok_and(|host| host == local)
+                {
+                    local
+                } else {
+                    self.context
+                        .peer_host(name)
+                        .ok_or(FacadeError::UnknownHost)?
+                },
+            )
+        } else {
+            None
+        };
+        let Some(host) = host.filter(|host| *host != self.context.identity.host) else {
+            return Ok(None);
+        };
+        let submission = graph_operation("graph-attempt-operation", &attempt.key)?;
+        let operation_id = peer::peer_cancel_operation(&submission)?;
+        let owner = BinaryRunOwner {
+            factory: self,
+            allow_remote: true,
+            actor: Some(
+                attempt
+                    .launch_actor
+                    .parse()
+                    .map_err(|_| FacadeError::StateCorrupt)?,
+            ),
+            chair: None,
+        };
+        match owner.peer(
+            host,
+            PeerAction::CancelSubmission {
+                extra: [(
+                    "graph_launch_actor".into(),
+                    serde_json::json!(attempt.launch_actor),
+                )]
+                .into(),
+                submission,
+                operation_id,
+                stop,
+            },
+            budget,
+            cancel,
+        )? {
+            PeerResult::SubmissionCancelled { settled, .. } => Ok(Some(settled)),
+            _ => Err(FacadeError::StateCorrupt),
+        }
+    }
+
     /// Cancel one live graph attempt. A missing checkpoint reference (a crash
     /// between acceptance and the save) is recovered from the stable operation ID.
     pub(crate) fn cancel_graph_attempt(
@@ -2074,6 +2155,12 @@ impl Factory {
         budget: WaitBudget,
         cancel: &CancelToken,
     ) -> Result<(), FacadeError> {
+        if self
+            .cancel_peer_submission(attempt, true, budget, cancel)?
+            .is_some()
+        {
+            return Ok(());
+        }
         owner.actor = Some(
             attempt
                 .launch_actor

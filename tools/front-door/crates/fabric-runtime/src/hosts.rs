@@ -424,6 +424,14 @@ pub enum PeerAction {
         extra: provenant_records::ExtraFields,
         operation_id: OperationId,
     },
+    /// Cancel or inspect cancellation of a receiver-owned graph by its stable submission.
+    CancelSubmission {
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
+        submission: OperationId,
+        operation_id: OperationId,
+        stop: bool,
+    },
     LandingPush {
         #[serde(flatten)]
         extra: provenant_records::ExtraFields,
@@ -530,7 +538,8 @@ impl PeerRequest {
         match &self.action {
             PeerAction::Inbox { input, .. } => input.operation_id().cloned(),
             PeerAction::Coordination { operation_id, .. } => operation_id.clone(),
-            PeerAction::LandingPush { operation_id, .. } => Some(operation_id.clone()),
+            PeerAction::LandingPush { operation_id, .. }
+            | PeerAction::CancelSubmission { operation_id, .. } => Some(operation_id.clone()),
             PeerAction::SessionHandoff { input, .. } => Some(input.operation_id.clone()),
             PeerAction::Submit {
                 input: facade::SubmitInput::Submit { operation_id, .. },
@@ -706,6 +715,11 @@ pub enum PeerResult {
     },
     Run {
         data: Box<crate::runs::RunResult>,
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
+    },
+    SubmissionCancelled {
+        settled: bool,
         #[serde(flatten)]
         extra: provenant_records::ExtraFields,
     },

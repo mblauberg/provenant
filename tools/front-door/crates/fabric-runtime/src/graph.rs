@@ -481,6 +481,11 @@ pub trait AttemptOwner {
         None
     }
 
+    /// Resolve a placement before persisting an uncertain launch.
+    fn placement_host_id(&self, _name: &str) -> Result<Option<String>, Self::Error> {
+        Ok(None)
+    }
+
     /// Reissue an idempotent stop if a policy successor appeared during cancellation.
     fn stop_cancelled_attempt(&mut self, _attempt: &GraphAttempt) -> Result<(), Self::Error> {
         Ok(())
@@ -2624,7 +2629,20 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                             .attempt
                             .as_ref()
                             .and_then(|spec| spec.host.as_ref())
-                            .map(|host| [("placement_host".into(), serde_json::json!(host))].into())
+                            .map(|host| {
+                                let mut extra: provenant_records::ExtraFields =
+                                    [("placement_host".into(), serde_json::json!(host))].into();
+                                if let Some(stable) =
+                                    owner.placement_host_id(host).map_err(GraphError::Run)?
+                                {
+                                    extra.insert(
+                                        "placement_host_id".into(),
+                                        serde_json::json!(stable),
+                                    );
+                                }
+                                Ok::<_, GraphError<R::Error, J::Error>>(extra)
+                            })
+                            .transpose()?
                             .unwrap_or_default(),
                         review_substitution,
                         key: key.clone(),

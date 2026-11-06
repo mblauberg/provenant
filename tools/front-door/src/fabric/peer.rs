@@ -47,6 +47,7 @@ fn peer_read_only(action: &PeerAction) -> bool {
         | PeerAction::ConsoleInbox { .. }
         | PeerAction::Doctor { .. }
         | PeerAction::Receipt { .. } => true,
+        PeerAction::CancelSubmission { stop, .. } => !stop,
         PeerAction::Inbox { input, .. } => !matches!(
             input,
             InboxInput::Answer {
@@ -369,6 +370,13 @@ pub fn peer(
                     })
                 }
             }
+            PeerAction::CancelSubmission { .. } => peer_result(
+                peer_cancel_submission_request(&peer_factory, &request, budget, &cancel),
+                |settled| PeerResult::SubmissionCancelled {
+                    settled,
+                    extra: Default::default(),
+                },
+            ),
             PeerAction::Run { input, extra } => {
                 let observed = owner
                     .run(input.clone(), budget, &cancel)
@@ -1058,16 +1066,58 @@ pub(crate) fn peer_submit_graph(
     peer_graph_receipt(factory, operation_id, &graph, &run.checkpoint)
 }
 
-fn peer_graph_receipt(
+pub(super) fn peer_graph_receipt(
     factory: &Factory,
     operation_id: provenant_core::OperationId,
     graph: &str,
     checkpoint: &provenant_fabric_runtime::graph::GraphCheckpoint,
 ) -> Result<SubmissionReceipt, FacadeError> {
-    let reference = checkpoint
+    let root = checkpoint
         .nodes
         .first()
-        .and_then(|node| node.attempts.last())
+        .and_then(|node| node.attempts.last());
+    if let Some(root) = root.filter(|attempt| attempt.attempt_ref.is_none()) {
+        // A graph can block on a definite refusal before recording its run
+        // reference. Consult the same sealed launch evidence as local replay;
+        // graph status text cannot prove either refusal or acceptance.
+        let cancel = CancelToken::new();
+        let owner = BinaryRunOwner {
+            factory,
+            allow_remote: false,
+            actor: Some(
+                root.launch_actor
+                    .parse()
+                    .map_err(|_| FacadeError::StateCorrupt)?,
+            ),
+            chair: None,
+        };
+        let session = owner.read_session(&cancel).map_err(|error| match error {
+            FacadeError::NotFound => FacadeError::LaunchUnknown {
+                operation_id: operation_id.clone(),
+            },
+            error => error,
+        })?;
+        let call = owner.call(&cancel);
+        let launch_operation = graph_operation("graph-attempt-operation", &root.key)?;
+        if let Some(operation) = session
+            .store
+            .operation(&launch_operation, &call)
+            .map_err(run_error)?
+            && matches!(
+                operation.state,
+                provenant_run::OperationState::Accepted
+                    | provenant_run::OperationState::Terminal
+                    | provenant_run::OperationState::Blocked
+            )
+        {
+            let run = session
+                .store
+                .run(operation.run_id, &call)
+                .map_err(run_error)?;
+            owner.receipt(&session, launch_operation, &run, &[], &call)?;
+        }
+    }
+    let reference = root
         .and_then(|attempt| attempt.attempt_ref.as_deref())
         .ok_or_else(|| FacadeError::LaunchUnknown {
             operation_id: operation_id.clone(),
@@ -1218,6 +1268,96 @@ pub(crate) fn peer_graph_fields_page(
     .into())
 }
 
+pub(crate) fn peer_cancel_operation(
+    submission: &provenant_core::OperationId,
+) -> Result<provenant_core::OperationId, FacadeError> {
+    let digest =
+        provenant_records::CanonicalV1::record_digest("peer-cancel-submission", 1, submission)
+            .map_err(|_| FacadeError::StateCorrupt)?;
+    format!("graph-{}", provenant_core::hex(digest.as_bytes()))
+        .parse()
+        .map_err(|_| FacadeError::StateCorrupt)
+}
+
+pub(crate) fn peer_cancel_submission_request(
+    factory: &Factory,
+    request: &PeerRequest,
+    budget: WaitBudget,
+    cancel: &CancelToken,
+) -> Result<bool, FacadeError> {
+    let PeerAction::CancelSubmission {
+        submission,
+        operation_id,
+        stop,
+        ..
+    } = &request.action
+    else {
+        return Err(FacadeError::InvalidInput { detail: None });
+    };
+    // Use the same authenticated launch namespace as Submit. request.actor()
+    // names the transport agent, rather than the retained graph launch actor.
+    let actor = request
+        .agent
+        .strip_prefix("graph-")
+        .and_then(|actor| actor.parse().ok())
+        .ok_or(FacadeError::ConfinementRefused { resource: None })?;
+    // Bind the cancellation to its submission rather than allowing callers to
+    // reuse a cancellation identity for a different receiver graph.
+    if *operation_id != peer_cancel_operation(submission)? {
+        return Err(FacadeError::Conflict);
+    }
+    peer_cancel_submission(factory, actor, submission, *stop, budget, cancel)
+}
+
+pub(crate) fn peer_cancel_submission(
+    factory: &Factory,
+    actor: provenant_core::ActorId,
+    submission: &provenant_core::OperationId,
+    stop: bool,
+    budget: WaitBudget,
+    cancel: &CancelToken,
+) -> Result<bool, FacadeError> {
+    let digest =
+        provenant_records::CanonicalV1::record_digest("peer-subgraph", 1, &(actor, submission))
+            .map_err(|_| FacadeError::StateCorrupt)?;
+    let graph = format!("peer-{}", &provenant_core::hex(digest.as_bytes())[..48]);
+    // Absence is not proof of cancellation: the accepted submission may still
+    // be arriving. The origin retains its fence and retries after reconnect.
+    let checkpoint = provenant_fabric_runtime::graph::FileJournal::read_checkpoint(
+        &factory.context.roots.state,
+        factory.context.identity.project,
+        &graph,
+    )
+    .map_err(graph_journal_error)?
+    .ok_or(FacadeError::NotFound)?;
+    let checkpoint = if stop {
+        factory
+            .stop_target(
+                &unified::GraphTarget {
+                    graph,
+                    node: None,
+                    attempt: None,
+                },
+                Some("Cancelled by origin".into()),
+                budget,
+                cancel,
+            )?
+            .checkpoint
+    } else {
+        checkpoint
+    };
+    // A settled node is the graph owner's proof that every admitted attempt
+    // and its custody have drained, including children of a terminal parent.
+    Ok(checkpoint.cancelled
+        && checkpoint.nodes.iter().all(|node| {
+            !matches!(
+                node.state,
+                provenant_fabric_runtime::graph::NodeState::Pending
+                    | provenant_fabric_runtime::graph::NodeState::Running
+            )
+        }))
+}
+
 pub(crate) fn peer_cancel_subtree(
     factory: &Factory,
     attempt: provenant_core::AttemptId,
@@ -1264,7 +1404,7 @@ pub(crate) fn peer_cancel_subtree(
     Ok(())
 }
 
-fn peer_retained_receipt(
+pub(super) fn peer_retained_receipt(
     factory: &Factory,
     operation_id: &provenant_core::OperationId,
     actor: provenant_core::ActorId,

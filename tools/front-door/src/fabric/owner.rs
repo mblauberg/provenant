@@ -1550,6 +1550,23 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
         ))
     }
 
+    fn placement_host_id(&self, name: &str) -> Result<Option<String>, Self::Error> {
+        let local = self.factory.context.identity.host;
+        let host = if matches!(name, "local" | "localhost")
+            || name
+                .parse::<provenant_core::HostId>()
+                .is_ok_and(|host| host == local)
+        {
+            local
+        } else {
+            self.factory
+                .context
+                .peer_host(name)
+                .ok_or(FacadeError::UnknownHost)?
+        };
+        Ok(Some(host.to_string()))
+    }
+
     fn stop_cancelled_attempt(
         &mut self,
         attempt: &provenant_fabric_runtime::graph::GraphAttempt,
@@ -1568,6 +1585,12 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
         &mut self,
         attempt: &provenant_fabric_runtime::graph::GraphAttempt,
     ) -> Result<bool, Self::Error> {
+        if let Some(settled) =
+            self.factory
+                .cancel_peer_submission(attempt, false, self.budget, self.cancel)?
+        {
+            return Ok(settled);
+        }
         let owner = BinaryRunOwner {
             factory: self.factory,
             allow_remote: true,

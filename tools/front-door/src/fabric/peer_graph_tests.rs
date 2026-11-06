@@ -8,6 +8,7 @@ type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
 fn receiver() -> TestResult<(crate::worktree_tests::support::TestRig, Factory)> {
     let rig = crate::worktree_tests::repository()?;
+    provenant_os::fixture::private_state_dir(&rig.state)?;
     let roots = crate::roots::child(&rig.home, &rig.project, rig.state.clone())?;
     let factory = Factory {
         context: Context::open(roots, &rig.home, &rig.project)?,
@@ -649,4 +650,141 @@ fn peer_hosted_lane_collection_preserves_origin_status() -> TestResult {
         &cancel,
     )?;
     Ok(())
+}
+
+#[test]
+fn peer_pacing_refusal_is_definite_and_preserves_its_fact_on_receipt_replay() -> TestResult {
+    if host_test(
+        "fabric::peer_tests::peer_graph_tests::peer_pacing_refusal_is_definite_and_preserves_its_fact_on_receipt_replay",
+    )? {
+        return Ok(());
+    }
+    use graph::GraphJournal;
+    use provenant_records::diagnostic::{PacingReserveSetting, PacingSettingSource, ResourceFact};
+    struct Pacing(ResourceFact);
+    impl provenant_run::Providers for Pacing {
+        fn prepare(
+            &self,
+            _: &provenant_run::TaskRequest,
+            _: &str,
+            _: &provenant_run::LaunchPaths,
+            _: Option<&provenant_run::AttemptRecord>,
+        ) -> Result<provenant_run::PreparedLaunch, provenant_run::PrepareRefusal> {
+            let mut route = provenant_records::run::SkippedRoute {
+                extra: Default::default(),
+                route: "fixture/model".into(),
+                kind: provenant_records::run::SkipKind::Unavailable,
+                cause: Some(provenant_records::RouteExclusionReason::PacingReserve),
+                detail: "PRIVATE_PACING_SENTINEL".into(),
+            };
+            route.set_guard_facts(None, Some(self.0)).unwrap();
+            let mut refusal = provenant_run::PrepareRefusal::from("PRIVATE_PACING_SENTINEL");
+            refusal.skipped_routes.push(route);
+            Err(refusal)
+        }
+        fn decode(
+            &self,
+            _: &provenant_run::RouteRecord,
+            _: &[u8],
+            _: &provenant_supervisor::custody::ExitObservation,
+            _: &std::path::Path,
+        ) -> Result<provenant_run::Decoded, String> {
+            Err("refused provider must never decode".into())
+        }
+    }
+    let (_rig, factory) = receiver()?;
+    let cancel = CancelToken::new();
+    let operation: provenant_core::OperationId = "peer-paced-parent".parse()?;
+    let receipt = submit_parent(&factory, operation.as_str(), &cancel)?;
+    let graph = receipt.extra["peer_graph"]["graph_id"]
+        .as_str()
+        .ok_or("graph pointer")?;
+    let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
+    let mut journal = FileJournal::open(
+        &factory.context.roots.state,
+        factory.context.identity.project,
+        graph,
+        budget,
+        &cancel,
+        &factory.clock,
+    )?;
+    let mut checkpoint = journal.load(graph)?.ok_or("receiver graph")?;
+    let mut unreplied = checkpoint.clone();
+    unreplied.nodes[0].attempts[0].attempt_ref = None;
+    assert!(matches!(
+        super::super::peer::peer_graph_receipt(&factory, operation.clone(), graph, &unreplied),
+        Err(FacadeError::LaunchUnknown { operation_id }) if operation_id == operation
+    ));
+    let root = &checkpoint.nodes[0].attempts[0];
+    let owner = BinaryRunOwner {
+        factory: &factory,
+        allow_remote: false,
+        actor: Some(root.launch_actor.parse()?),
+        chair: None,
+    };
+    let session = owner.session(&cancel)?;
+    let call = owner.call(&cancel);
+    let record = session.store.record(receipt.targets[0].attempt, &call)?;
+    let fact = ResourceFact::PacingReserve {
+        percent: 23,
+        setting: PacingReserveSetting::AdapterFiveHour,
+        origin: PacingSettingSource::Configuration,
+    };
+    let started =
+        session
+            .store
+            .start(record.run_id, &Pacing(fact), &|_, _| Ok(Vec::new()), &call)?;
+    let run = session.store.run(record.run_id, &call)?;
+    let first = owner
+        .receipt(&session, operation.clone(), &run, &started, &call)
+        .unwrap_err();
+    // Recreate the reply-loss boundary: the host sealed the refusal, while the
+    // graph has not yet recorded an attempt reference.
+    checkpoint.nodes[0].attempts[0].attempt_ref = None;
+    checkpoint.nodes[0].attempts[0].state = graph::AttemptState::Starting;
+    journal.save(&checkpoint)?;
+    drop(journal);
+    let blocked = advance_receiver(&factory, graph, &cancel)?;
+    assert_eq!(blocked.checkpoint.nodes[0].state, graph::NodeState::Blocked);
+    assert!(
+        blocked.checkpoint.nodes[0].attempts[0]
+            .attempt_ref
+            .is_none()
+    );
+    let current = super::super::peer::peer_graph_receipt(
+        &factory,
+        operation.clone(),
+        graph,
+        &blocked.checkpoint,
+    )
+    .unwrap_err();
+    let replay = super::super::peer::peer_retained_receipt(
+        &factory,
+        &operation,
+        factory.context.identity.inbox.actor,
+    )
+    .unwrap_err();
+    for error in [first, current, replay] {
+        assert!(matches!(&error, FacadeError::DispatchRefused {
+            fact: Some(provenant_fabric_runtime::coordination::facade::DispatchRefusalFact::Resource(actual)), ..
+        } if *actual == fact));
+        let wire = serde_json::to_string(&error)?;
+        assert!(!wire.contains("PRIVATE_PACING_SENTINEL"));
+        let decoded: FacadeError = serde_json::from_str(&wire)?;
+        assert!(matches!(decoded, FacadeError::DispatchRefused {
+            fact: Some(provenant_fabric_runtime::coordination::facade::DispatchRefusalFact::Resource(actual)), ..
+        } if actual == fact));
+        let diagnostic = decoded.diagnostic();
+        assert!(diagnostic.detail.as_deref().is_some_and(|detail| {
+            detail.contains("23") && detail.contains("domains.routing.pacing_reserve")
+        }));
+    }
+    assert!(blocked.checkpoint.nodes[0].launch_retry.is_none());
+    Ok(())
+}
+
+#[cfg(test)]
+#[allow(unused_imports)] // The harness=false worktree driver includes this file without libtest cases.
+mod cancellation_tests {
+    include!("peer_cancellation_tests.rs");
 }

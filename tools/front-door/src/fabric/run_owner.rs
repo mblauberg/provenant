@@ -368,7 +368,9 @@ pub(crate) fn launch_refusal(
             item,
             provenant_run::Started::Refused {
                 kind: provenant_run::RefusalKind::Policy
+                    | provenant_run::RefusalKind::PolicyResource(_)
                     | provenant_run::RefusalKind::PacingReserve
+                    | provenant_run::RefusalKind::PacingReserveResource(_)
                     | provenant_run::RefusalKind::RetainedImport { .. },
                 ..
             }
@@ -387,8 +389,23 @@ pub(crate) fn launch_refusal(
         Vec::new()
     };
     durable_launch_refusal(&sealed)?;
+    let pacing = sealed
+        .iter()
+        .flat_map(|lane| &lane.skipped_routes)
+        .find_map(|route| {
+            if route.cause != Some(provenant_records::RouteExclusionReason::PacingReserve) {
+                return None;
+            }
+            match route.diagnostic().fact {
+                Some(provenant_records::diagnostic::DiagnosticFact::Resource(
+                    fact @ provenant_records::diagnostic::ResourceFact::PacingReserve { .. },
+                )) => Some(fact),
+                _ => None,
+            }
+        });
     Some(FacadeError::DispatchRefused {
-        fact: None,
+        fact: pacing
+            .map(provenant_fabric_runtime::coordination::facade::DispatchRefusalFact::Resource),
         disk: None,
         reason: sealed
             .iter()
@@ -447,7 +464,7 @@ impl BinaryRunOwner<'_> {
         Ok(self.session_with_facts(cancel, facts)?.store)
     }
 
-    fn read_session(
+    pub(crate) fn read_session(
         &self,
         cancel: &CancelToken,
     ) -> Result<provenant_cli::run::Session, FacadeError> {
