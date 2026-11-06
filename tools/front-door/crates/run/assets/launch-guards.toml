@@ -124,6 +124,16 @@ boundary = "object_integrity"
 reason = "Applied write grants cannot overlap the host-owned target seed store."
 
 [[guard]]
+site = "cli/src/run/provider/preparation.rs#prepare_candidates"
+boundary = "authority"
+reason = "An adapter cannot be launched with capabilities or write access its declared model policy does not permit."
+
+[[guard]]
+site = "providers/src/lane.rs#LaunchSpec::configure_publishing"
+boundary = "authority"
+reason = "Publishing requires valid absolute paths before constructing its selected credential and Git wrappers."
+
+[[guard]]
 site = "cli/src/run/provider/preparation.rs#prepare_with"
 boundary = "credentials"
 reason = "Publishing policy must be read and its selected GitHub credential restrictions applied before publishing is enabled."

@@ -54,8 +54,7 @@ pub(super) fn prepare_command(
             network: task.access.network,
             skill_location: task.profile.require_skill_location,
             ..Default::default()
-        })
-        .map_err(|error| error.to_string())?;
+        })?;
     let adapter = REGISTRY
         .iter()
         .find(|entry| entry.adapter.id() == provider)

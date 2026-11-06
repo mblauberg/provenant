@@ -415,6 +415,8 @@ pub(super) enum PrepareError {
     #[error(transparent)]
     Prompt(#[from] LaunchPromptError),
     #[error(transparent)]
+    Unsupported(#[from] provenant_records::UnsupportedLaunch),
+    #[error(transparent)]
     Run(#[from] run::RunError),
     #[error(transparent)]
     ReadOnly(#[from] ReadOnlyPlanError),
@@ -507,6 +509,11 @@ impl PrepareError {
                     fallback_outcome,
                 }
             }
+            Self::Unsupported(error) => {
+                let mut refusal = run::PrepareRefusal::from(error.to_string());
+                refusal.boundary_class = provenant_records::diagnostic::BoundaryClass::Authority;
+                refusal
+            }
             Self::ContinuationRequest(error) => {
                 let mut refusal = run::PrepareRefusal::from(error.to_string());
                 refusal.boundary_class = provenant_records::diagnostic::BoundaryClass::Authority;
@@ -595,6 +602,12 @@ fn preparation_preserves_typed_boundaries_without_classifying_other_errors() {
             BoundaryClass::Authority
         );
     }
+    let unsupported = PrepareError::Unsupported(provenant_records::UnsupportedLaunch {
+        adapter: "fixture",
+        field: provenant_records::LaunchField::Write,
+    })
+    .into_refusal();
+    assert_eq!(unsupported.boundary_class, BoundaryClass::Authority);
     let other = PrepareError::Other("TOKEN_SENTINEL".into()).into_refusal();
     assert_eq!(other.boundary_class, BoundaryClass::None);
     for error in [
@@ -782,8 +795,7 @@ pub(super) fn prepare_with_wait(
                 network: task.access.network,
                 skill_location: task.profile.require_skill_location,
                 ..Default::default()
-            })
-            .map_err(|error| error.to_string())?;
+            })?;
         let roots = registry.roots.ok_or("routing context is unavailable")?;
         let config = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)
             .map_err(|error| error.to_string())?;
@@ -1873,6 +1885,10 @@ pub(super) fn prepare_candidates(
                     .intent
                     .check_launch(spec, &route.model, route.effort.as_deref())
         {
+            reason_boundaries.insert(
+                reasons.len(),
+                provenant_records::diagnostic::BoundaryClass::Authority,
+            );
             reasons.push(skip(&label, SkipKind::Refused, error.to_string()));
             continue;
         }
@@ -1884,6 +1900,10 @@ pub(super) fn prepare_candidates(
         let fallback_dropped = effective.dropped_fallback;
         let model_policy = effective.policy;
         if !model_policy.permits(request.intent) {
+            reason_boundaries.insert(
+                reasons.len(),
+                provenant_records::diagnostic::BoundaryClass::Authority,
+            );
             reasons.push(skip(&label, SkipKind::Refused, "read-only model policy"));
             continue;
         }
@@ -2631,11 +2651,13 @@ pub(super) fn prepare_candidates(
         if let Some(gh) = publishing_gh.as_ref() {
             let policy = provenant_config::GithubPolicy::read(&roots.state, project_id)
                 .map_err(|error| error.to_string())?;
-            let publishing = spec
-                .configure_publishing(scratch, &git, gh, &home, &policy)
-                .map_err(|error| error.to_string());
+            let publishing = spec.configure_publishing(scratch, &git, gh, &home, &policy);
             if let Err(error) = publishing {
-                reasons.push(skip(&label, SkipKind::Setup, error));
+                let class = error.boundary_class();
+                if class != provenant_records::diagnostic::BoundaryClass::None {
+                    reason_boundaries.insert(reasons.len(), class);
+                }
+                reasons.push(skip(&label, SkipKind::Setup, error.to_string()));
                 continue;
             }
         }
