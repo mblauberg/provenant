@@ -36,11 +36,7 @@ pub(super) fn validate_plan_grant_limit(
         ("write root grant count", plan.write_roots.len()),
     ] {
         if count > limit {
-            return Err(PermissionError::BoundExceeded {
-                family,
-                limit,
-                path: plan.scratch.path.clone(),
-            });
+            return Err(PermissionError::GrantLimitExceeded { family, limit });
         }
     }
     Ok(())
@@ -190,7 +186,7 @@ pub(super) fn validate_profile_spec(spec: &ProviderProfileSpec) -> Result<(), Pe
     validate_profile_spec_impl(spec, None, MAX_PATH_GRANTS)
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", test))]
 pub(super) fn validate_profile_spec_with_home(
     spec: &ProviderProfileSpec,
     home: &Path,
@@ -205,18 +201,48 @@ fn validate_profile_spec_impl(
     home: Option<&Path>,
     grant_limit: usize,
 ) -> Result<(), PermissionError> {
-    if spec.process_executables.len() > grant_limit
-        || spec.runtime_reads.len() > grant_limit
-        || spec.discovery_reads.len() > grant_limit
-        || spec.authentication.len() > 16
-        || spec.continuation_reads.len() > grant_limit
-        || spec.state_writes.len() > grant_limit
-        || spec.tool_exec_roots.len() > grant_limit
-        || spec.tool_writes.len() > grant_limit
-        || spec.provider_api.len() > grant_limit
-        || spec.native_controls.len() > 64
-    {
-        return Err(PermissionError::InvalidFixture);
+    for (family, count, limit) in [
+        (
+            "process executables",
+            spec.process_executables.len(),
+            grant_limit,
+        ),
+        ("runtime reads", spec.runtime_reads.len(), grant_limit),
+        (
+            "discovery reads",
+            spec.discovery_reads
+                .iter()
+                .filter(|grant| valid_discovery_read(grant))
+                .count(),
+            grant_limit,
+        ),
+        (
+            "authentication profiles",
+            spec.authentication.len(),
+            grant_limit.max(16),
+        ),
+        (
+            "continuation reads",
+            spec.continuation_reads.len(),
+            grant_limit,
+        ),
+        ("state writes", spec.state_writes.len(), grant_limit),
+        (
+            "tool execution roots",
+            spec.tool_exec_roots.len(),
+            grant_limit,
+        ),
+        ("tool writes", spec.tool_writes.len(), grant_limit),
+        ("provider endpoints", spec.provider_api.len(), grant_limit),
+        (
+            "native controls",
+            spec.native_controls.len(),
+            grant_limit.max(64),
+        ),
+    ] {
+        if count > limit {
+            return Err(PermissionError::GrantLimitExceeded { family, limit });
+        }
     }
     if spec.process_executables.is_empty() {
         return Err(PermissionError::ProcessPolicyMissing);
@@ -254,17 +280,6 @@ fn validate_profile_spec_impl(
             }
         })?;
     }
-    for grant in &spec.discovery_reads {
-        grant.validate()?;
-        if grant.scope != PathScope::Exact
-            || !matches!(
-                grant.path.file_name().and_then(OsStr::to_str),
-                Some(".agents" | ".claude" | ".codex")
-            )
-        {
-            return Err(PermissionError::InvalidPath(grant.path.clone()));
-        }
-    }
     for auth in &spec.authentication {
         if auth.mechanism.is_empty()
             || auth.mechanism.len() > 128
@@ -282,8 +297,16 @@ fn validate_profile_spec_impl(
                 return Err(PermissionError::BroadRoot);
             }
         }
-        if auth.roots.len() > grant_limit || auth.in_place_writes.len() > grant_limit {
-            return Err(PermissionError::InvalidFixture);
+        for (family, count) in [
+            ("authentication roots", auth.roots.len()),
+            ("authentication writes", auth.in_place_writes.len()),
+        ] {
+            if count > grant_limit {
+                return Err(PermissionError::GrantLimitExceeded {
+                    family,
+                    limit: grant_limit,
+                });
+            }
         }
         for write in &auth.in_place_writes {
             write.validate()?;
@@ -342,19 +365,26 @@ fn validate_profile_spec_impl(
             }
         })?;
     }
-    for endpoint in &spec.provider_api {
-        validate_endpoint(endpoint)?;
-    }
-    if spec.native_controls.iter().any(|control| {
-        control.is_empty()
-            || control.len() > 128
-            || control
-                .bytes()
-                .any(|byte| !(byte.is_ascii_alphanumeric() || b"._-".contains(&byte)))
-    }) {
-        return Err(PermissionError::InvalidFixture);
-    }
     Ok(())
+}
+
+#[cfg(any(target_os = "macos", test))]
+pub(super) fn valid_native_control(control: &str) -> bool {
+    !control.is_empty()
+        && control.len() <= 128
+        && control
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
+}
+
+pub(super) fn valid_discovery_read(grant: &PathGrant) -> bool {
+    grant.validate().is_ok()
+        && grant.scope == PathScope::Exact
+        && profile_path_representable(&grant.path)
+        && matches!(
+            grant.path.file_name().and_then(OsStr::to_str),
+            Some(".agents" | ".claude" | ".codex")
+        )
 }
 
 pub(crate) fn validate_noncredential_grant(grant: &PathGrant) -> Result<(), PermissionError> {
@@ -472,6 +502,14 @@ pub fn is_codex_standalone_package(path: &Path) -> bool {
         && !is_credential_root(&below.iter().collect::<PathBuf>())
 }
 
+/// Whether a path can be encoded losslessly in the sandbox profile language.
+pub fn profile_path_representable(path: &Path) -> bool {
+    path.to_str().is_some_and(|text| {
+        text.chars()
+            .all(|character| !character.is_control() || matches!(character, '\n' | '\r' | '\t'))
+    })
+}
+
 pub(crate) fn validate_absolute(path: &Path) -> Result<(), PermissionError> {
     let bytes = path.as_os_str().as_encoded_bytes();
     if !path.is_absolute()
@@ -573,7 +611,7 @@ pub(super) fn path_overlaps(left: &Path, right: &Path) -> bool {
     left.starts_with(right) || right.starts_with(left)
 }
 
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", test, feature = "snapshot"))]
 pub(super) fn validate_endpoint(endpoint: &NetworkEndpoint) -> Result<(), PermissionError> {
     if endpoint.port == 0
         || endpoint.port > u64::from(u16::MAX)

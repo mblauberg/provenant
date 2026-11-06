@@ -35,9 +35,10 @@ pub struct ProfileLimits {
 }
 impl Default for ProfileLimits {
     fn default() -> Self {
+        let config = crate::run_config::RunConfig::default();
         Self {
-            grant_limit: 128,
-            profile_limit_bytes: 512 * 1024,
+            grant_limit: config.grant_limit,
+            profile_limit_bytes: config.profile_limit_bytes,
         }
     }
 }

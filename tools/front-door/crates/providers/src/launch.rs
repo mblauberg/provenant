@@ -45,9 +45,11 @@ pub enum OmissionSource {
     Toolchain,
     /// The provider's own configuration discovery.
     ProviderConfig,
+    /// A shared package prefix was narrowed to the executable.
+    ProviderPackage,
 }
 
-/// An optional grant left out by the credential guard, with its source.
+/// An optional grant left out of the profile, with its source.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OmittedGrant {
     pub path: PathBuf,
@@ -86,10 +88,12 @@ impl PreparedToolRequirement {
     pub fn receipt(&self) -> serde_json::Value {
         use crate::{ClosureOutcome, IncompleteReason};
         let name = |path: &Path| {
-            path.file_name()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .into_owned()
+            path.file_name().map_or_else(String::new, |name| {
+                name.to_str()
+                    .filter(|name| !name.chars().any(char::is_control))
+                    .unwrap_or("<unrepresentable>")
+                    .to_owned()
+            })
         };
         let outcome = match self.dependency_closure.outcome {
             ClosureOutcome::Complete => "complete",
@@ -111,6 +115,9 @@ impl PreparedToolRequirement {
                 }
                 IncompleteReason::OmittedProtected(path) => {
                     ("protected_root", Some(path.as_path()))
+                }
+                IncompleteReason::OmittedUnrepresentable(path) => {
+                    ("unrepresentable_path", Some(path.as_path()))
                 }
             };
             if !reasons.contains(&kind) {
@@ -145,7 +152,7 @@ impl OmittedGrant {
     }
 }
 
-/// Remove optional discoveries that resolve into credential roots, retaining evidence.
+/// Omit optional discoveries that cannot safely be represented or reach credentials.
 pub(crate) fn filter_optional_grants(
     grants: &mut Vec<PathGrant>,
     start: usize,
@@ -155,19 +162,28 @@ pub(crate) fn filter_optional_grants(
 ) {
     let mut index = start;
     while index < grants.len() {
-        let target = std::fs::canonicalize(&grants[index].path).ok();
-        if let Some(target) =
-            target.filter(|path| provenant_confinement::refuses_lane_root(path, true, Some(home)))
-        {
+        let candidate = &grants[index].path;
+        let target = std::fs::canonicalize(candidate).ok();
+        let omitted_path = target
+            .as_ref()
+            .filter(|path| provenant_confinement::refuses_lane_root(path, true, Some(home)))
+            .or_else(|| {
+                (!provenant_confinement::permissions::profile_path_representable(candidate))
+                    .then_some(candidate)
+            })
+            .or_else(|| {
+                target.as_ref().filter(|path| {
+                    !provenant_confinement::permissions::profile_path_representable(path)
+                })
+            })
+            .cloned();
+        if let Some(path) = omitted_path {
             grants.remove(index);
             if !omitted
                 .iter()
-                .any(|entry| entry.path == target && entry.source == source)
+                .any(|entry| entry.path == path && entry.source == source)
             {
-                omitted.push(OmittedGrant {
-                    path: target,
-                    source,
-                });
+                omitted.push(OmittedGrant { path, source });
             }
         } else {
             index += 1;
@@ -188,7 +204,7 @@ pub struct LaunchSpec {
     pub secret_input: Option<provenant_os::exec::SecretInput>,
     pub cwd: PathBuf,
     pub setup: Vec<SetupStep>,
-    /// Discovered optional grants omitted by the credential guard.
+    /// Discovered optional grants omitted during preparation.
     pub omitted_discovery: Vec<OmittedGrant>,
     /// Exact staged skill content and warnings used by this launch.
     pub user_skills: crate::StagedUserSkills,
@@ -215,6 +231,12 @@ impl AppliedAccess {
         use sha2::{Digest, Sha256};
         use std::os::unix::ffi::OsStrExt;
         let display = |path: &Path| {
+            if path
+                .to_str()
+                .is_none_or(|text| text.chars().any(char::is_control))
+            {
+                return "<unrepresentable path>".into();
+            }
             path.strip_prefix(home)
                 .map(|path| format!("~/{}", path.display()))
                 .unwrap_or_else(|_| {
@@ -242,10 +264,10 @@ impl AppliedAccess {
             "toolchain_roots": self.toolchain_roots.iter().map(grant).collect::<Vec<_>>(),
             "omitted_grants": self.omitted_grants.iter().map(|entry| serde_json::json!({
                 "code": "discovered_grant_omitted",
-                "reason": if provenant_confinement::refuses_lane_root(&entry.path, true, Some(home)) { "credential_root" } else { "protected_root" },
+                "reason": if entry.source == OmissionSource::ProviderPackage { "shared_package_prefix" } else if provenant_confinement::refuses_lane_root(&entry.path, true, Some(home)) { "credential_root" } else if !provenant_confinement::permissions::profile_path_representable(&entry.path) { "unrepresentable_path" } else { "protected_root" },
                 "path": display(&entry.path),
                 "path_id": path_id(&entry.path),
-                "source": match entry.source { OmissionSource::UserSkill => "user_skill", OmissionSource::Toolchain => "toolchain", OmissionSource::ProviderConfig => "provider_config" },
+                "source": match entry.source { OmissionSource::UserSkill => "user_skill", OmissionSource::Toolchain => "toolchain", OmissionSource::ProviderConfig => "provider_config", OmissionSource::ProviderPackage => "provider_package" },
             })).collect::<Vec<_>>(),
         })
     }
@@ -433,6 +455,26 @@ pub(crate) fn admit(
     Ok((access, session))
 }
 
+/// Preserve native tool paths and omit an optional entry that PATH cannot encode.
+pub(crate) fn tool_search_path(home: &Path, include_cargo: bool) -> OsString {
+    let cargo = home.join(".cargo/bin");
+    let mut path = OsString::new();
+    if include_cargo {
+        if std::env::join_paths([&cargo]).is_ok() {
+            path.push(cargo);
+            path.push(":");
+        } else {
+            use std::io::Write;
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "warning: cannot include the Cargo bin directory in PATH; continuing without it"
+            );
+        }
+    }
+    path.push("/usr/bin:/bin");
+    path
+}
+
 /// Minimal environment: the user's identity, a fixed search path and TMPDIR
 /// under the attempt's private tmp directory. zsh ignores TMPDIR for the
 /// temporary files behind here-documents and here-strings and defaults
@@ -443,12 +485,12 @@ pub(crate) fn admit(
 pub(crate) fn base_env(
     input: &PrepareInput<'_>,
     scratch: &Path,
-    path: &str,
+    path: impl AsRef<std::ffi::OsStr>,
 ) -> Vec<(OsString, OsString)> {
     let mut env = vec![
         ("HOME".into(), input.home.into()),
         ("USER".into(), input.user.into()),
-        ("PATH".into(), path.into()),
+        ("PATH".into(), path.as_ref().to_owned()),
         ("TMPDIR".into(), scratch.into()),
         ("TMPPREFIX".into(), scratch.join("zsh").into()),
         ("LANG".into(), "en_US.UTF-8".into()),
@@ -485,10 +527,16 @@ pub(crate) fn private_git_objects(
             target: git.to_owned(),
         });
         if let Some((_, path)) = spec.env.iter_mut().find(|(key, _)| key == "PATH") {
-            let mut value = bin.into_os_string();
-            value.push(":");
-            value.push(&*path);
-            *path = value;
+            match std::env::join_paths(std::iter::once(bin).chain(std::env::split_paths(&*path))) {
+                Ok(value) => *path = value,
+                Err(_) => {
+                    use std::io::Write;
+                    let _ = writeln!(
+                        std::io::stderr().lock(),
+                        "warning: the read-only Git launcher cannot be included in PATH; continuing without it"
+                    );
+                }
+            }
         }
         spec.profile.spec.process_executables.push(exact(git));
         return Ok(());
@@ -592,6 +640,34 @@ impl LaunchSpec {
                             });
                         }
                     }
+                    _ if !provenant_confinement::permissions::profile_path_representable(
+                        &candidate.path,
+                    ) =>
+                    {
+                        if !spec.omitted_discovery.iter().any(|entry| {
+                            entry.path == candidate.path
+                                && entry.source == OmissionSource::Toolchain
+                        }) {
+                            spec.omitted_discovery.push(OmittedGrant {
+                                path: candidate.path.clone(),
+                                source: OmissionSource::Toolchain,
+                            });
+                        }
+                    }
+                    Ok(path)
+                        if !provenant_confinement::permissions::profile_path_representable(
+                            &path,
+                        ) =>
+                    {
+                        if !spec.omitted_discovery.iter().any(|entry| {
+                            entry.path == path && entry.source == OmissionSource::Toolchain
+                        }) {
+                            spec.omitted_discovery.push(OmittedGrant {
+                                path,
+                                source: OmissionSource::Toolchain,
+                            });
+                        }
+                    }
                     _ => writes.push(candidate.clone()),
                 }
             }
@@ -664,6 +740,8 @@ impl LaunchSpec {
                     })
                 {
                     LibraryAccess::AlreadyCovered
+                } else if !provenant_confinement::permissions::profile_path_representable(path) {
+                    LibraryAccess::OmitUnrepresentable
                 } else {
                     LibraryAccess::Grant
                 }
@@ -1139,8 +1217,8 @@ pub(crate) fn homebrew_tools(
 /// (`~/.cargo/bin`, `~/.local/bin`) grants only that `bin/`, never the tree
 /// (`credentials.toml`, `share/`). A shared prefix (`/opt/homebrew`, `/usr/local`,
 /// `/usr`) is refused: its `var/` must never become readable.
-pub(crate) fn package_root(executable: &Path) -> Result<&Path, ProviderError> {
-    let package = match executable.parent() {
+fn package_candidate(executable: &Path) -> Option<&Path> {
+    match executable.parent() {
         Some(bin) if bin.file_name() == Some("bin".as_ref()) => {
             let tree = bin.parent();
             let hidden = tree
@@ -1150,7 +1228,10 @@ pub(crate) fn package_root(executable: &Path) -> Result<&Path, ProviderError> {
         }
         parent => parent,
     }
-    .ok_or(ProviderError::InvalidPath)?;
+}
+
+pub(crate) fn package_root(executable: &Path) -> Result<&Path, ProviderError> {
+    let package = package_candidate(executable).ok_or(ProviderError::InvalidPath)?;
     let shared = [
         "/",
         "/opt",
@@ -1164,6 +1245,23 @@ pub(crate) fn package_root(executable: &Path) -> Result<&Path, ProviderError> {
         return Err(ProviderError::InvalidPath);
     }
     Ok(package)
+}
+
+/// Keep shared installation prefixes out of the profile without refusing launch.
+/// The executable remains readable and executable; the omitted prefix is reported.
+pub(crate) fn package_grant(executable: &Path, omitted: &mut Vec<OmittedGrant>) -> PathGrant {
+    match package_root(executable) {
+        Ok(root) => subtree(root),
+        Err(_) => {
+            omitted.push(OmittedGrant {
+                path: package_candidate(executable)
+                    .unwrap_or(executable)
+                    .to_owned(),
+                source: OmissionSource::ProviderPackage,
+            });
+            exact(executable)
+        }
+    }
 }
 
 pub(crate) fn exact(path: impl Into<PathBuf>) -> PathGrant {

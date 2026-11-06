@@ -2601,6 +2601,13 @@ mod tests {
 
     #[test]
     fn account_mismatch_names_the_repair_and_sign_out_keeps_login_text() {
+        let entry: provenant_providers::accounts::Registration = serde_json::from_value(
+            serde_json::json!({"adapter":"agy","label":"work","key":"key","directory":"/tmp/account"}),
+        )
+        .unwrap();
+        let repair = login_repair(Some(&entry));
+        assert!(repair.contains("HOME='/tmp/account' agy"), "{repair}");
+        assert!(repair.contains("/login"), "{repair}");
         let human = |error| {
             let report = QuotaReport {
                 schema_version: 1,
@@ -2622,7 +2629,7 @@ mod tests {
                     next_due_unix_seconds: None,
                     refreshing: false,
                     error: Some(error),
-                    repair: None,
+                    repair: Some(repair.clone()),
                     capacity_cooldowns: vec![],
                     display: None,
                 }],
@@ -2640,9 +2647,11 @@ mod tests {
         assert!(mismatch.contains("account_mismatch"), "{mismatch}");
         assert!(mismatch.contains("differs"), "{mismatch}");
         assert!(!mismatch.contains("needs login"), "{mismatch}");
+        assert!(mismatch.contains(&repair), "{mismatch}");
         let signed_out = human(ProbeFailure::Auth);
         assert!(signed_out.contains("needs login"), "{signed_out}");
         assert!(!signed_out.contains("differs"), "{signed_out}");
+        assert!(signed_out.contains(&repair), "{signed_out}");
     }
 
     #[test]

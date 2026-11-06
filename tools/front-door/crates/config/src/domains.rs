@@ -33,6 +33,14 @@ pub fn read_domain<T: DeserializeOwned + Default>(state: &Path, name: &str) -> s
     crate::loader::read_boundary_settings(state, &format!("domains.{name}"))
 }
 
+/// Read a domain and the explicitly supplied top-level keys from one snapshot.
+pub fn read_domain_with_keys<T: DeserializeOwned + Default>(
+    state: &Path,
+    name: &str,
+) -> std::io::Result<(T, std::collections::BTreeSet<String>)> {
+    crate::loader::read_boundary_settings_with_keys(state, &format!("domains.{name}"))
+}
+
 /// Editor metadata for one field the owning domain accepts. Paths are
 /// section-local; a `{name}` segment stands for one keyed map entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -146,3 +154,30 @@ impl<T> DomainSections<T> {
     }
 }
 pub(crate) const NO_DOMAINS: DomainSections<NoDomains> = DomainSections::new(&[]);
+
+#[cfg(test)]
+mod source_keys_tests {
+    use super::*;
+
+    #[derive(Default, Deserialize)]
+    #[serde(default, deny_unknown_fields)]
+    struct Settings {
+        limit: usize,
+    }
+
+    #[test]
+    fn domain_keys_distinguish_compiled_and_explicit_equal_values() -> std::io::Result<()> {
+        let state = tempfile::tempdir()?;
+        let (defaults, keys): (Settings, _) = read_domain_with_keys(state.path(), "sample")?;
+        assert_eq!(defaults.limit, 0);
+        assert!(keys.is_empty());
+        std::fs::write(
+            state.path().join("config.toml"),
+            "schema_version=1\n[domains.sample]\nlimit=0\n",
+        )?;
+        let (configured, keys): (Settings, _) = read_domain_with_keys(state.path(), "sample")?;
+        assert_eq!(configured.limit, 0);
+        assert!(keys.contains("limit"));
+        Ok(())
+    }
+}

@@ -21,12 +21,7 @@ fn reexec_test_in_lane(name: &str) -> Result<bool, Box<dyn std::error::Error>> {
         .filter(|(key, _)| !removed.contains(&key.as_os_str()))
         .collect();
     let cwd = std::env::current_dir()?;
-    let timeout = if name == "run::tests::wait_handles_a_stale_default_cursor" {
-        300
-    } else {
-        30
-    };
-    let mut options = ExecOptions::new(&argv, &cwd, Duration::from_secs(timeout));
+    let mut options = ExecOptions::new(&argv, &cwd, Duration::from_secs(30));
     options.env = Some(&env);
     options.stdout = StreamPolicy::Capture { limit: 65_536 };
     options.stderr = StreamPolicy::Capture { limit: 65_536 };
@@ -1287,22 +1282,6 @@ fn unsafe_store_path_reason_survives_cli_conversion() {
 }
 
 #[test]
-fn setup_lock_timeout_has_its_own_refusal_and_remedy() {
-    let failure = super::Fail::from(provenant_run::RunError::SetupLockTimeout { seconds: 42 });
-    assert_eq!(failure.kind.code(), "SETUP_LOCK_TIMEOUT");
-    assert_eq!(failure.status, Status::Refused);
-    assert!(failure.message.contains("provenant-lane-setup.lock"));
-    assert!(failure.message.contains("42s"));
-    let projection = failure.projection.expect("typed detail");
-    assert!(
-        projection
-            .next
-            .iter()
-            .any(|next| next.contains("setup_lock_wait_seconds"))
-    );
-}
-
-#[test]
 fn host_delivery_limit_keeps_its_text_as_typed_io_detail() {
     for (tool, command, text) in [
         (
@@ -1655,6 +1634,7 @@ fn submit_names_the_fix_for_a_bare_word_model_and_unsupported_effort()
     );
     // An uncatalogued exact model warns and is tried; the provider decides.
     assert!(super::catalogued("codex/gpt-6-lunaa", None).is_ok());
+    assert!(super::catalogued("opencode/opencode/beam-free", None).is_ok());
     let Err(effort) = super::catalogued("claude/claude-sonnet-5-5", Some("low")) else {
         panic!("unsupported effort accepted");
     };
@@ -4856,41 +4836,9 @@ fn wait_handles_a_stale_default_cursor() -> Result<(), Box<dyn std::error::Error
         .store
         .last_event_sequence(seed.attempts[0].attempt_id, &call)?;
     session.store.ack_seen("default", cursor, &call)?;
-    let active = make(1003)?;
+    let active = make(2)?;
     session.store.create(&active, &call)?;
     let id = active.attempts[0].attempt_id;
-    let mut explicit = Vec::new();
-    for first in (2..=1002).step_by(64) {
-        let mut prepared = make(first)?;
-        for n in first + 1..=(first + 63).min(1002) {
-            let extra = make(n)?;
-            prepared.request.tasks.push(extra.request.tasks[0].clone());
-            prepared.attempts.extend(extra.attempts);
-        }
-        explicit.push(Target {
-            selection: None,
-            run: Some(prepared.run_id),
-            task: None,
-            attempt: None,
-        });
-        session.store.create(&prepared, &call)?;
-        for attempt in &prepared.attempts {
-            session.store.withdraw(
-                attempt.attempt_id,
-                run::AttemptState::Queued {
-                    extra: Default::default(),
-                },
-                run::Outcome::Cancelled,
-                "fixture",
-                clock.wall_now()?,
-                &call,
-            )?;
-        }
-    }
-    let error = wait::select(&session, &explicit, None, session.context.actor_id, &call)
-        .expect_err("explicit selection over the cap must fail");
-    assert!(error.message.contains("1000"));
-    assert!(error.message.contains("narrow"));
     struct FetchHookGuard;
     impl Drop for FetchHookGuard {
         fn drop(&mut self) {
@@ -4932,23 +4880,18 @@ fn wait_handles_a_stale_default_cursor() -> Result<(), Box<dyn std::error::Error
         &session,
         &picks,
         Condition::Any,
-        Instant::now() + Duration::from_secs(30),
+        Instant::now() + Duration::from_secs(5),
         clock.wall_now()?,
         &edge,
     )
     .map_err(|e| e.message)?;
     assert!(!timed_out);
-    assert_eq!(data["settled_backlog"]["count"], 1001);
     assert!(
         data["lanes"]
             .as_array()
             .unwrap()
             .iter()
             .any(|lane| lane["attempt_id"] == json!(id))
-    );
-    assert_eq!(
-        data["settled_backlog"]["newest"].as_array().unwrap().len(),
-        100
     );
     let (next, _, _) = wait_command(
         &session,

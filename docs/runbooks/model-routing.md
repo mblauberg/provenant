@@ -112,9 +112,9 @@ mode; an unsupported explicit route is refused. Launch preparation checks the
 selected adapter again. There is no classifier or route-synonym inference. Effort is set only when the
 catalogue contains an exact recorded control; unsupported effort is refused.
 `route resolve MODEL` reports the recorded supported efforts, including when a
-model takes none. Uncatalogued exact IDs remain available as unverified models;
-resolution and dispatch suggest nearby catalogue IDs, and an explicit effort
-is refused because no controls are recorded for the unlisted ID.
+model takes none. Uncatalogued exact IDs, including OpenCode IDs, warn and are
+tried as unverified models; resolution and dispatch suggest nearby catalogue IDs,
+and an explicit effort is refused because no controls are recorded for the unlisted ID.
 
 The bundled Rust catalogue (`tools/front-door/crates/routing/assets/catalogue.toml`)
 owns default pool membership, weights, pacing and effort controls. Override a

@@ -53,22 +53,17 @@ impl crate::LaunchSpec {
         )
     }
     /// Restore selected environment before the provider starts a shell command.
-    pub fn configure_shell(
-        &mut self,
-        scratch: &Path,
-        adapter: &provenant_records::AdapterSpec,
-    ) -> Result<(), ProviderError> {
+    pub fn configure_shell(&mut self, scratch: &Path, adapter: &provenant_records::AdapterSpec) {
         let Some((relative, selector)) = adapter.shell_prefix else {
-            return Ok(());
+            return;
         };
         let path = scratch.join(relative);
         self.setup.push(SetupStep::CreateDir(scratch.join("bin")));
         self.setup.push(SetupStep::WriteExecutable {
             path: path.clone(),
-            bytes: claude_shell(&self.env)?,
+            bytes: claude_shell(&self.env),
         });
         self.env.push((selector.into(), path.into_os_string()));
-        Ok(())
     }
     /// Put a `cargo` shim first on the lane's PATH. Cargo commands that compile
     /// take one host build slot (`slots` across every project on this state
@@ -106,6 +101,20 @@ impl crate::LaunchSpec {
             text(gate.provenant)?,
             text(gate.cargo)?,
         );
+        // Validate the environment before mutating setup or grants. The caller
+        // can then omit this optional shim if its paths cannot be represented.
+        let path_index = self
+            .env
+            .iter()
+            .position(|(key, _)| key == "PATH")
+            .ok_or(ProviderError::InvalidPath)?;
+        let path = &self.env[path_index].1;
+        let next_path = if std::env::split_paths(path).next().as_deref() == Some(bin.as_path()) {
+            path.clone()
+        } else {
+            std::env::join_paths(std::iter::once(bin.clone()).chain(std::env::split_paths(path)))
+                .map_err(|_| ProviderError::InvalidPath)?
+        };
         let slots = gate
             .state
             .join(provenant_os::build_slots::DIRECTORY.join("/"));
@@ -117,17 +126,7 @@ impl crate::LaunchSpec {
             path: bin.join("cargo"),
             bytes: script.into_bytes(),
         });
-        let (_, path) = self
-            .env
-            .iter_mut()
-            .find(|(key, _)| key == "PATH")
-            .ok_or(ProviderError::InvalidPath)?;
-        if std::env::split_paths(path).next().as_deref() != Some(bin.as_path()) {
-            *path = std::env::join_paths(
-                std::iter::once(bin.clone()).chain(std::env::split_paths(path)),
-            )
-            .map_err(|_| ProviderError::InvalidPath)?;
-        }
+        self.env[path_index].1 = next_path;
         let profile = &mut self.profile.spec;
         // Read only: no write grant covers the slot directory.
         profile.runtime_reads.push(subtree(slots));
@@ -211,8 +210,9 @@ impl crate::LaunchSpec {
 }
 
 fn git_wrapper(git: &Path, options: &GitWrapper) -> Result<Vec<u8>, ProviderError> {
-    let git = git.to_str().ok_or(ProviderError::InvalidPath)?;
-    if git.chars().any(char::is_control) {
+    use std::os::unix::ffi::OsStrExt;
+    let git = git.as_os_str().as_bytes();
+    if git.contains(&0) {
         return Err(ProviderError::InvalidPath);
     }
     let mut bytes = b"#!/bin/sh\n".to_vec();
@@ -222,13 +222,21 @@ fn git_wrapper(git: &Path, options: &GitWrapper) -> Result<Vec<u8>, ProviderErro
             bytes.extend_from_slice(bound_exports(bound)?.as_bytes());
         }
     }
-    let executable = shell_quote(git);
+    bytes.extend_from_slice(b"exec '");
+    for byte in git {
+        if *byte == b'\'' {
+            bytes.extend_from_slice(b"'\\''");
+        } else {
+            bytes.push(*byte);
+        }
+    }
+    bytes.push(b'\'');
     let include = options
         .include
         .as_deref()
         .map(|value| format!(" -c {value}"))
         .unwrap_or_default();
-    bytes.extend_from_slice(format!("exec {executable}{include} \"$@\"\n").as_bytes());
+    bytes.extend_from_slice(format!("{include} \"$@\"\n").as_bytes());
     Ok(bytes)
 }
 
@@ -237,7 +245,7 @@ fn git_wrapper(git: &Path, options: &GitWrapper) -> Result<Vec<u8>, ProviderErro
 fn install_git(
     bin: &Path,
     git: &Path,
-    env: &mut [(OsString, OsString)],
+    env: &mut Vec<(OsString, OsString)>,
     setup: &mut Vec<SetupStep>,
     options: &GitWrapper,
     wrapper: bool,
@@ -259,15 +267,33 @@ fn install_git(
         setup.push(SetupStep::CreateDir(bin.to_owned()));
     }
     setup.push(step);
-    let (_, search_path) = env
-        .iter_mut()
-        .find(|(key, _)| key == "PATH")
-        .ok_or(ProviderError::InvalidPath)?;
-    if std::env::split_paths(search_path).next().as_deref() != Some(bin) {
-        *search_path = std::env::join_paths(
-            std::iter::once(bin.to_owned()).chain(std::env::split_paths(search_path)),
-        )
-        .map_err(|_| ProviderError::InvalidPath)?;
+    let index = match env.iter().position(|(key, _)| key == "PATH") {
+        Some(index) => index,
+        None => {
+            use std::io::Write;
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "warning: lane PATH is missing; using system defaults"
+            );
+            env.push(("PATH".into(), "/usr/bin:/bin".into()));
+            env.len() - 1
+        }
+    };
+    let search_path = &mut env[index].1;
+    if std::env::split_paths(&*search_path).next().as_deref() != Some(bin) {
+        match std::env::join_paths(
+            std::iter::once(bin.to_owned()).chain(std::env::split_paths(&*search_path)),
+        ) {
+            Ok(value) => *search_path = value,
+            Err(_) if options.bound.is_none() && options.include.is_none() => {
+                use std::io::Write;
+                let _ = writeln!(
+                    std::io::stderr().lock(),
+                    "warning: the Git launcher cannot be included in PATH; continuing without it"
+                );
+            }
+            Err(_) => return Err(ProviderError::InvalidPath),
+        }
     }
     Ok(())
 }
@@ -359,7 +385,7 @@ impl LaneRuntime<'_> {
             self.home,
         ]
         .iter()
-        .all(|p| p.is_absolute())
+        .all(|p| p.is_absolute() && p.to_str().is_some())
         {
             return Err(ProviderError::InvalidPath);
         }
@@ -384,7 +410,17 @@ impl LaneRuntime<'_> {
         allowed_tools: &str,
         image_rules: &[String],
     ) -> Result<Vec<SetupStep>, ProviderError> {
-        let mcp = serde_json::json!({"mcpServers": {"fabric": self.mcp(Harness::Claude)?}});
+        let mcp = match self.mcp(Harness::Claude) {
+            Ok(entry) => serde_json::json!({"mcpServers": {"fabric": entry}}),
+            Err(error) => {
+                use std::io::Write;
+                let _ = writeln!(
+                    std::io::stderr().lock(),
+                    "warning: Fabric MCP configuration is unavailable ({error}); continuing without Fabric MCP"
+                );
+                serde_json::json!({"mcpServers": {}})
+            }
+        };
         let mut settings = provenant_config::claude_lane_settings(self.executable, self.state)
             .map_err(|_| ProviderError::UnsupportedPolicy)?;
         settings["attribution"] = serde_json::json!({"commit": "", "pr": ""});
@@ -412,7 +448,17 @@ impl LaneRuntime<'_> {
     }
 
     pub(crate) fn codex(&self, argv: &mut Vec<OsString>) -> Result<(), ProviderError> {
-        let mcp = self.mcp(Harness::Codex)?;
+        let mcp = match self.mcp(Harness::Codex) {
+            Ok(entry) => entry,
+            Err(error) => {
+                use std::io::Write;
+                let _ = writeln!(
+                    std::io::stderr().lock(),
+                    "warning: Fabric MCP configuration is unavailable ({error}); continuing without Fabric MCP"
+                );
+                return Ok(());
+            }
+        };
         for key in ["command", "args", "env"] {
             // JSON values are TOML-compatible except object separators.
             let value = if key == "env" {
@@ -519,19 +565,28 @@ impl LaneRuntime<'_> {
     }
 }
 
-fn claude_shell(env: &[(OsString, OsString)]) -> Result<Vec<u8>, ProviderError> {
-    let mut exports = String::new();
+fn claude_shell(env: &[(OsString, OsString)]) -> Vec<u8> {
+    use std::os::unix::ffi::OsStrExt;
+    let mut script = b"#!/bin/sh\n".to_vec();
     for name in [
         "CARGO_BUILD_JOBS",
         "CARGO_INCREMENTAL",
         "CARGO_PROFILE_DEV_DEBUG",
     ] {
         if let Some((_, value)) = env.iter().find(|(key, _)| key == name) {
-            let value = value.to_str().ok_or(ProviderError::InvalidPath)?;
-            exports.push_str(&format!("export {name}={}\n", shell_quote(value)));
+            script.extend_from_slice(format!("export {name}='").as_bytes());
+            for byte in value.as_os_str().as_bytes() {
+                if *byte == b'\'' {
+                    script.extend_from_slice(b"'\\''");
+                } else {
+                    script.push(*byte);
+                }
+            }
+            script.extend_from_slice(b"'\n");
         }
     }
-    Ok(format!("#!/bin/sh\n{exports}exec /bin/bash -c \"$1\"\n").into_bytes())
+    script.extend_from_slice(b"exec /bin/bash -c \"$1\"\n");
+    script
 }
 
 /// Shell that applies the private binding only when Git acts on the lane
@@ -617,6 +672,79 @@ const UNBOUND: [&str; 9] = [
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unencodable_git_path_warns_but_bound_writer_still_refuses() {
+        let bin = Path::new("/fixture/scratch:other/bin");
+        for scrub in [false, true] {
+            let mut env = vec![("PATH".into(), "/usr/bin:/bin".into())];
+            let mut setup = Vec::new();
+            let options = GitWrapper {
+                scrub,
+                ..Default::default()
+            };
+            install_git(
+                bin,
+                Path::new("/fixture/git"),
+                &mut env,
+                &mut setup,
+                &options,
+                scrub,
+            )
+            .unwrap();
+            assert_eq!(env[0].1, "/usr/bin:/bin");
+        }
+        let mut env = vec![("PATH".into(), "/usr/bin:/bin".into())];
+        let mut setup = Vec::new();
+        let options = GitWrapper {
+            scrub: true,
+            bound: Some(BoundGit {
+                worktree: "/fixture/repo".into(),
+                env: vec![],
+            }),
+            ..Default::default()
+        };
+        assert!(matches!(
+            install_git(
+                bin,
+                Path::new("/fixture/git"),
+                &mut env,
+                &mut setup,
+                &options,
+                true
+            ),
+            Err(ProviderError::InvalidPath)
+        ));
+    }
+
+    #[test]
+    fn missing_search_path_uses_git_wrapper_and_system_defaults() {
+        let mut env = Vec::new();
+        let mut setup = Vec::new();
+        let bin = Path::new("/fixture/scratch/bin");
+        install_git(
+            bin,
+            Path::new("/fixture/git"),
+            &mut env,
+            &mut setup,
+            &GitWrapper::default(),
+            false,
+        )
+        .unwrap();
+        let path = env.iter().find(|(key, _)| key == "PATH").unwrap();
+        assert_eq!(
+            std::env::split_paths(&path.1).collect::<Vec<_>>(),
+            vec![
+                bin.to_owned(),
+                Path::new("/usr/bin").to_owned(),
+                Path::new("/bin").to_owned()
+            ]
+        );
+        assert!(setup.contains(&SetupStep::Symlink {
+            link: bin.join("git"),
+            target: "/fixture/git".into()
+        }));
+    }
 
     #[allow(clippy::disallowed_methods)] // Exercise real subprocess environment clearing.
     fn adapter_private_git(adapter: &str) -> Result<(), Box<dyn std::error::Error>> {
@@ -1308,6 +1436,35 @@ mod tests {
     }
 
     #[test]
+    fn rejected_build_slot_shim_leaves_launch_unchanged() {
+        let gate = BuildSlotGate {
+            provenant: Path::new("/runtime"),
+            state: Path::new("/state"),
+            slots: 1,
+            wait_seconds: 60,
+            cargo: Path::new("/cargo"),
+            wait_marker: Path::new("/scratch/wait"),
+        };
+        for missing_path in [true, false] {
+            let mut spec = bare_spec("/usr/bin");
+            if missing_path {
+                spec.env.retain(|(key, _)| key != "PATH");
+            }
+            let env = spec.env.clone();
+            let profile = spec.profile.spec.clone();
+            let scratch = if missing_path {
+                Path::new("/scratch")
+            } else {
+                Path::new("/scratch:invalid")
+            };
+            assert!(spec.configure_build_slots(scratch, &gate).is_err());
+            assert_eq!(spec.env, env);
+            assert_eq!(spec.profile.spec, profile);
+            assert!(spec.setup.is_empty());
+        }
+    }
+
+    #[test]
     #[allow(clippy::disallowed_methods)]
     fn claude_shell_restores_jobs_after_scrub() {
         use std::os::unix::fs::PermissionsExt;
@@ -1319,8 +1476,7 @@ mod tests {
                 ("CARGO_BUILD_JOBS".into(), "4".into()),
                 ("CARGO_INCREMENTAL".into(), "0".into()),
                 ("CARGO_PROFILE_DEV_DEBUG".into(), "line-tables-only".into()),
-            ])
-            .unwrap(),
+            ]),
         )
         .unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -1331,6 +1487,28 @@ mod tests {
             .unwrap();
         assert!(result.status.success());
         assert_eq!(result.stdout, b"4\n0\nline-tables-only\nquoted argument\n");
+    }
+
+    #[test]
+    #[allow(clippy::disallowed_methods)]
+    fn claude_shell_preserves_non_utf8_and_quotes() -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::ffi::OsStringExt;
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir()?;
+        let script = dir.path().join("prefix");
+        let value = vec![b'a', 0xff, b'\'', b'$', b'\n', b'z'];
+        std::fs::write(
+            &script,
+            claude_shell(&[("CARGO_BUILD_JOBS".into(), OsString::from_vec(value.clone()))]),
+        )?;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))?;
+        let output = std::process::Command::new(script)
+            .env_clear()
+            .arg("printf %s \"$CARGO_BUILD_JOBS\"")
+            .output()?;
+        assert!(output.status.success());
+        assert_eq!(output.stdout, value);
+        Ok(())
     }
 
     #[test]
@@ -1465,6 +1643,68 @@ mod tests {
         let link = outside.join("link");
         std::os::unix::fs::symlink(&worktree, &link).unwrap();
         assert_eq!(run(&link, &["status"]), bound("status"));
+    }
+
+    #[test]
+    #[allow(clippy::disallowed_methods)]
+    fn git_wrapper_preserves_native_executable_path() -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::{
+            ffi::{OsStrExt, OsStringExt},
+            fs::PermissionsExt,
+        };
+        let dir = tempfile::tempdir()?;
+        let git = PathBuf::from(OsString::from_vec(b"/fixture/git-\xff-'\n".to_vec()));
+        let mut script = git_wrapper(
+            &git,
+            &GitWrapper {
+                scrub: true,
+                ..Default::default()
+            },
+        )?;
+        let position = script
+            .windows(5)
+            .position(|bytes| bytes == b"exec ")
+            .ok_or("missing exec")?;
+        script.splice(position..position + 5, b"printf '%s' ".iter().copied());
+        let wrapper = dir.path().join("git-wrapper");
+        std::fs::write(&wrapper, script)?;
+        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700))?;
+        let output = std::process::Command::new(wrapper).output()?;
+        assert!(output.status.success());
+        assert_eq!(output.stdout, git.as_os_str().as_bytes());
+        Ok(())
+    }
+
+    #[test]
+    fn unrepresentable_mcp_paths_warn_and_preserve_claude_settings() -> Result<(), ProviderError> {
+        use std::os::unix::ffi::OsStringExt;
+        let bad = PathBuf::from(OsString::from_vec(b"/fixture/\xff".to_vec()));
+        let lane = LaneRuntime {
+            executable: Path::new("/fixture/provenant"),
+            git: Path::new("/fixture/git"),
+            state: Path::new("/fixture/state"),
+            child_state: &bad,
+            home: Path::new("/fixture/home"),
+            depth: 1,
+            attempt: AttemptId::from_bytes([1; 16]),
+            assets: Path::new("/fixture/assets"),
+        };
+        let mut codex = Vec::new();
+        lane.codex(&mut codex)?;
+        assert!(codex.is_empty());
+        let mut claude = Vec::new();
+        let setup = lane.claude(Path::new("/fixture/scratch"), &mut claude, "Bash", &[])?;
+        let documents: Vec<Value> = setup
+            .iter()
+            .filter_map(|step| match step {
+                SetupStep::WriteFile { bytes, .. } => serde_json::from_slice(bytes).ok(),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(documents[0]["mcpServers"], serde_json::json!({}));
+        assert!(documents[1]["hooks"].is_object());
+        assert!(claude.iter().any(|arg| arg == "--setting-sources"));
+        Ok(())
     }
 
     #[test]

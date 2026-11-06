@@ -240,7 +240,7 @@ pub(super) fn prepare_command(
         &scratch,
         &runtime,
         roots.state.as_path(),
-    )?;
+    );
     set_cargo_profile(&mut spec.env, &settings);
     set_cargo_jobs(
         &mut spec.env,
@@ -337,6 +337,7 @@ pub(super) fn configure_process_tree(
     Ok(())
 }
 
+#[allow(clippy::print_stderr)]
 pub(super) fn configure_build_slots(
     spec: &mut provenant_providers::LaunchSpec,
     settings: &provenant_config::LaneBuildSettings,
@@ -344,7 +345,7 @@ pub(super) fn configure_build_slots(
     scratch: &Path,
     runtime: &Path,
     state: &Path,
-) -> Result<(), String> {
+) {
     // Builds, not lanes, share the host's build slots: a `cargo` shim takes
     // one around each compiling command. The host (this process, outside
     // the sandbox) creates the slot files; the lane may only read and lock
@@ -354,8 +355,8 @@ pub(super) fn configure_build_slots(
         let total = provenant_os::sys::resources::memory().map_or(0, |memory| memory.total_bytes);
         let slots = settings.build_limit(total);
         match provenant_os::build_slots::BuildSlots::provision(state, slots) {
-            Ok(()) => spec
-                .configure_build_slots(
+            Ok(()) => {
+                if let Err(error) = spec.configure_build_slots(
                     scratch,
                     &provenant_providers::BuildSlotGate {
                         provenant: runtime,
@@ -367,17 +368,19 @@ pub(super) fn configure_build_slots(
                         // the host finds it; each waiting build adds its pid.
                         wait_marker: &scratch.join(provenant_os::build_slots::WAIT_MARKER),
                     },
-                )
-                .map_err(|error| error.to_string())?,
+                ) {
+                    eprintln!(
+                        "provenant: build slot shim unavailable for this lane, building without it: {error}"
+                    );
+                }
+            }
             // Build slots are fair sharing, not a boundary: without them
             // the lane still runs, ungated.
-            #[allow(clippy::print_stderr)]
             Err(error) => eprintln!(
                 "provenant: build slots unavailable for this lane, building without them: {error}"
             ),
         }
     }
-    Ok(())
 }
 
 pub(super) fn set_cargo_jobs(

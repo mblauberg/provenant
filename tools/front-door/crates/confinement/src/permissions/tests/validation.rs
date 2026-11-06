@@ -217,6 +217,47 @@ fn codex_standalone_package_is_read_exec_only() {
 }
 
 #[test]
+fn profile_family_limits_follow_configured_grant_limit() {
+    use super::super::validation::validate_profile_spec_with_home;
+    let grant = |path: &str, scope| PathGrant {
+        path: path.into(),
+        scope,
+    };
+    let mut spec = ProviderProfileSpec {
+        process_executables: vec![grant("/fixture/provider", PathScope::Exact)],
+        authentication: (0..17)
+            .map(|index| AuthenticationProfile {
+                mechanism: format!("fixture-{index}"),
+                roots: vec![grant(&format!("/fixture/auth/{index}"), PathScope::Exact)],
+                in_place_writes: vec![],
+            })
+            .collect(),
+        native_controls: (0..65).map(|index| format!("fixture-{index}")).collect(),
+        ..ProviderProfileSpec::default()
+    };
+    let error = validate_profile_spec_with_home(&spec, Path::new("/fixture/home"), 64).unwrap_err();
+    assert!(matches!(
+        &error,
+        PermissionError::GrantLimitExceeded {
+            family: "native controls",
+            limit: 64
+        }
+    ));
+    assert!(error.to_string().contains("domains.run.grant_limit"));
+    assert!(validate_profile_spec_with_home(&spec, Path::new("/fixture/home"), 65).is_ok());
+    spec.native_controls.clear();
+    spec.authentication.push(AuthenticationProfile {
+        mechanism: "fixture-extra".into(),
+        roots: vec![grant("/fixture/auth/extra", PathScope::Exact)],
+        in_place_writes: vec![],
+    });
+    assert!(validate_profile_spec_with_home(&spec, Path::new("/fixture/home"), 17).is_err());
+    spec.authentication.truncate(2);
+    spec.native_controls = vec!["first".into(), "second".into()];
+    assert!(validate_profile_spec_with_home(&spec, Path::new("/fixture/home"), 1).is_ok());
+}
+
+#[test]
 fn exact_tool_exec_grants_validate_without_allowing_credential_paths() {
     let mut spec = ProviderProfileSpec {
         process_executables: vec![PathGrant {
@@ -741,4 +782,31 @@ fn credential_writes_stay_inside_auth_roots_and_state_stays_outside() {
         )),
         Err(PermissionError::CredentialRoot)
     ));
+}
+
+#[test]
+fn invalid_native_control_labels_are_omitted() {
+    use super::super::render::filtered_native_controls;
+    let mut spec = ProviderProfileSpec {
+        process_executables: vec![PathGrant {
+            path: "/fixture/provider".into(),
+            scope: PathScope::Exact,
+        }],
+        native_controls: vec!["valid.control".into(), "bad\nlabel".into(), "".into()],
+        ..ProviderProfileSpec::default()
+    };
+    assert!(
+        super::super::validation::validate_profile_spec_with_home(
+            &spec,
+            Path::new("/fixture/home"),
+            64
+        )
+        .is_ok()
+    );
+    assert_eq!(
+        filtered_native_controls(&spec.native_controls),
+        ["valid.control"]
+    );
+    spec.native_controls = filtered_native_controls(&spec.native_controls);
+    assert_eq!(spec.native_controls, ["valid.control"]);
 }

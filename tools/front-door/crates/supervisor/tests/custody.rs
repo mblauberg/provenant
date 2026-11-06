@@ -54,6 +54,49 @@ impl provenant_supervisor::DiskPressure for MarkerDiskPressure {
 }
 
 struct CensusGateObserver;
+
+struct TrackingPublisher(PathBuf);
+impl ExitPublisher for TrackingPublisher {
+    fn tracking(
+        &self,
+        directory: &Directory,
+        bytes: &[u8],
+    ) -> provenant_supervisor::custody::Result<provenant_os::fs::Publication> {
+        if self
+            .0
+            .join("tracking-writer")
+            .join(scope().attempt.to_string())
+            .join("reservation.json")
+            .is_dir()
+        {
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(self.0.join("PROVENANT_STATE_DIR/s2-tracking-failures"))?
+                .write_all(b"x")?;
+        }
+        Ok(directory.atomic_write(
+            OsStr::new("reservation.json"),
+            ".custody-",
+            bytes,
+            provenant_os::fs::PublishMode::Replace,
+        )?)
+    }
+
+    fn publish(
+        &self,
+        directory: &Directory,
+        bytes: &[u8],
+    ) -> provenant_supervisor::custody::Result<provenant_os::fs::Publication> {
+        Ok(directory.atomic_write(
+            OsStr::new("process-exit.json"),
+            ".exit-",
+            bytes,
+            provenant_os::fs::PublishMode::NoReplace,
+        )?)
+    }
+}
+
 impl ProcessObserver for CensusGateObserver {
     fn boot_identity(&self) -> std::result::Result<String, CensusError> {
         fixture::RecordedBootObserver.boot_identity()
@@ -182,21 +225,6 @@ impl ProcessObserver for CensusGateObserver {
         let Some(state_dir) = std::env::var_os("PROVENANT_STATE_DIR").map(PathBuf::from) else {
             return Ok(census);
         };
-        if let Some(root) = state_dir.parent()
-            && root
-                .join("tracking-writer")
-                .join(scope().attempt.to_string())
-                .join("reservation.json")
-                .is_dir()
-        {
-            use std::io::Write;
-            std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(state_dir.join("s2-tracking-failures"))
-                .and_then(|mut file| file.write_all(b"x"))
-                .map_err(CensusError::ProcessList)?;
-        }
         if std::fs::remove_file(state_dir.join("s2-census-skip-gate-once")).is_ok() {
             return Ok(census);
         }
@@ -699,6 +727,22 @@ fn descendant_journal_failure_is_reported(root: &Path) -> Result<()> {
             .join(scope().attempt.to_string())
             .join("reservation.json"),
     )?;
+    let reservation = root
+        .join("tracking-writer")
+        .join(scope().attempt.to_string())
+        .join("reservation.json");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !std::fs::read(&reservation)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        .is_some_and(|value| value["census_incomplete"] == true)
+    {
+        assert!(
+            Instant::now() < deadline,
+            "journal did not recover after the fault was removed"
+        );
+        std::thread::park_timeout(Duration::from_millis(5));
+    }
     drop(held);
     let exit = exited(&handle)?;
     assert_eq!(exit.stop_reason, None);
@@ -2952,6 +2996,14 @@ fn main() -> Result<()> {
             Some(path) => fixture::ExitPublicationFaults::from_state_dir(&PathBuf::from(path))?,
             None => None,
         };
+        let tracking_publisher = std::env::var_os("PROVENANT_STATE_DIR")
+            .map(PathBuf::from)
+            .filter(|state| state.join("s2-tracking-failure").is_file())
+            .and_then(|state| {
+                state
+                    .parent()
+                    .map(|root| TrackingPublisher(root.to_path_buf()))
+            });
         let refusal = match std::fs::read(&refusal_marker) {
             Ok(marker) => Some(RefusingHolder {
                 clock: marker == b"clock",
@@ -2972,7 +3024,10 @@ fn main() -> Result<()> {
                 disk: disk
                     .as_ref()
                     .map(|disk| disk as &dyn provenant_supervisor::DiskPressure),
-                exit_publisher: publisher.as_ref().map(|item| item as &dyn ExitPublisher),
+                exit_publisher: tracking_publisher
+                    .as_ref()
+                    .map(|item| item as &dyn ExitPublisher)
+                    .or_else(|| publisher.as_ref().map(|item| item as &dyn ExitPublisher)),
                 stdout_decoder: Some(&Decoder),
                 ..Default::default()
             },

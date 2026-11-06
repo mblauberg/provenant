@@ -30,12 +30,12 @@ impl Driver<'_> {
             .map_err(|_| CustodyError::InvalidRecord)
             .and_then(|bytes| {
                 if self.last_tracking.as_ref() != Some(&bytes) {
-                    Publication::require_durable(write_record(
-                        &self.writer_dir,
-                        "reservation.json",
-                        &self.reservation,
-                        PublishMode::Replace,
-                    )?)?;
+                    let system_publisher = SystemExitPublisher;
+                    Publication::require_durable(
+                        self.exit_publisher
+                            .unwrap_or(&system_publisher)
+                            .tracking(&self.writer_dir, &bytes)?,
+                    )?;
                     self.last_tracking = Some(bytes);
                 }
                 Ok(())

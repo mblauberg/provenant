@@ -2528,9 +2528,6 @@ pub(super) fn gc_foreign_without_state_holds_writer_through_final_recheck()
                     Err(FsError::LockTimeout { .. })
                 )
             {
-                clock
-                    .wait_until(provenant_core::MonoTime::from_micros(10_000_000))
-                    .unwrap();
                 let repository = context
                     .project_state
                     .try_lock_existing(OsStr::new(REPOSITORY_LOCK), LockMode::Exclusive)
