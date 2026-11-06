@@ -234,12 +234,26 @@ pub(super) fn panel_pending(checkpoint: &GraphCheckpoint, expansion: &Expansion)
 
 /// A fresh panel supersedes delta findings for the next repair attempt.
 /// Preserve both immutable review receipts in the checkpoint.
-pub(super) fn panel_outputs<'a>(checkpoint: &'a GraphCheckpoint, parent: &str) -> Option<&'a NodeOutputs> {
+pub(super) fn panel_outputs<'a>(
+    checkpoint: &'a GraphCheckpoint,
+    parent: &str,
+) -> Option<&'a NodeOutputs> {
     let expansion = panel_expansion(checkpoint, parent)?;
-    if panel_pending(checkpoint, expansion) { return None; }
-    let root = expansion.nodes.iter().find(|candidate| candidate.composite.is_some()
-        && expansion.nodes.iter().all(|member| member.id == candidate.id || member.id.starts_with(&format!("{}--", candidate.id))))?;
-    checkpoint.nodes.iter().find(|progress| progress.id == root.id)?.outputs.as_ref()
+    if panel_pending(checkpoint, expansion) {
+        return None;
+    }
+    let root = expansion.nodes.iter().find(|candidate| {
+        candidate.composite.is_some()
+            && expansion.nodes.iter().all(|member| {
+                member.id == candidate.id || member.id.starts_with(&format!("{}--", candidate.id))
+            })
+    })?;
+    checkpoint
+        .nodes
+        .iter()
+        .find(|progress| progress.id == root.id)?
+        .outputs
+        .as_ref()
 }
 
 /// A failed expanded panel is recovered by its enclosing bounded repair loop.
@@ -248,9 +262,22 @@ pub(super) fn handled_panel(checkpoint: &GraphCheckpoint, node: &NodeProgress) -
         expansion.nodes.iter().any(|member| member.id == node.id)
             && expansion.patch.as_ref().is_some_and(|patch| {
                 patch.reason.as_deref() == Some("repair expanded risk or scope")
-                    && patch.parent.as_ref().and_then(|parent| checkpoint.nodes.iter().find(|progress| &progress.id == parent))
+                    && patch
+                        .parent
+                        .as_ref()
+                        .and_then(|parent| {
+                            checkpoint
+                                .nodes
+                                .iter()
+                                .find(|progress| &progress.id == parent)
+                        })
                         .and_then(|parent| parent.round.as_ref())
-                        .and_then(|round| checkpoint.nodes.iter().find(|progress| progress.id == round.loop_id))
+                        .and_then(|round| {
+                            checkpoint
+                                .nodes
+                                .iter()
+                                .find(|progress| progress.id == round.loop_id)
+                        })
                         .is_some_and(|owner| checkpoint.node_successful(owner))
             })
     })
@@ -288,13 +315,27 @@ pub(super) fn panel_failure(checkpoint: &GraphCheckpoint, expansion: &Expansion)
 /// Once the panel expands, later repair commits need that broader coverage too.
 /// Re-resolve it at each head, including lenses absent from the initial template.
 fn prior_panel(node: &PlannedNode, checkpoint: &GraphCheckpoint) -> bool {
-    let Some(round) = &node.round else { return false; };
-    checkpoint.expansions.iter().any(|expansion| expansion.patch.as_ref().is_some_and(|patch| {
-        patch.reason.as_deref() == Some("repair expanded risk or scope")
-            && patch.parent.as_ref().and_then(|parent| checkpoint.nodes.iter().find(|progress| &progress.id == parent))
-                .and_then(|parent| parent.round.as_ref())
-                .is_some_and(|previous| previous.loop_id == round.loop_id && previous.round < round.round)
-    }))
+    let Some(round) = &node.round else {
+        return false;
+    };
+    checkpoint.expansions.iter().any(|expansion| {
+        expansion.patch.as_ref().is_some_and(|patch| {
+            patch.reason.as_deref() == Some("repair expanded risk or scope")
+                && patch
+                    .parent
+                    .as_ref()
+                    .and_then(|parent| {
+                        checkpoint
+                            .nodes
+                            .iter()
+                            .find(|progress| &progress.id == parent)
+                    })
+                    .and_then(|parent| parent.round.as_ref())
+                    .is_some_and(|previous| {
+                        previous.loop_id == round.loop_id && previous.round < round.round
+                    })
+        })
+    })
 }
 
 /// A repair cannot be accepted on the old panel after a reviewer reports
@@ -311,7 +352,9 @@ pub(super) fn growth_in_round(
     if !is_repair_gate(node, plan, positions) {
         return false;
     }
-    if prior_panel(node, checkpoint) { return true; }
+    if prior_panel(node, checkpoint) {
+        return true;
+    }
     let rank = |tier: &str| match tier {
         "routine" => Some(0),
         "substantial" => Some(1),
@@ -383,13 +426,16 @@ pub(super) fn escalation(
         let Some(check) = selected("synthesis").or_else(|| selected("check")) else {
             break;
         };
-        if !check.state.settled() || selected("accepted").is_some_and(|gate| !gate.state.settled()) {
+        if !check.state.settled() || selected("accepted").is_some_and(|gate| !gate.state.settled())
+        {
             break;
         }
         let Some(outputs) = panel_outputs(checkpoint, &check.id).or(check.outputs.as_ref()) else {
             continue;
         };
-        if panel_expansion(checkpoint, &check.id).is_none() && outputs.findings.iter().any(grows_review) {
+        if panel_expansion(checkpoint, &check.id).is_none()
+            && outputs.findings.iter().any(grows_review)
+        {
             return Some("repair expanded risk or scope; full panel replan required");
         }
         let current: Vec<_> = outputs
@@ -469,7 +515,9 @@ pub(super) fn inactive_lens(
     }
     // Keep the static delta stage runnable before the broader host panel.
     // Newly selected lenses may not exist in the original template.
-    if prior_panel(node, checkpoint) { return false; }
+    if prior_panel(node, checkpoint) {
+        return false;
+    }
     // Scope or risk expansion requires the whole host-selected panel.
     if findings.iter().any(|(_, finding)| grows_review(finding)) {
         return false;

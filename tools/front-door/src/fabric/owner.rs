@@ -618,7 +618,11 @@ fn repair_scope_grew(
 /// Re-touching a protected surface can grow semantic risk even when the path
 /// set and its tier are unchanged. This deliberately loose signal only replans.
 fn repair_touches_risk(review: &provenant_routing::ReviewConfig, touched: &[String]) -> bool {
-    review.path_floors(touched).classes.iter().any(|class| !matches!(class.as_str(), "routine" | "unknown"))
+    review
+        .path_floors(touched)
+        .classes
+        .iter()
+        .any(|class| !matches!(class.as_str(), "routine" | "unknown"))
 }
 
 impl BoundGraphOwner<'_> {
@@ -679,9 +683,21 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                 )?;
         let delta = self.repair_git(
             &self.factory.cwd,
-            &["diff", "--no-renames", "--name-only", "-z", &before.to_string(), &after.to_string(), "--"],
+            &[
+                "diff",
+                "--no-renames",
+                "--name-only",
+                "-z",
+                &before.to_string(),
+                &after.to_string(),
+                "--",
+            ],
         )?;
-        let touched: Vec<String> = delta.split('\0').filter(|path| !path.is_empty()).map(str::to_owned).collect();
+        let touched: Vec<String> = delta
+            .split('\0')
+            .filter(|path| !path.is_empty())
+            .map(str::to_owned)
+            .collect();
         Ok(repair_scope_grew(&routing.review, &old, &new)
             || repair_touches_risk(&routing.review, &touched))
     }
@@ -1219,15 +1235,27 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
         identity.inbox.actor = scope.actor.parse().map_err(|_| FacadeError::StateCorrupt)?;
         let input = graph_notification_input(&scope)?;
         let refused = |error: &dyn std::fmt::Display| FacadeError::DispatchRefused {
-            fact: None, disk: None,
+            fact: None,
+            disk: None,
             reason: format!("graph owner notification {}: {error}", scope.ask.ask_id),
         };
         provenant_fabric_runtime::inbox::validate_request(
-            &identity, &context.config, context.in_lane, &input,
-        ).map_err(|error| refused(&error))?;
-        let service = InboxService::open(&context.roots.state, &identity, &self.factory.clock, self.cancel)
+            &identity,
+            &context.config,
+            context.in_lane,
+            &input,
+        )
+        .map_err(|error| refused(&error))?;
+        let service = InboxService::open(
+            &context.roots.state,
+            &identity,
+            &self.factory.clock,
+            self.cancel,
+        )
+        .map_err(|error| refused(&error))?;
+        let result = service
+            .execute(input, self.cancel)
             .map_err(|error| refused(&error))?;
-        let result = service.execute(input, self.cancel).map_err(|error| refused(&error))?;
         Ok(matches!(result, InboxResult::Saved { .. }))
     }
     fn close_node_ask(
