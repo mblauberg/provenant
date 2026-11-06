@@ -3103,11 +3103,12 @@ fn configured_node_limit_also_applies_to_flat_presets() {
 
 #[test]
 fn expanded_composite_id_refusal_matches_admission() {
-    let outer = "a".repeat(32);
+    let outer = "a".repeat(40);
     let inner = "b".repeat(32);
+    let middle = "m".repeat(64);
     let mut layers = Layers::empty();
     let preset = format!(
-        "stages=[{{ id='{outer}', stages=[{{ id='{inner}', prompt='work' }}], exports=[{{ node='{inner}', outputs=['result'] }}] }}]\n"
+        "stages=[{{ id='{outer}', stages=[{{id='{middle}',stages=[{{id='{middle}',stages=[{{ id='{inner}', prompt='work' }}]}}]}}] }}]\n"
     );
     layers.insert("test", "long-id", &preset).unwrap();
     let error = expand(&layers, "long-id", "brief", &[]).unwrap_err();
@@ -3122,11 +3123,12 @@ fn expanded_composite_id_refusal_matches_admission() {
 
 #[test]
 fn expanded_loop_id_refusal_matches_admission() {
-    let outer = "a".repeat(32);
+    let outer = "a".repeat(40);
     let inner = "b".repeat(32);
+    let middle = "m".repeat(64);
     let mut layers = Layers::empty();
     let preset = format!(
-        "stages=[{{id='{outer}',loop={{max_rounds=1,until='{inner}',stages=[{{id='{inner}',kind='gate',condition={{type='budget'}}}}]}}}}]\n"
+        "stages=[{{id='{outer}',stages=[{{id='{middle}',stages=[{{id='{middle}',loop={{max_rounds=1,until='{inner}',stages=[{{id='{inner}',kind='gate',condition={{type='budget'}}}}]}}}}]}}]}}]\n"
     );
     layers.insert("test", "long-loop", &preset).unwrap();
     let error = expand(&layers, "long-loop", "brief", &[]).unwrap_err();

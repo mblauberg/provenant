@@ -1620,10 +1620,11 @@ stages = [
     // valid graph as the admission input, then vary only the relevant bound or
     // parent ID for the two CLI calls.
     let member = "b".repeat(32);
+    let middle = "m".repeat(64);
     std::fs::write(
         presets.join("limits.toml"),
         format!(
-            "stages = [{{ id = 'group', stages = [{{ id = 'inner', stages = [{{ id = '{member}', prompt = 'work' }}] }}] }}]\n"
+            "stages = [{{ id = 'group', stages = [{{ id = '{middle}', stages = [{{ id = '{middle}', stages = [{{ id = '{member}', prompt = 'work' }}] }}] }}] }}]\n"
         ),
     )?;
     std::fs::write(state.join("config.toml"), "schema_version = 1\n")?;
@@ -1648,12 +1649,12 @@ stages = [
             )?;
         } else {
             std::fs::write(state.join("config.toml"), "schema_version = 1\n")?;
-            let parent = "a".repeat(32);
+            let parent = "a".repeat(40);
             candidate["nodes"][0]["id"] = serde_json::json!(parent);
             std::fs::write(
                 presets.join("limits.toml"),
                 format!(
-                    "stages = [{{ id = '{parent}', stages = [{{ id = 'inner', stages = [{{ id = '{member}', prompt = 'work' }}] }}] }}]\n"
+                    "stages = [{{ id = '{parent}', stages = [{{ id = '{middle}', stages = [{{ id = '{middle}', stages = [{{ id = '{member}', prompt = 'work' }}] }}] }}] }}]\n"
                 ),
             )?;
         }
