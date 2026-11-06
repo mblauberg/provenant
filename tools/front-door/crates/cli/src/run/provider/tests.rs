@@ -4118,11 +4118,14 @@ fn read_only_plan_runs_host_git_with_a_private_home_outside_the_child_store()
     std::fs::create_dir_all(&repo)?;
     std::fs::create_dir_all(base.join("home"))?;
     let real = provenant_os::git::git_executable().ok_or("git unavailable")?;
-    // The smallest repository layout Git accepts, without spawning Git.
-    for dir in [".git/objects", ".git/refs/heads"] {
-        std::fs::create_dir_all(repo.join(dir))?;
-    }
-    std::fs::write(repo.join(".git/HEAD"), "ref: refs/heads/main\n")?;
+    // The probe exercises a real Git repository, including its local config.
+    let init = std::process::Command::new(&real)
+        .args(["init", "-q"])
+        .current_dir(&repo)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .status()?;
+    assert!(init.success(), "git init: {init}");
     // A git that records the HOME and TMPDIR it was given, then runs the real one.
     let bin = base.join("bin");
     std::fs::create_dir_all(&bin)?;
@@ -4177,7 +4180,11 @@ fn read_only_plan_runs_host_git_with_a_private_home_outside_the_child_store()
         false,
         false,
     );
-    assert!(matches!(result, Err(ReadOnlyPlanError::MissingBinding)));
+    assert!(
+        matches!(result, Err(ReadOnlyPlanError::MissingBinding)),
+        "{:?}",
+        result.as_ref().err()
+    );
 
     let seen = std::fs::read_to_string(&record)?;
     assert!(!seen.is_empty(), "host git never ran");

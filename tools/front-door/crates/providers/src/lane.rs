@@ -1387,7 +1387,7 @@ mod tests {
 
         // Absolute Git receives the same host identity from the lane config,
         // including from a subdirectory. A repository-local identity remains
-        // higher priority, and an empty lane identity cannot synthesize one.
+        // higher priority, and an empty lane identity cannot synthesise one.
         let absolute_repo = root.join("absolute-git-repo");
         let nested = absolute_repo.join("nested");
         fs::create_dir_all(&nested)?;

@@ -6375,14 +6375,19 @@ fn claude_writer_shell_has_private_config_and_rust_tools() -> Result<(), Provide
             "CARGO_BUILD_BUILD_DIR",
             "/fixture/home/Library/Caches/provenant-lane-cargo/fixture/target",
         ),
-        ("GIT_CONFIG_GLOBAL", "/dev/null"),
-        ("GIT_CONFIG_NOSYSTEM", "1"),
+        ("GIT_CONFIG_GLOBAL", "/fixture/scratch/gitconfig"),
     ] {
         assert!(
             launch.env.iter().any(|(k, v)| k == key && v == value),
             "{key}"
         );
     }
+    assert!(
+        launch
+            .env
+            .iter()
+            .all(|(key, _)| key != "GIT_CONFIG_NOSYSTEM")
+    );
     for path in [
         "/fixture/home/.cargo/bin",
         "/fixture/home/.rustup/toolchains",

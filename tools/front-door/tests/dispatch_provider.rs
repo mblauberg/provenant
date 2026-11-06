@@ -2245,10 +2245,10 @@ fn codex_pinned_reader_launches_from_head_and_base() -> Result {
         .ok_or_else(|| format!("lane: {value}"))?;
     assert_eq!(lane["state"], "succeeded", "{lane}");
     let id = lane["attempt_id"].as_str().ok_or("attempt")?;
-    assert_eq!(
-        reply["data"]["result_tails"][id]["bytes"]["data"],
-        format!("OK{DONE_FENCE}")
-    );
+    let output = rig.command(&["output", id, "--json"])?;
+    assert_eq!(code(&output), 0, "{output:?}");
+    let output: Value = serde_json::from_slice(&output.stdout.bytes)?;
+    assert_eq!(output["data"]["bytes"]["data"], format!("OK{DONE_FENCE}"));
     cleanup.disarm();
     Ok(())
 }
@@ -2347,6 +2347,11 @@ fn codex_dispatch_observes_rollout() -> Result {
                 vec!["commit", "--allow-empty", "-qm", "old"],
                 vec!["commit", "--allow-empty", "-qm", "new"],
                 vec!["update-ref", "refs/remotes/origin/main", "HEAD"],
+                vec![
+                    "symbolic-ref",
+                    "refs/remotes/origin/HEAD",
+                    "refs/remotes/origin/main",
+                ],
                 vec!["reset", "--hard", "HEAD~1"],
             ] {
                 assert_eq!(code(&rig.execute(&git, &args, None)?), 0);
@@ -3631,7 +3636,9 @@ fn cancel_live_preparation_releases_writer_for_the_next_run() -> Result {
             assert_eq!(code(&add), 0, "{add:?}");
             let push = rig.execute(&git, &["push", "origin", "HEAD:refs/heads/main"], None)?;
             assert_eq!(code(&push), 0, "{push:?}");
-            let wrapper = rig.root.join("slow-git");
+            let wrapper_dir = rig.root.join("slow-git");
+            fs::create_dir(&wrapper_dir)?;
+            let wrapper = wrapper_dir.join("git");
             fs::write(
                 &wrapper,
                 format!(
