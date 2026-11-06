@@ -1972,6 +1972,13 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             .is_some_and(|operation| operation.state != provenant_run::OperationState::Prepared))
     }
 
+    fn launch_refused_before_acceptance(
+        &mut self,
+        attempt: &provenant_fabric_runtime::graph::GraphAttempt,
+    ) -> Result<bool, Self::Error> {
+        self.launch_accepted(attempt).map(|accepted| !accepted)
+    }
+
     fn observe_or_start(
         &mut self,
         key: &provenant_fabric_runtime::graph::AttemptKey,
