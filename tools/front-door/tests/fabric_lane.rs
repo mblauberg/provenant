@@ -339,7 +339,14 @@ fn lane_run_submits_child_through_parent_relay() -> Result {
     };
     assert_eq!(child.brief, "Parent marker only");
     assert_eq!(child.template, "task");
-    // Relay admission must not write a second run store in the lane.
+    let stopped = host(&rig, &["stop", "parent--child", "--json"])?;
+    assert_eq!(stopped["data"]["parent_attempt"], attempt.to_string());
+    let frame = received.recv_timeout(std::time::Duration::from_secs(2))?;
+    let RelayOp::Stop { node } = serde_json::from_value(frame)? else {
+        return Err("expected subtree stop through parent relay".into());
+    };
+    assert_eq!(node, "parent--child");
+    // Relay admission and control must not write a second run store in the lane.
     let child_store = rig.state.join("children").join(attempt.to_string());
     assert_eq!(std::fs::read_dir(child_store)?.count(), 0);
     drop(relay);
