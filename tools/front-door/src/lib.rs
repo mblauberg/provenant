@@ -35,6 +35,10 @@ mod pr;
 #[cfg(test)]
 mod pr_land_tests;
 #[cfg(test)]
+#[allow(
+    dead_code,
+    reason = "the custom worktree driver includes these legacy test fixtures without libtest"
+)]
 mod preset;
 #[cfg(test)]
 #[allow(
@@ -44,8 +48,16 @@ mod preset;
 )]
 mod preset_deliver_tests;
 #[cfg(test)]
+#[allow(
+    dead_code,
+    reason = "the custom worktree driver includes these legacy test fixtures without libtest"
+)]
 mod preset_roles;
 #[cfg(test)]
+#[allow(
+    dead_code,
+    reason = "the custom worktree driver includes these legacy test fixtures without libtest"
+)]
 mod preset_select;
 #[cfg(test)]
 #[allow(

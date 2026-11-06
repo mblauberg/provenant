@@ -1132,8 +1132,7 @@ mod tests {
             let actual = catalog
                 .commands
                 .iter()
-                .map(|entry| entry.command.strip_prefix("provenant "))
-                .flatten()
+                .filter_map(|entry| entry.command.strip_prefix("provenant "))
                 .filter(|path| !path.contains(' ') && *path != "help")
                 .collect::<std::collections::BTreeSet<_>>();
             assert_eq!(actual, expected.into_iter().collect());
@@ -1387,12 +1386,10 @@ mod tests {
             panic!("expected duration error");
         };
         assert!(error.to_string().contains("--wait"), "{error}");
-        for (args, flag) in [(vec!["quota", "history", "--until", "0d"], "--until")] {
-            let ParseOutcome::Invalid { error, .. } = parsed(&args) else {
-                panic!("expected span error");
-            };
-            assert!(error.to_string().contains(flag), "{error}");
-        }
+        let ParseOutcome::Invalid { error, .. } = parsed(&["quota", "history", "--until", "0d"]) else {
+            panic!("expected span error");
+        };
+        assert!(error.to_string().contains("--until"), "{error}");
         for (words, example) in [
             (
                 vec!["route", "resolve", "one", "two"],

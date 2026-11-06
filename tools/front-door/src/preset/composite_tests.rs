@@ -366,12 +366,11 @@ fn production_plain_run_keeps_route_access_and_attempt_controls() {
 #[test]
 fn production_graph_identity_tracks_operation_not_brief() {
     let request = |key: &str| {
-        let request = dispatch_fixture(
+        dispatch_fixture(
             ["run", "--prompt-file", "brief", "--operation-id", key]
                 .into_iter()
                 .map(Into::into),
-        );
-        request
+        )
     };
     let temp = tempfile::tempdir().unwrap();
     let directory = temp.path().canonicalize().unwrap();

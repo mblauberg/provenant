@@ -625,10 +625,7 @@ fn opencode_usage_limit_settlement_is_bounded() -> Result {
     Ok(())
 }
 
-/// Medium: real attempt settlement with a synthetic provider that never exits.
-
-/// Real stderr-only refusal and incidental text through the guardian.
-
+/// Read provider session facts from its committed WAL through a graph node.
 fn opencode_dispatch_observes_v2_wal_session() -> Result {
     if !graph_fixture_available()? {
         return Ok(());
@@ -1007,14 +1004,13 @@ fn claude_dispatch(host_native: bool, pool: bool) -> Result {
     assert!(!rig.home.join(".rustup").exists());
     let cleanup = rig.process_cleanup();
     let account = rig.home.join(".claude-pro");
-    let route = if host_native {
+    if host_native {
         writeln!(
             OpenOptions::new()
                 .append(true)
                 .open(rig.state.join("config.toml"))?,
             "\n[domains.fabric.host_native.ci-fixer]\nkind = 'claude-agent'\nmodel = 'claude/claude-sonnet-5-5'\neffort = 'medium'\ndescription = 'Repair CI'\nprompt = 'Repair failing CI checks.'"
         )?;
-        json!({"kind":"adapter","provider":"host-native","name":"ci-fixer"})
     } else if pool {
         writeln!(
             OpenOptions::new()
@@ -1022,10 +1018,7 @@ fn claude_dispatch(host_native: bool, pool: bool) -> Result {
                 .open(rig.state.join("config.toml"))?,
             "\n[domains.routing.pools]\nsecret-fixture = [{{ model = 'claude/claude-sonnet-5-5', effort = 'medium' }}]"
         )?;
-        json!({"kind":"review","name":"secret-fixture","effort":null,"excluded_families":[],"distinct_families":false})
-    } else {
-        json!({"kind":"model","provider":"claude","model":"claude-sonnet-5-5","effort":"medium"})
-    };
+    }
     let graph_route = if pool {
         json!({"alias":"secret-fixture"})
     } else if host_native {
@@ -1178,14 +1171,7 @@ fn graph_fixture_available() -> Result<bool> {
     Ok(true)
 }
 
-/// The preferred fake vanishes after its version probe. Its pool peer stays
-/// available, so a successful writer must actually start that peer.
-
-
-/// A node whose upstream result is far past the excerpt budget reads the whole
-/// of it from the file the host materialised in its own inputs directory, and
-/// nothing else beside it.
-
+/// A quota refusal with no generated work redraws the same alias in the graph.
 fn graph_read_only_alias_retries_another_member_after_empty_launch_quota() -> Result {
     if !graph_fixture_available()? {
         return Ok(());
@@ -1217,12 +1203,26 @@ fn graph_read_only_alias_retries_another_member_after_empty_launch_quota() -> Re
     let status: Value = serde_json::from_slice(&started.stdout.bytes)?;
     assert_eq!(status["data"]["status"], "complete", "{status}");
     assert_eq!(status["data"]["checkpoint"]["nodes"][0]["state"], "succeeded", "{status}");
-    // The graph never redraws: one attempt. The lane layer retries the alias
-    // once, because the quota stop came before any work was done.
-    let attempts = status["data"]["checkpoint"]["nodes"][0]["attempts"]
-        .as_array()
-        .ok_or("attempts")?;
+    // Graph retry archives the settled quota attempt and creates a new sealed
+    // key for the same alias. The shared store has one run per graph attempt.
+    let node = &status["data"]["checkpoint"]["nodes"][0];
+    let previous = node["previous_attempts"].as_array().ok_or("previous attempts")?;
+    let attempts = node["attempts"].as_array().ok_or("attempts")?;
+    assert_eq!(previous.len(), 1, "{status}");
     assert_eq!(attempts.len(), 1, "{status}");
+    assert_eq!(previous[0]["outcome"], "usage_limited", "{status}");
+    assert_eq!(attempts[0]["outcome"], "succeeded", "{status}");
+    assert_eq!(previous[0]["route"]["alias"], "retry-test", "{status}");
+    assert_eq!(attempts[0]["route"], previous[0]["route"], "{status}");
+    assert_ne!(attempts[0]["key"], previous[0]["key"], "{status}");
+    assert_eq!(attempts[0]["key"]["retry_generation"], 1, "{status}");
+    assert_eq!(attempts[0]["key"]["previous_attempt_ref"], previous[0]["attempt_ref"], "{status}");
+    let attempt_id = |attempt: &Value| -> Result<String> {
+        Ok(attempt["attempt_ref"].as_str().ok_or("attempt reference")?
+            .rsplit_once('/').ok_or("qualified attempt reference")?.1.to_owned())
+    };
+    let first_id = attempt_id(&previous[0])?;
+    let second_id = attempt_id(&attempts[0])?;
     let lanes = rig.command(&["status", "--all", "--json"])?;
     assert_eq!(code(&lanes), 0, "{lanes:?}");
     let lanes: Value = serde_json::from_slice(&lanes.stdout.bytes)?;
@@ -1230,19 +1230,27 @@ fn graph_read_only_alias_retries_another_member_after_empty_launch_quota() -> Re
     assert_eq!(rows.len(), 2, "{lanes}");
     let first = rows
         .iter()
-        .find(|row| row["attempt_number"] == 1)
+        .find(|row| row["attempt_id"] == first_id)
         .ok_or("first attempt")?;
     let second = rows
         .iter()
-        .find(|row| row["attempt_number"] == 2)
+        .find(|row| row["attempt_id"] == second_id)
         .ok_or("retry attempt")?;
     assert_eq!(first["state"], "quota_limited", "{lanes}");
     assert_eq!(
         first["applied_route"]["model"], "codex/gpt-6-luna",
         "{lanes}"
     );
-    assert_eq!(first["superseded_by"], second["attempt_id"], "{lanes}");
-    assert_eq!(second["retry_of"], first["attempt_id"], "{lanes}");
+    assert_ne!(first["run_id"], second["run_id"], "{lanes}");
+    assert!(first["superseded_by"].is_null(), "{lanes}");
+    assert!(second["retry_of"].is_null(), "{lanes}");
+    let database = rusqlite::Connection::open(rig.state.join("run.sqlite3"))?;
+    let retained: Vec<u8> = database.query_row(
+        "SELECT record FROM attempts WHERE id=?1", [&second_id], |row| row.get(0),
+    )?;
+    let retained: provenant_run::AttemptRecord = serde_json::from_slice(&retained)?;
+    let excluded = retained.profile.knobs.get("routing.graph_exclude").ok_or("excluded spent model")?;
+    assert_eq!(excluded, &json!(["codex/gpt-6-luna"]));
     assert_eq!(second["state"], "succeeded", "{lanes}");
     assert_eq!(
         second["applied_route"]["model"], "codex/gpt-6.1-terra",

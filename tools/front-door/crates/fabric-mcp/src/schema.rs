@@ -97,6 +97,9 @@ fn object(fields: Value) -> Value {
     json!({"type":"object","properties":properties,"required":required,"additionalProperties":false})
 }
 fn tagged(tag: &str, variants: Value) -> Value {
+    json!({"oneOf": tagged_variants(tag, variants)})
+}
+fn tagged_variants(tag: &str, variants: Value) -> Vec<Value> {
     let mut schemas = Vec::new();
     if let Some(variants) = variants.as_object() {
         for (name, fields) in variants {
@@ -105,7 +108,7 @@ fn tagged(tag: &str, variants: Value) -> Value {
             schemas.push(object(fields));
         }
     }
-    json!({"oneOf":schemas})
+    schemas
 }
 fn output_object(fields: Value) -> Value {
     object(fields)
@@ -298,9 +301,9 @@ fn build_strict() -> Vec<Value> {
         .iter()
         .zip(tools)
         .map(|((kind, name), (description, operations))| {
-            let mut input = tagged("op", operations);
+            let mut variants = tagged_variants("op", operations);
             if *kind == ToolKind::Run {
-                let graph = tagged("op", json!({
+                let graph = tagged_variants("op", json!({
                     "run":{"document?":{"type":"object"},"brief?":text(MAX_TEXT_BYTES),"use?":text(128),"tier?":text(128),"over?":{"anyOf":[{"type":"array","items":text(1024)},text(128)]},"set?":{"type":"object"},"explain?":{"type":"boolean"},"wait_seconds?":integer(1,crate::MAX_WAIT_SECONDS)},
                     "status":{"id?":text(200),"stats?":{"type":"boolean"},"by?":choices(&["tier","template"]),"wait_seconds?":integer(1,crate::MAX_WAIT_SECONDS)},
                     "stop":{"id":text(200),"reason?":text_allowing_empty(provenant_fabric_runtime::graph::MAX_CANCEL_REASON_BYTES),"wait_seconds?":integer(1,crate::MAX_WAIT_SECONDS)},
@@ -309,12 +312,12 @@ fn build_strict() -> Vec<Value> {
                     "templates":{"name?":text(128),"templates?":{"type":"object"}},
                     "output":{"id":text(200),"trace":{"const":true}}
                 }));
-                input["oneOf"].as_array_mut().unwrap().extend(graph["oneOf"].as_array().unwrap().iter().cloned());
+                variants.extend(graph);
             }
             if *kind == ToolKind::Output {
-                let trace = tagged("op", json!({"trace":{"id":text(200)}}));
-                input["oneOf"].as_array_mut().unwrap().extend(trace["oneOf"].as_array().unwrap().iter().cloned());
+                variants.extend(tagged_variants("op", json!({"trace":{"id":text(200)}})));
             }
+            let mut input = json!({"oneOf": variants});
             if matches!(
                 kind,
                 ToolKind::Mail

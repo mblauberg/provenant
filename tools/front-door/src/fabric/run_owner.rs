@@ -64,6 +64,13 @@ pub(crate) fn peer_adoption_custody(
     Ok(warning)
 }
 
+struct SubmissionPolicy {
+    access: provenant_records::run::LaneAccess,
+    settlement_retry_limit: Option<u8>,
+    apply_project_defaults: bool,
+    attempt: Option<provenant_fabric_runtime::graph::AttemptSpec>,
+}
+
 pub(crate) struct BinaryRunOwner<'a> {
     pub(crate) factory: &'a Factory,
     /// False only at peer ingress: no forwarding, and writers name a new
@@ -585,10 +592,12 @@ impl BinaryRunOwner<'_> {
             input,
             budget,
             cancel,
-            provenant_records::run::LaneAccess::default(),
-            None,
-            true,
-            None,
+            SubmissionPolicy {
+                access: Default::default(),
+                settlement_retry_limit: None,
+                apply_project_defaults: true,
+                attempt: None,
+            },
         )
         .map_err(|error| scope_io(error, "submit"))
     }
@@ -606,24 +615,24 @@ impl BinaryRunOwner<'_> {
             input,
             budget,
             cancel,
-            access,
-            settlement_retry_limit,
-            false,
-            attempt,
+            SubmissionPolicy {
+                access,
+                settlement_retry_limit,
+                apply_project_defaults: false,
+                attempt,
+            },
         )
         .map_err(|error| scope_io(error, "submit"))
     }
-    pub(crate) fn submit_inner(
+    fn submit_inner(
         &mut self,
         input: SubmitInput,
         budget: WaitBudget,
         cancel: &CancelToken,
-        access: provenant_records::run::LaneAccess,
-        settlement_retry_limit: Option<u8>,
-        apply_project_defaults: bool,
-        attempt: Option<provenant_fabric_runtime::graph::AttemptSpec>,
+        policy: SubmissionPolicy,
     ) -> Result<SubmissionReceipt, FacadeError> {
         use provenant_cli::run::{Submission, Submitted, derived_task, worktree_access};
+        let SubmissionPolicy { access, settlement_retry_limit, apply_project_defaults, attempt } = policy;
         let SubmitInput::Submit {
             operation_id,
             tasks,

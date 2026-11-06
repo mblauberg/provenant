@@ -15,7 +15,7 @@ use provenant_records::{CommandError, CommandResult, Harness, Outcome};
 use serde::Serialize;
 use std::ffi::OsStr;
 use std::{
-    io,
+    io::{self, Write},
     path::{Path, PathBuf},
 };
 
@@ -893,16 +893,21 @@ pub(super) fn run_install(args: cli::Install, globals: &cli::Globals) -> u8 {
         return match upgrade_preflight(globals) {
             Ok(findings) if findings.is_empty() => 0,
             Ok(findings) => {
+                let mut output = io::stdout().lock();
                 for finding in findings {
-                    println!("{finding}");
+                    if writeln!(output, "{finding}").is_err() {
+                        return 1;
+                    }
                 }
-                println!(
+                if writeln!(output,
                     "Finish or cancel pending graphs, drain lanes and port presets by hand; rerun with --yes to proceed anyway."
-                );
+                ).is_err() {
+                    return 1;
+                }
                 2
             }
             Err(error) => {
-                eprintln!("Upgrade preflight failed: {error}");
+                let _ = writeln!(io::stderr().lock(), "Upgrade preflight failed: {error}");
                 1
             }
         };

@@ -69,19 +69,6 @@ pub(crate) enum PresetSelectionSource {
     Triage,
     Experiment,
 }
-impl PresetSelectionSource {
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            Self::Default => "default",
-            Self::Rule => "rule",
-            Self::Readiness => "readiness",
-            Self::Override => "override",
-            Self::Triage => "triage",
-            Self::Experiment => "experiment",
-        }
-    }
-}
-
 pub(crate) fn select(
     repo_file: Option<&std::path::Path>,
     context: &SelectionContext,

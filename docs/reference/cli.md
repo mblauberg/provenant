@@ -1686,6 +1686,7 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 | `--hooks` | `{"description": "Enable hooks, or remove unchanged owned hooks (omission keeps ownership)", "name": "hooks", "values": ["on", "off"]}` |
 | `--adopt-existing` | `{"defaults": ["false"], "description": "Adopt matching existing files instead of refusing", "name": "adopt_existing", "values": ["true", "false"]}` |
 | `--dry-run` | `{"defaults": ["false"], "description": "Plan the install without changing anything", "name": "dry_run", "values": ["true", "false"]}` |
+| `--upgrade-preflight` | `{"defaults": ["false"], "description": "Check state before a graph cutover (installer use only)", "name": "upgrade_preflight", "values": ["true", "false"]}` |
 | `--help` | `{"description": "Print help", "name": "help"}` |
 | `--version` | `{"description": "Print version", "name": "version"}` |
 
@@ -1700,7 +1701,8 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
         "bin_dir",
         "hooks",
         "adopt_existing",
-        "dry_run"
+        "dry_run",
+        "upgrade_preflight"
       ],
       "multiple": true,
       "name": "Install",
@@ -1714,6 +1716,7 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 
 | Argument | Contract |
 |---|---|
+| `--yes` | `{"defaults": ["false"], "description": "Proceed after the upgrade preflight reports work to drain or port", "name": "yes", "values": ["true", "false"]}` |
 | `--from-source` | `{"description": "Build this checkout instead of downloading the latest release", "name": "from_source"}` |
 | `--hosts` | `{"defaults": ["all"], "description": "Upgrade this host and every registered Fabric peer", "name": "hosts", "values": ["all"]}` |
 | `--help` | `{"description": "Print help", "name": "help"}` |
@@ -1725,6 +1728,7 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
   "groups": [
     {
       "arguments": [
+        "yes",
         "from_source",
         "hosts"
       ],

@@ -377,21 +377,21 @@ impl Factory {
                 .filter(|value| !value.is_null())
                 .cloned()
                 .unwrap_or_else(|| json!({}));
-            if !parameters.is_object() || !overrides.is_object() {
-                return Err(FacadeError::invalid(InvalidInputDetail::Field("set".into())));
-            }
-            parameters
-                .as_object_mut()
-                .unwrap()
-                .extend(overrides.as_object().unwrap().clone());
+            parameters.as_object_mut()
+                .ok_or_else(|| FacadeError::invalid(InvalidInputDetail::Field("set".into())))?
+                .extend(overrides.as_object()
+                    .ok_or_else(|| FacadeError::invalid(InvalidInputDetail::Field("set".into())))?
+                    .clone());
             if template.parameters.contains_key("brief")
                 && let Some(brief) = input.get("brief").filter(|value| !value.is_null())
             {
                 parameters["brief"] = brief.clone();
             }
             if template.is_composite() {
-                node.as_object_mut().unwrap().remove("brief");
-                node.as_object_mut().unwrap().remove("tier");
+                let fields = node.as_object_mut()
+                    .ok_or_else(|| FacadeError::invalid(InvalidInputDetail::Field("document".into())))?;
+                fields.remove("brief");
+                fields.remove("tier");
             }
             let integration_branch = (node["use"] == "batch"
                 && library.layer("batch") == Some(Layer::Bundled))

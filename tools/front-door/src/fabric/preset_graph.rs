@@ -1,4 +1,5 @@
-use super::*;
+#[cfg(test)]
+use super::scratch_prepare_error;
 
 #[derive(Debug, thiserror::Error)]
 #[error("{0}")]
@@ -212,8 +213,7 @@ pub(super) fn shell_path(path: &std::path::Path) -> String {
 }
 
 #[cfg(test)]
-#[allow(dead_code, reason = "the custom worktree driver omits libtest functions")]
-#[allow(dead_code, unused_imports)] // The worktree driver includes this module without libtest functions.
+#[allow(dead_code, unused_imports, reason = "the custom worktree driver omits libtest functions")]
 mod tests {
     use super::{private_graph_directory_refusal, retry_collected_document};
     use std::path::Path;
@@ -225,7 +225,7 @@ mod tests {
         use provenant_os::{clock::SystemClock, fs::SystemPathResolver};
         use std::{
             sync::mpsc,
-            time::{Duration, Instant},
+            time::Duration,
         };
 
         let temp = tempfile::tempdir()?;
@@ -246,11 +246,11 @@ mod tests {
                 let cancel = CancelToken::new();
                 let budget = WaitBudget::cli(clock.mono_now(), 5).unwrap();
                 started_tx.send(()).unwrap();
-                let start = Instant::now();
+                let start = clock.mono_now();
                 let journal =
                     FileJournal::open(&root, project, "live-add-spike", budget, &cancel, &clock);
                 finished_tx
-                    .send((start.elapsed(), journal.is_ok()))
+                    .send((Duration::from_micros(clock.mono_now().as_micros().saturating_sub(start.as_micros())), journal.is_ok()))
                     .unwrap();
             });
             started_rx.recv().unwrap();
@@ -260,12 +260,8 @@ mod tests {
                     .is_err()
             );
             drop(held);
-            let (elapsed, opened) = finished_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            let (_elapsed, opened) = finished_rx.recv_timeout(Duration::from_secs(5)).unwrap();
             assert!(opened);
-            eprintln!(
-                "contended graph journal open waited {} ms",
-                elapsed.as_millis()
-            );
         });
         Ok(())
     }

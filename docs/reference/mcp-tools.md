@@ -878,6 +878,17 @@ Source: `tools/front-door/crates/fabric-mcp/tests/fixtures/all-tool-schemas.json
                     }
                   ]
                 },
+                "source_head": {
+                  "anyOf": [
+                    {
+                      "maxLength": 64,
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
                 "timeout_seconds": {
                   "maximum": 14400,
                   "minimum": 1,

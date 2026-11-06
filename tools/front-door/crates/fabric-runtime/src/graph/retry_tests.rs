@@ -1197,9 +1197,7 @@ fn retry_of_explicit_launch_refusal_preserves_pending_siblings_and_rejects_uncer
         &mut checkpoint,
         0,
         &crate::coordination::facade::FacadeError::InvalidInput { detail: None },
-        Some(at(0)),
-        60,
-        LaunchRetryPolicy::default(),
+        LaunchTiming { clock: Some(at(0)), admission_seconds: 60, policy: LaunchRetryPolicy::default() },
         &mut MemoryJournal::default(),
     )
     .unwrap();
@@ -1231,9 +1229,7 @@ fn retry_of_explicit_launch_refusal_preserves_pending_siblings_and_rejects_uncer
             &mut candidate,
             0,
             &error,
-            Some(at(0)),
-            60,
-            LaunchRetryPolicy::default(),
+            LaunchTiming { clock: Some(at(0)), admission_seconds: 60, policy: LaunchRetryPolicy::default() },
             &mut MemoryJournal::default(),
         )
         .unwrap();
@@ -1256,9 +1252,7 @@ fn retry_of_explicit_launch_refusal_preserves_pending_siblings_and_rejects_uncer
         &mut lookup_failed,
         0,
         &crate::coordination::facade::FacadeError::StateCorrupt,
-        Some(at(0)),
-        60,
-        LaunchRetryPolicy::default(),
+        LaunchTiming { clock: Some(at(0)), admission_seconds: 60, policy: LaunchRetryPolicy::default() },
         &mut MemoryJournal::default(),
     )
     .unwrap();
@@ -1278,12 +1272,10 @@ fn retry_of_explicit_launch_refusal_preserves_pending_siblings_and_rejects_uncer
         &crate::coordination::facade::FacadeError::LaunchUnknown {
             operation_id: provenant_core::OperationId::parse("unknown-operation").unwrap(),
         },
-        Some(at(0)),
-        60,
-        LaunchRetryPolicy {
+        LaunchTiming { clock: Some(at(0)), admission_seconds: 60, policy: LaunchRetryPolicy {
             limit: 0,
             ..Default::default()
-        },
+        } },
         &mut MemoryJournal::default(),
     )
     .unwrap();

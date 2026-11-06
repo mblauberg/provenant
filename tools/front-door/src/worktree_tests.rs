@@ -13,7 +13,7 @@ use std::{
     io::Write,
     path::{Path, PathBuf},
     thread,
-    time::{Duration, Instant},
+    time::Duration,
 };
 use support::{Result, TestRig, code};
 

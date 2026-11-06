@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 use std::path::Path;
 
 fn document(path: &Path) -> Result<Value, String> {
-    let text = std::fs::read_to_string(&path).map_err(|error| error.to_string())?;
+    let text = std::fs::read_to_string(path).map_err(|error| error.to_string())?;
     decode(&text)
 }
 fn decode(text: &str) -> Result<Value, String> {
@@ -205,6 +205,7 @@ pub(crate) fn graph_stats(
 }
 
 #[cfg(test)]
+#[allow(unused_imports, reason = "the custom worktree driver includes this module without libtest")]
 mod tests {
     use super::*;
 
