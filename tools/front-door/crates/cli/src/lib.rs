@@ -28,7 +28,6 @@ pub mod mileage;
 pub mod pr_body;
 pub mod provider_updates;
 mod render;
-use crate::metadata::CatalogueArg;
 use clap::{Arg, ArgAction, ArgGroup, CommandFactory, FromArgMatches};
 pub use grammar::*;
 use provenant_records::{HelpArgument, HelpCatalogue, HelpCommand, HelpErrorCode, HelpGroup};
@@ -130,31 +129,10 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> ParseOutcome {
     if let Some(error) = duplicate {
         return ParseOutcome::Invalid { error, globals };
     }
-    let mut invocation = match RawInvocation::from_arg_matches(&matches) {
+    let invocation = match RawInvocation::from_arg_matches(&matches) {
         Ok(value) => Invocation {
             globals,
             command: value.command,
-            preset_incompatible_flags: matches
-                .subcommand()
-                .filter(|(name, _)| matches!(*name, "run" | "dispatch"))
-                .map_or_else(Vec::new, |(_, sub)| {
-                    PRESET_INCOMPATIBLE
-                        .iter()
-                        .filter(|id| {
-                            sub.value_source(id) == Some(clap::parser::ValueSource::CommandLine)
-                        })
-                        .map(|id| {
-                            format!(
-                                "--{}",
-                                if *id == "knobs" {
-                                    "knob".to_owned()
-                                } else {
-                                    id.replace('_', "-")
-                                }
-                            )
-                        })
-                        .collect()
-                }),
             leaf: std::iter::successors(matches.subcommand(), |(_, sub)| sub.subcommand())
                 .map(|(name, _)| name)
                 .collect::<Vec<_>>()
@@ -208,23 +186,6 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> ParseOutcome {
             ),
             globals: invocation.globals,
         };
-    }
-    if let Command::Run(request) = &mut invocation.command {
-        if request.host.is_none()
-            && let Some(branch) = request.branch.take()
-        {
-            request.worktree_branch = Some(branch);
-        }
-        // An explicit `--mode` is never rewritten: a read-only run naming a
-        // worktree is refused by validation, not silently promoted to a writer.
-        if request.preset.is_none()
-            && request.access.mode.is_none()
-            && (request.access.worktree.is_some()
-                || request.worktree_branch.is_some()
-                || request.branch.is_some())
-        {
-            request.access.mode = Some(Mode::WorktreeWrite);
-        }
     }
     match validate(&invocation) {
         Ok(()) => ParseOutcome::Invocation(invocation),
@@ -398,16 +359,13 @@ fn usage_example(argv: &[OsString]) -> Option<String> {
             return Some(format!("provenant {target} --wait={value}"));
         }
     }
-    let has_account = argv.iter().any(|arg| arg == "--account");
     match path.as_str() {
         "provenant land" | "provenant pr land" => Some("provenant land 2199 --wait".into()),
         "provenant route resolve" => Some(
             "provenant route resolve --model ADAPTER/ID (or provenant route resolve senior)".into(),
         ),
         "provenant output" => Some("provenant output ATTEMPT --host HOST".into()),
-        "provenant dispatch" | "provenant run" if has_account => {
-            Some("provenant run --prompt-file brief.md --route senior --account ACCOUNT".into())
-        }
+        "provenant run" => Some("provenant run 'Meet the acceptance criteria' --use task".into()),
         _ => None,
     }
 }
@@ -459,31 +417,6 @@ fn parsed_globals(matches: &clap::ArgMatches, json: bool) -> (Globals, Option<Cl
     )
 }
 
-const PRESET_INCOMPATIBLE: &[&str] = &[
-    "manifest",
-    "prompt_stdin",
-    "model",
-    "route",
-    "effort",
-    "account",
-    "fallback",
-    "mode",
-    "branch",
-    "worktree_branch",
-    "host",
-    "deliver",
-    "write_root",
-    "knobs",
-    "delivery_id",
-    "head",
-    "base",
-    "title",
-    "build_heavy",
-    "read_heavy",
-    "confidential",
-    "provider_timeout",
-    "operation_id",
-];
 pub fn command_model() -> clap::Command {
     build_model(false, false)
 }
@@ -548,56 +481,7 @@ fn build_model(passive: bool, advanced: bool) -> clap::Command {
                     .required(true),
             );
         }
-        if matches!(path.as_str(), "provenant dispatch" | "provenant run") {
-            if path == "provenant dispatch" {
-                command = command.mut_arg("preset", |arg| {
-                    arg.conflicts_with_all(PRESET_INCOMPATIBLE.iter().copied())
-                });
-            }
-            command = command
-                .mut_arg("model", |arg| {
-                    if path == "provenant dispatch" {
-                        arg.required_unless_present_any(["route", "manifest", "preset"])
-                    } else {
-                        arg.required(false)
-                    }
-                })
-                .mut_arg("manifest", |arg| {
-                    arg.conflicts_with_all([
-                        "task_id",
-                        "delivery_id",
-                        "model",
-                        "route",
-                        "effort",
-                        "account",
-                        "fallback",
-                        "mode",
-                        "worktree",
-                        "deliver",
-                        "read_root",
-                        "attach",
-                        "write_root",
-                    ])
-                });
-        }
-        if path == "provenant dispatch" {
-            command = command.mut_arg("concurrency", |arg| arg.catalog_requires("manifest"));
-        }
-        if path == "provenant run" {
-            command = command
-                .mut_arg("worktree", |arg| arg.help("Bind an existing preset writer worktree; single tasks can create an owned worktree for a missing branch name"))
-                .mut_arg("wait", |arg| arg.default_value("240"))
-                .mut_arg("branch", |arg| {
-                    arg.catalog_clear_requires()
-                        .help("Create or reuse an owned writer worktree for this branch, locally or on --host")
-                });
-        }
-        if !advanced
-            && matches!(
-                path.as_str(),
-                "provenant run" | "provenant dispatch" | "provenant retry"
-            )
-        {
+        if !advanced && matches!(path.as_str(), "provenant retry") {
             let visible = [
                 "full",
                 "json",
@@ -608,6 +492,9 @@ fn build_model(passive: bool, advanced: bool) -> clap::Command {
                 "brief",
                 "node",
                 "extend",
+                "tier",
+                "over",
+                "file",
                 "preset",
                 "preset_set",
                 "preset_params_file",
@@ -740,65 +627,6 @@ fn validate(inv: &Invocation) -> Result<(), CliError> {
                 );
             }
             route_valid(&resolve.request)?
-        }
-        Command::Dispatch(dispatch) | Command::Run(dispatch) => {
-            if dispatch.preset.is_none()
-                && (!dispatch.preset_set.is_empty()
-                    || dispatch.preset_params_file.is_some()
-                    || dispatch.preset_plan.is_some()
-                    || dispatch.fresh)
-            {
-                return invalid("--set, --params-file, --plan and --fresh require --preset");
-            }
-            if matches!(inv.command, Command::Dispatch(_))
-                && dispatch.input.manifest.is_none()
-                && dispatch.route.model.is_none()
-                && dispatch.route.route.is_none()
-            {
-                return invalid("dispatch needs a model, route or manifest");
-            }
-            if matches!(inv.command, Command::Dispatch(_)) && dispatch.preset.is_some() {
-                return invalid("--preset is supported by run, not dispatch");
-            }
-            let access = &dispatch.access;
-            route_valid(&dispatch.route)?;
-            let writer_target = access.worktree.is_some()
-                || dispatch.branch.is_some()
-                || dispatch.worktree_branch.is_some();
-            let explicit_reader_target = matches!(access.mode, Some(Mode::ReadOnly))
-                && access.worktree.is_some()
-                && dispatch.branch.is_none()
-                && dispatch.worktree_branch.is_none();
-            if matches!(inv.command, Command::Dispatch(_))
-                && (access.mode() == Mode::WorktreeWrite) != writer_target
-                && !explicit_reader_target
-            {
-                return invalid(
-                    "a writer needs --worktree, --worktree-branch, or a peer --branch; a reader may name --worktree with --mode read-only",
-                );
-            }
-            if access.mode() == Mode::WorktreeWrite && !dispatch.route.fallback.is_empty() {
-                return invalid("writers cannot use fallback models");
-            }
-            if dispatch.concurrency.is_some()
-                && dispatch.input.manifest.is_none()
-                && dispatch.preset.is_none()
-            {
-                return invalid("--concurrency requires --manifest or --preset");
-            }
-            if access.attach.len() > 32
-                || access.read_root.len() > 32
-                || access.write_root.len() > 32
-                || access.capability.len() > 16
-                || access.no_capability.len() > 16
-            {
-                return invalid(
-                    "at most 32 read roots, 32 write roots and 16 capabilities are allowed",
-                );
-            }
-        }
-        Command::Lanes(lanes) if lanes.id.len() > 100 => {
-            return invalid("at most 100 IDs are allowed");
         }
         Command::Reconcile(reconcile) if reconcile.id.len() > 100 => {
             return invalid("at most 100 IDs are allowed");
@@ -1003,24 +831,11 @@ fn constraints(path: &str) -> Vec<String> {
         ];
     }
     let values: &[&str] = match path {
-        "provenant dispatch" => &[
-            "single prompt requires exactly one of model or route",
-            "operation-id is generated when omitted; supply it for planned retries",
-            "manifest conflicts with per-task route, access and metadata",
-            "concurrency requires manifest",
-            "worktree, or a peer writer's branch, is required with, and only valid for, worktree-write",
-            "fallback conflicts with a writer and has at most two distinct models",
-            "prompt and manifest inputs are at most 1 MiB",
-        ],
         "provenant run" => &[
-            "single prompt selects a preset by rules when model, route and preset are omitted",
-            "operation-id is generated when omitted; supply it for planned retries",
-            "manifest conflicts with per-task route, access and metadata",
-            "concurrency requires manifest or preset",
-            "single-task worktree, or a peer writer's branch, requires worktree-write",
-            "preset worktree bindings require an existing registered worktree",
-            "fallback conflicts with a writer and has at most two distinct models",
-            "prompt and manifest inputs are at most 1 MiB",
+            "a brief uses task by default; --use selects a layered template",
+            "--set binds template parameters using TOML values",
+            "--file accepts a graph document or a plain text brief",
+            "inside a lane, work joins the calling node's graph as a child",
         ],
         "provenant route resolve" => &[
             "exactly one of NAME, model or route",
@@ -1062,6 +877,16 @@ fn constraints(path: &str) -> Vec<String> {
 #[allow(clippy::panic)]
 mod tests {
     use super::*;
+    #[derive(clap::Parser)]
+    struct DispatchFixture {
+        #[command(flatten)]
+        request: Dispatch,
+    }
+    fn dispatch_fixture(words: &[&str]) -> Dispatch {
+        use clap::Parser;
+        DispatchFixture::try_parse_from(words).unwrap().request
+    }
+
     #[test]
     fn catalogue_numeric_bounds_match_parser_ranges() {
         let model = expanded_model();
@@ -1140,11 +965,6 @@ mod tests {
     fn published_non_numeric_bounds_and_weight_are_preserved() {
         let catalogue = catalog(&expanded_model());
         for (path, name, bounds) in [
-            ("provenant run", "fallback", (0, 2)),
-            ("provenant run", "read_root", (0, 32)),
-            ("provenant run", "attach", (0, 32)),
-            ("provenant run", "write_root", (0, 32)),
-            ("provenant run", "capability", (0, 16)),
             ("provenant stop", "reason", (0, 256)),
             ("provenant route set", "weight", (0, 100)),
         ] {
@@ -1201,69 +1021,6 @@ mod tests {
         }
     }
     #[test]
-    fn preset_compatibility_table_matches_clap_conflicts() {
-        let model = expanded_model();
-        for command in ["dispatch"] {
-            let command = model.find_subcommand(command).unwrap();
-            let preset = command
-                .get_arguments()
-                .find(|arg| arg.get_id() == "preset")
-                .unwrap();
-            let conflicts = command.get_arg_conflicts_with(preset);
-            for id in PRESET_INCOMPATIBLE {
-                assert!(conflicts.iter().any(|arg| arg.get_id() == *id), "{id}");
-            }
-            assert_eq!(conflicts.len(), PRESET_INCOMPATIBLE.len());
-        }
-    }
-    #[test]
-    fn task_id_is_compatible_with_explicit_and_automatic_presets() {
-        // Experiments assign arms by task id, so both preset paths accept it.
-        let task = ["--task-id", "11111111111111111111111111111111"];
-        let automatic = valid(&["run", "--prompt-file", "brief.md", task[0], task[1]]);
-        assert!(automatic.preset_incompatible_flags.is_empty());
-        valid(&[
-            "run",
-            "--prompt-file",
-            "brief.md",
-            "--preset",
-            "single",
-            task[0],
-            task[1],
-        ]);
-    }
-    #[test]
-    fn graph_run_accepts_launch_controls_with_a_template() {
-        for (flag, value) in [
-            ("--provider-timeout", "3600"),
-            ("--mode", "read-only"),
-            ("--operation-id", "chosen"),
-        ] {
-            let invocation = valid(&["run", "--prompt-file", "brief.md", flag, value]);
-            assert!(
-                invocation
-                    .preset_incompatible_flags
-                    .iter()
-                    .any(|item| item == flag),
-                "{flag}"
-            );
-            valid(&[
-                "run",
-                "--prompt-file",
-                "brief.md",
-                "--preset",
-                "single",
-                flag,
-                value,
-            ]);
-        }
-        assert!(
-            valid(&["run", "--prompt-file", "brief.md"])
-                .preset_incompatible_flags
-                .is_empty()
-        );
-    }
-    #[test]
     fn catalogue_paths_exist_in_command_model() {
         let model = expanded_model();
         for entry in catalog(&model).commands {
@@ -1318,7 +1075,7 @@ mod tests {
             valid(&["steer", id, "--text-stdin"]);
             valid(&["stop", id]);
             valid(&["retry", id]);
-            let Command::Resume(retry) = valid(&[
+            let Command::Retry(retry) = valid(&[
                 "retry",
                 id,
                 "--node",
@@ -1338,7 +1095,7 @@ mod tests {
         }
         let long_node = "n".repeat(200);
         valid(&["output", &long_node]);
-        let Command::Cancel(stop) = valid(&["stop", "DEADBEEF"]).command else {
+        let Command::Stop(stop) = valid(&["stop", "DEADBEEF"]).command else {
             panic!("stop");
         };
         assert_eq!(stop.target.selection.as_deref(), Some("DEADBEEF"));
@@ -1356,70 +1113,94 @@ mod tests {
 
     #[test]
     fn core_path_help_and_defaults() {
-        for command in ["run", "dispatch"] {
-            let ParseOutcome::Help { text, .. } = parsed(&[command, "--help"]) else {
-                panic!("{command} help");
-            };
-            assert!(text.contains("--mode"), "{text}");
-        }
+        let expected = [
+            "run",
+            "status",
+            "output",
+            "steer",
+            "stop",
+            "retry",
+            "edit",
+            "templates",
+            "land",
+            "quota",
+        ];
         for words in [&[][..], &["help"][..]] {
-            let ParseOutcome::Help { text, .. } = parsed(words) else {
-                panic!("core help");
+            let ParseOutcome::Help { text, catalog, .. } = parsed(words) else {
+                panic!("core help")
             };
-            for verb in ["run", "status", "land", "quota", "install", "help --all"] {
-                assert!(text.contains(verb), "{text}");
-            }
-            assert!(!text.contains("dispatch"), "{text}");
-            assert!(!text.contains("telemetry"), "{text}");
+            let actual = catalog
+                .commands
+                .iter()
+                .map(|entry| entry.command.strip_prefix("provenant "))
+                .flatten()
+                .filter(|path| !path.contains(' ') && *path != "help")
+                .collect::<std::collections::BTreeSet<_>>();
+            assert_eq!(actual, expected.into_iter().collect());
+            assert!(text.contains("help --all"));
         }
-        valid(&[
-            "run",
-            "--prompt-file",
-            "brief.md",
-            "--route",
-            "senior",
-            "--wait",
-            "30m",
-        ]);
-        valid(&[
-            "run",
-            "--prompt-stdin",
-            "--model",
-            "codex/id",
-            "--wait",
-            "3600s",
-        ]);
-        let ParseOutcome::Help { catalog, .. } = parsed(&["help", "--json"]) else {
-            panic!("catalog");
-        };
-        assert!(
-            catalog
-                .commands
-                .iter()
-                .any(|entry| entry.command == "provenant run")
-        );
-        assert!(
-            !catalog
-                .commands
-                .iter()
-                .any(|entry| entry.command == "provenant dispatch")
-        );
+        for command in ["dispatch", "review", "lanes", "resume", "cancel", "preset"] {
+            invalid(&[command]);
+        }
+        invalid(&["fabric", "graph", "status", "example"]);
         valid(&["status"]);
-        valid(&["status", &"a".repeat(32)]);
-        valid(&["status", "preset-8393dcc0aeff699d582703992f0a8de7"]);
-        valid(&["status", "abcdef12", "--all"]);
-        invalid(&["lanes", "--all", "--id", "abcdef12"]);
-        valid(&["status", "--all", "--json"]);
         valid(&["land", "1947"]);
         valid(&["quota"]);
-        valid(&["stop", &"a".repeat(32)]);
-        valid(&["retry", &"a".repeat(32), "--prompt-stdin"]);
         assert!(matches!(
             parsed(&["help", "--all"]),
             ParseOutcome::Help { .. }
         ));
-        invalid(&["pr", "merge", "1947", "--head", &"a".repeat(40)]);
-        invalid(&["pr", "land", "1947", "--head", &"a".repeat(40)]);
+    }
+
+    #[test]
+    fn graph_run_and_template_controls_parse() {
+        let Command::Run(request) = valid(&[
+            "run",
+            "Inspect the code",
+            "--use",
+            "explore",
+            "--tier",
+            "junior",
+            "--over",
+            "cli",
+            "--over",
+            "runtime",
+            "--set",
+            "limit=3",
+            "--explain",
+            "--wait=30m",
+        ])
+        .command
+        else {
+            panic!("run")
+        };
+        assert_eq!(request.brief.as_deref(), Some("Inspect the code"));
+        assert_eq!(request.template.as_deref(), Some("explore"));
+        assert_eq!(request.tier.as_deref(), Some("junior"));
+        assert_eq!(request.over, ["cli", "runtime"]);
+        assert_eq!(request.set, ["limit=3"]);
+        assert!(request.explain);
+        assert_eq!(request.wait, Some(1800));
+        valid(&["run", "--file", "work.toml", "--explain"]);
+        invalid(&["run", "--preset", "task"]);
+        valid(&["status", "--stats", "--by", "tier"]);
+        valid(&["status", "--stats", "--by", "template"]);
+        invalid(&["status", "--by", "tier"]);
+        invalid(&["status", "--stats", "--by", "node"]);
+        valid(&["templates"]);
+        valid(&["templates", "review.security", "--file", "inline.toml"]);
+        valid(&["edit", "example", "--file", "patch.toml"]);
+        invalid(&["edit", "example"]);
+        for flag in [
+            "--preset",
+            "--prompt-file",
+            "--model",
+            "--route",
+            "--manifest",
+            "--plan",
+        ] {
+            invalid(&["run", flag, "example"]);
+        }
     }
     #[test]
     fn expanded_help_catalogue_describes_commands_and_requirements() {
@@ -1427,25 +1208,23 @@ mod tests {
             panic!("help");
         };
         assert!(text.contains("provenant help COMMAND"));
-        for path in ["provenant run", "provenant dispatch"] {
-            let command = catalog.commands.iter().find(|c| c.command == path).unwrap();
+        let run = catalog
+            .commands
+            .iter()
+            .find(|command| command.command == "provenant run")
+            .unwrap();
+        assert!(
+            run.description
+                .as_deref()
+                .is_some_and(|text| !text.is_empty())
+        );
+        for name in [
+            "brief", "template", "tier", "over", "set", "file", "explain", "wait",
+        ] {
             assert!(
-                command
-                    .description
-                    .as_deref()
-                    .is_some_and(|s| !s.is_empty())
+                run.arguments.iter().any(|argument| argument.name == name),
+                "{name}"
             );
-            for (name, expected) in [
-                ("preset_set", vec!["preset"]),
-                ("preset_params_file", vec!["preset"]),
-                ("preset_plan", vec!["preset"]),
-                ("fresh", vec!["preset"]),
-                ("preset", vec!["prompt_file"]),
-            ] {
-                let arg = command.arguments.iter().find(|a| a.name == name).unwrap();
-                assert_eq!(arg.requires, expected);
-                assert!(arg.description.as_deref().is_some_and(|s| !s.is_empty()));
-            }
         }
         let status = catalog
             .commands
@@ -1468,33 +1247,6 @@ mod tests {
                 .constraints
                 .iter()
                 .any(|c| c.contains("newline-delimited"))
-        );
-        let dispatch = catalog
-            .commands
-            .iter()
-            .find(|c| c.command == "provenant dispatch")
-            .unwrap();
-        assert_eq!(
-            dispatch
-                .arguments
-                .iter()
-                .find(|a| a.name == "branch")
-                .unwrap()
-                .requires,
-            ["host", "base"]
-        );
-        let run = catalog
-            .commands
-            .iter()
-            .find(|c| c.command == "provenant run")
-            .unwrap();
-        assert!(
-            run.arguments
-                .iter()
-                .find(|a| a.name == "branch")
-                .unwrap()
-                .requires
-                .is_empty()
         );
     }
     #[test]
@@ -1652,10 +1404,6 @@ mod tests {
                 vec!["land", "2199", "--wait", "5m"],
                 "provenant land 2199 --wait=5m",
             ),
-            (
-                vec!["dispatch", "--account"],
-                "provenant run --prompt-file brief.md --route senior --account ACCOUNT",
-            ),
             (vec!["pr", "land", "2199"], "provenant land 2199 --wait"),
         ] {
             let ParseOutcome::Invalid { error, .. } = parsed(&words) else {
@@ -1706,53 +1454,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn worktree_access_explicit_read_only_is_not_promoted_to_a_writer() {
-        // Regression: `--mode read-only --worktree` was rewritten to
-        // worktree-write, so a read-only-policy model was refused as a write.
-        let reader = valid(&[
-            "run",
-            "--model",
-            "agy/gemini-3.8-flash",
-            "--mode",
-            "read-only",
-            "--worktree",
-            "/fixture/writer",
-            "--prompt-file",
-            "p.md",
-        ]);
-        let Command::Run(request) = reader.command else {
-            panic!("run")
-        };
-        assert_eq!(request.access.mode(), Mode::ReadOnly);
-        let inv = valid(&[
-            "run",
-            "--model",
-            "agy/gemini-3.8-flash",
-            "--worktree",
-            "/fixture/writer",
-            "--prompt-file",
-            "p.md",
-        ]);
-        let Command::Run(request) = inv.command else {
-            panic!("run")
-        };
-        assert_eq!(request.access.mode(), Mode::WorktreeWrite);
-        let inv = valid(&[
-            "run",
-            "--model",
-            "agy/gemini-3.8-flash",
-            "--mode",
-            "read-only",
-            "--prompt-file",
-            "p.md",
-        ]);
-        let Command::Run(request) = inv.command else {
-            panic!("run")
-        };
-        assert_eq!(request.access.mode(), Mode::ReadOnly);
-        assert!(request.access.worktree.is_none());
-    }
     #[test]
     fn writing_paths_and_private_descriptors_are_bounded() {
         let mut words = vec!["check", "writing"];
@@ -1881,154 +1582,6 @@ mod tests {
         invalid(&["disk", "report", "--dry-run"]);
     }
     #[test]
-    fn template_arguments_require_run_and_prompt() {
-        valid(&[
-            "run",
-            "--preset",
-            "single",
-            "--prompt-file",
-            "brief",
-            "--explain",
-            "--set",
-            "parameters.route='utility'",
-        ]);
-        valid(&["preset", "list"]);
-        valid(&["preset", "show", "single"]);
-        valid(&["preset", "explain"]);
-        valid(&[
-            "preset",
-            "explain",
-            "--risk",
-            "critical",
-            "--kind",
-            "code",
-            "--path",
-            "src/lib.rs",
-            "--underspecified",
-        ]);
-        valid(&[
-            "run",
-            "--prompt-file",
-            "brief",
-            "--risk-tier",
-            "critical",
-            "--task-kind",
-            "code",
-            "--path",
-            "src/lib.rs",
-        ]);
-        invalid(&["run", "--preset", "single"]);
-        valid(&["run", "--prompt-file", "brief", "--explain"]);
-        valid(&[
-            "run",
-            "--preset",
-            "single",
-            "--prompt-file",
-            "brief",
-            "--route",
-            "senior",
-        ]);
-        invalid(&["dispatch", "--preset", "single", "--prompt-file", "brief"]);
-        invalid(&[
-            "run",
-            "--prompt-file",
-            "brief",
-            "--route",
-            "senior",
-            "--set",
-            "parameters.route=utility",
-        ]);
-        for input in [["--prompt-stdin", ""], ["--manifest", "tasks.json"]] {
-            let mut args = vec!["run", "--use", "task", "--prompt-file", "brief", input[0]];
-            if !input[1].is_empty() {
-                args.push(input[1]);
-            }
-            invalid(&args);
-        }
-    }
-    #[test]
-    fn preset_runs_keep_an_explicit_network_restriction() {
-        for args in [
-            &[
-                "run",
-                "--preset",
-                "single",
-                "--prompt-file",
-                "brief",
-                "--network",
-                "off",
-            ][..],
-            &["run", "--prompt-file", "brief", "--network", "off"][..],
-        ] {
-            let Command::Run(request) = valid(args).command else {
-                panic!("run");
-            };
-            assert!(matches!(request.access.network, Some(Switch::Off)));
-        }
-    }
-    #[test]
-    fn preset_runs_accept_graph_controls_without_dispatch_writer_mode() {
-        let invocation = valid(&[
-            "run",
-            "--preset",
-            "generator-evaluator",
-            "--prompt-file",
-            "brief",
-            "--worktree",
-            "/fixture/writer",
-            "--read-root",
-            "/fixture/source",
-            "--read-root",
-            "/fixture/other",
-            "--attach",
-            "/fixture/first.png",
-            "--attach",
-            "/fixture/second.png",
-            "--wait",
-            "30m",
-            "--concurrency",
-            "3",
-        ]);
-        let Command::Run(request) = invocation.command else {
-            panic!("run")
-        };
-        assert_eq!(request.wait, Some(1800));
-        assert_eq!(request.concurrency, Some(3));
-        assert_eq!(request.access.mode(), Mode::ReadOnly);
-        assert_eq!(
-            request.access.worktree,
-            Some(std::path::PathBuf::from("/fixture/writer"))
-        );
-        assert_eq!(request.access.read_root.len(), 2);
-        assert_eq!(
-            request.access.attach,
-            [
-                std::path::PathBuf::from("/fixture/first.png"),
-                std::path::PathBuf::from("/fixture/second.png")
-            ]
-        );
-        for concurrency in ["0", "17"] {
-            invalid(&[
-                "run",
-                "--preset",
-                "single",
-                "--prompt-file",
-                "brief",
-                "--concurrency",
-                concurrency,
-            ]);
-        }
-        invalid(&[
-            "dispatch",
-            "--preset",
-            "single",
-            "--prompt-file",
-            "brief",
-            "--wait",
-            "10s",
-        ]);
-    }
-    #[test]
     fn run_refuses_adapter_unsupported_flags_before_side_effects() {
         // Models are catalogued, so an effort is refused only by the adapter
         // (cursor) or by the catalogue entry, which records no effort (opencode).
@@ -2039,8 +1592,8 @@ mod tests {
             ("opencode/opencode-go/glm-5.3-flash", "high", true),
             ("cursor/gpt-5.3-codex-low", "high", true),
         ] {
-            let invocation = valid(&[
-                "run",
+            let request = dispatch_fixture(&[
+                "fixture",
                 "--prompt-stdin",
                 "--model",
                 model,
@@ -2049,9 +1602,6 @@ mod tests {
                 "--worktree-branch",
                 "feat/x",
             ]);
-            let Command::Run(request) = invocation.command else {
-                panic!("run")
-            };
             let result = run::check_flag_capabilities(&request, None);
             assert_eq!(result.is_err(), refused, "{model}");
             if let Err(fail) = result {
@@ -2073,10 +1623,7 @@ mod tests {
             .unwrap();
         };
         write("cursor/m");
-        let invocation = valid(&["run", "--manifest", path.to_str().unwrap()]);
-        let Command::Run(request) = invocation.command else {
-            panic!("run")
-        };
+        let request = dispatch_fixture(&["fixture", "--manifest", path.to_str().unwrap()]);
         let fail = run::check_flag_capabilities(&request, None).unwrap_err();
         assert_eq!(fail.kind.code(), "UNSUPPORTED");
     }
@@ -2086,286 +1633,6 @@ mod tests {
         assert!(run::pool_effort_refusal(&["cursor"], "high").is_some());
         assert!(run::pool_effort_refusal(&["cursor", "unregistered-provider"], "high").is_none());
         assert!(run::pool_effort_refusal(&[], "high").is_none());
-    }
-    #[test]
-    fn run_accepts_dispatch_effort_and_network() {
-        let invocation = valid(&[
-            "run",
-            "--prompt-stdin",
-            "--model",
-            "codex/id",
-            "--effort",
-            "high",
-            "--network",
-            "off",
-        ]);
-        let Command::Run(request) = invocation.command else {
-            panic!("run")
-        };
-        assert_eq!(request.route.effort.as_deref(), Some("high"));
-        assert!(matches!(request.access.network, Some(Switch::Off)));
-        invalid(&[
-            "run",
-            "--prompt-stdin",
-            "--model",
-            "codex/id",
-            "--network",
-            "invalid",
-        ]);
-    }
-    #[test]
-    fn task_title_flags_are_optional_and_per_task() {
-        for verb in ["run", "dispatch"] {
-            let invocation = valid(&[
-                verb,
-                "--prompt-stdin",
-                "--model",
-                "codex/id",
-                "--title",
-                "Review changes",
-            ]);
-            let request = match invocation.command {
-                Command::Run(request) | Command::Dispatch(request) => request,
-                _ => panic!("submission"),
-            };
-            assert_eq!(request.title.as_deref(), Some("Review changes"));
-            invalid(&[
-                verb,
-                "--manifest",
-                "tasks.json",
-                "--title",
-                "Review changes",
-            ]);
-        }
-    }
-    #[test]
-    fn dispatch_base_is_optional_without_a_peer_branch() {
-        for input in [
-            vec!["--prompt-stdin", "--model", "codex/id"],
-            vec!["--manifest", "tasks.json"],
-        ] {
-            let mut words = vec![
-                "dispatch",
-                "--operation-id",
-                "git-context",
-                "--base",
-                "main",
-            ];
-            words.extend(input);
-            let Command::Dispatch(request) = valid(&words).command else {
-                panic!("dispatch")
-            };
-            assert_eq!(request.base.as_deref(), Some("main"));
-            assert!(request.branch.is_none());
-        }
-        invalid(&[
-            "dispatch",
-            "--prompt-stdin",
-            "--operation-id",
-            "git-context",
-            "--model",
-            "codex/id",
-            "--host",
-            "peer",
-            "--mode",
-            "worktree-write",
-            "--branch",
-            "feat/context",
-        ]);
-    }
-    #[test]
-    fn manifest_and_writer_authority_do_not_mix() {
-        valid(&[
-            "route",
-            "resolve",
-            "--model",
-            "opencode/openrouter/anthropic/model",
-        ]);
-        valid(&[
-            "dispatch",
-            "--manifest",
-            "tasks.json",
-            "--operation-id",
-            "op",
-            "--concurrency",
-            "8",
-        ]);
-        let invocation = valid(&[
-            "dispatch",
-            "--manifest",
-            "tasks.json",
-            "--operation-id",
-            "op",
-            "--provider-timeout",
-            "1",
-        ]);
-        let Command::Dispatch(request) = invocation.command else {
-            panic!("dispatch")
-        };
-        assert_eq!(request.provider_timeout, 1);
-        // `--network` is the default a manifest task's `network` overrides.
-        valid(&[
-            "dispatch",
-            "--manifest",
-            "tasks.json",
-            "--operation-id",
-            "op",
-            "--network",
-            "off",
-        ]);
-        for args in [
-            vec!["--model", "codex/id"],
-            vec!["--mode", "read-only"],
-            vec!["--effort", "high"],
-        ] {
-            let mut words = vec![
-                "dispatch",
-                "--manifest",
-                "tasks.json",
-                "--operation-id",
-                "op",
-            ];
-            words.extend(args);
-            invalid(&words);
-        }
-        let base = [
-            "dispatch",
-            "--prompt-stdin",
-            "--operation-id",
-            "op",
-            "--model",
-            "codex/id",
-        ];
-        let inv = valid(&base);
-        let Command::Dispatch(request) = inv.command else {
-            panic!("dispatch")
-        };
-        assert_eq!(request.provider_timeout, 3600);
-        assert_eq!(request.concurrency, None);
-        let mut words = base.to_vec();
-        words.extend(["--mode", "worktree-write"]);
-        invalid(&words);
-        words.extend(["--worktree", "/fixture/worktree"]);
-        let inv = valid(&words);
-        let Command::Dispatch(request) = inv.command else {
-            panic!("dispatch")
-        };
-        assert_eq!(request.provider_timeout, 10800);
-        words.extend(["--fallback", "claude/id"]);
-        invalid(&words);
-        let mut words = base.to_vec();
-        words.extend(["--worktree", "/fixture"]);
-        invalid(&words);
-        let mut words = base.to_vec();
-        words.extend(["--concurrency", "4"]);
-        invalid(&words);
-        let mut words = base.to_vec();
-        words.extend(["--fallback", "a/id,a/id"]);
-        invalid(&words);
-        let mut words = base.to_vec();
-        words.extend(["--fallback", "a/id,b/id,c/id"]);
-        invalid(&words);
-        let mut words = base.to_vec();
-        words.extend(["--fallback", "a/id", "--fallback", "b/id"]);
-        invalid(&words);
-    }
-
-    #[test]
-    fn lifecycle_flags_parse_and_refuse_ambiguous_authority() {
-        let base = [
-            "dispatch",
-            "--prompt-stdin",
-            "--operation-id",
-            "owned",
-            "--model",
-            "codex/id",
-            "--mode",
-            "worktree-write",
-            "--worktree-branch",
-            "feat/owned",
-        ];
-        let mut words = base.to_vec();
-        words.extend(["--base", "main", "--deliver", "integrate:integration"]);
-        let Command::Dispatch(dispatch) = valid(&words).command else {
-            panic!("dispatch");
-        };
-        assert_eq!(dispatch.worktree_branch.as_deref(), Some("feat/owned"));
-        assert_eq!(
-            dispatch.deliver,
-            Some(provenant_records::run::DeliveryMode::Integrate(
-                "integration".into()
-            ))
-        );
-        for flags in [
-            vec!["--worktree", "existing"],
-            vec!["--host", "peer"],
-            vec!["--deliver", "integrate:../main"],
-        ] {
-            let mut words = base.to_vec();
-            words.extend(flags);
-            invalid(&words);
-        }
-        invalid(&["worktree", "adopt", "../native", "--owner", "manual"]);
-        let Command::Lane(Lane::Deliver { accept_review, .. }) = valid(&[
-            "lane",
-            "deliver",
-            "11111111111111111111111111111111",
-            "--deliver",
-            "pr",
-            "--accept-review",
-        ])
-        .command
-        else {
-            panic!("lane deliver");
-        };
-        assert!(accept_review);
-        let Command::Output(output) = valid(&[
-            "output",
-            "11111111111111111111111111111111",
-            "--part",
-            "transcript",
-            "--to",
-            "saved.txt",
-        ])
-        .command
-        else {
-            panic!("output --to");
-        };
-        assert_eq!(output.to, Some(std::path::PathBuf::from("saved.txt")));
-        valid(&[
-            "output",
-            "11111111111111111111111111111111",
-            "--path",
-            "--part",
-            "stderr",
-        ]);
-        invalid(&[
-            "output",
-            "11111111111111111111111111111111",
-            "--path",
-            "--to",
-            "saved.txt",
-        ]);
-        invalid(&[
-            "output",
-            "11111111111111111111111111111111",
-            "--path",
-            "--tail",
-            "5",
-        ]);
-        let Command::Resume(resume) = valid(&[
-            "retry",
-            "11111111111111111111111111111111",
-            "--operation-id",
-            "fresh",
-            "--prompt-stdin",
-            "--no-fallback",
-        ])
-        .command
-        else {
-            panic!("retry");
-        };
-        assert!(resume.no_fallback);
     }
     #[test]
     fn control_commands_require_piped_text_and_a_channel() {
@@ -2498,30 +1765,6 @@ mod tests {
                 vec!["worktree", "remove", "--merged", "--integration", "main"],
                 "--branch",
                 100,
-            ),
-            (
-                vec![
-                    "dispatch",
-                    "--prompt-stdin",
-                    "--operation-id",
-                    "op",
-                    "--model",
-                    "a/id",
-                ],
-                "--read-root",
-                32,
-            ),
-            (
-                vec![
-                    "dispatch",
-                    "--prompt-stdin",
-                    "--operation-id",
-                    "op",
-                    "--model",
-                    "a/id",
-                ],
-                "--capability",
-                16,
             ),
         ] {
             let id = "a".repeat(32);

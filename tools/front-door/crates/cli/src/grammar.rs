@@ -19,8 +19,6 @@ pub struct Invocation {
     pub command: Command,
     /// Space-separated subcommand path, such as `quota tick`.
     pub leaf: String,
-    /// Explicit flags that cannot be applied to an automatically selected preset.
-    pub preset_incompatible_flags: Vec<String>,
 }
 #[derive(Debug, Default)]
 pub struct Globals {
@@ -63,13 +61,10 @@ pub enum Command {
         root: u32,
     },
     /// Post a human decision, assumption or question
-    #[command(add = crate::metadata::CoreCommand(4, "provenant ask --file request.json --session SESSION --json"))]
     Ask(crate::inbox::Ask),
     /// List, inspect, close and acknowledge human requests
-    #[command(add = crate::metadata::CoreCommand(5, "provenant inbox --json"))]
     Inbox(Box<crate::inbox::Inbox>),
     /// Answer a request using the revision you saw
-    #[command(add = crate::metadata::CoreCommand(6, "provenant help answer"))]
     Answer(Box<crate::inbox::Answer>),
     /// Register and list provider accounts
     #[command(subcommand)]
@@ -86,7 +81,6 @@ pub enum Command {
     #[command(subcommand)]
     Fabric(crate::fabric::Fabric),
     /// Install the release for chosen harnesses
-    #[command(add = crate::metadata::CoreCommand(7, "provenant install"))]
     Install(Install),
     /// Upgrade the recorded installation on this host and Fabric peers
     Upgrade(Upgrade),
@@ -95,19 +89,14 @@ pub enum Command {
     /// Inspect and edit model routing
     #[command(subcommand)]
     Route(crate::route::Route),
-    /// List and inspect pipeline presets
-    #[command(subcommand)]
-    Preset(Preset),
-    /// Dispatch, wait and read the result
-    #[command(add = crate::metadata::CoreCommand(0, "provenant run --prompt-file brief.md --route senior"))]
-    Run(Box<Dispatch>),
-    /// Dispatch and collect a configured review shape
-    Review(Review),
+    /// Start work from a template or graph document
+    #[command(add = crate::metadata::CoreCommand(0, "provenant run 'Meet the acceptance criteria' --use task"))]
+    Run(Box<GraphRunArgs>),
     /// Show graph, node and attempt status
     #[command(add = crate::metadata::CoreCommand(1, "provenant status"))]
     Status(Status),
     /// Merge on green CI and prune the merged worktree
-    #[command(add = crate::metadata::CoreCommand(2, "provenant land 1947 --wait"))]
+    #[command(add = crate::metadata::CoreCommand(8, "provenant land 1947 --wait"))]
     Land {
         /// Pull request numbers in landing order
         #[arg(catalog_u64_range = 1..)]
@@ -134,22 +123,24 @@ pub enum Command {
         #[arg(long)]
         explain: bool,
     },
-    /// Start a provider lane or manifest of lanes
-    Dispatch(Box<Dispatch>),
-    /// List lanes or wait on their state
-    #[command(skip)]
-    Lanes(Lanes),
     /// Read graph, node or attempt output
-    #[command(add = crate::metadata::CoreCommand(4, "provenant output ID"))]
+    #[command(add = crate::metadata::CoreCommand(2, "provenant output ID"))]
     Output(Output),
     /// Stop a graph, node or attempt subtree
-    #[command(name = "stop", add = crate::metadata::CoreCommand(6, "provenant stop ID"))]
-    Cancel(Cancel),
+    #[command(name = "stop", add = crate::metadata::CoreCommand(4, "provenant stop ID"))]
+    Stop(Cancel),
     /// Retry a graph, node or attempt
     #[command(name = "retry", add = crate::metadata::CoreCommand(5, "provenant retry ID"))]
-    Resume(Resume),
+    Retry(Resume),
     /// Queue a steering message for a lane when its provider supports control
+    #[command(add = crate::metadata::CoreCommand(3, "provenant steer ID --file message.md"))]
     Steer(crate::inbox::Steer),
+    /// Apply a patch to unstarted graph nodes
+    #[command(add = crate::metadata::CoreCommand(6, "provenant edit ID --file patch.json"))]
+    Edit(Edit),
+    /// List or show templates from all layers
+    #[command(add = crate::metadata::CoreCommand(7, "provenant templates"))]
+    Templates(Templates),
     /// Deliver a settled writer attempt
     #[command(subcommand)]
     Lane(Lane),
@@ -162,7 +153,7 @@ pub enum Command {
     #[command(subcommand)]
     Native(Native),
     /// Show and refresh provider quota
-    #[command(add = crate::metadata::CoreCommand(3, "provenant quota"))]
+    #[command(add = crate::metadata::CoreCommand(9, "provenant quota"))]
     Quota {
         #[command(subcommand)]
         command: Option<crate::quota::Quota>,
@@ -420,16 +411,15 @@ mod viewer_tests {
 
     #[test]
     fn dispatch_accepts_skill_location_requirement() {
-        let invocation = RawInvocation::try_parse_from([
-            "provenant",
-            "run",
-            "--require-skill-location",
-            "--prompt-stdin",
-        ])
-        .unwrap();
-        let Command::Run(dispatch) = invocation.command else {
-            panic!("expected run")
-        };
+        #[derive(clap::Parser)]
+        struct Fixture {
+            #[command(flatten)]
+            dispatch: Dispatch,
+        }
+        let dispatch =
+            Fixture::try_parse_from(["fixture", "--require-skill-location", "--prompt-stdin"])
+                .unwrap()
+                .dispatch;
         assert!(dispatch.require_skill_location);
     }
 
@@ -670,6 +660,33 @@ pub struct DispatchInput {
     #[arg(long)]
     pub manifest: Option<PathBuf>,
 }
+#[derive(Debug, Args)]
+pub struct GraphRunArgs {
+    /// Brief for the selected template
+    pub brief: Option<String>,
+    /// Select a layered template [default: task]
+    #[arg(long = "use")]
+    pub template: Option<String>,
+    /// Override the template's route tier
+    #[arg(long)]
+    pub tier: Option<String>,
+    /// Copy the node over named items, or a resolver such as @review-panel
+    #[arg(long, value_delimiter = ',')]
+    pub over: Vec<String>,
+    /// Bind a template parameter (NAME=TOML_VALUE); repeatable
+    #[arg(long = "set")]
+    pub set: Vec<String>,
+    /// Read a graph document (JSON or TOML), or a plain text brief
+    #[arg(long)]
+    pub file: Option<PathBuf>,
+    /// Explain the compiled graph without starting work
+    #[arg(long)]
+    pub explain: bool,
+    /// Wait for settlement (default 1 hour; use --wait=30m for a duration)
+    #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "1h", catalog_duration())]
+    pub wait: Option<u64>,
+}
+
 #[derive(Debug, Args)]
 #[command(group(clap::ArgGroup::new("writer_target").args(["worktree", "branch", "worktree_branch"])))]
 pub struct Dispatch {
@@ -1701,6 +1718,12 @@ pub(crate) fn duration_seconds(value: &str) -> Result<u64, &'static str> {
 }
 #[derive(Debug, Args)]
 pub struct Status {
+    /// Report attempt efficiency without counting composite aggregates
+    #[arg(long, conflicts_with = "wait")]
+    pub stats: bool,
+    /// Group efficiency by requested tier or template
+    #[arg(long, requires = "stats", value_parser = ["tier", "template"], default_value = "template")]
+    pub by: String,
     /// Wait for mixed targets (no value uses domains.wait.timeout_seconds)
     #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "configured", catalog_status_wait(), conflicts_with_all = ["all", "cursor"])]
     pub wait: Option<u64>,
@@ -1732,4 +1755,21 @@ fn parse_landing_tier(value: &str) -> Result<String, String> {
     ))
     .map(|_| value.to_owned())
     .map_err(|_| "expected routine, substantial, crucial or terminal".into())
+}
+
+#[derive(Debug, Args)]
+pub struct Edit {
+    /// Graph ID
+    pub id: String,
+    /// Patch document (JSON or TOML)
+    #[arg(long)]
+    pub file: PathBuf,
+}
+#[derive(Debug, Args)]
+pub struct Templates {
+    /// Template to show; omit to list effective templates
+    pub name: Option<String>,
+    /// Document containing inline templates (JSON or TOML)
+    #[arg(long)]
+    pub file: Option<PathBuf>,
 }

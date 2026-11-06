@@ -310,7 +310,7 @@ fn production_plain_run_is_one_task_node() {
 
 #[test]
 fn production_plain_run_keeps_route_access_and_attempt_controls() {
-    let parsed = provenant_cli::parse(
+    let request = dispatch_fixture(
         [
             "run",
             "--prompt-file",
@@ -336,12 +336,6 @@ fn production_plain_run_keeps_route_access_and_attempt_controls() {
         .into_iter()
         .map(Into::into),
     );
-    let provenant_cli::ParseOutcome::Invocation(invocation) = parsed else {
-        panic!("parse failed: {parsed:?}");
-    };
-    let provenant_cli::Command::Run(request) = invocation.command else {
-        panic!("not run");
-    };
     let mut expansion =
         expand_for_run(&Layers::empty(), "single", "Do the task", &[], &[]).unwrap();
     super::super::bind_plain_run(&mut expansion, &request).unwrap();
@@ -359,17 +353,11 @@ fn production_plain_run_keeps_route_access_and_attempt_controls() {
 #[test]
 fn production_graph_identity_tracks_operation_not_brief() {
     let request = |key: &str| {
-        let parsed = provenant_cli::parse(
+        let request = dispatch_fixture(
             ["run", "--prompt-file", "brief", "--operation-id", key]
                 .into_iter()
                 .map(Into::into),
         );
-        let provenant_cli::ParseOutcome::Invocation(invocation) = parsed else {
-            panic!("invalid run");
-        };
-        let provenant_cli::Command::Run(request) = invocation.command else {
-            panic!("not run");
-        };
         request
     };
     let temp = tempfile::tempdir().unwrap();
@@ -443,21 +431,26 @@ build_heavy = true
         &["parameters.write_scope=['src/api']".into()],
     )
     .unwrap();
-    let parsed = provenant_cli::parse(
+    let request = dispatch_fixture(
         ["run", "--use", "custom-writer", "--prompt-file", "brief"]
             .into_iter()
             .map(Into::into),
     );
-    let provenant_cli::ParseOutcome::Invocation(invocation) = parsed else {
-        panic!("invalid run");
-    };
-    let provenant_cli::Command::Run(request) = invocation.command else {
-        panic!("not run");
-    };
     super::super::bind_plain_run(&mut expansion, &request).unwrap();
     let node = &expansion.document["nodes"][0];
     assert_eq!(node["worktree"], "/repo/writer");
     assert_eq!(node["write_scope"], json!(["src/api"]));
     assert_eq!(node["attempt"]["account"], "template-account");
     assert_eq!(node["attempt"]["build_heavy"], true);
+}
+
+fn dispatch_fixture(
+    args: impl IntoIterator<Item = std::ffi::OsString>,
+) -> Box<provenant_cli::Dispatch> {
+    #[derive(clap::Parser)]
+    struct Fixture {
+        #[command(flatten)]
+        request: provenant_cli::Dispatch,
+    }
+    Box::new(<Fixture as clap::Parser>::parse_from(args).request)
 }

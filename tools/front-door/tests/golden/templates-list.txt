@@ -1,0 +1,9 @@
+{
+  "templates": [
+    {
+      "layer": "bundled",
+      "name": "batch",
+      "template": {
+        "doc": "Implement named slices into one integration branch, then review it.",
+        "nodes": [
+(8 of 930 lines shown, 0 clipped to 200 bytes; 922 lines omitted; use --full for all detail)

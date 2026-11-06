@@ -396,7 +396,7 @@ fn call(
     Ok(result.structured_content)
 }
 #[test]
-fn lane_graph_status_reaches_the_owner() -> Result<(), Box<dyn Error>> {
+fn graph_documents_reach_the_shared_owner_unchanged() -> Result<(), Box<dyn Error>> {
     let temp = tempfile::tempdir()?;
     let base = temp.path().canonicalize()?;
     let mut inputs = RootInputs::new(base.join("home"), base.join("checkout"));
@@ -426,17 +426,28 @@ fn lane_graph_status_reaches_the_owner() -> Result<(), Box<dyn Error>> {
             "lane_coordination_refused"
         );
     }
-    let result = ToolCall::Graph(GraphInput::Status {
-        extra: Default::default(),
-        id: "g-test".into(),
-    })
-    .execute(&mut service, &CancelToken::new());
-    // FakeFacade's default graph owner is unavailable, proving status got
-    // through the lane guard without needing a graph run in the fixture.
-    assert!(matches!(
-        result,
-        Err(ServiceError::Facade(FacadeError::OwnerUnavailable))
-    ));
+    let trace = ToolCall::parse("fabric_output", json!({"op":"trace","id":"g-test"}))?;
+    assert_eq!(trace.name(), "fabric_output");
+    assert_eq!(
+        trace
+            .execute(&mut service, &CancelToken::new())?
+            .structured_content,
+        json!({"op":"output","id":"g-test","trace":true})
+    );
+    let status = json!({"op":"status","id":"g-test"});
+    assert_eq!(call(&mut service, "fabric_run", status.clone())?, status);
+    let child_request = json!({"op":"run","brief":"inspect parser","use":"explore","tier":"junior","wait_seconds":1});
+    assert_eq!(
+        call(&mut service, "fabric_run", child_request.clone())?,
+        child_request
+    );
+    service = service.with_lane_restrictions(false);
+    for request in [
+        json!({"op":"run","document":{"id":"graph","nodes":[{"id":"inspect","use":"task","brief":"inspect parser"}],"templates":{"local":{"brief":"local"}}}}),
+        json!({"op":"edit","id":"graph","patch":{"expected_revision":1,"idempotency_key":"edit-1","nodes":[{"id":"next","use":"local"}]}}),
+    ] {
+        assert_eq!(call(&mut service, "fabric_run", request.clone())?, request);
+    }
     Ok(())
 }
 #[test]
@@ -538,6 +549,14 @@ fn five_tools_reach_the_real_store_through_runtime_and_keep_fences_scoped()
 use crate::test_facade::local_inbox_owner;
 local_inbox_owner!(SubmitFacade);
 impl McpFacade for FakeFacade {
+    fn graph_document(
+        &mut self,
+        input: Value,
+        _: WaitBudget,
+        _: &CancelToken,
+    ) -> Result<Value, ServiceError> {
+        Ok(input)
+    }
     fn inbox_owner(
         &mut self,
         input: InboxInput,
