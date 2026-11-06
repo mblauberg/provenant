@@ -40,7 +40,9 @@ after the first review and is separate from CI's `max_iterations`. Each repair
 starts a fresh writer attempt. Prefer a route outside the reviewers' families;
 when none is available, continue on the available route and retain the separation
 warning. The raising lenses review the delta and relevant tests. Risk or scope
-growth requires a full panel re-plan through `@review-panel`.
+growth requires a full panel re-plan through `@review-panel`. Continuation
+fragments currently retain the launch-time resolver snapshot; selecting a new
+panel from a raised risk tier still needs host resolver support.
 
 An evidenced `design_defect` or a recurring blocking finding escalates early.
 Exhausting the repair limit takes the same read-only principal `design` path,
