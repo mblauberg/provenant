@@ -567,6 +567,81 @@ impl BinaryRunOwner<'_> {
         )
         .map_err(|error| scope_io(error, "submit"))
     }
+    fn retained_operation(
+        &self,
+        operation_id: &provenant_core::OperationId,
+        cancel: &CancelToken,
+    ) -> Result<bool, FacadeError> {
+        let session = match self.read_session(cancel) {
+            Ok(session) => session,
+            Err(FacadeError::NotFound) => return Ok(false),
+            Err(error) => return Err(error),
+        };
+        Ok(session.store.operation(operation_id, &self.call(cancel)).map_err(run_error)?
+            .is_some_and(|operation| operation.state != provenant_run::OperationState::Prepared))
+    }
+
+    /// Read an accepted graph operation in the authenticated owner's namespace.
+    pub(crate) fn retained_graph_receipt(
+        &self,
+        operation_id: &provenant_core::OperationId,
+        cancel: &CancelToken,
+    ) -> Result<Option<SubmissionReceipt>, FacadeError> {
+        let session = match self.read_session(cancel) {
+            Ok(session) => session,
+            Err(FacadeError::NotFound) => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        let call = self.call(cancel);
+        let Some(operation) = session.store.operation(operation_id, &call).map_err(run_error)?
+            .filter(|operation| operation.state != provenant_run::OperationState::Prepared)
+        else { return Ok(None); };
+        let request = session.store.request(operation.run_id, &call).map_err(run_error)?;
+        if request.tasks.is_empty() || request.tasks.iter().any(|task| {
+            task.context.as_ref().is_none_or(|context| !context.graph_template_launch
+                || context.graph_id.as_ref().is_none_or(|id| id.is_empty())
+                || context.node_id.as_ref().is_none_or(|id| id.is_empty()))
+        }) {
+            return Ok(None);
+        }
+        let page = session.service().lanes(&provenant_run::LaneQuery {
+            targets: vec![provenant_run::LaneTarget { run: operation.run_id, task: None, attempt: None }],
+            all: true, limit: 100, after: 0, newest_first: false, owner: None, unseen_after: None,
+        }, &call).map_err(run_error)?;
+        if page.lanes.is_empty() { return Ok(None); }
+        Ok(Some(SubmissionReceipt {
+            extra: Default::default(), operation_id: operation_id.clone(), worktree: None,
+            targets: page.lanes.into_iter().map(|attempt| AttemptTarget {
+                extra: Default::default(), host: Some(self.factory.context.identity.host), attempt: attempt.attempt_id,
+            }).collect(),
+        }))
+    }
+
+    fn guard_graph_admission(
+        &self,
+        operation_id: &provenant_core::OperationId,
+        host: Option<provenant_core::HostId>,
+        budget: WaitBudget,
+        cancel: &CancelToken,
+    ) -> Result<(), FacadeError> {
+        let refusal = match crate::install::cutover_admission_guard(&self.factory.context.roots.state) {
+            Ok(()) => return Ok(()),
+            Err(error) => error,
+        };
+        let retained = if let Some(host) = host.filter(|host| *host != self.factory.context.identity.host) {
+            let actor = self.actor.unwrap_or(self.factory.context.identity.inbox.actor);
+            matches!(self.peer(host, PeerAction::Receipt {
+                extra: [("graph_launch_actor".into(), serde_json::json!(actor))].into(),
+                operation_id: operation_id.clone(),
+            }, budget, cancel), Ok(PeerResult::Submitted { data, .. })
+                if data.operation_id == *operation_id && !data.targets.is_empty()
+                    && data.worktree.is_none() && data.targets.iter().all(|target| target.host == Some(host)))
+        } else {
+            self.retained_operation(operation_id, cancel)?
+        };
+        if retained { Ok(()) } else { Err(refusal) }
+    }
+
     fn launch_graph_attempt(
         &mut self,
         input: SubmitInput,
@@ -634,6 +709,7 @@ impl BinaryRunOwner<'_> {
             {
                 return Err(FacadeError::ConfinementRefused { resource: None });
             }
+            self.guard_graph_admission(&operation_id, Some(host), budget, cancel)?;
             let mut attempt = attempt.unwrap_or_default();
             attempt.host = None;
             let mut extra = provenant_records::ExtraFields::default();
@@ -684,6 +760,7 @@ impl BinaryRunOwner<'_> {
                 "attempt placement".into(),
             )));
         }
+        self.guard_graph_admission(&operation_id, host, budget, cancel)?;
         let mut submitted = Vec::new();
         for (index, task) in tasks.into_iter().enumerate() {
             worktree_access(

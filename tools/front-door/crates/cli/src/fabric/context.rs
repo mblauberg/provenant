@@ -472,7 +472,7 @@ impl Context {
         // the attempt, even when another agent later resumes its graph.
         // Keep that namespace under the authenticated sending host rather
         // than adopting a caller-supplied actor ID on the receiving host.
-        let agent = if let PeerAction::Submit { extra, .. } = &action {
+        let agent = if let PeerAction::Submit { extra, .. } | PeerAction::Receipt { extra, .. } = &action {
             match extra.get("graph_launch_actor") {
                 Some(value) => {
                     let actor = value

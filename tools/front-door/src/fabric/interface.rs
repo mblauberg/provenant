@@ -2365,7 +2365,7 @@ mod tests {
             let cancel = CancelToken::new();
             let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
             let document: GraphDocument = serde_json::from_value(json!({
-                "schema_version":2, "graph_id":"g-child-e2e", "integration_branch":branch,
+                "schema_version":2, "graph_id":"g-child-e2e", "template_library":{}, "integration_branch":branch,
                 "nodes":[{"id":"parent", "access":"read_only", "prompt":"Go", "route":{"alias":"senior"}}]
             }))?;
             let reference = format!("{}/caller", factory.context.identity.host);

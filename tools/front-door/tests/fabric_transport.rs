@@ -2193,6 +2193,11 @@ fn peer_dispatch_recovers_receipt_when_probes_fail() -> Result {
     let legacy = include_bytes!("fixtures/install/old-pending-checkpoint.json");
     std::fs::write(&legacy_path, legacy)?;
     std::fs::set_permissions(&legacy_path, std::fs::Permissions::from_mode(0o600))?;
+    let origin_legacy_directory = rig.state.join("fabric/graphs/11111111111111111111111111111111");
+    std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&origin_legacy_directory)?;
+    let origin_legacy_path = origin_legacy_directory.join("graph-old-pending-fixture.json");
+    std::fs::write(&origin_legacy_path, legacy)?;
+    std::fs::set_permissions(&origin_legacy_path, std::fs::Permissions::from_mode(0o600))?;
     rig.env.retain(|(key, _)| key != "PROVENANT_AGENT_LABEL");
     rig.env
         .push(("PROVENANT_AGENT_LABEL".into(), "replacement-runner".into()));
@@ -2215,6 +2220,7 @@ fn peer_dispatch_recovers_receipt_when_probes_fail() -> Result {
         .collect::<std::io::Result<_>>()?;
     assert_eq!(replayed, after);
     assert_eq!(std::fs::read(&legacy_path)?, legacy);
+    assert_eq!(std::fs::read(&origin_legacy_path)?, legacy);
     rig.assert_legacy_unchanged()?;
     cleanup.disarm();
     Ok(())
