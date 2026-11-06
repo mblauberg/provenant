@@ -1198,6 +1198,32 @@ mod lineage_tests {
                 ),
                 Err(RunError::WriterLineage("graph predecessor context"))
             ));
+            for field in ["writer", "source", "head"] {
+                let mut mismatch = graph.request.tasks[0].clone();
+                match field {
+                    "writer" => {
+                        mismatch.writer.as_mut().ok_or("writer")?.worktree =
+                            project.join(".worktrees/other");
+                    }
+                    "source" => mismatch.source_head = Some("0".repeat(40)),
+                    "head" => mismatch.head = Some("1".repeat(40)),
+                    _ => unreachable!(),
+                }
+                assert!(
+                    matches!(
+                        store.check_launch_writer_lineage(
+                            &graph_record,
+                            &mismatch,
+                            &tree.worktree,
+                            &call
+                        ),
+                        Err(RunError::WriterLineage(
+                            "graph predecessor writer or source"
+                        ))
+                    ),
+                    "graph predecessor accepted mismatched {field}"
+                );
+            }
             let next = Resume {
                 prior,
                 expected_generation: 0,
