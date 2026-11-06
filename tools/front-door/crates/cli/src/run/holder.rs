@@ -227,6 +227,7 @@ mod tests {
         let (context, _) = child_fixture(temp.path(), &clock)?;
         let state = &context.state_root;
         let project = context.project_id;
+        std::fs::create_dir_all(state.as_path())?;
         assert!(!live_graph_children(state, project, "host/parent-attempt")?);
         let cancel = CancelToken::new();
         let budget = provenant_core::WaitBudget::cli(clock.mono_now(), 5)?;
@@ -254,10 +255,10 @@ mod tests {
                 "schema_version":1,"graph_id":"custody","plan_digest":"fixture",
                 "nodes":[{"id":"parent","state":"succeeded","attempts":[{
                     "launched":true,"key":{"graph_id":"custody","node_id":"parent","route_index":0},
-                    "route":{"alias":"senior"},"state":"succeeded","attempt_ref":"host/parent-attempt",
+                    "route":{"alias":"senior"},"state":"terminal","attempt_ref":"host/parent-attempt",
                     "outcome":null,"launch_actor":"fixture"
-                }]}, {"id":"parent--child--grandchild","state":status},
-                {"id":"parental--other","state":"running"}]
+                }]}, {"id":"parent--child--grandchild","state":status,"attempts":[]},
+                {"id":"parental--other","state":"running","attempts":[]}]
             }))?;
             journal.save(&checkpoint)?;
             assert_eq!(
