@@ -538,6 +538,27 @@ reason = "The applicable host or project cap is configured or shipped; the refus
 [[guard]]
 site = "run/src/admission.rs#RunStore::admit"
 boundary = "configurable_default"
+code = "LANE_CAP"
+setting = "domains.fabric.lanes.max_writer_lanes"
+reason = "The host writer cap is configured or shipped and its source and value accompany the refusal."
+
+[[guard]]
+site = "run/src/admission.rs#RunStore::admit"
+boundary = "configurable_default"
+code = "LANE_CAP"
+setting = "domains.fabric.lanes.max_lanes"
+reason = "The host lane cap is configured or shipped and its source and value accompany the refusal."
+
+[[guard]]
+site = "run/src/admission.rs#RunStore::admit"
+boundary = "configurable_default"
+code = "LANE_CAP"
+setting = "domains.fabric.lanes.max_project_lanes"
+reason = "The project lane cap is configured or shipped and its source and value accompany the refusal."
+
+[[guard]]
+site = "run/src/admission.rs#RunStore::admit"
+boundary = "configurable_default"
 code = "HOST_PROCESSES"
 setting = "operating system RLIMIT_NPROC"
 reason = "The operating system's per-user soft process limit is adjustable; the refusal identifies the limit and shipped reserved headroom."

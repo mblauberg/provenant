@@ -892,13 +892,50 @@ mod diagnostic_projection_tests {
                 "max_project_writer_lanes",
                 "writer",
             ),
+            (
+                AdmissionError::LaneCap {
+                    active: 5,
+                    limit: 5,
+                    kind: provenant_records::diagnostic::LaneLimit::HostWriters,
+                    origin: provenant_records::diagnostic::SettingSource::Configuration,
+                },
+                "max_writer_lanes",
+                "writer",
+            ),
+            (
+                AdmissionError::LaneCap {
+                    active: 5,
+                    limit: 5,
+                    kind: provenant_records::diagnostic::LaneLimit::HostTotal,
+                    origin: provenant_records::diagnostic::SettingSource::Configuration,
+                },
+                "max_lanes",
+                "lane",
+            ),
+            (
+                AdmissionError::LaneCap {
+                    active: 5,
+                    limit: 5,
+                    kind: provenant_records::diagnostic::LaneLimit::ProjectTotal,
+                    origin: provenant_records::diagnostic::SettingSource::ShippedDefault,
+                },
+                "max_project_lanes",
+                "lane",
+            ),
         ];
         for (cause, limit, corrective) in cases {
             let error = RunError::Admission(cause);
             let code = ErrorKind::from(&error).code();
+            assert_eq!(error.boundary_class(), BoundaryClass::None);
             let guard = guards
                 .iter()
-                .find(|row| row.get("code").and_then(|v| v.as_str()) == Some(code))
+                .find(|row| {
+                    row.get("code").and_then(|v| v.as_str()) == Some(code)
+                        && row
+                            .get("setting")
+                            .and_then(|v| v.as_str())
+                            .is_some_and(|s| s.contains(limit))
+                })
                 .expect("resource refusal must be inventoried");
             assert_eq!(guard["boundary"].as_str(), Some("configurable_default"));
             let setting = guard["setting"].as_str().unwrap();
@@ -906,6 +943,7 @@ mod diagnostic_projection_tests {
                 repository: None,
                 home: None,
             });
+            assert_eq!(diagnostic.code, code);
             assert!(diagnostic.detail.as_deref().unwrap().contains(limit));
             assert!(diagnostic.detail.as_deref().unwrap().contains(setting));
             assert!(
