@@ -632,7 +632,12 @@ impl BinaryRunOwner<'_> {
         policy: SubmissionPolicy,
     ) -> Result<SubmissionReceipt, FacadeError> {
         use provenant_cli::run::{Submission, Submitted, derived_task, worktree_access};
-        let SubmissionPolicy { access, settlement_retry_limit, apply_project_defaults, attempt } = policy;
+        let SubmissionPolicy {
+            access,
+            settlement_retry_limit,
+            apply_project_defaults,
+            attempt,
+        } = policy;
         let SubmitInput::Submit {
             operation_id,
             tasks,

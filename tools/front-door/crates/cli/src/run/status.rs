@@ -245,26 +245,43 @@ fn status_rows(data: &Value) -> Vec<Value> {
             "node_id": null, "attempt_id": null, "state": data["status"],
             "reason": data["cancel_reason"].as_str().or(data["pause_reason"].as_str())})];
     }
-    data["lanes"].as_array().into_iter().flatten().map(|lane| {
-        // The common row envelope augments the owner's projection: terminal
-        // causes, settlement evidence and retry lineage remain observable.
-        let mut row = lane.clone();
-        row["id"] = lane["attempt_id"].clone();
-        row["kind"] = "attempt".into();
-        row["graph_id"] = lane["graph_id"].clone();
-        row["node_id"] = lane["task_id"].clone();
-        row["reason"] = lane["reason"].clone();
-        row
-    }).chain(data["native_attempts"].as_array().into_iter().flatten().map(|attempt| {
-        let mut row = attempt.clone();
-        row["kind"] = "attempt".into();
-        row["graph_id"] = Value::Null;
-        row["node_id"] = Value::Null;
-        row["attempt_id"] = attempt["id"].clone();
-        row["state"] = if attempt["ended_at"].is_null() { "running" } else { "settled" }.into();
-        row["reason"] = Value::Null;
-        row
-    })).collect()
+    data["lanes"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|lane| {
+            // The common row envelope augments the owner's projection: terminal
+            // causes, settlement evidence and retry lineage remain observable.
+            let mut row = lane.clone();
+            row["id"] = lane["attempt_id"].clone();
+            row["kind"] = "attempt".into();
+            row["graph_id"] = lane["graph_id"].clone();
+            row["node_id"] = lane["task_id"].clone();
+            row["reason"] = lane["reason"].clone();
+            row
+        })
+        .chain(
+            data["native_attempts"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|attempt| {
+                    let mut row = attempt.clone();
+                    row["kind"] = "attempt".into();
+                    row["graph_id"] = Value::Null;
+                    row["node_id"] = Value::Null;
+                    row["attempt_id"] = attempt["id"].clone();
+                    row["state"] = if attempt["ended_at"].is_null() {
+                        "running"
+                    } else {
+                        "settled"
+                    }
+                    .into();
+                    row["reason"] = Value::Null;
+                    row
+                }),
+        )
+        .collect()
 }
 
 fn append_native_status(
@@ -429,9 +446,15 @@ mod graph_status_tests {
         for key in graph[0].as_object().unwrap().keys() {
             assert!(attempts[0].get(key).is_some(), "missing common field {key}");
         }
-        assert_eq!(attempts[0]["terminal_cause"], serde_json::json!({"code": "quota"}));
+        assert_eq!(
+            attempts[0]["terminal_cause"],
+            serde_json::json!({"code": "quota"})
+        );
         assert_eq!(attempts[0]["retry_of"], "previous");
-        assert_eq!(attempts[0]["settlement"], serde_json::json!({"complete": true}));
+        assert_eq!(
+            attempts[0]["settlement"],
+            serde_json::json!({"complete": true})
+        );
         assert_eq!(graph[0]["reason"], "budget");
         assert_eq!(attempts[0]["kind"], "attempt");
         assert_eq!(attempts[0]["state"], "running");

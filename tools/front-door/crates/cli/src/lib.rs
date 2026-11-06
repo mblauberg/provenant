@@ -1386,7 +1386,8 @@ mod tests {
             panic!("expected duration error");
         };
         assert!(error.to_string().contains("--wait"), "{error}");
-        let ParseOutcome::Invalid { error, .. } = parsed(&["quota", "history", "--until", "0d"]) else {
+        let ParseOutcome::Invalid { error, .. } = parsed(&["quota", "history", "--until", "0d"])
+        else {
             panic!("expected span error");
         };
         assert!(error.to_string().contains("--until"), "{error}");

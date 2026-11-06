@@ -29,7 +29,8 @@ impl Factory {
         )
         .map_err(|_| FacadeError::InvalidInput { detail: None })?;
         // Resolver selection needs review context, before template nodes compile.
-        let mut resolver_document = json!({"schema_version":2,"graph_id":"launch-resolvers","nodes":[]});
+        let mut resolver_document =
+            json!({"schema_version":2,"graph_id":"launch-resolvers","nodes":[]});
         for field in ["review", "context"] {
             if let Some(value) = document.and_then(|document| document.get(field)) {
                 resolver_document[field] = value.clone();
@@ -56,7 +57,9 @@ impl Factory {
                 .get("set")
                 .is_some_and(|value| value.as_object().is_none_or(|object| !object.is_empty()))
         {
-            return Err(FacadeError::invalid(InvalidInputDetail::Field("document".into())));
+            return Err(FacadeError::invalid(InvalidInputDetail::Field(
+                "document".into(),
+            )));
         }
         // Distinct submissions may have identical briefs. Generate the key once
         // per call; transport retries retain this request and its identity.
@@ -110,19 +113,24 @@ impl Factory {
             crate::graph_support::project_worktrees(&self.cwd),
             &self.context.config.graph.allowed_read_roots,
         );
-        crate::graph_support::confine_pattern_roots(node, &policy).map_err(|_| FacadeError::InvalidInput { detail: None })?;
+        crate::graph_support::confine_pattern_roots(node, &policy)
+            .map_err(|_| FacadeError::InvalidInput { detail: None })?;
         if let Some(roots) = node.get_mut("read_roots").and_then(Value::as_array_mut) {
             for root in roots {
-                let given = root
-                    .as_str()
-                    .ok_or_else(|| FacadeError::invalid(InvalidInputDetail::Field("read_roots".into())))?;
+                let given = root.as_str().ok_or_else(|| {
+                    FacadeError::invalid(InvalidInputDetail::Field("read_roots".into()))
+                })?;
                 let path = Path::new(given);
                 let path = if path.is_absolute() {
                     path.to_owned()
                 } else {
                     self.cwd.join(path)
                 };
-                *root = encode(policy.confine(&path).map_err(|_| FacadeError::InvalidInput { detail: None })?)?;
+                *root = encode(
+                    policy
+                        .confine(&path)
+                        .map_err(|_| FacadeError::InvalidInput { detail: None })?,
+                )?;
             }
         }
         for pointer in ["/composite/nodes", "/loop/body", "/plan/fallback/nodes"] {
@@ -149,7 +157,9 @@ impl Factory {
             .map(PathBuf::from)
             .unwrap_or_else(|| self.home.join(".config"));
         if !config.is_absolute() {
-            return Err(FacadeError::invalid(InvalidInputDetail::Field("document".into())));
+            return Err(FacadeError::invalid(InvalidInputDetail::Field(
+                "document".into(),
+            )));
         }
         let mut library = TemplateLibrary::bundled();
         library
@@ -177,9 +187,9 @@ impl Factory {
     ) -> Result<Value, FacadeError> {
         let operation = required(&input, "op")?;
         if let Some(wait) = input.get("wait_seconds") {
-            let seconds = wait
-                .as_u64()
-                .ok_or_else(|| FacadeError::invalid(InvalidInputDetail::Field("wait_seconds".into())))?;
+            let seconds = wait.as_u64().ok_or_else(|| {
+                FacadeError::invalid(InvalidInputDetail::Field("wait_seconds".into()))
+            })?;
             WaitBudget::cli(self.clock.mono_now(), seconds)
                 .map_err(|_| FacadeError::InvalidInput { detail: None })?;
         }
@@ -264,7 +274,9 @@ impl Factory {
                 self.control_receipt(run, &target, &input, budget, cancel, true)
             }
             "retry" => self.retry_document(&input, budget, cancel),
-            _ => Err(FacadeError::invalid(InvalidInputDetail::Field("operation".into()))),
+            _ => Err(FacadeError::invalid(InvalidInputDetail::Field(
+                "operation".into(),
+            ))),
         }
     }
 
@@ -276,7 +288,9 @@ impl Factory {
     ) -> Result<Value, FacadeError> {
         let raw = input.get("document");
         if raw.is_some_and(|document| !document.is_object()) {
-            return Err(FacadeError::invalid(InvalidInputDetail::Field("document".into())));
+            return Err(FacadeError::invalid(InvalidInputDetail::Field(
+                "document".into(),
+            )));
         }
         let has_overrides = ["brief", "use", "tier", "over"]
             .iter()
@@ -377,19 +391,26 @@ impl Factory {
                 .filter(|value| !value.is_null())
                 .cloned()
                 .unwrap_or_else(|| json!({}));
-            parameters.as_object_mut()
+            parameters
+                .as_object_mut()
                 .ok_or_else(|| FacadeError::invalid(InvalidInputDetail::Field("set".into())))?
-                .extend(overrides.as_object()
-                    .ok_or_else(|| FacadeError::invalid(InvalidInputDetail::Field("set".into())))?
-                    .clone());
+                .extend(
+                    overrides
+                        .as_object()
+                        .ok_or_else(|| {
+                            FacadeError::invalid(InvalidInputDetail::Field("set".into()))
+                        })?
+                        .clone(),
+                );
             if template.parameters.contains_key("brief")
                 && let Some(brief) = input.get("brief").filter(|value| !value.is_null())
             {
                 parameters["brief"] = brief.clone();
             }
             if template.is_composite() {
-                let fields = node.as_object_mut()
-                    .ok_or_else(|| FacadeError::invalid(InvalidInputDetail::Field("document".into())))?;
+                let fields = node.as_object_mut().ok_or_else(|| {
+                    FacadeError::invalid(InvalidInputDetail::Field("document".into()))
+                })?;
                 fields.remove("brief");
                 fields.remove("tier");
             }
@@ -569,7 +590,9 @@ impl Factory {
                 .as_deref()
                 .is_some_and(|selected| selected != node)
             {
-                return Err(FacadeError::invalid(InvalidInputDetail::Field("over".into())));
+                return Err(FacadeError::invalid(InvalidInputDetail::Field(
+                    "over".into(),
+                )));
             }
             target.node = Some(node.into());
         }
@@ -583,7 +606,9 @@ impl Factory {
         if !extend.is_empty()
             && (target.node.is_some() || input.get("brief").is_some_and(|value| !value.is_null()))
         {
-            return Err(FacadeError::invalid(InvalidInputDetail::Field("node".into())));
+            return Err(FacadeError::invalid(InvalidInputDetail::Field(
+                "node".into(),
+            )));
         }
         let id = target.graph.clone();
         if let Some(node) = target.node.as_deref() {
@@ -627,7 +652,9 @@ impl Factory {
             .map_err(|_| FacadeError::InvalidInput { detail: None })?;
             journal.save(&checkpoint).map_err(graph_journal_error)?;
         } else if input.get("brief").is_some_and(|value| !value.is_null()) {
-            return Err(FacadeError::invalid(InvalidInputDetail::Field("brief".into())));
+            return Err(FacadeError::invalid(InvalidInputDetail::Field(
+                "brief".into(),
+            )));
         }
         let run = self.graph(
             GraphInput::Resume {
@@ -785,7 +812,9 @@ impl Factory {
     fn graph_stats(&self, input: &Value) -> Result<Value, FacadeError> {
         let by = input.get("by").and_then(Value::as_str).unwrap_or("tier");
         if !matches!(by, "tier" | "template") {
-            return Err(FacadeError::invalid(InvalidInputDetail::Field("tier".into())));
+            return Err(FacadeError::invalid(InvalidInputDetail::Field(
+                "tier".into(),
+            )));
         }
         let ids =
             FileJournal::event_graph_ids(&self.context.roots.state, self.context.identity.project)
@@ -951,7 +980,11 @@ fn add(row: &mut Value, key: &str, value: u64) {
 }
 
 #[cfg(test)]
-#[allow(dead_code, unused_imports, reason = "the custom worktree driver omits libtest functions")]
+#[allow(
+    dead_code,
+    unused_imports,
+    reason = "the custom worktree driver omits libtest functions"
+)]
 mod tests {
     use super::*;
     use crate::worktree_tests::support::{Result, TestRig};

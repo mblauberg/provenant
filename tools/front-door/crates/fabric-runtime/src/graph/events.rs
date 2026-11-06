@@ -231,23 +231,24 @@ pub(super) fn append_changes(
             )?);
         }
         if old.is_none_or(|old| old.outputs != node.outputs)
-            && let Some(outputs) = &node.outputs {
-                if outputs.branch.is_some() {
-                    events.push(event(
-                        GraphEventKind::Effect,
-                        &node.id,
-                        "branch",
-                        &outputs.branch,
-                    )?);
-                }
-                if outputs.commit.is_some() {
-                    events.push(event(
-                        GraphEventKind::Effect,
-                        &node.id,
-                        "commit",
-                        &outputs.commit,
-                    )?);
-                }
+            && let Some(outputs) = &node.outputs
+        {
+            if outputs.branch.is_some() {
+                events.push(event(
+                    GraphEventKind::Effect,
+                    &node.id,
+                    "branch",
+                    &outputs.branch,
+                )?);
+            }
+            if outputs.commit.is_some() {
+                events.push(event(
+                    GraphEventKind::Effect,
+                    &node.id,
+                    "commit",
+                    &outputs.commit,
+                )?);
+            }
         }
     }
     if previous.is_none_or(|old| old.cancelled != current.cancelled) && current.cancelled {
@@ -318,11 +319,7 @@ pub(super) fn append_patch(
 /// The journal line for an admitted patch: digests and identifiers only.
 fn patch_event(record: &super::patch::PatchRecord) -> Result<GraphEvent, JournalError> {
     // Free text (the reason, replaced briefs) is kept as digests.
-    let reason = record
-        .reason
-        .as_ref()
-        .map(digest)
-        .transpose()?;
+    let reason = record.reason.as_ref().map(digest).transpose()?;
     let replaced = record
         .replaced
         .iter()

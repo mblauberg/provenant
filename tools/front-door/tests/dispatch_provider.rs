@@ -693,9 +693,13 @@ fn opencode_dispatch_observes_v2_wal_session() -> Result {
             db.execute("UPDATE session_message SET data = ?1", [
                 serde_json::to_string(&json!({"model": {"providerID": provider, "id": session_model}, "finish": "stop"}))?
             ])?;
-            let lane = run_graph_provider(&rig, operation, json!({
-                "id":"provider", "prompt":text, "access":"read_only", "route":{"adapter":"opencode", "model":model}
-            }))?;
+            let lane = run_graph_provider(
+                &rig,
+                operation,
+                json!({
+                    "id":"provider", "prompt":text, "access":"read_only", "route":{"adapter":"opencode", "model":model}
+                }),
+            )?;
             assert_eq!(lane["state"], expected, "{lane}");
             let account = if provider == "opencode-go" {
                 "go"
@@ -1202,11 +1206,16 @@ fn graph_read_only_alias_retries_another_member_after_empty_launch_quota() -> Re
     assert_eq!(code(&started), 0, "{started:?}");
     let status: Value = serde_json::from_slice(&started.stdout.bytes)?;
     assert_eq!(status["data"]["status"], "complete", "{status}");
-    assert_eq!(status["data"]["checkpoint"]["nodes"][0]["state"], "succeeded", "{status}");
+    assert_eq!(
+        status["data"]["checkpoint"]["nodes"][0]["state"], "succeeded",
+        "{status}"
+    );
     // Graph retry archives the settled quota attempt and creates a new sealed
     // key for the same alias. The shared store has one run per graph attempt.
     let node = &status["data"]["checkpoint"]["nodes"][0];
-    let previous = node["previous_attempts"].as_array().ok_or("previous attempts")?;
+    let previous = node["previous_attempts"]
+        .as_array()
+        .ok_or("previous attempts")?;
     let attempts = node["attempts"].as_array().ok_or("attempts")?;
     assert_eq!(previous.len(), 1, "{status}");
     assert_eq!(attempts.len(), 1, "{status}");
@@ -1216,10 +1225,18 @@ fn graph_read_only_alias_retries_another_member_after_empty_launch_quota() -> Re
     assert_eq!(attempts[0]["route"], previous[0]["route"], "{status}");
     assert_ne!(attempts[0]["key"], previous[0]["key"], "{status}");
     assert_eq!(attempts[0]["key"]["retry_generation"], 1, "{status}");
-    assert_eq!(attempts[0]["key"]["previous_attempt_ref"], previous[0]["attempt_ref"], "{status}");
+    assert_eq!(
+        attempts[0]["key"]["previous_attempt_ref"], previous[0]["attempt_ref"],
+        "{status}"
+    );
     let attempt_id = |attempt: &Value| -> Result<String> {
-        Ok(attempt["attempt_ref"].as_str().ok_or("attempt reference")?
-            .rsplit_once('/').ok_or("qualified attempt reference")?.1.to_owned())
+        Ok(attempt["attempt_ref"]
+            .as_str()
+            .ok_or("attempt reference")?
+            .rsplit_once('/')
+            .ok_or("qualified attempt reference")?
+            .1
+            .to_owned())
     };
     let first_id = attempt_id(&previous[0])?;
     let second_id = attempt_id(&attempts[0])?;
@@ -1246,10 +1263,16 @@ fn graph_read_only_alias_retries_another_member_after_empty_launch_quota() -> Re
     assert!(second["retry_of"].is_null(), "{lanes}");
     let database = rusqlite::Connection::open(rig.state.join("run.sqlite3"))?;
     let retained: Vec<u8> = database.query_row(
-        "SELECT record FROM attempts WHERE id=?1", [&second_id], |row| row.get(0),
+        "SELECT record FROM attempts WHERE id=?1",
+        [&second_id],
+        |row| row.get(0),
     )?;
     let retained: provenant_run::AttemptRecord = serde_json::from_slice(&retained)?;
-    let excluded = retained.profile.knobs.get("routing.graph_exclude").ok_or("excluded spent model")?;
+    let excluded = retained
+        .profile
+        .knobs
+        .get("routing.graph_exclude")
+        .ok_or("excluded spent model")?;
     assert_eq!(excluded, &json!(["codex/gpt-6-luna"]));
     assert_eq!(second["state"], "succeeded", "{lanes}");
     assert_eq!(

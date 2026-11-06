@@ -701,7 +701,17 @@ fn safe_base_ref(name: &str) -> Option<&str> {
 pub(super) fn safe_input_field(field: &str) -> Option<&str> {
     let allowed = [
         "scope",
-        "use", "brief", "over", "set", "node", "by", "tier", "templates", "read_roots", "op", "source_head",
+        "use",
+        "brief",
+        "over",
+        "set",
+        "node",
+        "by",
+        "tier",
+        "templates",
+        "read_roots",
+        "op",
+        "source_head",
         "paths",
         "path",
         "key",

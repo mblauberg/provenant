@@ -27,17 +27,19 @@ pub mod planner;
 
 pub mod composites;
 mod panel;
+pub(crate) use crate::graph_support::{
+    bare_placeholder, confine_pattern_roots, project_worktrees, tier_route,
+};
 #[cfg(test)]
 #[allow(unused_imports, reason = "preset tests construct a selector result")]
 pub use panel::ShapeHint;
+pub use panel::ShapeSelector;
 #[cfg(test)]
 #[allow(
     unused_imports,
     reason = "used by library tests; integration targets also include this module"
 )]
 pub(crate) use panel::fixture_protected_selector;
-pub(crate) use crate::graph_support::{bare_placeholder, confine_pattern_roots, project_worktrees, tier_route};
-pub use panel::ShapeSelector;
 #[cfg(test)]
 pub use panel::review_selector;
 
@@ -4073,7 +4075,10 @@ mod readiness_tests {
 
 #[cfg(test)]
 mod template_lowering_tests {
-    #[allow(unused_imports, reason = "the custom worktree driver includes this module without libtest")]
+    #[allow(
+        unused_imports,
+        reason = "the custom worktree driver includes this module without libtest"
+    )]
     use serde_json::json;
 
     #[test]

@@ -54,11 +54,7 @@ fn invoke(
         Ok(data) => {
             let human = serde_json::to_string_pretty(&data).unwrap_or_default() + "\n";
             crate::emit(
-                &CommandResult::new(
-                    command,
-                    response_outcome(command, &data),
-                    data,
-                ),
+                &CommandResult::new(command, response_outcome(command, &data), data),
                 globals,
                 &human,
                 matches!(command, "templates" | "status" | "stats"),
@@ -69,17 +65,26 @@ fn invoke(
                 .downcast_ref::<provenant_fabric_runtime::coordination::facade::FacadeError>()
                 .map(|error| error.diagnostic())
                 .or_else(|| {
-                    error.downcast_ref::<provenant_cli::fabric::EdgeError>()
+                    error
+                        .downcast_ref::<provenant_cli::fabric::EdgeError>()
                         .and_then(provenant_cli::fabric::edge_diagnostic)
                 });
             let outcome = error
                 .downcast_ref::<provenant_fabric_runtime::coordination::facade::FacadeError>()
-                .map_or(Outcome::Invalid, provenant_cli::fabric::coordination_outcome);
+                .map_or(
+                    Outcome::Invalid,
+                    provenant_cli::fabric::coordination_outcome,
+                );
             let mut result = CommandResult::new(command, outcome, Value::Null);
             result.error = Some(provenant_records::CommandError {
                 diagnostic: projection.as_ref().map(Into::into),
-                code: projection.as_ref().map_or("GRAPH_INTERFACE", |value| value.code.as_str()).into(),
-                message: projection.as_ref().and_then(|value| value.detail.clone())
+                code: projection
+                    .as_ref()
+                    .map_or("GRAPH_INTERFACE", |value| value.code.as_str())
+                    .into(),
+                message: projection
+                    .as_ref()
+                    .and_then(|value| value.detail.clone())
                     .unwrap_or_else(|| "graph input could not be processed".into()),
                 cause: None,
                 repair: projection.and_then(|value| value.next),
@@ -205,7 +210,10 @@ pub(crate) fn graph_stats(
 }
 
 #[cfg(test)]
-#[allow(unused_imports, reason = "the custom worktree driver includes this module without libtest")]
+#[allow(
+    unused_imports,
+    reason = "the custom worktree driver includes this module without libtest"
+)]
 mod tests {
     use super::*;
 
@@ -222,7 +230,13 @@ mod tests {
             assert_eq!(response_outcome("run", &data), expected);
             assert_eq!(response_outcome("status", &data), Outcome::Ok);
         }
-        assert_eq!(response_outcome("run", &json!({"document":{}})), Outcome::Ok);
-        assert_eq!(response_outcome("run", &json!({"timed_out":true})), Outcome::Waiting);
+        assert_eq!(
+            response_outcome("run", &json!({"document":{}})),
+            Outcome::Ok
+        );
+        assert_eq!(
+            response_outcome("run", &json!({"timed_out":true})),
+            Outcome::Waiting
+        );
     }
 }

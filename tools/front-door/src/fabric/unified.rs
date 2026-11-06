@@ -216,12 +216,19 @@ pub(crate) fn enrich_status_rows(
     let peer_budget = WaitBudget::cli(clock.mono_now(), 30).map_err(|_| FacadeError::Timeout)?;
     let mut peer_executor = None;
     for row in rows {
-        if row["kind"] != "attempt" { continue; }
-        let Some((host, attempt)) = row["attempt_id"].as_str().and_then(|id| id.split_once('/')) else { continue; };
+        if row["kind"] != "attempt" {
+            continue;
+        }
+        let Some((host, attempt)) = row["attempt_id"].as_str().and_then(|id| id.split_once('/'))
+        else {
+            continue;
+        };
         let host = host.parse().map_err(|_| FacadeError::StateCorrupt)?;
         let attempt = attempt.parse().map_err(|_| FacadeError::StateCorrupt)?;
         let record = if host == context.identity.host {
-            let Some(store) = &store else { continue; };
+            let Some(store) = &store else {
+                continue;
+            };
             match store.record(attempt, &call) {
                 Ok(record) => record,
                 // A collected run leaves the retained graph's own row readable.
@@ -231,17 +238,36 @@ pub(crate) fn enrich_status_rows(
         } else {
             let executor = match &peer_executor {
                 Some(executor) => executor,
-                None => peer_executor.insert(SystemExecutor::new(1).map_err(|_| FacadeError::io("create peer status executor"))?),
+                None => peer_executor.insert(
+                    SystemExecutor::new(1)
+                        .map_err(|_| FacadeError::io("create peer status executor"))?,
+                ),
             };
-            let response = context.peer_with(executor, clock, host, PeerAction::Run {
-                extra: Default::default(),
-                input: RunInput::Status { extra: Default::default(), target: AttemptTarget {
-                    extra: Default::default(), host: Some(host), attempt,
-                } },
-            }, peer_budget, cancel).map_err(|failure| failure.error)?;
+            let response = context
+                .peer_with(
+                    executor,
+                    clock,
+                    host,
+                    PeerAction::Run {
+                        extra: Default::default(),
+                        input: RunInput::Status {
+                            extra: Default::default(),
+                            target: AttemptTarget {
+                                extra: Default::default(),
+                                host: Some(host),
+                                attempt,
+                            },
+                        },
+                    },
+                    peer_budget,
+                    cancel,
+                )
+                .map_err(|failure| failure.error)?;
             match response {
                 PeerResult::Run { data, .. } => match *data {
-                    RunResult::Status { attempt: record, .. } if record.attempt_id == attempt => record,
+                    RunResult::Status {
+                        attempt: record, ..
+                    } if record.attempt_id == attempt => record,
                     _ => return Err(FacadeError::StateCorrupt),
                 },
                 _ => return Err(FacadeError::StateCorrupt),
@@ -250,15 +276,22 @@ pub(crate) fn enrich_status_rows(
         if record.context.as_ref().is_none_or(|context| {
             context.graph_id.as_deref() != row["graph_id"].as_str()
                 || context.node_id.as_deref() != row["node_id"].as_str()
-        }) { return Err(FacadeError::StateCorrupt); }
+        }) {
+            return Err(FacadeError::StateCorrupt);
+        }
         let projected = provenant_cli::run::project_lane(
-            &record, &[], context.roots.state.as_path(), &Default::default(),
-            clock.wall_now().ok(), false,
+            &record,
+            &[],
+            context.roots.state.as_path(),
+            &Default::default(),
+            clock.wall_now().ok(),
+            false,
         );
         let fields = serde_json::to_value(projected).map_err(|_| FacadeError::StateCorrupt)?;
         let reference = row["attempt_id"].clone();
         let graph_state = row["state"].clone();
-        row.as_object_mut().ok_or(FacadeError::StateCorrupt)?
+        row.as_object_mut()
+            .ok_or(FacadeError::StateCorrupt)?
             .extend(fields.as_object().ok_or(FacadeError::StateCorrupt)?.clone());
         row["attempt_id"] = reference;
         row["graph_state"] = graph_state;
@@ -344,11 +377,14 @@ pub(crate) fn unified_graph_command(
                 wait,
             } => {
                 if *legacy_prompt || *no_fallback {
-                    return Err(FacadeError::invalid(InvalidInputDetail::Field("node".into())).into());
+                    return Err(
+                        FacadeError::invalid(InvalidInputDetail::Field("node".into())).into(),
+                    );
                 }
                 if !extend.is_empty() && (node.is_some() || brief.is_some()) {
-                    return Err(FacadeError::invalid(InvalidInputDetail::Field("node".into()))
-                    .into());
+                    return Err(
+                        FacadeError::invalid(InvalidInputDetail::Field("node".into())).into(),
+                    );
                 }
                 input["extend"] = json!(extend);
                 if let Some(node) = node {
@@ -517,7 +553,12 @@ pub(crate) fn append_graph_status(
             ) {
                 Ok(Some(checkpoint)) => {
                     let mut graph_rows = status_rows(&graph_snapshot(checkpoint), &target);
-                    enrich_status_rows(&mut graph_rows, &factory.context, &factory.clock, &CancelToken::new())?;
+                    enrich_status_rows(
+                        &mut graph_rows,
+                        &factory.context,
+                        &factory.clock,
+                        &CancelToken::new(),
+                    )?;
                     rows.extend(graph_rows);
                 }
                 Ok(None) => {}
@@ -661,7 +702,9 @@ pub(crate) fn unified_graph_output(
         // ranges, paths and destination writes.
         if references.len() == 1 {
             let mut selected = command.clone();
-            selected.attempt = references[0].parse().map_err(|_| FacadeError::InvalidInput { detail: None })?;
+            selected.attempt = references[0]
+                .parse()
+                .map_err(|_| FacadeError::InvalidInput { detail: None })?;
             return Ok(Some(provenant_cli::run::output(selected, edge)));
         }
         let mut outputs = Vec::new();
@@ -671,12 +714,15 @@ pub(crate) fn unified_graph_output(
         for reference in references {
             let mut selected = command.clone();
             selected.to = None;
-            selected.attempt = reference.parse().map_err(|_| FacadeError::InvalidInput { detail: None })?;
+            selected.attempt = reference
+                .parse()
+                .map_err(|_| FacadeError::InvalidInput { detail: None })?;
             let reply = provenant_cli::run::output(selected, edge);
             if reply.result.status != provenant_records::Outcome::Ok {
                 if command.to.is_some() {
-                    return Err(FacadeError::invalid(InvalidInputDetail::Field("target".into()))
-                    .into());
+                    return Err(
+                        FacadeError::invalid(InvalidInputDetail::Field("target".into())).into(),
+                    );
                 }
                 outcome = reply.result.status;
             }
@@ -689,8 +735,9 @@ pub(crate) fn unified_graph_output(
                         .ok_or(FacadeError::StateCorrupt)?,
                 ),
                 _ if command.to.is_some() => {
-                    return Err(FacadeError::invalid(InvalidInputDetail::Field("target".into()))
-                    .into());
+                    return Err(
+                        FacadeError::invalid(InvalidInputDetail::Field("target".into())).into(),
+                    );
                 }
                 _ => {}
             }
@@ -796,10 +843,14 @@ pub(crate) fn read_status_rows(
     .map_err(graph_journal_error)?
     .ok_or(FacadeError::NotFound)?;
     let mut rows = status_rows(&graph_snapshot(checkpoint), &target);
-    enrich_status_rows(&mut rows, &context, &SystemClock::new(), &CancelToken::new())?;
+    enrich_status_rows(
+        &mut rows,
+        &context,
+        &SystemClock::new(),
+        &CancelToken::new(),
+    )?;
     Ok(Some(rows))
 }
-
 
 fn missing_graph_context(error: &(dyn std::error::Error + 'static)) -> bool {
     matches!(
@@ -809,16 +860,20 @@ fn missing_graph_context(error: &(dyn std::error::Error + 'static)) -> bool {
 }
 
 // Stdin's bounded I/O API takes a real-time deadline at this transport edge.
-#[allow(clippy::disallowed_methods, reason = "sample the real-time stdin transport deadline")]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "sample the real-time stdin transport deadline"
+)]
 fn read_steering_stdin() -> std::io::Result<Vec<u8>> {
-    provenant_os::sys::hook_io::read_stdin(
-        4096,
-        Instant::now() + std::time::Duration::from_secs(5),
-    )
+    provenant_os::sys::hook_io::read_stdin(4096, Instant::now() + std::time::Duration::from_secs(5))
 }
 
 #[cfg(test)]
-#[allow(dead_code, unused_imports, reason = "the custom worktree driver omits libtest functions")]
+#[allow(
+    dead_code,
+    unused_imports,
+    reason = "the custom worktree driver omits libtest functions"
+)]
 mod tests {
     use super::*;
     use provenant_fabric_runtime::graph::NodeState;

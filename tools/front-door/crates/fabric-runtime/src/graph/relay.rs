@@ -281,7 +281,11 @@ pub fn admit_child_bound(
         .to_string();
     let mut patch = child_patch(request, worktree.as_deref(), context)?;
     if let Some((branch, commit)) = writer_base {
-        let node = patch.nodes.first_mut().and_then(Value::as_object_mut).ok_or_else(|| invalid("child patch requires an object node".into()))?;
+        let node = patch
+            .nodes
+            .first_mut()
+            .and_then(Value::as_object_mut)
+            .ok_or_else(|| invalid("child patch requires an object node".into()))?;
         node.insert(
             "delivery".into(),
             serde_json::to_value(provenant_records::run::DeliveryMode::Integrate(
@@ -467,11 +471,12 @@ fn inherit_child_controls(node: &mut Value, request: &ChildRequest) {
     // Deterministic actions retain their executor and access policy.
     if (node.get("kind").is_none()
         || matches!(node["kind"].as_str(), Some("task" | "plan" | "synthesise")))
-        && let Some(tier) = &request.tier {
-            node["route"] = serde_json::json!({"alias": tier});
-            if let Some(object) = node.as_object_mut() {
-                object.remove("routes");
-            }
+        && let Some(tier) = &request.tier
+    {
+        node["route"] = serde_json::json!({"alias": tier});
+        if let Some(object) = node.as_object_mut() {
+            object.remove("routes");
+        }
     }
 }
 
@@ -596,7 +601,9 @@ pub(super) fn settle_subtrees<R: AttemptOwner, J: GraphJournal>(
                 .nodes
                 .iter_mut()
                 .find(|node| node.id == parent)
-                .ok_or_else(|| GraphError::Refused("cancelled parent missing from checkpoint".into()))?
+                .ok_or_else(|| {
+                    GraphError::Refused("cancelled parent missing from checkpoint".into())
+                })?
                 .extra
                 .insert("children_cancelled".into(), true.into());
         }
@@ -630,8 +637,9 @@ pub(super) fn settle_subtrees<R: AttemptOwner, J: GraphJournal>(
                         first_error.get_or_insert(error);
                     }
                     if stopped.insert((attempt.key.node_id.clone(), attempt.key.route_index))
-                        && let Err(error) = owner.stop_cancelled_attempt(attempt) {
-                            first_error.get_or_insert(error);
+                        && let Err(error) = owner.stop_cancelled_attempt(attempt)
+                    {
+                        first_error.get_or_insert(error);
                     }
                 }
             }

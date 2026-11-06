@@ -1776,7 +1776,8 @@ pub(super) fn flatten_fragment(
             child.continues = None;
         }
     }
-    let (plan, _) = validate_flat_plan(&local_validation, &generous()).map_err(|error| error.to_string())?;
+    let (plan, _) =
+        validate_flat_plan(&local_validation, &generous()).map_err(|error| error.to_string())?;
     validate_output_kinds(&local).map_err(|error| error.to_string())?;
     let mut nodes: Vec<GraphNode> = plan
         .nodes

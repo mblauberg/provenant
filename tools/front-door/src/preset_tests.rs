@@ -6237,87 +6237,84 @@ fn dispatch_fixture(
     Box::new(<Fixture as clap::Parser>::parse_from(args).request)
 }
 
-    #[test]
-    fn linked_worktrees_come_from_git_without_the_main_checkout() {
-        let temp = tempfile::tempdir().unwrap();
-        let main = temp.path().join("main");
-        let linked = temp.path().join("linked \"worktree\"\nline");
-        std::fs::create_dir(&main).unwrap();
-        let git = |dir: &std::path::Path, args: &[&str]| {
-            let output = provenant_os::fixture::git_command()
-                .current_dir(dir)
-                .args(args)
-                .env("GIT_CONFIG_GLOBAL", "/dev/null")
-                .env("GIT_CONFIG_SYSTEM", "/dev/null")
-                .output()
-                .unwrap();
-            assert!(output.status.success(), "{args:?}: {output:?}");
-        };
-        git(&main, &["init", "-q", "-b", "main"]);
-        git(&main, &["commit", "-q", "--allow-empty", "-m", "root"]);
-        git(
-            &main,
-            &[
-                "worktree",
-                "add",
-                "-q",
-                "-b",
-                "lane",
-                linked.to_str().unwrap(),
-            ],
-        );
-        let linked_worktrees = |path| {
-            super::preset::linked_worktrees_from(&super::preset::project_worktrees(
-                path,
-            ))
-        };
-        let found = linked_worktrees(&main);
-        let subdirectory = main.join("nested project directory");
-        std::fs::create_dir(&subdirectory).unwrap();
-        assert_eq!(linked_worktrees(&subdirectory), found);
-        let expected = std::fs::canonicalize(&linked)
+#[test]
+fn linked_worktrees_come_from_git_without_the_main_checkout() {
+    let temp = tempfile::tempdir().unwrap();
+    let main = temp.path().join("main");
+    let linked = temp.path().join("linked \"worktree\"\nline");
+    std::fs::create_dir(&main).unwrap();
+    let git = |dir: &std::path::Path, args: &[&str]| {
+        let output = provenant_os::fixture::git_command()
+            .current_dir(dir)
+            .args(args)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{args:?}: {output:?}");
+    };
+    git(&main, &["init", "-q", "-b", "main"]);
+    git(&main, &["commit", "-q", "--allow-empty", "-m", "root"]);
+    git(
+        &main,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "lane",
+            linked.to_str().unwrap(),
+        ],
+    );
+    let linked_worktrees =
+        |path| super::preset::linked_worktrees_from(&super::preset::project_worktrees(path));
+    let found = linked_worktrees(&main);
+    let subdirectory = main.join("nested project directory");
+    std::fs::create_dir(&subdirectory).unwrap();
+    assert_eq!(linked_worktrees(&subdirectory), found);
+    let expected = std::fs::canonicalize(&linked)
+        .unwrap()
+        .display()
+        .to_string();
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(
+        std::fs::canonicalize(&found[0])
             .unwrap()
             .display()
-            .to_string();
-        assert_eq!(found.len(), 1, "{found:?}");
-        assert_eq!(
-            std::fs::canonicalize(&found[0])
-                .unwrap()
-                .display()
-                .to_string(),
-            expected
-        );
-        // Outside a repository the project is only its own directory: no lanes.
-        let bare = temp.path().join("bare");
-        std::fs::create_dir(&bare).unwrap();
-        assert!(linked_worktrees(&bare).is_empty());
-        let bare_repo = temp.path().join("bare.git");
-        let bare_lane = temp.path().join("bare lane");
-        git(
-            &main,
-            &[
-                "clone",
-                "-q",
-                "--bare",
-                main.to_str().unwrap(),
-                bare_repo.to_str().unwrap(),
-            ],
-        );
-        git(
-            &bare_repo,
-            &[
-                "worktree",
-                "add",
-                "-q",
-                "-b",
-                "bare-lane",
-                bare_lane.to_str().unwrap(),
-            ],
-        );
-        let bare_found = linked_worktrees(&bare_repo);
-        assert_eq!(bare_found.len(), 1);
-        assert_eq!(
-            std::fs::canonicalize(&bare_found[0]).unwrap(),
-            std::fs::canonicalize(&bare_lane).unwrap()
-        );
-    }
+            .to_string(),
+        expected
+    );
+    // Outside a repository the project is only its own directory: no lanes.
+    let bare = temp.path().join("bare");
+    std::fs::create_dir(&bare).unwrap();
+    assert!(linked_worktrees(&bare).is_empty());
+    let bare_repo = temp.path().join("bare.git");
+    let bare_lane = temp.path().join("bare lane");
+    git(
+        &main,
+        &[
+            "clone",
+            "-q",
+            "--bare",
+            main.to_str().unwrap(),
+            bare_repo.to_str().unwrap(),
+        ],
+    );
+    git(
+        &bare_repo,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "bare-lane",
+            bare_lane.to_str().unwrap(),
+        ],
+    );
+    let bare_found = linked_worktrees(&bare_repo);
+    assert_eq!(bare_found.len(), 1);
+    assert_eq!(
+        std::fs::canonicalize(&bare_found[0]).unwrap(),
+        std::fs::canonicalize(&bare_lane).unwrap()
+    );
+}
