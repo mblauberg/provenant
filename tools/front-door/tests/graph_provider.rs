@@ -1280,11 +1280,19 @@ fn graph_read_only_alias_retries_another_member_after_empty_launch_quota() -> Re
     assert_eq!(rows.len(), 2, "{lanes}");
     let first = rows
         .iter()
-        .find(|row| row["attempt_id"] == first_id)
-        .ok_or("first attempt")?;
+        .find(|row| {
+            row["attempt_id"]
+                .as_str()
+                .is_some_and(|id| id.ends_with(&first_id))
+        })
+        .ok_or_else(|| format!("first attempt {first_id}: {lanes}"))?;
     let second = rows
         .iter()
-        .find(|row| row["attempt_id"] == second_id)
+        .find(|row| {
+            row["attempt_id"]
+                .as_str()
+                .is_some_and(|id| id.ends_with(&second_id))
+        })
         .ok_or("retry attempt")?;
     assert_eq!(first["state"], "quota_limited", "{lanes}");
     assert_eq!(
@@ -1412,11 +1420,19 @@ fn partial_quota_alias_fixture(writer: bool) -> Result {
     assert_eq!(rows.len(), 2, "{lanes}");
     let first = rows
         .iter()
-        .find(|row| row["attempt_id"] == first_id)
-        .ok_or("first")?;
+        .find(|row| {
+            row["attempt_id"]
+                .as_str()
+                .is_some_and(|id| id.ends_with(&first_id))
+        })
+        .ok_or_else(|| format!("first: {first_id}: {lanes}"))?;
     let second = rows
         .iter()
-        .find(|row| row["attempt_id"] == second_id)
+        .find(|row| {
+            row["attempt_id"]
+                .as_str()
+                .is_some_and(|id| id.ends_with(&second_id))
+        })
         .ok_or("second")?;
     let database = rusqlite::Connection::open(rig.state.join("run.sqlite3"))?;
     let sealed: Vec<u8> = database.query_row(
@@ -2586,8 +2602,7 @@ fn run_graph_provider_with_wait(
         "run",
         "--file",
         document.to_str().ok_or("document")?,
-        "--wait",
-        wait,
+        &format!("--wait={wait}"),
         "--json",
     ])?;
     let response: Value = serde_json::from_slice(&out.stdout.bytes)?;
