@@ -252,19 +252,23 @@ fn repeat_lowers_a_composite_template_to_a_loop() {
     let node = Compiler::new(&bundled)
         .compile(
             &json!({"id": "fix", "use": "repair", "repeat": {"until": "accepted", "max_rounds": 2},
-                         "with": {"worktree": "/fixture/writer", "write_scope": ["src"], "lens": "security"}}),
+                         "with": {"worktree": "/fixture/writer", "write_scope": ["src"], "lenses": ["security"]}}),
         )
         .unwrap();
     assert_eq!(node.kind, Some(NodeKind::Loop));
     let body = &node.loop_body.as_ref().unwrap().body;
     assert_eq!(
         body.iter().map(|node| node.id.as_str()).collect::<Vec<_>>(),
-        ["fix", "check", "accepted"]
+        ["fix", "check", "synthesis", "accepted"]
     );
     assert_eq!(body[0].access, AccessMode::WorktreeWrite);
     assert_eq!(body[0].write_scope, ["src"]);
-    assert_eq!(body[0].inputs[0].node, "previous.check");
-    assert!(body[1].prompt.contains("security lens"));
+    assert_eq!(body[0].inputs[0].node, "previous.synthesis");
+    assert!(
+        body[1].composite.as_ref().unwrap().nodes[0]
+            .prompt
+            .contains("security lens")
+    );
     assert!(matches!(&body[1].source, Some(SourceBinding::Node { node }) if node == "fix"));
     let ids = expanded_ids(vec![node]);
     assert!(ids.contains(&"fix--r2--accepted".to_owned()), "{ids:?}");
@@ -347,4 +351,98 @@ fn review_templates_record_the_raising_lens() {
         assert!(lowered["prompt"].as_str().unwrap().contains(lens));
         assert_eq!(lowered["require_findings"], true);
     }
+}
+
+#[test]
+fn delivery_templates_admit_bounded_review_repairs() {
+    let bundled = library();
+    let resolvers = BTreeMap::from([(
+        "review-panel".to_owned(),
+        vec!["security".to_owned(), "tests".to_owned()],
+    )]);
+    let compiler = Compiler {
+        library: &bundled,
+        resolvers: &resolvers,
+    };
+    for template in ["deliver", "batch"] {
+        let node = compiler
+            .compile(&json!({"id":"delivery", "use":template,
+            "with":{"worktree":"/fixture/writer", "write_scope":["src"], "max_repair_cycles":2}}))
+            .unwrap();
+        let mut doc = document(vec![node]);
+        if template == "batch" {
+            doc.integration_branch = Some("batch/integration".into());
+        }
+        let delivery_limits = crate::config::GraphLimits::default();
+        doc.admit(&delivery_limits).unwrap();
+        let expanded = doc.expanded(&delivery_limits).unwrap();
+        let repair = expanded
+            .nodes
+            .iter()
+            .find(|node| node.id.ends_with("repair--cycles"))
+            .unwrap();
+        let policy = repair.loop_body.as_ref().unwrap();
+        assert_eq!(policy.max_rounds, 2);
+        assert_eq!(policy.extra["review_repair"], true);
+        assert!(repair.on_fail.as_ref().unwrap().ends_with("design"));
+        let design = expanded
+            .nodes
+            .iter()
+            .find(|node| node.id.ends_with("repair--design"))
+            .unwrap();
+        assert_eq!(design.access, AccessMode::ReadOnly);
+        assert_eq!(
+            design.route.as_ref().unwrap().alias.as_deref(),
+            Some("principal")
+        );
+        let continuation = expanded
+            .nodes
+            .iter()
+            .find(|node| node.id.ends_with("repair--continue"))
+            .unwrap();
+        let slice = &continuation.plan.as_ref().unwrap().templates[0];
+        assert_eq!(slice.name.as_deref(), Some("repair-slice"));
+        assert_eq!(slice.nodes[0]["write_scope"], json!(["src"]));
+        assert_eq!(slice.nodes[0]["worktree"], "/fixture/writer");
+        if template == "deliver" {
+            let accept = expanded
+                .nodes
+                .iter()
+                .find(|node| node.id == "delivery--accept")
+                .unwrap();
+            assert!(
+                matches!(&accept.condition, Some(GateCondition::Verdict { expected, threshold: VerdictThreshold::All, .. }) if expected == "VERDICT: PASS")
+            );
+            let review = expanded
+                .nodes
+                .iter()
+                .find(|node| node.id == "delivery--review--lenses--security")
+                .unwrap();
+            assert!(
+                matches!(&review.source, Some(SourceBinding::Head { node }) if node == "delivery--implement")
+            );
+            assert!(
+                expanded
+                    .nodes
+                    .iter()
+                    .any(|node| node.id == "delivery--land" && node.land.is_some())
+            );
+        }
+    }
+}
+
+#[test]
+fn review_cycle_limit_is_configurable_but_never_above_three() {
+    let bundled = library();
+    for cycles in [0, 4] {
+        let error = Compiler::new(&bundled).compile(&json!({"id":"repair", "use":"review-repair",
+            "with":{"worktree":"/fixture/writer", "write_scope":["src"], "max_repair_cycles":cycles}})).unwrap_err();
+        assert!(error.contains("1 to 3"), "{error}");
+    }
+    let error = Compiler::new(&bundled)
+        .compile(&json!({"id":"repair", "use":"repair",
+        "with":{"worktree":"/fixture/writer", "write_scope":["src"]},
+        "repeat":{"until":"accepted", "max_rounds":4, "review_repair":true}}))
+        .unwrap_err();
+    assert!(error.contains("between 1 and 3"), "{error}");
 }

@@ -49,10 +49,13 @@ instruction to stop and report instead of widening scope. One writer per
 worktree. Name the method skill: `test-design` for observable behaviour,
 `refactor` for restructuring, `diagnose` for an unknown cause.
 
-A separate writer repairs accepted review findings; the raising lenses
-re-review the delta. After three cycles or a concrete design concern, obtain
-read-only principal scoping. Proceed within approved scope and notify the
-owner; changed scope and one-way doors need the owner's decision.
+A separate fresh writer attempt repairs qualified review findings; the raising
+lenses re-review the delta. `max_repair_cycles` defaults to three and accepts
+one to three, independently of the CI repair limit. A recurring finding or an
+evidenced design defect escalates early to read-only principal scoping. Proceed
+within approved scope and notify the owner; changed scope and one-way doors
+wait on a `decide` node. If no separate route is available, continue in a fresh
+attempt on the available route with a recorded separation warning.
 
 ## Writer rules
 
