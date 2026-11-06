@@ -188,20 +188,7 @@ impl Snapshot {
                 if rows.is_empty() {
                     return Err("named graph selection is empty".into());
                 }
-                let terminal = rows.iter().all(|row| {
-                    matches!(
-                        row["state"].as_str(),
-                        Some(
-                            "complete"
-                                | "cancelled"
-                                | "succeeded"
-                                | "failed"
-                                | "blocked"
-                                | "skipped"
-                                | "terminal"
-                        )
-                    )
-                });
+                let terminal = graph_rows_terminal(&rows);
                 let notable = terminal || rows.iter().any(|row| row["state"] == "paused");
                 Ok(Self {
                     terminal,
@@ -263,6 +250,33 @@ impl Stop {
             .wait_timeout_while(stopped, duration, |stopped| !*stopped)
             .is_ok_and(|(stopped, _)| !*stopped)
     }
+}
+
+/// A settled graph or node row already proves its attempts drained, and attempt
+/// rows use a wider vocabulary (`timed_out`, `quota_limited`, ...), so an attempt
+/// decides only when no owner row was selected.
+fn graph_rows_terminal(rows: &[Value]) -> bool {
+    let mut owners = rows
+        .iter()
+        .filter(|row| row["kind"] != "attempt")
+        .peekable();
+    if owners.peek().is_none() {
+        return rows.iter().all(|row| !row["finished_at"].is_null());
+    }
+    owners.all(|row| {
+        matches!(
+            row["state"].as_str(),
+            Some(
+                "complete"
+                    | "cancelled"
+                    | "succeeded"
+                    | "failed"
+                    | "blocked"
+                    | "skipped"
+                    | "terminal"
+            )
+        )
+    })
 }
 
 struct Update {
@@ -497,6 +511,23 @@ mod tests {
         assert_eq!(wait_exit(true, false), 0);
         assert_eq!(wait_exit(false, true), 124);
     }
+    #[test]
+    fn a_settled_graph_is_terminal_whatever_its_attempt_state() {
+        let graph = |state: &str| json!({"kind": "graph", "state": state});
+        let attempt = |state: &str, finished: Value| json!({"kind": "attempt", "state": state, "finished_at": finished});
+        let done = json!("2026-11-07T00:00:00Z");
+        assert!(graph_rows_terminal(&[
+            graph("complete"),
+            attempt("timed_out", done.clone())
+        ]));
+        assert!(!graph_rows_terminal(&[
+            graph("pending"),
+            attempt("timed_out", done.clone())
+        ]));
+        assert!(graph_rows_terminal(&[attempt("quota_limited", done)]));
+        assert!(!graph_rows_terminal(&[attempt("running", Value::Null)]));
+    }
+
     fn update(target: &str, state: &str, terminal: bool) -> Update {
         Update {
             target: target.into(),

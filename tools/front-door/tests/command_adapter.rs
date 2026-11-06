@@ -529,14 +529,14 @@ fn command_timeout_cleans_descendants_and_running_replay_keeps_one_attempt() -> 
         json!({"slow":{"argv":["/bin/sh","-c","/usr/bin/perl -MPOSIX -e 'POSIX::setsid(); sleep 30' & child=$!; printf 'child=%s\\n' \"$child\"; wait"]}}),
     )?;
     let _cleanup = rig.process_cleanup();
-    let first = dispatch_with(&rig, "slow", 10, None, false)?;
+    let first = dispatch_with(&rig, "slow", 5, None, false)?;
     let id = attempt_id(&first)?;
     let running = settled(&rig, id)?;
     assert!(
         matches!(running["state"].as_str(), Some("starting" | "running")),
         "{running}"
     );
-    let second = dispatch_with(&rig, "slow", 10, None, false)?;
+    let second = dispatch_with(&rig, "slow", 5, None, false)?;
     assert_eq!(id, attempt_id(&second)?);
     let waited = rig.command(&["status", "slow", "--wait=30s", "--until", "all", "--json"])?;
     assert_eq!(code(&waited), 0, "{waited:?}");
