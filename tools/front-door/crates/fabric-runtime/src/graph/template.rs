@@ -741,10 +741,18 @@ impl<'a> Compiler<'a> {
             if let Some(routes) = panel_routes {
                 let fields: Map<String, Value> = serde_json::from_str(&routes[index])
                     .map_err(|_| "invalid review panel route")?;
-                if fields
-                    .keys()
-                    .any(|key| !matches!(key.as_str(), "route" | "routes" | "family_group" | "distinct_from" | "distinct_strength" | "require_findings" | "required_verdict"))
-                    || fields.contains_key("route") == fields.contains_key("routes")
+                if fields.keys().any(|key| {
+                    !matches!(
+                        key.as_str(),
+                        "route"
+                            | "routes"
+                            | "family_group"
+                            | "distinct_from"
+                            | "distinct_strength"
+                            | "require_findings"
+                            | "required_verdict"
+                    )
+                }) || fields.contains_key("route") == fields.contains_key("routes")
                 {
                     return Err("invalid review panel route fields".into());
                 }

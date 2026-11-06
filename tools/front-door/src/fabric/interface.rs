@@ -1288,10 +1288,16 @@ mod tests {
         struct Journal(Option<graph::GraphCheckpoint>);
         impl graph::GraphJournal for Journal {
             type Error = std::convert::Infallible;
-            fn load(&mut self, _: &str) -> std::result::Result<Option<graph::GraphCheckpoint>, Self::Error> {
+            fn load(
+                &mut self,
+                _: &str,
+            ) -> std::result::Result<Option<graph::GraphCheckpoint>, Self::Error> {
                 Ok(self.0.clone())
             }
-            fn save(&mut self, checkpoint: &graph::GraphCheckpoint) -> std::result::Result<(), Self::Error> {
+            fn save(
+                &mut self,
+                checkpoint: &graph::GraphCheckpoint,
+            ) -> std::result::Result<(), Self::Error> {
                 self.0 = Some(checkpoint.clone());
                 Ok(())
             }
@@ -1303,27 +1309,47 @@ mod tests {
         }
         impl AttemptOwner for Owner {
             type Error = std::convert::Infallible;
-            fn actor(&self) -> String { "template-review-fixture".into() }
-            fn bind_writer_worktree(&mut self, worktree: &str) -> std::result::Result<Option<graph::WriterWorktreeBinding>, Self::Error> {
+            fn actor(&self) -> String {
+                "template-review-fixture".into()
+            }
+            fn bind_writer_worktree(
+                &mut self,
+                worktree: &str,
+            ) -> std::result::Result<Option<graph::WriterWorktreeBinding>, Self::Error>
+            {
                 Ok(Some(graph::WriterWorktreeBinding {
-                    extra: Default::default(), worktree: worktree.into(), head: self.source.clone(),
+                    extra: Default::default(),
+                    worktree: worktree.into(),
+                    head: self.source.clone(),
                 }))
             }
             fn observe_or_start(
-                &mut self, key: &graph::AttemptKey, node: graph::NodeInput<'_>,
-                _: &graph::GraphRoute, access: graph::AccessMode, _: Option<&str>, _: graph::Replay<'_>,
+                &mut self,
+                key: &graph::AttemptKey,
+                node: graph::NodeInput<'_>,
+                _: &graph::GraphRoute,
+                access: graph::AccessMode,
+                _: Option<&str>,
+                _: graph::Replay<'_>,
             ) -> std::result::Result<graph::AttemptObservation, Self::Error> {
                 let writer = key.node_id == "writer";
                 if !writer {
                     assert_eq!(access, graph::AccessMode::ReadOnly);
-                    self.reviewed.insert(key.node_id.clone(), node.source_commit.map(str::to_owned));
+                    self.reviewed
+                        .insert(key.node_id.clone(), node.source_commit.map(str::to_owned));
                 }
-                let mut result = provenant_records::result_capture::ResultCapture::new(node.required_verdict);
-                result.push(b"```findings\n{\"schema_version\":1,\"findings\":[]}\n```\nVERDICT: PASS\n");
+                let mut result =
+                    provenant_records::result_capture::ResultCapture::new(node.required_verdict);
+                result.push(
+                    b"```findings\n{\"schema_version\":1,\"findings\":[]}\n```\nVERDICT: PASS\n",
+                );
                 Ok(graph::AttemptObservation::Terminal {
                     attempt_ref: Some(format!("fixture/{}", key.node_id)),
-                    outcome: graph::AttemptOutcome::Succeeded, launched: true,
-                    result: Some(Box::new(result.finish())), result_warning: None, result_path: None,
+                    outcome: graph::AttemptOutcome::Succeeded,
+                    launched: true,
+                    result: Some(Box::new(result.finish())),
+                    result_warning: None,
+                    result_path: None,
                     branch: writer.then(|| "slice".into()),
                     commit: writer.then(|| self.commit.clone()),
                 })
@@ -1348,30 +1374,74 @@ mod tests {
                     ]
                 }
             });
-            let response = factory.graph_document(input, budget, &cancel)
+            let response = factory
+                .graph_document(input, budget, &cancel)
                 .map_err(|error| format!("{risk} public template submission: {error:?}"))?;
             let document: GraphDocument = serde_json::from_value(response["document"].clone())?;
             let expanded = document.expanded(&factory.context.config.graph.limits)?;
-            let review_stages: std::collections::BTreeSet<String> = expanded.nodes.iter()
+            let review_stages: std::collections::BTreeSet<String> = expanded
+                .nodes
+                .iter()
                 .filter(|node| node.id.starts_with("review--") && node.composite.is_none())
-                .map(|node| node.id.clone()).collect();
+                .map(|node| node.id.clone())
+                .collect();
             for stage in ["frame", "verify", "synthesis"] {
-                assert_eq!(review_stages.iter().any(|id| id.contains(&format!("--{stage}"))), full_panel, "{risk}: {stage}");
+                assert_eq!(
+                    review_stages
+                        .iter()
+                        .any(|id| id.contains(&format!("--{stage}"))),
+                    full_panel,
+                    "{risk}: {stage}"
+                );
             }
-            if !full_panel { assert_eq!(review_stages.len(), 1); }
+            if !full_panel {
+                assert_eq!(review_stages.len(), 1);
+            }
             // A moving checkout cannot change the immutable commit supplied by
             // the completed writer to the review template and all its stages.
             crate::worktree_tests::git(&rig, &["commit", "--allow-empty", "-m", "later head"])?;
-            assert_ne!(crate::worktree_tests::git(&rig, &["rev-parse", "HEAD"])?, writer_commit);
-            let mut owner = Owner { source: original.clone(), commit: writer_commit.clone(), reviewed: BTreeMap::new() };
-            let run = graph::advance_with_budget(&document, &mut owner, &mut Journal::default(),
-                &factory.context.config.graph.limits, &factory.context.config.graph.budget)?;
+            assert_ne!(
+                crate::worktree_tests::git(&rig, &["rev-parse", "HEAD"])?,
+                writer_commit
+            );
+            let mut owner = Owner {
+                source: original.clone(),
+                commit: writer_commit.clone(),
+                reviewed: BTreeMap::new(),
+            };
+            let run = graph::advance_with_budget(
+                &document,
+                &mut owner,
+                &mut Journal::default(),
+                &factory.context.config.graph.limits,
+                &factory.context.config.graph.budget,
+            )?;
             assert_eq!(run.status, graph::GraphStatus::Complete);
             assert!(run.checkpoint.successful(), "{risk}: {:?}", run.checkpoint);
-            assert_eq!(owner.reviewed.keys().cloned().collect::<std::collections::BTreeSet<_>>(), review_stages);
+            assert_eq!(
+                owner
+                    .reviewed
+                    .keys()
+                    .cloned()
+                    .collect::<std::collections::BTreeSet<_>>(),
+                review_stages
+            );
             for (id, source) in owner.reviewed {
-                assert_eq!(source.as_deref(), Some(writer_commit.as_str()), "{risk}: {id}");
-                assert_eq!(run.checkpoint.nodes.iter().find(|node| node.id == id).ok_or("review checkpoint")?.source_commit.as_deref(), Some(writer_commit.as_str()));
+                assert_eq!(
+                    source.as_deref(),
+                    Some(writer_commit.as_str()),
+                    "{risk}: {id}"
+                );
+                assert_eq!(
+                    run.checkpoint
+                        .nodes
+                        .iter()
+                        .find(|node| node.id == id)
+                        .ok_or("review checkpoint")?
+                        .source_commit
+                        .as_deref(),
+                    Some(writer_commit.as_str())
+                );
             }
         }
         Ok(())

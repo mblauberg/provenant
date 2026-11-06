@@ -42,7 +42,10 @@ pub(super) fn clean_start(
 
 fn approved(outputs: &NodeOutputs) -> bool {
     outputs.verdict_error.is_none()
-        && outputs.verdict.as_deref().and_then(provenant_records::workflow::ReviewVerdict::from_token)
+        && outputs
+            .verdict
+            .as_deref()
+            .and_then(provenant_records::workflow::ReviewVerdict::from_token)
             == Some(provenant_records::workflow::ReviewVerdict::Approve)
 }
 
@@ -121,7 +124,11 @@ pub(super) fn replan_source<'a>(
     };
     let parent = member("synthesis")
         .filter(|progress| progress.state == NodeState::Succeeded && progress.outputs.is_some())
-        .or_else(|| member("check").filter(|progress| progress.state == NodeState::Succeeded && progress.outputs.is_some()))?;
+        .or_else(|| {
+            member("check").filter(|progress| {
+                progress.state == NodeState::Succeeded && progress.outputs.is_some()
+            })
+        })?;
     let commit = member("fix")?.outputs.as_ref()?.commit.as_deref()?;
     Some((&parent.id, commit))
 }
@@ -130,7 +137,8 @@ pub(super) fn replan_source<'a>(
 pub(super) fn cached_growth(progress: &NodeProgress, before: &str, after: &str) -> Option<bool> {
     let cache = progress.extra.get("repair_growth")?;
     (cache.get("before")?.as_str()? == before && cache.get("after")?.as_str()? == after)
-        .then(|| cache.get("grew").and_then(serde_json::Value::as_bool)).flatten()
+        .then(|| cache.get("grew").and_then(serde_json::Value::as_bool))
+        .flatten()
 }
 
 pub(super) fn repair_commits<'a>(
@@ -202,30 +210,52 @@ pub(super) fn panel_expansion<'a>(
 
 /// A prior immutable panel can certify only its pinned repaired commit.
 pub(super) fn panel_reviews_commit(expansion: &Expansion, commit: &str) -> bool {
-    let mut leaves = expansion.nodes.iter().filter(|node| node.composite.is_none()).peekable();
-    leaves.peek().is_some() && leaves.all(|node| matches!(&node.source,
-        Some(SourceBinding::Commit { commit: subject }) if subject == commit))
+    let mut leaves = expansion
+        .nodes
+        .iter()
+        .filter(|node| node.composite.is_none())
+        .peekable();
+    leaves.peek().is_some()
+        && leaves.all(|node| {
+            matches!(&node.source,
+        Some(SourceBinding::Commit { commit: subject }) if subject == commit)
+        })
 }
 
 pub(super) fn panel_pending(checkpoint: &GraphCheckpoint, expansion: &Expansion) -> bool {
-    expansion.nodes.iter().any(|member| checkpoint.nodes.iter()
-        .find(|progress| progress.id == member.id).is_some_and(|progress| !progress.state.settled()))
+    expansion.nodes.iter().any(|member| {
+        checkpoint
+            .nodes
+            .iter()
+            .find(|progress| progress.id == member.id)
+            .is_some_and(|progress| !progress.state.settled())
+    })
 }
 
 pub(super) fn panel_failure(checkpoint: &GraphCheckpoint, expansion: &Expansion) -> Option<String> {
-    let Some(root) = expansion.nodes.iter().find(|candidate| candidate.composite.is_some()
-        && expansion.nodes.iter().all(|member| member.id == candidate.id
-            || member.id.starts_with(&format!("{}--", candidate.id)))) else {
+    let Some(root) = expansion.nodes.iter().find(|candidate| {
+        candidate.composite.is_some()
+            && expansion.nodes.iter().all(|member| {
+                member.id == candidate.id || member.id.starts_with(&format!("{}--", candidate.id))
+            })
+    }) else {
         return Some("replanned panel boundary is missing".into());
     };
-    let Some(progress) = checkpoint.nodes.iter().find(|progress| progress.id == root.id) else {
+    let Some(progress) = checkpoint
+        .nodes
+        .iter()
+        .find(|progress| progress.id == root.id)
+    else {
         return Some("replanned panel boundary is missing".into());
     };
     let Some(outputs) = progress.outputs.as_ref() else {
         return Some("replanned panel has no complete output".into());
     };
-    if progress.state != NodeState::Succeeded || outputs.findings_available != Some(true)
-        || !approved(outputs) || outputs.findings.iter().any(blocking) {
+    if progress.state != NodeState::Succeeded
+        || outputs.findings_available != Some(true)
+        || !approved(outputs)
+        || outputs.findings.iter().any(blocking)
+    {
         return Some("replanned panel did not pass".into());
     }
     None
@@ -500,5 +530,4 @@ mod tests {
         assert_eq!(patch.nodes[0]["use"], "review-panel");
         assert_eq!(patch.nodes[0]["distinct_strength"], "prefer");
     }
-
 }

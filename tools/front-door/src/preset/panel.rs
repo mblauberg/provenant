@@ -246,12 +246,25 @@ fn review_selector_with_git(
                 } else {
                     format!("; lenses={}", lens_reason.join(","))
                 },
-                if paths_unreadable { format!("unreadable (highest configured floor: {})", floors.classes.join(",")) } else if floors.classes.is_empty() { "none".to_owned() } else { floors.classes.join(",") },
+                if paths_unreadable {
+                    format!(
+                        "unreadable (highest configured floor: {})",
+                        floors.classes.join(",")
+                    )
+                } else if floors.classes.is_empty() {
+                    "none".to_owned()
+                } else {
+                    floors.classes.join(",")
+                },
                 size.unwrap_or("unknown"),
                 kind.unwrap_or("unknown"),
                 query.risk.unwrap_or("unknown")
             ),
-            floor_min_reviewers: if floors.tier.is_some() { selected.shape.reviewers.iter().map(|row| row.count).sum() } else { 0 },
+            floor_min_reviewers: if floors.tier.is_some() {
+                selected.shape.reviewers.iter().map(|row| row.count).sum()
+            } else {
+                0
+            },
             required_floor_lenses: floors.lenses,
             plan,
             warnings,
@@ -272,8 +285,18 @@ fn review_selector_with_git(
                 .by_paths
                 .values()
                 .flat_map(|rule| rule.add.iter().cloned())
-                .chain(review.shapes.values().flat_map(|shape| shape.reviewers.iter().flat_map(|group| group.lenses.iter().cloned())))
-                .chain(review.floors.values().flat_map(|floor| floor.lenses.iter().cloned()))
+                .chain(review.shapes.values().flat_map(|shape| {
+                    shape
+                        .reviewers
+                        .iter()
+                        .flat_map(|group| group.lenses.iter().cloned())
+                }))
+                .chain(
+                    review
+                        .floors
+                        .values()
+                        .flat_map(|floor| floor.lenses.iter().cloned()),
+                )
                 .chain(std::iter::once("tests".to_owned()))
                 .collect(),
             ..Default::default()
