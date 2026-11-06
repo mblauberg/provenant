@@ -533,7 +533,9 @@ fn expand_loops(document: &GraphDocument, extensions: &[String]) -> Result<Graph
                     let previous = ["synthesis", "check"]
                         .into_iter()
                         .find(|name| spec.body.iter().any(|body| body.id == *name));
-                    let selections = if round > 1 && let Some(previous) = previous {
+                    let selections = if round > 1
+                        && let Some(previous) = previous
+                    {
                         vec![GraphInput {
                             extra: Default::default(),
                             node: id(&node.id, round - 1, previous),

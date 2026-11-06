@@ -602,29 +602,36 @@ fn repair_scope_grew(
 impl BoundGraphOwner<'_> {
     fn repair_git(&self, directory: &Path, args: &[&str]) -> Result<String, String> {
         use provenant_os::exec::{ExecOptions, Executor, Termination};
-        let git = provenant_os::git::git_executable()
-            .ok_or("Git executable unavailable")?;
+        let git = provenant_os::git::git_executable().ok_or("Git executable unavailable")?;
         let mut argv = vec![git.into_os_string()];
         argv.extend(args.iter().map(std::ffi::OsString::from));
         let remaining = std::time::Duration::from_micros(
-            self.budget.remaining(self.factory.clock.mono_now()).as_micros(),
-        ).min(std::time::Duration::from_secs(30));
+            self.budget
+                .remaining(self.factory.clock.mono_now())
+                .as_micros(),
+        )
+        .min(std::time::Duration::from_secs(30));
         let mut options = ExecOptions::new(&argv, directory, remaining);
         options.cancel = Some(self.cancel);
-        let output = self.factory.executor.execute(options)
+        let output = self
+            .factory
+            .executor
+            .execute(options)
             .map_err(|_| "repair Git command could not run".to_owned())?;
-        if output.termination != Termination::Exit(0) || output.timed_out || output.stdout.truncated {
+        if output.termination != Termination::Exit(0) || output.timed_out || output.stdout.truncated
+        {
             return Err("repair Git command did not complete within its bounds".into());
         }
-        String::from_utf8(output.stdout.bytes)
-            .map_err(|_| "repair Git output is not UTF-8".into())
+        String::from_utf8(output.stdout.bytes).map_err(|_| "repair Git output is not UTF-8".into())
     }
 }
 
 impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
     fn detect_repair_growth(&mut self, before: &str, after: &str) -> Result<bool, String> {
-        let before = provenant_core::GitOid::parse(before).map_err(|_| "repair source commit is invalid")?;
-        let after = provenant_core::GitOid::parse(after).map_err(|_| "repaired commit is invalid")?;
+        let before =
+            provenant_core::GitOid::parse(before).map_err(|_| "repair source commit is invalid")?;
+        let after =
+            provenant_core::GitOid::parse(after).map_err(|_| "repaired commit is invalid")?;
         let base = self
             .integration_base
             .and_then(|bases| bases.review.or(bases.integration))
@@ -645,7 +652,9 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
         let new = paths(&after)?;
         let routing: provenant_routing::RoutingConfig =
             provenant_config::read_domain(self.factory.context.roots.state.as_path(), "routing")
-                .map_err(|_| "repair review configuration is unavailable; correct routing settings")?;
+                .map_err(
+                    |_| "repair review configuration is unavailable; correct routing settings",
+                )?;
         Ok(repair_scope_grew(&routing.review, &old, &new))
     }
 
@@ -654,7 +663,8 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
         document: &provenant_fabric_runtime::graph::GraphDocument,
         subject: &str,
     ) -> Result<provenant_fabric_runtime::graph::RepairPanelResolution, String> {
-        let subject = provenant_core::GitOid::parse(subject).map_err(|_| "repair review subject is invalid")?;
+        let subject = provenant_core::GitOid::parse(subject)
+            .map_err(|_| "repair review subject is invalid")?;
         let base = self
             .integration_base
             .and_then(|bases| bases.review.or(bases.integration))
@@ -671,8 +681,11 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             .collect();
         let routing: provenant_routing::RoutingConfig =
             provenant_config::read_domain(self.factory.context.roots.state.as_path(), "routing")
-                .map_err(|_| "repair review configuration is unavailable; correct routing settings")?;
-        let raw = serde_json::to_value(document).map_err(|_| "repair review document could not be encoded")?;
+                .map_err(
+                    |_| "repair review configuration is unavailable; correct routing settings",
+                )?;
+        let raw = serde_json::to_value(document)
+            .map_err(|_| "repair review document could not be encoded")?;
         let mut request: provenant_routing::ReviewRequest = raw
             .get("review")
             .cloned()
@@ -691,24 +704,35 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
         let panel = routing
             .review
             .resolve_panel(&request, None, &paths, false)
-            .map_err(|_| "repair review panel could not resolve; correct review routing settings")?;
+            .map_err(
+                |_| "repair review panel could not resolve; correct review routing settings",
+            )?;
         let single = panel.slots.len() == 1;
         let frame = !single && panel.frame;
         let verifiers = if single { 0 } else { panel.verifiers };
         let synthesis = !single && panel.synthesis == provenant_routing::ReviewSynthesis::Model;
-        let advice = panel.slots.iter().map(|slot| (
-            slot.lens.clone(),
-            if slot.lens == "tests" {
-                include_str!("../../assets/review-tests-advice.txt").to_owned()
-            } else {
-                String::new()
-            },
-        )).collect();
-        let slots = panel.slots
+        let advice = panel
+            .slots
+            .iter()
+            .map(|slot| {
+                (
+                    slot.lens.clone(),
+                    if slot.lens == "tests" {
+                        include_str!("../../assets/review-tests-advice.txt").to_owned()
+                    } else {
+                        String::new()
+                    },
+                )
+            })
+            .collect();
+        let slots = panel
+            .slots
             .into_iter()
             .map(|slot| {
-                let (key, route) = crate::graph_support::tier_route(&slot.lens, &slot.tier, None, true)
-                    .map_err(|_| "repair review route is invalid; correct reviewer tier settings")?;
+                let (key, route) = crate::graph_support::tier_route(
+                    &slot.lens, &slot.tier, None, true,
+                )
+                .map_err(|_| "repair review route is invalid; correct reviewer tier settings")?;
                 let mut fields = serde_json::Map::new();
                 fields.insert(key.into(), route);
                 Ok(provenant_fabric_runtime::graph::RepairPanelSlot {
@@ -721,7 +745,11 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             })
             .collect::<Result<Vec<_>, String>>()?;
         Ok(provenant_fabric_runtime::graph::RepairPanelResolution {
-            slots, frame, verifiers, synthesis, advice,
+            slots,
+            frame,
+            verifiers,
+            synthesis,
+            advice,
         })
     }
 

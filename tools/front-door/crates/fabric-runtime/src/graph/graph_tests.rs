@@ -11212,15 +11212,26 @@ fn independent_template_review_bases_are_pinned_and_replayed() {
     let compiler = template::Compiler::new(&library);
     let subject = "1".repeat(40);
     let bases = ["2".repeat(40), "3".repeat(40)];
-    let nodes = bases.iter().enumerate().map(|(index, base)| compiler.compile(&serde_json::json!({
-        "id": format!("review-{index}"), "use": "review",
-        "source": {"type":"commit", "commit":subject}, "review_base":base
-    })).unwrap()).collect();
+    let nodes = bases
+        .iter()
+        .enumerate()
+        .map(|(index, base)| {
+            compiler
+                .compile(&serde_json::json!({
+                    "id": format!("review-{index}"), "use": "review",
+                    "source": {"type":"commit", "commit":subject}, "review_base":base
+                }))
+                .unwrap()
+        })
+        .collect();
     let mut document = graph(nodes);
     document.schema_version = 2;
     let mut owner = FakeOwner {
-        observations: [terminal_with_result(AttemptOutcome::Succeeded, &findings_text("")),
-            terminal_with_result(AttemptOutcome::Succeeded, &findings_text(""))].into(),
+        observations: [
+            terminal_with_result(AttemptOutcome::Succeeded, &findings_text("")),
+            terminal_with_result(AttemptOutcome::Succeeded, &findings_text("")),
+        ]
+        .into(),
         ..Default::default()
     };
     let mut journal = MemoryJournal::default();
@@ -11230,9 +11241,18 @@ fn independent_template_review_bases_are_pinned_and_replayed() {
     for (node, base) in run.checkpoint.nodes.iter().zip(&bases) {
         assert_eq!(node.source_commit.as_deref(), Some(subject.as_str()));
         assert_eq!(node.review_base.as_deref(), Some(base.as_str()));
-        assert_eq!(node.attempts[0].input_manifest.as_ref().unwrap().review_base.as_deref(), Some(base.as_str()));
+        assert_eq!(
+            node.attempts[0]
+                .input_manifest
+                .as_ref()
+                .unwrap()
+                .review_base
+                .as_deref(),
+            Some(base.as_str())
+        );
     }
-    journal.0 = Some(serde_json::from_slice(&serde_json::to_vec(&run.checkpoint).unwrap()).unwrap());
+    journal.0 =
+        Some(serde_json::from_slice(&serde_json::to_vec(&run.checkpoint).unwrap()).unwrap());
     owner.resolved_review_base = Some("4".repeat(40));
     let replay = advance(&document, &mut owner, &mut journal).unwrap();
     assert_eq!(replay.status, GraphStatus::Complete);
@@ -11244,12 +11264,20 @@ fn independent_template_review_bases_are_pinned_and_replayed() {
 fn template_review_admission_rejects_expanded_ids_over_the_limit() {
     let library = template::TemplateLibrary::bundled();
     let compiler = template::Compiler::new(&library);
-    let mut boundary = graph(vec![compiler.compile(&serde_json::json!({
-        "id":"x".repeat(190),"use":"review","over":["security"]
-    })).unwrap()]);
+    let mut boundary = graph(vec![
+        compiler
+            .compile(&serde_json::json!({
+                "id":"x".repeat(190),"use":"review","over":["security"]
+            }))
+            .unwrap(),
+    ]);
     boundary.admit(&Default::default()).unwrap();
-    boundary.nodes = vec![compiler.compile(&serde_json::json!({
-        "id":"x".repeat(191),"use":"review","over":["security"]
-    })).unwrap()];
+    boundary.nodes = vec![
+        compiler
+            .compile(&serde_json::json!({
+                "id":"x".repeat(191),"use":"review","over":["security"]
+            }))
+            .unwrap(),
+    ];
     assert!(boundary.admit(&Default::default()).is_err());
 }

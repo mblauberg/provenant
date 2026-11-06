@@ -205,13 +205,16 @@ fn node_bound(
     let ci = matches!(node.condition, Some(GateCondition::Ci { .. }));
     let boundary = gate || node.loop_body.is_some();
     let mut skeleton = NodeProgress {
-        extra: [(
-            "retry".into(),
-            serde_json::json!({"retries":u8::MAX,"origin":"shipped_default"}),
-        ), (
-            "repair_growth".into(),
-            serde_json::json!({"before":"1".repeat(64),"after":"1".repeat(64),"grew":false}),
-        )]
+        extra: [
+            (
+                "retry".into(),
+                serde_json::json!({"retries":u8::MAX,"origin":"shipped_default"}),
+            ),
+            (
+                "repair_growth".into(),
+                serde_json::json!({"before":"1".repeat(64),"after":"1".repeat(64),"grew":false}),
+            ),
+        ]
         .into_iter()
         .collect(),
         children: node.composite_members.clone(),
@@ -332,7 +335,9 @@ fn node_bound(
     // `substantial` is the longest accepted risk tier, and false is the
     // longest cached growth boolean. Commit IDs may be SHA-256 (64 bytes).
     if let Some(outputs) = &mut skeleton.outputs {
-        outputs.extra.insert("risk_tier".into(), "substantial".into());
+        outputs
+            .extra
+            .insert("risk_tier".into(), "substantial".into());
     }
     let mut bytes = canonical_len(&skeleton)
         + 64 // source commit

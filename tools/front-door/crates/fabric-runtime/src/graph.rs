@@ -1724,8 +1724,11 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         );
                     }
                     if let Some((before, after)) = repair::repair_commits(node, &checkpoint)
-                        .map(|(before, after)| (before.to_owned(), after.to_owned())) {
-                        if let Some(value) = repair::cached_growth(&checkpoint.nodes[node_index], &before, &after) {
+                        .map(|(before, after)| (before.to_owned(), after.to_owned()))
+                    {
+                        if let Some(value) =
+                            repair::cached_growth(&checkpoint.nodes[node_index], &before, &after)
+                        {
                             growth |= value;
                         } else {
                             match owner.detect_repair_growth(&before, &after) {
@@ -1736,7 +1739,8 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                                     growth |= value;
                                 }
                                 Err(error) if !reported => {
-                                    replan_error = Some(format!("cannot assess repair growth: {error}"))
+                                    replan_error =
+                                        Some(format!("cannot assess repair growth: {error}"))
                                 }
                                 Err(_) => {}
                             }
@@ -1757,9 +1761,19 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                                     .map_err(|e| e.to_string())?;
                                 let panel = owner.resolve_repair_panel(document, &commit)?;
                                 let single = panel.slots.len() == 1;
-                                let topology = format!("f{}-v{}-s{}", u8::from(panel.frame && !single),
-                                    u8::from(panel.verifiers > 0 && !single), u8::from(panel.synthesis && !single));
-                                let verifier_ids = if single { Vec::new() } else { (1..=panel.verifiers).map(|index| index.to_string()).collect() };
+                                let topology = format!(
+                                    "f{}-v{}-s{}",
+                                    u8::from(panel.frame && !single),
+                                    u8::from(panel.verifiers > 0 && !single),
+                                    u8::from(panel.synthesis && !single)
+                                );
+                                let verifier_ids = if single {
+                                    Vec::new()
+                                } else {
+                                    (1..=panel.verifiers)
+                                        .map(|index| index.to_string())
+                                        .collect()
+                                };
                                 let slots = panel.slots;
                                 let mut routes = Vec::with_capacity(slots.len());
                                 let mut lenses = Vec::with_capacity(slots.len());
@@ -1778,7 +1792,8 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                                     fields.insert("distinct_from".into(), "dependencies".into());
                                     fields.insert("distinct_strength".into(), "prefer".into());
                                     fields.insert("require_findings".into(), true.into());
-                                    fields.insert("required_verdict".into(), "VERDICT: PASS".into());
+                                    fields
+                                        .insert("required_verdict".into(), "VERDICT: PASS".into());
                                     routes.push(
                                         serde_json::to_string(&fields)
                                             .map_err(|error| error.to_string())?,
@@ -1791,7 +1806,10 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                                     ("review-verifiers".into(), verifier_ids),
                                 ]);
                                 for lens in lenses {
-                                    resolvers.insert(format!("review-advice-{lens}"), vec![panel.advice.get(&lens).cloned().unwrap_or_default()]);
+                                    resolvers.insert(
+                                        format!("review-advice-{lens}"),
+                                        vec![panel.advice.get(&lens).cloned().unwrap_or_default()],
+                                    );
                                 }
                                 let library = template::TemplateLibrary::bundled();
                                 let context = patch::PatchContext {
