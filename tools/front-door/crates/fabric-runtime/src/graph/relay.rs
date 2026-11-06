@@ -21,6 +21,7 @@ pub const DEFAULT_CHILD_DEPTH: usize = 8;
 pub const DETACHED: &str = "detached";
 /// Progress field set while a parent waits on its children.
 pub const YIELDED_SLOT: &str = "yielded_slot";
+pub(super) const DETACHED_FROM_GRAPH_CANCEL: &str = "detached_from_graph_cancel";
 pub(super) const SUBTREE_CANCEL: &str = "subtree_cancel";
 const SEPARATOR: &str = "--";
 const ID_BYTES: usize = 64;
@@ -67,6 +68,8 @@ pub enum RelayOp {
     Wait { waiting: bool },
     /// Observe the calling node's children.
     Children,
+    /// Stop one node within the calling lane's subtree.
+    Stop { node: String },
 }
 
 fn task() -> String {
@@ -353,6 +356,11 @@ pub fn admit_child_bound(
         .ok_or_else(|| invalid("admitted child patch record missing".into()))?;
     record.extra.insert(REQUEST_DIGEST.into(), digest.into());
     record.journaled = context.journal.is_some();
+    // A retried parent can admit fresh live children after an earlier settle.
+    // Re-arm closure only when a new admission actually commits.
+    if let Some(progress) = graph.checkpoint.nodes.iter_mut().find(|node| node.id == parent) {
+        progress.extra.remove("children_cancelled");
+    }
     Ok(ChildReceipt {
         graph_id,
         parent: parent.to_owned(),
@@ -520,6 +528,33 @@ pub struct SubtreeCancel {
     pub detached: Vec<String>,
 }
 
+/// Fence explicitly detached branches out of whole-graph cancellation. The
+/// persisted flags let recovery settle cancellation without reloading templates.
+pub fn fence_detached_cancellation(
+    document: &GraphDocument,
+    checkpoint: &mut GraphCheckpoint,
+) -> Result<BTreeSet<String>, String> {
+    let expanded = plans::expand(
+        document,
+        &checkpoint.extensions,
+        &checkpoint.expansions,
+        &plans::generous(),
+    )?;
+    let roots: Vec<_> = expanded.nodes.iter()
+        .filter(|node| node.extra.get(DETACHED) == Some(&Value::Bool(true)))
+        .map(|node| node.id.as_str()).collect();
+    let mut protected = BTreeSet::new();
+    for node in &mut checkpoint.nodes {
+        if roots.iter().any(|root| node.id == *root || node.id.starts_with(&format!("{root}{SEPARATOR}"))) {
+            node.extra.insert(DETACHED_FROM_GRAPH_CANCEL.into(), true.into());
+            protected.insert(node.id.clone());
+        } else {
+            node.extra.remove(DETACHED_FROM_GRAPH_CANCEL);
+        }
+    }
+    Ok(protected)
+}
+
 /// Cancel every descendant of `parent` that is not detached. Settled nodes
 /// are left as they are; running ones are returned for the host to stop.
 pub fn cancel_subtree(
@@ -584,7 +619,7 @@ pub fn cancel_subtree(
     Ok(result)
 }
 
-/// Fence failed parents' children before stopping their attempts. Repeated
+/// Fence settled parents' children before stopping their attempts. Repeated
 /// advances retry uncertain stops without ever observing/relaunching the child.
 pub(super) fn settle_subtrees<R: AttemptOwner, J: GraphJournal>(
     document: &GraphDocument,
@@ -597,14 +632,31 @@ pub(super) fn settle_subtrees<R: AttemptOwner, J: GraphJournal>(
         .nodes
         .iter()
         .filter(|node| {
-            matches!(node.state, NodeState::Failed | NodeState::Skipped)
+            node.state.settled()
                 && node.extra.get("children_cancelled") != Some(&Value::Bool(true))
         })
         .map(|node| node.id.clone())
         .collect();
     if !parents.is_empty() {
         for parent in parents {
-            cancel_subtree(document, checkpoint, &parent).map_err(GraphError::Refused)?;
+            let succeeded = checkpoint.nodes.iter().any(|node| node.id == parent && node.state == NodeState::Succeeded);
+            if succeeded {
+                // Final patches deliberately schedule work after their producer
+                // completes. Only live relay children share the process lifetime.
+                let children: Vec<String> = checkpoint.expansions.iter()
+                    .filter(|expansion| expansion.patch.as_ref().is_some_and(|record| {
+                        record.parent.as_deref() == Some(parent.as_str()) && record.extra.contains_key(REQUEST_DIGEST)
+                    }))
+                    .flat_map(|expansion| expansion.nodes.iter())
+                    .filter(|node| node.extra.get(DETACHED) != Some(&Value::Bool(true)) && checkpoint.nodes.iter().any(|progress| progress.id == node.id && !progress.state.settled()))
+                    .map(|node| node.id.clone()).collect();
+                for child in children {
+                    super::cancel_node_subtree(document, checkpoint, &child, Some("parent settled"))
+                        .map_err(GraphError::Refused)?;
+                }
+            } else {
+                cancel_subtree(document, checkpoint, &parent).map_err(GraphError::Refused)?;
+            }
             checkpoint
                 .nodes
                 .iter_mut()

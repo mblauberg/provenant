@@ -361,8 +361,7 @@ fn detached_children_do_not_gate_their_parents_dependants() {
     assert!(cancelled.detached.is_empty());
 }
 
-#[test]
-fn failed_parent_stops_running_children_and_preserves_detached_subtrees() {
+fn settled_parent_stops_running_children(outcome: AttemptOutcome) {
     let (document, mut checkpoint) = live(None);
     add(&document, &mut checkpoint, "a", &child("stop", "stop")).unwrap();
     let mut keep = child("keep", "keep");
@@ -382,7 +381,7 @@ fn failed_parent_stops_running_children_and_preserves_detached_subtrees() {
     let mut owner = FakeOwner {
         observations: [
             AttemptObservation::Terminal {
-                outcome: AttemptOutcome::OtherFailure,
+                outcome,
                 result_warning: None,
                 result_path: None,
                 branch: None,
@@ -398,6 +397,8 @@ fn failed_parent_stops_running_children_and_preserves_detached_subtrees() {
         .into(),
         ..Default::default()
     };
+    let mut launched = launched;
+    cancel_node_subtree(&document, &mut launched.checkpoint, "b", None).unwrap();
     let mut journal = MemoryJournal(Some(launched.checkpoint));
     let failed = advance(&document, &mut owner, &mut journal).unwrap();
     assert_eq!(owner.cancellation_stops, 1);
@@ -834,4 +835,178 @@ fn provisioning_fence_survives_a_checkpoint_round_trip_until_cleared() {
     relay::clear_provisioning(&mut checkpoint, "a--w");
     assert!(relay::pending_provisioning(&checkpoint).is_empty());
     assert!(!checkpoint.extra.contains_key("pending_writer_provisioning"));
+}
+
+#[test]
+fn successful_parent_closes_attached_children_but_not_detached_children() {
+    let (document, mut checkpoint) = live(None);
+    checkpoint.nodes.iter_mut().find(|node| node.id == "a").unwrap().extra.insert("children_cancelled".into(), true.into());
+    add(&document, &mut checkpoint, "a", &child("stop", "s1")).unwrap();
+    let mut keep = child("keep", "s2");
+    keep.detached = true;
+    add(&document, &mut checkpoint, "a", &keep).unwrap();
+    let parent = checkpoint.nodes.iter_mut().find(|node| node.id == "a").unwrap();
+    parent.state = NodeState::Succeeded;
+    parent.attempts[0].state = AttemptState::Terminal;
+    parent.attempts[0].outcome = Some(AttemptOutcome::Succeeded);
+    let mut journal = MemoryJournal(Some(checkpoint.clone()));
+    relay::settle_subtrees(&document, &mut checkpoint, &mut FakeOwner::default(), &mut journal, &mut Default::default()).unwrap();
+    assert_eq!(progress(&checkpoint, "a--stop").state, NodeState::Skipped);
+    assert_eq!(progress(&checkpoint, "a--keep").state, NodeState::Pending);
+}
+
+#[test]
+fn whole_graph_cancel_preserves_detached_children_and_their_descendants() {
+    let (document, mut checkpoint) = live(None);
+    add(&document, &mut checkpoint, "a", &child("stop", "g1")).unwrap();
+    let mut keep = child("keep", "g2");
+    keep.detached = true;
+    add(&document, &mut checkpoint, "a", &keep).unwrap();
+    mark_running(&mut checkpoint, "a--keep");
+    add(&document, &mut checkpoint, "a--keep", &child("under", "g3")).unwrap();
+    let protected = relay::fence_detached_cancellation(&document, &mut checkpoint).unwrap();
+    assert_eq!(protected.into_iter().collect::<Vec<_>>(), ["a--keep", "a--keep--under"]);
+    checkpoint.cancelled = true;
+    let mut owner = FakeOwner::default();
+    let mut journal = MemoryJournal(Some(checkpoint.clone()));
+    settle_cancelled_nodes(&mut checkpoint, &mut owner, &mut journal).unwrap();
+    assert_eq!(owner.cancellation_stops, 1);
+    assert_eq!(progress(&checkpoint, "a--stop").state, NodeState::Skipped);
+    assert_eq!(progress(&checkpoint, "a--keep").state, NodeState::Running);
+    assert_eq!(progress(&checkpoint, "a--keep--under").state, NodeState::Pending);
+}
+
+#[test]
+fn yielded_writer_parent_drains_more_children_than_the_slot_limit() {
+    let document: GraphDocument = serde_json::from_value(json!({
+        "schema_version":1, "graph_id":"writers", "integration_branch":"integration", "nodes":[
+            {"id":"a", "access":"worktree_write", "worktree":".worktrees/parent", "write_scope":["src"], "prompt":"Start", "route":{"alias":"senior"}}
+        ]
+    })).unwrap();
+    let mut owner = FakeOwner {
+        observations: [AttemptObservation::Pending { attempt_ref: Some("attempt-a".into()) }].into(),
+        ..Default::default()
+    };
+    let mut checkpoint = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap().checkpoint;
+    for index in 0..4 {
+        let mut request = child(&format!("c{index}"), &format!("slot{index}"));
+        request.writer = true;
+        request.write_scope = vec!["src".into()];
+        add(&document, &mut checkpoint, "a", &request).unwrap();
+    }
+    set_waiting(&mut checkpoint, "a", true);
+    let limits = crate::config::GraphLimits { concurrency: Some(1), ..Default::default() };
+    for index in 0..4 {
+        let mut owner = FakeOwner {
+            observations: [AttemptObservation::Pending { attempt_ref: Some("attempt-a".into()) }, AttemptObservation::Pending { attempt_ref: Some(format!("child-{index}")) }].into(),
+            ..Default::default()
+        };
+        let run = advance_with_budget(&document, &mut owner, &mut MemoryJournal(Some(checkpoint)), &limits, &Default::default()).unwrap();
+        checkpoint = run.checkpoint;
+        assert_eq!(progress(&checkpoint, &format!("a--c{index}")).state, NodeState::Running);
+        assert_eq!(progress(&checkpoint, "a").state, NodeState::Running);
+        let completed = checkpoint.nodes.iter_mut().find(|node| node.id == format!("a--c{index}")).unwrap();
+        completed.state = NodeState::Succeeded;
+        for attempt in &mut completed.attempts {
+            attempt.state = AttemptState::Terminal;
+            attempt.outcome = Some(AttemptOutcome::Succeeded);
+        }
+    }
+}
+
+#[test]
+fn failed_parent_stops_running_children_and_preserves_detached_subtrees() {
+    settled_parent_stops_running_children(AttemptOutcome::OtherFailure);
+}
+
+#[test]
+fn successful_parent_stops_running_children_and_preserves_detached_subtrees() {
+    settled_parent_stops_running_children(AttemptOutcome::Succeeded);
+}
+
+#[test]
+fn successful_final_patch_producer_leaves_its_planned_work_pending() {
+    let (document, mut checkpoint) = live(None);
+    add(&document, &mut checkpoint, "a", &child("producer", "final-producer")).unwrap();
+    mark_running(&mut checkpoint, "a--producer");
+    let library = template::TemplateLibrary::bundled();
+    let resolvers = Default::default();
+    let limits = plans::generous();
+    let context = patch::PatchContext {
+        journal: None, library: &library, resolvers: &resolvers,
+        limits: &limits, scan: &|_| Ok(()),
+    };
+    patch::admit_patch(&mut patch::LiveGraph { document: &document, checkpoint: &mut checkpoint }, Some("a--producer"), &patch::Patch {
+        schema_version: patch::PATCH_SCHEMA_VERSION,
+        nodes: vec![json!({"id":"planned", "use":"task", "brief":"Scheduled final work"})],
+        ..Default::default()
+    }, &context).unwrap();
+    for id in ["a", "a--producer"] {
+        let parent = checkpoint.nodes.iter_mut().find(|node| node.id == id).unwrap();
+        parent.state = NodeState::Succeeded;
+        for attempt in &mut parent.attempts {
+            attempt.state = AttemptState::Terminal;
+            attempt.outcome = Some(AttemptOutcome::Succeeded);
+        }
+    }
+    relay::settle_subtrees(&document, &mut checkpoint, &mut FakeOwner::default(), &mut MemoryJournal::default(), &mut Default::default()).unwrap();
+    assert_eq!(progress(&checkpoint, "a--producer--planned").state, NodeState::Pending);
+}
+
+#[test]
+fn cancelled_graph_keeps_advancing_its_detached_children() {
+    let (document, mut checkpoint) = live(None);
+    let mut keep = child("keep", "advance-keep");
+    keep.detached = true;
+    add(&document, &mut checkpoint, "a", &keep).unwrap();
+    checkpoint.cancelled = true;
+    let mut owner = FakeOwner {
+        cancelled_attempt_settled: true,
+        observations: [AttemptObservation::Pending { attempt_ref: Some("keep-attempt".into()) }].into(),
+        ..Default::default()
+    };
+    let mut journal = MemoryJournal(Some(checkpoint));
+    let running = advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(running.status, GraphStatus::Pending);
+    assert!(running.checkpoint.cancelled);
+    assert_eq!(progress(&running.checkpoint, "a").state, NodeState::Skipped);
+    assert_eq!(progress(&running.checkpoint, "b").state, NodeState::Skipped);
+    assert_eq!(progress(&running.checkpoint, "a--keep").state, NodeState::Running);
+    assert_eq!(owner.calls.len(), 1);
+    owner.observations.push_back(done_as("keep-attempt"));
+    let completed = advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(completed.status, GraphStatus::Cancelled);
+    assert_eq!(progress(&completed.checkpoint, "a--keep").state, NodeState::Succeeded);
+}
+
+#[test]
+fn stopping_selected_child_preserves_parent_and_sibling() {
+    let (document, mut checkpoint) = live(None);
+    add(&document, &mut checkpoint, "a", &child("one", "select-one")).unwrap();
+    add(&document, &mut checkpoint, "a", &child("two", "select-two")).unwrap();
+    mark_running(&mut checkpoint, "a--one");
+    add(&document, &mut checkpoint, "a--one", &child("deep", "select-deep")).unwrap();
+    let stopped = cancel_node_subtree(&document, &mut checkpoint, "a--one", None).unwrap();
+    assert_eq!(stopped.skipped, ["a--one--deep", "a--one"]);
+    assert_eq!(progress(&checkpoint, "a").state, NodeState::Running);
+    assert_eq!(progress(&checkpoint, "a--two").state, NodeState::Pending);
+}
+
+#[test]
+fn detached_node_asks_survive_whole_graph_cancellation() {
+    let (document, mut checkpoint) = live(None);
+    let mut keep = child("keep", "ask-keep");
+    keep.detached = true;
+    add(&document, &mut checkpoint, "a", &keep).unwrap();
+    checkpoint.cancelled = true;
+    relay::fence_detached_cancellation(&document, &mut checkpoint).unwrap();
+    for (id, node) in [("attached-ask", "a"), ("detached-ask", "a--keep")] {
+        checkpoint.asks.push(serde_json::from_value(json!({
+            "ask_id":id, "kind":"decide", "node":node, "session":"chair",
+            "title":"Choose", "body":"Choose", "options":[], "resolved":false, "closed":false
+        })).unwrap());
+    }
+    close_resolved_asks(&mut checkpoint, &mut FakeOwner::default(), &mut MemoryJournal::default()).unwrap();
+    assert!(checkpoint.asks[0].resolved);
+    assert!(!checkpoint.asks[1].resolved);
 }
