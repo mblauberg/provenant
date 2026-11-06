@@ -431,15 +431,34 @@ fn assert_fits(document: GraphDocument) {
 
 #[test]
 fn repair_growth_and_risk_metadata_fit_the_checkpoint_bound() {
-    assert_fits_with_repair_metadata(mixed(), "terminal", true);
-    assert_fits_with_repair_metadata(mixed(), "substantial", false);
+    let document: GraphDocument = serde_json::from_value(json!({
+        "schema_version":1,"graph_id":"repair-envelope","decision_session":"chair","nodes":[
+            {"id":"initial","access":"read_only","prompt":"review","route":{"alias":"senior"}},
+            {"id":"repair","kind":"loop","access":"read_only","depends_on":["initial"],
+                "inputs":[{"node":"initial","outputs":["findings","verdict"]}],
+                "loop":{"review_repair":true,"max_rounds":3,"until":"accepted","decision_session":"chair","body":[
+                    {"id":"fix","access":"worktree_write","worktree":"/fixture/writer","prompt":"repair","route":{"alias":"senior"}},
+                    {"id":"check","access":"read_only","depends_on":["fix"],"source":{"type":"node","node":"fix"},"prompt":"review repair","route":{"alias":"senior"}},
+                    {"id":"accepted","kind":"gate","access":"read_only","depends_on":["check"],"inputs":[{"node":"check","outputs":["verdict"]}],
+                        "condition":{"type":"verdict","expected":"VERDICT: PASS","threshold":"all"}}
+                ]}}
+        ]
+    })).unwrap();
+    let plan = planned(&document);
+    let positions = plan.nodes.iter().enumerate().map(|(index,node)| (node.id.clone(),index)).collect();
+    assert_eq!(plan.nodes.iter().filter(|node| repair::is_repair_gate(node,&plan,&positions)).count(), 3);
+    assert_fits_with_repair_metadata(document.clone(), "terminal", true);
+    assert_fits_with_repair_metadata(document, "substantial", false);
 }
 
 fn assert_fits_with_repair_metadata(document: GraphDocument, tier: &str, grew: bool) {
     let plan = planned(&document);
     let mut checkpoint = filled_checkpoint(&document, &plan);
-    for node in &mut checkpoint.nodes {
-        node.extra.insert("repair_growth".into(), json!({"before":"1".repeat(64),"after":"2".repeat(64),"grew":grew}));
+    let positions = plan.nodes.iter().enumerate().map(|(index,node)| (node.id.clone(),index)).collect();
+    for (node, planned) in checkpoint.nodes.iter_mut().zip(&plan.nodes) {
+        if repair::is_repair_gate(planned, &plan, &positions) {
+            node.extra.insert("repair_growth".into(), json!({"before":"1".repeat(64),"after":"2".repeat(64),"grew":grew}));
+        }
         if let Some(outputs) = &mut node.outputs {
             outputs.extra.insert("risk_tier".into(), tier.into());
         }

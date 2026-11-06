@@ -159,6 +159,8 @@ pub(super) fn checkpoint_bound(
             *rounds = (*rounds).max(round.round);
         }
     }
+    let positions = plan.nodes.iter().enumerate()
+        .map(|(index, node)| (node.id.clone(), index)).collect();
     plan.nodes
         .iter()
         .map(|node| {
@@ -169,6 +171,7 @@ pub(super) fn checkpoint_bound(
                 node,
                 loop_rounds.get(node.id.as_str()).copied().unwrap_or(0),
                 admitted,
+                repair::is_repair_gate(node, plan, &positions),
             )
             .saturating_add(1)
         })
@@ -199,6 +202,7 @@ fn node_bound(
     node: &PlannedNode,
     loop_rounds: usize,
     admitted: bool,
+    repair_gate: bool,
 ) -> usize {
     let expands = node.plan.is_some() || plans::writer(node);
     let gate = node.condition.is_some();
@@ -209,10 +213,6 @@ fn node_bound(
             (
                 "retry".into(),
                 serde_json::json!({"retries":u8::MAX,"origin":"shipped_default"}),
-            ),
-            (
-                "repair_growth".into(),
-                serde_json::json!({"before":"1".repeat(64),"after":"1".repeat(64),"grew":false}),
             ),
         ]
         .into_iter()
@@ -332,6 +332,12 @@ fn node_bound(
         launch_retry: None,
         last_launch_retry: None,
     };
+    // Only a repair acceptance gate can retain a measured growth cache.
+    // Ordinary agent nodes may still report risk assessments in their output.
+    if repair_gate {
+        skeleton.extra.insert("repair_growth".into(),
+            serde_json::json!({"before":"1".repeat(64),"after":"1".repeat(64),"grew":false}));
+    }
     // `substantial` is the longest accepted risk tier, and false is the
     // longest cached growth boolean. Commit IDs may be SHA-256 (64 bytes).
     if let Some(outputs) = &mut skeleton.outputs {
