@@ -701,6 +701,7 @@ impl<'a> Compiler<'a> {
             .remove("min_ok")
             .map(|value| interpolate(&value, bindings))
             .transpose()?;
+        let reduce_verdict = copy.remove("reduce_verdict");
         // A used template that declares `item` receives it unless set.
         if let Some(name) = copy.get("use").and_then(Value::as_str)
             && self
@@ -733,6 +734,9 @@ impl<'a> Compiler<'a> {
         composite.insert("exports".into(), Value::Array(exports));
         if let Some(min_ok) = min_ok {
             composite.insert("min_successful".into(), min_ok);
+        }
+        if let Some(reduce_verdict) = reduce_verdict {
+            composite.insert("reduce_verdict".into(), reduce_verdict);
         }
         boundary.insert("composite".into(), Value::Object(composite));
         self.finish(boundary, stack)
@@ -924,14 +928,7 @@ impl<'a> Compiler<'a> {
                 resolvers.insert("review-panel".into(), lenses);
                 children[2]["plan"]["resolvers"] = serde_json::json!(resolvers);
             }
-            let single_review = name == "review-panel"
-                && self.library.layer(name) == Some(Layer::Bundled)
-                && composites::single_review(&mut children);
-            let exports = if single_review {
-                vec![
-                    serde_json::json!({"node":"review", "outputs":["result", "findings", "verdict"]}),
-                ]
-            } else if template.exports.is_empty() {
+            let exports = if template.exports.is_empty() {
                 default_exports(&children)
             } else {
                 serde_json::to_value(&template.exports)

@@ -52,6 +52,27 @@ impl Factory {
             .resolve_panel(&request, None, &[], false)
             .map_err(FacadeError::invalid)?;
         let mut resolvers = BTreeMap::new();
+        let single = panel.slots.len() == 1;
+        let frame = !single && panel.frame;
+        let verifiers = if single { 0 } else { panel.verifiers };
+        let synthesis = !single && panel.synthesis == provenant_routing::ReviewSynthesis::Model;
+        resolvers.insert(
+            "review-topology".into(),
+            vec![format!(
+                "f{}-v{}-s{}",
+                u8::from(frame),
+                u8::from(verifiers > 0),
+                u8::from(synthesis)
+            )],
+        );
+        // The explicit shape variants containing a verifier also explain on
+        // their own when the selected shape happens to need none.
+        resolvers.insert(
+            "review-verifiers".into(),
+            (1..=verifiers.max(1))
+                .map(|number| number.to_string())
+                .collect(),
+        );
         let mut lenses = Vec::new();
         for lens in panel.slots.iter().map(|slot| slot.lens.as_str()).chain([
             "correctness",
