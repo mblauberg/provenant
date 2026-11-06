@@ -4166,6 +4166,31 @@ fn cooling_ready_candidate_beats_unavailable_candidate() -> Result<(), Box<dyn s
     Ok(())
 }
 
+// Fresh exhaustion now excludes a named-pool member before account selection.
+// A one-member profile therefore refuses the pool rather than returning an
+// unavailable route. Check the exact member and reset, not an arbitrary error.
+fn agy_profile_ready(
+    result: Result<ResolvedRoute, Box<dyn std::error::Error>>,
+    model: &str,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    match result {
+        Ok(route) => {
+            assert!(matches!(route.readiness, RouteReadiness::Ready { .. }));
+            Ok(true)
+        }
+        Err(error) => match error.downcast_ref::<RoutingError>() {
+            Some(RoutingError::NoEligiblePoolMember { exclusions }) => {
+                assert_eq!(
+                    exclusions,
+                    &[format!("{model}: exhausted; earliest known reset 604900")]
+                );
+                Ok(false)
+            }
+            _ => Err(error),
+        },
+    }
+}
+
 #[test]
 fn agy_models_are_paced_and_reserved_by_their_own_quota_pool_only()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -4199,13 +4224,14 @@ fn agy_models_are_paced_and_reserved_by_their_own_quota_pool_only()
             10_000,
             "quota_pool=gemini",
         ),
-        ("agy/gemini-3.8-flash", 10_000, 0, 2_500, "gemini.weekly"),
+        ("agy/gemini-3.8-flash", 9_900, 0, 2_500, "gemini.weekly"),
+        ("agy/gemini-3.8-flash", 10_000, 0, 10_000, "exhausted"),
     ] {
         let config: RoutingConfig = serde_json::from_value(serde_json::json!({
             "pacing":{"accounts":{"agy-host":{"policy":"pace", "windows":["seven_day"]}}},
             "pacing_reserve":{"agy":{"seven_day_percent":5}}
         }))?;
-        let route = profile_preview(
+        let result = profile_preview(
             config,
             model,
             "agy-host",
@@ -4214,7 +4240,12 @@ fn agy_models_are_paced_and_reserved_by_their_own_quota_pool_only()
                 window("claude.weekly", claude),
             ],
             vec![],
-        )?;
+        );
+        if detail == "exhausted" {
+            assert!(!agy_profile_ready(result, model)?);
+            continue;
+        }
+        let route = result?;
         let candidate = &route.pool_selection.as_ref().ok_or("receipt")?.candidates[0];
         let text = candidate.pacing_detail.as_deref().ok_or("detail")?;
         assert_eq!(candidate.factor_basis_points, factor, "{model} {text}");
@@ -4287,9 +4318,10 @@ fn agy_exhaustion_follows_the_models_serving_windows() -> Result<(), Box<dyn std
         let config: RoutingConfig = serde_json::from_value(
             serde_json::json!({"pacing":{"accounts":{"agy-host":{"policy":"max"}}}}),
         )?;
-        let route =
-            profile_preview_with_status(config, model, "agy-host", windows, vec![], status)?;
-        Ok(matches!(route.readiness, RouteReadiness::Ready { .. }))
+        agy_profile_ready(
+            profile_preview_with_status(config, model, "agy-host", windows, vec![], status),
+            model,
+        )
     };
     let (claude, gemini) = ("agy/claude-sonnet-4-6", "agy/gemini-3.8-flash");
     // An exhausted ungrouped window serves every model.
@@ -4344,15 +4376,17 @@ fn agy_shared_claude_pool_exhaustion_skips_only_the_claude_models()
         let config: RoutingConfig = serde_json::from_value(
             serde_json::json!({"pacing":{"accounts":{"agy-host":{"policy":"max"}}}}),
         )?;
-        let route = profile_preview_with_status(
-            config,
+        agy_profile_ready(
+            profile_preview_with_status(
+                config,
+                model,
+                "agy-host",
+                windows.clone(),
+                vec![],
+                QuotaStatus::Available,
+            ),
             model,
-            "agy-host",
-            windows.clone(),
-            vec![],
-            QuotaStatus::Available,
-        )?;
-        Ok(matches!(route.readiness, RouteReadiness::Ready { .. }))
+        )
     };
     assert!(ready("agy/gemini-3.8-flash")?);
     assert!(!ready("agy/claude-sonnet-4-6")?);
