@@ -11345,6 +11345,7 @@ fn typed_review_cannot_pass_open_blockers_or_incomplete_findings() {
     let bundled = template::TemplateLibrary::bundled();
     for (findings, verdict) in [
         (entry(""), "VERDICT: FAIL"),
+        (entry(",\"disposition\":\"deferred\""), "VERDICT: PASS"),
         (format!("{},{{}}", entry("")), "VERDICT: INCONCLUSIVE"),
         (String::new(), "VERDICT: PASS"),
     ] {
@@ -11392,8 +11393,9 @@ fn typed_delta_verifier_can_falsify_a_previously_upheld_finding() {
         ].into(),
         ..Default::default()
     };
+    let document = graph(vec![node("prior", route("fixture")), verify]);
     let run = advance(
-        &graph(vec![node("prior", route("fixture")), verify]),
+        &document,
         &mut owner,
         &mut MemoryJournal::default(),
     )
@@ -11403,4 +11405,8 @@ fn typed_delta_verifier_can_falsify_a_previously_upheld_finding() {
     assert_eq!(output.findings[0].extra["verification"], "falsified");
     assert_eq!(output.findings[0].extra["propagates"], "prior:F1");
     assert_eq!(output.verdict.as_deref(), Some("VERDICT: PASS"));
+    let (plan, _) = validate_plan(&document).unwrap();
+    assert!(review_verification_error(&plan.nodes[1], &[], &[], &[(output.findings[0].id.clone(), "member:0".into())], output).is_none());
+    // An overflow proof owns completeness for these known upstream identities.
+    assert!(review_verification_error(&plan.nodes[1], &output.findings, &[], &[], output).is_none());
 }

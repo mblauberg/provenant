@@ -947,6 +947,8 @@ pub(super) fn route_is_bounded(route: &GraphRoute) -> bool {
 pub(super) fn review_verification_error(
     node: &PlannedNode,
     upstream: &[Finding],
+    required: &[Finding],
+    overflow: &[(String, String)],
     outputs: &NodeOutputs,
 ) -> Option<(&'static str, String)> {
     if !template::review_verifier(node) {
@@ -955,6 +957,7 @@ pub(super) fn review_verification_error(
     if template::review_behaviour(node).is_some()
         && outputs.findings.iter().any(|finding| {
             !upstream.iter().any(|source| source.id == finding.id)
+                && !overflow.iter().any(|(id, _)| id == &finding.id)
                 && (finding
                     .extra
                     .get("verification")
@@ -971,14 +974,14 @@ pub(super) fn review_verification_error(
             "new verifier findings need verification=new and an evidence reason".into(),
         ));
     }
-    for finding in upstream {
+    for finding in required {
         let matches: Vec<_> = outputs
             .findings
             .iter()
             .filter(|output| output.id == finding.id)
             .collect();
         if matches.len()
-            != upstream
+            != required
                 .iter()
                 .filter(|source| source.id == finding.id)
                 .count()
