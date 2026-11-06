@@ -289,6 +289,70 @@ fn every_bundled_template_is_listed_shown_and_explained() -> Result {
 }
 
 #[test]
+fn review_test_lens_receives_risk_selected_mutation_guidance() -> Result {
+    fn collect<'a>(value: &'a Value, found: &mut Vec<&'a Value>) {
+        match value {
+            Value::Object(map) => {
+                if map.contains_key("review_lens") {
+                    found.push(value);
+                }
+                for child in map.values() {
+                    collect(child, found);
+                }
+            }
+            Value::Array(items) => {
+                for child in items {
+                    collect(child, found);
+                }
+            }
+            _ => {}
+        }
+    }
+    let rig = GraphProject::new()?;
+    for (risk, expected) in [
+        ("substantial", false),
+        ("crucial", true),
+        ("terminal", true),
+    ] {
+        let path = rig.document(&json!({
+            "context": {"risk_tier": risk},
+            "nodes": [{"id":"review", "use":"review-panel"}]
+        }))?;
+        let output = rig
+            .command()
+            .args(["run", "--file"])
+            .arg(path)
+            .arg("--explain")
+            .output()?;
+        let result: Value = serde_json::from_slice(&output.stdout)?;
+        assert!(output.status.success(), "{risk}: {result}");
+        let mut reviews = Vec::new();
+        collect(&result["data"]["document"], &mut reviews);
+        let tests = reviews
+            .iter()
+            .find(|node| node["review_lens"] == "tests")
+            .ok_or("tests lens")?;
+        assert_eq!(
+            tests["prompt"]
+                .as_str()
+                .ok_or("prompt")?
+                .contains("Diff-scoped mutation evidence"),
+            expected,
+            "{risk}"
+        );
+        for other in reviews.iter().filter(|node| node["review_lens"] != "tests") {
+            assert!(
+                !other["prompt"]
+                    .as_str()
+                    .unwrap_or("")
+                    .contains("Diff-scoped mutation evidence")
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn invalid_template_documents_are_refused_by_list_and_show() -> Result {
     let rig = GraphProject::new()?;
     let repo = rig.project.join(".provenant/templates");

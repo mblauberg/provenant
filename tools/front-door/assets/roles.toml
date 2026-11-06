@@ -211,21 +211,6 @@ references = [
 ]
 
 [roles."lens.tests"]
-conditional_parameters = { mutation_testing = { parameter = "risk_tier", equals_any = ["crucial", "terminal"], value = """
-
-
-Diff-scoped mutation evidence (optional; crucial or terminal risk only):
-generate the PR patch with `git diff --relative=<workspace> <base>...<PR head>` and run
-`cargo mutants --in-diff <workspace-relative diff of the PR head> --workspace`.
-Copy any required out-of-workspace includes into the workspace before running.
-Skip tests that fail on the unmutated baseline and list them as skipped. If
-`cargo-mutants` is unavailable or the diff matches no mutants, say so and
-continue. Report mutant, caught, missed and timed-out counts plus wall time, and
-classify every survivor as a gap or noise. Cap the run (`cargo mutants
---timeout` per mutant and stop after about 15 minutes); report partial counts as
-timed-out or skipped, and still end with the verdict. This evidence is optional
-and never gates delivery.
-""", otherwise = "" } }
 extends = "lens"
 family = "any"
 card = "Lens tests. Check that tests prove the behaviour and would fail without it."
@@ -241,7 +226,6 @@ Base (diff reference): ${base}
 Spec (acceptance criteria): ${spec}
 Check correctness against the spec as well as this lens.
 ${local_check_policy}
-${mutation_testing}
 End with a findings block (schema_version 1) whose findings are a JSON array,
 with at most 32 entries and an empty array when there are no findings. Keep each
 summary to one line and include the evidence and proposed fix as structured

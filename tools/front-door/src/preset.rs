@@ -1781,60 +1781,7 @@ fn lower_leaf(
         "entry",
         &mut BTreeMap::new(),
     )?;
-    // Conditional values belong to the role or stage that uses them. Explicit
-    // parameters win, just as they did for ordinary interpolation.
-    let mut effective_parameters = parameters.clone();
-    if let Some(rules) = profile
-        .as_object_mut()
-        .and_then(|map| map.remove("conditional_parameters"))
-    {
-        let rules = rules
-            .as_object()
-            .ok_or_else(|| format!("node {id}: conditional_parameters must be a table"))?;
-        let target = effective_parameters
-            .as_object_mut()
-            .ok_or("parameters must be a table")?;
-        for (key, rule) in rules {
-            let rule = rule
-                .as_object()
-                .ok_or_else(|| format!("node {id}: conditional parameter {key} must be a table"))?;
-            if rule.keys().any(|key| {
-                !["parameter", "equals_any", "value", "otherwise"].contains(&key.as_str())
-            }) {
-                return Err(format!(
-                    "node {id}: conditional parameter {key} has an unknown field"
-                ));
-            }
-            let source = rule
-                .get("parameter")
-                .and_then(Value::as_str)
-                .ok_or_else(|| format!("node {id}: conditional parameter {key} needs parameter"))?;
-            let choices = rule
-                .get("equals_any")
-                .and_then(Value::as_array)
-                .ok_or_else(|| {
-                    format!("node {id}: conditional parameter {key} needs equals_any")
-                })?;
-            let value = rule
-                .get("value")
-                .ok_or_else(|| format!("node {id}: conditional parameter {key} needs value"))?;
-            let otherwise = rule
-                .get("otherwise")
-                .ok_or_else(|| format!("node {id}: conditional parameter {key} needs otherwise"))?;
-            let selected = if target
-                .get(source)
-                .is_some_and(|actual| choices.contains(actual))
-            {
-                value
-            } else {
-                otherwise
-            };
-            if !target.contains_key(key) {
-                target.insert(key.clone(), selected.clone());
-            }
-        }
-    }
-    let mut node = interpolate(&profile, &effective_parameters, prompt, index)?;
+    let mut node = interpolate(&profile, parameters, prompt, index)?;
     let map = node.as_object_mut().ok_or("leaf must be a table")?;
     for alias in ["goal", "brief"] {
         if let Some(value) = map.remove(alias) {
