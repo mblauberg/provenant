@@ -62,8 +62,10 @@ fn event(
     value: &impl Serialize,
 ) -> Result<GraphEvent, JournalError> {
     Ok(GraphEvent {
-        timestamp_micros: provenant_os::clock::SystemClock::new().wall_now()
-            .map_err(|error| std::io::Error::other(error.to_string()))?.as_micros(),
+        timestamp_micros: provenant_os::clock::SystemClock::new()
+            .wall_now()
+            .map_err(|error| std::io::Error::other(error.to_string()))?
+            .as_micros(),
         kind,
         subject: subject.into(),
         code: code.into(),
@@ -75,8 +77,10 @@ fn event(
 
 fn effect_identifier(kind: &str, value: Option<&str>) -> Option<Value> {
     let value = value?;
-    if value.len() > 512 || !value.bytes().all(|byte| byte.is_ascii_graphic())
-        || super::patch::scan_for_secrets(value).is_err() {
+    if value.len() > 512
+        || !value.bytes().all(|byte| byte.is_ascii_graphic())
+        || super::patch::scan_for_secrets(value).is_err()
+    {
         return None;
     }
     Some(serde_json::json!({"effect":kind,"identifier":value}))
@@ -135,7 +139,8 @@ pub(super) fn append_changes(
     for node in &current.nodes {
         let old = previous.and_then(|previous| previous.nodes.iter().find(|old| old.id == node.id));
         if old.is_none_or(|old| {
-            old.state != node.state || old.advance_error_code != node.advance_error_code
+            old.state != node.state
+                || old.advance_error_code != node.advance_error_code
                 || old.loop_pause_code != node.loop_pause_code
         }) {
             let mut change = event(
@@ -151,7 +156,9 @@ pub(super) fn append_changes(
                 },
                 &node.advance_error_code,
             )?;
-            change.details = Some(serde_json::json!({"cause": node.advance_error_code.as_deref().or(node.loop_pause_code.as_deref())}));
+            change.details = Some(
+                serde_json::json!({"cause": node.advance_error_code.as_deref().or(node.loop_pause_code.as_deref())}),
+            );
             events.push(change);
         }
         for attempt in node.recorded_attempts() {
@@ -228,12 +235,28 @@ pub(super) fn append_changes(
             }
         }
         if old.and_then(|node| node.extra.get("slot_wait")) != node.extra.get("slot_wait") {
-            events.push(event(GraphEventKind::Wait, &node.id,
-                if node.extra.contains_key("slot_wait") { "slot" } else { "slot_acquired" }, &node.state)?);
+            events.push(event(
+                GraphEventKind::Wait,
+                &node.id,
+                if node.extra.contains_key("slot_wait") {
+                    "slot"
+                } else {
+                    "slot_acquired"
+                },
+                &node.state,
+            )?);
         }
         if super::relay::yields_slot(node) != old.is_some_and(super::relay::yields_slot) {
-            events.push(event(GraphEventKind::Wait, &node.id,
-                if super::relay::yields_slot(node) { "slot_yielded" } else { "slot_reclaimed" }, &node.state)?);
+            events.push(event(
+                GraphEventKind::Wait,
+                &node.id,
+                if super::relay::yields_slot(node) {
+                    "slot_yielded"
+                } else {
+                    "slot_reclaimed"
+                },
+                &node.state,
+            )?);
         }
         if old.map_or(node.launch_retry.is_some() || node.ci.is_some(), |old| {
             old.launch_retry != node.launch_retry || old.ci != node.ci
@@ -264,7 +287,12 @@ pub(super) fn append_changes(
         if !node.children.is_empty()
             && old.is_none_or(|old| old.children != node.children || old.state != node.state)
         {
-            let mut join = event(GraphEventKind::Join, &node.id, "changed", &(&node.children, node.state))?;
+            let mut join = event(
+                GraphEventKind::Join,
+                &node.id,
+                "changed",
+                &(&node.children, node.state),
+            )?;
             join.details = Some(serde_json::json!({"children":node.children,"state":node.state}));
             events.push(join);
         }
@@ -272,12 +300,14 @@ pub(super) fn append_changes(
             && let Some(outputs) = &node.outputs
         {
             if outputs.branch.is_some() {
-                let mut effect = event(GraphEventKind::Effect, &node.id, "branch", &outputs.branch)?;
+                let mut effect =
+                    event(GraphEventKind::Effect, &node.id, "branch", &outputs.branch)?;
                 effect.details = effect_identifier("branch", outputs.branch.as_deref());
                 events.push(effect);
             }
             if outputs.commit.is_some() {
-                let mut effect = event(GraphEventKind::Effect, &node.id, "commit", &outputs.commit)?;
+                let mut effect =
+                    event(GraphEventKind::Effect, &node.id, "commit", &outputs.commit)?;
                 effect.details = effect_identifier("commit", outputs.commit.as_deref());
                 events.push(effect);
             }
@@ -320,7 +350,9 @@ pub(super) fn append_changes(
     {
         let mut observation = patch_event(record)?;
         if let Some(details) = observation.details.as_mut().and_then(Value::as_object_mut) {
-            let author = record.parent.as_ref()
+            let author = record
+                .parent
+                .as_ref()
                 .and_then(|id| current.nodes.iter().find(|node| &node.id == id))
                 .and_then(|node| node.attempts.last())
                 .and_then(|attempt| attempt.attempt_ref.as_ref());
@@ -334,9 +366,14 @@ pub(super) fn append_changes(
     if previous.is_none_or(|old| old.pull_request != current.pull_request)
         && current.pull_request.is_some()
     {
-        let mut effect = event(GraphEventKind::Effect, id, "pull_request", &current.pull_request)?;
-                effect.details = effect_identifier("pull_request", current.pull_request.as_deref());
-                events.push(effect);
+        let mut effect = event(
+            GraphEventKind::Effect,
+            id,
+            "pull_request",
+            &current.pull_request,
+        )?;
+        effect.details = effect_identifier("pull_request", current.pull_request.as_deref());
+        events.push(effect);
     }
     let mut saved = event(GraphEventKind::Checkpoint, id, "save", current)?;
     saved.details = Some(serde_json::json!({"pause_code": current.pause_code,
@@ -357,7 +394,12 @@ pub(super) fn append_patch(
 
 /// The journal line for an admitted patch: digests and identifiers only.
 fn patch_event(record: &super::patch::PatchRecord) -> Result<GraphEvent, JournalError> {
-    let mut observation = event(GraphEventKind::Patch, record.parent.as_deref().unwrap_or("host"), "admitted", &record.digest)?;
+    let mut observation = event(
+        GraphEventKind::Patch,
+        record.parent.as_deref().unwrap_or("host"),
+        "admitted",
+        &record.digest,
+    )?;
     observation.details = Some(serde_json::json!({
         "revision": record.revision, "patch_digest": record.digest, "author_node": record.parent,
         "cause": if record.parent.is_some() { "node_patch" } else { "host_patch" },
@@ -452,19 +494,34 @@ mod tests {
             "schema_version":1,"graph_id":"g","plan_digest":"digest",
             "nodes":[{"id":"build","state":"pending","worktree":null,"attempts":[],"slot_wait":true}]
         })).unwrap();
-        append_changes(&directory,"g",None,&before,None).unwrap();
+        append_changes(&directory, "g", None, &before, None).unwrap();
         let mut after = before.clone();
         after.nodes[0].extra.remove("slot_wait");
         after.nodes[0].state = NodeState::Failed;
         after.nodes[0].advance_error_code = Some("required_input_unavailable".into());
         after.nodes[0].advance_error = Some("private brief or secret text".into());
-        append_changes(&directory,"g",Some(&before),&after,None).unwrap();
-        let records = read(&directory,"g").unwrap();
-        assert!(records.iter().any(|event| event.subject == "build" && event.code == "slot"));
-        assert!(records.iter().any(|event| event.subject == "build" && event.code == "slot_acquired"));
+        append_changes(&directory, "g", Some(&before), &after, None).unwrap();
+        let records = read(&directory, "g").unwrap();
+        assert!(
+            records
+                .iter()
+                .any(|event| event.subject == "build" && event.code == "slot")
+        );
+        assert!(
+            records
+                .iter()
+                .any(|event| event.subject == "build" && event.code == "slot_acquired")
+        );
         let failure = records.iter().find(|event| event.code == "failed").unwrap();
-        assert_eq!(failure.details.as_ref().unwrap()["cause"], "required_input_unavailable");
-        assert!(!String::from_utf8(bytes(&directory,"g").unwrap()).unwrap().contains("private brief"));
+        assert_eq!(
+            failure.details.as_ref().unwrap()["cause"],
+            "required_input_unavailable"
+        );
+        assert!(
+            !String::from_utf8(bytes(&directory, "g").unwrap())
+                .unwrap()
+                .contains("private brief")
+        );
     }
 
     #[test]

@@ -328,20 +328,40 @@ pub(crate) fn graph_attempt_usage(
     let mut wall_time_seconds = record.provider_ms.map(|ms| ms.saturating_add(999) / 1000);
     if let Ok(fact) = provenant_run::fact(record.clone()) {
         if let Some(started) = fact.started_at {
-            wall_time_seconds = fact.finished_at.as_micros().checked_sub(started.as_micros())
+            wall_time_seconds = fact
+                .finished_at
+                .as_micros()
+                .checked_sub(started.as_micros())
                 .and_then(|micros| u64::try_from(micros).ok())
                 .map(|micros| micros.saturating_add(999_999) / 1_000_000);
         }
-        let inputs = [fact.usage.uncached_input, fact.usage.cache_read, fact.usage.cache_write];
-        let input_tokens = inputs.into_iter().collect::<Option<Vec<_>>>()
+        let inputs = [
+            fact.usage.uncached_input,
+            fact.usage.cache_read,
+            fact.usage.cache_write,
+        ];
+        let input_tokens = inputs
+            .into_iter()
+            .collect::<Option<Vec<_>>>()
             .map(|counts| counts.into_iter().fold(0u64, u64::saturating_add));
-        if let Some(route) = fact.observed_route.as_ref().or(fact.applied_route.as_ref()).or(fact.resolved_route.as_ref()) {
-            extra.insert("resolved_route".into(), serde_json::json!({
-                "provider": route.provider, "model": route.model, "effort": route.effort
-            }));
+        if let Some(route) = fact
+            .observed_route
+            .as_ref()
+            .or(fact.applied_route.as_ref())
+            .or(fact.resolved_route.as_ref())
+        {
+            extra.insert(
+                "resolved_route".into(),
+                serde_json::json!({
+                    "provider": route.provider, "model": route.model, "effort": route.effort
+                }),
+            );
         }
         for (key, value) in [
-            ("cache_read_tokens", serde_json::json!(fact.usage.cache_read)),
+            (
+                "cache_read_tokens",
+                serde_json::json!(fact.usage.cache_read),
+            ),
             ("input_tokens", serde_json::json!(input_tokens)),
             ("queue_time_ms", serde_json::json!(fact.slot_wait_ms)),
             ("outcome", serde_json::json!(fact.terminal_state)),

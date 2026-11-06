@@ -887,7 +887,10 @@ impl Factory {
                     {
                         continue;
                     }
-                    attempts.insert((id.clone(), attempt.identity.clone()), (event.subject, attempt));
+                    attempts.insert(
+                        (id.clone(), attempt.identity.clone()),
+                        (event.subject, attempt),
+                    );
                 }
             }
         }
@@ -898,12 +901,14 @@ impl Factory {
                 "template" => attempt.template.clone(),
                 _ => attempt.tier.clone(),
             };
-            let row = groups.entry(group.clone()).or_insert_with(|| json!({
-                "name":group,"attempts":0,"tokens":0,"cost_micro_usd":0,
-                "wall_time_seconds":0,"queue_time_ms":0,"cache_read_tokens":0,
-                "input_tokens":0,"unknown_usage":0,"outcomes":{},
-                "unknown_queue_time":0,"unknown_cache_usage":0
-            }));
+            let row = groups.entry(group.clone()).or_insert_with(|| {
+                json!({
+                    "name":group,"attempts":0,"tokens":0,"cost_micro_usd":0,
+                    "wall_time_seconds":0,"queue_time_ms":0,"cache_read_tokens":0,
+                    "input_tokens":0,"unknown_usage":0,"outcomes":{},
+                    "unknown_queue_time":0,"unknown_cache_usage":0
+                })
+            });
             add(row, "attempts", 1);
             for (key, value) in [
                 ("tokens", attempt.tokens),
@@ -925,7 +930,11 @@ impl Factory {
             if attempt.queue_time_ms.is_none() {
                 add(row, "unknown_queue_time", 1);
             }
-            add(&mut row["outcomes"], attempt.outcome.as_deref().unwrap_or("unsettled"), 1);
+            add(
+                &mut row["outcomes"],
+                attempt.outcome.as_deref().unwrap_or("unsettled"),
+                1,
+            );
             if !attempt.has_usage {
                 add(row, "unknown_usage", 1);
             }
@@ -1576,7 +1585,8 @@ mod tests {
         assert_eq!(stats["groups"][0]["outcomes"]["timed_out"], 1);
         let nodes = factory.graph_document(
             json!({"op":"status","id":id,"stats":true,"by":"node"}),
-            budget, &cancel,
+            budget,
+            &cancel,
         )?;
         assert_eq!(nodes["groups"][0]["name"], format!("{id}/task"));
         assert_eq!(nodes["groups"][0]["tokens"], 100);
