@@ -12,14 +12,14 @@ pub fn cancel(command: Cancel, edge: &Edge<'_>) -> Reply {
 pub(super) fn cancel_inner(mut command: Cancel, edge: &Edge<'_>) -> Reply {
     let candidate = match targets::resolve(edge, &command.target, true) {
         Ok(candidate) => candidate,
-        Err(fail) => return reply("cancel", Err(fail)),
+        Err(fail) => return reply("stop", Err(fail)),
     };
     command.target = candidate.target.clone();
     match targets::placement(edge, &candidate.target, true) {
         Ok(Some(placement)) => {
             if crate::fabric::in_lane() {
                 return reply(
-                    "cancel",
+                    "stop",
                     Err(Fail::new(
                         Status::Refused,
                         ErrorKind::LaneCoordinationRefused,
@@ -30,11 +30,11 @@ pub(super) fn cancel_inner(mut command: Cancel, edge: &Edge<'_>) -> Reply {
             return remote::cancel(&command, &placement, edge);
         }
         Ok(None) => {}
-        Err(fail) => return reply("cancel", Err(fail)),
+        Err(fail) => return reply("stop", Err(fail)),
     }
     let mut status = Status::Ok;
     let mut out = reply(
-        "cancel",
+        "stop",
         (|| {
             let clock = SystemClock::new();
             let cancel = CancelToken::new();

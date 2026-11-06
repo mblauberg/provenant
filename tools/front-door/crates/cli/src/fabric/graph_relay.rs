@@ -83,6 +83,7 @@ pub fn serve(
                 library: &library,
                 resolvers: &resolvers,
                 scan: &scan_for_secrets,
+                journal: None,
                 limits: &context.config.graph.limits,
             };
             let receipt = relay::admit_child(

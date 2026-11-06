@@ -184,7 +184,7 @@ pub struct Answer {
 #[derive(Debug, Args)]
 pub struct Steer {
     /// Attempt ID
-    pub attempt: provenant_core::AttemptId,
+    pub attempt: String,
     /// Read the message from standard input (at most 4 KiB; input must finish within 5 seconds)
     #[arg(long, required = true)]
     pub text_stdin: bool,
@@ -342,7 +342,10 @@ impl HumanCommand {
             },
             Self::Steer(args) => InboxInput::Steer {
                 extra: Default::default(),
-                attempt: args.attempt,
+                attempt: args
+                    .attempt
+                    .parse()
+                    .map_err(|_| Error::Input("expected an attempt ID"))?,
                 text: read_text()?,
                 operation_id: args.operation_id,
             },

@@ -593,7 +593,7 @@ fn build_model(passive: bool, advanced: bool) -> clap::Command {
         if !advanced
             && matches!(
                 path.as_str(),
-                "provenant run" | "provenant dispatch" | "provenant resume" | "provenant lanes"
+                "provenant run" | "provenant dispatch" | "provenant retry"
             )
         {
             let visible = [
@@ -603,6 +603,9 @@ fn build_model(passive: bool, advanced: bool) -> clap::Command {
                 "account",
                 "prompt_file",
                 "prompt_stdin",
+                "brief",
+                "node",
+                "extend",
                 "preset",
                 "preset_set",
                 "preset_params_file",
@@ -1025,7 +1028,7 @@ fn constraints(path: &str) -> Vec<String> {
             "dates mean midnight UTC; timestamps need an offset",
             "since must precede until",
         ],
-        "provenant resume" => &[
+        "provenant retry" => &[
             "target is an ATTEMPT ID, RUN/ATTEMPT or RUN/TASK/ATTEMPT",
             "prompt is at most 1 MiB; expected generation is 0",
             "operation-id is generated when omitted; supply it for planned retries",
@@ -1140,8 +1143,7 @@ mod tests {
             ("provenant run", "attach", (0, 32)),
             ("provenant run", "write_root", (0, 32)),
             ("provenant run", "capability", (0, 16)),
-            ("provenant cancel", "reason", (0, 256)),
-            ("provenant fabric graph cancel", "reason", (0, 256)),
+            ("provenant stop", "reason", (0, 256)),
             ("provenant route set", "weight", (0, 100)),
         ] {
             let command = catalogue
@@ -1160,22 +1162,8 @@ mod tests {
                 "{path} {name}"
             );
         }
-        invalid(&[
-            "fabric",
-            "graph",
-            "cancel",
-            "graph",
-            "--reason",
-            &"é".repeat(129),
-        ]);
-        valid(&[
-            "fabric",
-            "graph",
-            "cancel",
-            "graph",
-            "--reason",
-            &"é".repeat(128),
-        ]);
+        invalid(&["stop", "graph", "--reason", &"é".repeat(129)]);
+        valid(&["stop", "graph", "--reason", &"é".repeat(128)]);
     }
     #[test]
     fn ranged_parsers_use_catalogue_builders() {
@@ -1312,6 +1300,58 @@ mod tests {
         );
     }
     #[test]
+    fn unified_lifecycle_commands_accept_graph_node_and_attempt_ids() {
+        for id in [
+            "graph-build",
+            "graph-build/verify",
+            "verify",
+            "a",
+            "face",
+            "DEADBEEF",
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "11111111111111111111111111111111",
+        ] {
+            valid(&["status", id, "--wait", "--json"]);
+            valid(&["output", id]);
+            valid(&["steer", id, "--text-stdin"]);
+            valid(&["stop", id]);
+            valid(&["retry", id]);
+            let Command::Resume(retry) = valid(&[
+                "retry",
+                id,
+                "--node",
+                "--brief",
+                "Repair the failure",
+                "--extend",
+                "budget=20",
+            ])
+            .command
+            else {
+                panic!("retry command");
+            };
+            assert!(retry.node);
+            assert_eq!(retry.brief.as_deref(), Some("Repair the failure"));
+            assert_eq!(retry.extend, ["budget=20"]);
+        }
+        let long_node = "n".repeat(200);
+        valid(&["output", &long_node]);
+        let Command::Cancel(stop) = valid(&["stop", "DEADBEEF"]).command else {
+            panic!("stop");
+        };
+        assert_eq!(stop.target.selection.as_deref(), Some("DEADBEEF"));
+        for words in [
+            &["lanes"][..],
+            &["resume", "graph-build"],
+            &["continue", "graph-build"],
+            &["cancel", "graph-build"],
+            &["redo", "graph-build"],
+            &["fabric", "graph", "status", "graph-build"],
+        ] {
+            invalid(words);
+        }
+    }
+
+    #[test]
     fn core_path_help_and_defaults() {
         for command in ["run", "dispatch"] {
             let ParseOutcome::Help { text, .. } = parsed(&[command, "--help"]) else {
@@ -1365,12 +1405,12 @@ mod tests {
         valid(&["status", &"a".repeat(32)]);
         valid(&["status", "preset-8393dcc0aeff699d582703992f0a8de7"]);
         valid(&["status", "abcdef12", "--all"]);
-        valid(&["lanes", "--all", "--id", "abcdef12"]);
+        invalid(&["lanes", "--all", "--id", "abcdef12"]);
         valid(&["status", "--all", "--json"]);
         valid(&["land", "1947"]);
         valid(&["quota"]);
-        valid(&["cancel", &"a".repeat(32)]);
-        valid(&["resume", &"a".repeat(32), "--prompt-stdin"]);
+        valid(&["stop", &"a".repeat(32)]);
+        valid(&["retry", &"a".repeat(32), "--prompt-stdin"]);
         assert!(matches!(
             parsed(&["help", "--all"]),
             ParseOutcome::Help { .. }
@@ -1586,16 +1626,11 @@ mod tests {
     }
     #[test]
     fn common_usage_errors_name_the_correct_invocation() {
-        for flag in ["--wait", "--watch"] {
-            let ParseOutcome::Invalid { error, .. } = parsed(&["lanes", flag, "5h"]) else {
-                panic!("expected duration error");
-            };
-            assert!(error.to_string().contains(flag), "{error}");
-        }
-        for (args, flag) in [
-            (vec!["lanes", "--since", "0d"], "--since"),
-            (vec!["quota", "history", "--until", "0d"], "--until"),
-        ] {
+        let ParseOutcome::Invalid { error, .. } = parsed(&["status", "--wait=5h"]) else {
+            panic!("expected duration error");
+        };
+        assert!(error.to_string().contains("--wait"), "{error}");
+        for (args, flag) in [(vec!["quota", "history", "--until", "0d"], "--until")] {
             let ParseOutcome::Invalid { error, .. } = parsed(&args) else {
                 panic!("expected span error");
             };
@@ -1745,13 +1780,13 @@ mod tests {
         invalid(&["status", "--follow"]);
         invalid(&["status", "--target", "pr:2721"]);
         for wait in ["1", "14400"] {
-            valid(&["lanes", "--wait", wait]);
+            valid(&["status", &format!("--wait={wait}")]);
         }
         for wait in ["0", "14401", "-1", "1.5", "18446744073709551616"] {
-            invalid(&["lanes", "--wait", wait]);
+            invalid(&["status", &format!("--wait={wait}")]);
         }
-        valid(&["lanes", "--limit", "100"]);
-        invalid(&["lanes", "--limit", "101"]);
+        valid(&["status", "--limit", "100"]);
+        invalid(&["status", "--limit", "101"]);
         let attempt = "11".repeat(16) + &format!("/{}/{}", "22".repeat(16), "33".repeat(16));
         valid(&["output", &attempt, "--tail", "500", "--max-bytes", "65536"]);
         valid(&["output", &attempt, "--tail", "501"]);
@@ -1770,65 +1805,6 @@ mod tests {
             &format!("{}/{}", "11".repeat(16), "33".repeat(16)),
         ]);
         invalid(&["output", &format!("{}/", "11".repeat(16))]);
-    }
-    #[test]
-    fn lanes_accept_repeatable_state_and_since_filters() {
-        valid(&[
-            "lanes",
-            "--all",
-            "--state",
-            "running",
-            "--state",
-            "input_required",
-            "--state",
-            "review_required",
-            "--since",
-            "86400",
-        ]);
-        valid(&["lanes", "--since", "2026-10-25T00:00:00.000000Z"]);
-        invalid(&["lanes", "--since"]);
-        invalid(&["lanes", "--state", "unknown"]);
-        valid(&["lanes", "--since", "1d"]);
-        valid(&["lanes", "--wait", "10", "--since", "86400"]);
-        invalid(&["lanes", "--wait", "10", "--state", "running"]);
-    }
-    #[test]
-    fn lanes_host_lists_waits_and_watches_a_peer_without_ids_or_cursors() {
-        valid(&["lanes", "--host", "workshop"]);
-        valid(&["lanes", "--host", "workshop", "--all", "--state", "running"]);
-        valid(&["lanes", "--host", "workshop", "--wait", "5"]);
-        valid(&["lanes", "--host", "workshop", "--watch", "5"]);
-        let run = "11".repeat(16);
-        invalid(&["lanes", "--host", "workshop", "--id", &run]);
-        invalid(&["lanes", "--host", "workshop", "--cursor", "1"]);
-    }
-    #[test]
-    fn lanes_session_and_watch_have_bounded_shapes() {
-        valid(&["lanes", "--session", "chair"]);
-        valid(&[
-            "lanes",
-            "--session",
-            "chair",
-            "--wait",
-            "30",
-            "--condition",
-            "all",
-        ]);
-        valid(&["lanes", "--watch"]);
-        valid(&["lanes", "--watch", "600", "--session", "chair"]);
-        let invocation = valid(&["lanes", "--watch", "30m"]);
-        let Command::Lanes(lanes) = invocation.command else {
-            panic!("expected lanes")
-        };
-        assert_eq!(lanes.watch, Some(1800));
-        invalid(&["lanes", "--session", "has space"]);
-        invalid(&["lanes", "--session", ""]);
-        invalid(&["lanes", "--session", "chair", "--all"]);
-        invalid(&["lanes", "--watch", "0"]);
-        invalid(&["lanes", "--watch", "14401"]);
-        invalid(&["lanes", "--watch", "5", "--wait", "5"]);
-        invalid(&["lanes", "--watch", "5", "--state", "running"]);
-        invalid(&["lanes", "--watch", "--condition", "all"]);
     }
     #[test]
     fn session_handoff_names_a_peer_and_an_account() {
@@ -2399,7 +2375,7 @@ mod tests {
             "5",
         ]);
         let Command::Resume(resume) = valid(&[
-            "resume",
+            "retry",
             "11111111111111111111111111111111",
             "--operation-id",
             "fresh",
@@ -2408,7 +2384,7 @@ mod tests {
         ])
         .command
         else {
-            panic!("resume");
+            panic!("retry");
         };
         assert!(resume.no_fallback);
     }
@@ -2510,8 +2486,8 @@ mod tests {
     }
     #[test]
     fn paging_recovery_and_removal_require_explicit_scopes() {
-        invalid(&["lanes", "--condition", "all"]);
-        invalid(&["lanes", "--wait", "1", "--cursor", "next"]);
+        invalid(&["status", "--until", "all"]);
+        invalid(&["status", "--wait=1", "--cursor", "1"]);
         invalid(&["worktree", "remove", "--merged", "--integration", "main"]);
         valid(&[
             "worktree",
@@ -2538,7 +2514,6 @@ mod tests {
     #[test]
     fn collection_caps_are_not_per_occurrence_caps() {
         for (prefix, flag, max) in [
-            (vec!["lanes"], "--id", 100),
             (vec!["reconcile"], "--id", 100),
             (
                 vec!["worktree", "remove", "--merged", "--integration", "main"],
@@ -2581,22 +2556,15 @@ mod tests {
         }
         let target = "a".repeat(32);
         let reason = "é".repeat(129);
-        invalid(&[
-            "cancel",
-            &target,
-            "--operation-id",
-            "op",
-            "--reason",
-            &reason,
-        ]);
+        invalid(&["stop", &target, "--operation-id", "op", "--reason", &reason]);
     }
     #[test]
     fn parsed_globals_survive_help_version_and_failures() {
         for tail in [
-            vec!["lanes", "--help"],
+            vec!["status", "--help"],
             vec!["--version"],
-            vec!["help", "lanes"],
-            vec!["lanes", "--limit", "0"],
+            vec!["help", "status"],
+            vec!["status", "--limit", "0"],
         ] {
             let mut words = vec![
                 "--state-dir",
@@ -2622,16 +2590,20 @@ mod tests {
                 Some(std::path::Path::new("/fixture/project"))
             );
         }
-        let ParseOutcome::Invalid { globals, .. } =
-            parsed(&["--state-dir", "/fixture/state", "--json", "lanes", "--json"])
-        else {
+        let ParseOutcome::Invalid { globals, .. } = parsed(&[
+            "--state-dir",
+            "/fixture/state",
+            "--json",
+            "status",
+            "--json",
+        ]) else {
             panic!("invalid")
         };
         assert_eq!(
             globals.state_dir.as_deref(),
             Some(std::path::Path::new("/fixture/state"))
         );
-        let ParseOutcome::Invalid { error, .. } = parsed(&["--json", "lanes", "--unknown"]) else {
+        let ParseOutcome::Invalid { error, .. } = parsed(&["--json", "status", "--unknown"]) else {
             panic!("invalid")
         };
         assert!(!error.to_string().contains("Usage:"));
@@ -2665,8 +2637,8 @@ mod tests {
     #[test]
     fn globals_help_and_json_transport_are_pure_and_exact() {
         for words in [
-            &["lanes", "--json", "--limit", "0"][..],
-            &["--json", "lanes", "--limit", "0"],
+            &["status", "--json", "--limit", "0"][..],
+            &["--json", "status", "--limit", "0"],
         ] {
             assert!(matches!(
                 parsed(words),
@@ -2693,10 +2665,10 @@ mod tests {
         invalid(&["hook", "claude", "pre-tool-use", "--json"]);
         invalid(&["internal", "supervise", "--json"]);
         invalid(&["-h"]);
-        invalid(&["lanes", "--lim", "1"]);
-        invalid(&["lanes", "--limit", "1", "--limit", "2"]);
-        invalid(&["--json", "lanes", "--json"]);
-        invalid(&["--state-dir", "/a", "lanes", "--state-dir", "/b"]);
+        invalid(&["status", "--lim", "1"]);
+        invalid(&["status", "--limit", "1", "--limit", "2"]);
+        invalid(&["--json", "status", "--json"]);
+        invalid(&["--state-dir", "/a", "status", "--state-dir", "/b"]);
         let ParseOutcome::Help { catalog, .. } = parsed(&["help", "--all", "--json"]) else {
             panic!("catalog")
         };
@@ -2706,16 +2678,14 @@ mod tests {
                 .iter()
                 .any(|command| command.command.contains("internal"))
         );
-        let lanes = catalog
+        let status = catalog
             .commands
             .iter()
-            .find(|command| command.command == "provenant lanes");
-        assert!(lanes.is_some_and(|command| {
-            command
-                .arguments
-                .iter()
-                .any(|arg| arg.name == "wait" && arg.bounds == Some((1, 14400)))
-        }));
+            .find(|command| command.command == "provenant status");
+        assert!(
+            status
+                .is_some_and(|command| { command.arguments.iter().any(|arg| arg.name == "wait") })
+        );
         let ParseOutcome::Help { catalog, .. } = parsed(&["help", "reconcile", "--json"]) else {
             panic!("reconcile help")
         };
@@ -2745,8 +2715,8 @@ mod tests {
         );
         assert!(names(&["hosts", "--help", "--json"]).len() == 2);
         assert_eq!(
-            names(&["--project", "hosts", "lanes", "--help", "--json"]),
-            vec!["provenant lanes".to_owned()]
+            names(&["--project", "hosts", "status", "--help", "--json"]),
+            vec!["provenant status".to_owned()]
         );
         assert_eq!(
             names(&["hosts", "--help", "doctor", "--json"]).len(),
