@@ -6762,7 +6762,9 @@ fn shared_provider_package_prefix_falls_back_to_exact_executable() -> Result<(),
                     .all(|grant| {
                         !grant.path.starts_with(&shared_var)
                             && !shared_var.starts_with(&grant.path)
-                            && !Path::new(prefix).join("bin/provider").starts_with(&grant.path)
+                            && !Path::new(prefix)
+                                .join("bin/provider")
+                                .starts_with(&grant.path)
                     }),
                 "{adapter}: {prefix}"
             );
