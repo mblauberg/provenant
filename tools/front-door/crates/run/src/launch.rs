@@ -382,6 +382,46 @@ fn dependency_preparation_diagnostic_names_setting_and_source() {
     }
 }
 
+#[test]
+fn lane_port_limit_diagnostic_matches_inventory() {
+    use provenant_records::diagnostic::{PortSettingSource, ResourceFact};
+    let inventory = include_str!("../assets/launch-guards.toml")
+        .parse::<toml_edit::DocumentMut>()
+        .unwrap();
+    for source in [
+        PortSettingSource::Configuration,
+        PortSettingSource::ShippedDefault,
+        PortSettingSource::RecordedPlan,
+    ] {
+        let fact = ResourceFact::LanePorts {
+            blocks: 2,
+            origin: source,
+        };
+        let diagnostic = RefusalKind::HandoffResource(fact).diagnostic().unwrap();
+        let detail = diagnostic.detail.unwrap();
+        assert!(detail.contains("domains.fabric.lanes.lane_port_blocks"));
+        assert!(detail.contains(source.description()));
+        assert!(
+            inventory["guard"]
+                .as_array_of_tables()
+                .unwrap()
+                .iter()
+                .any(|row| {
+                    row.get("site").and_then(|v| v.as_str())
+                        == Some("supervisor/src/guardian.rs#Driver::run")
+                        && row.get("boundary").and_then(|v| v.as_str())
+                            == Some("configurable_default")
+                        && row.get("code").and_then(|v| v.as_str())
+                            == Some(diagnostic.code.as_str())
+                        && row
+                            .get("setting")
+                            .and_then(|v| v.as_str())
+                            .is_some_and(|setting| detail.contains(setting))
+                })
+        );
+    }
+}
+
 /// Run-owned per-attempt paths. Allocated once, shared by explicit fallback candidates.
 pub struct LaunchPaths {
     pub attempt_id: AttemptId,
@@ -775,7 +815,9 @@ impl RefusalKind {
             ResourceFact::Disk { .. } => ErrorKind::DiskFloor,
             ResourceFact::ArgvPromptLimit { .. } => ErrorKind::Invalid,
             ResourceFact::WriteGrantLimit { .. } => ErrorKind::Limit,
-            ResourceFact::DependencyPreparation { .. } => ErrorKind::Refused,
+            ResourceFact::DependencyPreparation { .. } | ResourceFact::LanePorts { .. } => {
+                ErrorKind::Refused
+            }
             ResourceFact::GrantLimit { .. } | ResourceFact::ProfileLimit { .. } => {
                 ErrorKind::Confinement
             }

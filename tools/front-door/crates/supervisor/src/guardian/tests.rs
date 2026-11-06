@@ -1589,6 +1589,17 @@ fn unavailable_port_allocation_warns_and_does_not_claim_a_block()
     let error = lane_port_allocation(Some(&available))
         .err()
         .ok_or("expected exhausted pool")?;
-    assert!(error.contains("domains.fabric.lanes.lane_port_blocks=1 (host configuration)"));
+    assert!(
+        error
+            .to_string()
+            .contains("domains.fabric.lanes.lane_port_blocks=1 (host configuration)")
+    );
+    assert_eq!(
+        error.fact(),
+        provenant_records::diagnostic::ResourceFact::LanePorts {
+            blocks: 1,
+            origin: provenant_records::diagnostic::PortSettingSource::Configuration
+        }
+    );
     Ok(())
 }

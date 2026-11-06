@@ -893,18 +893,14 @@ mod diagnostic_projection_tests {
                             .is_some_and(|s| !s.trim().is_empty()),
                         "missing setting for {site}"
                     );
-                    // Guardian port exhaustion is not yet projected as a typed
-                    // refusal. Do not claim it has a code until that path is migrated.
-                    if complete || site != "supervisor/src/guardian.rs#Driver::run" {
-                        let code = guard
-                            .get("code")
-                            .and_then(|value| value.as_str())
-                            .expect("configurable refusal code");
-                        assert!(
-                            ErrorKind::ALL.iter().any(|kind| kind.code() == code),
-                            "unknown code {code} at {site}"
-                        );
-                    }
+                    let code = guard
+                        .get("code")
+                        .and_then(|value| value.as_str())
+                        .expect("configurable refusal code");
+                    assert!(
+                        ErrorKind::ALL.iter().any(|kind| kind.code() == code),
+                        "unknown code {code} at {site}"
+                    );
                 }
                 "unclassified" if !complete => {}
                 _ => panic!("invalid or incomplete classification {boundary} at {site}"),

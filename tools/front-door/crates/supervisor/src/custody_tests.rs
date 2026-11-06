@@ -434,6 +434,7 @@ fn exit_publication_bounds_escaped_facts_and_counts_every_omission() -> TestResu
         settlement_evidence: SettlementEvidence::Unresolved,
         stdout: CaptureTotals::default(),
         stderr: CaptureTotals::default(),
+        launch_refusal: None,
         warnings: vec!["\u{0001}".repeat(160); 24],
         omitted_warnings: 5,
     };
@@ -1099,5 +1100,20 @@ fn failed_ownership_publication_reports_retained_reservation() -> TestResult {
     );
     assert!(matches!(result, Err(CustodyError::ReservationRetained(_))));
     assert!(reservation_present(&directory, scope())?);
+    Ok(())
+}
+
+#[test]
+fn never_spawned_resource_fact_survives_exit_storage() -> TestResult {
+    use provenant_records::diagnostic::{PortSettingSource, ResourceFact};
+    let fact = ResourceFact::LanePorts {
+        blocks: 2,
+        origin: PortSettingSource::Configuration,
+    };
+    let mut exit = ProcessExit::never_spawned(scope(), None, vec![]);
+    exit.launch_refusal = Some(fact);
+    let stored: StoredExit = serde_json::from_slice(&serde_json::to_vec(&exit)?)?;
+    assert_eq!(stored.launch_refusal, Some(fact));
+    assert_eq!(exit.durable_observation().launch_refusal, Some(fact));
     Ok(())
 }

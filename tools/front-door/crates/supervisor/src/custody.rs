@@ -1175,6 +1175,8 @@ pub struct ProcessExit {
     pub settlement_evidence: SettlementEvidence,
     pub stdout: CaptureTotals,
     pub stderr: CaptureTotals,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch_refusal: Option<provenant_records::diagnostic::ResourceFact>,
     pub warnings: Vec<String>,
     pub omitted_warnings: u64,
 }
@@ -1206,6 +1208,7 @@ impl ProcessExit {
             settlement_evidence: SettlementEvidence::NeverSpawned,
             stdout: CaptureTotals::default(),
             stderr: CaptureTotals::default(),
+            launch_refusal: None,
             warnings,
             omitted_warnings: 0,
         }
@@ -1225,6 +1228,7 @@ impl ProcessExit {
             omitted_reaped: self.omitted_reaped,
             spared: self.spared.clone(),
             omitted_spared: self.omitted_spared,
+            launch_refusal: self.launch_refusal,
             warnings: self.warnings.clone(),
             omitted_warnings: self.omitted_warnings,
             terminal_observed: self.terminal_observed,
@@ -1292,6 +1296,8 @@ struct StoredExit {
     omitted_reaped: u64,
     spared: Vec<ProcessIdentity>,
     omitted_spared: u64,
+    #[serde(default)]
+    launch_refusal: Option<provenant_records::diagnostic::ResourceFact>,
     warnings: Vec<String>,
     omitted_warnings: u64,
     terminal_observed: bool,
@@ -1317,6 +1323,8 @@ pub struct ExitObservation {
     pub omitted_reaped: u64,
     pub spared: Vec<ProcessIdentity>,
     pub omitted_spared: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub launch_refusal: Option<provenant_records::diagnostic::ResourceFact>,
     pub warnings: Vec<String>,
     pub omitted_warnings: u64,
     pub terminal_observed: bool,
@@ -1442,6 +1450,7 @@ pub fn observe(
                     omitted_reaped: record.omitted_reaped,
                     spared: record.spared,
                     omitted_spared: record.omitted_spared,
+                    launch_refusal: record.launch_refusal,
                     warnings: record.warnings,
                     omitted_warnings: record.omitted_warnings,
                     terminal_observed: record.terminal_observed,

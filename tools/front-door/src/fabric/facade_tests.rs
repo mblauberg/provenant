@@ -1261,6 +1261,7 @@ pub(crate) mod peer_tests {
             },
             termination: Some(provenant_os::exec::Termination::Exit(0)),
             never_spawned: false,
+            launch_refusal: None,
             stop_reason: None,
             delivered_signals: vec![],
             reaped: vec![],

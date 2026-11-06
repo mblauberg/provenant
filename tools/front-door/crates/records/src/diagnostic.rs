@@ -97,6 +97,24 @@ impl LaneLimit {
     }
 }
 
+/// Origin of a lane-port block count in the handed-off plan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PortSettingSource {
+    Configuration,
+    ShippedDefault,
+    RecordedPlan,
+}
+impl PortSettingSource {
+    pub fn description(self) -> &'static str {
+        match self {
+            Self::Configuration => "host configuration",
+            Self::ShippedDefault => "shipped default",
+            Self::RecordedPlan => "recorded plan",
+        }
+    }
+}
+
 /// Closed resource facts safe to project across host boundaries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -125,6 +143,10 @@ pub enum ResourceFact {
     },
     DependencyPreparation {
         configured: bool,
+    },
+    LanePorts {
+        blocks: u32,
+        origin: PortSettingSource,
     },
     MemoryPressure {
         level: PressureLevel,
@@ -165,6 +187,9 @@ impl ResourceFact {
             Self::DependencyPreparation { configured } => diagnostic
                 .detail(format!("dependency preparation failed; lanes.prepare_deps=true (source: {})", if *configured { "sealed profile" } else { "shipped default" }))
                 .next("repair dependency preparation or set lanes.prepare_deps=false"),
+            Self::LanePorts { blocks, origin } => diagnostic
+                .detail(format!("no free lane port block; domains.fabric.lanes.lane_port_blocks is {blocks} (source: {})", origin.description()))
+                .next("wait for a lane port block or raise or disable domains.fabric.lanes.lane_port_blocks"),
             Self::MemoryPressure { level, threshold, origin } => diagnostic
                 .detail(format!("host memory pressure is {}; domains.fabric.lanes.memory_pressure_threshold is {} (source: {})", level.name(), threshold.name(), origin.description()))
                 .next("reduce host memory pressure before retrying"),

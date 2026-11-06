@@ -5553,6 +5553,10 @@ fn never_spawned_exit_is_a_refusal_with_its_reason() -> TestResult {
     observed.termination = None;
     observed.terminal_observed = false;
     observed.warnings = vec!["admission refused".into()];
+    observed.launch_refusal = Some(provenant_records::diagnostic::ResourceFact::LanePorts {
+        blocks: 1,
+        origin: provenant_records::diagnostic::PortSettingSource::Configuration,
+    });
     observed.settlement_evidence = provenant_supervisor::custody::SettlementEvidence::NeverSpawned;
     seal_exit(&store, &observed)?;
     let dir = store.attempt_dir(run.run_id, id, false)?;
@@ -5568,6 +5572,11 @@ fn never_spawned_exit_is_a_refusal_with_its_reason() -> TestResult {
         provenant_records::AttemptOutcome::Rejected
     );
     assert_eq!(fact.reason.as_deref(), Some("admission refused"));
+    let record = store.record(id, &call)?;
+    let (_, reason) = provenant_records::wire::lane::LaneRow::state_and_reason(&record.state);
+    let reason = reason.ok_or("missing projected refusal")?;
+    assert!(reason.contains("domains.fabric.lanes.lane_port_blocks"));
+    assert!(reason.contains("host configuration"));
     assert_eq!(fake.decoded.get(), 0);
     Ok(())
 }
