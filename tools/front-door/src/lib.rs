@@ -997,6 +997,7 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
         Command::Run(cmd) => graph_interface::run(*cmd, globals, process.workers()),
         Command::Edit(cmd) => graph_interface::edit(cmd, globals, process.workers()),
         Command::Templates(cmd) => graph_interface::templates(cmd, globals, process.workers()),
+        Command::Stats(cmd) => graph_interface::graph_stats(cmd, globals, process.workers()),
         Command::Status(cmd) if cmd.session_stream => run_edge(&inv.leaf, globals, |edge| {
             provenant_cli::run::status_session_stream(cmd, edge, &mut io::stdout().lock())
         }),
@@ -1429,7 +1430,10 @@ pub fn dispatch(parsed: ParseOutcome, process: &dyn Process) -> u8 {
     let read_only_graph = match &parsed {
         ParseOutcome::Invocation(inv) => {
             matches!(&inv.command, Command::Run(args) if args.explain)
-                || matches!(&inv.command, Command::Templates(_) | Command::Status(_))
+                || matches!(
+                    &inv.command,
+                    Command::Templates(_) | Command::Status(_) | Command::Stats(_)
+                )
         }
         _ => false,
     };

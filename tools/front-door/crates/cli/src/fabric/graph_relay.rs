@@ -154,6 +154,49 @@ pub fn serve(
             }
             serde_json::to_value(receipt)?
         }
+        RelayOp::Edit { id, patch } => {
+            let belongs = id == graph_id
+                || checkpoint.nodes.iter().any(|node| {
+                    id == node.id
+                        || id == format!("{graph_id}/{}", node.id)
+                        || node.recorded_attempts().any(|row| {
+                            row.attempt_ref.as_ref().is_some_and(|reference| {
+                                id == *reference
+                                    || reference.rsplit('/').next() == Some(id.as_str())
+                            })
+                        })
+                });
+            if !belongs {
+                return Err(refused(
+                    "not_found",
+                    "the target is not the calling lane's graph",
+                ));
+            }
+            let library = template_library(&context.home, &context.cwd)
+                .map_err(|error| refused("invalid_template", error))?;
+            let config =
+                provenant_config::read_with_domains(&context.roots, &crate::domains::SECTIONS)
+                    .map_err(|error| refused("invalid_config", error.to_string()))?;
+            let resolvers = launch_resolvers(&config.domains.routing.review, &document)
+                .map_err(|error| refused("invalid_review", error))?;
+            let admitted = provenant_fabric_runtime::graph::patch::admit_patch(
+                &mut LiveGraph {
+                    document: &document,
+                    checkpoint: &mut checkpoint,
+                },
+                Some(&parent),
+                &patch,
+                &PatchContext {
+                    journal: None,
+                    library: &library,
+                    resolvers: &resolvers,
+                    scan: &scan_for_secrets,
+                    limits: &context.config.graph.limits,
+                },
+            )
+            .map_err(|error| refused(error.code, error.message))?;
+            json!({"graph_id":graph_id,"revision":admitted.revision,"replayed":admitted.replayed,"added":admitted.added})
+        }
         RelayOp::Children => {
             return Ok(relay::child_states(&checkpoint, &parent));
         }

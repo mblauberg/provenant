@@ -1183,6 +1183,8 @@ mod tests {
         assert_eq!(request.wait, Some(1800));
         valid(&["run", "--file", "work.toml", "--explain"]);
         invalid(&["run", "--preset", "task"]);
+        valid(&["stats", "--by", "tier"]);
+        invalid(&["stats", "--by", "node"]);
         valid(&["status", "--stats", "--by", "tier"]);
         valid(&["status", "--stats", "--by", "template"]);
         invalid(&["status", "--by", "tier"]);

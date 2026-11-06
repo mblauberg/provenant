@@ -330,3 +330,97 @@ fn lane_run_submits_child_through_parent_relay() -> Result {
     drop(relay);
     Ok(())
 }
+
+#[test]
+fn lane_edit_admits_revision_through_host_relay() -> Result {
+    use provenant_core::{Clock, WaitBudget};
+    use provenant_fabric_runtime::graph::{
+        FileJournal, GraphCheckpoint, GraphDocument, GraphExecution, GraphJournal,
+    };
+    let mut rig = TestRig::new()?;
+    let explanation = host(&rig, &["run", "Initial", "--explain", "--json"])?;
+    let document: GraphDocument = serde_json::from_value(explanation["data"]["document"].clone())?;
+    let graph_id = document.graph_id.clone();
+    let mut inputs = RootInputs::new(rig.home.clone(), rig.project.clone());
+    inputs.state_dir = Some(rig.state.clone());
+    let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+    let context = provenant_cli::fabric::Context::open(roots, &rig.home, &rig.project)?;
+    let attempt = AttemptId::from_bytes(provenant_os::fs::entropy_128()?);
+    let reference = format!("{}/{attempt}", context.identity.host);
+    let checkpoint: GraphCheckpoint = serde_json::from_value(json!({
+        "schema_version":1,"graph_id":graph_id,"plan_digest":"test",
+        "nodes":[{"id":"task","worktree":null,"state":"running","attempts":[{
+            "key":{"graph_id":graph_id,"node_id":"task","route_index":0},
+            "launched":true,"route":{"alias":"senior"},"state":"running",
+            "attempt_ref":reference,"launch_actor":"actor"
+        }]}]
+    }))?;
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let budget = WaitBudget::cli(clock.mono_now(), 55)?;
+    let mut journal = FileJournal::open(
+        &context.roots.state,
+        context.identity.project,
+        &graph_id,
+        budget,
+        &cancel,
+        &clock,
+    )?;
+    journal.bind(GraphExecution {
+        extra: Default::default(),
+        directory: rig.project.clone(),
+        document,
+        review_base: None,
+        integration_base: None,
+    })?;
+    journal.save(&checkpoint)?;
+    drop(journal);
+    let state = context.roots.state.clone();
+    let project = context.identity.project;
+    let relay = provenant_fabric_mcp::lane::HostRelay::start_with_graph(
+        provenant_providers::LaneRuntime::fabric_socket(attempt),
+        provenant_records::Limits::CONFIG,
+        |_, _, _| {
+            Err(provenant_fabric_mcp::tools::ServiceError::Cli {
+                code: "unexpected".into(),
+                message: "unexpected coordination".into(),
+                data: Value::Null,
+            })
+        },
+        move |arguments, cancel, within| {
+            let budget = provenant_fabric_mcp::lane::host_budget(&clock, within)?;
+            provenant_cli::fabric::graph_relay::serve(
+                &context,
+                &attempt.to_string(),
+                arguments,
+                budget,
+                cancel,
+                &clock,
+            )
+        },
+    )?;
+    lane_environment(&mut rig, attempt)?;
+    let path = rig.root.join("patch.json");
+    std::fs::write(
+        &path,
+        serde_json::to_vec(
+            &json!({"schema_version":1,"expected_revision":0,"idempotency_key":"live-edit","nodes":[{"id":"next","use":"task","brief":"Next"}]}),
+        )?,
+    )?;
+    let path = path.to_str().ok_or("patch path")?;
+    let result = host(&rig, &["edit", &graph_id, "--file", path, "--json"])?;
+    assert_eq!(result["data"]["revision"], 1);
+    let replay = host(&rig, &["edit", &graph_id, "--file", path, "--json"])?;
+    assert_eq!(replay["data"]["replayed"], true);
+    let saved = FileJournal::read_status_checkpoint(&state, project, &graph_id)?
+        .ok_or("missing checkpoint")?;
+    assert!(saved.nodes.iter().any(|node| node.id == "task--next"));
+    let events = FileJournal::read_events(&state, project, &graph_id)?;
+    assert!(
+        events
+            .iter()
+            .any(|event| event.kind == provenant_fabric_runtime::graph::GraphEventKind::Patch)
+    );
+    drop(relay);
+    Ok(())
+}
