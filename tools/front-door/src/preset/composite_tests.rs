@@ -12,6 +12,29 @@ fn resolvers() -> BTreeMap<String, Vec<String>> {
 }
 
 #[test]
+fn composite_expansion_uses_the_selected_template_layers() {
+    use provenant_fabric_runtime::graph::{Layer, Template, TemplateLibrary};
+    let mut library = TemplateLibrary::bundled();
+    let template = |brief: &str| Template {
+        brief: Some(brief.into()),
+        ..Default::default()
+    };
+    library
+        .insert(Layer::User, "custom", template("user brief"))
+        .unwrap();
+    let mut layers = Layers::empty();
+    layers.trusted_templates = Some(library.clone());
+    library
+        .insert(Layer::Repository, "custom", template("repo brief"))
+        .unwrap();
+    layers.templates = Some(library);
+    let expand = || expand_composite(&layers, "custom", &json!({}), &[], &resolvers()).unwrap();
+    assert_eq!(expand().document["nodes"][0]["prompt"], "repo brief");
+    layers.exclude_repo.set(true);
+    assert_eq!(expand().document["nodes"][0]["prompt"], "user brief");
+}
+
+#[test]
 fn composite_catalogue_maps_every_bundled_preset() {
     let layers = Layers::empty();
     let bundled = layers.entries.keys().collect::<BTreeSet<_>>();

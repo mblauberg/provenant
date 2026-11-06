@@ -58,7 +58,12 @@ pub fn expand_composite(
         );
     }
     let compiler = Compiler {
-        library: bundled_templates(),
+        library: if layers.exclude_repo.get() {
+            layers.trusted_templates.as_ref()
+        } else {
+            layers.templates.as_ref()
+        }
+        .unwrap_or_else(|| bundled_templates()),
         resolvers,
     };
     let mut node = compiler.compile(&json!({"id":"work", "use":template, "with":parameters}))?;
