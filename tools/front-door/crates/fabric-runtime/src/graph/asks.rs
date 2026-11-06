@@ -225,12 +225,12 @@ fn decide_body(graph_id: &str, node_id: &str, spec: &DecideSpec, previous: Optio
 
 /// The ID sequence of a decide ask, so a replacement never reuses an ID.
 fn decide_sequence(ask: &NodeAsk, node_id: &str) -> Option<u64> {
-    ask.ask_id
-        .strip_prefix(node_id)?
-        .strip_prefix(".ask-")?
-        .parse()
-        .ok()
-        .filter(|sequence| *sequence > 0)
+    let identity = ask.ask_id.strip_prefix(node_id)?.strip_prefix(".ask-")?;
+    let sequence = if let Some((sequence, generation)) = identity.split_once(".retry-") {
+        generation.parse::<u64>().ok().filter(|generation| *generation > 0)?;
+        sequence
+    } else { identity };
+    sequence.parse().ok().filter(|sequence| *sequence > 0)
 }
 
 pub(super) fn decide_ask(
@@ -535,6 +535,11 @@ pub(super) fn decide<R: AttemptOwner, J: GraphJournal>(
                 wake_at,
                 rejected,
             );
+            if repair_scope_gate(node.extra.get("repair_scope_gate"))
+                && let Some(generation) = checkpoint.nodes[index].extra.get("retry_generation")
+                    .and_then(serde_json::Value::as_u64).filter(|generation| *generation > 0) {
+                ask.ask_id.push_str(&format!(".retry-{generation}"));
+            }
             if repair_scope_gate(node.extra.get("repair_scope_gate"))
                 && let Some(report) = node.depends_on.iter().find_map(|id| {
                     checkpoint

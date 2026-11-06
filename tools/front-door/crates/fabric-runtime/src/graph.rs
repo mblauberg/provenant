@@ -3010,6 +3010,12 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                                 commit,
                                 &upstream_findings,
                             );
+                            if !plan.nodes.iter().any(|consumer| {
+                                consumer.extra.get("repair_scope_gate") == Some(&serde_json::Value::Bool(true))
+                                    && consumer.depends_on.contains(&node.id)
+                            }) {
+                                outputs.extra.remove("repair_design");
+                            }
                             if node.kind == Some(NodeKind::Synthesise)
                                 && node.dispositions.is_empty()
                             {

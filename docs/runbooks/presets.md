@@ -44,7 +44,8 @@ growth requires a full panel re-plan through `@review-panel`. The host also
 checks repair diffs for newly touched paths and changes to risk-tagged paths
 already reviewed; this is a loose escalation guardrail rather than a refusal.
 Blocking findings from a replanned panel feed the next repair round within the
-same cycle cap.
+same cycle cap. Later repair commits re-resolve that broader panel, so newly
+selected lenses also review closure.
 
 An evidenced `design_defect` or a recurring blocking finding escalates early.
 Exhausting the repair limit takes the same read-only principal `design` path,
