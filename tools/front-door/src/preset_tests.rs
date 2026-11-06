@@ -4681,7 +4681,7 @@ mod planner_front_end {
     fn linked_worktrees_come_from_git_without_the_main_checkout() {
         let temp = tempfile::tempdir().unwrap();
         let main = temp.path().join("main");
-        let linked = temp.path().join("linked");
+        let linked = temp.path().join("linked \"worktree\"\nline");
         std::fs::create_dir(&main).unwrap();
         let git = |dir: &std::path::Path, args: &[&str]| {
             let output = provenant_os::fixture::git_command()
@@ -4712,6 +4712,9 @@ mod planner_front_end {
             ))
         };
         let found = linked_worktrees(&main);
+        let subdirectory = main.join("nested project directory");
+        std::fs::create_dir(&subdirectory).unwrap();
+        assert_eq!(linked_worktrees(&subdirectory), found);
         let expected = std::fs::canonicalize(&linked)
             .unwrap()
             .display()
@@ -4728,6 +4731,35 @@ mod planner_front_end {
         let bare = temp.path().join("bare");
         std::fs::create_dir(&bare).unwrap();
         assert!(linked_worktrees(&bare).is_empty());
+        let bare_repo = temp.path().join("bare.git");
+        let bare_lane = temp.path().join("bare lane");
+        git(
+            &main,
+            &[
+                "clone",
+                "-q",
+                "--bare",
+                main.to_str().unwrap(),
+                bare_repo.to_str().unwrap(),
+            ],
+        );
+        git(
+            &bare_repo,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "bare-lane",
+                bare_lane.to_str().unwrap(),
+            ],
+        );
+        let bare_found = linked_worktrees(&bare_repo);
+        assert_eq!(bare_found.len(), 1);
+        assert_eq!(
+            std::fs::canonicalize(&bare_found[0]).unwrap(),
+            std::fs::canonicalize(&bare_lane).unwrap()
+        );
         // The discovered list is what the planner is offered by default.
         let mut project = layers(PlanMode::On, None);
         project.plan.as_mut().unwrap().worktrees = found.clone();

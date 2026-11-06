@@ -269,7 +269,32 @@ fn repo_facts_resolves_a_moved_ref_fresh() -> Result<(), Box<dyn Error>> {
     )?;
     assert!(registrations.starts_with(b"worktree "));
     assert!(registrations.ends_with(b"\0\0"));
+    assert_eq!(
+        facts.read_only_worktree_paths(
+            &read_only,
+            context.executor,
+            context.utility,
+            context.utility_budget,
+            &cancel(),
+        )?,
+        vec![fixture.repo.root_path().to_path_buf()]
+    );
     let limited_inventory = RepoFacts::with_limits(1, provenant_os::git::REPO_FACT_SCALAR_LIMIT)?;
+    let git = provenant_os::git::git_executable().ok_or("Git executable unavailable")?;
+    let environment = provenant_os::fixture::git_env();
+    assert!(matches!(
+        limited_inventory.discover_worktree_paths(
+            fixture.repo.root_path(),
+            &git,
+            &environment,
+            context.executor,
+            std::time::Duration::from_secs(30),
+            &cancel(),
+        ),
+        Err(WorktreeError::Utility(UtilityError::Truncated {
+            stream: "stdout"
+        }))
+    ));
     assert!(matches!(
         limited_inventory.read_only_inventory(
             &read_only,

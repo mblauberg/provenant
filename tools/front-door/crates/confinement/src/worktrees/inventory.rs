@@ -339,6 +339,70 @@ impl RepoFacts {
         Ok(outcome.stdout.bytes)
     }
 
+    /// Discover registrations from a working directory, including a bare
+    /// repository or a subdirectory that has not been opened as a checkout.
+    /// The caller supplies its already-sanitised Git environment.
+    pub fn discover_worktree_paths(
+        &self,
+        cwd: &Path,
+        git: &Path,
+        environment: &[(OsString, OsString)],
+        executor: &dyn Executor,
+        timeout: std::time::Duration,
+        cancel: &CancelToken,
+    ) -> Result<Vec<PathBuf>, WorktreeError> {
+        use provenant_os::exec::{ExecOptions, StreamPolicy};
+        let argv = [
+            git.as_os_str().to_owned(),
+            "-c".into(),
+            "core.fsmonitor=false".into(),
+            "worktree".into(),
+            "list".into(),
+            "--porcelain".into(),
+            "-z".into(),
+        ];
+        let mut options = ExecOptions::new(&argv, cwd, timeout);
+        options.env = Some(environment);
+        options.stdin = Some(b"");
+        options.cancel = Some(cancel);
+        options.stdout = StreamPolicy::Capture {
+            limit: self.inventory_limit,
+        };
+        options.stderr = StreamPolicy::Capture { limit: 4096 };
+        options.stop_on_output_limit = true;
+        let output = executor.execute(options).map_err(UtilityError::from)?;
+        if output.stdout.truncated {
+            return Err(UtilityError::Truncated { stream: "stdout" }.into());
+        }
+        if output.cancelled {
+            return Err(UtilityError::Cancelled.into());
+        }
+        if output.timed_out {
+            return Err(UtilityError::TimedOut.into());
+        }
+        if output.drain_truncated || output.stdout.read_failed || output.stdout.sink_failed {
+            return Err(UtilityError::Incomplete.into());
+        }
+        if output.termination != Termination::Exit(0) {
+            return Err(WorktreeError::InvalidOutput);
+        }
+        inventory_paths(&output.stdout.bytes)
+    }
+
+    /// Read registered checkout paths without interpreting Git's quoted text
+    /// format. Bare primary registrations are included, as in Git's inventory.
+    pub fn read_only_worktree_paths(
+        &self,
+        repo: &crate::repo::ReadOnlyRepo,
+        executor: &dyn Executor,
+        utility: &UtilityRuntime,
+        budget: UtilityBudget,
+        cancel: &CancelToken,
+    ) -> Result<Vec<PathBuf>, WorktreeError> {
+        let inventory = self.read_only_inventory(repo, executor, utility, budget, cancel)?;
+        inventory_paths(&inventory)
+    }
+
     /// Read inventory afresh and invalidate any older advisory snapshot.
     pub(super) fn read_inventory(
         &self,
@@ -454,6 +518,33 @@ pub(crate) struct GitWorktree {
     pub(super) locked: bool,
     pub(super) prunable: bool,
     pub(crate) bare: bool,
+}
+
+fn inventory_paths(bytes: &[u8]) -> Result<Vec<PathBuf>, WorktreeError> {
+    if !bytes.ends_with(b"\0\0") {
+        return Err(WorktreeError::InvalidOutput);
+    }
+    let mut paths = Vec::new();
+    let mut at_record_start = true;
+    for field in bytes.split(|byte| *byte == 0) {
+        if field.is_empty() {
+            at_record_start = true;
+        } else if at_record_start {
+            let path = field
+                .strip_prefix(b"worktree ")
+                .filter(|path| path.first() == Some(&b'/'))
+                .ok_or(WorktreeError::InvalidOutput)?;
+            paths.push(PathBuf::from(OsString::from_vec(path.to_vec())));
+            if paths.len() > MAX_WORKTREES {
+                return Err(WorktreeError::InvalidOutput);
+            }
+            at_record_start = false;
+        }
+    }
+    if paths.is_empty() {
+        return Err(WorktreeError::InvalidOutput);
+    }
+    Ok(paths)
 }
 
 pub(crate) fn parse_worktree_list(bytes: &[u8]) -> Result<Vec<GitWorktree>, WorktreeError> {
@@ -719,4 +810,23 @@ pub(super) fn read_bounded(
                 source,
             },
         })
+}
+
+#[cfg(test)]
+mod path_tests {
+    use super::*;
+    use std::os::unix::ffi::OsStrExt;
+
+    #[test]
+    fn inventory_paths_preserve_unquoted_native_paths_and_bare_records() {
+        let paths =
+            inventory_paths(b"worktree /bare\0bare\0\0worktree /lane \xff\nname\0HEAD 123\0\0")
+                .expect("valid inventory");
+        assert_eq!(paths.len(), 2);
+        assert_eq!(paths[0], PathBuf::from("/bare"));
+        assert_eq!(paths[1].as_os_str().as_bytes(), b"/lane \xff\nname");
+        assert!(inventory_paths(b"worktree /truncated\0").is_err());
+        assert!(inventory_paths(b"worktree relative\0bare\0\0").is_err());
+        assert!(inventory_paths(b"\0\0").is_err());
+    }
 }

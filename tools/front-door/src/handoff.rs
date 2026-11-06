@@ -106,7 +106,7 @@ fn git(dir: &Path, args: &[&str], timeout: Duration) -> Result<(bool, String), R
     let mut options = ExecOptions::new(&argv, dir, timeout);
     options.env = Some(&environment);
     options.stdin = Some(b"");
-    let limit = provenant_os::git::fact_capture_limit(args, 64 * 1024);
+    let limit = 64 * 1024;
     options.stdout = StreamPolicy::Capture { limit };
     options.stderr = StreamPolicy::Capture { limit: 4096 };
     let out = SystemExecutor::new(1)?.execute(options)?;
@@ -137,15 +137,6 @@ fn git(dir: &Path, args: &[&str], timeout: Duration) -> Result<(bool, String), R
         String::from_utf8_lossy(&out.stderr.bytes).into_owned()
     };
     Ok((ok, text))
-}
-
-/// Plain-text Git output for callers outside the handoff owner.
-pub(crate) fn git_text(dir: &Path, args: &[&str]) -> Result<String, String> {
-    match git(dir, args, GIT_TIMEOUT) {
-        Ok((true, text)) => Ok(text),
-        Ok((false, text)) => Err(text.trim().to_owned()),
-        Err(refusal) => Err(refusal.message),
-    }
 }
 
 fn inspect(
@@ -1360,21 +1351,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn git_text_refuses_stdout_past_its_bound() {
+    fn git_refuses_stdout_past_its_bound() {
         let temp = tempfile::tempdir().unwrap();
         std::fs::write(temp.path().join("big"), vec![b'a'; 128 * 1024]).unwrap();
-        let error = git_text(
+        let error = git(
             temp.path(),
             &["diff", "--no-index", "--no-color", "/dev/null", "big"],
+            GIT_TIMEOUT,
         )
-        .expect_err("truncated output must not read as complete");
+        .expect_err("truncated output must not read as complete")
+        .message;
         assert!(
             error.contains("output exceeded the 65536-byte limit"),
             "{error}"
         );
         assert!(error.contains("diff"), "{error}");
         // Output within the bound is still returned whole.
-        let text = git_text(temp.path(), &["--version"]).unwrap();
+        let (ok, text) = git(temp.path(), &["--version"], GIT_TIMEOUT).unwrap();
+        assert!(ok);
         assert!(text.starts_with("git version"), "{text}");
     }
 
