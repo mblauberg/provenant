@@ -61,6 +61,11 @@ boundary = "authority"
 reason = "A continuation must match its recorded route and grant identity."
 
 [[guard]]
+site = "cli/src/run/provider/continuation.rs#continuation_request"
+boundary = "authority"
+reason = "A continuation must resolve the provider and model actually applied to its prior attempt."
+
+[[guard]]
 site = "cli/src/run/provider/continuation.rs#continuation_for"
 boundary = "authority"
 reason = "A continuation requires its recorded session, applied route and account identity and must match the selected route."

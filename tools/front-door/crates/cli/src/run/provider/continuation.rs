@@ -1,25 +1,42 @@
 use super::*;
 
+#[derive(Debug, thiserror::Error)]
+pub(super) enum ContinuationRequestError {
+    #[error(
+        "the prior attempt recorded no applied route; run provenant run with its result as context"
+    )]
+    MissingRoute,
+    #[error(
+        "the prior attempt recorded no applied model; run provenant run with its result as context"
+    )]
+    MissingModel,
+    #[error("{0}; run provenant run with the prior result as context")]
+    InvalidModel(String),
+    #[error(
+        "the prior attempt's applied provider and model differ; run provenant run with its result as context"
+    )]
+    ProviderMismatch,
+}
+
 /// Recheck current readiness for the exact route the provider session used.
 /// Resolving an exact model bypasses named-pool selection and quota redraws.
 pub(super) fn continuation_request(
     prior: &run::AttemptRecord,
-) -> Result<provenant_routing::RouteRequest, String> {
+) -> Result<provenant_routing::RouteRequest, ContinuationRequestError> {
     use provenant_routing::{Fallback, ModelId, RouteChoice};
 
-    let applied = prior.applied_route.as_ref().ok_or(
-        "the prior attempt recorded no applied route; run provenant run with its result as context",
-    )?;
-    let model = applied.model.as_deref().ok_or(
-        "the prior attempt recorded no applied model; run provenant run with its result as context",
-    )?;
+    let applied = prior
+        .applied_route
+        .as_ref()
+        .ok_or(ContinuationRequestError::MissingRoute)?;
+    let model = applied
+        .model
+        .as_deref()
+        .ok_or(ContinuationRequestError::MissingModel)?;
     let model = ModelId::parse(model)
-        .map_err(|error| format!("{error}; run provenant run with the prior result as context"))?;
+        .map_err(|error| ContinuationRequestError::InvalidModel(error.to_string()))?;
     if applied.provider.as_deref() != Some(model.adapter()) {
-        return Err(
-            "the prior attempt's applied provider and model differ; run provenant run with its result as context"
-                .into(),
-        );
+        return Err(ContinuationRequestError::ProviderMismatch);
     }
     Ok(provenant_routing::RouteRequest {
         intent: Default::default(),

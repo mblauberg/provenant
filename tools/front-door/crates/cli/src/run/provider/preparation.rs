@@ -414,6 +414,8 @@ pub(super) enum PrepareError {
     DirtyWriter(String),
     #[error(transparent)]
     SourceHead(#[from] SourceHeadError),
+    #[error(transparent)]
+    ContinuationRequest(#[from] ContinuationRequestError),
     #[error("{message}")]
     DependencyPreparation { message: String, configured: bool },
     #[error("{message}")]
@@ -489,6 +491,11 @@ impl PrepareError {
                     fallback_outcome,
                 }
             }
+            Self::ContinuationRequest(error) => {
+                let mut refusal = run::PrepareRefusal::from(error.to_string());
+                refusal.boundary_class = provenant_records::diagnostic::BoundaryClass::Authority;
+                refusal
+            }
             Self::SourceHead(error) => {
                 let mut refusal = run::PrepareRefusal::from(error.to_string());
                 refusal.boundary_class = provenant_records::diagnostic::BoundaryClass::Authority;
@@ -558,6 +565,19 @@ fn preparation_preserves_typed_boundaries_without_classifying_other_errors() {
     for error in [SourceHeadError::Missing, SourceHeadError::Invalid] {
         let refusal = PrepareError::SourceHead(error).into_refusal();
         assert_eq!(refusal.boundary_class, BoundaryClass::Authority);
+    }
+    for error in [
+        ContinuationRequestError::MissingRoute,
+        ContinuationRequestError::MissingModel,
+        ContinuationRequestError::InvalidModel("invalid".into()),
+        ContinuationRequestError::ProviderMismatch,
+    ] {
+        assert_eq!(
+            PrepareError::ContinuationRequest(error)
+                .into_refusal()
+                .boundary_class,
+            BoundaryClass::Authority
+        );
     }
     let other = PrepareError::Other("TOKEN_SENTINEL".into()).into_refusal();
     assert_eq!(other.boundary_class, BoundaryClass::None);
