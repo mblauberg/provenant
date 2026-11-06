@@ -117,6 +117,19 @@ fn resolve_reports_effort_controls_and_nearby_models() -> Result {
     let path = dir.join("codex.json");
     fs::write(&path, serde_json::to_vec(&file)?)?;
     fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
+    let config = rig.state.join("config.toml");
+    let mut text = fs::read_to_string(&config)?;
+    text.push_str("\n[domains.routing.pools]\nwriting=[{model='codex/gpt-6-luna',weight=1,effort='high',efforts=['high']}]\n");
+    fs::write(config, text)?;
+    let writing = call(&rig, &["route", "resolve", "writing"], 0)?;
+    assert_eq!(
+        writing["data"]["recorded_readiness"][0]["observation"]["reason"], "provider_refusal",
+        "{writing}"
+    );
+    let preview = rig.command(&["route", "resolve", "writing"])?;
+    assert!(
+        String::from_utf8_lossy(&preview.stdout.bytes).contains("unavailable (provider refusal)")
+    );
     let known = call(&rig, &["route", "resolve", "codex/gpt-6-luna"], 0)?;
     assert_eq!(
         known["data"]["recorded_readiness"][0]["account_key"],
@@ -519,7 +532,7 @@ fn override_list_shows_active_future_and_expired_schedules() -> Result {
     fs::write(rig.state.join("config.toml"), config)?;
     let listed = call(&rig, &["route", "override", "list"], 0)?;
     let rows = listed["data"]["overrides"].as_array().ok_or("overrides")?;
-    assert_eq!(rows.len(), 4);
+    assert_eq!(rows.len(), 3);
     assert_eq!(rows[0]["active"], true);
     assert!(
         rows[0]["remaining_seconds"]
@@ -527,14 +540,16 @@ fn override_list_shows_active_future_and_expired_schedules() -> Result {
             .is_some_and(|s| s > 0 && s <= 300)
     );
     assert_eq!(rows[1]["active"], false);
-    assert_eq!(rows[2]["active"], false);
-    assert_eq!(rows[2]["remaining_seconds"], 0);
-    assert_eq!(rows[3]["kind"], "model_policy");
+    assert_eq!(rows[2]["kind"], "model_policy");
     assert_eq!(
-        rows[3]["schedule"]["windows"][0]["weekdays"],
+        rows[2]["schedule"]["windows"][0]["weekdays"],
         serde_json::json!([5, 6])
     );
-    assert!(rows[3]["remaining_seconds"].is_null());
+    assert!(rows[2]["remaining_seconds"].is_null());
+    let all = call(&rig, &["route", "override", "list", "--all"], 0)?;
+    let rows = all["data"]["overrides"].as_array().ok_or("overrides")?;
+    assert_eq!(rows.len(), 4);
+    assert_eq!(rows[2]["remaining_seconds"], 0);
     Ok(())
 }
 
