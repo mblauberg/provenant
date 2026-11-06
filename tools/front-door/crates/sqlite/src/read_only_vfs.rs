@@ -498,24 +498,21 @@ mod tests {
         let control = methods.xFileControl.ok_or("file control")?;
         let byte = 0u8;
         // SAFETY: the live file and one-byte buffer match xWrite's signature.
-        assert_eq!(
-            unsafe { write(file, (&byte as *const u8).cast(), 1, 0) },
-            ffi::SQLITE_READONLY
-        );
+        let written = unsafe { write(file, (&byte as *const u8).cast(), 1, 0) };
+        assert_eq!(written, ffi::SQLITE_READONLY);
         // SAFETY: the file remains open; truncation is refused before native work.
-        assert_eq!(unsafe { truncate(file, 0) }, ffi::SQLITE_READONLY);
+        let truncated = unsafe { truncate(file, 0) };
+        assert_eq!(truncated, ffi::SQLITE_READONLY);
         let mut size: ffi::sqlite3_int64 = 1_000_000;
         // SAFETY: SIZE_HINT receives its documented live integer argument.
-        assert_eq!(
-            unsafe {
-                control(
-                    file,
-                    ffi::SQLITE_FCNTL_SIZE_HINT,
-                    (&mut size as *mut ffi::sqlite3_int64).cast(),
-                )
-            },
-            ffi::SQLITE_NOTFOUND
-        );
+        let controlled = unsafe {
+            control(
+                file,
+                ffi::SQLITE_FCNTL_SIZE_HINT,
+                (&mut size as *mut ffi::sqlite3_int64).cast(),
+            )
+        };
+        assert_eq!(controlled, ffi::SQLITE_NOTFOUND);
         Ok(())
     }
 }
