@@ -644,6 +644,16 @@ pub(super) fn compact_findings(
     }
 }
 
+/// Use the same input projection at settlement and checkpoint replay.
+pub(super) fn upstream_finding(node: &PlannedNode, source: &str, mut finding: Finding) -> Finding {
+    if template::review_behaviour(node) == Some(template::ReviewBehaviour::Verify) {
+        // A delta verifier replaces prior verification; synthesis inherits it.
+        finding.extra.remove("verification");
+    }
+    finding.extra.insert("propagates".into(), format!("{source}:{}", finding.id).into());
+    finding
+}
+
 /// Reject malformed compacted records on checkpoint replay.
 pub(super) fn valid_compacted_findings(
     index: usize,
@@ -669,13 +679,7 @@ pub(super) fn valid_compacted_findings(
     }
     let upstream: Vec<_> = selected_findings(&plan.nodes[index], plan, checkpoint, positions)
         .into_iter()
-        .map(|(source, mut finding)| {
-            finding.extra.insert(
-                "propagates".into(),
-                format!("{source}:{}", finding.id).into(),
-            );
-            finding
-        })
+        .map(|(source, finding)| upstream_finding(&plan.nodes[index], &source, finding))
         .collect();
     !upstream.is_empty() && parse_findings(block, &upstream).is_ok()
 }
@@ -700,13 +704,7 @@ pub(super) fn materialised_findings(
     };
     let upstream: Vec<_> = selected_findings(&plan.nodes[index], plan, checkpoint, positions)
         .into_iter()
-        .map(|(source, mut finding)| {
-            finding.extra.insert(
-                "propagates".into(),
-                format!("{source}:{}", finding.id).into(),
-            );
-            finding
-        })
+        .map(|(source, finding)| upstream_finding(&plan.nodes[index], &source, finding))
         .collect();
     parse_findings(block, &upstream)
         .map(|(findings, _, _)| findings)

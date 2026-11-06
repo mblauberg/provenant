@@ -1791,7 +1791,9 @@ fn large_synthesis_compacts_immutable_fields_and_replays_with_finding_identities
         ]
         .concat()
         .join(",");
-        let verifier_text = findings_text(&entries);
+        let verifier_text = findings_text(&if verifying {
+            entries.replace("\"status\":\"open\"", "\"status\":\"open\",\"verification\":\"upheld\"")
+        } else { entries });
         for i in 0..20 {
             let mut verifier = node(&format!("verifier{i}"), route("first"));
             verifier.depends_on = vec!["seed".into()];
@@ -1817,7 +1819,7 @@ fn large_synthesis_compacts_immutable_fields_and_replays_with_finding_identities
         next.depends_on = vec!["synthesis".into()];
         next.inputs = vec![input("synthesis")];
         nodes.push(next);
-        let decisions = serde_json::json!({"id":"F1", "disposition":"accepted", "reason":"yes", "detail":"detail", "verification":"upheld"});
+        let decisions = serde_json::json!({"id":"F1", "disposition":"accepted", "reason":"yes", "detail":"detail", "verification":"falsified"});
         observations.push_back(terminal_with_result(
             AttemptOutcome::Succeeded,
             &findings_text(&format!(
@@ -1877,6 +1879,9 @@ fn large_synthesis_compacts_immutable_fields_and_replays_with_finding_identities
             20 * MAX_FINDINGS
         );
         assert_eq!(reconstructed.len(), 20 * MAX_FINDINGS);
+        if verifying {
+            assert!(reconstructed.iter().all(|finding| finding.extra["verification"] == "falsified"));
+        }
         assert!(reconstructed.iter().all(|finding| {
             (finding.id == "F1" || finding.id == "F2")
                 && finding.severity == "high"

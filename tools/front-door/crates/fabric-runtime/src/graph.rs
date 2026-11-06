@@ -2928,20 +2928,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                 } else {
                     selected_findings(node, &plan, &checkpoint, &positions)
                         .into_iter()
-                        .map(|(source, mut finding)| {
-                            if template::review_behaviour(node)
-                                == Some(template::ReviewBehaviour::Verify)
-                            {
-                                // A delta verifier replaces the previous verification, while
-                                // synthesis continues to inherit it as immutable evidence.
-                                finding.extra.remove("verification");
-                            }
-                            finding.extra.insert(
-                                "propagates".into(),
-                                format!("{source}:{}", finding.id).into(),
-                            );
-                            finding
-                        })
+                        .map(|(source, finding)| upstream_finding(node, &source, finding))
                         .collect()
                 };
                 let proof_dispositions =
