@@ -70,40 +70,6 @@ fn invalid_input_paths_omit_untrusted_data() {
 }
 
 #[test]
-fn oversized_input_projects_field_reason_and_action() {
-    use provenant_fabric_runtime::coordination::input::ValidateInput;
-    let input: SubmitInput = serde_json::from_value(json!({
-        "op":"submit", "operation_id":"large-prompt",
-        "tasks":[{"prompt":format!("TOKEN_SENTINEL{}", "é".repeat(40000)), "route":{"kind":"named", "name":"utility"}, "timeout_seconds":1}]
-    })).unwrap();
-    let error = input
-        .validate_input(provenant_core::WaitTransport::Mcp)
-        .unwrap_err();
-    let wire = ServiceError::Invalid(error).structured_error();
-    assert_eq!(wire["code"], "invalid_input");
-    assert_eq!(wire["path"], "tasks[0].prompt");
-    let detail = wire["detail"].as_str().unwrap();
-    assert!(detail.contains("tasks[0].prompt"));
-    assert!(detail.contains("65536"));
-    assert!(wire["hint"].is_string());
-    assert!(!wire.to_string().contains("TOKEN_SENTINEL"));
-}
-
-#[test]
-fn typed_validation_selects_safe_field_without_parsing_error_text() {
-    let arguments = json!({"op":"submit","tasks":[{
-        "title":"TOKEN_SENTINEL\u{1b}", "prompt":"work",
-        "route":{"kind":"named","name":"utility"}, "timeout_seconds":1
-    }]});
-    let Err(error) = ToolCall::parse("fabric_run", arguments) else {
-        panic!("control characters in title must be refused");
-    };
-    assert!(
-        matches!(error, InvalidInput::Validated(error) if error.safe_path() == Some("tasks[0].title"))
-    );
-}
-
-#[test]
 fn memory_pressure_projects_configured_source_and_action() {
     use provenant_records::diagnostic::{
         PressureLevel, PressureThreshold, ResourceFact, SettingSource,
@@ -254,37 +220,6 @@ fn unreadable_input_io_projects_safe_reason() {
 use super::*;
 use provenant_core::OperationId;
 use serde_json::json;
-
-#[test]
-fn shared_peer_records_remain_strict_at_the_mcp_argument_boundary() {
-    let submit = json!({"op":"submit","operation_id":"submit","tasks":[{
-        "prompt":"work","route":{"kind":"named","name":"senior"},"timeout_seconds":60,
-        "deliver":{"remote":"origin","branch":"work","open_pr":true}
-    }]});
-    assert!(ToolCall::parse("fabric_run", submit.clone()).is_ok());
-    for pointer in ["", "/tasks/0", "/tasks/0/route", "/tasks/0/deliver"] {
-        let mut arguments = submit.clone();
-        arguments.pointer_mut(pointer).unwrap()["future"] = json!({"nested":true});
-        assert!(
-            matches!(
-                ToolCall::parse("fabric_run", arguments),
-                Err(InvalidInput::Arguments { .. })
-            ),
-            "{pointer}"
-        );
-    }
-    let mail = json!({"op":"send","recipients":["11111111111111111111111111111111"],"kind":"note","body":"work",
-        "artifacts":[{"path":{"encoding":"utf8","path":"out"},"digest":null}]});
-    assert!(ToolCall::parse("fabric_mail", mail.clone()).is_ok());
-    for pointer in ["/artifacts/0", "/artifacts/0/path"] {
-        let mut arguments = mail.clone();
-        arguments.pointer_mut(pointer).unwrap()["future"] = json!(true);
-        assert!(
-            ToolCall::parse("fabric_mail", arguments).is_err(),
-            "{pointer}"
-        );
-    }
-}
 
 #[test]
 fn io_error_payload_omits_unanchored_path_and_source_text() {
@@ -523,62 +458,6 @@ fn coordination_mutations_accept_only_valid_top_level_operation_ids() {
         )
         .is_err()
     );
-}
-
-#[test]
-fn run_submission_requires_its_explicit_operation() {
-    let task = json!({"prompt":"review","route":{"kind":"model","provider":"codex","model":"model"},"timeout_seconds":1800,"access":"read_only","worktree":"/tmp/work"});
-    let untagged = json!({"operation_id":"submit-1","tasks":[task]});
-    assert!(ToolCall::parse("fabric_run", untagged.clone()).is_err());
-    let mut tagged = untagged;
-    tagged["op"] = json!("submit");
-    assert!(matches!(
-        ToolCall::parse("fabric_run", tagged.clone()),
-        Ok(ToolCall::SubmitWait(_, 30, false))
-    ));
-    tagged["tasks"][0]["capabilities"] = json!(["postgres"]);
-    assert!(
-        matches!(ToolCall::parse("fabric_run", tagged.clone()), Ok(ToolCall::SubmitWait(SubmitInput::Submit { tasks, .. }, _, _)) if tasks[0].capabilities.as_deref() == Some(["postgres".to_owned()].as_slice()))
-    );
-    tagged["tasks"][0]["timeout_seconds"] = json!("soon");
-    assert!(
-        matches!(ToolCall::parse("fabric_run", tagged.clone()), Err(InvalidInput::Arguments { path }) if path == "arguments.tasks[0].timeout_seconds")
-    );
-    tagged["op"] = json!("submission");
-    assert!(ToolCall::parse("fabric_run", tagged).is_err());
-}
-
-#[test]
-fn run_defaults_preserve_explicit_ids_and_generate_distinct_ids() {
-    let task = json!({"prompt":"review","route":{"kind":"model","provider":"codex","model":"model"},"timeout_seconds":1800,"access":"read_only","worktree":"/tmp/work"});
-    let args = json!({"op":"submit","tasks":[task]});
-    let id = |args| match ToolCall::parse("fabric_run", args).unwrap() {
-        ToolCall::SubmitWait(SubmitInput::Submit { operation_id, .. }, _, _) => operation_id,
-        _ => panic!("expected submit"),
-    };
-    assert_ne!(id(args.clone()), id(args.clone()));
-    let mut explicit = args;
-    explicit["operation_id"] = json!("retry-1");
-    assert_eq!(id(explicit).to_string(), "retry-1");
-    assert!(matches!(
-        ToolCall::parse(
-            "fabric_run",
-            json!({"op":"status","target":{"attempt":"00000000000000000000000000000001"},"detail":true})
-        ),
-        Ok(ToolCall::RunDetailed(_))
-    ));
-    assert!(matches!(
-        ToolCall::parse(
-            "fabric_output",
-            json!({"op":"read","target":{"attempt":"00000000000000000000000000000001"}})
-        ),
-        Ok(ToolCall::Output(OutputInput::Read {
-            part: OutputPart::Result,
-            offset: 0,
-            max_bytes: 16_384,
-            ..
-        }))
-    ));
 }
 
 #[test]
@@ -849,5 +728,47 @@ fn projected_mcp_failure_omits_untrusted_sources_and_bounds_safe_detail() {
         assert!(!detail.chars().any(char::is_control));
         assert!(!error.to_string().contains("TOKEN_SENTINEL"));
         assert!(error["next"].is_string());
+    }
+}
+
+#[test]
+fn submit_is_removed_and_graph_run_is_the_only_launch_operation() {
+    assert!(ToolCall::parse("fabric_run", json!({"op":"submit", "tasks":[]})).is_err());
+    assert!(ToolCall::parse("fabric_run", json!({"op":"run", "brief":"fix X"})).is_ok());
+}
+
+#[test]
+fn lane_runs_keep_explicit_retry_identity_and_new_calls_have_new_identity() {
+    let request =
+        json!({"op":"run", "brief":"fix X", "access":"worktree_write", "write_scope":["src"]});
+    let first = serde_json::to_value(lane_run_request(&request).unwrap()).unwrap();
+    let second = serde_json::to_value(lane_run_request(&request).unwrap()).unwrap();
+    assert_ne!(first["idempotency_key"], second["idempotency_key"]);
+    assert_eq!(first["writer"], true);
+    assert_eq!(first["write_scope"], json!(["src"]));
+    let explicit = json!({"idempotency_key":"retry-child", "op":"run", "brief":"fix X"});
+    assert_eq!(
+        serde_json::to_value(lane_run_request(&explicit).unwrap()).unwrap(),
+        serde_json::to_value(lane_run_request(&explicit).unwrap()).unwrap()
+    );
+    for access in [json!(false), json!({}), json!("writer"), Value::Null] {
+        let mut invalid = request.clone();
+        invalid["access"] = access;
+        assert!(lane_run_request(&invalid).is_err());
+    }
+    for field in [
+        "route",
+        "capabilities",
+        "capability_sources",
+        "read_roots",
+        "inputs",
+        "source",
+        "after",
+        "deadline_seconds",
+    ] {
+        let mut invalid = request.clone();
+        invalid["document"] = json!({"use":"task"});
+        invalid["document"][field] = json!("unsupported");
+        assert!(lane_run_request(&invalid).is_err());
     }
 }

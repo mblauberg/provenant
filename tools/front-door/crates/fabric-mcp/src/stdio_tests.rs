@@ -326,9 +326,6 @@ fn schema_tools_report_errors_in_text_in_both_protocol_eras() {
     for modern in [false, true] {
         let gate = Arc::new(Gate::default());
         gate.release();
-        gate.state.lock().unwrap().submit_error = Some(FacadeError::LaunchUnknown {
-            operation_id: provenant_core::OperationId::parse("unknown-launch-17").unwrap(),
-        });
         let server = Server::start(FakeFactory::new(gate), false);
         if modern {
             server.send_bytes(include_bytes!(
@@ -339,11 +336,31 @@ fn schema_tools_report_errors_in_text_in_both_protocol_eras() {
             server.send(&notification("notifications/initialized", json!({})));
         }
         for (index, (id, name, arguments, code, detail)) in [
-            ("identity", "fabric_context", json!({"op":"inspect"}), "not_found", "not_found"),
-            ("submit", "fabric_run", json!({"op":"submit","operation_id":"unknown-launch-17", "tasks":[{"prompt":"work", "route":{"kind":"named","name":"utility"}, "timeout_seconds":1}]}), "LAUNCH_UNKNOWN", "unknown-launch-17"),
-            ("bad-identity", "fabric_context", json!({"op":"inspect","extra":true}), "invalid_input", "arguments.<unknown>"),
-            ("bad-submit", "fabric_run", json!({"op":"submit","operation_id":"invalid", "tasks":[]}), "invalid_input", "arguments.tasks"),
-        ].into_iter().enumerate() {
+            (
+                "identity",
+                "fabric_context",
+                json!({"op":"inspect"}),
+                "not_found",
+                "not_found",
+            ),
+            (
+                "bad-identity",
+                "fabric_context",
+                json!({"op":"inspect","extra":true}),
+                "invalid_input",
+                "arguments.<unknown>",
+            ),
+            (
+                "bad-submit",
+                "fabric_run",
+                json!({"op":"submit","operation_id":"invalid", "tasks":[]}),
+                "invalid_input",
+                "arguments.op",
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
             let mut request = tool_call(id, name, arguments);
             if modern {
                 request["params"]["_meta"] = json!({
@@ -355,7 +372,11 @@ fn schema_tools_report_errors_in_text_in_both_protocol_eras() {
             let frames = server.wait_for_frames(index + 2, TEST_WAIT).unwrap();
             let result = &frames.iter().find(|frame| frame["id"] == id).unwrap()["result"];
             assert_eq!(result["isError"], true, "{result}");
-            assert_eq!(result.get("structuredContent").is_none(), name == "fabric_context", "{result}");
+            assert_eq!(
+                result.get("structuredContent").is_none(),
+                name == "fabric_context",
+                "{result}"
+            );
             let text = result["content"][0]["text"].as_str().unwrap();
             assert!(text.contains(code) && text.contains(detail), "{text}");
             if id == "bad-identity" {
@@ -365,27 +386,6 @@ fn schema_tools_report_errors_in_text_in_both_protocol_eras() {
         }
         assert!(matches!(server.finish(), Ok(())));
     }
-}
-
-#[test]
-fn generated_submit_id_survives_facade_error() {
-    let gate = Arc::new(Gate::default());
-    gate.release();
-    gate.state.lock().unwrap().submit_error = Some(FacadeError::NotFound);
-    let server = Server::start(FakeFactory::new(gate), false);
-    server.send(&initialize());
-    server.send(&notification("notifications/initialized", json!({})));
-    server.send(&tool_call("submit", "fabric_run", json!({"op":"submit", "tasks":[{"prompt":"work", "route":{"kind":"named","name":"utility"}, "timeout_seconds":1}]})));
-    let frames = server.wait_for_frames(2, TEST_WAIT).unwrap();
-    let result = &frames[1]["result"];
-    assert_eq!(result["isError"], true);
-    assert!(
-        result["structuredContent"]["operation_id"]
-            .as_str()
-            .unwrap()
-            .starts_with("mcp-")
-    );
-    assert!(matches!(server.finish(), Ok(())));
 }
 
 #[test]
@@ -1082,7 +1082,6 @@ struct GateState {
     panic_in_open: bool,
     run_cancel_calls: usize,
     output_bytes: Vec<u8>,
-    submit_error: Option<FacadeError>,
     run_error: Option<FacadeError>,
     spend_run_budget: bool,
     tokens: Vec<CancelToken>,
@@ -1232,7 +1231,6 @@ struct Fact {
 struct FakeFacade(Arc<Gate>, SharedClock);
 impl F3Facade for FakeFacade {
     type Identity = Fact;
-    type Submit = Fact;
     type Run = Fact;
     type Hosts = Fact;
     fn identity(
@@ -1244,17 +1242,6 @@ impl F3Facade for FakeFacade {
         self.0.maybe_panic();
         self.0.hold(cancel);
         Err(FacadeError::NotFound)
-    }
-    fn submit(
-        &mut self,
-        _: SubmitInput,
-        _: WaitBudget,
-        _: &CancelToken,
-    ) -> Result<Fact, FacadeError> {
-        if let Some(error) = &self.0.state.lock().unwrap().submit_error {
-            return Err(error.clone());
-        }
-        Ok(Fact { state: "accepted" })
     }
     fn run(
         &mut self,

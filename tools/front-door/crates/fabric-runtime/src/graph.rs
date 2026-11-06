@@ -242,11 +242,6 @@ pub trait AttemptOwner {
         Ok(None)
     }
 
-    /// Infrastructure successors already published in this run lineage.
-    fn retry_successors(&mut self, _attempt_ref: &str) -> Result<u64, Self::Error> {
-        Ok(0)
-    }
-
     /// Origin of the effective node prompt limit, sealed with the attempt.
     fn input_cap_source(&self) -> InputCapSource {
         InputCapSource::EffectiveGraphLimits
@@ -393,6 +388,16 @@ pub trait AttemptOwner {
     fn bind_writer_worktree(
         &mut self,
         _worktree: &str,
+    ) -> Result<Option<WriterWorktreeBinding>, Self::Error> {
+        Ok(None)
+    }
+
+    /// Create or recover a graph-owned writer after its base is checkpointed.
+    fn provision_writer_worktree(
+        &mut self,
+        _worktree: &str,
+        _branch: &str,
+        _base: &str,
     ) -> Result<Option<WriterWorktreeBinding>, Self::Error> {
         Ok(None)
     }
@@ -1201,7 +1206,14 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                 for (node, progress) in plan.nodes.iter().zip(&mut checkpoint.nodes) {
                     // A loop round's worktree is advanced by earlier rounds;
                     // its starting head becomes known only at that round.
-                    if plans::writer(node) && node.round.is_none() {
+                    if plans::writer(node)
+                        && node.round.is_none()
+                        && node
+                            .attempt
+                            .as_ref()
+                            .and_then(|spec| spec.new_worktree.as_ref())
+                            .is_none()
+                    {
                         let worktree = node
                             .worktree
                             .as_deref()
@@ -2078,7 +2090,42 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         .worktree
                         .as_deref()
                         .ok_or_else(|| GraphError::Invalid("writer worktree missing".into()))?;
-                    let binding = match owner.bind_writer_worktree(path) {
+                    let binding_result = if let Some(spec) = node
+                        .attempt
+                        .as_ref()
+                        .and_then(|spec| spec.new_worktree.as_ref())
+                    {
+                        // Retain the resolved base before any Git effect. Recovery
+                        // adopts only the clean worktree at this exact commit.
+                        let base = match checkpoint.nodes[node_index]
+                            .extra
+                            .get("new_worktree_base")
+                            .and_then(serde_json::Value::as_str)
+                        {
+                            Some(base) => base.to_owned(),
+                            None => {
+                                let base = owner
+                                    .resolve_review_base(&spec.base, None)
+                                    .map_err(GraphError::Run)?
+                                    .filter(|base| base.parse::<provenant_core::GitOid>().is_ok())
+                                    .ok_or_else(|| {
+                                        GraphError::Refused(format!(
+                                            "node {}: writer base could not be resolved",
+                                            node.id
+                                        ))
+                                    })?;
+                                checkpoint.nodes[node_index]
+                                    .extra
+                                    .insert("new_worktree_base".into(), base.clone().into());
+                                journal.save(&checkpoint).map_err(GraphError::Journal)?;
+                                base
+                            }
+                        };
+                        owner.provision_writer_worktree(path, &spec.branch, &base)
+                    } else {
+                        owner.bind_writer_worktree(path)
+                    };
+                    let binding = match binding_result {
                         Ok(binding) => binding,
                         Err(error) => {
                             let progress = &mut checkpoint.nodes[node_index];
@@ -2092,7 +2139,13 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                             break;
                         }
                     };
-                    if binding.is_none() && document.schema_version >= 2 {
+                    if binding.is_none()
+                        && (document.schema_version >= 2
+                            || node
+                                .attempt
+                                .as_ref()
+                                .is_some_and(|spec| spec.new_worktree.is_some()))
+                    {
                         return Err(GraphError::Refused(format!(
                             "node {}: host cannot bind the writer source",
                             node.id

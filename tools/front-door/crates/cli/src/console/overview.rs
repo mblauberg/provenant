@@ -145,7 +145,6 @@ pub(super) fn read(roots: &Roots, projects: &[Project]) -> Result<Value, Error> 
                         &item.record,
                         &[],
                         roots.state.as_path(),
-                        &Default::default(),
                         clock.wall_now().ok(),
                         false,
                     );

@@ -40,6 +40,27 @@ fn invoke(
 ) -> u8 {
     let result = (|| -> Result<Value, Box<dyn std::error::Error>> {
         let input = input?;
+        if command == "run" && std::env::var_os(provenant_run::PARENT_ATTEMPT_ENV).is_some() {
+            let request = provenant_fabric_mcp::tools::lane_run_request(&input)?;
+            if input["explain"] == true {
+                return Ok(serde_json::to_value(request)?);
+            }
+            let cancel = CancelToken::new();
+            let within =
+                std::time::Duration::from_secs(input["wait_seconds"].as_u64().unwrap_or(55));
+            let mut receipt =
+                provenant_cli::fabric::graph_relay::from_lane(&request, &cancel, within)?;
+            if let Some(seconds) = input["wait_seconds"].as_u64() {
+                match provenant_cli::fabric::graph_relay::wait_for_children(
+                    &cancel,
+                    std::time::Duration::from_secs(seconds),
+                ) {
+                    Ok(children) => receipt["children"] = children,
+                    Err(error) => receipt["observation_error"] = json!(error.to_string()),
+                }
+            }
+            return Ok(receipt);
+        }
         let factory =
             if input["explain"] == true || matches!(command, "templates" | "status" | "stats") {
                 fabric::read_factory(globals, workers)?
@@ -100,6 +121,21 @@ pub(crate) fn run(
 ) -> u8 {
     let input = (|| {
         let mut input = json!({"op":"run","explain":request.explain});
+        if let Some(mode) = request.mode {
+            input["access"] = json!(mode.replace('-', "_"));
+        }
+        if let Some(path) = request.worktree {
+            input["worktree"] = json!(path);
+        }
+        if let Some(branch) = request.branch {
+            input["branch"] = json!(branch);
+        }
+        if let Some(base) = request.base {
+            input["base"] = json!(base);
+        }
+        if !request.write_scope.is_empty() {
+            input["write_scope"] = json!(request.write_scope);
+        }
         if let Some(wait) = request.wait {
             input["wait_seconds"] = json!(wait);
         }

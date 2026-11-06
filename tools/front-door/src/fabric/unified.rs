@@ -296,7 +296,6 @@ pub(crate) fn enrich_status_rows(
             &record,
             &waits,
             context.roots.state.as_path(),
-            &Default::default(),
             clock.wall_now().ok(),
             false,
         );
@@ -960,7 +959,6 @@ mod tests {
                 record,
                 waits,
                 Path::new("/unused"),
-                &Default::default(),
                 None,
                 false,
             );

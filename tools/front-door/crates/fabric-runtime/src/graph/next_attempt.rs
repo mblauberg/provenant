@@ -380,23 +380,6 @@ pub(crate) fn fallback_denial(
     )
 }
 
-/// Automatic quota redos share an infrastructure budget; an explicit user
-/// redo starts a fresh budget while retaining older evidence for trace.
-pub(super) fn infrastructure_attempts(
-    progress: &NodeProgress,
-) -> impl Iterator<Item = &GraphAttempt> {
-    let archived = progress
-        .extra
-        .get("quota_redraw_archived")
-        .and_then(serde_json::Value::as_u64)
-        .unwrap_or(0) as usize;
-    progress
-        .previous_attempts
-        .iter()
-        .skip(progress.previous_attempts.len().saturating_sub(archived))
-        .chain(&progress.attempts)
-}
-
 /// The sealed allowance bounds all launched attempts across automatic redos.
 pub(super) fn quota_redraw_budget(progress: &NodeProgress) -> bool {
     progress
@@ -542,8 +525,7 @@ pub(super) fn decide_next_attempt<R: AttemptOwner>(
 
     // 4. Retry accounting. Preparation refusals have not launched a provider
     // and do not consume the settlement retry allowance. Each launched
-    // attempt that needs another route consumes one infrastructure retry, in
-    // addition to successors within a run.
+    // attempt that needs another route consumes one infrastructure retry.
     let switching = route_index > 0
         && progress.attempts.last().is_some_and(|attempt| {
             attempt.state == AttemptState::Terminal
@@ -576,12 +558,6 @@ pub(super) fn decide_next_attempt<R: AttemptOwner>(
         .extra
         .get("retry")
         .and_then(|value| value["retries"].as_u64());
-    let mut spent = 0u64;
-    for reference in
-        infrastructure_attempts(progress).filter_map(|attempt| attempt.attempt_ref.as_deref())
-    {
-        spent = spent.saturating_add(owner.retry_successors(reference)?);
-    }
     let automatic = progress
         .extra
         .get("quota_redraw_spent")
@@ -596,9 +572,7 @@ pub(super) fn decide_next_attempt<R: AttemptOwner>(
                     || (automatic > 0 && attempt.outcome == Some(AttemptOutcome::UsageLimited)))
         })
         .count() as u64;
-    spent = spent
-        .saturating_add(automatic)
-        .saturating_add(launched_switches);
+    let spent = automatic.saturating_add(launched_switches);
     if switching && allowance.is_some_and(|limit| spent > limit) {
         return Ok(NextAttempt::Fail {
             code: Some("fallback_budget_exhausted"),

@@ -18,6 +18,74 @@ fn required<'a>(input: &'a Value, field: &str) -> Result<&'a str, FacadeError> {
         .ok_or_else(|| FacadeError::invalid(InvalidInputDetail::Field(field.into())))
 }
 
+/// Apply plain-task execution controls before template lowering and patch admission.
+fn bind_launch_controls(input: &Value, node: &mut Value, cwd: &Path) -> Result<(), FacadeError> {
+    let invalid = |field: &str| FacadeError::invalid(InvalidInputDetail::Field(field.into()));
+    let branch = input.get("branch").filter(|value| !value.is_null());
+    let base = input.get("base").filter(|value| !value.is_null());
+    let worktree = input.get("worktree").filter(|value| !value.is_null());
+    let access = input.get("access").filter(|value| !value.is_null());
+    if branch.is_some() != base.is_some() || branch.is_some() && worktree.is_some() {
+        return Err(invalid("branch"));
+    }
+    if let Some(access) = access {
+        if !matches!(access.as_str(), Some("read_only" | "worktree_write")) {
+            return Err(invalid("access"));
+        }
+        node["access"] = access.clone();
+    }
+    if branch.is_some() || worktree.is_some() {
+        if access == Some(&json!("read_only")) {
+            return Err(invalid("access"));
+        }
+        node["access"] = json!("worktree_write");
+    }
+    if let Some(branch) = branch {
+        let branch = branch
+            .as_str()
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| invalid("branch"))?;
+        provenant_confinement::repo::GitRefName::branch(branch).map_err(|_| invalid("branch"))?;
+        let base = base
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| invalid("base"))?;
+        provenant_confinement::repo::GitRevision::new(base).map_err(|_| invalid("base"))?;
+        node["worktree"] = json!(format!(".worktrees/{}", branch.replace('/', "-")));
+        if node.get("attempt").is_none() {
+            node["attempt"] = json!({});
+        }
+        if !node["attempt"].is_object() {
+            return Err(invalid("attempt"));
+        }
+        node["attempt"]["new_worktree"] = json!({"branch":branch,"base":base});
+    } else if let Some(worktree) = worktree {
+        let path = Path::new(
+            worktree
+                .as_str()
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| invalid("worktree"))?,
+        );
+        node["worktree"] = json!(if path.is_absolute() {
+            path.to_owned()
+        } else {
+            cwd.join(path)
+        });
+    } else if access == Some(&json!("worktree_write")) && node.get("worktree").is_none() {
+        node["worktree"] = json!(cwd);
+    }
+    if let Some(scope) = input.get("write_scope").filter(|value| !value.is_null()) {
+        if !scope
+            .as_array()
+            .is_some_and(|paths| paths.iter().all(Value::is_string))
+        {
+            return Err(invalid("write_scope"));
+        }
+        node["write_scope"] = scope.clone();
+    }
+    Ok(())
+}
+
 impl Factory {
     fn launch_resolvers(
         &self,
@@ -51,59 +119,25 @@ impl Factory {
         budget: WaitBudget,
         cancel: &CancelToken,
     ) -> Result<Value, FacadeError> {
-        if input.get("document").is_some_and(|value| !value.is_null())
-            || input.get("over").is_some_and(|value| !value.is_null())
-            || input
-                .get("set")
-                .is_some_and(|value| value.as_object().is_none_or(|object| !object.is_empty()))
-        {
-            return Err(FacadeError::invalid(InvalidInputDetail::Field(
-                "document".into(),
-            )));
-        }
-        // Distinct submissions may have identical briefs. Generate the key once
-        // per call; transport retries retain this request and its identity.
-        let key = format!(
-            "child-{}",
-            provenant_core::hex(
-                &provenant_os::fs::entropy_128()
-                    .map_err(|_| FacadeError::io("create child operation identity"))?
-            )
-        );
-        let request = provenant_fabric_runtime::graph::relay::ChildRequest {
-            id: key.clone(),
-            template: input
-                .get("use")
-                .and_then(Value::as_str)
-                .unwrap_or("task")
-                .into(),
-            brief: required(input, "brief")?.into(),
-            tier: input.get("tier").and_then(Value::as_str).map(str::to_owned),
-            timeout_seconds: None,
-            writer: false,
-            write_scope: vec![],
-            detached: false,
-            idempotency_key: key,
-            reason: Some("run".into()),
-        };
+        let request = provenant_fabric_mcp::tools::lane_run_request(input)
+            .map_err(|_| FacadeError::InvalidInput { detail: None })?;
         if input["explain"] == true {
             return encode(request);
         }
         let within =
             std::time::Duration::from_micros(budget.remaining(self.clock.mono_now()).as_micros());
-        let receipt = provenant_cli::fabric::graph_relay::from_lane(
-            &provenant_fabric_runtime::graph::relay::RelayOp::Add(request),
-            cancel,
-            within,
-        )
-        .map_err(|_| FacadeError::InvalidInput { detail: None })?;
-        if let Some(seconds) = input.get("wait_seconds").and_then(Value::as_u64) {
-            let children = provenant_cli::fabric::graph_relay::wait_for_children(
-                cancel,
-                std::time::Duration::from_secs(seconds),
-            )
+        let receipt = provenant_cli::fabric::graph_relay::from_lane(&request, cancel, within)
             .map_err(|_| FacadeError::InvalidInput { detail: None })?;
-            return Ok(json!({"receipt":receipt,"children":children}));
+        if let Some(seconds) = input.get("wait_seconds").and_then(Value::as_u64) {
+            return Ok(
+                match provenant_cli::fabric::graph_relay::wait_for_children(
+                    cancel,
+                    std::time::Duration::from_secs(seconds),
+                ) {
+                    Ok(children) => json!({"receipt":receipt,"children":children}),
+                    Err(error) => json!({"receipt":receipt,"observation_error":error.to_string()}),
+                },
+            );
         }
         Ok(receipt)
     }
@@ -300,9 +334,19 @@ impl Factory {
                 "integration_branch".into(),
             )));
         }
-        let has_overrides = ["brief", "use", "tier", "over"]
-            .iter()
-            .any(|field| input.get(*field).is_some_and(|value| !value.is_null()))
+        let has_overrides = [
+            "brief",
+            "use",
+            "tier",
+            "over",
+            "access",
+            "worktree",
+            "branch",
+            "base",
+            "write_scope",
+        ]
+        .iter()
+        .any(|field| input.get(*field).is_some_and(|value| !value.is_null()))
             || input
                 .get("set")
                 .is_some_and(|value| value.as_object().is_none_or(|object| !object.is_empty()));
@@ -375,6 +419,16 @@ impl Factory {
             let template = library
                 .resolve(node["use"].as_str().unwrap_or("task"))
                 .map_err(|_| FacadeError::InvalidInput { detail: None })?;
+            if template.is_composite()
+                && ["access", "worktree", "branch", "base", "write_scope"]
+                    .iter()
+                    .any(|field| input.get(*field).is_some_and(|value| !value.is_null()))
+            {
+                return Err(FacadeError::invalid(InvalidInputDetail::Field(
+                    "launch controls require a leaf template".into(),
+                )));
+            }
+            bind_launch_controls(input, &mut node, &self.cwd)?;
             let mut parameters = node.get("with").cloned().unwrap_or_else(|| json!({}));
             let overrides = input
                 .get("set")
@@ -519,7 +573,7 @@ impl Factory {
         let scratch = self
             .prepare_scratch(cancel, budget)
             .map_err(scratch_prepare_error)?;
-        let path = publish_preset_graph(&scratch, &encode(&document)?)
+        let path = publish_graph_document(&scratch, &encode(&document)?)
             .map_err(|_| FacadeError::InvalidInput { detail: None })?;
         let run = self.graph_with_scratch(
             GraphInput::Run {
@@ -1045,6 +1099,102 @@ mod tests {
             mcp_project: None,
             workers: &Workers,
         })
+    }
+
+    #[test]
+    fn plain_task_launch_controls_bind_writer_and_route_before_admission() -> Result {
+        let rig = TestRig::new()?;
+        let factory = factory(&rig)?;
+        let cancel = CancelToken::new();
+        let budget = WaitBudget::cli(factory.clock.mono_now(), 10)?;
+        let response = factory.graph_document(
+            json!({
+                "op":"run", "brief":"Fix the parser", "tier":"senior",
+                "worktree":rig.project, "write_scope":["src"], "explain":true
+            }),
+            budget,
+            &cancel,
+        )?;
+        let document: GraphDocument = serde_json::from_value(response["document"].clone())?;
+        assert_eq!(document.nodes.len(), 1);
+        let node = &document.nodes[0];
+        assert_eq!(
+            node.access,
+            provenant_fabric_runtime::graph::AccessMode::WorktreeWrite
+        );
+        assert_eq!(node.worktree.as_deref(), rig.project.to_str());
+        assert_eq!(node.write_scope, vec!["src"]);
+        assert_eq!(
+            node.route.as_ref().and_then(|route| route.alias.as_deref()),
+            Some("senior")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn writer_branch_explanation_is_one_admitted_node_without_git_effects() -> Result {
+        let rig = TestRig::new()?;
+        let factory = factory(&rig)?;
+        let budget = WaitBudget::cli(factory.clock.mono_now(), 10)?;
+        let cancel = CancelToken::new();
+        let response = factory.graph_document(
+            json!({
+                "op":"run", "brief":"Fix the parser", "branch":"fix/parser",
+                "base":"HEAD", "explain":true
+            }),
+            budget,
+            &cancel,
+        )?;
+        let document: GraphDocument = serde_json::from_value(response["document"].clone())?;
+        assert_eq!(document.nodes.len(), 1);
+        let node = &document.nodes[0];
+        assert_eq!(node.worktree.as_deref(), Some(".worktrees/fix-parser"));
+        let target = node
+            .attempt
+            .as_ref()
+            .and_then(|spec| spec.new_worktree.as_ref())
+            .ok_or("new worktree missing")?;
+        assert_eq!(target.branch, "fix/parser");
+        assert_eq!(target.base, "HEAD");
+        assert!(!rig.project.join(".worktrees/fix-parser").exists());
+        assert!(
+            factory
+                .graph_document(
+                    json!({"op":"run","use":"deliver","worktree":rig.project,"explain":true}),
+                    budget,
+                    &cancel
+                )
+                .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn writer_controls_preserve_new_branch_and_refuse_conflicting_access() -> Result {
+        let cwd = Path::new("/fixture/project");
+        let mut node = json!({"id":"task","use":"task"});
+        bind_launch_controls(
+            &json!({"branch":"fix/parser","base":"origin/main"}),
+            &mut node,
+            cwd,
+        )?;
+        assert_eq!(node["worktree"], ".worktrees/fix-parser");
+        assert_eq!(
+            node["attempt"]["new_worktree"],
+            json!({"branch":"fix/parser","base":"origin/main"})
+        );
+        assert_eq!(node["access"], "worktree_write");
+        for input in [
+            json!({"worktree":".","access":"read_only"}),
+            json!({"branch":"fix/parser"}),
+            json!({"base":"HEAD"}),
+            json!({"branch":"fix/parser","base":"HEAD","worktree":"."}),
+            json!({"access":"unknown"}),
+            json!({"write_scope":[1]}),
+        ] {
+            assert!(bind_launch_controls(&input, &mut json!({"use":"task"}), cwd).is_err());
+        }
+        Ok(())
     }
 
     #[test]
