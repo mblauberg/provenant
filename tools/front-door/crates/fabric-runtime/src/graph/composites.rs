@@ -12,8 +12,8 @@ pub struct CompositeSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub min_successful: Option<usize>,
     /// Reduce successful exporting members' verdicts using the worst outcome.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub reduce_verdict: bool,
+    #[serde(default, skip_serializing_if = "PresentBool::absent")]
+    pub reduce_verdict: PresentBool,
     pub nodes: Vec<GraphNode>,
     pub exports: Vec<GraphInput>,
 }
@@ -253,7 +253,7 @@ fn children(
                 &[],
                 None,
                 &[],
-                node.require_skill_location,
+                node.require_skill_location.value(),
                 depth,
                 depth_bound,
                 nodes_bound,
@@ -319,7 +319,7 @@ fn children(
                 &node.inputs,
                 node.source.as_ref(),
                 &node.read_roots,
-                node.require_skill_location,
+                node.require_skill_location.value(),
                 depth + 1,
                 depth_bound,
                 nodes_bound,
@@ -330,9 +330,9 @@ fn children(
                 .map(|child| scoped(&node.id, &child.id))
                 .collect();
             node.after_expansion.extend(node.composite_members.clone());
-            node.inputs.clear();
+            node.inputs = Default::default();
             node.source = None;
-            node.read_roots.clear();
+            node.read_roots = Default::default();
             node.composite = Some(CompositeSpec {
                 min_successful: spec.min_successful,
                 reduce_verdict: spec.reduce_verdict,
@@ -382,7 +382,7 @@ fn outputs(
     let mut truncation_header = None;
     let mut inherited_notices = Vec::new();
     let mut family_notices = Vec::new();
-    let partial = spec.min_successful.is_some() || spec.reduce_verdict;
+    let partial = spec.min_successful.is_some() || spec.reduce_verdict.value();
     let unavailable = unavailable_with_wording(spec, checkpoint, positions, legacy);
     let finding_exports: Vec<_> = spec
         .exports
@@ -498,7 +498,7 @@ fn outputs(
                 .push(bounded(&format!("unavailable {entry}"), WARNING_BYTES));
         }
     }
-    if spec.reduce_verdict {
+    if spec.reduce_verdict.value() {
         use provenant_records::workflow::ReviewVerdict;
         let rank = |verdict| match verdict {
             ReviewVerdict::Approve => 0,
@@ -529,12 +529,13 @@ fn outputs(
         selected.verdict = verdict.map(|verdict| format!("VERDICT: {}", verdict.as_token()));
         selected.verdict_error = None;
     }
-    if selected
+    let output_bound = crate::config::GraphLimits::output_field_bytes_bound();
+    if let Some(reason) = selected
         .findings
         .iter()
-        .any(|finding| finding.id.len() > OUTPUT_FIELD_BYTES)
+        .find_map(|finding| output_bound.refusal(finding.id.len()))
     {
-        return Err("composite exported findings exceed cap".into());
+        return Err(format!("composite exported findings exceed cap: {reason}"));
     }
     let total = selected.findings.len();
     if total > MAX_FINDINGS || canonical_len(&selected.findings) > FINDINGS_BYTES {
@@ -768,7 +769,7 @@ fn unavailable_with_wording(
     positions: &BTreeMap<String, usize>,
     legacy: bool,
 ) -> Vec<String> {
-    if spec.min_successful.is_none() && !spec.reduce_verdict {
+    if spec.min_successful.is_none() && !spec.reduce_verdict.value() {
         return Vec::new();
     }
     exporting_members(spec, positions)
@@ -776,7 +777,7 @@ fn unavailable_with_wording(
         .map(|member| &checkpoint.nodes[member])
         .filter(|progress| {
             progress.state == NodeState::Failed
-                || (spec.reduce_verdict
+                || (spec.reduce_verdict.value()
                     && matches!(progress.state, NodeState::Blocked | NodeState::Skipped))
         })
         .map(|progress| {
@@ -808,7 +809,7 @@ fn coverage_shortfall_with_wording(
     legacy: bool,
 ) -> Option<String> {
     let members = exporting_members(spec, positions);
-    let minimum = if spec.reduce_verdict {
+    let minimum = if spec.reduce_verdict.value() {
         spec.min_successful.unwrap_or(members.len()).max(1)
     } else {
         spec.min_successful?.min(members.len())
@@ -882,7 +883,7 @@ fn state(
     if node
         .composite
         .as_ref()
-        .is_some_and(|spec| spec.min_successful.is_some() || spec.reduce_verdict)
+        .is_some_and(|spec| spec.min_successful.is_some() || spec.reduce_verdict.value())
     {
         // The group's own dependencies decide first; the rules below judge
         // its members, whose failures are the point of a partial group.
@@ -924,7 +925,7 @@ fn state(
         if !node
             .composite
             .as_ref()
-            .is_some_and(|spec| spec.reduce_verdict)
+            .is_some_and(|spec| spec.reduce_verdict.value())
             && members
                 .iter()
                 .any(|state| matches!(state, NodeState::Blocked | NodeState::Skipped))

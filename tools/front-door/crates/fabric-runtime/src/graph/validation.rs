@@ -92,7 +92,7 @@ pub(super) fn supplied_kinds(node: &GraphNode) -> Vec<OutputKind> {
                 }
                 kinds
             });
-        if composite.reduce_verdict && !kinds.contains(&OutputKind::Verdict) {
+        if composite.reduce_verdict.value() && !kinds.contains(&OutputKind::Verdict) {
             kinds.push(OutputKind::Verdict);
         }
         return kinds;
@@ -659,14 +659,14 @@ pub(super) fn validate_flat_plan(
             role: node.role.clone(),
             distinct_from: node.distinct_from,
             distinct_strength: node.distinct_strength,
-            dispositions: node.dispositions.clone(),
-            read_roots: node.read_roots.clone(),
+            dispositions: node.dispositions.to_vec(),
+            read_roots: node.read_roots.to_vec(),
             capabilities: node.capabilities.clone(),
             source: node.source.clone(),
             after_expansion: node.after_expansion.clone(),
             plan: node.plan.clone(),
-            write_scope: node.write_scope.clone(),
-            acceptance_checks: node.acceptance_checks.clone(),
+            write_scope: node.write_scope.to_vec(),
+            acceptance_checks: node.acceptance_checks.to_vec(),
             loop_body: node.loop_body.clone(),
             decide: node.decide.clone(),
             continues: node.continues.clone(),
@@ -688,18 +688,18 @@ pub(super) fn validate_flat_plan(
             on_fail: node.on_fail.clone(),
             delivery: node.delivery.clone(),
             access: node.access,
-            require_skill_location: node.require_skill_location,
+            require_skill_location: node.require_skill_location.value(),
             worktree: node.worktree.clone(),
             id: node.id.clone(),
             title: node.title.clone(),
             prompt: plans::prompt(node),
             depends_on,
-            advisory: node.advisory,
-            inputs: node.inputs.clone(),
+            advisory: node.advisory.value(),
+            inputs: node.inputs.to_vec(),
             routes,
             required_verdict: node.required_verdict.clone(),
             deadline_seconds: node.deadline_seconds,
-            require_findings: node.require_findings,
+            require_findings: node.require_findings.value(),
             skip_without_findings: node.skip_without_findings,
         });
     }
@@ -1125,6 +1125,16 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
             }
         }
         if let Some(condition) = &node.condition {
+            if let Some(reason) = progress
+                .ci
+                .as_ref()
+                .and_then(|evidence| ci::evidence_bound_reason(evidence, condition))
+            {
+                return Err(GraphError::BadCheckpointLimit {
+                    node: node.id.clone(),
+                    reason,
+                });
+            }
             let valid = match (&progress.gate, progress.state) {
                 (None, NodeState::Pending | NodeState::Blocked | NodeState::Skipped) => {
                     progress.outputs.is_none() && progress.ci.is_none()

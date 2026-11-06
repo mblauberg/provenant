@@ -11,6 +11,186 @@ fn document(version: u32, nodes: Value) -> GraphDocument {
 }
 
 #[test]
+fn input_required_outputs_preserves_explicit_empty_presence() {
+    for input in [
+        json!({"node":"source","outputs":["result"]}),
+        json!({"node":"source","outputs":["result"],"required_outputs":[]}),
+        json!({"node":"source","outputs":["result"],"required_outputs":["result"]}),
+    ] {
+        let typed: GraphInput = serde_json::from_value(input.clone()).unwrap();
+        assert_eq!(serde_json::to_value(typed).unwrap(), input);
+    }
+    assert!(
+        serde_json::from_value::<GraphInput>(json!({
+            "node":"source","outputs":["result"],"required_outputs":null
+        }))
+        .is_err()
+    );
+    let mut input: GraphInput = serde_json::from_value(json!({
+        "node":"source","outputs":["result"]
+    }))
+    .unwrap();
+    input.required_outputs = PresentVec::present(Vec::new());
+    assert_eq!(
+        serde_json::to_value(input).unwrap()["required_outputs"],
+        json!([])
+    );
+}
+
+#[test]
+fn node_list_fields_preserve_explicit_empty_presence() {
+    for field in [
+        "dispositions",
+        "write_scope",
+        "acceptance_checks",
+        "read_roots",
+    ] {
+        for contents in [None, Some(json!([])), Some(json!(["example"]))] {
+            let mut value =
+                json!({"id":"work","access":"read_only","prompt":"work","depends_on":[]});
+            if let Some(contents) = contents {
+                value[field] = contents;
+            }
+            let node: GraphNode = serde_json::from_value(value.clone()).unwrap();
+            assert_eq!(serde_json::to_value(node).unwrap(), value);
+        }
+    }
+}
+
+#[test]
+fn node_inputs_preserve_explicit_empty_presence() {
+    for inputs in [
+        None,
+        Some(json!([])),
+        Some(json!([{"node":"source","outputs":["result"]}])),
+    ] {
+        let mut value = json!({"id":"work","access":"read_only","prompt":"work","depends_on":[]});
+        if let Some(inputs) = inputs {
+            value["inputs"] = inputs;
+        }
+        let node: GraphNode = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(serde_json::to_value(node).unwrap(), value);
+    }
+}
+
+#[test]
+fn node_prompt_preserves_explicit_empty_presence() {
+    for prompt in [None, Some(""), Some("work")] {
+        let mut value = json!({"id":"work","access":"read_only","depends_on":[]});
+        if let Some(prompt) = prompt {
+            value["prompt"] = json!(prompt);
+        }
+        let node: GraphNode = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(serde_json::to_value(node).unwrap(), value);
+    }
+}
+
+#[test]
+fn node_flags_preserve_explicit_false_presence() {
+    for field in ["advisory", "require_findings", "require_skill_location"] {
+        for flag in [None, Some(false), Some(true)] {
+            let mut value =
+                json!({"id":"work","access":"read_only","prompt":"work","depends_on":[]});
+            if let Some(flag) = flag {
+                value[field] = json!(flag);
+            }
+            let node: GraphNode = serde_json::from_value(value.clone()).unwrap();
+            assert_eq!(serde_json::to_value(node).unwrap(), value);
+        }
+    }
+}
+
+#[test]
+fn loop_extension_rounds_preserve_explicit_default_presence() {
+    for maximum in [None, Some(5), Some(7)] {
+        let mut value = json!({"body":[],"until":"done","max_rounds":1});
+        if let Some(maximum) = maximum {
+            value["max_extension_rounds"] = json!(maximum);
+        }
+        let spec: LoopSpec = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(serde_json::to_value(spec).unwrap(), value);
+    }
+}
+
+#[test]
+fn composite_reduction_preserves_explicit_false_presence() {
+    for reduction in [None, Some(false), Some(true)] {
+        let mut value = json!({"nodes":[],"exports":[]});
+        if let Some(reduction) = reduction {
+            value["reduce_verdict"] = json!(reduction);
+        }
+        let spec: CompositeSpec = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(serde_json::to_value(spec).unwrap(), value);
+    }
+}
+
+#[test]
+fn planner_settings_preserve_explicit_defaults() {
+    for field in ["patterns_only", "disjoint_waves", "wire_exports"] {
+        let mut value = json!({"kinds":[],"max_nodes":1});
+        value[field] = json!(false);
+        let spec: PlanSpec = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(serde_json::to_value(spec).unwrap(), value);
+    }
+    for field in [
+        "patterns",
+        "fallback_depends_on",
+        "fallback_inputs",
+        "fallback_read_roots",
+    ] {
+        let mut value = json!({"kinds":[],"max_nodes":1});
+        value[field] = json!([]);
+        let spec: PlanSpec = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(serde_json::to_value(spec).unwrap(), value);
+    }
+}
+
+#[test]
+fn planner_pattern_fields_preserve_explicit_empty_values() {
+    let pattern = json!({"name":"example","nodes":[],"exports":[],"parameters":{}});
+    let typed: PatternSpec = serde_json::from_value(pattern.clone()).unwrap();
+    assert_eq!(serde_json::to_value(typed).unwrap(), pattern);
+    let parameter = json!({"type":"string","enum":[]});
+    let typed: PatternParameter = serde_json::from_value(parameter.clone()).unwrap();
+    assert_eq!(serde_json::to_value(typed).unwrap(), parameter);
+}
+
+#[test]
+fn review_fields_preserve_omitted_null_and_empty_values() {
+    for field in [
+        "shape",
+        "risk_tier",
+        "kind",
+        "size",
+        "worktree",
+        "min_successful",
+    ] {
+        for present in [false, true] {
+            let mut value = json!({"max_nodes":1});
+            if present {
+                value[field] = Value::Null;
+            }
+            let spec: ReviewSpec = serde_json::from_value(value.clone()).unwrap();
+            assert_eq!(serde_json::to_value(spec).unwrap(), value);
+        }
+    }
+    for when in [None, Some(Value::Null), Some(json!("security"))] {
+        let mut value = json!({"name":"review", "tier":null});
+        if let Some(when) = when {
+            value["when"] = when;
+        }
+        let lens: ReviewLens = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(serde_json::to_value(lens).unwrap(), value);
+    }
+    for field in ["risk_tags", "lenses"] {
+        let mut value = json!({"max_nodes":1});
+        value[field] = json!([]);
+        let spec: ReviewSpec = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(serde_json::to_value(spec).unwrap(), value);
+    }
+}
+
+#[test]
 fn admission_refuses_unenforced_required_output_fields() {
     {
         let key = "required";
@@ -91,7 +271,7 @@ fn required_output_contract_requires_v2_and_selected_supported_kinds() {
     assert!(composite.admit(&limits).is_ok());
     let mut unsupported = composite.clone();
     unsupported.nodes[1].inputs[0].outputs = vec![OutputKind::Verdict];
-    unsupported.nodes[1].inputs[0].required_outputs = vec![OutputKind::Verdict];
+    unsupported.nodes[1].inputs[0].required_outputs = vec![OutputKind::Verdict].into();
     assert!(
         unsupported
             .admit(&limits)

@@ -603,6 +603,72 @@ selected = {{ type = "string", default = "{selected}" }}
 }
 
 #[test]
+fn group_reduction_preserves_explicit_false() {
+    let mut layers = Layers::empty();
+    layers
+        .insert(
+            "test",
+            "explicit-reduction",
+            "stages=[{id='group',reduce_verdict=false,parallel=[{id='one',prompt='work'}]}]",
+        )
+        .unwrap();
+    let expansion = expand(&layers, "explicit-reduction", "brief", &[]).unwrap();
+    assert_eq!(
+        expansion.document["nodes"][0]["composite"]["reduce_verdict"],
+        json!(false)
+    );
+    let typed: provenant_fabric_runtime::graph::GraphDocument =
+        serde_json::from_value(expansion.document.clone()).unwrap();
+    assert_eq!(serde_json::to_value(typed).unwrap(), expansion.document);
+
+    let mut layers = real_selector("/nonexistent");
+    let review = include_str!("../assets/presets/review.toml").replace(
+        "id = \"lenses\", min_successful",
+        "id = \"lenses\", reduce_verdict = false, export_first = [], min_successful",
+    );
+    layers.insert("test", "review", &review).unwrap();
+    let expansion = expand(
+        &layers,
+        "generator-evaluator",
+        "brief",
+        &["parameters.worktree='/repo/lane'".into()],
+    )
+    .unwrap();
+    let lens = expansion.document["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|node| node["id"] == "lens")
+        .unwrap();
+    assert_eq!(
+        lens["composite"]["nodes"][0]["review"]["reduce_verdict"],
+        json!(false)
+    );
+    assert_eq!(
+        lens["composite"]["nodes"][0]["review"]["export_first"],
+        json!([])
+    );
+    let typed: provenant_fabric_runtime::graph::GraphDocument =
+        serde_json::from_value(expansion.document.clone()).unwrap();
+    assert_eq!(serde_json::to_value(typed).unwrap(), expansion.document);
+}
+
+#[test]
+fn group_exports_keep_explicit_empty_requirements() {
+    let mut layers = Layers::empty();
+    layers.insert(
+        "test",
+        "explicit-exports",
+        "stages=[{id='group',exports=[{node='one',outputs=['result'],required_outputs=[]}],parallel=[{id='one',prompt='work'}]}]",
+    ).unwrap();
+    let expansion = expand(&layers, "explicit-exports", "brief", &[]).unwrap();
+    assert_eq!(
+        expansion.document["nodes"][0]["composite"]["exports"][0]["required_outputs"],
+        json!([])
+    );
+}
+
+#[test]
 fn invalid_stage_output_names_the_node_and_field() {
     let mut layers = Layers::empty();
     for (name, second) in [
@@ -2277,6 +2343,81 @@ fn read_only_worktree_bindings_lower_to_read_roots() {
     assert!(lens.get("worktree").is_none());
     assert_eq!(lens["read_roots"], json!(["/repo/writer"]));
     assert_eq!(lens["source"], json!({"type":"node","node":"implement"}));
+}
+
+#[test]
+fn custom_graph_preserves_explicit_defaults_when_typed() {
+    let mut layers = Layers::empty();
+    layers.insert(
+        "test",
+        "explicit-defaults",
+        "stages=[{id='work',prompt='work',advisory=false,require_findings=false,require_skill_location=false,read_roots=[],write_scope=[],acceptance_checks=[],dispositions=[],inputs=[]}]",
+    ).unwrap();
+    let expansion = expand(&layers, "explicit-defaults", "brief", &[]).unwrap();
+    let node = &expansion.document["nodes"][0];
+    for field in ["advisory", "require_findings", "require_skill_location"] {
+        assert_eq!(node[field], json!(false), "{field}");
+    }
+    for field in [
+        "read_roots",
+        "write_scope",
+        "acceptance_checks",
+        "dispositions",
+        "inputs",
+    ] {
+        assert_eq!(node[field], json!([]), "{field}");
+    }
+    let typed: provenant_fabric_runtime::graph::GraphDocument =
+        serde_json::from_value(expansion.document.clone()).unwrap();
+    assert_eq!(serde_json::to_value(typed).unwrap(), expansion.document);
+}
+
+#[test]
+fn bundled_graphs_preserve_wire_fields_when_typed() {
+    fn differences(path: &str, before: &Value, after: &Value, out: &mut Vec<String>) {
+        match (before, after) {
+            (Value::Object(left), Value::Object(right)) => {
+                for key in left
+                    .keys()
+                    .chain(right.keys())
+                    .collect::<std::collections::BTreeSet<_>>()
+                {
+                    match (left.get(key), right.get(key)) {
+                        (Some(a), Some(b)) => differences(&format!("{path}.{key}"), a, b, out),
+                        (a, b) => out.push(format!("{path}.{key}: {a:?} -> {b:?}")),
+                    }
+                }
+            }
+            (Value::Array(left), Value::Array(right)) if left.len() == right.len() => {
+                for (index, (a, b)) in left.iter().zip(right).enumerate() {
+                    differences(&format!("{path}[{index}]"), a, b, out);
+                }
+            }
+            (a, b) if a != b => out.push(format!("{path}: {a:?} -> {b:?}")),
+            _ => {}
+        }
+    }
+    let mut mismatches = Vec::new();
+    for name in [
+        "single",
+        "scope",
+        "chain",
+        "fan-out",
+        "fan-out-synthesise",
+        "scout-swarm",
+        "generator-evaluator",
+        "review",
+        "big-batch",
+        "scope-then-run",
+        "deliver",
+    ] {
+        let expansion = expand(&Layers::empty(), name, "brief", &[]).unwrap();
+        let typed: provenant_fabric_runtime::graph::GraphDocument =
+            serde_json::from_value(expansion.document.clone()).unwrap();
+        let encoded = serde_json::to_value(typed).unwrap();
+        differences(name, &expansion.document, &encoded, &mut mismatches);
+    }
+    assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
 }
 
 #[test]

@@ -69,17 +69,21 @@ fn deferred_review_bound(node: &PlannedNode, review: &ReviewSpec) -> usize {
                 condition.get("type").and_then(serde_json::Value::as_str) == Some("ci")
             });
             let ci_bytes = ci.map_or(0, |condition| {
-                let bytes = condition
-                    .get("failed_checks_max_bytes")
-                    .and_then(serde_json::Value::as_u64)
-                    .and_then(|value| usize::try_from(value).ok())
-                    .unwrap_or_else(ci::default_failed_checks_max_bytes);
-                let count = condition
-                    .get("max_failed_checks")
-                    .and_then(serde_json::Value::as_u64)
-                    .and_then(|value| usize::try_from(value).ok())
-                    .unwrap_or_else(ci::default_max_failed_checks)
-                    .min(bytes / 32);
+                let bytes = crate::config::GraphLimits::ci_failed_checks_bytes_bound(
+                    condition
+                        .get("failed_checks_max_bytes")
+                        .and_then(serde_json::Value::as_u64)
+                        .and_then(|value| usize::try_from(value).ok()),
+                )
+                .maximum;
+                let count = crate::config::GraphLimits::ci_failed_checks_count_bound(
+                    condition
+                        .get("max_failed_checks")
+                        .and_then(serde_json::Value::as_u64)
+                        .and_then(|value| usize::try_from(value).ok()),
+                )
+                .maximum
+                .min(bytes / 32);
                 bytes
                     .saturating_mul(2)
                     .saturating_add(count.saturating_mul(256))
@@ -481,10 +485,12 @@ fn node_bound(
             // Evidence array and its findings projection, including per-finding keys.
             // A failed-check object costs at least 32 bytes, even with no text.
             let max_bytes =
-                failed_checks_max_bytes.unwrap_or_else(ci::default_failed_checks_max_bytes);
-            let count = max_failed_checks
-                .unwrap_or_else(ci::default_max_failed_checks)
-                .min(max_bytes / 32);
+                crate::config::GraphLimits::ci_failed_checks_bytes_bound(*failed_checks_max_bytes)
+                    .maximum;
+            let count =
+                crate::config::GraphLimits::ci_failed_checks_count_bound(*max_failed_checks)
+                    .maximum
+                    .min(max_bytes / 32);
             bytes = bytes
                 .saturating_add(max_bytes.saturating_mul(2))
                 .saturating_add(count.saturating_mul(256))

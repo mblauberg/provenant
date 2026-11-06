@@ -38,12 +38,12 @@ fn admission_planner_fragment_capability() {
 #[test]
 fn planner_fragment_inherits_skill_requirement() {
     let mut doc = planner(2);
-    doc.nodes[0].require_skill_location = true;
+    doc.nodes[0].require_skill_location = true.into();
     let output = result(vec![slice("child", &[])]);
     let mut owner = fixture_owner(&[&output, "done", "done"]);
     let run = advance(&doc, &mut owner, &mut MemoryJournal::default()).unwrap();
     assert_eq!(run.checkpoint.expansions.len(), 1);
-    assert!(run.checkpoint.expansions[0].nodes.iter().any(|node| node.require_skill_location));
+    assert!(run.checkpoint.expansions[0].nodes.iter().any(|node| node.require_skill_location.value()));
     assert!(owner.skill_requirements.iter().take(2).all(|required| *required));
 }
 
@@ -84,7 +84,7 @@ fn planned_fan_out_survives_checkpoint_json_and_mixed_settlement() {
         } else {
             doc.nodes[0].plan.as_mut().unwrap().patterns = vec![serde_json::from_value(json!({
                 "name":"lens", "nodes":[leaves[0]], "exports":[exports[0]]
-            })).unwrap()];
+            })).unwrap()].into();
             format!("```fragment\n{}\n```", json!({"schema_version":1,"nodes":[],"patterns":
                 (0..4).map(|i| json!({"id":format!("lens{i}"),"pattern":"lens"})).collect::<Vec<_>>()
             }))
@@ -566,7 +566,7 @@ fn planner_prelaunch_failure_runs_static_fallback_without_an_attempt() {
         ]
     })).unwrap();
     let mut document = document;
-    document.nodes[1].prompt = "x".repeat(100);
+    document.nodes[1].prompt = "x".repeat(100).into();
     let mut owner = fixture_owner(&[&"u".repeat(3000), "static result", "done"]);
     let limits = crate::config::GraphLimits {
         node_prompt_bytes: 2000,
@@ -700,9 +700,9 @@ fn original_writers_fence_overlapping_and_unspecified_scopes() {
     for scope in [vec!["src".into()], Vec::new(), vec!["./src".into()], vec!["src/*".into()]] {
         let mut first = writer_graph().nodes.remove(0);
         first.required_verdict = None;
-        first.write_scope = scope;
+        first.write_scope = scope.into();
         let mut second = first.clone(); second.id = "second".into();
-        second.worktree = Some(".worktrees/second".into()); second.write_scope = vec!["src/a".into()];
+        second.worktree = Some(".worktrees/second".into()); second.write_scope = vec!["src/a".into()].into();
         let doc = graph(vec![first, second]);
         let mut owner = FakeOwner::default();
         owner.observations.push_back(AttemptObservation::Pending { attempt_ref: Some("first".into()) });
@@ -722,7 +722,7 @@ fn skipped_writer_does_not_connect_separate_checkouts_during_expansion() {
     for (id, scope) in [("skipped", "src/a"), ("active", "src/b")] {
         let mut writer = writer_graph().nodes.remove(0);
         writer.id = id.into(); writer.worktree = Some(format!(".worktrees/{id}"));
-        writer.write_scope = vec![scope.into()]; writer.required_verdict = None;
+        writer.write_scope = vec![scope.into()].into(); writer.required_verdict = None;
         doc.nodes.push(writer);
     }
     let (plan, _) = validate_plan(&doc).unwrap();
@@ -761,7 +761,7 @@ fn planner_prompt_names_only_the_nodes_allow_listed_patterns() {
     let mut doc = pattern_planner(4);
     let parameters = &mut doc.nodes[0].plan.as_mut().unwrap().patterns[0].parameters;
     parameters.get_mut("label").unwrap().default = None;
-    parameters.get_mut("retries").unwrap().allowed = vec![json!(1), json!(2)];
+    parameters.get_mut("retries").unwrap().allowed = vec![json!(1), json!(2)].into();
     let prompt = plans::prompt(&doc.nodes[0]);
     assert!(prompt.contains("generator"));
     assert!(!prompt.contains("not-allow-listed-pattern"));
@@ -994,7 +994,7 @@ fn pattern_parameter_errors_are_refused() {
     let mut missing_required = pattern_planner(4);
     missing_required.nodes[0].plan.as_mut().unwrap().patterns[0].parameters.get_mut("label").unwrap().default = None;
     let mut enum_violation = pattern_planner(4);
-    enum_violation.nodes[0].plan.as_mut().unwrap().patterns[0].parameters.get_mut("retries").unwrap().allowed = vec![json!(1)];
+    enum_violation.nodes[0].plan.as_mut().unwrap().patterns[0].parameters.get_mut("retries").unwrap().allowed = vec![json!(1)].into();
 
     for (case, doc, parameters, reason) in [
         ("missing required parameter", missing_required, json!({}), "requires parameter label"),
@@ -1174,7 +1174,7 @@ fn writer_graph() -> GraphDocument {
 #[test]
 fn honest_stop_continues_once_on_same_checkout_with_handoff_and_verdict_contract() {
     let mut doc = writer_graph();
-    doc.nodes[1].inputs = vec![GraphInput { required_outputs: Vec::new(),extra: Default::default(),  node: "write".into(), outputs: vec![OutputKind::Result] }];
+    doc.nodes[1].inputs = vec![GraphInput { required_outputs: Default::default(),extra: Default::default(),  node: "write".into(), outputs: vec![OutputKind::Result] }].into();
     let mut owner = fixture_owner(&[STOP, "VERDICT: PASS", "checked"]);
     let mut journal = MemoryJournal::default();
     let run = advance(&doc, &mut owner, &mut journal).unwrap();
@@ -1444,7 +1444,7 @@ fn fragment_cannot_widen_read_roots_source_or_role() {
     sourced["source"] = json!({"type":"integration"});
     for (node, reason) in [(wide, "read root"), (roled, "role"), (sourced, "source")] {
         let mut doc = planner(1);
-        doc.nodes[0].read_roots = vec!["/granted".into()];
+        doc.nodes[0].read_roots = vec!["/granted".into()].into();
         let mut owner = fixture_owner(&[&result(vec![node])]);
         let run = advance(&doc, &mut owner, &mut MemoryJournal::default()).unwrap();
         assert_eq!(run.status, GraphStatus::Paused);
@@ -1454,7 +1454,7 @@ fn fragment_cannot_widen_read_roots_source_or_role() {
     let mut same = slice("same", &["src"]);
     same["read_roots"] = json!(["/granted"]);
     let mut doc = planner(1);
-    doc.nodes[0].read_roots = vec!["/granted".into()];
+    doc.nodes[0].read_roots = vec!["/granted".into()].into();
     let run = advance(&doc, &mut fixture_owner(&[&result(vec![same]), "done", "done"]), &mut MemoryJournal::default()).unwrap();
     assert_eq!(run.checkpoint.expansions.len(), 1);
 }
@@ -1483,7 +1483,7 @@ fn two_instances(first: Value, second: Value) -> String {
 fn disjoint_waves_refuse_overlapping_scopes_unless_a_dependency_orders_them() {
     let mut doc = pattern_planner(8);
     doc.integration_branch = Some("integration".into());
-    doc.nodes[0].plan.as_mut().unwrap().disjoint_waves = true;
+    doc.nodes[0].plan.as_mut().unwrap().disjoint_waves = true.into();
     let one = json!({"id":"one", "pattern":"generator", "parameters":{"scope":["src/a"]}});
     let clash = json!({"id":"two", "pattern":"generator", "parameters":{"scope":["src/a/b"]}});
     let mut owner = fixture_owner(&[&two_instances(one.clone(), clash.clone())]);
@@ -1507,7 +1507,7 @@ fn disjoint_waves_refuse_overlapping_scopes_unless_a_dependency_orders_them() {
     // Without the switch, overlapping instances keep sharing one checkout.
     let mut plain = pattern_planner(8);
     plain.integration_branch = Some("integration".into());
-    plain.nodes[0].plan.as_mut().unwrap().disjoint_waves = false;
+    plain.nodes[0].plan.as_mut().unwrap().disjoint_waves = false.into();
     let results = ["implemented", "reviewed", "implemented", "reviewed", "checked"];
     let mut owner = fixture_owner(&[&[two_instances(one, clash).as_str()][..], &results[..]].concat());
     let run = advance(&plain, &mut owner, &mut MemoryJournal::default()).unwrap();
@@ -1518,7 +1518,7 @@ fn disjoint_waves_refuse_overlapping_scopes_unless_a_dependency_orders_them() {
 fn planner_adds_lenses_omitted_by_a_path_floor() {
     let mut doc = planner(4);
     let spec = doc.nodes[0].plan.as_mut().unwrap();
-    spec.patterns_only = true;
+    spec.patterns_only = true.into();
     for name in ["lens-tests", "lens-security-privacy"] {
         spec.patterns.push(serde_json::from_value(json!({
             "name": name,
@@ -1557,7 +1557,7 @@ fn planner_adds_lenses_omitted_by_a_path_floor() {
 #[test]
 fn patterns_only_plans_refuse_raw_fragment_nodes() {
     let mut doc = pattern_planner(8);
-    doc.nodes[0].plan.as_mut().unwrap().patterns_only = true;
+    doc.nodes[0].plan.as_mut().unwrap().patterns_only = true.into();
     let raw = format!(
         "```fragment\n{}\n```",
         json!({"schema_version":1,"nodes":[slice("a", &["src"])],"patterns":[]})
@@ -1582,7 +1582,7 @@ fn pattern_routes_may_vary_only_over_a_closed_list() {
             .get_mut("label")
             .unwrap();
         parameter.default = Some(json!("junior"));
-        parameter.allowed = vec![json!("junior"), json!("senior")];
+        parameter.allowed = vec![json!("junior"), json!("senior")].into();
     }
     assert!(plans::validate_spec(&doc.nodes[0]).is_ok());
     let outside = json!({"id":"impl", "pattern":"generator", "parameters":{"label":"principal"}});
@@ -1606,7 +1606,7 @@ fn pattern_read_roots_may_follow_only_a_closed_list() {
             .get_mut("label")
             .unwrap();
         parameter.default = Some(json!("/repo/a"));
-        parameter.allowed = vec![json!("/repo/a"), json!("/repo/b")];
+        parameter.allowed = vec![json!("/repo/a"), json!("/repo/b")].into();
     }
     assert!(plans::validate_spec(&doc.nodes[0]).is_ok());
 }
@@ -1837,11 +1837,11 @@ fn planned_workers_and_the_no_scout_note_expand_and_feed_their_consumers() {
 #[test]
 fn a_hand_written_plan_keeps_its_consumers_declared_inputs() {
     let mut doc = pattern_planner(4);
-    doc.nodes[1].inputs = vec![GraphInput { required_outputs: Vec::new(),
+    doc.nodes[1].inputs = vec![GraphInput { required_outputs: Default::default(),
         extra: Default::default(),
         node: "plan".into(),
         outputs: vec![OutputKind::Result],
-    }];
+    }].into();
     let instance = json!({"id":"impl", "pattern":"generator", "parameters":{}});
     let run_it = |doc: &GraphDocument| {
         let mut owner = fixture_owner(&[&pattern_result(instance.clone()), "a", "b", "c"]);
@@ -1854,7 +1854,7 @@ fn a_hand_written_plan_keeps_its_consumers_declared_inputs() {
     let inputs: Vec<_> = after.inputs.iter().map(|i| i.node.as_str()).collect();
     assert_eq!(inputs, ["plan"], "no wire_exports, no extra inputs");
     // Declared by the plan node, the same consumer also reads the instance exports.
-    doc.nodes[0].plan.as_mut().unwrap().wire_exports = true;
+    doc.nodes[0].plan.as_mut().unwrap().wire_exports = true.into();
     let wired = run_it(&doc);
     let after = wired.nodes.iter().find(|n| n.id == "after").unwrap();
     assert!(after.inputs.len() > 1);

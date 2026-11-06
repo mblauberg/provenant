@@ -167,20 +167,26 @@ pub enum SeparationOutcome {
 /// Deferred review configuration supplied to the host resolver.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReviewSpec {
-    pub shape: Option<String>,
-    pub risk_tier: Option<String>,
-    pub kind: Option<String>,
-    pub size: Option<String>,
-    #[serde(default)]
-    pub risk_tags: Vec<String>,
-    pub worktree: Option<String>,
-    #[serde(default)]
-    pub lenses: Vec<ReviewLens>,
-    pub min_successful: Option<usize>,
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub reduce_verdict: bool,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub export_first: Vec<OutputKind>,
+    #[serde(default, skip_serializing_if = "PresentOption::absent")]
+    pub shape: PresentOption<String>,
+    #[serde(default, skip_serializing_if = "PresentOption::absent")]
+    pub risk_tier: PresentOption<String>,
+    #[serde(default, skip_serializing_if = "PresentOption::absent")]
+    pub kind: PresentOption<String>,
+    #[serde(default, skip_serializing_if = "PresentOption::absent")]
+    pub size: PresentOption<String>,
+    #[serde(default, skip_serializing_if = "PresentVec::absent")]
+    pub risk_tags: PresentVec<String>,
+    #[serde(default, skip_serializing_if = "PresentOption::absent")]
+    pub worktree: PresentOption<String>,
+    #[serde(default, skip_serializing_if = "PresentVec::absent")]
+    pub lenses: PresentVec<ReviewLens>,
+    #[serde(default, skip_serializing_if = "PresentOption::absent")]
+    pub min_successful: PresentOption<usize>,
+    #[serde(default, skip_serializing_if = "PresentBool::absent")]
+    pub reduce_verdict: PresentBool,
+    #[serde(default, skip_serializing_if = "PresentVec::absent")]
+    pub export_first: PresentVec<OutputKind>,
     /// Outputs selected from every member of this review group.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub member_outputs: Option<Vec<OutputKind>>,
@@ -198,7 +204,8 @@ impl ReviewSpec {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReviewLens {
     pub name: String,
-    pub when: Option<String>,
+    #[serde(default, skip_serializing_if = "PresentOption::absent")]
+    pub when: PresentOption<String>,
     pub tier: serde_json::Value,
 }
 
@@ -257,10 +264,10 @@ pub struct GraphNode {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub distinct_strength: Option<FamilyStrength>,
     /// Dispositions each finding must carry at settlement, with a reason.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub dispositions: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub read_roots: Vec<String>,
+    #[serde(default, skip_serializing_if = "PresentVec::absent")]
+    pub dispositions: PresentVec<String>,
+    #[serde(default, skip_serializing_if = "PresentVec::absent")]
+    pub read_roots: PresentVec<String>,
     /// Explicit node capability set; absent inherits the writer project default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capabilities: Option<Vec<String>>,
@@ -271,10 +278,10 @@ pub struct GraphNode {
     pub(super) after_expansion: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan: Option<PlanSpec>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub write_scope: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub acceptance_checks: Vec<String>,
+    #[serde(default, skip_serializing_if = "PresentVec::absent")]
+    pub write_scope: PresentVec<String>,
+    #[serde(default, skip_serializing_if = "PresentVec::absent")]
+    pub acceptance_checks: PresentVec<String>,
     #[serde(default, rename = "loop", skip_serializing_if = "Option::is_none")]
     pub loop_body: Option<LoopSpec>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -295,8 +302,8 @@ pub struct GraphNode {
     pub on_fail: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delivery: Option<provenant_records::run::DeliveryMode>,
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub require_skill_location: bool,
+    #[serde(default, skip_serializing_if = "PresentBool::absent")]
+    pub require_skill_location: PresentBool,
     pub access: AccessMode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree: Option<String>,
@@ -306,15 +313,20 @@ pub struct GraphNode {
     /// Wall-clock limit for this node's lane, in seconds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deadline_seconds: Option<u64>,
-    #[serde(default, alias = "goal", alias = "brief")]
-    pub prompt: String,
+    #[serde(
+        default,
+        alias = "goal",
+        alias = "brief",
+        skip_serializing_if = "PresentString::absent"
+    )]
+    pub prompt: PresentString,
     #[serde(default)]
     pub depends_on: Vec<String>,
     /// Allow dependants to proceed after this node fails or is blocked.
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub advisory: bool,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub inputs: Vec<GraphInput>,
+    #[serde(default, skip_serializing_if = "PresentBool::absent")]
+    pub advisory: PresentBool,
+    #[serde(default, skip_serializing_if = "PresentVec::absent")]
+    pub inputs: PresentVec<GraphInput>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub route: Option<GraphRoute>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -323,8 +335,8 @@ pub struct GraphNode {
     /// Require this exact, case-sensitive line (ignoring surrounding whitespace)
     /// in a successful result. A missing line fails the node without fallback.
     pub required_verdict: Option<String>,
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub require_findings: bool,
+    #[serde(default, skip_serializing_if = "PresentBool::absent")]
+    pub require_findings: PresentBool,
     /// On a CI gate's recovery node: skip when the gate failed with no
     /// findings. Unset, a node skips only if it takes the gate's findings as
     /// an input; `false` always runs it, `true` always skips it.
@@ -639,6 +651,339 @@ pub struct GateResult {
     pub on_fail: Option<String>,
 }
 
+/// An optional value that distinguishes an omitted field from explicit null.
+#[derive(Clone, Debug)]
+pub struct PresentOption<T> {
+    value: Option<T>,
+    present: bool,
+}
+impl<T> Default for PresentOption<T> {
+    fn default() -> Self {
+        Self {
+            value: None,
+            present: false,
+        }
+    }
+}
+impl<T> From<Option<T>> for PresentOption<T> {
+    fn from(value: Option<T>) -> Self {
+        Self {
+            value,
+            present: true,
+        }
+    }
+}
+impl<T: PartialEq> PartialEq for PresentOption<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.value == other.value
+    }
+}
+impl<T: Eq> Eq for PresentOption<T> {}
+impl<T> std::ops::Deref for PresentOption<T> {
+    type Target = Option<T>;
+    fn deref(&self) -> &Self::Target {
+        &self.value
+    }
+}
+impl<T> std::ops::DerefMut for PresentOption<T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.present = true;
+        &mut self.value
+    }
+}
+impl<T: Serialize> Serialize for PresentOption<T> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.value.serialize(serializer)
+    }
+}
+impl<'de, T: Deserialize<'de>> Deserialize<'de> for PresentOption<T> {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Option::deserialize(deserializer).map(Into::into)
+    }
+}
+impl<T> PresentOption<T> {
+    fn absent(&self) -> bool {
+        !self.present && self.value.is_none()
+    }
+}
+
+/// A boolean that retains whether `false` appeared on the wire.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PresentBool {
+    value: bool,
+    present: bool,
+}
+impl PresentBool {
+    pub fn value(self) -> bool {
+        self.value
+    }
+
+    /// Explicitly encode either value, including `false`.
+    pub fn present(value: bool) -> Self {
+        Self {
+            value,
+            present: true,
+        }
+    }
+
+    pub(super) fn absent(&self) -> bool {
+        !self.present && !self.value
+    }
+}
+impl From<bool> for PresentBool {
+    fn from(value: bool) -> Self {
+        Self {
+            value,
+            present: value,
+        }
+    }
+}
+impl PartialEq for PresentBool {
+    fn eq(&self, other: &Self) -> bool {
+        self.value == other.value
+    }
+}
+impl Eq for PresentBool {}
+impl std::ops::BitOrAssign<bool> for PresentBool {
+    fn bitor_assign(&mut self, other: bool) {
+        if other {
+            self.value = true;
+            self.present = true;
+        }
+    }
+}
+impl Serialize for PresentBool {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.value.serialize(serializer)
+    }
+}
+impl<'de> Deserialize<'de> for PresentBool {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        bool::deserialize(deserializer).map(Self::present)
+    }
+}
+
+/// Text that retains whether an empty value appeared on the wire.
+#[derive(Clone, Debug, Default)]
+pub struct PresentString {
+    value: String,
+    present: bool,
+}
+impl From<String> for PresentString {
+    fn from(value: String) -> Self {
+        Self {
+            value,
+            present: true,
+        }
+    }
+}
+impl From<&str> for PresentString {
+    fn from(value: &str) -> Self {
+        value.to_owned().into()
+    }
+}
+impl PartialEq for PresentString {
+    fn eq(&self, other: &Self) -> bool {
+        self.value == other.value
+    }
+}
+impl Eq for PresentString {}
+impl std::ops::Deref for PresentString {
+    type Target = String;
+    fn deref(&self) -> &Self::Target {
+        &self.value
+    }
+}
+impl std::ops::DerefMut for PresentString {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.present = true;
+        &mut self.value
+    }
+}
+impl std::fmt::Display for PresentString {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.value, formatter)
+    }
+}
+impl Serialize for PresentString {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.value.serialize(serializer)
+    }
+}
+impl<'de> Deserialize<'de> for PresentString {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        String::deserialize(deserializer).map(Into::into)
+    }
+}
+impl PresentString {
+    fn absent(&self) -> bool {
+        !self.present && self.value.is_empty()
+    }
+}
+
+/// A list that retains whether an empty value appeared on the wire.
+///
+/// `Default` and conversion from an empty `Vec` produce an omitted field;
+/// use [`Self::present`] to explicitly encode an empty list.
+#[derive(Clone, Debug)]
+pub struct PresentVec<T> {
+    values: Vec<T>,
+    present: bool,
+}
+
+impl<T> Default for PresentVec<T> {
+    fn default() -> Self {
+        Self {
+            values: Vec::new(),
+            present: false,
+        }
+    }
+}
+
+impl<T> From<Vec<T>> for PresentVec<T> {
+    fn from(values: Vec<T>) -> Self {
+        let present = !values.is_empty();
+        Self { values, present }
+    }
+}
+
+impl<T: PartialEq> PartialEq for PresentVec<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.values == other.values
+    }
+}
+impl<T: Eq> Eq for PresentVec<T> {}
+impl<T: PartialEq> PartialEq<Vec<T>> for PresentVec<T> {
+    fn eq(&self, other: &Vec<T>) -> bool {
+        self.values == *other
+    }
+}
+impl<T> std::ops::Deref for PresentVec<T> {
+    type Target = Vec<T>;
+    fn deref(&self) -> &Self::Target {
+        &self.values
+    }
+}
+impl<T> std::ops::DerefMut for PresentVec<T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.present = true;
+        &mut self.values
+    }
+}
+impl<'a, T> IntoIterator for &'a PresentVec<T> {
+    type Item = &'a T;
+    type IntoIter = std::slice::Iter<'a, T>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.values.iter()
+    }
+}
+impl<'a, T> IntoIterator for &'a mut PresentVec<T> {
+    type Item = &'a mut T;
+    type IntoIter = std::slice::IterMut<'a, T>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.values.iter_mut()
+    }
+}
+impl<T> FromIterator<T> for PresentVec<T> {
+    fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
+        Vec::from_iter(iter).into()
+    }
+}
+impl<T: Serialize> Serialize for PresentVec<T> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.values.serialize(serializer)
+    }
+}
+impl<'de, T: Deserialize<'de>> Deserialize<'de> for PresentVec<T> {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Vec::deserialize(deserializer).map(|values| Self {
+            values,
+            present: true,
+        })
+    }
+}
+impl<T> PresentVec<T> {
+    /// Construct a value that is present even when the list is empty.
+    pub fn present(values: Vec<T>) -> Self {
+        Self {
+            values,
+            present: true,
+        }
+    }
+
+    pub(super) fn absent(&self) -> bool {
+        !self.present && self.values.is_empty()
+    }
+}
+
+/// A sorted map that retains whether an empty value appeared on the wire.
+#[derive(Clone, Debug)]
+pub struct PresentMap<K, V> {
+    values: std::collections::BTreeMap<K, V>,
+    present: bool,
+}
+impl<K, V> Default for PresentMap<K, V> {
+    fn default() -> Self {
+        Self {
+            values: Default::default(),
+            present: false,
+        }
+    }
+}
+impl<K, V> From<std::collections::BTreeMap<K, V>> for PresentMap<K, V> {
+    fn from(values: std::collections::BTreeMap<K, V>) -> Self {
+        let present = !values.is_empty();
+        Self { values, present }
+    }
+}
+impl<K: PartialEq, V: PartialEq> PartialEq for PresentMap<K, V> {
+    fn eq(&self, other: &Self) -> bool {
+        self.values == other.values
+    }
+}
+impl<K: Eq, V: Eq> Eq for PresentMap<K, V> {}
+impl<K, V> std::ops::Deref for PresentMap<K, V> {
+    type Target = std::collections::BTreeMap<K, V>;
+    fn deref(&self) -> &Self::Target {
+        &self.values
+    }
+}
+impl<K, V> std::ops::DerefMut for PresentMap<K, V> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.present = true;
+        &mut self.values
+    }
+}
+impl<'a, K, V> IntoIterator for &'a PresentMap<K, V> {
+    type Item = (&'a K, &'a V);
+    type IntoIter = std::collections::btree_map::Iter<'a, K, V>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.values.iter()
+    }
+}
+impl<K: Serialize, V: Serialize> Serialize for PresentMap<K, V> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.values.serialize(serializer)
+    }
+}
+impl<'de, K: Ord + Deserialize<'de>, V: Deserialize<'de>> Deserialize<'de> for PresentMap<K, V> {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        std::collections::BTreeMap::deserialize(deserializer).map(Self::present)
+    }
+}
+impl<K, V> PresentMap<K, V> {
+    /// Construct a value that is present even when the map is empty.
+    pub fn present(values: std::collections::BTreeMap<K, V>) -> Self {
+        Self {
+            values,
+            present: true,
+        }
+    }
+    pub(super) fn absent(&self) -> bool {
+        !self.present && self.values.is_empty()
+    }
+}
+
 /// Select outputs from a direct dependency for inclusion in this node's brief.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GraphInput {
@@ -647,8 +992,8 @@ pub struct GraphInput {
     pub node: String,
     pub outputs: Vec<OutputKind>,
     /// Selected machine-readable outputs that must be available before launch.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub required_outputs: Vec<OutputKind>,
+    #[serde(default, skip_serializing_if = "PresentVec::absent")]
+    pub required_outputs: PresentVec<OutputKind>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

@@ -48,6 +48,8 @@ pub struct CapturedResult {
 
 impl ResultCapture {
     pub const HEAD_BYTES: usize = HEAD_BYTES;
+    /// Maximum bytes retained in the trailing result window.
+    pub const TAIL_BYTES: usize = TAIL_BYTES;
 
     pub fn new(required_verdict: Option<&str>) -> Self {
         Self {
@@ -592,8 +594,8 @@ mod tests {
             result.digest,
             format!("sha256:{}", provenant_core::hex(&Sha256::digest(&data)))
         );
-        assert_eq!(result.excerpt.len(), HEAD_BYTES);
-        assert_eq!(result.tail.len(), TAIL_BYTES);
+        assert_eq!(result.excerpt.len(), ResultCapture::HEAD_BYTES);
+        assert_eq!(result.tail.len(), ResultCapture::TAIL_BYTES);
         assert!(result.truncated);
     }
 

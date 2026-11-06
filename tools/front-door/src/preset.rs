@@ -1640,9 +1640,16 @@ fn select_graph_inputs(
             extra: Default::default(),
             node: node.clone(),
             outputs: outputs.to_vec(),
-            required_outputs: Vec::new(),
+            required_outputs: Default::default(),
         })
         .collect()
+}
+
+fn parse_graph_inputs(
+    id: &str,
+    value: Value,
+) -> Result<Vec<provenant_fabric_runtime::graph::GraphInput>, String> {
+    serde_json::from_value(value).map_err(|error| format!("stage {id}: exports: {error}"))
 }
 
 fn stage_output_kinds(
@@ -2939,8 +2946,7 @@ impl StageBuilder<'_> {
                 1,
             )?;
             let kinds = stage_output_kinds(id, &outputs)?;
-            let exports = serde_json::to_value(select_graph_inputs(&ends, &kinds))
-                .map_err(|error| format!("node {id}: exports: {error}"))?;
+            let exports = select_graph_inputs(&ends, &kinds);
             let mut boundary_deps = deps.to_vec();
             for child in &children {
                 if let Some(dependencies) = child.get("depends_on").and_then(Value::as_array) {
@@ -3236,12 +3242,8 @@ impl StageBuilder<'_> {
                     .transpose()?
                     .or_else(|| config.get("exports").cloned());
                 let exports = match exports {
-                    Some(exports) => exports,
-                    None => serde_json::to_value(select_graph_inputs(
-                        &ends,
-                        &CompositeSpec::DEFAULT_MEMBER_OUTPUTS,
-                    ))
-                    .map_err(|error| format!("stage {id}: exports: {error}"))?,
+                    Some(exports) => parse_graph_inputs(&id, exports)?,
+                    None => select_graph_inputs(&ends, &CompositeSpec::DEFAULT_MEMBER_OUTPUTS),
                 };
                 (
                     composite(&id, children, exports, deps, &outputs, None)?,
@@ -3295,25 +3297,19 @@ impl StageBuilder<'_> {
                         })
                         .transpose()?;
                     let mut exports = match exports {
-                        Some(exports) => exports,
-                        None => serde_json::to_value(select_graph_inputs(&ends, &member_outputs))
-                            .map_err(|error| format!("stage {id}: exports: {error}"))?,
+                        Some(exports) => parse_graph_inputs(&id, exports)?,
+                        None => select_graph_inputs(&ends, &member_outputs),
                     };
                     if let Some(requested) = object.remove("export_first") {
                         let requested =
                             interpolate(&requested, &self.parameters, self.prompt, index as usize)?;
                         let first = exports
-                            .as_array_mut()
-                            .and_then(|exports| exports.first_mut())
-                            .and_then(|export| export.get_mut("outputs"))
-                            .and_then(Value::as_array_mut)
+                            .first_mut()
                             .ok_or("export_first requires at least one group export")?;
-                        for output in requested
-                            .as_array()
-                            .ok_or("export_first must be an array")?
-                        {
-                            if !first.contains(output) {
-                                first.push(output.clone());
+                        let requested = stage_output_kinds(&id, &requested)?;
+                        for output in requested {
+                            if !first.outputs.contains(&output) {
+                                first.outputs.push(output);
                             }
                         }
                     }
@@ -3345,12 +3341,11 @@ impl StageBuilder<'_> {
                                 .as_bool()
                                 .ok_or_else(|| "reduce_verdict must be a boolean".to_owned())
                         })
-                        .transpose()?
-                        .unwrap_or(false);
+                        .transpose()?;
                     let mut group =
                         composite(&id, children, exports, deps, &outputs, min_successful)?;
-                    if reduce_verdict {
-                        group["composite"]["reduce_verdict"] = json!(true);
+                    if let Some(reduce_verdict) = reduce_verdict {
+                        group["composite"]["reduce_verdict"] = json!(reduce_verdict);
                     }
                     (group, true)
                 }
@@ -3364,12 +3359,8 @@ impl StageBuilder<'_> {
                     })
                     .transpose()?;
                 let exports = match exports {
-                    Some(exports) => exports,
-                    None => serde_json::to_value(select_graph_inputs(
-                        &ends,
-                        &CompositeSpec::DEFAULT_MEMBER_OUTPUTS,
-                    ))
-                    .map_err(|error| format!("stage {id}: exports: {error}"))?,
+                    Some(exports) => parse_graph_inputs(&id, exports)?,
+                    None => select_graph_inputs(&ends, &CompositeSpec::DEFAULT_MEMBER_OUTPUTS),
                 };
                 (
                     composite(&id, children, exports, deps, &outputs, None)?,
@@ -3574,7 +3565,7 @@ fn check_pattern(
 fn composite(
     id: &str,
     nodes: Vec<Value>,
-    exports: Value,
+    exports: Vec<provenant_fabric_runtime::graph::GraphInput>,
     deps: &[String],
     outputs: &Value,
     min_successful: Option<u64>,

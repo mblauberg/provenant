@@ -4580,7 +4580,7 @@ impl BoundGraphOwner<'_> {
             if !node.read_roots.is_empty() {
                 map.insert("read_roots".into(), serde_json::json!(node.read_roots));
             }
-            if node.require_skill_location {
+            if node.require_skill_location.value() {
                 map.insert("require_skill_location".into(), serde_json::json!(true));
             }
             map.insert(
@@ -4644,7 +4644,7 @@ impl BoundGraphOwner<'_> {
                     extra: Default::default(),
                     node: member.id.clone(),
                     outputs,
-                    required_outputs: Vec::new(),
+                    required_outputs: Default::default(),
                 }
             })
             .collect();
@@ -4665,7 +4665,7 @@ impl BoundGraphOwner<'_> {
                         n
                     }
                 }),
-                reduce_verdict: reduction,
+                reduce_verdict: reduction.into(),
                 nodes: Vec::new(),
                 exports,
             },
@@ -4696,14 +4696,14 @@ impl BoundGraphOwner<'_> {
             });
             result.read_roots = node.read_roots.clone();
             result.depends_on = deps;
-            result.inputs = inputs;
+            result.inputs = inputs.into();
             Ok(result)
         };
         let selected = |id: String, outputs: Vec<OutputKind>| GraphInput {
             extra: Default::default(),
             node: id,
             outputs,
-            required_outputs: Vec::new(),
+            required_outputs: Default::default(),
         };
         let mut children = Vec::new();
         if panel.frame {
@@ -4711,7 +4711,7 @@ impl BoundGraphOwner<'_> {
                 "frame",
                 &frame_id,
                 node.depends_on.clone(),
-                node.inputs.clone(),
+                node.inputs.to_vec(),
             )?);
         }
         children.push(lens_group);
@@ -4758,14 +4758,14 @@ impl BoundGraphOwner<'_> {
                 OutputKind::Verdict,
                 OutputKind::Commit,
             ],
-            required_outputs: Vec::new(),
+            required_outputs: Default::default(),
         }];
         if let Some(verifier) = verifier_output {
             root_exports.push(GraphInput {
                 extra: Default::default(),
                 node: verifier,
                 outputs: vec![OutputKind::Result, OutputKind::Findings],
-                required_outputs: Vec::new(),
+                required_outputs: Default::default(),
             });
         }
         let root = GraphNode::composite(
@@ -4773,7 +4773,7 @@ impl BoundGraphOwner<'_> {
             node.depends_on.clone(),
             CompositeSpec {
                 min_successful: None,
-                reduce_verdict: false,
+                reduce_verdict: false.into(),
                 nodes: Vec::new(),
                 exports: root_exports,
             },
@@ -5028,17 +5028,17 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             }
         }
         let request = provenant_routing::ReviewRequest {
-            shape: spec.shape.clone(),
-            risk_tier: spec.risk_tier.clone(),
-            kind: spec.kind.clone(),
-            size: spec.size.clone(),
-            risk_tags: spec.risk_tags.clone(),
+            shape: spec.shape.as_ref().cloned(),
+            risk_tier: spec.risk_tier.as_ref().cloned(),
+            kind: spec.kind.as_ref().cloned(),
+            size: spec.size.as_ref().cloned(),
+            risk_tags: spec.risk_tags.to_vec(),
             lenses: spec
                 .lenses
                 .iter()
                 .map(|lens| provenant_routing::ReviewLens {
                     name: lens.name.clone(),
-                    when: lens.when.clone(),
+                    when: lens.when.as_ref().cloned(),
                     tier: lens.tier.clone(),
                 })
                 .collect(),

@@ -9,20 +9,64 @@ pub struct LoopSpec {
     pub body: Vec<GraphNode>,
     pub until: String,
     pub max_rounds: usize,
-    #[serde(
-        default = "default_extension_rounds",
-        skip_serializing_if = "is_default_extension_rounds"
-    )]
-    pub max_extension_rounds: usize,
+    #[serde(default, skip_serializing_if = "ExtensionRounds::absent")]
+    pub max_extension_rounds: ExtensionRounds,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub decision_session: Option<String>,
 }
 
-fn default_extension_rounds() -> usize {
-    5
+/// A loop extension limit that preserves an explicitly declared default.
+#[derive(Clone, Copy, Debug)]
+pub struct ExtensionRounds {
+    value: usize,
+    present: bool,
 }
-fn is_default_extension_rounds(value: &usize) -> bool {
-    *value == 5
+impl ExtensionRounds {
+    pub fn value(self) -> usize {
+        self.value
+    }
+    /// Explicitly encode the limit, including the default value.
+    pub fn present(value: usize) -> Self {
+        Self {
+            value,
+            present: true,
+        }
+    }
+    fn absent(&self) -> bool {
+        !self.present && self.value == 5
+    }
+}
+impl Default for ExtensionRounds {
+    fn default() -> Self {
+        Self {
+            value: 5,
+            present: false,
+        }
+    }
+}
+impl From<usize> for ExtensionRounds {
+    fn from(value: usize) -> Self {
+        Self {
+            value,
+            present: value != 5,
+        }
+    }
+}
+impl PartialEq for ExtensionRounds {
+    fn eq(&self, other: &Self) -> bool {
+        self.value == other.value
+    }
+}
+impl Eq for ExtensionRounds {}
+impl Serialize for ExtensionRounds {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.value.serialize(serializer)
+    }
+}
+impl<'de> Deserialize<'de> for ExtensionRounds {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        usize::deserialize(deserializer).map(Self::present)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -111,14 +155,14 @@ pub(super) fn expanded_node_count(
                 node.id
             ));
         }
-        if spec.max_extension_rounds == 0 {
+        if spec.max_extension_rounds.value() == 0 {
             return Err(format!(
                 "node {}: loop.max_extension_rounds must be positive",
                 node.id
             ));
         }
         if let Some(reason) = crate::config::GraphLimits::loop_extension_rounds_bound()
-            .refusal(spec.max_extension_rounds)
+            .refusal(spec.max_extension_rounds.value())
         {
             return Err(format!(
                 "node {}: loop.max_extension_rounds: {reason}",
@@ -235,7 +279,7 @@ pub(super) fn validate_resume_extension(
             > original
                 .loop_body
                 .as_ref()
-                .map_or(5, |spec| spec.max_extension_rounds)
+                .map_or(5, |spec| spec.max_extension_rounds.value())
         {
             return Err("loop extension exceeds max_extension_rounds".into());
         }

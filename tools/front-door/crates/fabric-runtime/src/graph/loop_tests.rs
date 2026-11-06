@@ -319,10 +319,10 @@ fn loop_on_fail_and_inactive_paths_reuse_gate_routing() {
         });
         gate.id = "initial".into();
         gate.depends_on = vec!["initial-review".into()];
-        gate.inputs = vec![GraphInput { required_outputs: Vec::new(),extra: Default::default(),
+        gate.inputs = vec![GraphInput { required_outputs: Default::default(),extra: Default::default(),
             node: "initial-review".into(),
             outputs: vec![OutputKind::Verdict],
-        }];
+        }].into();
         gate.on_fail = Some("revise".into());
         document.nodes[0].depends_on = vec!["initial".into()];
         document.nodes.insert(0, gate);
@@ -1474,7 +1474,7 @@ fn loop_inbox_large_extension_cannot_bypass_host_node_limit() {
     let mut document = fixture("exhaust");
     let spec = document.nodes[0].loop_body.as_mut().unwrap();
     spec.decision_session = Some("chair-session".into());
-    spec.max_extension_rounds = 1024;
+    spec.max_extension_rounds = 1024.into();
     let mut owner = DecisionOwner {
         inner: reviews(&["VERDICT: FAIL", "VERDICT: FAIL"]),
         response: Ok(Some(LoopDecision::Extend { rounds: 500 })),

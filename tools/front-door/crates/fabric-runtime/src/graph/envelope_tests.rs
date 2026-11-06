@@ -1083,7 +1083,7 @@ fn disposition_checkpoint_fits_its_reduced_bound() {
         .iter_mut()
         .find(|node| node.id == "review")
         .unwrap()
-        .dispositions = vec!["accepted".into()];
+        .dispositions = vec!["accepted".into()].into();
     let plan = planned(&document);
     let mut checkpoint = filled_checkpoint(&document, &plan);
     let index = plan

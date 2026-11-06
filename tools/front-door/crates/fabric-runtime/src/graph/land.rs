@@ -295,7 +295,7 @@ fn reviewed_head(
     let index = *positions.get(reviewer)?;
     let node = &plan.nodes[index];
     if let Some(spec) = &node.composite {
-        if spec.reduce_verdict {
+        if spec.reduce_verdict.value() {
             let mut head = None;
             let mut seen = std::collections::BTreeSet::new();
             for export in &spec.exports {

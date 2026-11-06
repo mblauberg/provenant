@@ -423,16 +423,16 @@ fn node(id: &str, route: GraphRoute) -> GraphNode {
         topology_present: Default::default(),
         distinct_from: None,
         distinct_strength: None,
-        dispositions: Vec::new(),
+        dispositions: Default::default(),
         composite: None,
         role: None,
-        read_roots: Vec::new(),
+        read_roots: Default::default(),
         capabilities: None,
         source: None,
         after_expansion: Vec::new(),
         plan: None,
-        write_scope: Vec::new(),
-        acceptance_checks: Vec::new(),
+        write_scope: Default::default(),
+        acceptance_checks: Default::default(),
         decide: None,
         continues: None,
         land: None,
@@ -442,20 +442,20 @@ fn node(id: &str, route: GraphRoute) -> GraphNode {
         condition: None,
         on_fail: None,
         delivery: None,
-        require_skill_location: false,
+        require_skill_location: false.into(),
         access: AccessMode::ReadOnly,
         worktree: None,
         id: id.to_owned(),
         title: None,
         deadline_seconds: None,
-        prompt: format!("work for {id}"),
+        prompt: format!("work for {id}").into(),
         depends_on: Vec::new(),
-        advisory: false,
-        inputs: Vec::new(),
+        advisory: false.into(),
+        inputs: Default::default(),
         route: Some(route),
         routes: None,
         required_verdict: None,
-        require_findings: false,
+        require_findings: false.into(),
         skip_without_findings: None,
     }
 }
@@ -501,7 +501,7 @@ fn node_capabilities_preserve_inheritance_and_explicit_empty() {
 fn graph_skill_location_requirement_reaches_the_lane() {
     for required in [false, true] {
         let mut lane = node("lane", route("first"));
-        lane.require_skill_location = required;
+        lane.require_skill_location = required.into();
         let encoded = serde_json::to_value(&lane).unwrap();
         let decoded: GraphNode = serde_json::from_value(encoded).unwrap();
         let mut owner = FakeOwner {
@@ -669,23 +669,23 @@ fn admitted_deferred_review_fits_checkpoint_after_expansion() {
         commit: oid.clone(),
     });
     review.review = Some(ReviewSpec {
-        shape: None,
-        risk_tier: Some("crucial".into()),
-        kind: None,
-        size: None,
-        risk_tags: vec![],
-        worktree: None,
-        lenses: vec![],
-        min_successful: Some(1),
-        reduce_verdict: false,
-        export_first: vec![],
+        shape: None.into(),
+        risk_tier: Some("crucial".into()).into(),
+        kind: None.into(),
+        size: None.into(),
+        risk_tags: PresentVec::present(vec![]),
+        worktree: None.into(),
+        lenses: PresentVec::present(vec![]),
+        min_successful: Some(1).into(),
+        reduce_verdict: false.into(),
+        export_first: Default::default(),
         member_outputs: None,
         max_nodes: 2,
     });
     let mut nodes = vec![review];
     for i in 0..9 {
         let mut item = node(&format!("disposition-{i}"), route("first"));
-        item.dispositions = vec!["accepted".into()];
+        item.dispositions = vec!["accepted".into()].into();
         nodes.push(item);
     }
     let mut document = graph(nodes);
@@ -714,11 +714,11 @@ fn admitted_deferred_review_fits_checkpoint_after_expansion() {
         commit: oid.clone(),
     });
     root.composite = Some(CompositeSpec {
-        reduce_verdict: false,
+        reduce_verdict: false.into(),
         min_successful: Some(1),
         nodes: vec![lens],
         exports: vec![GraphInput {
-            required_outputs: Vec::new(),
+            required_outputs: Default::default(),
             extra: Default::default(),
             node: "lens".into(),
             outputs: vec![OutputKind::Result],
@@ -772,16 +772,16 @@ fn deferred_review_journals_and_replays_without_resolving_again() {
         commit: oid.clone(),
     });
     review.review = Some(ReviewSpec {
-        shape: None,
-        risk_tier: None,
-        kind: None,
-        size: None,
-        risk_tags: vec![],
-        worktree: None,
-        lenses: vec![],
-        min_successful: Some(1),
-        reduce_verdict: false,
-        export_first: vec![],
+        shape: None.into(),
+        risk_tier: None.into(),
+        kind: None.into(),
+        size: None.into(),
+        risk_tags: PresentVec::present(vec![]),
+        worktree: None.into(),
+        lenses: PresentVec::present(vec![]),
+        min_successful: Some(1).into(),
+        reduce_verdict: false.into(),
+        export_first: Default::default(),
         member_outputs: None,
         max_nodes: 3,
     });
@@ -790,11 +790,11 @@ fn deferred_review_journals_and_replays_without_resolving_again() {
     outer.route = None;
     outer.prompt.clear();
     outer.composite = Some(CompositeSpec {
-        reduce_verdict: false,
+        reduce_verdict: false.into(),
         min_successful: Some(1),
         nodes: vec![review],
         exports: vec![GraphInput {
-            required_outputs: Vec::new(),
+            required_outputs: Default::default(),
             extra: Default::default(),
             node: "review".into(),
             outputs: vec![OutputKind::Result, OutputKind::Findings],
@@ -803,12 +803,13 @@ fn deferred_review_journals_and_replays_without_resolving_again() {
     let mut synthesis = node("synthesis", route("first"));
     synthesis.depends_on = vec!["outer".into()];
     synthesis.inputs = vec![GraphInput {
-        required_outputs: Vec::new(),
+        required_outputs: Default::default(),
         extra: Default::default(),
         node: "outer".into(),
         outputs: vec![OutputKind::Findings],
-    }];
-    synthesis.dispositions = vec!["accepted".into()];
+    }]
+    .into();
+    synthesis.dispositions = vec!["accepted".into()].into();
     let mut document = graph(vec![outer, synthesis]);
     document.schema_version = 2;
     let unsupported = advance(
@@ -836,11 +837,11 @@ fn deferred_review_journals_and_replays_without_resolving_again() {
         commit: oid.clone(),
     });
     root.composite = Some(CompositeSpec {
-        reduce_verdict: false,
+        reduce_verdict: false.into(),
         min_successful: Some(1),
         nodes: vec![lens],
         exports: vec![GraphInput {
-            required_outputs: Vec::new(),
+            required_outputs: Default::default(),
             extra: Default::default(),
             node: "lens".into(),
             outputs: vec![OutputKind::Result, OutputKind::Findings],
@@ -1640,7 +1641,7 @@ const DISPOSITIONS: [&str; 3] = ["accepted", "rejected", "deferred"];
 
 fn synthesis_run(text: &str) -> NodeProgress {
     let mut synthesis = node("synthesis", route("first"));
-    synthesis.dispositions = DISPOSITIONS.map(String::from).to_vec();
+    synthesis.dispositions = DISPOSITIONS.map(String::from).to_vec().into();
     let mut owner = FakeOwner {
         observations: [terminal_with_result(AttemptOutcome::Succeeded, text)].into(),
         ..Default::default()
@@ -1686,14 +1687,15 @@ fn a_synthesis_settles_with_a_disposition_and_reason_for_every_finding() {
 #[test]
 fn identity_only_dispositions_inherit_selected_findings() {
     let mut synthesis = node("synthesis", route("first"));
-    synthesis.dispositions = DISPOSITIONS.map(String::from).to_vec();
+    synthesis.dispositions = DISPOSITIONS.map(String::from).to_vec().into();
     synthesis.depends_on = vec!["review".into()];
     synthesis.inputs = vec![GraphInput {
-        required_outputs: Vec::new(),
+        required_outputs: Default::default(),
         extra: Default::default(),
         node: "review".into(),
         outputs: vec![OutputKind::Findings],
-    }];
+    }]
+    .into();
     for (id, state) in [
         ("F1", NodeState::Succeeded),
         ("missing-F9", NodeState::Failed),
@@ -1894,14 +1896,15 @@ fn a_synthesis_must_dispose_of_every_selected_upstream_finding_exactly_once() {
     let run = |text: &str| {
         let mut synthesis = node("synthesis", route("first"));
         synthesis.kind = Some(NodeKind::Synthesise);
-        synthesis.dispositions = DISPOSITIONS.map(String::from).to_vec();
+        synthesis.dispositions = DISPOSITIONS.map(String::from).to_vec().into();
         synthesis.depends_on = vec!["review".into()];
         synthesis.inputs = vec![GraphInput {
-            required_outputs: Vec::new(),
+            required_outputs: Default::default(),
             extra: Default::default(),
             node: "review".into(),
             outputs: vec![OutputKind::Findings],
-        }];
+        }]
+        .into();
         let mut owner = FakeOwner {
             observations: [
                 terminal_with_result(AttemptOutcome::Succeeded, &findings_text(&entry(""))),
@@ -1944,18 +1947,19 @@ fn synthesis_disposes_once_of_findings_propagated_through_verifier() {
     let mut verify = node("verify", route("first"));
     verify.depends_on = vec!["lens".into()];
     verify.inputs = vec![GraphInput {
-        required_outputs: Vec::new(),
+        required_outputs: Default::default(),
         extra: Default::default(),
         node: "lens".into(),
         outputs: vec![OutputKind::Result],
-    }];
+    }]
+    .into();
     let mut synthesis = node("synthesis", route("first"));
-    synthesis.dispositions = DISPOSITIONS.map(String::from).to_vec();
+    synthesis.dispositions = DISPOSITIONS.map(String::from).to_vec().into();
     synthesis.depends_on = vec!["lens".into(), "verify".into()];
     synthesis.inputs = ["verify", "lens"]
         .into_iter()
         .map(|id| GraphInput {
-            required_outputs: Vec::new(),
+            required_outputs: Default::default(),
             extra: Default::default(),
             node: id.into(),
             outputs: vec![OutputKind::Findings],
@@ -1993,7 +1997,7 @@ fn synthesis_disposes_once_of_findings_propagated_through_verifier() {
 #[test]
 fn large_synthesis_trims_metadata_and_replays_with_finding_identities() {
     let input = |id: &str| GraphInput {
-        required_outputs: Vec::new(),
+        required_outputs: Default::default(),
         extra: Default::default(),
         node: id.into(),
         outputs: vec![OutputKind::Findings],
@@ -2008,7 +2012,7 @@ fn large_synthesis_trims_metadata_and_replays_with_finding_identities() {
     for i in 0..8 {
         let mut verifier = node(&format!("verifier{i}"), route("first"));
         verifier.depends_on = vec!["seed".into()];
-        verifier.inputs = vec![input("seed")];
+        verifier.inputs = vec![input("seed")].into();
         nodes.push(verifier);
         observations.push_back(terminal_with_result(
             AttemptOutcome::Succeeded,
@@ -2018,11 +2022,11 @@ fn large_synthesis_trims_metadata_and_replays_with_finding_identities() {
     let mut synthesis = node("synthesis", route("first"));
     synthesis.depends_on = (0..8).map(|i| format!("verifier{i}")).collect();
     synthesis.inputs = synthesis.depends_on.iter().map(|id| input(id)).collect();
-    synthesis.dispositions = DISPOSITIONS.map(String::from).to_vec();
+    synthesis.dispositions = DISPOSITIONS.map(String::from).to_vec().into();
     nodes.push(synthesis);
     let mut next = node("next", route("first"));
     next.depends_on = vec!["synthesis".into()];
-    next.inputs = vec![input("synthesis")];
+    next.inputs = vec![input("synthesis")].into();
     nodes.push(next);
     let decisions = serde_json::json!({"id":"F1", "disposition":"accepted", "reason":"yes", "detail":"x".repeat(8000)});
     observations.push_back(terminal_with_result(
@@ -2080,7 +2084,7 @@ fn large_synthesis_trims_metadata_and_replays_with_finding_identities() {
 #[test]
 fn large_synthesis_compacts_immutable_fields_and_replays_with_finding_identities() {
     let input = |id: &str| GraphInput {
-        required_outputs: Vec::new(),
+        required_outputs: Default::default(),
         extra: Default::default(),
         node: id.into(),
         outputs: vec![OutputKind::Findings],
@@ -2104,7 +2108,7 @@ fn large_synthesis_compacts_immutable_fields_and_replays_with_finding_identities
     for i in 0..20 {
         let mut verifier = node(&format!("verifier{i}"), route("first"));
         verifier.depends_on = vec!["seed".into()];
-        verifier.inputs = vec![input("seed")];
+        verifier.inputs = vec![input("seed")].into();
         nodes.push(verifier);
         observations.push_back(terminal_with_result(
             AttemptOutcome::Succeeded,
@@ -2114,11 +2118,11 @@ fn large_synthesis_compacts_immutable_fields_and_replays_with_finding_identities
     let mut synthesis = node("synthesis", route("first"));
     synthesis.depends_on = (0..20).map(|i| format!("verifier{i}")).collect();
     synthesis.inputs = synthesis.depends_on.iter().map(|id| input(id)).collect();
-    synthesis.dispositions = DISPOSITIONS.map(String::from).to_vec();
+    synthesis.dispositions = DISPOSITIONS.map(String::from).to_vec().into();
     nodes.push(synthesis);
     let mut next = node("next", route("first"));
     next.depends_on = vec!["synthesis".into()];
-    next.inputs = vec![input("synthesis")];
+    next.inputs = vec![input("synthesis")].into();
     nodes.push(next);
     let decisions =
         serde_json::json!({"id":"F1", "disposition":"accepted", "reason":"yes", "detail":"detail"});
@@ -2237,7 +2241,7 @@ fn large_synthesis_compacts_immutable_fields_and_replays_with_finding_identities
 #[test]
 fn compacted_synthesis_survives_composite_export_and_replay() {
     let input = |id: &str| GraphInput {
-        required_outputs: Vec::new(),
+        required_outputs: Default::default(),
         extra: Default::default(),
         node: id.into(),
         outputs: vec![OutputKind::Findings],
@@ -2254,7 +2258,7 @@ fn compacted_synthesis_survives_composite_export_and_replay() {
     for i in 0..20 {
         let mut verifier = node(&format!("verifier{i}"), route("first"));
         verifier.depends_on = vec!["seed".into()];
-        verifier.inputs = vec![input("seed")];
+        verifier.inputs = vec![input("seed")].into();
         nodes.push(verifier);
         observations.push_back(terminal_with_result(
             AttemptOutcome::Succeeded,
@@ -2264,7 +2268,7 @@ fn compacted_synthesis_survives_composite_export_and_replay() {
     let mut synthesis = node("synthesis", route("first"));
     synthesis.depends_on = (0..20).map(|i| format!("verifier{i}")).collect();
     synthesis.inputs = synthesis.depends_on.iter().map(|id| input(id)).collect();
-    synthesis.dispositions = DISPOSITIONS.map(String::from).to_vec();
+    synthesis.dispositions = DISPOSITIONS.map(String::from).to_vec().into();
     let mut outer = node("outer", route("first"));
     outer.kind = Some(NodeKind::Composite);
     outer.route = None;
@@ -2274,7 +2278,7 @@ fn compacted_synthesis_survives_composite_export_and_replay() {
     synthesis.depends_on.clear();
     synthesis.inputs.clear();
     outer.composite = Some(CompositeSpec {
-        reduce_verdict: false,
+        reduce_verdict: false.into(),
         min_successful: None,
         nodes: vec![synthesis],
         exports: vec![input("synthesis")],
@@ -2282,7 +2286,7 @@ fn compacted_synthesis_survives_composite_export_and_replay() {
     nodes.push(outer);
     let mut next = node("next", route("first"));
     next.depends_on = vec!["outer".into()];
-    next.inputs = vec![input("outer")];
+    next.inputs = vec![input("outer")].into();
     nodes.push(next);
     let decisions =
         serde_json::json!({"id":"F1", "disposition":"accepted", "reason":"yes", "detail":"detail"});
@@ -2358,22 +2362,22 @@ fn compacted_synthesis_survives_composite_export_and_replay() {
 #[test]
 fn settled_copies_keep_origin_and_evidence_for_downstream_disposition() {
     let input = |id: &str| GraphInput {
-        required_outputs: Vec::new(),
+        required_outputs: Default::default(),
         extra: Default::default(),
         node: id.into(),
         outputs: vec![OutputKind::Findings],
     };
     let mut verify = node("verify", route("first"));
     verify.depends_on = vec!["lens".into()];
-    verify.inputs = vec![input("lens")];
+    verify.inputs = vec![input("lens")].into();
     let mut synthesis = node("synthesis", route("first"));
-    synthesis.dispositions = DISPOSITIONS.map(String::from).to_vec();
+    synthesis.dispositions = DISPOSITIONS.map(String::from).to_vec().into();
     synthesis.depends_on = vec!["lens".into(), "verify".into()];
-    synthesis.inputs = vec![input("lens"), input("verify")];
+    synthesis.inputs = vec![input("lens"), input("verify")].into();
     let mut downstream = node("downstream", route("first"));
-    downstream.dispositions = DISPOSITIONS.map(String::from).to_vec();
+    downstream.dispositions = DISPOSITIONS.map(String::from).to_vec().into();
     downstream.depends_on = vec!["lens".into(), "synthesis".into()];
-    downstream.inputs = vec![input("lens"), input("synthesis")];
+    downstream.inputs = vec![input("lens"), input("synthesis")].into();
     let decision = findings_text(r#"{"id":"F1","disposition":"accepted","reason":"verified"}"#);
     let mut owner = FakeOwner {
         observations: [
@@ -2640,18 +2644,18 @@ fn a_marker_shared_by_several_findings_stays_unresolved() {
 #[test]
 fn qualified_propagations_group_colliding_originals() {
     let input = |id: &str| GraphInput {
-        required_outputs: Vec::new(),
+        required_outputs: Default::default(),
         extra: Default::default(),
         node: id.into(),
         outputs: vec![OutputKind::Findings],
     };
     let mut verify = node("verify", route("first"));
     verify.depends_on = vec!["a".into(), "b".into()];
-    verify.inputs = vec![input("a"), input("b")];
+    verify.inputs = vec![input("a"), input("b")].into();
     let mut synthesis = node("synthesis", route("first"));
-    synthesis.dispositions = DISPOSITIONS.map(String::from).to_vec();
+    synthesis.dispositions = DISPOSITIONS.map(String::from).to_vec().into();
     synthesis.depends_on = vec!["a".into(), "b".into(), "verify".into()];
-    synthesis.inputs = vec![input("a"), input("b"), input("verify")];
+    synthesis.inputs = vec![input("a"), input("b"), input("verify")].into();
     let propagated = ["a", "b"]
         .map(|source| {
             entry(&format!(
@@ -2711,7 +2715,7 @@ fn qualified_propagations_group_colliding_originals() {
 #[test]
 fn multiple_verifiers_share_one_disposition_and_keep_evidence() {
     let input = |id: &str| GraphInput {
-        required_outputs: Vec::new(),
+        required_outputs: Default::default(),
         extra: Default::default(),
         node: id.into(),
         outputs: vec![OutputKind::Findings],
@@ -2719,13 +2723,13 @@ fn multiple_verifiers_share_one_disposition_and_keep_evidence() {
     let verifier = |id: &str| {
         let mut n = node(id, route("first"));
         n.depends_on = vec!["lens".into()];
-        n.inputs = vec![input("lens")];
+        n.inputs = vec![input("lens")].into();
         n
     };
     let mut synthesis = node("synthesis", route("first"));
-    synthesis.dispositions = DISPOSITIONS.map(String::from).to_vec();
+    synthesis.dispositions = DISPOSITIONS.map(String::from).to_vec().into();
     synthesis.depends_on = vec!["lens".into(), "verify".into(), "verify2".into()];
-    synthesis.inputs = vec![input("lens"), input("verify"), input("verify2")];
+    synthesis.inputs = vec![input("lens"), input("verify"), input("verify2")].into();
     let mut owner = FakeOwner {
         observations: [
             terminal_with_result(AttemptOutcome::Succeeded, &findings_text(&entry(""))),
@@ -2783,21 +2787,21 @@ fn multiple_verifiers_share_one_disposition_and_keep_evidence() {
 #[test]
 fn chain_resolves_rendered_markers_and_preserves_every_copy() {
     let input = |id: &str| GraphInput {
-        required_outputs: Vec::new(),
+        required_outputs: Default::default(),
         extra: Default::default(),
         node: id.into(),
         outputs: vec![OutputKind::Findings],
     };
     let mut v1 = node("v1", route("first"));
     v1.depends_on = vec!["a".into(), "b".into()];
-    v1.inputs = vec![input("a"), input("b")];
+    v1.inputs = vec![input("a"), input("b")].into();
     let mut v2 = node("v2", route("first"));
     v2.depends_on = vec!["v1".into()];
-    v2.inputs = vec![input("v1")];
+    v2.inputs = vec![input("v1")].into();
     let mut synth = node("synthesis", route("first"));
-    synth.dispositions = DISPOSITIONS.map(String::from).to_vec();
+    synth.dispositions = DISPOSITIONS.map(String::from).to_vec().into();
     synth.depends_on = vec!["a".into(), "b".into(), "v1".into(), "v2".into()];
-    synth.inputs = vec![input("a"), input("b"), input("v1"), input("v2")];
+    synth.inputs = vec![input("a"), input("b"), input("v1"), input("v2")].into();
     let propagated = entry(",\"evidence\":\"middle\",\"propagates\":\"a:a:F1\"");
     let last = entry(",\"evidence\":\"last\",\"propagates\":\"v1:F1\"");
     let decisions = r#"{"id":"a:F1","disposition":"accepted","reason":"yes"},{"id":"b:F1","disposition":"rejected","reason":"no"}"#;
@@ -2853,7 +2857,7 @@ fn chain_resolves_rendered_markers_and_preserves_every_copy() {
 #[test]
 fn result_only_inputs_do_not_change_rendered_finding_ids() {
     let input = |id: &str, output| GraphInput {
-        required_outputs: Vec::new(),
+        required_outputs: Default::default(),
         extra: Default::default(),
         node: id.into(),
         outputs: vec![output],
@@ -2864,14 +2868,16 @@ fn result_only_inputs_do_not_change_rendered_finding_ids() {
         input("a", OutputKind::Result),
         input("b", OutputKind::Findings),
         input("c", OutputKind::Findings),
-    ];
+    ]
+    .into();
     let mut synth = node("synthesis", route("first"));
-    synth.dispositions = DISPOSITIONS.map(String::from).to_vec();
+    synth.dispositions = DISPOSITIONS.map(String::from).to_vec().into();
     synth.depends_on = vec!["b".into(), "verify".into()];
     synth.inputs = vec![
         input("b", OutputKind::Findings),
         input("verify", OutputKind::Findings),
-    ];
+    ]
+    .into();
     let mut owner = FakeOwner {
         observations: [
             terminal_with_result(
@@ -2933,7 +2939,7 @@ fn result_only_inputs_do_not_change_rendered_finding_ids() {
 #[test]
 fn qualified_id_collision_requires_three_distinct_dispositions() {
     let input = |id: &str| GraphInput {
-        required_outputs: Vec::new(),
+        required_outputs: Default::default(),
         extra: Default::default(),
         node: id.into(),
         outputs: vec![OutputKind::Findings],
@@ -2949,9 +2955,9 @@ fn qualified_id_collision_requires_three_distinct_dispositions() {
         ),
     ] {
         let mut synth = node("synthesis", route("first"));
-        synth.dispositions = DISPOSITIONS.map(String::from).to_vec();
+        synth.dispositions = DISPOSITIONS.map(String::from).to_vec().into();
         synth.depends_on = vec!["a".into(), "b".into(), "c".into()];
-        synth.inputs = vec![input("a"), input("b"), input("c")];
+        synth.inputs = vec![input("a"), input("b"), input("c")].into();
         let mut owner = FakeOwner {
             observations: [
                 terminal_with_result(AttemptOutcome::Succeeded, &findings_text(&entry(""))),
@@ -2987,21 +2993,21 @@ fn qualified_id_collision_requires_three_distinct_dispositions() {
 #[test]
 fn ambiguous_propagation_warns_and_remains_independent() {
     let input = |id: &str| GraphInput {
-        required_outputs: Vec::new(),
+        required_outputs: Default::default(),
         extra: Default::default(),
         node: id.into(),
         outputs: vec![OutputKind::Findings],
     };
     let mut a = node("a", route("first"));
     a.depends_on = vec!["b".into()];
-    a.inputs = vec![input("b")];
+    a.inputs = vec![input("b")].into();
     let mut verify = node("verify", route("first"));
     verify.depends_on = vec!["a".into(), "b".into(), "c".into()];
-    verify.inputs = vec![input("a"), input("b"), input("c")];
+    verify.inputs = vec![input("a"), input("b"), input("c")].into();
     let mut synth = node("synthesis", route("first"));
-    synth.dispositions = DISPOSITIONS.map(String::from).to_vec();
+    synth.dispositions = DISPOSITIONS.map(String::from).to_vec().into();
     synth.depends_on = vec!["b".into(), "verify".into()];
-    synth.inputs = vec![input("b"), input("verify")];
+    synth.inputs = vec![input("b"), input("verify")].into();
     // a:b:F1 matches the stored ID of a's independent finding and the
     // rendered ID of a's propagated copy of b:F1.
     let renamed = entry("").replace("\"id\":\"F1\"", "\"id\":\"b:F1\"");
@@ -3058,18 +3064,18 @@ fn ambiguous_propagation_warns_and_remains_independent() {
 #[test]
 fn unresolved_marker_warns_and_remains_an_independent_identity() {
     let input = |id: &str| GraphInput {
-        required_outputs: Vec::new(),
+        required_outputs: Default::default(),
         extra: Default::default(),
         node: id.into(),
         outputs: vec![OutputKind::Findings],
     };
     let mut verify = node("verify", route("first"));
     verify.depends_on = vec!["a".into()];
-    verify.inputs = vec![input("a")];
+    verify.inputs = vec![input("a")].into();
     let mut synth = node("synthesis", route("first"));
-    synth.dispositions = DISPOSITIONS.map(String::from).to_vec();
+    synth.dispositions = DISPOSITIONS.map(String::from).to_vec().into();
     synth.depends_on = vec!["a".into(), "verify".into()];
-    synth.inputs = vec![input("a"), input("verify")];
+    synth.inputs = vec![input("a"), input("verify")].into();
     let decisions = r#"{"id":"a:F1","disposition":"accepted","reason":"yes"},{"id":"verify:F1","disposition":"rejected","reason":"no"}"#;
     let mut owner = FakeOwner {
         observations: [
@@ -3112,18 +3118,19 @@ fn dependent_reviewers_with_independent_same_ids_require_distinct_dispositions()
     let mut b = node("b", route("first"));
     b.depends_on = vec!["a".into()];
     b.inputs = vec![GraphInput {
-        required_outputs: Vec::new(),
+        required_outputs: Default::default(),
         extra: Default::default(),
         node: "a".into(),
         outputs: vec![OutputKind::Result],
-    }];
+    }]
+    .into();
     let mut synthesis = node("synthesis", route("first"));
-    synthesis.dispositions = DISPOSITIONS.map(String::from).to_vec();
+    synthesis.dispositions = DISPOSITIONS.map(String::from).to_vec().into();
     synthesis.depends_on = vec!["a".into(), "b".into()];
     synthesis.inputs = ["a", "b"]
         .into_iter()
         .map(|id| GraphInput {
-            required_outputs: Vec::new(),
+            required_outputs: Default::default(),
             extra: Default::default(),
             node: id.into(),
             outputs: vec![OutputKind::Findings],
@@ -3167,14 +3174,15 @@ fn dependent_reviewers_with_independent_same_ids_require_distinct_dispositions()
 #[test]
 fn unknown_disposition_does_not_hide_an_undisposed_finding_on_replay() {
     let mut synthesis = node("synthesis", route("first"));
-    synthesis.dispositions = DISPOSITIONS.map(String::from).to_vec();
+    synthesis.dispositions = DISPOSITIONS.map(String::from).to_vec().into();
     synthesis.depends_on = vec!["review".into()];
     synthesis.inputs = vec![GraphInput {
-        required_outputs: Vec::new(),
+        required_outputs: Default::default(),
         extra: Default::default(),
         node: "review".into(),
         outputs: vec![OutputKind::Findings],
-    }];
+    }]
+    .into();
     let document = graph(vec![node("review", route("first")), synthesis]);
     let upstream = format!("{},{}", entry(""), entry("").replace("F1", "F2"));
     let decisions = r#"{"id":"F1","disposition":"accepted","reason":"yes"},{"id":"F9","disposition":"rejected","reason":"no"}"#;
@@ -3204,7 +3212,7 @@ fn unknown_disposition_does_not_hide_an_undisposed_finding_on_replay() {
 #[test]
 fn required_findings_prompt_includes_empty_example_even_when_fence_is_mentioned() {
     let mut lens = node("lens", route("first"));
-    lens.require_findings = true;
+    lens.require_findings = true.into();
     lens.prompt = "Review the existing ```findings block.".into();
     let mut owner = FakeOwner {
         observations: VecDeque::from([terminal_with_result(
@@ -3226,35 +3234,37 @@ fn required_findings_prompt_includes_empty_example_even_when_fence_is_mentioned(
 #[test]
 fn synthesis_recovers_upheld_findings_when_verifier_block_is_truncated() {
     let mut lens = node("lens", route("first"));
-    lens.require_findings = true;
+    lens.require_findings = true.into();
 
     let mut verify = node("verify", route("first"));
     verify.depends_on = vec!["lens".into()];
     verify.inputs = vec![GraphInput {
-        required_outputs: Vec::new(),
+        required_outputs: Default::default(),
         extra: Default::default(),
         node: "lens".into(),
         outputs: vec![OutputKind::Result, OutputKind::Findings],
-    }];
+    }]
+    .into();
 
     let mut synthesis = node("synthesis", route("first"));
     synthesis.kind = Some(NodeKind::Synthesise);
-    synthesis.dispositions = DISPOSITIONS.map(String::from).to_vec();
+    synthesis.dispositions = DISPOSITIONS.map(String::from).to_vec().into();
     synthesis.depends_on = vec!["lens".into(), "verify".into()];
     synthesis.inputs = vec![
         GraphInput {
-            required_outputs: Vec::new(),
+            required_outputs: Default::default(),
             extra: Default::default(),
             node: "lens".into(),
             outputs: vec![OutputKind::Findings],
         },
         GraphInput {
-            required_outputs: Vec::new(),
+            required_outputs: Default::default(),
             extra: Default::default(),
             node: "verify".into(),
             outputs: vec![OutputKind::Result, OutputKind::Findings],
         },
-    ];
+    ]
+    .into();
 
     let upheld = "F1 remains valid: UPHELD because the call still panics.\n```findings\n{\"schema_version\":1,\"findings\":[";
     let mut owner = FakeOwner {
@@ -3348,11 +3358,12 @@ fn synthesis_stops_when_the_pinned_integration_head_moves() {
         synthesis.source = Some(SourceBinding::Integration);
         synthesis.depends_on = vec!["lens".into()];
         synthesis.inputs = vec![GraphInput {
-            required_outputs: Vec::new(),
+            required_outputs: Default::default(),
             extra: Default::default(),
             node: "lens".into(),
             outputs: vec![OutputKind::Result],
-        }];
+        }]
+        .into();
         let mut document = graph(vec![node("lens", route("first")), synthesis]);
         document.integration_branch = Some("batch".into());
         let mut owner = FakeOwner {
@@ -3382,7 +3393,7 @@ fn source_and_read_roots_survive_retry_and_replay() {
     let commit = "1".repeat(40);
     let mut leaf = node("review", route("first"));
     leaf.source = Some(SourceBinding::Integration);
-    leaf.read_roots = vec!["/authorised/other-worktree".into()];
+    leaf.read_roots = vec!["/authorised/other-worktree".into()].into();
     leaf.route = None;
     leaf.routes = Some(vec![route("first"), route("fallback")]);
     let mut document = graph(vec![leaf]);
@@ -3415,6 +3426,44 @@ fn source_and_read_roots_survive_retry_and_replay() {
     );
     let replay = advance(&document, &mut FakeOwner::default(), &mut journal).unwrap();
     assert_eq!(replay.checkpoint.nodes[0].source_commit, Some(commit));
+}
+
+#[test]
+fn composite_read_roots_move_to_members_without_empty_boundary_field() {
+    let mut root = node("group", route("first"));
+    root.kind = Some(NodeKind::Composite);
+    root.route = None;
+    root.prompt.clear();
+    root.read_roots = vec!["/authorised/tree".to_owned()].into();
+    root.composite = Some(CompositeSpec {
+        min_successful: None,
+        reduce_verdict: false.into(),
+        nodes: vec![node("member", route("first"))],
+        exports: vec![GraphInput {
+            extra: Default::default(),
+            node: "member".into(),
+            outputs: vec![OutputKind::Result],
+            required_outputs: Default::default(),
+        }],
+    });
+    let expanded = composites::expand(&graph(vec![root]), &plans::generous()).unwrap();
+    let boundary = expanded
+        .nodes
+        .iter()
+        .find(|node| node.id == "group")
+        .unwrap();
+    let member = expanded
+        .nodes
+        .iter()
+        .find(|node| node.id == "group--member")
+        .unwrap();
+    assert_eq!(member.read_roots, vec!["/authorised/tree".to_owned()]);
+    assert!(
+        serde_json::to_value(boundary)
+            .unwrap()
+            .get("read_roots")
+            .is_none()
+    );
 }
 
 #[test]
@@ -4025,13 +4074,13 @@ fn typed_composite_constructor_matches_decoded_graph_node() {
         vec!["source".into()],
         CompositeSpec {
             min_successful: Some(1),
-            reduce_verdict: true,
+            reduce_verdict: true.into(),
             nodes: Vec::new(),
             exports: vec![GraphInput {
                 extra: Default::default(),
                 node: "member".into(),
                 outputs: vec![OutputKind::Result, OutputKind::Findings],
-                required_outputs: Vec::new(),
+                required_outputs: Default::default(),
             }],
         },
     );
@@ -5190,7 +5239,7 @@ fn verdict_fixture(
         let review = node(&format!("review-{i}"), route("fixture"));
         gate.depends_on.push(review.id.clone());
         gate.inputs.push(GraphInput {
-            required_outputs: Vec::new(),
+            required_outputs: Default::default(),
             extra: Default::default(),
             node: review.id.clone(),
             outputs: vec![OutputKind::Verdict],
@@ -6449,7 +6498,7 @@ fn parent_and_child(
     let mut child = node("child", route("fixture"));
     child.depends_on.push("parent".into());
     child.inputs.push(GraphInput {
-        required_outputs: Vec::new(),
+        required_outputs: Default::default(),
         extra: Default::default(),
         node: "parent".into(),
         outputs: vec![OutputKind::Result],
@@ -6483,7 +6532,7 @@ fn attempt_manifests_retain_selected_evidence_across_fallback_and_replay() {
         extra: Default::default(),
         node: "parent".into(),
         outputs: vec![OutputKind::Result, OutputKind::Commit],
-        required_outputs: vec![OutputKind::Commit],
+        required_outputs: vec![OutputKind::Commit].into(),
     });
     let mut producer = node("parent", route("fixture"));
     producer.source = Some(SourceBinding::Commit {
@@ -6613,7 +6662,7 @@ fn attempt_manifest_bounds_the_number_of_selected_values() {
             extra: Default::default(),
             node: id.clone(),
             outputs: vec![OutputKind::Result],
-            required_outputs: Vec::new(),
+            required_outputs: Default::default(),
         });
         nodes.push(node(&id, route("fixture")));
     }
@@ -7156,16 +7205,16 @@ fn tries_routes_in_order_and_persists_each_terminal_attempt() {
         topology_present: Default::default(),
         distinct_from: None,
         distinct_strength: None,
-        dispositions: Vec::new(),
+        dispositions: Default::default(),
         composite: None,
         role: None,
-        read_roots: Vec::new(),
+        read_roots: Default::default(),
         capabilities: None,
         source: None,
         after_expansion: Vec::new(),
         plan: None,
-        write_scope: Vec::new(),
-        acceptance_checks: Vec::new(),
+        write_scope: Default::default(),
+        acceptance_checks: Default::default(),
         decide: None,
         continues: None,
         land: None,
@@ -7175,20 +7224,20 @@ fn tries_routes_in_order_and_persists_each_terminal_attempt() {
         condition: None,
         on_fail: None,
         delivery: None,
-        require_skill_location: false,
+        require_skill_location: false.into(),
         access: AccessMode::ReadOnly,
         worktree: None,
         id: "node".to_owned(),
         title: None,
         deadline_seconds: None,
-        prompt: "do the work".to_owned(),
+        prompt: "do the work".into(),
         depends_on: Vec::new(),
-        advisory: false,
-        inputs: Vec::new(),
+        advisory: false.into(),
+        inputs: Default::default(),
         route: None,
         routes: Some(routes.clone()),
         required_verdict: None,
-        require_findings: false,
+        require_findings: false.into(),
         skip_without_findings: None,
     }]);
     let mut owner = FakeOwner {
@@ -7432,16 +7481,16 @@ fn pending_and_unknown_keep_observing_the_same_route_without_fallback() {
             topology_present: Default::default(),
             distinct_from: None,
             distinct_strength: None,
-            dispositions: Vec::new(),
+            dispositions: Default::default(),
             composite: None,
             role: None,
-            read_roots: Vec::new(),
+            read_roots: Default::default(),
             capabilities: None,
             source: None,
             after_expansion: Vec::new(),
             plan: None,
-            write_scope: Vec::new(),
-            acceptance_checks: Vec::new(),
+            write_scope: Default::default(),
+            acceptance_checks: Default::default(),
             decide: None,
             continues: None,
             land: None,
@@ -7451,20 +7500,20 @@ fn pending_and_unknown_keep_observing_the_same_route_without_fallback() {
             condition: None,
             on_fail: None,
             delivery: None,
-            require_skill_location: false,
+            require_skill_location: false.into(),
             access: AccessMode::ReadOnly,
             worktree: None,
             id: "node".to_owned(),
             title: None,
             deadline_seconds: None,
-            prompt: "do the work".to_owned(),
+            prompt: "do the work".into(),
             depends_on: Vec::new(),
-            advisory: false,
-            inputs: Vec::new(),
+            advisory: false.into(),
+            inputs: Default::default(),
             route: None,
             routes: Some(routes.clone()),
             required_verdict: None,
-            require_findings: false,
+            require_findings: false.into(),
             skip_without_findings: None,
         }]);
         let mut owner = FakeOwner {
@@ -8057,16 +8106,16 @@ fn terminal_task_failure_does_not_try_a_fallback_route() {
         topology_present: Default::default(),
         distinct_from: None,
         distinct_strength: None,
-        dispositions: Vec::new(),
+        dispositions: Default::default(),
         composite: None,
         role: None,
-        read_roots: Vec::new(),
+        read_roots: Default::default(),
         capabilities: None,
         source: None,
         after_expansion: Vec::new(),
         plan: None,
-        write_scope: Vec::new(),
-        acceptance_checks: Vec::new(),
+        write_scope: Default::default(),
+        acceptance_checks: Default::default(),
         decide: None,
         continues: None,
         land: None,
@@ -8076,20 +8125,20 @@ fn terminal_task_failure_does_not_try_a_fallback_route() {
         condition: None,
         on_fail: None,
         delivery: None,
-        require_skill_location: false,
+        require_skill_location: false.into(),
         access: AccessMode::ReadOnly,
         worktree: None,
         id: "node".to_owned(),
         title: None,
         deadline_seconds: None,
-        prompt: "do the work".to_owned(),
+        prompt: "do the work".into(),
         depends_on: Vec::new(),
-        advisory: false,
-        inputs: Vec::new(),
+        advisory: false.into(),
+        inputs: Default::default(),
         route: None,
         routes: Some(vec![route("first"), route("second")]),
         required_verdict: None,
-        require_findings: false,
+        require_findings: false.into(),
         skip_without_findings: None,
     }]);
     let mut owner = FakeOwner {
@@ -8232,16 +8281,16 @@ fn deferred_lens_substitution_keeps_panel_topology() {
         commit: oid.clone(),
     });
     review.review = Some(ReviewSpec {
-        shape: None,
-        risk_tier: None,
-        kind: None,
-        size: None,
-        risk_tags: vec![],
-        worktree: None,
-        lenses: vec![],
-        min_successful: Some(1),
-        reduce_verdict: false,
-        export_first: vec![],
+        shape: None.into(),
+        risk_tier: None.into(),
+        kind: None.into(),
+        size: None.into(),
+        risk_tags: PresentVec::present(vec![]),
+        worktree: None.into(),
+        lenses: PresentVec::present(vec![]),
+        min_successful: Some(1).into(),
+        reduce_verdict: false.into(),
+        export_first: Default::default(),
         member_outputs: None,
         max_nodes: 2,
     });
@@ -8265,13 +8314,13 @@ fn deferred_lens_substitution_keeps_panel_topology() {
     });
     root.composite = Some(CompositeSpec {
         min_successful: Some(1),
-        reduce_verdict: false,
+        reduce_verdict: false.into(),
         nodes: vec![lens],
         exports: vec![GraphInput {
             extra: Default::default(),
             node: "lens".into(),
             outputs: vec![OutputKind::Result],
-            required_outputs: Vec::new(),
+            required_outputs: Default::default(),
         }],
     });
     let expansion = Expansion {
@@ -8678,7 +8727,7 @@ fn outputs_feed_direct_dependants_and_survive_replay() {
     let mut child = node("child", route("fixture"));
     child.depends_on.push("parent".into());
     child.inputs.push(GraphInput {
-        required_outputs: Vec::new(),
+        required_outputs: Default::default(),
         extra: Default::default(),
         node: "parent".into(),
         outputs: vec![OutputKind::Result, OutputKind::Findings],
@@ -8725,7 +8774,7 @@ fn output_parsing_is_lenient_and_rendering_fails_instead_of_omitting() {
     let mut child = node("child", route("fixture"));
     child.depends_on.push("parent".into());
     child.inputs.push(GraphInput {
-        required_outputs: Vec::new(),
+        required_outputs: Default::default(),
         extra: Default::default(),
         node: "parent".into(),
         outputs: vec![OutputKind::Result],
@@ -8773,7 +8822,7 @@ fn optional_findings_distinguish_missing_invalid_and_valid_empty() {
         let mut child = node("child", route("fixture"));
         child.depends_on.push("parent".into());
         child.inputs.push(GraphInput {
-            required_outputs: Vec::new(),
+            required_outputs: Default::default(),
             extra: Default::default(),
             node: "parent".into(),
             outputs: vec![OutputKind::Findings],
@@ -8860,7 +8909,7 @@ fn required_inputs_stop_before_consumer_attempt_when_unavailable() {
             extra: Default::default(),
             node: "parent".into(),
             outputs: vec![kind],
-            required_outputs: vec![kind],
+            required_outputs: vec![kind].into(),
         });
         let mut document = graph(vec![child, parent]);
         document.schema_version = 2;
@@ -8905,7 +8954,7 @@ fn required_findings_that_do_not_fit_are_not_partially_delivered() {
         extra: Default::default(),
         node: "parent".into(),
         outputs: vec![OutputKind::Findings],
-        required_outputs: vec![OutputKind::Findings],
+        required_outputs: vec![OutputKind::Findings].into(),
     });
     let mut document = graph(vec![child, node("parent", route("fixture"))]);
     document.schema_version = 2;
@@ -8957,7 +9006,7 @@ fn required_values_do_not_trust_a_truncated_source() {
             extra: Default::default(),
             node: "parent".into(),
             outputs: vec![kind],
-            required_outputs: vec![kind],
+            required_outputs: vec![kind].into(),
         });
         let mut document = graph(vec![child, node("parent", route("fixture"))]);
         document.schema_version = 2;
@@ -9021,7 +9070,7 @@ fn optional_invalid_commit_and_verdict_are_visible_as_unavailable() {
             extra: Default::default(),
             node: "parent".into(),
             outputs: vec![kind],
-            required_outputs: Vec::new(),
+            required_outputs: Default::default(),
         });
         let document = graph(vec![child, parent]);
         let mut first = terminal_with_result(AttemptOutcome::Succeeded, text);
@@ -9126,7 +9175,7 @@ fn upstream_data_boundary_cannot_be_closed_by_result_content() {
     let mut child = node("child", route("fixture"));
     child.depends_on.push("parent".into());
     child.inputs.push(GraphInput {
-        required_outputs: Vec::new(),
+        required_outputs: Default::default(),
         extra: Default::default(),
         node: "parent".into(),
         outputs: vec![OutputKind::Result],
@@ -9165,7 +9214,7 @@ fn synthesise_receives_selected_reviewer_findings_and_emits_typed_output() {
     synthesis.inputs = ["one", "two", "three"]
         .iter()
         .map(|id| GraphInput {
-            required_outputs: Vec::new(),
+            required_outputs: Default::default(),
             extra: Default::default(),
             node: (*id).into(),
             outputs: vec![OutputKind::Findings],
@@ -9252,7 +9301,7 @@ fn result_path_is_visible_in_status_but_not_in_input() {
     let mut child = node("child", route("fixture"));
     child.depends_on.push("parent".into());
     child.inputs.push(GraphInput {
-        required_outputs: Vec::new(),
+        required_outputs: Default::default(),
         extra: Default::default(),
         node: "parent".into(),
         outputs: vec![OutputKind::Result],
@@ -9285,10 +9334,10 @@ fn result_path_is_visible_in_status_but_not_in_input() {
 #[test]
 fn selected_inputs_without_room_fail_before_launch() {
     let mut child = node("child", route("fixture"));
-    child.prompt = "x".repeat(90);
+    child.prompt = "x".repeat(90).into();
     child.depends_on.push("parent".into());
     child.inputs.push(GraphInput {
-        required_outputs: Vec::new(),
+        required_outputs: Default::default(),
         extra: Default::default(),
         node: "parent".into(),
         outputs: vec![OutputKind::Result],
@@ -9331,10 +9380,10 @@ fn selected_inputs_without_room_fail_before_launch() {
 #[test]
 fn oversized_prompt_with_inputs_pauses_and_resumes_after_extension() {
     let mut child = node("child", route("fixture"));
-    child.prompt = "x".repeat(300);
+    child.prompt = "x".repeat(300).into();
     child.depends_on.push("parent".into());
     child.inputs.push(GraphInput {
-        required_outputs: Vec::new(),
+        required_outputs: Default::default(),
         extra: Default::default(),
         node: "parent".into(),
         outputs: vec![OutputKind::Result],
@@ -9448,7 +9497,7 @@ fn foreign_output_schema_is_rejected_on_resume() {
 #[test]
 fn no_input_prompt_does_not_change_on_resume_with_lower_cap() {
     let mut root = node("parent", route("fixture"));
-    root.prompt = "x".repeat(300);
+    root.prompt = "x".repeat(300).into();
     let document = graph(vec![root]);
     let mut owner = FakeOwner {
         input_cap_source: Some(InputCapSource::Default),
@@ -9496,7 +9545,7 @@ fn cap_failure_on_fallback_preserves_prior_attempt_outcome() {
     child.routes = Some(vec![route("first"), route("second")]);
     child.depends_on.push("parent".into());
     child.inputs.push(GraphInput {
-        required_outputs: Vec::new(),
+        required_outputs: Default::default(),
         extra: Default::default(),
         node: "parent".into(),
         outputs: vec![OutputKind::Result],
@@ -9620,7 +9669,7 @@ fn replay_keeps_the_admission_input_cap() {
     let mut child = node("child", route("fixture"));
     child.depends_on.push("parent".into());
     child.inputs.push(GraphInput {
-        required_outputs: Vec::new(),
+        required_outputs: Default::default(),
         extra: Default::default(),
         node: "parent".into(),
         outputs: vec![OutputKind::Result],
@@ -9682,7 +9731,7 @@ fn replay_keeps_the_admission_input_cap() {
 fn inputs_require_unique_direct_dependencies() {
     let mut child = node("child", route("fixture"));
     child.inputs.push(GraphInput {
-        required_outputs: Vec::new(),
+        required_outputs: Default::default(),
         extra: Default::default(),
         node: "parent".into(),
         outputs: vec![OutputKind::Result],
@@ -10930,6 +10979,9 @@ fn composite_rejects_overlong_qualified_finding_id() {
         composite.advance_error_code.as_deref(),
         Some("composite_findings_exceed_cap")
     );
+    let reason = composite.advance_error.as_deref().unwrap();
+    assert!(reason.contains("output_field_bytes"), "{reason}");
+    assert!(reason.contains("graph output capture"), "{reason}");
     assert_ne!(
         run.checkpoint
             .nodes
@@ -10951,14 +11003,15 @@ fn composite_rejects_overlong_qualified_finding_id() {
 #[test]
 fn identity_dispositions_preserve_large_inherited_fields() {
     let mut synthesis = node("synthesis", route("first"));
-    synthesis.dispositions = DISPOSITIONS.map(String::from).to_vec();
+    synthesis.dispositions = DISPOSITIONS.map(String::from).to_vec().into();
     synthesis.depends_on = vec!["review".into()];
     synthesis.inputs = vec![GraphInput {
-        required_outputs: Vec::new(),
+        required_outputs: Default::default(),
         extra: Default::default(),
         node: "review".into(),
         outputs: vec![OutputKind::Findings],
-    }];
+    }]
+    .into();
     let long = "x".repeat(900);
     let entries: Vec<_> = (0..3).map(|i| serde_json::json!({"id":format!("F{i}"),"severity":"high","file":long,"summary":long,"status":long})).collect();
     let review = format!(
@@ -11004,12 +11057,12 @@ fn identity_dispositions_preserve_large_inherited_fields() {
 #[test]
 fn direct_reviewers_with_duplicate_ids_require_distinct_dispositions() {
     let mut synthesis = node("synthesis", route("first"));
-    synthesis.dispositions = DISPOSITIONS.map(String::from).to_vec();
+    synthesis.dispositions = DISPOSITIONS.map(String::from).to_vec().into();
     synthesis.depends_on = vec!["a".into(), "b".into()];
     synthesis.inputs = ["a", "b"]
         .into_iter()
         .map(|id| GraphInput {
-            required_outputs: Vec::new(),
+            required_outputs: Default::default(),
             extra: Default::default(),
             node: id.into(),
             outputs: vec![OutputKind::Findings],
@@ -11079,16 +11132,16 @@ fn review_plan_schema_validation() {
         commit: "1".repeat(40),
     });
     reader.review = Some(ReviewSpec {
-        shape: None,
-        risk_tier: None,
-        kind: None,
-        size: None,
-        risk_tags: vec![],
-        worktree: None,
-        lenses: vec![],
-        min_successful: None,
-        reduce_verdict: false,
-        export_first: vec![],
+        shape: None.into(),
+        risk_tier: None.into(),
+        kind: None.into(),
+        size: None.into(),
+        risk_tags: PresentVec::present(vec![]),
+        worktree: None.into(),
+        lenses: PresentVec::present(vec![]),
+        min_successful: None.into(),
+        reduce_verdict: false.into(),
+        export_first: Default::default(),
         member_outputs: None,
         max_nodes: 4,
     });
@@ -11120,16 +11173,16 @@ fn deferred_review_evaluator_uses_bounded_findings_and_tolerates_one_invalid_len
             commit: oid.clone(),
         });
         review.review = Some(ReviewSpec {
-            shape: None,
-            risk_tier: None,
-            kind: None,
-            size: None,
-            risk_tags: vec![],
-            worktree: None,
-            lenses: vec![],
-            min_successful: Some(0),
-            reduce_verdict: false,
-            export_first: vec![],
+            shape: None.into(),
+            risk_tier: None.into(),
+            kind: None.into(),
+            size: None.into(),
+            risk_tags: PresentVec::present(vec![]),
+            worktree: None.into(),
+            lenses: PresentVec::present(vec![]),
+            min_successful: Some(0).into(),
+            reduce_verdict: false.into(),
+            export_first: Default::default(),
             member_outputs: None,
             max_nodes: 9,
         });
@@ -11140,17 +11193,17 @@ fn deferred_review_evaluator_uses_bounded_findings_and_tolerates_one_invalid_len
         let lenses: Vec<_> = (0..8)
             .map(|i| {
                 let mut lens = node(&format!("lens-{i}"), route("first"));
-                lens.require_findings = true;
+                lens.require_findings = true.into();
                 lens
             })
             .collect();
         root.composite = Some(CompositeSpec {
-            reduce_verdict: false,
+            reduce_verdict: false.into(),
             min_successful: Some(7),
             exports: lenses
                 .iter()
                 .map(|lens| GraphInput {
-                    required_outputs: Vec::new(),
+                    required_outputs: Default::default(),
                     extra: Default::default(),
                     node: lens.id.clone(),
                     outputs: vec![OutputKind::Result, OutputKind::Findings],
@@ -11184,11 +11237,12 @@ fn deferred_review_evaluator_uses_bounded_findings_and_tolerates_one_invalid_len
         let mut evaluate = node("evaluate", route("first"));
         evaluate.depends_on = vec!["review".into()];
         evaluate.inputs = vec![GraphInput {
-            required_outputs: Vec::new(),
+            required_outputs: Default::default(),
             extra: Default::default(),
             node: "review".into(),
             outputs: vec![OutputKind::Findings],
-        }];
+        }]
+        .into();
         let mut document = graph(vec![review, evaluate]);
         document.schema_version = 2;
         let large = format!("{}\n{}", "x".repeat(250_000), findings_text(&entry("")));
@@ -11280,16 +11334,16 @@ fn a_deferred_review_lens_keeps_the_writer_for_family_separation() {
         node: "write".into(),
     });
     review.review = Some(ReviewSpec {
-        shape: None,
-        risk_tier: None,
-        kind: None,
-        size: None,
-        risk_tags: vec![],
-        worktree: None,
-        lenses: vec![],
-        min_successful: Some(1),
-        reduce_verdict: false,
-        export_first: vec![],
+        shape: None.into(),
+        risk_tier: None.into(),
+        kind: None.into(),
+        size: None.into(),
+        risk_tags: PresentVec::present(vec![]),
+        worktree: None.into(),
+        lenses: PresentVec::present(vec![]),
+        min_successful: Some(1).into(),
+        reduce_verdict: false.into(),
+        export_first: Default::default(),
         member_outputs: None,
         max_nodes: 3,
     });
@@ -11301,11 +11355,11 @@ fn a_deferred_review_lens_keeps_the_writer_for_family_separation() {
     lens.distinct_from = Some(DistinctFrom::Writer);
     lens.distinct_strength = Some(FamilyStrength::Require);
     root.composite = Some(CompositeSpec {
-        reduce_verdict: false,
+        reduce_verdict: false.into(),
         min_successful: Some(1),
         nodes: vec![lens],
         exports: vec![GraphInput {
-            required_outputs: Vec::new(),
+            required_outputs: Default::default(),
             extra: Default::default(),
             node: "lens".into(),
             outputs: vec![OutputKind::Result],
@@ -11368,14 +11422,14 @@ fn a_deferred_review_lens_keeps_the_writer_for_family_separation() {
         .composite
         .as_mut()
         .unwrap()
-        .reduce_verdict = true;
+        .reduce_verdict = true.into();
     assert!(plans::validate_review_addition(&document, &changed_reduction).is_err());
     let mut declared_reduction = document.clone();
     declared_reduction.nodes[1]
         .review
         .as_mut()
         .unwrap()
-        .reduce_verdict = true;
+        .reduce_verdict = true.into();
     assert!(plans::validate_review_addition(&declared_reduction, &changed_reduction).is_ok());
     let mut declared_outputs = document.clone();
     declared_outputs.nodes[1]
@@ -11476,8 +11530,9 @@ fn equal_review_range_warns_on_review_nodes() {
         extra: Default::default(),
         node: "synthesis".into(),
         outputs: vec![OutputKind::Verdict],
-        required_outputs: Vec::new(),
-    }];
+        required_outputs: Default::default(),
+    }]
+    .into();
     let pass = "```findings\n{\"schema_version\":1,\"findings\":[]}\n```\nVERDICT: PASS";
     let mut owner = FakeOwner {
         equal_range: true,
@@ -11648,7 +11703,7 @@ fn deferred_panel_replay_keeps_the_recorded_reduction() {
     })).unwrap();
     assert!(plans::validate_review_addition(&document, &addition).is_ok());
     let mut changed = addition.clone();
-    changed.nodes[1].composite.as_mut().unwrap().reduce_verdict = false;
+    changed.nodes[1].composite.as_mut().unwrap().reduce_verdict = false.into();
     assert!(plans::validate_review_addition(&document, &changed).is_err());
     let mut changed = addition;
     changed.nodes[2].source = Some(SourceBinding::Commit {

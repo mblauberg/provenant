@@ -321,6 +321,78 @@ impl GraphLimits {
         }
     }
 
+    /// Maximum size of a field retained in a graph output.
+    pub const fn output_field_bytes_bound() -> GraphBound<'static> {
+        GraphBound {
+            name: "output_field_bytes",
+            maximum: 1024,
+            owner: "graph output capture",
+        }
+    }
+
+    /// Maximum number of findings retained from an individual output.
+    pub const fn finding_count_bound() -> GraphBound<'static> {
+        GraphBound {
+            name: "finding_count",
+            maximum: 32,
+            owner: "graph output capture",
+        }
+    }
+
+    /// Canonical byte budget for findings stored from an individual output.
+    pub const fn findings_bytes_bound() -> GraphBound<'static> {
+        GraphBound {
+            name: "findings_bytes",
+            maximum: 9_216,
+            owner: "graph output capture",
+        }
+    }
+
+    /// Canonical byte budget for the disposition projection of upstream findings.
+    pub const fn disposition_findings_bytes_bound() -> GraphBound<'static> {
+        GraphBound {
+            name: "disposition_findings_bytes",
+            maximum: 128 * 1024,
+            owner: "graph output capture",
+        }
+    }
+
+    /// Maximum size of the leading result capture window.
+    pub const fn result_capture_head_bytes_bound() -> GraphBound<'static> {
+        GraphBound {
+            name: "result_capture_head_bytes",
+            maximum: provenant_records::result_capture::ResultCapture::HEAD_BYTES,
+            owner: "result capture",
+        }
+    }
+
+    /// Maximum size of the trailing result capture window.
+    pub const fn result_capture_tail_bytes_bound() -> GraphBound<'static> {
+        GraphBound {
+            name: "result_capture_tail_bytes",
+            maximum: provenant_records::result_capture::ResultCapture::TAIL_BYTES,
+            owner: "result capture",
+        }
+    }
+
+    /// Canonical byte budget for failed-check evidence in a CI gate.
+    pub fn ci_failed_checks_bytes_bound(maximum: Option<usize>) -> GraphBound<'static> {
+        GraphBound {
+            name: "failed_checks_max_bytes",
+            maximum: maximum.unwrap_or(16_384),
+            owner: "graph CI gate",
+        }
+    }
+
+    /// Count budget for failed-check evidence in a CI gate.
+    pub fn ci_failed_checks_count_bound(maximum: Option<usize>) -> GraphBound<'static> {
+        GraphBound {
+            name: "max_failed_checks",
+            maximum: maximum.unwrap_or(20),
+            owner: "graph CI gate",
+        }
+    }
+
     /// Maximum size of a persisted graph document accepted by graph readers.
     pub fn document_bytes_bound() -> GraphBound<'static> {
         GraphBound {

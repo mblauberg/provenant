@@ -63,7 +63,7 @@ pub use asks::{
 };
 pub use composites::CompositeSpec;
 pub use land::{LandAuthority, LandObservation, LandRecord, LandRequest, LandSpec};
-pub use loops::{InvalidLoopDecision, LoopDecision, LoopRound, LoopSpec};
+pub use loops::{ExtensionRounds, InvalidLoopDecision, LoopDecision, LoopRound, LoopSpec};
 pub use plans::{
     Expansion, PatternInstantiation, PatternParameter, PatternParameterKind, PatternSpec, PlanSpec,
     RemainingBudgets,
@@ -176,17 +176,19 @@ const MAX_CHECKPOINT_MEMBERS: usize = MAX_CHECKPOINT_BYTES as usize / 2;
 const MAX_ADVANCE_ERROR_BYTES: usize = 2_048;
 // Canonical-byte shares for runtime text stored in a checkpoint. The envelope
 // bound in `graph/envelope.rs` adds them up for each plan before admission.
-const RESULT_EXCERPT_BYTES: usize = 4_096;
+const RESULT_EXCERPT_BYTES: usize =
+    crate::config::GraphLimits::result_capture_head_bytes_bound().maximum;
 /// Canonical bytes of a declared handoff's remaining items carried in a node's
 /// outputs; the full block stays with the stopped-early continuation.
 const REMAINING_BYTES: usize = 4_096;
 const COMPOSITE_EXCERPT_BYTES: usize = 65_536;
 /// The raw findings block is at most 8 KiB of JSON; canonical form adds at
 /// most a null `line` per finding.
-const FINDINGS_BYTES: usize = 9_216;
+const FINDINGS_BYTES: usize = crate::config::GraphLimits::findings_bytes_bound().maximum;
 // Oversized disposition projections retain their bounded findings block and
 // reconstruct inherited copies from upstream checkpoint inputs.
-const DISPOSITION_FINDINGS_BYTES: usize = 128 * 1024;
+const DISPOSITION_FINDINGS_BYTES: usize =
+    crate::config::GraphLimits::disposition_findings_bytes_bound().maximum;
 const WARNING_BYTES: usize = 512;
 /// Output parsing, writer handoff and an empty review range can each add warnings.
 const MAX_WARNINGS: usize = 5;
@@ -484,6 +486,8 @@ pub enum GraphError<RunError: Error + 'static, JournalError: Error + 'static> {
         node: String,
         invariant: &'static str,
     },
+    #[error("graph checkpoint node {node}: {reason}")]
+    BadCheckpointLimit { node: String, reason: String },
     #[error("cannot canonically encode the validated graph plan")]
     Canonical(#[source] CanonicalError),
     #[error("run attempt owner failed: {0}")]
@@ -501,7 +505,7 @@ impl<R: Error + 'static, J: Error + 'static> GraphError<R, J> {
             Self::Extension(_) => "invalid_extension",
             Self::Refused(_) => "graph_refused",
             Self::PlanChanged => "plan_changed",
-            Self::BadCheckpoint { .. } => "bad_checkpoint",
+            Self::BadCheckpoint { .. } | Self::BadCheckpointLimit { .. } => "bad_checkpoint",
             Self::Canonical(_) => "canonical",
             Self::Run(_) => "run",
             Self::Journal(_) => "journal",

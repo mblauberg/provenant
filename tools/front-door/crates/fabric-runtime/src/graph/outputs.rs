@@ -1,10 +1,11 @@
 use super::*;
 
-pub(super) const OUTPUT_FIELD_BYTES: usize = 1024;
+pub(super) const OUTPUT_FIELD_BYTES: usize =
+    crate::config::GraphLimits::output_field_bytes_bound().maximum;
 /// Families and bytes per family a recorded separation keeps.
 pub(super) const SEPARATION_FAMILIES: usize = 8;
 pub(super) const FAMILY_BYTES: usize = 64;
-pub(super) const MAX_FINDINGS: usize = 32;
+pub(super) const MAX_FINDINGS: usize = crate::config::GraphLimits::finding_count_bound().maximum;
 /// Checkpoint extension holding the original bounded synthesis block.
 const COMPACT_FINDINGS: &str = "_compact_disposition_findings";
 
@@ -78,9 +79,8 @@ pub(super) fn make_outputs_with_upstream(
         .and_then(|capture| capture.verdict.as_deref())
         .map(str::to_owned);
     let parsed = result
-        .ok_or("field findings: block missing")
+        .ok_or_else(|| "field findings: block missing".to_owned())
         .and_then(findings_block)
-        .map_err(str::to_owned)
         .and_then(|block| parse_findings(block, upstream));
     let findings_available = Some(
         result.is_some_and(|capture| !capture.source_truncated)
@@ -232,8 +232,10 @@ fn parse_findings(
             .collect(),
         _ => return Err("field findings: expected array or object".into()),
     };
-    if entries.len() > MAX_FINDINGS {
-        return Err(format!("field findings: exceeds {MAX_FINDINGS} entries"));
+    if let Some(reason) = crate::config::GraphLimits::finding_count_bound().refusal(entries.len()) {
+        return Err(format!(
+            "field findings: exceeds {MAX_FINDINGS} entries: {reason}"
+        ));
     }
     let mut findings = Vec::new();
     let mut skipped = Vec::new();
@@ -385,8 +387,13 @@ fn parse_findings(
         ] {
             explicit_extensions.remove(field);
         }
-        if canonical_len(&explicit_extensions) > FINDINGS_BYTES {
-            return Err(fail("findings", "additional fields exceed byte cap"));
+        if let Some(reason) = crate::config::GraphLimits::findings_bytes_bound()
+            .refusal(canonical_len(&explicit_extensions))
+        {
+            return Err(fail(
+                "findings",
+                &format!("additional fields exceed byte cap: {reason}"),
+            ));
         }
         // Expand one disposition to all copies, inheriting each separately.
         let copies: Vec<_> = source.map_or_else(
@@ -479,8 +486,13 @@ fn parse_findings(
             ] {
                 extensions.remove(field);
             }
-            if canonical_len(&extensions) > FINDINGS_BYTES {
-                return Err(fail("findings", "additional fields exceed byte cap"));
+            if let Some(reason) = crate::config::GraphLimits::findings_bytes_bound()
+                .refusal(canonical_len(&extensions))
+            {
+                return Err(fail(
+                    "findings",
+                    &format!("additional fields exceed byte cap: {reason}"),
+                ));
             }
             findings.push(
                 serde_json::from_value::<Finding>(entry.into())
@@ -488,11 +500,6 @@ fn parse_findings(
             );
         }
     }
-    let cap = if upstream.is_empty() {
-        FINDINGS_BYTES
-    } else {
-        DISPOSITION_FINDINGS_BYTES
-    };
     let mut size = canonical_len(&findings);
     let mut trimmed = 0;
     if !upstream.is_empty() && size > DISPOSITION_TEXT_TARGET {
@@ -517,8 +524,12 @@ fn parse_findings(
             }
         }
     }
-    if upstream.is_empty() && size > cap {
-        return Err("field findings: exceeds canonical byte cap".into());
+    if upstream.is_empty()
+        && let Some(reason) = crate::config::GraphLimits::findings_bytes_bound().refusal(size)
+    {
+        return Err(format!(
+            "field findings: exceeds canonical byte cap: {reason}"
+        ));
     }
     if findings.is_empty()
         && let Some(warning) = skipped
@@ -531,7 +542,7 @@ fn parse_findings(
 }
 
 /// Read only a complete findings block from the captured head or tail.
-fn findings_block(capture: &crate::result_capture::CapturedResult) -> Result<&str, &'static str> {
+fn findings_block(capture: &crate::result_capture::CapturedResult) -> Result<&str, String> {
     let head = if capture.truncated {
         capture
             .excerpt
@@ -555,8 +566,12 @@ fn findings_block(capture: &crate::result_capture::CapturedResult) -> Result<&st
         .ok_or("field findings: block unterminated")?;
     // ResultCapture's largest window is 16 KiB. Refuse a fabricated capture
     // that would evade the checkpoint reservation for this block.
-    if block.len() > 16 * 1024 {
-        return Err("field findings: block exceeds capture window");
+    if let Some(reason) =
+        crate::config::GraphLimits::result_capture_tail_bytes_bound().refusal(block.len())
+    {
+        return Err(format!(
+            "field findings: block exceeds capture window: {reason}"
+        ));
     }
     Ok(block)
 }
@@ -601,7 +616,9 @@ pub(super) fn valid_compacted_findings(
     let Some(block) = value.as_str() else {
         return false;
     };
-    if block.len() > 16 * 1024
+    if crate::config::GraphLimits::result_capture_tail_bytes_bound()
+        .refusal(block.len())
+        .is_some()
         || !outputs.findings.is_empty()
         || plan.nodes[index].dispositions.is_empty()
     {
@@ -1644,6 +1661,46 @@ mod alias_tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn excess_findings_name_the_shared_bound_and_owner() {
+        let block = serde_json::json!({
+            "schema_version": 1,
+            "findings": vec![serde_json::json!({}); MAX_FINDINGS + 1],
+        })
+        .to_string();
+        let reason = parse_findings(&block, &[]).unwrap_err();
+        assert!(reason.contains("finding_count"), "{reason}");
+        assert!(reason.contains("graph output capture"), "{reason}");
+    }
+
+    #[test]
+    fn oversized_findings_name_the_shared_byte_bound_and_owner() {
+        let entries = (0..20)
+            .map(|i| {
+                serde_json::json!({
+                    "id": format!("F{i}"), "severity": "high", "file": "src/lib.rs",
+                    "summary": "s".repeat(500), "status": "open"
+                })
+            })
+            .collect::<Vec<_>>();
+        let block = serde_json::json!({"schema_version": 1, "findings": entries}).to_string();
+        let reason = parse_findings(&block, &[]).unwrap_err();
+        assert!(reason.contains("findings_bytes"), "{reason}");
+        assert!(reason.contains("graph output capture"), "{reason}");
+    }
+
+    #[test]
+    fn oversized_findings_block_names_the_capture_window_owner() {
+        let mut capture = crate::result_capture::ResultCapture::new(None).finish();
+        capture.tail = format!(
+            "```findings\n{}\n```",
+            "x".repeat(crate::result_capture::ResultCapture::TAIL_BYTES + 1)
+        );
+        let reason = findings_block(&capture).unwrap_err();
+        assert!(reason.contains("result_capture_tail_bytes"), "{reason}");
+        assert!(reason.contains("result capture"), "{reason}");
     }
 
     #[test]

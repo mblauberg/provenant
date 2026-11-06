@@ -979,6 +979,18 @@ fn findingless_ci_failure_respects_loop_recovery_override() {
 }
 
 #[test]
+fn ci_evidence_bounds_name_the_gate_owner() {
+    for bound in [
+        crate::config::GraphLimits::ci_failed_checks_bytes_bound(Some(150)),
+        crate::config::GraphLimits::ci_failed_checks_count_bound(Some(1)),
+    ] {
+        let reason = bound.refusal(bound.maximum + 1).unwrap();
+        assert!(reason.contains(bound.name), "{reason}");
+        assert!(reason.contains("graph CI gate"), "{reason}");
+    }
+}
+
+#[test]
 fn ci_failed_checks_obey_count_and_canonical_byte_caps_with_unicode_and_escapes() {
     let mut check = failed_check();
     check.name = "é\"\\\n".repeat(20);
@@ -1034,6 +1046,18 @@ fn ci_configured_evidence_caps_apply_before_checkpoint_and_findings() {
         advance(&doc, &mut owner, &mut journal).unwrap().checkpoint,
         run.checkpoint
     );
+    let checkpoint = journal.0.as_mut().unwrap();
+    checkpoint.nodes[0]
+        .ci
+        .as_mut()
+        .unwrap()
+        .failed_checks
+        .push(failed_check());
+    let error = advance(&doc, &mut owner, &mut journal).unwrap_err();
+    assert_eq!(error.code(), "bad_checkpoint");
+    let reason = error.to_string();
+    assert!(reason.contains("max_failed_checks"), "{reason}");
+    assert!(reason.contains("graph CI gate"), "{reason}");
 }
 
 #[test]

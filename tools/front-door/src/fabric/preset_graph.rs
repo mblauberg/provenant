@@ -458,7 +458,7 @@ fn document_model_verdict(
         .find(|node| {
             node.composite
                 .as_ref()
-                .is_some_and(|group| group.reduce_verdict)
+                .is_some_and(|group| group.reduce_verdict.value())
         })
         .or_else(|| document.nodes.last())?;
     let outputs = checkpoint

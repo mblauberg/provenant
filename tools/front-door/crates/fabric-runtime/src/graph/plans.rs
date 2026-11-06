@@ -11,32 +11,32 @@ pub struct PlanSpec {
     pub kinds: Vec<NodeKind>,
     pub max_nodes: usize,
     /// Patterns this plan node allows a fragment to instantiate.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub patterns: Vec<PatternSpec>,
+    #[serde(default, skip_serializing_if = "PresentVec::absent")]
+    pub patterns: PresentVec<PatternSpec>,
     /// A fragment may instantiate patterns only, never emit raw nodes.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub patterns_only: bool,
+    #[serde(default, skip_serializing_if = "PresentBool::absent")]
+    pub patterns_only: PresentBool,
     /// Fragment units that no dependency orders form one wave, and the writers
     /// of one wave must hold disjoint scopes. Without it, overlapping writers
     /// share a checkout and run in turn.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub disjoint_waves: bool,
+    #[serde(default, skip_serializing_if = "PresentBool::absent")]
+    pub disjoint_waves: PresentBool,
     /// Consumers of the plan node also read what the fragment's pattern
     /// instances export. Off, a consumer keeps exactly the inputs it declared.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub wire_exports: bool,
+    #[serde(default, skip_serializing_if = "PresentBool::absent")]
+    pub wire_exports: PresentBool,
     /// Static preset stage to run if this planner's attempt fails.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fallback: Option<CompositeSpec>,
     /// Existing dependencies and inputs inherited by the static stage.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub fallback_depends_on: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub fallback_inputs: Vec<GraphInput>,
+    #[serde(default, skip_serializing_if = "PresentVec::absent")]
+    pub fallback_depends_on: PresentVec<String>,
+    #[serde(default, skip_serializing_if = "PresentVec::absent")]
+    pub fallback_inputs: PresentVec<GraphInput>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fallback_source: Option<SourceBinding>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub fallback_read_roots: Vec<String>,
+    #[serde(default, skip_serializing_if = "PresentVec::absent")]
+    pub fallback_read_roots: PresentVec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fallback_title: Option<String>,
 }
@@ -46,8 +46,8 @@ pub struct PatternSpec {
     #[serde(flatten)]
     pub extra: provenant_records::ExtraFields,
     pub name: String,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub parameters: BTreeMap<String, PatternParameter>,
+    #[serde(default, skip_serializing_if = "PresentMap::absent")]
+    pub parameters: PresentMap<String, PatternParameter>,
     /// Kept as JSON until parameter interpolation, because a typed field such as
     /// `write_scope` may be a single `${scope}` placeholder for a list value.
     pub nodes: Vec<serde_json::Value>,
@@ -66,8 +66,8 @@ pub struct PatternParameter {
     pub min: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max: Option<serde_json::Value>,
-    #[serde(default, rename = "enum", skip_serializing_if = "Vec::is_empty")]
-    pub allowed: Vec<serde_json::Value>,
+    #[serde(default, rename = "enum", skip_serializing_if = "PresentVec::absent")]
+    pub allowed: PresentVec<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub doc: Option<String>,
 }
@@ -259,8 +259,8 @@ fn pattern_summary(spec: &PlanSpec) -> String {
 }
 
 pub fn prompt(node: &GraphNode) -> String {
-    let mut prompt = node.prompt.clone();
-    if node.require_findings {
+    let mut prompt = node.prompt.to_string();
+    if node.require_findings.value() {
         prompt.push_str(
             "\n\nInclude a fenced `findings` JSON block in your final response. If there are no findings, emit exactly:\n```findings\n{\"schema_version\":1,\"findings\":[]}\n```\nEach finding must include its id, severity, file, summary and status.",
         );
@@ -540,7 +540,7 @@ fn derive_topology(
                 &addition.source,
                 spec,
                 document,
-                planner.require_skill_location,
+                planner.require_skill_location.value(),
             )
             .map_err(|_| {
                 (
@@ -649,7 +649,7 @@ pub(super) fn append(document: &mut GraphDocument, expansion: &Expansion) {
         .and_then(|plan| plan.fallback.as_ref())
         .filter(|fallback| fallback.nodes.len() == 1)
         .and_then(|fallback| fallback.nodes[0].composite.as_ref())
-        .filter(|inner| inner.reduce_verdict)
+        .filter(|inner| inner.reduce_verdict.value())
         .map(|inner| inner.min_successful);
     for node in &mut document.nodes {
         if node.dependencies().any(|name| name == &expansion.source) {
@@ -667,7 +667,7 @@ pub(super) fn append(document: &mut GraphDocument, expansion: &Expansion) {
                 wire_exports(node, &expansion.source, &exported);
                 if expansion.review.is_none()
                     && let Some(composite) = &mut node.composite
-                    && composite.reduce_verdict
+                    && composite.reduce_verdict.value()
                     && composite
                         .exports
                         .iter()
@@ -927,7 +927,7 @@ pub(super) fn validate_review_addition(
                         "reduce" => {
                             lenses
                                 .and_then(|node| node.composite.as_ref())
-                                .is_some_and(|group| group.reduce_verdict)
+                                .is_some_and(|group| group.reduce_verdict.value())
                                 && !addition
                                     .nodes
                                     .iter()
@@ -936,7 +936,7 @@ pub(super) fn validate_review_addition(
                         "model" => {
                             lenses
                                 .and_then(|node| node.composite.as_ref())
-                                .is_some_and(|group| !group.reduce_verdict)
+                                .is_some_and(|group| !group.reduce_verdict.value())
                                 && addition
                                     .nodes
                                     .iter()
@@ -960,7 +960,7 @@ pub(super) fn validate_review_addition(
         || addition.nodes.len() > spec.max_nodes
         || lens_root.composite.as_ref().is_none_or(|composite| {
             let mut exported = std::collections::BTreeSet::new();
-            (!whole_panel && composite.reduce_verdict != spec.reduce_verdict)
+            (!whole_panel && composite.reduce_verdict.value() != spec.reduce_verdict.value())
                 || composite.min_successful != spec.min_successful.map(|n| if n == 0 { composite.exports.len().saturating_sub(1).max(1) } else { n })
                 || composite.exports.is_empty()
                 || composite.exports.first().is_none_or(|first| spec.export_first.iter().any(|output| !first.outputs.contains(output)))
@@ -972,7 +972,7 @@ pub(super) fn validate_review_addition(
                                 || export.outputs.iter().any(|output| {
                                     !requested.contains(output)
                                         && !(index == 0 && (spec.export_first.contains(output)
-                                            || (whole_panel && composite.reduce_verdict && *output == OutputKind::Commit)))
+                                            || (whole_panel && composite.reduce_verdict.value() && *output == OutputKind::Commit)))
                                 })
                         })
                         || !addition.nodes.iter().any(|member| member.id == export.node && member.id != lens_root.id && member.id.starts_with(&format!("{}--", lens_root.id)))
@@ -981,11 +981,11 @@ pub(super) fn validate_review_addition(
         })
         || (whole_panel && root.composite.as_ref().is_none_or(|composite| {
             let lens = lens_root;
-            let reduced = lens.composite.as_ref().is_some_and(|group| group.reduce_verdict);
+            let reduced = lens.composite.as_ref().is_some_and(|group| group.reduce_verdict.value());
             let output = if reduced { lens.id.clone() } else { format!("{}--s", root.id) };
             let verifier_count = addition.nodes.iter().filter(|node| node.id.starts_with(&format!("{}--v-", root.id))).count();
             let expected_exports = if reduced && verifier_count > 0 { 2 } else { 1 };
-            composite.reduce_verdict || composite.min_successful.is_some()
+            composite.reduce_verdict.value() || composite.min_successful.is_some()
                 || composite.exports.len() != expected_exports || composite.exports[0].node != output
                 || [OutputKind::Result, OutputKind::Findings, OutputKind::Verdict, OutputKind::Commit].iter().any(|kind| !composite.exports[0].outputs.contains(kind))
                 || (expected_exports == 2 && (composite.exports[1].node != format!("{}--v-{verifier_count}", root.id)
@@ -1028,13 +1028,13 @@ fn fragment_exports(document: &GraphDocument, expansion: &Expansion) -> Vec<Grap
         if root
             .composite
             .as_ref()
-            .is_some_and(|spec| spec.reduce_verdict)
+            .is_some_and(|spec| spec.reduce_verdict.value())
             && !outputs.contains(&OutputKind::Verdict)
         {
             outputs.push(OutputKind::Verdict);
         }
         return vec![GraphInput {
-            required_outputs: Vec::new(),
+            required_outputs: Default::default(),
             extra: Default::default(),
             node: root.id.clone(),
             outputs,
@@ -1045,7 +1045,7 @@ fn fragment_exports(document: &GraphDocument, expansion: &Expansion) -> Vec<Grap
         .iter()
         .find(|n| n.id == expansion.source)
         .and_then(|n| n.plan.as_ref())
-        .filter(|spec| spec.wire_exports)
+        .filter(|spec| spec.wire_exports.value())
     else {
         return Vec::new();
     };
@@ -1066,7 +1066,7 @@ fn fragment_exports(document: &GraphDocument, expansion: &Expansion) -> Vec<Grap
             }
         }
         return vec![GraphInput {
-            required_outputs: Vec::new(),
+            required_outputs: Default::default(),
             extra: Default::default(),
             node: format!("{}--fallback", expansion.source),
             outputs,
@@ -1078,7 +1078,7 @@ fn fragment_exports(document: &GraphDocument, expansion: &Expansion) -> Vec<Grap
         .filter_map(|instance| {
             let pattern = spec.patterns.iter().find(|p| p.name == instance.name)?;
             Some(pattern.exports.iter().map(move |export| GraphInput {
-                required_outputs: Vec::new(),
+                required_outputs: Default::default(),
                 extra: Default::default(),
                 node: format!("{}--{}", instance.id, export.node),
                 outputs: export.outputs.clone(),
@@ -1108,7 +1108,7 @@ fn wire_exports(node: &mut GraphNode, source: &str, exported: &[GraphInput]) {
             continue;
         }
         node.inputs.push(GraphInput {
-            required_outputs: Vec::new(),
+            required_outputs: Default::default(),
             extra: Default::default(),
             node: export.node.clone(),
             outputs,
@@ -1351,7 +1351,7 @@ fn fragment(
     }
     let mut fragment: Fragment =
         serde_json::from_value(value).map_err(|e| format!("invalid fragment: {e}"))?;
-    if spec.patterns_only && !fragment.nodes.is_empty() {
+    if spec.patterns_only.value() && !fragment.nodes.is_empty() {
         return Err("this plan accepts pattern instances only; raw nodes are refused".into());
     }
     if fragment.schema_version != 1 || fragment.nodes.len() > spec.max_nodes {
@@ -1536,7 +1536,7 @@ fn fragment(
         .iter()
         .filter_map(|n| local.nodes.iter().find(|child| child.id == n.id).cloned())
         .collect();
-    if spec.disjoint_waves {
+    if spec.disjoint_waves.value() {
         check_waves(&units, &nodes)?;
     }
     // Union overlapping writer scopes, including transitive overlaps. Every
@@ -1797,7 +1797,7 @@ fn continuation(
     child.title = None;
     child.depends_on = vec![node.id.clone()];
     child.after_expansion.clear();
-    child.inputs.clear();
+    child.inputs = Default::default();
     if child.access == AccessMode::WorktreeWrite && child.source.is_some() {
         child.source = Some(SourceBinding::Node {
             node: node.id.clone(),

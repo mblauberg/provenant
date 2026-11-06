@@ -27,13 +27,6 @@ pub struct CiFailedCheck {
     pub excerpt: String,
 }
 
-pub(super) fn default_failed_checks_max_bytes() -> usize {
-    16_384
-}
-pub(super) fn default_max_failed_checks() -> usize {
-    20
-}
-
 impl CiObservation {
     /// Cap the complete canonical JSON array, including names, URLs and escapes.
     /// Both host probes and checkpoint admission use this same boundary.
@@ -136,8 +129,10 @@ pub(super) fn evaluate<O: AttemptOwner>(
     else {
         unreachable!()
     };
-    let max_bytes = failed_checks_max_bytes.unwrap_or_else(default_failed_checks_max_bytes);
-    let max_checks = max_failed_checks.unwrap_or_else(default_max_failed_checks);
+    let max_bytes =
+        crate::config::GraphLimits::ci_failed_checks_bytes_bound(*failed_checks_max_bytes).maximum;
+    let max_checks =
+        crate::config::GraphLimits::ci_failed_checks_count_bound(*max_failed_checks).maximum;
     let resolved = match target {
         CiTarget::Ref(target) => Some(target.clone()),
         CiTarget::Node { node, .. } => checkpoint
@@ -358,19 +353,32 @@ pub(super) fn outputs(passed: bool, ci: Option<&CiEvidence>) -> NodeOutputs {
     outputs
 }
 
-pub(super) fn valid_evidence(ci: &CiEvidence, condition: &GateCondition) -> bool {
+pub(super) fn evidence_bound_reason(ci: &CiEvidence, condition: &GateCondition) -> Option<String> {
     let GateCondition::Ci {
         failed_checks_max_bytes,
         max_failed_checks,
         ..
     } = condition
     else {
-        return false;
+        return None;
     };
-    ci.failed_checks.len() <= max_failed_checks.unwrap_or_else(default_max_failed_checks)
-        && (ci.failed_checks.is_empty()
-            || canonical_len(&ci.failed_checks)
-                <= failed_checks_max_bytes.unwrap_or_else(default_failed_checks_max_bytes))
+    crate::config::GraphLimits::ci_failed_checks_count_bound(*max_failed_checks)
+        .refusal(ci.failed_checks.len())
+        .or_else(|| {
+            (!ci.failed_checks.is_empty())
+                .then(|| {
+                    crate::config::GraphLimits::ci_failed_checks_bytes_bound(
+                        *failed_checks_max_bytes,
+                    )
+                    .refusal(canonical_len(&ci.failed_checks))
+                })
+                .flatten()
+        })
+}
+
+pub(super) fn valid_evidence(ci: &CiEvidence, condition: &GateCondition) -> bool {
+    matches!(condition, GateCondition::Ci { .. })
+        && evidence_bound_reason(ci, condition).is_none()
         && encoded_len(&ci.summary) <= OUTPUT_FIELD_BYTES + 2
         && canonical_len(&ci.check_names) <= OUTPUT_FIELD_BYTES + 2
         && ci

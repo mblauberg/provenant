@@ -3156,8 +3156,8 @@ pub(crate) mod peer_tests {
         };
         let mut unreadable = deferred(None, serde_json::json!([]))?;
         let unreadable_spec = unreadable.review.as_mut().ok_or("review spec missing")?;
-        unreadable_spec.shape = Some("quick".into());
-        unreadable_spec.worktree = Some("missing-review-directory".into());
+        unreadable_spec.shape = Some("quick".into()).into();
+        unreadable_spec.worktree = Some("missing-review-directory".into()).into();
         let unreadable = bound.resolve_review(&unreadable, &head)?;
         let record = unreadable.review.as_ref().ok_or("review resolution missing")?;
         assert_eq!(record.shape, "deep");
@@ -3165,7 +3165,7 @@ pub(crate) mod peer_tests {
         assert!(record.source.contains("highest configured floor"));
         bound.integration_base = None;
         let mut no_base = deferred(None, serde_json::json!([]))?;
-        no_base.review.as_mut().ok_or("review spec missing")?.shape = Some("quick".into());
+        no_base.review.as_mut().ok_or("review spec missing")?.shape = Some("quick".into()).into();
         let no_base = bound.resolve_review(&no_base, &head)?;
         let record = no_base.review.as_ref().ok_or("review resolution missing")?;
         assert_eq!(record.shape, "deep");
@@ -3188,8 +3188,8 @@ pub(crate) mod peer_tests {
         // A read-only alias repeats so a usage-limited first member falls back.
         assert_eq!(lens.routes.as_ref().map(Vec::len), Some(2));
         assert_eq!(lens.depends_on, ["subject"]);
-        assert_eq!(lens.read_roots, ["/repo/lane"]);
-        assert!(lens.require_skill_location);
+        assert_eq!(lens.read_roots.as_slice(), ["/repo/lane"]);
+        assert!(lens.require_skill_location.value());
         assert!(matches!(&lens.source, Some(graph::SourceBinding::Commit { commit }) if *commit == head));
         let floored = bound.resolve_review(&deferred(Some("crucial"), serde_json::json!([]))?, &head)?;
         let record = floored.review.as_ref().ok_or("review resolution missing")?;
@@ -3198,8 +3198,8 @@ pub(crate) mod peer_tests {
         // Five standard-shape lenses share one family group. The label only
         // steers routes: every lens is still a member of the panel.
         let mut standard = deferred(None, serde_json::json!([]))?;
-        standard.review.as_mut().ok_or("review spec missing")?.shape = Some("standard".into());
-        standard.review.as_mut().ok_or("review spec missing")?.min_successful = Some(0);
+        standard.review.as_mut().ok_or("review spec missing")?.shape = Some("standard".into()).into();
+        standard.review.as_mut().ok_or("review spec missing")?.min_successful = Some(0).into();
         let standard = bound.resolve_review(&standard, &head)?;
         let group_node = standard.nodes.iter().find(|node| node.id.ends_with("--p")).ok_or("lens group missing")?;
         assert_eq!(group_node.composite.as_ref().ok_or("composite missing")?.min_successful, Some(4));
@@ -3214,7 +3214,7 @@ pub(crate) mod peer_tests {
         assert!(verify.depends_on.contains(&group_node.id));
         assert!(synthesis.depends_on.contains(&verify.id));
         assert!(standard.nodes.iter().filter(|node| node.composite.is_none()).all(|node| matches!(&node.source, Some(graph::SourceBinding::Commit { commit }) if *commit == head)));
-        assert!(small.nodes[1].composite.as_ref().is_some_and(|group| group.reduce_verdict));
+        assert!(small.nodes[1].composite.as_ref().is_some_and(|group| group.reduce_verdict.value()));
         let mut reduced_with_verifier = deferred(None, serde_json::json!([]))?;
         reduced_with_verifier.extra.insert("panel_verifiers".into(), serde_json::json!(1));
         let reduced_with_verifier = bound.resolve_review(&reduced_with_verifier, &head)?;

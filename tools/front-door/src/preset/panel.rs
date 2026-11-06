@@ -805,7 +805,8 @@ impl StageBuilder<'_> {
                     .get("when")
                     .and_then(Value::as_str)
                     .filter(|when| !when.is_empty())
-                    .map(str::to_owned),
+                    .map(str::to_owned)
+                    .into(),
                 tier: lens
                     .get("tier")
                     .filter(|tier| tier_is_set(tier))
@@ -838,13 +839,13 @@ impl StageBuilder<'_> {
             }
         }
         Ok(ReviewSpec {
-            shape: text("review_shape"),
-            risk_tier: text("risk_tier"),
-            kind,
-            size: text("size"),
-            risk_tags,
-            worktree: text("worktree"),
-            lenses,
+            shape: text("review_shape").into(),
+            risk_tier: text("risk_tier").into(),
+            kind: kind.into(),
+            size: text("size").into(),
+            risk_tags: provenant_fabric_runtime::graph::PresentVec::present(risk_tags),
+            worktree: text("worktree").into(),
+            lenses: provenant_fabric_runtime::graph::PresentVec::present(lenses),
             min_successful: group
                 .get("min_successful")
                 .map(|value| {
@@ -859,7 +860,8 @@ impl StageBuilder<'_> {
                     };
                     usize::try_from(count).map_err(|_| "min_successful is too large".to_owned())
                 })
-                .transpose()?,
+                .transpose()?
+                .into(),
             reduce_verdict: group
                 .get("reduce_verdict")
                 .map(|value| {
@@ -868,7 +870,8 @@ impl StageBuilder<'_> {
                         .ok_or_else(|| "reduce_verdict must be a boolean".to_owned())
                 })
                 .transpose()?
-                .unwrap_or(false),
+                .map(provenant_fabric_runtime::graph::PresentBool::present)
+                .unwrap_or_default(),
             export_first: group
                 .get("export_first")
                 .map(|value| {

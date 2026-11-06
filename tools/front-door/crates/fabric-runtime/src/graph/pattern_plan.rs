@@ -287,7 +287,7 @@ fn check_value(parameter: &PatternParameter, value: &Value) -> Result<(), String
     if !parameter.allowed.is_empty() && !parameter.allowed.contains(value) {
         return Err(format!(
             "must be one of {}, received {}",
-            Value::Array(parameter.allowed.clone()),
+            Value::Array(parameter.allowed.to_vec()),
             value
         ));
     }
