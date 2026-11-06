@@ -62,17 +62,19 @@ needed. Treat findings and unavailable checks as advice, never a filing gate.
    about to be worked.
 4. Dedupe a batch against itself. Cap Ready issues near two to three times the
    writer lanes; pause filing at the cap, not delivery.
-5. After a failed, timed-out or slow create, search for the exact title before any retry; use an existing match instead of filing again. If the result is uncertain, reconcile it before retrying.
+5. After any create error, timeout or slow response, search for the exact title before any retry; use an existing match instead of filing again. If the result is uncertain, reconcile it before retrying.
 6. Never file only to record evidence on delivered work. Agents never approve their
    own filings. Workers report follow-ups; only the chair or steward writes.
 
 ## Link and close
 
 Parentage is the native sub-issue link, and ordering is a blocked-by edge, with the
-prose sentence deleted. Check the installed `gh` first:
+prose sentence deleted. Check the installed `gh` first. List repository issue types
+with `gh api repos/{owner}/{repo}/issue-types`; pass `--type` only when the
+requested type is listed. If the lookup fails or returns none, omit `--type`:
 
 ```sh
-gh issue create --type Task --parent 123 --blocked-by 120 --title T --body-file B.md
+gh issue create --parent 123 --blocked-by 120 --title T --body-file B.md
 gh issue view 123 --json subIssues,blockedBy
 ```
 
