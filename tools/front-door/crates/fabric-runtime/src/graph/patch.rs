@@ -486,9 +486,12 @@ fn retry_node_scope(
     if dependants {
         loop {
             let before = reset_ids.len();
-            let prefixes: Vec<_> = expanded.nodes.iter().filter(|node| {
-                reset_ids.contains(&node.id) && redo_container(node)
-            }).map(|node| format!("{}--", node.id)).collect();
+            let prefixes: Vec<_> = expanded
+                .nodes
+                .iter()
+                .filter(|node| reset_ids.contains(&node.id) && redo_container(node))
+                .map(|node| format!("{}--", node.id))
+                .collect();
             for node in &expanded.nodes {
                 if node.dependencies().any(|parent| reset_ids.contains(parent))
                     || prefixes.iter().any(|prefix| node.id.starts_with(prefix))
@@ -588,12 +591,15 @@ fn retry_node_scope(
     // with a new execution, so their expansions retire in this same candidate.
     let mut retired = BTreeSet::new();
     for container in expanded.nodes.iter().filter(|node| {
-        reset_ids.contains(&node.id)
-            && (redo_container(node) || dependants && node.plan.is_some())
+        reset_ids.contains(&node.id) && (redo_container(node) || dependants && node.plan.is_some())
     }) {
         retired.extend(
-            super::retire::dynamic_subtree(&mut candidate, &container.id, &format!("retry node {id}"))
-                .map_err(PatchError::invalid)?,
+            super::retire::dynamic_subtree(
+                &mut candidate,
+                &container.id,
+                &format!("retry node {id}"),
+            )
+            .map_err(PatchError::invalid)?,
         );
     }
     if !retired.is_empty() {
@@ -617,7 +623,8 @@ fn retry_node_scope(
             let container = expanded.nodes.iter().any(|node| {
                 reset_ids.contains(&node.id)
                     && redo_container(node)
-                    && (node.id == progress.id || progress.id.starts_with(&format!("{}--", node.id)))
+                    && (node.id == progress.id
+                        || progress.id.starts_with(&format!("{}--", node.id)))
             });
             *progress = reset_progress(progress, container)?;
         }
