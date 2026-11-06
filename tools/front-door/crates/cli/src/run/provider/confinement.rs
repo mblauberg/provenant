@@ -841,29 +841,6 @@ pub(super) fn setup_directory(
     }
 }
 
-#[cfg(test)]
-mod alias_tests {
-    use super::*;
-
-    #[test]
-    fn only_the_temporary_variables_move_to_the_alias() {
-        let scratch = Path::new("/state/runs/r/attempts/a/tmp/candidate-0");
-        let alias = Path::new("/private/tmp/pv-0123/candidate-0");
-        let os = std::ffi::OsString::from;
-        let mut env = vec![
-            (os("TMPDIR"), scratch.into()),
-            (os("TMPPREFIX"), scratch.join("zsh").into()),
-            (os("CARGO_TARGET_DIR"), scratch.join("target").into()),
-            (os("TMPDIR_OTHER"), scratch.into()),
-        ];
-        alias_temporary_env(&mut env, scratch, alias);
-        assert_eq!(env[0].1, alias.as_os_str());
-        assert_eq!(env[1].1, alias.join("zsh").as_os_str());
-        assert_eq!(env[2].1, scratch.join("target").as_os_str());
-        assert_eq!(env[3].1, scratch.as_os_str());
-    }
-}
-
 /// Verify the pinned writer source and describe retained predecessor edits.
 /// A continuation keeps dirty work in place; unreadable status and mismatched
 /// source evidence still refuse preparation.
@@ -908,4 +885,27 @@ pub(super) fn writer_source_context(
             uncommitted.join(", ")
         )
     }))
+}
+
+#[cfg(test)]
+mod alias_tests {
+    use super::*;
+
+    #[test]
+    fn only_the_temporary_variables_move_to_the_alias() {
+        let scratch = Path::new("/state/runs/r/attempts/a/tmp/candidate-0");
+        let alias = Path::new("/private/tmp/pv-0123/candidate-0");
+        let os = std::ffi::OsString::from;
+        let mut env = vec![
+            (os("TMPDIR"), scratch.into()),
+            (os("TMPPREFIX"), scratch.join("zsh").into()),
+            (os("CARGO_TARGET_DIR"), scratch.join("target").into()),
+            (os("TMPDIR_OTHER"), scratch.into()),
+        ];
+        alias_temporary_env(&mut env, scratch, alias);
+        assert_eq!(env[0].1, alias.as_os_str());
+        assert_eq!(env[1].1, alias.join("zsh").as_os_str());
+        assert_eq!(env[2].1, scratch.join("target").as_os_str());
+        assert_eq!(env[3].1, scratch.as_os_str());
+    }
 }

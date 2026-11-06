@@ -3116,7 +3116,8 @@ fn main() -> ExitCode {
     {
         fixture()
     } else {
-        let tests: &[(&str, fn() -> Result)] = &[
+        type NamedTest = (&'static str, fn() -> Result);
+        let tests: &[NamedTest] = &[
             #[cfg(target_os = "macos")]
             (
                 "graph_launch_proceeds_when_provider_update_is_busy",
