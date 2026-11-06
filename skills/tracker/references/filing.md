@@ -23,10 +23,14 @@ Never assert "no duplicate" without it. Outcomes: duplicate (close the new one
 `duplicate-of`, add detail to the canonical issue), same outcome (extend in place and
 note what changed), or new.
 
-Before retrying a failed, timed-out or slow create, look up issues with the exact
-title, including closed issues, and compare returned titles literally. If the
+After any create error, timeout or slow response, look up issues with the exact
+title before retrying, including closed issues, and compare returned titles literally. If the
 create succeeded, use that issue. If the lookup cannot establish the result,
 reconcile it before retrying; do not blindly repeat the create.
+
+Optional aid, never a gate: semantic search with
+`gh api 'search/issues?search_type=hybrid&q=TITLE+is:issue+repo:OWNER/NAME'`.
+Include `is:issue`; without it GitHub silently falls back to keyword search.
 
 ## Placement
 

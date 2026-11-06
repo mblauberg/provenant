@@ -975,7 +975,6 @@ mod tests {
         let writer_terminal = crate::writer::WriterTerminal {
             schema_version: 1,
             head: committed_head,
-            protected_paths: vec![],
         };
         crate::artifacts::seal(
             &attempt_dir,

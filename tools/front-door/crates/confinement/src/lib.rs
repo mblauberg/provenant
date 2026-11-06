@@ -8,7 +8,6 @@ pub mod guard;
 pub mod output_custody;
 pub mod permissions;
 pub mod plan;
-pub mod quarantine;
 pub mod redact;
 pub mod repo;
 pub mod review_exempt;

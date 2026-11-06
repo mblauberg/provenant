@@ -1177,7 +1177,6 @@ impl RunStore {
         if let Some(raw) = read_sealed(&attempt, "writer-terminal.json", RECORD_LIMIT)? {
             let writer: crate::writer::WriterTerminal = decode(&raw)?;
             next.head = Some(writer.head);
-            next.protected_paths = writer.protected_paths;
         }
         if publication.outcome == Outcome::Succeeded {
             // Recovery reports uncertainty from the sealed start marker without

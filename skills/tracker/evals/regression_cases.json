@@ -89,6 +89,21 @@
         "companion_skills": []
       },
       "note": "Case added, effect not demonstrated: both trial arms found the false premise and criterion; the routing harness does not measure improvement."
+    },
+    {
+      "id": "r2977",
+      "relation": "positive",
+      "prompt": "Create a task issue with a parent and blocker. The repository lists no issue types, and the create command reports an error after submitting. What do you do before retrying?",
+      "tags": [
+        "filing",
+        "dedupe",
+        "issue-types"
+      ],
+      "expected": {
+        "primary_skill": "tracker",
+        "companion_skills": []
+      },
+      "note": "Omit the type flag when unavailable; search for the exact title, including closed issues, and reconcile the result before any retry."
     }
   ]
 }

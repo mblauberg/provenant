@@ -12,6 +12,7 @@ use provenant_os::{
 use provenant_records::{CanonicalV1, FileDigest, PathWire};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
+use std::collections::BTreeSet;
 use std::ffi::{OsStr, OsString};
 use std::ops::Deref;
 use std::os::unix::ffi::OsStrExt;
@@ -259,6 +260,39 @@ impl<'a> Git<'a> {
         Ok(())
     }
 
+    /// Symlinks no review-exempt listing may cover: index entries, plus any
+    /// path that was a symlink in any of `bases` or in HEAD among the paths changed
+    /// between them, so unstaging a committed link does not hide it.
+    pub(crate) fn symlink_paths(
+        &self,
+        bases: &[GitOid],
+    ) -> Result<BTreeSet<Vec<u8>>, GitEvidenceError> {
+        let raw = self
+            .read(GitRead::IndexEntries { paths: Vec::new() })?
+            .stdout
+            .bytes;
+        let mut paths = BTreeSet::new();
+        for entry in parse_index_entries(&raw)? {
+            let entry = entry?;
+            if entry.mode == 0o120000 {
+                paths.insert(entry.path.to_vec());
+            }
+        }
+        // Staged changes against HEAD, so a committed link removed from the
+        // index without a new commit is still known.
+        let staged = self.read(GitRead::StagedModes)?.stdout.bytes;
+        paths.extend(raw_symlink_paths(&staged)?);
+        let head = self.head()?;
+        for base in bases {
+            let raw = self
+                .read(GitRead::ChangedModes { base: *base, head })?
+                .stdout
+                .bytes;
+            paths.extend(raw_symlink_paths(&raw)?);
+        }
+        Ok(paths)
+    }
+
     /// Changed and untracked paths when HEAD is still `base`; empty once the
     /// writer committed. Ignored paths, `.review-snapshots/` and the project's
     /// review-exempt paths never count.
@@ -355,6 +389,27 @@ fn index_has_stage_zero_regular(raw: &[u8], paths: &[RepoPath]) -> Result<bool, 
         *slot = true;
     }
     Ok(found.into_iter().all(|value| value))
+}
+
+/// Paths a `diff --raw -z` lists with a symlink mode on either side.
+fn raw_symlink_paths(raw: &[u8]) -> Result<Vec<Vec<u8>>, GitEvidenceError> {
+    if !raw.is_empty() && !raw.ends_with(&[0]) {
+        return Err(GitEvidenceError::Incomplete);
+    }
+    let mut fields = raw.split(|byte| *byte == 0);
+    let mut paths = Vec::new();
+    while let Some(meta) = fields.next().filter(|meta| !meta.is_empty()) {
+        let path = fields.next().ok_or(GitEvidenceError::Incomplete)?;
+        let meta = meta
+            .strip_prefix(b":")
+            .ok_or(GitEvidenceError::Incomplete)?;
+        let mut parts = meta.split(|byte| *byte == b' ');
+        let (old, new) = (parts.next(), parts.next());
+        if old == Some(b"120000") || new == Some(b"120000") {
+            paths.push(path.to_vec());
+        }
+    }
+    Ok(paths)
 }
 
 pub(crate) fn canonical_paths(paths: &[RepoPath]) -> Result<Vec<RepoPath>, GitEvidenceError> {
@@ -460,49 +515,6 @@ pub(crate) fn read_optional_file(
     };
     match parent.metadata_at(&leaf, false) {
         Ok(_) => read_tracked_file(root, path, limit).map(Some),
-        Err(error) if error.is_not_found() => Ok(None),
-        Err(error) => Err(error.into()),
-    }
-}
-
-/// Like `read_tracked_file`, but a symlink leaf is evidence too: its bytes are
-/// the link target, read with readlink and never followed.
-pub(crate) fn read_protected_entry(
-    root: &Directory,
-    path: &RepoPath,
-    limit: u64,
-) -> Result<FileSnapshot, GitEvidenceError> {
-    use std::os::unix::ffi::OsStrExt;
-    let (parent, leaf) = open_parent(root, path)?;
-    let before = parent.metadata_at(&leaf, false)?;
-    if before.kind != provenant_os::fs::FileKind::Symlink {
-        return read_tracked_file(root, path, limit);
-    }
-    let target = parent.read_link(&leaf)?;
-    let bytes = target.as_os_str().as_bytes().to_vec();
-    if bytes.len() as u64 > limit {
-        return Err(GitEvidenceError::TooLarge);
-    }
-    let after = parent.metadata_at(&leaf, false)?;
-    if !before.unchanged(&after) {
-        return Err(GitEvidenceError::ConcurrentChange);
-    }
-    let fingerprint = fingerprint(path, &bytes, after)?;
-    Ok(FileSnapshot { bytes, fingerprint })
-}
-
-pub(crate) fn read_optional_protected_entry(
-    root: &Directory,
-    path: &RepoPath,
-    limit: u64,
-) -> Result<Option<FileSnapshot>, GitEvidenceError> {
-    let (parent, leaf) = match open_parent(root, path) {
-        Ok(parent) => parent,
-        Err(GitEvidenceError::Filesystem(error)) if error.is_not_found() => return Ok(None),
-        Err(error) => return Err(error),
-    };
-    match parent.metadata_at(&leaf, false) {
-        Ok(_) => read_protected_entry(root, path, limit).map(Some),
         Err(error) if error.is_not_found() => Ok(None),
         Err(error) => Err(error.into()),
     }

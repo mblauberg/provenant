@@ -223,6 +223,21 @@ struct Usage {
     cache_write_input_tokens: Option<u64>,
     output_tokens: u64,
 }
+/// The provider's own refusal of the requested model, in its words.
+fn model_refusal(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("model")
+        && [
+            "not supported",
+            "unsupported model",
+            "does not exist",
+            "not found",
+            "unknown model",
+            "no access",
+        ]
+        .iter()
+        .any(|phrase| lower.contains(phrase))
+}
 fn decode(bytes: &[u8]) -> Result<Vec<E>, ProviderError> {
     Ok(match wire::<Event>(bytes)? {
         Event::Thread { thread_id } => vec![E::Session(thread_id)],
@@ -250,6 +265,8 @@ fn decode(bytes: &[u8]) -> Result<Vec<E>, ProviderError> {
             let lower = message.to_ascii_lowercase();
             vec![if lower.contains("reconnecting") {
                 E::TransientError
+            } else if model_refusal(&message) {
+                E::ModelUnavailable { message }
             } else if lower.contains("too many requests") || lower.contains("status: 429") {
                 E::RateLimited { message }
             } else {
@@ -258,12 +275,22 @@ fn decode(bytes: &[u8]) -> Result<Vec<E>, ProviderError> {
         }
         Event::Failed { error } => {
             let typed = error.as_ref().and_then(|error| {
+                let refused = error
+                    .get("message")
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|message| model_refusal(message))
+                    .map(|message| E::ModelUnavailable {
+                        message: message.to_owned(),
+                    });
                 let message = || {
                     error
                         .get("message")
                         .and_then(serde_json::Value::as_str)
                         .map(str::to_owned)
                 };
+                if refused.is_some() {
+                    return refused;
+                }
                 match error.get("codex_error_info")?.as_str()? {
                     // Without the capacity message the failure stays generic.
                     "server_overloaded" => message().map(|message| E::ModelOverloaded { message }),
@@ -281,4 +308,27 @@ fn decode(bytes: &[u8]) -> Result<Vec<E>, ProviderError> {
         }
         _ => vec![],
     })
+}
+
+#[cfg(test)]
+mod model_refusal_tests {
+    use super::*;
+
+    #[test]
+    fn a_provider_model_refusal_is_a_typed_cause() {
+        let message = "The 'gpt-9' model is not supported when using Codex with a ChatGPT account.";
+        for line in [
+            serde_json::json!({"type": "error", "message": message}),
+            serde_json::json!({"type": "turn.failed", "error": {"message": message}}),
+        ] {
+            let events = decode(line.to_string().as_bytes()).expect("decoded");
+            assert!(
+                matches!(events.as_slice(), [E::ModelUnavailable { message: m }] if m == message),
+                "{events:?}"
+            );
+        }
+        let other = serde_json::json!({"type": "error", "message": "stream disconnected"});
+        let events = decode(other.to_string().as_bytes()).expect("decoded");
+        assert!(matches!(events.as_slice(), [E::Error]));
+    }
 }

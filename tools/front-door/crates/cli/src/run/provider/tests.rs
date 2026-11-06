@@ -3250,6 +3250,13 @@ printf 'agy 1.0.0\n'
         "cursor",
         false,
     )?;
+    assert!(
+        !request
+            .permissions
+            .protected_roots
+            .iter()
+            .any(|grant| grant.path == project.join("AGENTS.md"))
+    );
     assert_eq!(
         request.permissions.write_roots,
         vec![PathGrant {
