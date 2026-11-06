@@ -367,6 +367,12 @@ fn review_shape_selects_the_expected_template_nodes() -> Result {
             Value::Object(map) => {
                 if let Some(id) = map.get("id").and_then(Value::as_str) {
                     out.push(id.to_owned());
+                    if matches!(id, "lenses" | "verify") && map.contains_key("composite") {
+                        assert_eq!(map["composite"]["min_successful"], 1);
+                        if id == "verify" {
+                            assert_eq!(map["composite"]["reduce_verdict"], true);
+                        }
+                    }
                 }
                 for child in map.values() {
                     ids(child, out);

@@ -42,6 +42,19 @@ The `deliver` composite binds implementation, CI, bounded repair, independent
 review and landing to one integrated head. Check every external action against
 the authority envelope; a template grants no publication or promotion authority.
 
+## Review results
+
+Review templates enforce findings, verification, synthesis dispositions and a
+final verdict in code, including when the brief is overridden. An invalid reply
+reports a contract error; a valid FAIL is a completed review. Full details live
+in the [graph output contract](../specs/fabric.md).
+
+Lens and verifier groups accept one successful member (`min_ok = 1`). Missing
+coverage remains partial through verification and synthesis, so a partial panel
+can report findings but cannot approve the change. Shapes without synthesis
+reduce the lens and verifier verdicts together. A composite template may set
+`reduce_verdict = true` to reduce exported verdicts; node overrides take precedence.
+
 ## Host-native repairs
 
 `deliver` and `batch` collect qualified findings before repair: id, raising

@@ -350,6 +350,7 @@ fn node_bound(
     // `substantial` is the longest accepted risk tier, and false is the
     // longest cached growth boolean. Commit IDs may be SHA-256 (64 bytes).
     if let Some(outputs) = &mut skeleton.outputs {
+        outputs.extra.insert(review::PARTIAL.into(), false.into());
         outputs
             .extra
             .insert("risk_tier".into(), "substantial".into());

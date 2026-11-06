@@ -43,6 +43,7 @@ mod prompt_store;
 pub mod relay;
 mod repair;
 mod retire;
+mod review;
 pub mod template;
 #[cfg(test)]
 mod template_tests;
@@ -3237,6 +3238,8 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     truncated_finding_ids(node, &plan, &checkpoint, &positions)
                 };
                 let marker_inputs = propagation_inputs(node, &plan, &checkpoint, &positions);
+                let partial_review = template::review_behaviour(node).is_some()
+                    && review::partial_inputs(node, &checkpoint, &positions);
                 let mut settled_result = None;
                 let retry_was_pending;
                 let should_continue = {
@@ -3319,10 +3322,18 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                                 }
                             }
                             let marker_warnings = propagation_warnings(&outputs, &marker_inputs);
+                            let propagation_error =
+                                template::review_behaviour(node).and_then(|_| {
+                                    marker_warnings.first().map(|warning| {
+                                        ("review_propagation_invalid", warning.clone())
+                                    })
+                                });
                             if !marker_warnings.is_empty() {
                                 outputs.warnings.truncate(MAX_WARNINGS.saturating_sub(2));
                                 outputs.warnings.extend(marker_warnings);
                             }
+                            let review_contract_error =
+                                review::contract_error(node, &upstream_findings, &outputs);
                             if node.access == AccessMode::ReadOnly
                                 && template::review_node(node)
                                 && let Some(reference) = attempt.attempt_ref.as_deref()
@@ -3349,24 +3360,6 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                                         outputs.warnings.push(format!("equal_base_and_head: review range is empty (base {base}, head {head})"));
                                     }
                                     _ => {}
-                                }
-                            }
-                            if template::review_behaviour(node).is_some()
-                                && outputs.verdict.as_deref() == Some("VERDICT: PASS")
-                            {
-                                if outputs.findings_available != Some(true) {
-                                    outputs.verdict = Some("VERDICT: INCONCLUSIVE".into());
-                                } else if outputs.findings.iter().any(|finding| {
-                                    (repair::blocking(finding)
-                                        && finding.disposition.as_deref() != Some("deferred")
-                                        && finding
-                                            .extra
-                                            .get("verification")
-                                            .and_then(serde_json::Value::as_str)
-                                            != Some("falsified"))
-                                        || finding.disposition.as_deref() == Some("accepted")
-                                }) {
-                                    outputs.verdict = Some("VERDICT: FAIL".into());
                                 }
                             }
                             outputs.warnings.truncate(MAX_WARNINGS);
@@ -3423,8 +3416,23 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                                         mismatch.then(|| ("disposition_overflow_inconsistent", "structured findings disagree with their DISPOSITION lines".to_owned()))
                                     })
                             };
+                            let disposition_error = disposition_error
+                                .or(propagation_error)
+                                .or(review_contract_error);
                             if template::review_behaviour(node).is_some() {
                                 retain_synthesis_findings(&mut outputs, &upstream_findings);
+                                if let Some((code, _)) = &disposition_error {
+                                    outputs.verdict_error = Some((*code).into());
+                                    outputs.extra.insert(review::PARTIAL.into(), true.into());
+                                    outputs.findings_available = Some(false);
+                                } else if partial_review {
+                                    review::mark_partial(&mut outputs);
+                                    outputs.warnings.truncate(MAX_WARNINGS.saturating_sub(1));
+                                    outputs.warnings.push(
+                                        "review_partial: selected review coverage is incomplete"
+                                            .into(),
+                                    );
+                                }
                             }
                             let review_result = node.access == AccessMode::ReadOnly
                                 && template::review_node(node)
@@ -3436,7 +3444,13 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                                     .iter()
                                     .any(|warning| warning.starts_with(FINDINGS_INVALID))
                                 && disposition_error.is_none();
-                            let outcome = if outcome == AttemptOutcome::DeclaredStop
+                            let outcome = if matches!(
+                                outcome,
+                                AttemptOutcome::Succeeded | AttemptOutcome::DeclaredStop
+                            ) && disposition_error.is_some()
+                            {
+                                AttemptOutcome::TaskFailed
+                            } else if outcome == AttemptOutcome::DeclaredStop
                                 && review_result
                                 && !warned
                             {

@@ -325,7 +325,9 @@ fn children(
                             | OutputKind::Commit
                             | OutputKind::Remaining
                     ) {
-                        if scalar.contains(kind) {
+                        if scalar.contains(kind)
+                            && !(*kind == OutputKind::Verdict && spec.reduce_verdict)
+                        {
                             return Err("composite scalar output has multiple sources".into());
                         }
                         scalar.push(*kind);
@@ -436,8 +438,14 @@ fn outputs(
         let member = &checkpoint.nodes[positions[&export.node]];
         // A partial composite exports only members that succeeded: a failed
         // member's output, such as a result without findings, is not evidence.
-        if partial && member.state != NodeState::Succeeded {
+        if partial
+            && member.state != NodeState::Succeeded
+            && !review::retained_findings(&plan.nodes[positions[&export.node]], member)
+        {
             continue;
+        }
+        if member.outputs.as_ref().is_some_and(review::partial) {
+            selected.extra.insert(review::PARTIAL.into(), true.into());
         }
         let Some(source) = member.outputs.as_ref() else {
             continue;
@@ -550,6 +558,13 @@ fn outputs(
             .max_by_key(|verdict| rank(*verdict));
         selected.verdict = verdict.map(|verdict| format!("VERDICT: {}", verdict.as_token()));
         selected.verdict_error = None;
+    }
+    let review_members = spec
+        .exports
+        .iter()
+        .any(|export| template::review_behaviour(&plan.nodes[positions[&export.node]]).is_some());
+    if (!unavailable.is_empty() && review_members) || review::partial(&selected) {
+        review::mark_partial(&mut selected);
     }
     if selected
         .findings
