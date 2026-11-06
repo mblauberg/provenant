@@ -1681,13 +1681,17 @@ mod tests {
         let bad = PathBuf::from(OsString::from_vec(b"/fixture/\xff".to_vec()));
         let lane = LaneRuntime {
             executable: Path::new("/fixture/provenant"),
-            git: Path::new("/fixture/git"),
-            state: &bad,
+            git: &bad,
+            state: Path::new("/fixture/state"),
             home: Path::new("/fixture/home"),
             depth: 1,
             attempt: AttemptId::from_bytes([1; 16]),
             assets: Path::new("/fixture/assets"),
         };
+        assert!(matches!(
+            lane.mcp(Harness::Codex),
+            Err(ProviderError::InvalidPath)
+        ));
         let mut codex = Vec::new();
         lane.codex(&mut codex)?;
         assert!(codex.is_empty());

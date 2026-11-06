@@ -6241,13 +6241,10 @@ fn selected_accounts_control_provider_environment_and_exact_authentication_grant
                     .state_writes
                     .iter()
                     .filter(|g| g.path.starts_with("/fixture/state"))
+                    .cloned()
                     .collect::<Vec<_>>();
-                let expected = [
-                    crate::launch::subtree("/fixture/state/children/attempt"),
-                    crate::launch::subtree("/fixture/state/workflow"),
-                ];
-                assert_eq!(lane.len(), expected.len());
-                assert!(expected.iter().all(|grant| lane.contains(&grant)));
+                // Child admission crosses the relay; no child-store write grant remains.
+                assert_eq!(lane, [crate::launch::subtree("/fixture/state/workflow")]);
             } else {
                 // The accepted design keeps runtime state per attempt. Only the
                 // selected identity's auth.json is linked into CODEX_HOME.
