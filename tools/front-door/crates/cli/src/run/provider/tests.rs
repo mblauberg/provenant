@@ -5862,13 +5862,19 @@ fn write_grant_limit_reports_configured_value_and_origin() -> Result<(), Box<dyn
     };
     let default = registry.write_grant_limit();
     assert_eq!(default.bytes, provenant_records::run::MAX_WRITE_GRANT_BYTES);
-    assert_eq!(default.origin, "compiled default");
+    assert_eq!(
+        default.origin,
+        provenant_records::diagnostic::SettingSource::ShippedDefault
+    );
     std::fs::write(
         state.join("config.toml"),
         "schema_version=1\n[domains.run]\nwrite_grant_limit_bytes=1048576\n",
     )?;
     let configured = registry.write_grant_limit();
     assert_eq!(configured.bytes, 1048576);
-    assert_eq!(configured.origin, "host configuration");
+    assert_eq!(
+        configured.origin,
+        provenant_records::diagnostic::SettingSource::Configuration
+    );
     Ok(())
 }

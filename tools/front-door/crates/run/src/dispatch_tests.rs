@@ -1757,7 +1757,7 @@ fn oversized_write_grants_reject_without_stalling_launch() -> TestResult {
     assert!(matches!(
         started.as_slice(),
         [
-            Started::Refused { attempt: first, kind: RefusalKind::WriteGrantsLimit, .. },
+            Started::Refused { attempt: first, kind: RefusalKind::WriteGrantsLimit(_), .. },
             Started::Refused { attempt: second, kind: RefusalKind::Handoff, .. },
         ] if *first == id && *second == sibling
     ));
@@ -9557,7 +9557,7 @@ fn raised_write_grant_limit_preserves_large_terminal_ledger() -> TestResult {
         fn write_grant_limit(&self) -> WriteGrantLimit {
             WriteGrantLimit {
                 bytes: 2 * 1024 * 1024,
-                origin: "host configuration",
+                origin: provenant_records::diagnostic::SettingSource::Configuration,
             }
         }
         fn prepare(

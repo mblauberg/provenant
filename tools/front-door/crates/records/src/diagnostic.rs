@@ -110,6 +110,10 @@ pub enum ResourceFact {
         limit: u64,
         origin: SettingSource,
     },
+    WriteGrantLimit {
+        limit: u64,
+        origin: SettingSource,
+    },
     MemoryPressure {
         level: PressureLevel,
         threshold: PressureThreshold,
@@ -137,6 +141,9 @@ impl ResourceFact {
             Self::ArgvPromptLimit { limit, origin } => diagnostic
                 .detail(format!("argv prompt exceeds domains.run.argv_prompt_limit_bytes ({limit} bytes; source: {})", origin.description()))
                 .next("shorten the prompt or adjust domains.run.argv_prompt_limit_bytes"),
+            Self::WriteGrantLimit { limit, origin } => diagnostic
+                .detail(format!("encoded write grants exceed domains.run.write_grant_limit_bytes ({limit} bytes; source: {})", origin.description()))
+                .next("reduce the write grants or adjust domains.run.write_grant_limit_bytes"),
             Self::MemoryPressure { level, threshold, origin } => diagnostic
                 .detail(format!("host memory pressure is {}; domains.fabric.lanes.memory_pressure_threshold is {} (source: {})", level.name(), threshold.name(), origin.description()))
                 .next("reduce host memory pressure before retrying"),

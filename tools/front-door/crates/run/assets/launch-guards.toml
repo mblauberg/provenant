@@ -72,6 +72,7 @@ reason = "Applied write grant paths must be representable so continuation and ha
 site = "run/src/launch.rs#applied_write_grants"
 boundary = "configurable_default"
 setting = "domains.run.write_grant_limit_bytes"
+code = "LIMIT"
 reason = "The encoded applied write-grant ledger has a configurable default; refusal and receipt report the effective value and origin."
 
 [[guard]]

@@ -154,9 +154,12 @@ enum WriteGrantError {
     #[error("invalid write grant path")]
     InvalidPath,
     #[error(
-        "encoded write grants exceed domains.run.write_grant_limit_bytes={limit} (source: {origin})"
+        "encoded write grants exceed domains.run.write_grant_limit_bytes={limit} (source: {})", .origin.description()
     )]
-    Limit { limit: u64, origin: &'static str },
+    Limit {
+        limit: u64,
+        origin: provenant_records::diagnostic::SettingSource,
+    },
 }
 
 fn applied_write_grants(
@@ -309,6 +312,45 @@ fn preparation_refusal_retains_its_typed_boundary() {
             })
     );
 }
+#[test]
+fn write_grant_limit_diagnostic_names_setting_and_source() {
+    use provenant_records::diagnostic::{BoundaryClass, ResourceFact, SettingSource};
+    for source in [SettingSource::Configuration, SettingSource::ShippedDefault] {
+        let kind = RefusalKind::WriteGrantsLimit(ResourceFact::WriteGrantLimit {
+            limit: 1024,
+            origin: source,
+        });
+        assert_eq!(kind.boundary_class(), BoundaryClass::None);
+        let diagnostic = kind.diagnostic().unwrap();
+        assert_eq!(diagnostic.code, "LIMIT");
+        let detail = diagnostic.detail.unwrap();
+        assert!(detail.contains("domains.run.write_grant_limit_bytes"));
+        assert!(detail.contains("1024"));
+        assert!(detail.contains(source.description()));
+        let inventory = include_str!("../assets/launch-guards.toml")
+            .parse::<toml_edit::DocumentMut>()
+            .unwrap();
+        assert!(
+            inventory["guard"]
+                .as_array_of_tables()
+                .unwrap()
+                .iter()
+                .any(|row| {
+                    row.get("site").and_then(|v| v.as_str())
+                        == Some("run/src/launch.rs#applied_write_grants")
+                        && row.get("code").and_then(|v| v.as_str())
+                            == Some(diagnostic.code.as_str())
+                        && row.get("boundary").and_then(|v| v.as_str())
+                            == Some("configurable_default")
+                        && row
+                            .get("setting")
+                            .and_then(|v| v.as_str())
+                            .is_some_and(|setting| detail.contains(setting))
+                })
+        );
+    }
+}
+
 /// Run-owned per-attempt paths. Allocated once, shared by explicit fallback candidates.
 pub struct LaunchPaths {
     pub attempt_id: AttemptId,
@@ -512,13 +554,13 @@ impl RunStore {
 #[derive(Clone, Copy, Debug)]
 pub struct WriteGrantLimit {
     pub bytes: u64,
-    pub origin: &'static str,
+    pub origin: provenant_records::diagnostic::SettingSource,
 }
 impl Default for WriteGrantLimit {
     fn default() -> Self {
         Self {
             bytes: provenant_records::run::MAX_WRITE_GRANT_BYTES,
-            origin: "compiled default",
+            origin: provenant_records::diagnostic::SettingSource::ShippedDefault,
         }
     }
 }
@@ -536,7 +578,7 @@ impl WriteGrantLimit {
         }
     }
     fn receipt(self) -> serde_json::Value {
-        serde_json::json!({"key": "domains.run.write_grant_limit_bytes", "value": self.bytes, "origin": self.origin})
+        serde_json::json!({"key": "domains.run.write_grant_limit_bytes", "value": self.bytes, "origin": match self.origin { provenant_records::diagnostic::SettingSource::Configuration => "host configuration", provenant_records::diagnostic::SettingSource::ShippedDefault => "compiled default" }})
     }
 }
 
@@ -676,7 +718,7 @@ pub enum RefusalKind {
     PriorityUnavailable,
     StoredPromptUnreadable,
     InvalidWriteGrantPath,
-    WriteGrantsLimit,
+    WriteGrantsLimit(provenant_records::diagnostic::ResourceFact),
     Handoff,
     HandoffBoundary(provenant_records::diagnostic::BoundaryClass),
     HandoffResource(provenant_records::diagnostic::ResourceFact),
@@ -694,12 +736,14 @@ impl RefusalKind {
         let fact = match self {
             Self::HandoffResource(fact)
             | Self::PolicyResource(fact)
-            | Self::PreparationResource(fact) => fact,
+            | Self::PreparationResource(fact)
+            | Self::WriteGrantsLimit(fact) => fact,
             _ => return None,
         };
         let kind = match fact {
             ResourceFact::Disk { .. } => ErrorKind::DiskFloor,
             ResourceFact::ArgvPromptLimit { .. } => ErrorKind::Invalid,
+            ResourceFact::WriteGrantLimit { .. } => ErrorKind::Limit,
             ResourceFact::MemoryPressure { .. } => ErrorKind::MemoryPressure,
             ResourceFact::Processes { .. } => ErrorKind::Processes,
             ResourceFact::LaneCap { .. } => ErrorKind::LaneCap,
@@ -722,7 +766,7 @@ impl RefusalKind {
             | Self::Preparation
             | Self::PacingReserve
             | Self::PriorityUnavailable
-            | Self::WriteGrantsLimit
+            | Self::WriteGrantsLimit(_)
             | Self::Handoff
             | Self::HandoffResource(_)
             | Self::PreparationResource(_)
@@ -1966,7 +2010,12 @@ impl RunStore {
                 Err(error) => {
                     let kind = match error {
                         WriteGrantError::InvalidPath => RefusalKind::InvalidWriteGrantPath,
-                        WriteGrantError::Limit { .. } => RefusalKind::WriteGrantsLimit,
+                        WriteGrantError::Limit { limit, origin } => RefusalKind::WriteGrantsLimit(
+                            provenant_records::diagnostic::ResourceFact::WriteGrantLimit {
+                                limit,
+                                origin,
+                            },
+                        ),
                     };
                     let reason = error.to_string();
                     match self.withdraw(
