@@ -11206,6 +11206,50 @@ fn quota_alias_redraw_uses_graph_retry_keeps_spent_models_and_is_bounded() {
     }
 }
 
+
+#[test]
+fn quota_alias_redraw_retains_partial_writer_work_and_predecessor() {
+    let mut alias = route("first");
+    alias.adapter = None;
+    alias.model = None;
+    alias.alias = Some("junior".into());
+    let mut writer = node("writer", alias);
+    writer.access = AccessMode::WorktreeWrite;
+    writer.worktree = Some("lane".into());
+    let mut document = graph(vec![writer]);
+    document.schema_version = 2;
+    let head = "1".repeat(40);
+    let partial_commit = "2".repeat(40);
+    let mut quota = terminal_with_result(AttemptOutcome::UsageLimited, "Partial implementation");
+    if let AttemptObservation::Terminal { attempt_ref, commit, .. } = &mut quota {
+        *attempt_ref = Some("host/partial".into());
+        *commit = Some(partial_commit.clone());
+    }
+    let mut owner = FakeOwner {
+        implicit_head: Some(head.clone()),
+        quota_redraw: true,
+        retry_limit: Some(1),
+        observations: [quota, terminal(AttemptOutcome::Succeeded)].into(),
+        models: [("host/partial".into(), "codex/one".into())].into(),
+        ..Default::default()
+    };
+    let status = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
+    let progress = &status.checkpoint.nodes[0];
+    assert_eq!(progress.state, NodeState::Succeeded);
+    assert_eq!(owner.implicit_bindings, 1);
+    assert_eq!(progress.writer_binding.as_ref().unwrap().head, head);
+    assert_eq!(progress.writer_binding.as_ref().unwrap().worktree, "/fixture/lane");
+    assert_eq!(owner.permissions, vec![
+        (AccessMode::WorktreeWrite, Some("/fixture/lane".into())),
+        (AccessMode::WorktreeWrite, Some("/fixture/lane".into())),
+    ]);
+    assert_eq!(progress.previous_attempts.len(), 1);
+    assert_eq!(progress.previous_attempts[0].attempt_ref.as_deref(), Some("host/partial"));
+    assert_eq!(owner.calls[1].0.extra["previous_attempt_ref"], "host/partial");
+    assert_eq!(owner.prior_attempts[1], vec!["codex/one"]);
+    assert_ne!(owner.calls[0].0, owner.calls[1].0);
+}
+
 #[test]
 fn independent_template_review_bases_are_pinned_and_replayed() {
     let library = template::TemplateLibrary::bundled();

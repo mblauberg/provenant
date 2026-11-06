@@ -1287,6 +1287,14 @@ pub(crate) fn pr_land_refuses_incomplete_worker_census() -> Result {
         assert_eq!(status(&value, "branch")?, "skipped", "{value}");
         let text = value.to_string();
         assert!(text.contains("incomplete worker census"), "{value}");
+        // The initial list refusal uses the observer's fallback; a late
+        // custody refusal retains the scoped observation's evidence.
+        let cause = if observation == "initial" {
+            "process census unavailable"
+        } else {
+            "fixture census unavailable"
+        };
+        assert!(text.contains(cause), "{observation}: {value}");
         assert!(
             text.contains("deletion skipped because its registered worktree was kept"),
             "{value}"

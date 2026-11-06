@@ -71,7 +71,7 @@ pub(super) fn output_summary(data: &Value, text: &str, headed: bool) -> crate::S
             Some(reason) => format!(
                 "settlement: {} ({})",
                 crate::bounded_text(state, 64),
-                crate::bounded_text(reason, 160)
+                crate::bounded_text(reason, 2048)
             ),
             None => format!("settlement: {}", crate::bounded_text(state, 64)),
         });
@@ -116,8 +116,12 @@ pub(super) fn output_summary(data: &Value, text: &str, headed: bool) -> crate::S
             None => "changed files: unavailable".into(),
         });
     }
-    let body = crate::head_and_tail(text, limits::OUTPUT_BYTES);
-    lines.extend(body.lines().map(str::to_owned));
+    // An empty result uses its safe diagnostic as human text. The settlement
+    // header already contains that detail, so render it only once.
+    if !headed || data["reason"].as_str() != Some(text.trim()) {
+        let body = crate::head_and_tail(text, limits::OUTPUT_BYTES);
+        lines.extend(body.lines().map(str::to_owned));
+    }
     let target = data["attempt_id"].as_str().map(|id| {
         data["host"]
             .as_str()
@@ -596,6 +600,30 @@ fn output_read_part(
         offset: command.offset,
         max_bytes: command.max_bytes,
     };
+    let waits = session
+        .store
+        .lane_waits(std::slice::from_ref(&record), call);
+    let detail = status::lane_reason(&record, &waits);
+    if matches!(part, run::ArtifactPart::Result)
+        && record.result.is_none()
+        && command.offset == 0
+        && command.tail.is_none()
+        && command.to.is_none()
+        && let Some(reason) = &detail
+    {
+        // There may be useful admission evidence before a result exists. Do
+        // not invent an artefact length, digest or completeness for it.
+        return Ok((
+            json!({
+                "attempt_id": id, "state": state_and_reason(&record.state).0,
+                "reason": reason, "part": "result", "offset": 0, "next_offset": 0,
+                "length": null, "eof": true, "clipped": null, "complete": null,
+                "digest": null, "bytes": json!({"encoding":"utf8", "data":""}),
+                "selected": selected,
+            }),
+            format!("{reason}\n"),
+        ));
+    }
     let mut chunk = session.service().output(id, part, range, call)?;
     let tail = command.tail.map(|lines| lines.min(TAIL_MAX));
     if let Some(lines) = tail {
@@ -619,7 +647,17 @@ fn output_read_part(
         None
     };
     // The text alone cannot tell a clean success from one that needs the chair.
-    let (state, reason) = state_and_reason(&record.state);
+    let state = state_and_reason(&record.state).0;
+    let reason = detail;
+    if matches!(command.part, Part::Result)
+        && text.is_empty()
+        && command.offset == 0
+        && command.tail.is_none()
+        && command.to.is_none()
+        && let Some(reason) = &reason
+    {
+        text = format!("{reason}\n");
+    }
     let mut data = json!({
             "attempt_id": id,
             "state": state,

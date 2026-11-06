@@ -557,21 +557,6 @@ pub(crate) fn writer_source_identity_matches(
         })
 }
 
-/// A quota refusal may redraw an alias only when there is no generated work.
-fn quota_alias_has_no_work(
-    result: &str,
-    usage: &provenant_records::run::UsageRecord,
-    writer: bool,
-    session: Option<&str>,
-) -> bool {
-    result.trim().is_empty()
-        && usage.output_excluding_reasoning.unwrap_or(0) == 0
-        && usage.reasoning.unwrap_or(0) == 0
-        && (!writer
-            || usage.output_excluding_reasoning == Some(0)
-            || session.is_none_or(str::is_empty))
-}
-
 pub(crate) fn unanimous_preparation_cause(
     skipped: &[provenant_records::run::SkippedRoute],
 ) -> Option<provenant_records::RouteExclusionReason> {
@@ -936,23 +921,10 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
         {
             return Ok(false);
         }
-        let request = store.request(record.run_id, &call).map_err(run_error)?;
-        let task = request
-            .tasks
-            .iter()
-            .find(|task| task.task_id == record.task_id)
-            .ok_or(FacadeError::StateCorrupt)?;
-        let result = match store.stream_result(record.attempt_id, &call, None) {
-            Ok(result) if !result.truncated && !result.source_truncated => result,
-            Ok(_) | Err(provenant_run::RunError::NotFound) => return Ok(false),
-            Err(error) => return Err(run_error(error)),
-        };
-        Ok(quota_alias_has_no_work(
-            &result.excerpt,
-            &record.usage,
-            task.writer.is_some(),
-            record.session.as_deref(),
-        ))
+        // Main 4c52d7f28 deliberately permits partial output and writer commits.
+        // The checks above prove identity, typed quota, named alias, an applied
+        // member, and released custody; the kernel separately bounds redraws.
+        Ok(matches!(record.requested_route, RequestedRoute::Named { .. }))
     }
 
     fn preparation_refusal_cause(
@@ -1598,6 +1570,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             // A graph retry is a new attempt, but retains the predecessor's
             // original source pin and terminal writer head. Mark continuations
             // even when both heads agree so preparation checks dirty remnants.
+            let mut submission_prompt = node.prompt.to_owned();
             let (mut source_head, mut successor_head) = if !accepted
                 && access == provenant_fabric_runtime::graph::AccessMode::WorktreeWrite
                 && let Some(previous) = key
@@ -1626,6 +1599,12 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                     .map_err(run_error)?
                 {
                     return Err(FacadeError::Conflict);
+                }
+                if matches!(previous.requested_route, provenant_records::run::RequestedRoute::Named { .. })
+                    && matches!(previous.state, provenant_records::run::AttemptState::Terminal {
+                    outcome: provenant_records::run::Outcome::QuotaLimited, ..
+                }) {
+                    submission_prompt.push_str("\n\nThe previous member stopped on quota. Inspect the retained worktree and any commits, then continue the original task from that work rather than restart. Use another eligible member of the same alias.");
                 }
                 let request = store.request(previous.run_id, &call).map_err(run_error)?;
                 let previous_task = request
@@ -1661,6 +1640,40 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                     Ok(request) => {
                         let task = request.tasks.first().ok_or(FacadeError::StateCorrupt)?;
                         if accepted {
+                            use provenant_run::{AttemptFilter, AttemptReader};
+                            let session = owner.session(self.cancel)?;
+                            let mut attempts = session.store.attempts(AttemptFilter {
+                                run_id: Some(operation.run_id), task_id: Some(task.task_id),
+                            }, &call).map_err(run_error)?;
+                            let attempt = attempts.next().ok_or(FacadeError::StateCorrupt)?
+                                .map_err(run_error)?;
+                            let record = session.store.record(attempt.attempt_id, &call).map_err(run_error)?;
+                            if record.prompt.bytes > provenant_records::run::RECORD_LIMIT {
+                                return Err(FacadeError::StateCorrupt);
+                            }
+                            let mut bytes = Vec::new();
+                            loop {
+                                let offset = bytes.len() as u64;
+                                let prompt = session.store.read_output(
+                                    attempt.attempt_id, provenant_run::ArtifactPart::Prompt,
+                                    provenant_run::ByteRange { offset, ..Default::default() },
+                                    &session.context, &call,
+                                ).map_err(run_error)?;
+                                if !prompt.complete || prompt.len != record.prompt.bytes
+                                    || prompt.digest != task.prompt_digest
+                                    || prompt.offset != offset
+                                    || prompt.next_offset != offset + prompt.bytes.len() as u64
+                                    || prompt.next_offset > record.prompt.bytes
+                                    || (!prompt.eof && prompt.next_offset <= offset)
+                                    || prompt.eof != (prompt.next_offset == record.prompt.bytes)
+                                {
+                                    return Err(FacadeError::StateCorrupt);
+                                }
+                                bytes.extend(prompt.bytes);
+                                if prompt.eof { break; }
+                            }
+                            submission_prompt = String::from_utf8(bytes)
+                                .map_err(|_| FacadeError::StateCorrupt)?;
                             source_head = task.source_head.clone();
                             successor_head = task.head.clone();
                             accepted_knobs = Some(task.profile.overrides.clone());
@@ -1934,7 +1947,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                         == provenant_fabric_runtime::graph::AccessMode::WorktreeWrite)
                         .then(|| worktree.map(str::to_owned))
                         .flatten(),
-                    prompt: node.prompt.into(),
+                    prompt: submission_prompt,
                     title: Some(node.title.to_owned()),
                     route: accepted_route.unwrap_or(match &route.model {
                         None if route.name.is_some() => {
@@ -2522,38 +2535,6 @@ pub(crate) fn restore_scratch_source(
 
 #[cfg(test)]
 mod journal_error_tests {
-    #[test]
-    fn quota_alias_redraw_requires_no_generated_work() {
-        use super::quota_alias_has_no_work;
-        let mut usage = provenant_records::run::UsageRecord::default();
-        assert!(quota_alias_has_no_work(" ", &usage, false, Some("startup")));
-        assert!(quota_alias_has_no_work("", &usage, true, None));
-        assert!(!quota_alias_has_no_work(
-            "",
-            &usage,
-            true,
-            Some("writer-session")
-        ));
-        usage.output_excluding_reasoning = Some(0);
-        assert!(quota_alias_has_no_work(
-            "",
-            &usage,
-            true,
-            Some("writer-session")
-        ));
-        assert!(!quota_alias_has_no_work(
-            "completed work",
-            &usage,
-            false,
-            None
-        ));
-        usage.output_excluding_reasoning = Some(1);
-        assert!(!quota_alias_has_no_work("", &usage, false, None));
-        usage.output_excluding_reasoning = Some(0);
-        usage.reasoning = Some(1);
-        assert!(!quota_alias_has_no_work("", &usage, false, None));
-    }
-
     #[test]
     fn repair_scope_comparison_detects_new_paths() {
         let review = provenant_routing::ReviewConfig::default();

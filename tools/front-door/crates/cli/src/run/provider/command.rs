@@ -14,7 +14,7 @@ fn unavailable(message: String) -> PrepareError {
 fn executable_unavailable(program: &str) -> PrepareError {
     PrepareError::Refusal {
         message: provenant_records::run::TerminalCause::CommandUnavailable
-            .reason()
+            .detail()
             .into(),
         cause: provenant_records::run::TerminalCause::CommandUnavailable,
         note: Some(format!(
@@ -447,5 +447,30 @@ pub(super) fn skip(route: &str, kind: SkipKind, _detail: impl Into<String>) -> S
         kind,
         cause: None,
         detail,
+    }
+}
+
+#[cfg(test)]
+mod refusal_tests {
+    use super::*;
+
+    #[test]
+    fn command_preparation_unavailable_retains_full_remedy() {
+        let error = executable_unavailable("fixture-tool");
+        let PrepareError::Refusal {
+            message,
+            cause,
+            note,
+        } = error
+        else {
+            unreachable!();
+        };
+        assert_eq!(
+            cause,
+            provenant_records::run::TerminalCause::CommandUnavailable
+        );
+        assert_eq!(message, cause.detail());
+        assert!(message.contains("domains.fabric.commands"));
+        assert_eq!(note.as_deref(), Some("executable fixture-tool"));
     }
 }

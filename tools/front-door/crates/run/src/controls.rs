@@ -3014,6 +3014,81 @@ mod tests {
     use super::*;
 
     #[test]
+    fn interrupted_writer_preparation_keeps_generic_rejection_diagnostic()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let clock = crate::tests::clock();
+        let cancel = provenant_core::CancelToken::new();
+        let call = crate::tests::call(&clock, &cancel);
+        let context = crate::tests::context(temp.path())?;
+        let store = RunStore::open(&context, &call)?;
+        let mut run = crate::tests::input();
+        run.request.tasks[0].writer = Some(WriterRequest {
+            extra: Default::default(),
+            project: temp.path().join("checkout"),
+            worktree: temp.path().join("checkout/.worktrees/interrupted"),
+        });
+        store.create(&run, &call)?;
+        let id = run.attempts[0].attempt_id;
+        let starting = store.mark_starting(
+            &store.record(id, &call)?,
+            &crate::tests::route(),
+            &[],
+            &Default::default(),
+            None,
+            &call,
+        )?;
+        let custody = context
+            .state_root
+            .as_path()
+            .join("worktrees")
+            .join(context.project_id.to_string())
+            .join("interrupted");
+        std::fs::create_dir_all(&custody)?;
+        // Preparation reserved the writer, then its submitter died before a
+        // guardian handoff. No provider preparation refusal was observed.
+        drop(provenant_supervisor::fixture::acquire_writer(
+            provenant_os::fs::Directory::open_anchor(&custody)?,
+            RunStore::scope(&starting),
+            call.lock_budget(),
+            &cancel,
+            &clock,
+        )?);
+        let found = store.reconcile_with_observer(
+            run.run_id,
+            &crate::dispatch_tests::Fake::default(),
+            &call,
+            &SystemProcessObserver,
+        )?;
+        assert_eq!(found, vec![(id, Reconciled::Withdrawn)]);
+        assert!(store.writer_fences()?.is_empty());
+        let terminal = store.record(id, &call)?;
+        let AttemptState::Terminal {
+            extra,
+            outcome,
+            reason,
+            ..
+        } = &terminal.state
+        else {
+            return Err("interrupted preparation did not settle".into());
+        };
+        assert_eq!(*outcome, Outcome::Rejected);
+        assert_eq!(
+            reason.as_deref(),
+            Some("launch interrupted: writer preparation never reached a guardian")
+        );
+        assert!(!extra.contains_key("terminal_cause"));
+        assert!(!extra.contains_key("terminal_note"));
+        let projected =
+            provenant_records::wire::lane::LaneRow::project(&terminal, Default::default());
+        assert_eq!(
+            projected.reason.as_deref(),
+            Some(Outcome::Rejected.diagnostic_reason())
+        );
+        Ok(())
+    }
+
+    #[test]
     fn reconcile_journal_errors_do_not_hide_other_attempts()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
         for failure in ["clear", "blocked", "listing"] {

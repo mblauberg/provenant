@@ -281,8 +281,9 @@ pub trait AttemptOwner {
         Ok(None)
     }
 
-    /// Host proof that a terminal quota refusal did no work, belongs to the
-    /// same unpinned alias and has released custody. Missing evidence denies redraw.
+    /// Host proof that a terminal quota refusal belongs to the same unpinned
+    /// alias and has released custody. Partial writer work is retained for the
+    /// successor; missing identity or custody evidence denies redraw.
     fn quota_alias_redraw(
         &mut self,
         _key: &AttemptKey,

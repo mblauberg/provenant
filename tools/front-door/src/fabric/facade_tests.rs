@@ -1910,10 +1910,12 @@ esac
             actor: None,
             chair: None,
         };
+        let replay_prompt = "Review the slice. ".repeat(5_000);
+        assert!(replay_prompt.len() > provenant_records::run::OUTPUT_LIMIT as usize);
         let input: SubmitInput = serde_json::from_value(serde_json::json!({
             "op":"submit", "operation_id":graph_operation("graph-attempt-operation", &key)?,
             "tasks":[{
-                "title":"inspect", "prompt":"Review the slice",
+                "title":"inspect", "prompt":replay_prompt,
                 "base":original_head,
                 "head":successor_head,
                 "source_head":original_head,
@@ -1943,7 +1945,7 @@ esac
             require_skill_location: false, settlement_retry_limit: None, context: None,
             title: Some("inspect".into()),
             task_id: provenant_cli::run::derived_task(&plain_operation, 0).map_err(|_| "plain task id")?,
-            prompt: "Review the slice".into(), base: Some(original_head.clone()), pinned_base: None,
+            prompt: replay_prompt.clone(), base: Some(original_head.clone()), pinned_base: None,
             head: Some(successor_head.clone()),
             source_head: Some(original_head.clone()),
             route: serde_json::from_value(serde_json::json!({"kind":"model", "provider":"fixture", "model":"fixture/model"}))?,
@@ -2002,7 +2004,7 @@ esac
                     source_commit: None,
                     review_base: None,
                     title: "inspect",
-                    prompt: "Review the slice",
+                    prompt: &replay_prompt,
                     required_verdict: None,
                     deadline_seconds: None,
                     inputs_dir: None,
