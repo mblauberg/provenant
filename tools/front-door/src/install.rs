@@ -1406,7 +1406,9 @@ fn upgrade_preflight(globals: &cli::Globals) -> Result<Vec<String>, String> {
             )
             .map_err(|e| e.to_string())?;
             for id in ids {
-                findings.push(format!("Pending graph {project}/{id}"));
+                findings.push(format!(
+                    "Pending graph {project}/{id}: finish or cancel it with the previous release before upgrading"
+                ));
             }
         }
     }
