@@ -430,14 +430,14 @@ pub(super) fn render_run(mut result: Reply, edge: &Edge<'_>) -> Reply {
             && wait.is_none()
             && matches!(state, "queued" | "starting" | "running" | "settling")
         {
-            wait = Some(format!("provenant lanes --id {id} --wait 4m"));
+            wait = Some(format!("provenant status {id} --wait=4m"));
         }
         // One typed next step: the first lane that needs one.
         if next.is_none() {
             if timed_out && matches!(state, "queued" | "starting" | "running" | "settling") {
-                next = Some(format!("provenant lanes --id {id} --wait 4m"));
+                next = Some(format!("provenant status {id} --wait=4m"));
             } else if state == "input_required" {
-                next = Some(format!("provenant resume {id} --prompt-file ANSWER"));
+                next = Some(format!("provenant retry {id} --prompt-file ANSWER"));
             } else if !matches!(state, "succeeded") {
                 next = Some(format!("provenant output {id}"));
             }
@@ -868,7 +868,7 @@ pub(super) fn dispatch_inner(
             return Err(Fail::new(
                 Status::Invalid,
                 ErrorKind::Invalid,
-                "--explain applies to one --route or --model, or to --preset",
+                "--explain inspects one template or graph before launch",
             ));
         }
         let run_config = provenant_config::read_with_domains(edge.roots, &crate::domains::SECTIONS)

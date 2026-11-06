@@ -27,8 +27,7 @@ success from a clean final answer:
   `AGENTS.md`, `CONTRIBUTING` or runbooks name it; otherwise compare the test
   diff by hand. A suite that only grows is a finding.
 
-For a wide review, fan out readers with `provenant run --preset
-fan-out-synthesise --set 'parameters.width=3' --prompt-file Q.md`, one slice of
+For a wide review, fan out readers with `provenant run --use explore --route junior --over costs,quality,recovery --file Q.md`, one slice of
 runs per branch.
 
 ## Method

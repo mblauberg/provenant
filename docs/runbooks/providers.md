@@ -80,7 +80,7 @@ Model and effort belong to this configured row; the task cannot override them.
 Network defaults to open, as on ordinary model routes; explicit provider-only
 or local reach and access remain the lane's declared permissions. Every launch
 starts fresh: explicit `resume --no-fallback` refuses it, automatic policy retries are
-disabled, and ordinary `resume` can dispatch a fresh lane with the prior result.
+disabled, and ordinary `retry` can dispatch a fresh lane with the prior result.
 Receipts retain the actual provider/model/effort plus `host_native` and the
 configuration `source` in `applied_route`.
 
@@ -135,7 +135,7 @@ adapter route leaves room for other named, model-less adapters. It carries no
 model, effort or account. Prompt text never supplies or changes argv. Bare
 executables resolve on the host's captured PATH; paths resolve from the lane's
 working directory. A single task needs no manifest:
-`provenant dispatch --route command/fmt-check --prompt-file P`. The applied
+a deterministic action template bound to `command/fmt-check`. The applied
 route records `domains.fabric.commands.NAME` as its configuration source, with no model in the receipt.
 
 Commands use the ordinary supervisor, guardian, deadlines, descendant cleanup
@@ -504,7 +504,7 @@ and `--host` dispatch cannot pass `--write-root`, so declare the directory in
 see [configuration](configuration.md#writer-extra-write-paths). Its entries are
 used as written and must be real paths (`/private/tmp`, not `/tmp`).
 
-Inspect `provenant lanes --id RUN/TASK/ATTEMPT --json` and its `write_grants`
+Inspect `provenant status RUN/TASK/ATTEMPT --json` and its `write_grants`
 array for the write allowances applied to that attempt. Each entry records its
 source, scope and absolute path. The path is stored relative to `/`, as
 `{"relative_to_root":{"encoding":"utf8","path":"Users/..."}}`, or with
@@ -584,12 +584,12 @@ cloud_target = "verify"
 The project setting is optional. Without it, choose the target explicitly:
 
 ```sh
-provenant run --placement cloud:verify --prompt-file task.txt
+provenant run --file cloud-verify.toml --explain
 provenant reconcile --id ATTEMPT_ID
-provenant lanes --id ATTEMPT_ID
 provenant status ATTEMPT_ID
 provenant output ATTEMPT_ID
-provenant cancel ATTEMPT_ID
+provenant output ATTEMPT_ID
+provenant stop ATTEMPT_ID
 ```
 
 `--placement local` overrides a project's cloud default. The target's branch
@@ -601,7 +601,7 @@ before returning. Cloud jobs are read-only verification work and cannot take a
 writer or delivery target.
 
 The owner saves the intent before submission and the remote ID before waiting.
-After a restart, `reconcile` observes saved jobs; `lanes`, `status` and `output`
+After a restart, `reconcile` observes saved jobs; `status`, `status` and `output`
 show the saved observation and its result. Cloud lane states are prefixed
 `cloud_`. In JSON status, `cloud_state` and `cloud_jobs` describe the remote
 job; the underlying local attempt has no process exit. A changed tracked file

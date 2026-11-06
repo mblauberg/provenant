@@ -1,5 +1,33 @@
 {
   "schema_version": 1,
+  "documented_fields": [
+      "profile",
+      "lanes.max_concurrency",
+      "lanes.max_concurrency_read_only",
+      "lanes.max_depth",
+      "lanes.silence_seconds",
+      "lanes.slot_wait_seconds",
+      "lanes.publish",
+      "routing.exclude",
+      "routing.graph_exclude",
+      "fabric.accept_handoff",
+      "usage.project_attribution",
+      "domains.run.writer_token_budget",
+      "domains.pr.land.integration",
+      "domains.pr.land.batch_size",
+      "domains.pr.land.gate.checks",
+      "domains.pr.land.gate.timeout_seconds",
+      "domains.pr.land.local_gate.mode",
+      "domains.pr.land.local_gate.commands",
+      "domains.fabric.graph.limits.nodes",
+      "domains.fabric.graph.limits.expansion_depth",
+      "domains.fabric.graph.limits.concurrency",
+      "domains.fabric.lanes.max_concurrent_builds",
+      "domains.fabric.lanes.build_wait_minutes",
+      "providers.{provider}.update",
+      "providers.{provider}.runtime_deadline_seconds",
+      "gc.graph_checkpoint_days"
+  ],
   "host_gc_settings": {
     "path": "gc",
     "settings": {

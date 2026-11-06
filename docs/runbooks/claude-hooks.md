@@ -11,7 +11,7 @@ diagnostics to stderr.
 | Event | Handler | What it does |
 |---|---|---|
 | `PreToolUse` (`Bash`) | `hook claude pre-tool-use` | Enforces the guard, then optionally offers human answers |
-| `SessionStart` (`startup`, `resume`, `clear`) | `hook claude session-start` | Reports the checkpoint status, then the state digest |
+| `SessionStart` (`startup`, `retry`, `clear`) | `hook claude session-start` | Reports the checkpoint status, then the state digest |
 | `SessionStart` (`compact`) | `hook claude compact` | The same report after compaction |
 | `PreCompact` | `hook claude pre-compact` | Writes derived state to `autosave.md`, preserving the chair checkpoint |
 | `Stop` | `hook claude stop` | Refreshes `autosave.md` if an existing session is 10 minutes quiet |
@@ -45,7 +45,7 @@ The digest is read-only and at most 3 KiB; the whole hook output stays under
 8 KiB, and the checkpoint excerpt shrinks first.
 
 - **Lanes in flight:** this project's non-terminal lanes from
-  `provenant lanes`, with ID, state and route, and the worktree and delivery
+  `provenant status`, with ID, state and route, and the worktree and delivery
   branch when the listing reports them.
 - **Lanes settled since the last chair save:** terminal lanes (including
   `input_required`) that finished after the chair last wrote the checkpoint.
@@ -74,7 +74,7 @@ pointer in a truncated excerpt all repeat the hook's `--state-dir` the same way
 (absolute, single-quoted) when it was non-default. A hint that could not
 round-trip is never printed as a command: the `Save:` line then says that no
 runnable command is shown and that a save without the hook's `--state-dir` goes
-to the default store. The `output bounded` marker that points at `provenant lanes`
+to the default store. The `output bounded` marker that points at `provenant status`
 follows the same rule, with a plain note when the command cannot be shown.
 
 A section the hook could not read is listed as unavailable, never as empty.

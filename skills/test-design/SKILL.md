@@ -23,4 +23,4 @@ Run focused tests locally and the project's exact-head CI gates. For risky logic
 
 For substantial work, use `generator-evaluator` with `--set 'parameters.lenses=[{name="tests"}]'` for an independent test review. Its lens reviews the writer's commit; it does not write acceptance tests. Arrange an independent acceptance author separately.
 
-For pruning, classify tests with read-only `fan-out`, then use `big-batch` with a registered writer worktree and disjoint scope per crate. Supply the brief and required worktree or lane parameters to `provenant run --preset NAME --prompt-file BRIEF --explain` before submission.
+For pruning, classify tests with `explore` over crates, then use `batch` with disjoint writer scopes into one integration branch. Inspect `provenant run --use batch --file BRIEF --explain` before submission.

@@ -28,12 +28,8 @@ does not fix them without the grant.
 
 ## How it runs
 
-- Audit several skills with `provenant run --preset fan-out-synthesise
-  --set 'parameters.width=3' --prompt-file B.md --explain`: one read-only lane
-  per skill, then synthesis. Submit only after `--explain` looks right.
-- Rewrite several skills with `provenant run --preset big-batch --params-file
-  lanes.toml --explain`, one `lanes` entry per skill. Prepare each writer
-  worktree first; `big-batch` does not provision them.
+- Audit with `provenant run --use explore --route junior --over skill-a,skill-b --file B.md --explain`; synthesise the evidence.
+- Rewrite with `provenant run --use batch --file B.md --explain`, disjoint scopes and one integration branch. Inspect before submitting.
 
 ## Working rules
 

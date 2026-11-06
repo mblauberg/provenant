@@ -10,7 +10,7 @@ profile or a knob with `provenant config set profile economy` or
 `provenant config set lanes.max_concurrency 4`; `config unset KNOB` reverts it.
 
 Profiles are `balanced` and `economy`. Override a knob for one run
-with `provenant run --knob NAME=VALUE` (the terminal path; agents use
+through an authorised template document (agents use
 `fabric_run` (`op: submit`)'s `knobs`).
 
 ## Precedence and stamps
@@ -193,7 +193,7 @@ the admission deadline and is then refused with the cap, setting and source. On
 macOS it defers starts at critical kernel memory pressure by default. Set `domains.fabric.lanes.memory_pressure_threshold`
 to `warning` to defer at warning and critical, or `never` to disable this gate.
 The 5 % memory floor warns on every platform; the disk floor
-applies to both classes. `lanes` shows a queued or starting lane's
+applies to both classes. `status` shows a queued or starting lane's
 class and what it is waiting for, such as `read-only startup spacing: 1.2 s
 left of 2.0 s`.
 
@@ -244,18 +244,18 @@ the slot its own parent holds and waits until it times out; keep
 A command that finds every slot taken waits, prints
 `provenant: waiting for a build slot (n of m in use)` on its own stderr, and
 repeats the message about every 60 seconds. While it waits it also writes
-`build-slot-wait.PID` (one per command) in the lane's scratch directory, and `lanes` and
+`build-slot-wait.PID` (one per command) in the lane's scratch directory, and `status` and
 `status` show the lane as waiting (`build slot: ...`) the way they show an
 admission wait. The host trusts only which of two fixed waits the file names
 and that it was refreshed in the last 150 seconds. A slot wait also records when
-it began and how many slots were held, so `lanes` shows
+it began and how many slots were held, so `status` shows
 `build slot: waiting N of M (longest first); H of S slots held`: N is the lane's
 rank among this project's waiting lanes by time waited, M how many of them wait,
 and H of S the slots held by any project on the host. Slots go to whichever
 waiter polls first, so the rank is an estimate, not a queue position. Writer lanes are told in their preamble
 that this wait is normal and bounded, and to keep waiting rather than stop. It gives up after
 `build_wait_minutes` (default 30) with an error that names the slot count and
-suggests `provenant lanes` to find the holders. The same bounded wait and
+suggests `provenant status` to find the holders. The same bounded wait and
 progress message apply while the command waits for another build's
 `.cargo-lock` on its target directory, which it does before it takes a slot so
 a slot is never held by a build that Cargo would queue anyway. Both waits share
@@ -265,7 +265,7 @@ Linux the child is also signalled if the shim is killed outright, so a build
 does not keep compiling after the shim and its slot are gone. Provenant repairs
 the slot directory when it launches a lane: it restores the 0700 and 0600 modes
 and recreates a missing, non-regular or hard-linked slot file. Waiting blocks
-that command only, not the lane or its admission. `lanes` does not report
+that command only, not the lane or its admission. `status` does not report
 build waits; the message is in the lane's output.
 
 The slots are files `slot-0.lock` to `slot-N-1.lock` under
@@ -498,8 +498,8 @@ runtime_deadline_seconds = 7200
 
 The deadline runs on the wall clock, so a host that sleeps through it stops the
 provider on waking. The attempt settles as `timed_out`, releases its worktree
-and lock, and `lanes` shows the deadline of each running lane and a
-`provenant resume` hint for a timed-out one.
+and lock, and `status` shows the deadline of each running lane and a
+`provenant retry` hint for a timed-out one.
 
 ## Store busy timeout
 

@@ -5,8 +5,7 @@ description: "Use to build an approved software change through the deliver loop:
 
 # Implement
 
-The `deliver` composite is the default loop. This skill covers what the composite
-does not: what to hand it, how to map work onto its nodes, and when to stop.
+Use `implement` for a slice and `deliver` for the full delivery loop.
 
 ## Entry
 
@@ -27,10 +26,10 @@ named targets, and leave T2 and T3 to CI or a configured host.
 ## How it runs
 
 ```sh
-provenant run --use deliver --file ISSUE.md --explain
+provenant run --use implement --route junior --file ISSUE.md --explain
 ```
 
-Check authority, write scopes, CI, review and landing gates in the explanation,
+Check authority, write scopes and gates in the explanation,
 then submit without `--explain`. `deliver` is the default composite; use
 `implement` for one slice, `implement.fix` for a known defect, and `batch` for
 parallel slices into one integration branch. Use `plan` when the shape is open.

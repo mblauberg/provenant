@@ -11,6 +11,7 @@ landing. `explore`, `research` and `design` gather evidence or settle options;
 `verify`, `synthesise` and `repair` check claims, reconcile inputs and fix findings.
 
 ```sh
+provenant run --route junior --file brief.md --explain
 provenant run --use deliver --file brief.md --explain
 provenant run --use deliver --file brief.md
 provenant status
@@ -21,7 +22,7 @@ provenant output TARGET
 `--over`, `--set`, `--file`, `--explain` and `--wait`. Inspect the resolved
 shape and authority before submitting. A wait expiry leaves work running.
 The core verbs are `run`, `status`, `output`, `steer`, `stop`, `retry`, `edit`,
-`templates`, `land`, `quota` and `trace`; `help --all` reveals the rest.
+`templates`, `land` and `quota`; `help --all` reveals the rest.
 
 ## Deliver through CI to land
 
@@ -98,8 +99,7 @@ concrete purpose.
 ## Observe and recover
 
 `status` uses one row schema for graphs, nodes and attempts. `output TARGET`
-collects evidence; `output TARGET --trace` shows the timeline. `trace` exposes
-trace inspection. Events retain identifiers, digests and cause codes for
+collects evidence; `output TARGET --trace` shows the timeline. Advanced `trace` inspection is listed in `help --all`. Events retain identifiers, digests and cause codes for
 patches, attempts, waits, gates, joins, budget and effects. Checkpoints own
 recovery; replay reconciles uncertain launches and reuses finished outputs.
 

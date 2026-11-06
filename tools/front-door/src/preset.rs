@@ -470,8 +470,8 @@ impl Layers {
             }),
             "layers": self.entries.get(name).into_iter().flatten().map(|(origin, _)| origin).collect::<Vec<_>>(),
             "next": [
-                format!("provenant run --preset {name} --prompt-file FILE --explain"),
-                format!("provenant run --preset {name} --prompt-file FILE --set STAGE.PARAMETER=VALUE")
+                format!("provenant run --use {name} --file FILE --explain"),
+                format!("provenant run --use {name} --file FILE --set PARAMETER=VALUE")
             ]
         }))
     }

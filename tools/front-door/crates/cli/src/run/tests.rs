@@ -1599,7 +1599,7 @@ fn core_run_timeout_only_offers_waiting_for_unsettled_lanes()
     assert_eq!(report.result.status, Status::Waiting);
     assert!(
             report.human.contains(
-                "run is still running; keep waiting with `provenant lanes --id 01010101010101010101010101010101 --wait 4m`"
+                "run is still running; keep waiting with `provenant status 01010101010101010101010101010101 --wait=4m`"
             ),
             "{}",
             report.human
@@ -1613,7 +1613,7 @@ fn core_run_timeout_only_offers_waiting_for_unsettled_lanes()
     assert!(!report.human.contains("keep waiting:"), "{}", report.human);
     assert_eq!(
         next(&report).as_deref(),
-        Some("provenant lanes --id 01010101010101010101010101010101 --wait 4m")
+        Some("provenant status 01010101010101010101010101010101 --wait=4m")
     );
     let input = super::reply(
         "dispatch",
@@ -1629,7 +1629,7 @@ fn core_run_timeout_only_offers_waiting_for_unsettled_lanes()
     assert_eq!(input.result.status, Status::Ok);
     assert_eq!(
         next(&input).as_deref(),
-        Some("provenant resume 03030303030303030303030303030303 --prompt-file ANSWER")
+        Some("provenant retry 03030303030303030303030303030303 --prompt-file ANSWER")
     );
     assert!(!input.human.contains("keep waiting:"));
     Ok(())

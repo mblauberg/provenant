@@ -432,7 +432,7 @@ envelopes retain outcomes recorded so far and distinguish `LAND_CONTENTION`,
 #### Landing settings
 
 Set these under `[domains.pr.land]` in host `config.toml`. The generated
-[configuration reference](../reference/config-keys.md#host-land-settings) lists
+[configuration reference](../reference/config-keys-all.md#host-land-settings) lists
 defaults, values and bounds for every key. Policy resolves bundled defaults,
 host settings, `projects.<project>`, `tiers.<tier>`, then invocation overrides;
 omitted fields inherit. The project and tier tables accept the same fields.

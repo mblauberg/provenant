@@ -110,8 +110,9 @@ receipt, and never invent role or effort values. Start graphs with
 `provenant run --use TEMPLATE` (inspect first with `--explain`). Templates are
 leaves or composites; `task` handles one assignment, `plan` shapes work, `batch`
 integrates parallel slices and `deliver` carries implementation through landing.
+Default implementation slices to `run --route junior`; raise tiers for design.
 The core commands are `run`, `status`, `output`, `steer`, `stop`, `retry`,
-`edit`, `templates`, `land`, `quota` and `trace`; `help --all` lists the rest.
+`edit`, `templates`, `land` and `quota`; `help --all` lists the rest.
 Use `output --trace` for the timeline and `edit` for revisioned graph patches. Pools,
 pacing, the council, run attempts and the state root are in
 `docs/runbooks/model-routing.md`. Prefer per-run controls: editing a global
