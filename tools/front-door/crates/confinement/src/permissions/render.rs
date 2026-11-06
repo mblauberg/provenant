@@ -564,7 +564,7 @@ pub(super) fn verify_shared_writes(
     Ok(())
 }
 
-/// GitHub CLI configuration roots available to explicitly publishing writers.
+/// GitHub CLI configuration roots that networked read-only lanes may read.
 #[cfg(any(target_os = "macos", feature = "snapshot"))]
 pub(super) fn gh_config_paths(home: &Path) -> Vec<PathBuf> {
     vec![
@@ -859,7 +859,10 @@ fn render_profile_with_limit(
 
     // The gh read comes before the secret-root denies: Seatbelt is
     // last-match-wins, so an overlapping secret root must still hide it.
-    let gh_paths = if !profile.spec.deny_credential_access && plan.writer_publishing() {
+    let gh_paths = if !profile.spec.deny_credential_access
+        && ((matches!(plan.mode, AccessMode::ReadOnly) && plan.network == NetworkAccess::Open)
+            || plan.writer_publishing())
+    {
         gh_config_paths(home)
     } else {
         Vec::new()

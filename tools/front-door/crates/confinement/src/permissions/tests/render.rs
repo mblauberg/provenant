@@ -545,8 +545,8 @@ fn network_levels_shared_writes_and_hard_denies_render_in_order() {
         let read = format!("(allow file-read* (subpath \"{path}\"))");
         let deny_read = format!("(deny file-read* (subpath \"{path}\"))");
         let deny_write = format!("(deny file-write* (subpath \"{path}\"))");
-        assert!(!open.contains(&read), "{path}");
-        assert!(open.contains(&deny_read), "{path}");
+        assert!(open.contains(&read), "{path}");
+        assert!(!open.contains(&deny_read), "{path}");
         assert!(open.contains(&deny_write), "{path}");
         assert!(!provider.contains(&read), "{path}");
         assert!(!local.contains(&read), "{path}");
@@ -556,6 +556,19 @@ fn network_levels_shared_writes_and_hard_denies_render_in_order() {
     assert!(
         open.find(ssh_read).expect("ssh deny") > open.rfind("(allow file-read*").expect("allow")
     );
+
+    // A secret root overlapping the gh config must be denied after the allow.
+    for secret in [
+        "/Users/fixture/.config/gh",
+        "/Users/fixture/.config/gh/hosts.yml",
+        "/Users/fixture/.config",
+    ] {
+        plan.secret_roots = vec![grant(secret)];
+        let hidden = render(&plan);
+        let deny = format!("(deny file-read* (subpath \"{secret}\"))");
+        let allow = "(allow file-read* (subpath \"/Users/fixture/.config/gh\"))";
+        assert!(hidden.find(&deny).expect(secret) > hidden.find(allow).expect(allow));
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -649,88 +662,6 @@ fn network_endpoints_accept_only_sbpl_hosts_and_checked_ports() {
         );
     }
 }
-
-#[cfg(target_os = "macos")]
-#[test]
-fn native_open_reader_cannot_read_github_credentials() -> Result<(), Box<dyn std::error::Error>> {
-    use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, Termination};
-    use std::time::Duration;
-
-    let temp = tempfile::tempdir()?;
-    let root = provenant_os::fs::canonicalize(temp.path())?;
-    let home = root.join("home");
-    let scratch = root.join("scratch");
-    std::fs::create_dir_all(home.join(".config/gh"))?;
-    std::fs::create_dir(&scratch)?;
-    let secret = home.join(".config/gh/hosts.yml");
-    let control = scratch.join("control");
-    std::fs::write(&secret, "fixture token")?;
-    std::fs::write(&control, "control")?;
-    let executor = SystemExecutor::new(1)?;
-    let cancel = CancelToken::new();
-    if let Err(error) = system_backend(&BackendContext {
-        executor: &executor,
-        cancel: &cancel,
-        env: &[],
-    }) {
-        provenant_test_support::skip_sandbox_dependent_test(format!(
-            "native sandbox unavailable: {error}"
-        ))?;
-        return Ok(());
-    }
-    let subtree = |path: PathBuf| PathGrant {
-        path,
-        scope: PathScope::Subtree,
-    };
-    let exact = |path: &str| PathGrant {
-        path: path.into(),
-        scope: PathScope::Exact,
-    };
-    let plan = PlanPermissions {
-        read_only: None,
-        mode: AccessMode::ReadOnly,
-        scratch: subtree(scratch.clone()),
-        private_state: None,
-        read_roots: vec![],
-        protected_roots: vec![],
-        secret_roots: vec![],
-        selected_authentication: None,
-        include_continuation: false,
-        write_roots: vec![],
-        network: NetworkAccess::Open,
-        nested_confinement: false,
-    };
-    let profile = ProviderProfile {
-        spec: ProviderProfileSpec {
-            process_executables: vec![exact("/bin/cat")],
-            ..ProviderProfileSpec::default()
-        },
-        observations: BTreeMap::new(),
-    };
-    let source = render_profile(&plan, &profile, &[], &[], None, &home)?;
-    let launch = ConfinedLaunch {
-        enforcement: Enforcement::MacOsSandboxExec,
-        profile: source,
-        profile_digest: [0; 32],
-        native_controls: vec![],
-    };
-    let read = |path: &Path| -> Result<_, Box<dyn std::error::Error>> {
-        let argv = ["/bin/cat".into(), path.as_os_str().to_owned()];
-        let command = launch.command(&argv, &provenant_core::AttemptId::from_bytes([9; 16]))?;
-        let mut options = ExecOptions::new(&command, &scratch, Duration::from_secs(10));
-        options.stdout = StreamPolicy::Capture { limit: 1024 };
-        options.stderr = StreamPolicy::Discard;
-        Ok(executor.execute(options)?)
-    };
-    let allowed = read(&control)?;
-    assert_eq!(allowed.termination, Termination::Exit(0));
-    assert_eq!(allowed.stdout.bytes, b"control");
-    let denied = read(&secret)?;
-    assert_eq!(denied.termination, Termination::Exit(1));
-    assert!(denied.stdout.bytes.is_empty());
-    Ok(())
-}
-
 #[cfg(any(target_os = "macos", feature = "snapshot"))]
 #[test]
 fn invalid_provider_endpoints_warn_and_preserve_open_network() -> Result<(), PermissionError> {

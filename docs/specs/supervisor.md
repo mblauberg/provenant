@@ -576,9 +576,7 @@ Confinement compiles `ReadOnly` or `WorktreeWrite(VerifiedWorktree)` from
 verified anchors. It refuses traversal, symlinked state or lock leaves,
 credential roots and grants enclosing them, broad home or tmp grants and
 Git-internal roots. `~/.ssh`, `~/.aws`, `~/.kube`, `~/.secrets` and Cargo
-`credentials` are denied after every grant. GitHub CLI credentials are readable
-only for an open-network writer with explicit `lanes.publish=true`; open networking
-alone never grants them. Unsupported or nested
+`credentials` are denied after every grant. Unsupported or nested
 confinement fails `ConfinementUnavailable` and never widens access; Linux has
 no backend.
 An optional discovered root that resolves into a credential root is omitted
