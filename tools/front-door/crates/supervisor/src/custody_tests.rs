@@ -392,6 +392,11 @@ fn slot_reservation_cutover_keeps_reboot_device_proof() -> TestResult {
         carried.extra["slot_original_device"],
         record.reservation_device
     );
+    let proof = recovered
+        .after_reboot_with(&attempt, scope(), &world)?
+        .ok_or("cutover lost reboot proof")?;
+    proof.release()?;
+    assert!(!reservation_present(&slot, scope())?);
     Ok(())
 }
 

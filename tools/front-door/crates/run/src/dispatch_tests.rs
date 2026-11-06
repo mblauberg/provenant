@@ -7024,6 +7024,86 @@ fn reconcile_recovers_writer_when_device_numbers_change_after_reboot() -> TestRe
 }
 
 #[test]
+fn reconcile_rebooted_slot_handoff_after_device_numbers_change() -> TestResult {
+    let observer = RebootObserver(NEW_BOOT);
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let context = context(temp.path())?;
+    let store = RunStore::open(&context, &call)?;
+    let mut run = input();
+    let worktree = temp.path().join("lane");
+    std::fs::create_dir(&worktree)?;
+    std::fs::write(worktree.join("unfinished.rs"), "keep my work")?;
+    run.request.tasks[0].writer = Some(WriterRequest {
+        extra: Default::default(),
+        project: temp.path().to_path_buf(),
+        worktree: worktree.clone(),
+    });
+    store.create(&run, &call)?;
+    let id = run.attempts[0].attempt_id;
+    store.mark_starting(
+        &store.record(id, &call)?,
+        &route(),
+        &[],
+        &Default::default(),
+        None,
+        &call,
+    )?;
+    store
+        .claim(id, &at_micros(100), &call)?
+        .ok_or("not admitted")?;
+    let scope = RunStore::scope(&store.record(id, &call)?);
+    let attempt = store.attempt_dir(run.run_id, id, false)?;
+    let custody = store
+        .writer_registry
+        .join("worktrees")
+        .join(context.project_id.to_string())
+        .join(provenant_confinement::worktrees::state_dir_name(&worktree));
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&custody)?;
+    let slot = Directory::open_anchor(&custody)?;
+    drop(provenant_supervisor::fixture::acquire_writer(
+        slot.try_clone()?,
+        scope,
+        call.lock_budget(),
+        &cancel,
+        &clock,
+    )?);
+    let child_reservation = custody.join(id.to_string()).join("reservation.json");
+    let mut value: serde_json::Value = serde_json::from_slice(&std::fs::read(&child_reservation)?)?;
+    let old_device = slot.metadata()?.device + 1;
+    value["boot"] = OLD_BOOT.into();
+    value["launch_state"] = "handing_off".into();
+    value["reservation_device"] = old_device.into();
+    value["reservation_inode"] = slot.metadata()?.inode.into();
+    value["attempt_device"] = old_device.into();
+    value["attempt_inode"] = attempt.metadata()?.inode.into();
+    std::fs::write(
+        custody.join("reservation.json"),
+        serde_json::to_vec(&value)?,
+    )?;
+    std::fs::remove_file(&child_reservation)?;
+
+    assert_eq!(
+        store.reconcile_with_observer(run.run_id, &Fake::default(), &call, &observer)?,
+        vec![(id, Reconciled::Finished)]
+    );
+    assert_eq!(terminal(&store, id, &call)?, Outcome::Lost);
+    assert!(store.writer_fences()?.is_empty());
+    assert!(!custody.join("reservation.json").exists());
+    assert!(!child_reservation.exists());
+    assert_eq!(
+        std::fs::read_to_string(worktree.join("unfinished.rs"))?,
+        "keep my work"
+    );
+    assert!(artifacts::read_sealed(&attempt, "process-exit.json", RECORD_LIMIT)?.is_none());
+    Ok(())
+}
+
+#[test]
 fn changed_device_numbers_on_same_boot_keep_writer_custody() -> TestResult {
     recover_rebooted_writer_inner(false, false, true, OLD_BOOT, false, true, false)
 }

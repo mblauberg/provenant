@@ -270,6 +270,13 @@ pub(crate) struct Reservation {
     pub extra: std::collections::BTreeMap<String, serde_json::Value>,
 }
 impl Reservation {
+    fn original_reservation_device(&self) -> u64 {
+        self.extra
+            .get("slot_original_device")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(self.reservation_device)
+    }
+
     pub(crate) fn validate(&self) -> Result<()> {
         self.binding.validate()?;
         if self.attempt_device.is_some() != self.attempt_inode.is_some() {
@@ -1886,11 +1893,7 @@ pub(crate) fn acquire_reboot_recovery_with(
         || reservation.attempt_inode != Some(target.inode)
         || !reservation.attempt_device.is_some_and(|device| {
             same_device_rebinding(
-                reservation
-                    .extra
-                    .get("slot_original_device")
-                    .and_then(serde_json::Value::as_u64)
-                    .unwrap_or(reservation.reservation_device),
+                reservation.original_reservation_device(),
                 device,
                 slot.device,
                 target.device,
@@ -2159,7 +2162,7 @@ impl Recovery {
             if self.reservation.reservation_inode != slot.inode
                 || !self.reservation.attempt_device.is_some_and(|device| {
                     same_device_rebinding(
-                        self.reservation.reservation_device,
+                        self.reservation.original_reservation_device(),
                         device,
                         slot.device,
                         metadata.device,
