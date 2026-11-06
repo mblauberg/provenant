@@ -85,11 +85,8 @@ and waits in `RunStore::admit` until host, project and run concurrency, 20 s
 host start spacing and the configured resource guards allow a start, or until the
 admission deadline refuses it. `terminal` runs after the sealed exit is
 durable: `finish` decodes the sealed stdout capture, commits the terminal
-record idempotently. Writers seal an instruction baseline before launch and
-quarantine protected changes under the held writer lease before committing an
-outcome. Terminal checks also enforce base ancestry and refuse unfinished Git
-operations. Incomplete quarantine stays retryable; review-required changes fail
-with retained evidence. Run seals the real quarantine manifest, and supervisor's
+record idempotently. Terminal checks enforce base ancestry and refuse unfinished
+Git operations. Run seals the quarantine manifest, and supervisor's
 `publish_release` binds its digest into the settlement receipt so custody can
 clear. The holder context carries a `RootSeed`
 because the guardian's environment is cleared.

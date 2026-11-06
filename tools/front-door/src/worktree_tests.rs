@@ -564,7 +564,7 @@ fn writer_dispatch_edits_a_linked_worktree() -> Result {
         state: context.state_root.as_path().to_owned(),
         home: fs::canonicalize(&rig.home)?,
         project: context.project_id,
-        mode: "edit",
+        mode: "instruction-edit",
     };
     let holder = holder_context(&rig, &roots, &context);
     let started = start_writer(&store, first_record.run_id, &provider, &holder, &call)?;
@@ -579,15 +579,19 @@ fn writer_dispatch_edits_a_linked_worktree() -> Result {
     assert!(matches!(
         &first_terminal.state,
         provenant_run::AttemptState::Terminal { reason: Some(reason), .. }
-            if reason.contains("uncommitted edits") && reason.contains("writer-edited")
+            if reason.contains("uncommitted edits") && reason.contains("AGENTS.md")
     ));
+    assert_eq!(fs::read(path.join("AGENTS.md"))?, b"writer instructions\n");
     assert_eq!(
         fs::read_to_string(path.join("writer-edited"))?,
         "writer fixture completed"
     );
     wait_for_writer_release(&store)?;
     let path_text = path.to_str().ok_or("fixture worktree encoding")?;
-    git(&rig, &["-C", path_text, "add", "writer-edited"])?;
+    git(
+        &rig,
+        &["-C", path_text, "add", "writer-edited", "AGENTS.md"],
+    )?;
     git(&rig, &["-C", path_text, "commit", "-qm", "Writer edit"])?;
 
     // Fabric supplies absolute paths; the CLI also accepts repo-relative ones.
@@ -1632,6 +1636,9 @@ pub(crate) fn provider(args: &[OsString]) -> Result {
         .ok_or("writer provider worktree missing")?;
     match mode {
         "edit" => {}
+        "instruction-edit" => {
+            fs::write(worktree.join("AGENTS.md"), b"writer instructions\n")?;
+        }
         "control" => {
             for name in [
                 "nested/AGENTS.md",
