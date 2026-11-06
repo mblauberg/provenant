@@ -6,7 +6,7 @@ use serde::Serialize;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ProviderError {
-    #[error("argv prompt exceeds 64 KiB")]
+    #[error("argv prompt exceeds its configured byte limit")]
     PromptTooLarge,
     #[error("provider protocol is malformed")]
     Malformed,
@@ -65,10 +65,15 @@ pub struct AvailabilityRecord {
 pub struct Prompt {
     text: String,
     file: Option<std::path::PathBuf>,
+    argv_limit: usize,
 }
 impl Prompt {
     pub fn new(text: String) -> Self {
-        Self { text, file: None }
+        Self {
+            text,
+            file: None,
+            argv_limit: provenant_confinement::run_config::DEFAULT_ARGV_PROMPT_LIMIT_BYTES,
+        }
     }
     pub fn from_file(path: std::path::PathBuf) -> Self {
         Self {
@@ -77,7 +82,13 @@ impl Prompt {
                 path.display()
             ),
             file: Some(path),
+            argv_limit: provenant_confinement::run_config::DEFAULT_ARGV_PROMPT_LIMIT_BYTES,
         }
+    }
+    /// Override the compiled argv prompt threshold for this launch.
+    pub fn with_argv_limit(mut self, limit: usize) -> Self {
+        self.argv_limit = limit;
+        self
     }
     pub fn file(&self) -> Option<&std::path::Path> {
         self.file.as_deref()
@@ -86,7 +97,7 @@ impl Prompt {
         &self.text
     }
     pub fn check_argv(&self) -> Result<(), ProviderError> {
-        if self.text.len() > 65_536 {
+        if self.text.len() > self.argv_limit {
             Err(ProviderError::PromptTooLarge)
         } else {
             Ok(())

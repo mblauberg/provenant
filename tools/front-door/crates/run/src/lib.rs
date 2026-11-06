@@ -67,8 +67,8 @@ pub use git_context::{
 pub use holder::{HolderContext, HostLaunchContext, RootSeed, RunHolder, SealedTask};
 pub use launch::{
     Decoded, LaunchPaths, PrepareRefusal, PreparedLaunch, PreparedStart, Providers,
-    QUEUED_RUNS_PAGE_SIZE, RefusalKind, Started, ValidatedChild, access_root_allowed, capture_plan,
-    concurrency,
+    QUEUED_RUNS_PAGE_SIZE, RefusalKind, Started, ValidatedChild, WriteGrantLimit,
+    access_root_allowed, capture_plan, concurrency,
 };
 pub use overview::{OverviewAttempt, OverviewState, RunOverview};
 pub use plan::{isolated_read_only_plan, live_read_only_plan, read_only_plan};

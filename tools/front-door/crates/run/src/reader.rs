@@ -1050,11 +1050,12 @@ pub(crate) fn valid_write_grants(grants: &[WriteGrantRecord]) -> bool {
 }
 
 /// Launch-time wire-size bound; stored records remain readable.
-pub(crate) fn write_grants_fit(grants: &[WriteGrantRecord]) -> bool {
-    valid_write_grants(grants)
-        && provenant_records::CanonicalV1::bytes(&grants).is_ok_and(|bytes| {
-            bytes.as_bytes().len() as u64 <= provenant_records::run::MAX_WRITE_GRANT_BYTES
-        })
+pub(crate) fn write_grants_fit(grants: &[WriteGrantRecord], limit: u64) -> bool {
+    (1..=provenant_records::run::MAX_WRITE_GRANT_BYTES_CEILING).contains(&limit)
+        && valid_write_grants(grants)
+        && (grants.is_empty()
+            || provenant_records::CanonicalV1::bytes(&grants)
+                .is_ok_and(|bytes| bytes.as_bytes().len() as u64 <= limit))
 }
 
 pub(crate) fn validate_attempt(r: &AttemptRecord) -> Result<()> {

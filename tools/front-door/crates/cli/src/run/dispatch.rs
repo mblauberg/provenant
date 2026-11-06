@@ -2505,6 +2505,9 @@ pub(super) struct PreparedProvider<'a> {
 }
 
 impl run::Providers for PreparedProvider<'_> {
+    fn write_grant_limit(&self) -> run::WriteGrantLimit {
+        self.fallback.write_grant_limit()
+    }
     fn runtime_cap(&self, provider: &str) -> Option<u64> {
         self.fallback.runtime_cap(provider)
     }

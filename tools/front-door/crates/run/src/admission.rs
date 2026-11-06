@@ -22,10 +22,19 @@ use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
 /// Write evidence from the prepared confinement plan, never launch authority.
-#[derive(Default)]
 pub(crate) struct AppliedWriteGrants {
     pub grants: Vec<WriteGrantRecord>,
     pub git_grants_digest: Option<provenant_core::Digest>,
+    pub max_bytes: u64,
+}
+impl Default for AppliedWriteGrants {
+    fn default() -> Self {
+        Self {
+            grants: Vec::new(),
+            git_grants_digest: None,
+            max_bytes: provenant_records::run::MAX_WRITE_GRANT_BYTES,
+        }
+    }
 }
 
 /// Fixed ceilings on live lanes of any class, independent of batch
@@ -776,7 +785,7 @@ impl RunStore {
         if !valid_read_only_writable(writable) {
             return Err(RunError::Validation("invalid read-only writable paths"));
         }
-        if !crate::reader::write_grants_fit(&write_grants.grants) {
+        if !crate::reader::write_grants_fit(&write_grants.grants, write_grants.max_bytes) {
             return Err(RunError::Validation("invalid write grants"));
         }
         let next = self.write(call, |tx| {
@@ -1204,7 +1213,7 @@ pub(crate) fn update_attempt(
         "UPDATE attempts SET revision=?1, record=?2 WHERE id=?3 AND revision=?4 AND terminal=0",
         params![
             sql_int(next.revision)?,
-            bytes(next)?,
+            crate::db::attempt_bytes(next)?,
             next.attempt_id.to_string(),
             sql_int(old.revision)?
         ],

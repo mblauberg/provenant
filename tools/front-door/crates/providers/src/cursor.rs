@@ -1,5 +1,5 @@
 use crate::launch::{
-    Access, PrepareInput, Session, SetupStep, Stdin, base_env, exact, package_root, subtree,
+    Access, PrepareInput, Session, SetupStep, Stdin, base_env, exact, package_grant, subtree,
 };
 use crate::{LaunchSpec, ProviderError, ProviderEvent as E, StreamState, stream::wire};
 use provenant_confinement::permissions::{
@@ -63,7 +63,8 @@ fn prepare(
         argv.extend(["--model".into(), input.route.model.as_str().into()]);
     }
     argv.extend(["--".into(), input.prompt.text().into()]);
-    let package = package_root(input.executable)?;
+    let mut package_omissions = Vec::new();
+    let package = package_grant(input.executable, &mut package_omissions);
     let mut authentication = vec![exact(input.home.join(".cursor/cli-config.json"))];
     let config = input.home.join(".config/cursor");
     if config.is_dir() {
@@ -71,7 +72,7 @@ fn prepare(
     }
     let staged_skills = input.stage_user_skills();
     let skill_reads = staged_skills.root.iter().map(subtree).collect::<Vec<_>>();
-    let mut omitted_discovery = Vec::new();
+    let mut omitted_discovery = package_omissions;
     let mut optional_reads = if access == Access::WorktreeWrite {
         crate::launch::git_global_files(&input.home.join(".config"))
     } else {
@@ -141,7 +142,7 @@ fn prepare(
             spec: ProviderProfileSpec {
                 process_executables: vec![exact(input.executable)],
                 allow_process_fork: true,
-                runtime_reads: [subtree(package)]
+                runtime_reads: [package.clone()]
                     .into_iter()
                     .chain(skill_reads)
                     .chain(optional_reads)
@@ -155,7 +156,7 @@ fn prepare(
                 // The resolved launcher is a shell script in the self-updated
                 // `versions/<version>/` payload that execs its sibling `node`,
                 // so every lane needs a shell and that one payload directory.
-                tool_exec_roots: vec![subtree("/bin"), subtree("/usr/bin"), subtree(package)],
+                tool_exec_roots: vec![subtree("/bin"), subtree("/usr/bin"), package.clone()],
                 provider_api: vec![NetworkEndpoint {
                     address: "*".into(),
                     port: 443,

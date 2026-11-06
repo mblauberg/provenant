@@ -1,0 +1,515 @@
+# Inventory in progress: do not treat this as an exhaustive policy catalogue.
+# `unclassified` identifies a refusal that still needs a boundary decision or
+# a configurable default. Paths name the implementation, not a stable API.
+schema_version = 1
+complete = false
+
+[[guard]]
+site = "confinement/src/permissions/validation.rs#verify_worktree_authority"
+boundary = "lane_git"
+reason = "Verified worktree, selected ref and Git grants must match."
+
+[[guard]]
+site = "confinement/src/permissions/validation.rs#verify_git_control_links"
+boundary = "lane_git"
+reason = "A second link to a Git control file could permit writes through another name."
+
+[[guard]]
+site = "confinement/src/permissions/validation.rs#refuses_lane_root"
+boundary = "credentials"
+reason = "A lane root must not expose credential stores."
+
+[[guard]]
+site = "run/src/writer.rs#launch_resource_limits"
+boundary = "warning"
+reason = "Unreadable or invalid resource settings warn and use the compiled domains.run.grant_limit and domains.run.profile_limit_bytes defaults."
+
+[[guard]]
+site = "confinement/src/permissions/validation.rs#validate_plan_grant_limit"
+boundary = "configurable_default"
+setting = "domains.run.grant_limit"
+reason = "Bounds plan grant counts; the refusal names the effective setting, limit and host or compiled origin."
+
+[[guard]]
+site = "confinement/src/permissions/render.rs#render_with_limit"
+boundary = "configurable_default"
+setting = "domains.run.profile_limit_bytes"
+reason = "Bounds rendered sandbox profile size; the refusal identifies the effective setting and its host or compiled origin."
+
+[[guard]]
+site = "providers/src/contract.rs#Prompt::check_argv"
+boundary = "configurable_default"
+setting = "domains.run.argv_prompt_limit_bytes"
+reason = "The argv prompt byte threshold defaults to 65536 and can be overridden; top-level launches spill above it."
+
+[[guard]]
+site = "cli/src/run/provider/observation.rs#check_launch_prompt"
+boundary = "authority"
+reason = "Nested argv prompts above the threshold cannot spill to a parent-writable file without allowing the parent to alter the child task."
+
+[[guard]]
+site = "providers/src/contract.rs#Continuation::validate"
+boundary = "authority"
+reason = "A continuation must match its recorded route and grant identity."
+
+[[guard]]
+site = "run/src/launch.rs#child_access_within_impl"
+boundary = "authority"
+reason = "A child cannot exceed its parent access or select another graph source."
+
+[[guard]]
+site = "run/src/launch.rs#child_access_within_impl"
+boundary = "credentials"
+reason = "Child roots may not reach credential stores, including through canonicalised paths."
+
+[[guard]]
+site = "run/src/launch.rs#applied_write_grants"
+boundary = "authority"
+reason = "Applied write grant paths must be representable so continuation and handoff use the selected attempt's actual authority."
+
+[[guard]]
+site = "run/src/launch.rs#applied_write_grants"
+boundary = "configurable_default"
+setting = "domains.run.write_grant_limit_bytes"
+reason = "The encoded applied write-grant ledger has a configurable default; refusal and receipt report the effective value and origin."
+
+[[guard]]
+site = "run/src/reader.rs#write_grants_fit"
+boundary = "object_integrity"
+reason = "The configurable ceiling reserves space for the remaining fields of bounded host-owned attempt and terminal records."
+
+[[guard]]
+site = "run/src/launch.rs#RunStore::start_inner"
+boundary = "warning"
+setting = "domains.fabric.lanes.priority"
+reason = "Unavailable lane priority warns and falls back to the compiled priority for the lane mode."
+
+[[guard]]
+site = "cli/src/run/provider/confinement.rs#host_indexes_protected"
+boundary = "object_integrity"
+reason = "Applied write grants cannot overlap host indexes that carry durable authority and run state."
+
+[[guard]]
+site = "cli/src/run/provider/confinement.rs#target_seeds_protected"
+boundary = "object_integrity"
+reason = "Applied write grants cannot overlap the host-owned target seed store."
+
+[[guard]]
+site = "cli/src/run/provider/preparation.rs#prepare_with"
+boundary = "credentials"
+reason = "Publishing policy must be read and its selected GitHub credential restrictions applied before publishing is enabled."
+
+[[guard]]
+site = "cli/src/run/provider/preparation.rs#prepare_writer_dependencies"
+boundary = "configurable_default"
+setting = "lanes.prepare_deps"
+reason = "Automatic writer dependency preparation defaults on; a refusal reports the sealed profile or compiled default and can be disabled with this setting."
+
+[[guard]]
+site = "run/src/launch.rs#lane_port_plan_or_warn"
+boundary = "warning"
+reason = "Unreadable or unrepresentable lane-port settings warn and leave the lane without an allocated port block."
+
+[[guard]]
+site = "supervisor/src/guardian.rs#Driver::run"
+boundary = "configurable_default"
+setting = "domains.fabric.lanes.lane_port_blocks"
+reason = "An exhausted port-block pool refuses the writer and reports the effective count, its host or compiled origin, and the setting that can raise the pool or disable allocation."
+
+[[guard]]
+site = "supervisor/src/guardian.rs#lane_port_allocation"
+boundary = "warning"
+reason = "A port-block allocation I/O failure warns and continues without a block; stale port-block environment variables are removed."
+
+[[guard]]
+site = "run/src/launch.rs#Providers::check_policy"
+boundary = "configurable_default"
+setting = "gc.free_floor"
+reason = "Writer launch may refuse when available storage remains below the configured free-space floor after collection."
+
+[[guard]]
+site = "cli/src/run/dispatch.rs#PreparedProvider::check_policy"
+boundary = "authority"
+reason = "A prepared continuation must retain its validated task identity."
+
+[[guard]]
+site = "cli/src/run.rs#writer_gc_settings"
+boundary = "warning"
+setting = "gc.free_floor"
+reason = "An unreadable GC configuration warns and uses compiled defaults; an unavailable disk policy context warns and skips the check."
+
+[[guard]]
+site = "cli/src/run/submit.rs#check_writer_disk_with_collection"
+boundary = "warning"
+reason = "An unobservable disk floor or available space warns and allows dispatch; measured low space retains the configurable floor."
+
+[[guard]]
+site = "run/src/launch.rs#RunStore::start_inner"
+boundary = "authority"
+reason = "The stored prompt must match its recorded length and digest before a host launches the task."
+
+[[guard]]
+site = "run/src/artifacts.rs#RunStore::artifact_bytes"
+boundary = "object_integrity"
+reason = "At launch the validated attempt record already limits its recorded prompt to RECORD_LIMIT; a file exceeding that read bound cannot match the recorded length. Length and digest are then verified before use."
+
+[[guard]]
+site = "run/src/artifacts.rs#RunStore::artifact_bytes"
+boundary = "authority"
+reason = "If the stored prompt cannot be reopened, its bytes cannot be verified against the authorised task and no substitute prompt is launched."
+
+[[guard]]
+site = "run/src/launch.rs#start_inner"
+boundary = "unclassified"
+reason = "Remaining policy, provider preparation and handoff refusals need caller-specific classification."
+
+[[guard]]
+site = "confinement/src/plan.rs#ConfinedPlan::new"
+boundary = "authority"
+reason = "Read-only execution cannot enable unconfined extensions or inherited hooks that exceed its selected policy; requested nested confinement cannot be claimed when unsupported."
+
+[[guard]]
+site = "confinement/src/plan.rs#ConfinedPlan::new"
+boundary = "credentials"
+reason = "Secret roots and provider-private state must not overlap grants that expose credential material."
+
+[[guard]]
+site = "confinement/src/plan.rs#ConfinedPlan::new"
+boundary = "object_integrity"
+reason = "Write roots cannot overlap protected host objects, and private scratch and provider state must not overlap each other or the approved lane roots."
+
+[[guard]]
+site = "confinement/src/plan.rs#ConfinedPlan::new"
+boundary = "credentials"
+reason = "Agy's selected home source and private destinations must not overlap secret or protected roots."
+
+[[guard]]
+site = "confinement/src/plan.rs#ConfinedPlan::new"
+boundary = "unclassified"
+reason = "Invalid path shapes and remaining overlapping roots need classification or a tolerant fallback."
+
+[[guard]]
+site = "confinement/src/permissions/render.rs#compile_sbpl"
+boundary = "lane_git"
+reason = "Writer grants must match held worktree authority and keep real Git metadata outside writable scratch."
+
+[[guard]]
+site = "confinement/src/permissions/render.rs#compile_sbpl"
+boundary = "credentials"
+reason = "Credential, secret and private-state exclusions must hold after anchors and grants are resolved."
+
+[[guard]]
+site = "confinement/src/permissions/render.rs#compile_sbpl"
+boundary = "authority"
+reason = "The backend cannot claim a requested nested confinement policy that it cannot enforce."
+
+[[guard]]
+site = "confinement/src/permissions/render.rs#compile_sbpl"
+boundary = "authority"
+reason = "Held grant anchors are verified before and after rendering so replaced paths cannot change the authority that was approved."
+
+[[guard]]
+site = "confinement/src/permissions/render.rs#compile_sbpl"
+boundary = "unclassified"
+reason = "Remaining missing anchors and path failures need classification or a tolerant fallback."
+
+[[guard]]
+site = "providers/src/launch.rs#filter_optional_grants"
+boundary = "warning"
+reason = "Optional discovered grants that cannot be represented in SBPL are omitted and reported; required grants remain subject to confinement validation."
+
+[[guard]]
+site = "providers/src/launch.rs#LaunchSpec::complete_tool_requirements"
+boundary = "warning"
+reason = "Unrepresentable optional write grants are omitted; unrepresentable library dependencies make the reported closure incomplete."
+
+[[guard]]
+site = "cli/src/run/provider/project_paths.rs#resolve"
+boundary = "warning"
+reason = "A configured optional project path whose canonical target cannot be represented is omitted with its setting key and reason."
+
+[[guard]]
+site = "confinement/src/permissions/render.rs#sbpl_path"
+boundary = "unclassified"
+reason = "Non-UTF-8 paths and unsupported control characters cannot be encoded in SBPL; remaining required path cases need classification while optional discoveries warn and are omitted."
+
+[[guard]]
+site = "confinement/src/permissions/probe.rs#system_backend"
+boundary = "credentials"
+reason = "Without an enforcing sandbox the lane could read credential stores outside its selected authentication grants."
+
+[[guard]]
+site = "confinement/src/permissions/probe.rs#system_backend"
+boundary = "lane_git"
+reason = "Without an enforcing sandbox a writer could modify the real Git administrative and common directories."
+
+[[guard]]
+site = "confinement/src/repo.rs#verify_worktree"
+boundary = "lane_git"
+reason = "Worktree registration, common Git identity, backlinks and repository revalidation bind a writer to its selected project and Git directories."
+
+[[guard]]
+site = "confinement/src/repo.rs#reject_alternates"
+boundary = "object_integrity"
+reason = "Protected history cannot rely on unverified alternate Git object stores."
+
+[[guard]]
+site = "confinement/src/repo.rs#VerifiedRepo::open_structure"
+boundary = "lane_git"
+reason = "The selected repository and Git marker must be owner-controlled and their descriptors must identify the same Git structure."
+
+[[guard]]
+site = "confinement/src/repo.rs#VerifiedRepo::revalidate"
+boundary = "lane_git"
+reason = "A probed repository's Git structure and configuration must retain their recorded identities at use time."
+
+[[guard]]
+site = "confinement/src/repo.rs#read_bounded"
+boundary = "lane_git"
+reason = "Git markers and configuration must be read completely and consistently before the selected worktree and its Git policy can be verified."
+
+[[guard]]
+site = "confinement/src/repo.rs#reject_alternates"
+boundary = "object_integrity"
+reason = "The complete alternates declaration must be inspected before protected history can be accepted."
+
+[[guard]]
+site = "confinement/src/repo.rs#RepoError"
+boundary = "unclassified"
+reason = "Remaining repository opening, metadata bounds and filesystem failures require caller-specific classification."
+
+[[guard]]
+site = "providers/src/opencode.rs#prepare"
+boundary = "credentials"
+reason = "The selected authentication policy and private provider state must match OpenCode's credential isolation."
+
+[[guard]]
+site = "providers/src/opencode.rs#prepare"
+boundary = "authority"
+reason = "A resumed invocation requires its validated continuation identity."
+
+[[guard]]
+site = "providers/src/opencode.rs#prepare"
+boundary = "warning"
+reason = "Absent separate private state warns and uses the already-confined attempt scratch directory for OpenCode configuration."
+
+[[guard]]
+site = "providers/src/opencode.rs#prepare"
+boundary = "authority"
+reason = "When a Git-context prompt refers to scratch, OpenCode must receive an exact matching path for that authorised context."
+
+[[guard]]
+site = "providers/src/opencode.rs#prepare"
+boundary = "warning"
+reason = "A read-only Git launcher whose directory cannot be encoded in PATH is omitted with a warning."
+
+[[guard]]
+site = "providers/src/opencode.rs#prepare"
+boundary = "lane_git"
+reason = "A writer must be able to place its private Git launcher in PATH before its Git binding can be enforced."
+
+[[guard]]
+site = "providers/src/command.rs#prepare"
+boundary = "credentials"
+reason = "A configured command does not accept a provider authentication grant."
+
+[[guard]]
+site = "providers/src/command.rs#prepare"
+boundary = "authority"
+reason = "A configured command cannot silently ignore a requested continuation, model, effort or account selection."
+
+[[guard]]
+site = "providers/src/command.rs#prepare"
+boundary = "authority"
+reason = "A configured command must have non-empty argv and an absolute host-resolved executable to launch the selected invocation."
+
+[[guard]]
+site = "providers/src/command.rs#prepare"
+boundary = "unclassified"
+reason = "Writer capability still refuses preparation; capability eligibility is tracked separately."
+
+[[guard]]
+site = "providers/src/cursor.rs#prepare"
+boundary = "credentials"
+reason = "The selected login and attempt-private state must be present before Cursor receives its credential access."
+
+[[guard]]
+site = "providers/src/cursor.rs#prepare"
+boundary = "authority"
+reason = "A resumed invocation requires its validated continuation identity."
+
+[[guard]]
+site = "providers/src/agy.rs#prepare"
+boundary = "credentials"
+reason = "Agy must select its keychain authentication; its home remains in attempt-private state or scratch."
+
+[[guard]]
+site = "providers/src/agy.rs#prepare"
+boundary = "warning"
+reason = "Absent separate private state warns and uses the already-confined attempt scratch directory as Agy's home."
+
+[[guard]]
+site = "providers/src/agy.rs#prepare"
+boundary = "authority"
+reason = "A resumed invocation requires its validated continuation identity."
+
+[[guard]]
+site = "providers/src/codex.rs#prepare"
+boundary = "credentials"
+reason = "The selected login and attempt-private state must be present before Codex receives its credential access."
+
+[[guard]]
+site = "providers/src/codex.rs#prepare"
+boundary = "authority"
+reason = "A resumed invocation requires its validated continuation identity, and Codex must use its clean configuration policy."
+
+[[guard]]
+site = "providers/src/claude.rs#prepare"
+boundary = "credentials"
+reason = "Claude receives only its selected account token through the host pipe, with no separate credential root grant."
+
+[[guard]]
+site = "providers/src/claude.rs#prepare"
+boundary = "authority"
+reason = "The token must match the selected account and a resumed invocation must retain its validated continuation identity."
+
+[[guard]]
+site = "providers/src/claude.rs#prepare"
+boundary = "warning"
+reason = "Absent separate private state warns and uses the already-confined attempt scratch directory for Claude configuration."
+
+[[guard]]
+site = "providers/src/lane.rs#LaneRuntime::mcp"
+boundary = "warning"
+reason = "Unrepresentable Fabric MCP paths warn and omit that optional integration; Claude retains its isolated settings."
+
+[[guard]]
+site = "providers/src/lane.rs#LaneRuntime::claude"
+boundary = "authority"
+reason = "Claude's isolated settings must retain the Provenant pre-tool guard; an unrepresentable hook executable or state path cannot safely substitute inherited settings."
+
+[[guard]]
+site = "run/src/launch.rs#RunStore::start_inner"
+boundary = "authority"
+reason = "Request digest and host-owned retry checks bind launch to the validated request and caller."
+
+[[guard]]
+site = "confinement/src/permissions/validation.rs#validate_profile_spec_impl"
+boundary = "configurable_default"
+setting = "domains.run.grant_limit"
+reason = "Profile family counts use the configured grant limit and name its origin in a refusal; authentication and native controls preserve historical minimum caps of 16 and 64."
+
+[[guard]]
+site = "confinement/src/permissions/validation.rs#validate_profile_spec_impl"
+boundary = "credentials"
+reason = "Authentication roots and writes must be confined to the selected provider and ordinary reads and writes cannot encompass credential roots."
+
+[[guard]]
+site = "confinement/src/permissions/render.rs#filtered_native_controls"
+boundary = "warning"
+reason = "Malformed native-control labels are omitted from the applied result with a warning; they do not alter the sandbox profile."
+
+[[guard]]
+site = "confinement/src/permissions/validation.rs#validate_profile_spec_impl"
+boundary = "authority"
+reason = "A process policy must identify exact executables and the Fabric socket must name an exact endpoint before those permissions can be enforced."
+
+[[guard]]
+site = "confinement/src/permissions/validation.rs#validate_profile_spec_impl"
+boundary = "credentials"
+reason = "Valid discovery marker anchors reject links or identity changes that could redirect a read into credential material."
+
+[[guard]]
+site = "confinement/src/permissions/render.rs#render_profile_with_limit"
+boundary = "warning"
+reason = "Malformed provider endpoints are omitted before SBPL rendering; valid endpoints and open-network policy remain in force."
+
+[[guard]]
+site = "confinement/src/permissions/render.rs#render_profile_with_limit"
+boundary = "warning"
+reason = "Malformed or unrepresentable discovery-only reads are omitted before anchor collection and rendering."
+
+[[guard]]
+site = "confinement/src/permissions/validation.rs#validate_profile_spec_impl"
+boundary = "unclassified"
+reason = "Remaining malformed profile paths require caller-specific classification or a tolerant fallback."
+
+[[guard]]
+site = "providers/src/launch.rs#admit"
+boundary = "authority"
+reason = "The adapter, registered account and continuation must match the selected route, and a read-only working directory must lie within a granted root."
+
+[[guard]]
+site = "providers/src/launch.rs#admit"
+boundary = "credentials"
+reason = "The host home must be absolute so credential exclusions are evaluated against the selected host identity."
+
+[[guard]]
+site = "providers/src/launch.rs#admit"
+boundary = "authority"
+reason = "Executable and working-directory paths must be absolute to bind the launch to the selected executable and granted working directory."
+
+[[guard]]
+site = "providers/src/launch.rs#tool_search_path"
+boundary = "warning"
+reason = "An optional Cargo directory that cannot be represented in PATH is omitted with a warning."
+
+[[guard]]
+site = "providers/src/launch.rs#package_grant"
+boundary = "warning"
+reason = "A shared package prefix is omitted and the executable receives an exact grant; the omission is reported."
+
+[[guard]]
+site = "providers/src/launch.rs#private_git_objects"
+boundary = "warning"
+reason = "A read-only Git launcher whose directory cannot be encoded in PATH is omitted with a warning; the selected Git executable remains explicitly granted."
+
+[[guard]]
+site = "providers/src/launch.rs#private_git_objects"
+boundary = "lane_git"
+reason = "A writer's Git wrapper must bind commands to the private Git and object directories."
+
+[[guard]]
+site = "providers/src/lane.rs#LaunchSpec::configure_publishing"
+boundary = "credentials"
+reason = "The publishing wrapper must preserve the selected GitHub credential policy and avoid exposing it to other lanes."
+
+[[guard]]
+site = "providers/src/lane.rs#install_git"
+boundary = "warning"
+reason = "A missing PATH warns and uses system defaults with the private Git launcher first."
+
+[[guard]]
+site = "providers/src/lane.rs#install_git"
+boundary = "warning"
+reason = "An unbound Git launcher whose directory cannot be encoded in PATH is omitted with a warning."
+
+[[guard]]
+site = "providers/src/lane.rs#install_git"
+boundary = "lane_git"
+reason = "A bound writer Git launcher must be placed first in PATH so Git uses its private view."
+
+[[guard]]
+site = "providers/src/lane.rs#git_wrapper"
+boundary = "authority"
+reason = "A Git executable containing a NUL cannot identify an executable to launch; native non-UTF-8 and shell-special bytes are preserved."
+
+[[guard]]
+site = "providers/src/lane.rs#LaunchSpec::configure_build_slots"
+boundary = "warning"
+reason = "Unrepresentable optional build-slot shim configuration leaves the launch ungated and emits a warning."
+
+[[guard]]
+site = "providers/src/identity.rs#RegisteredAccount::validate_route"
+boundary = "authority"
+reason = "The selected account must match the route it authorises."
+
+[[guard]]
+site = "run/src/launch.rs#RunStore::check_child_attempt_id"
+boundary = "authority"
+reason = "Child attempts must be host-derived members of the validated request."
+
+[[guard]]
+site = "run/src/launch.rs#RunStore::validate_child"
+boundary = "authority"
+reason = "Child parent, depth, attempts and permitted delegation must match host authority."

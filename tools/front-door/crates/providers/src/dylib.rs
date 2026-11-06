@@ -25,6 +25,7 @@ pub enum IncompleteReason {
     Limit { max_libraries: usize },
     OmittedCredential(PathBuf),
     OmittedProtected(PathBuf),
+    OmittedUnrepresentable(PathBuf),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -33,6 +34,7 @@ pub(crate) enum LibraryAccess {
     AlreadyCovered,
     OmitCredential,
     OmitProtected,
+    OmitUnrepresentable,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -156,6 +158,14 @@ pub(crate) fn dependency_closure(
                     add_reason(
                         &mut reasons,
                         IncompleteReason::OmittedProtected(path.clone()),
+                    );
+                    omitted.push(path);
+                    continue;
+                }
+                LibraryAccess::OmitUnrepresentable => {
+                    add_reason(
+                        &mut reasons,
+                        IncompleteReason::OmittedUnrepresentable(path.clone()),
                     );
                     omitted.push(path);
                     continue;
@@ -485,6 +495,35 @@ mod tests {
         );
         assert_eq!(closure.omitted, vec![protected]);
         assert!(closure.libraries.is_empty());
+    }
+
+    #[test]
+    fn unrepresentable_dependency_is_reported_in_closure_receipt()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().canonicalize()?;
+        let library = root.join("library.dylib");
+        std::fs::write(&library, b"not read")?;
+        let executable = root.join("tool");
+        std::fs::write(
+            &executable,
+            image_with_dependencies(&[library.to_str().ok_or("library")?]),
+        )?;
+        let closure = dependency_closure(&executable, |_| LibraryAccess::OmitUnrepresentable);
+        assert_eq!(closure.outcome, ClosureOutcome::Incomplete);
+        assert!(closure.libraries.is_empty());
+        assert_eq!(
+            closure.reasons,
+            [IncompleteReason::OmittedUnrepresentable(library.clone())]
+        );
+        assert_eq!(closure.omitted, [library]);
+        let receipt = crate::PreparedToolRequirement {
+            executable,
+            dependency_closure: closure,
+        }
+        .receipt();
+        assert_eq!(receipt["reason"], "unrepresentable_path");
+        Ok(())
     }
 
     #[test]
