@@ -591,7 +591,11 @@ pub(super) fn validate_flat_plan(
                 && let Err(error) = spec.check_launch(&provenant_records::LaunchRequest {
                     model: route.model.as_deref(),
                     effort: route.effort.as_deref(),
-                    write: node.access == AccessMode::WorktreeWrite,
+                    write: node.access == AccessMode::WorktreeWrite
+                        || node
+                            .attempt
+                            .as_ref()
+                            .is_some_and(|spec| !spec.write_roots.is_empty()),
                     ..Default::default()
                 })
             {
@@ -816,11 +820,18 @@ pub(crate) fn valid_identifier(value: &str) -> bool {
 }
 
 /// Why a node's attempt spec cannot launch through the graph, if it cannot.
-/// The graph launches local attempts in a worktree it binds itself, so it
-/// honours account, capabilities and build weight only.
+/// Worktree creation is owned by the graph, not an individual attempt.
 fn attempt_error(node: &GraphNode, spec: &AttemptSpec) -> Option<&'static str> {
-    if spec.placement.is_some() || spec.new_worktree.is_some() || !spec.write_roots.is_empty() {
-        return Some("graph attempts do not support placement, new_worktree or write_roots");
+    if spec.new_worktree.is_some() {
+        return Some("graph attempts do not support new_worktree");
+    }
+    if spec.write_roots.len() > 32
+        || spec
+            .write_roots
+            .iter()
+            .any(|root| root.is_empty() || root.len() > 4096 || root.contains('\0'))
+    {
+        return Some("invalid write roots");
     }
     if node.capabilities.is_some() && !spec.capabilities.is_empty() {
         return Some("set capabilities on the node or its attempt, not both");
