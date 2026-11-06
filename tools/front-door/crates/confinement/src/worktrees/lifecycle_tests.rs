@@ -507,6 +507,76 @@ fn cached_inventory_is_reused_until_a_worktree_mutation() -> Result<(), Box<dyn 
 }
 
 #[test]
+fn doctor_admission_and_list_share_one_inventory_with_100_worktrees() -> Result<(), Box<dyn Error>>
+{
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    struct CountingGit<'a> {
+        inner: &'a dyn Executor,
+        listings: AtomicUsize,
+    }
+    impl Executor for CountingGit<'_> {
+        fn execute(
+            &self,
+            options: provenant_os::exec::ExecOptions<'_>,
+        ) -> Result<ExecOutcome, provenant_os::exec::ExecError> {
+            if options
+                .argv
+                .windows(2)
+                .any(|pair| pair[0] == "worktree" && pair[1] == "list")
+            {
+                self.listings.fetch_add(1, Ordering::SeqCst);
+            }
+            self.inner.execute(options)
+        }
+    }
+    let fixture = Fixture::new()?;
+    for index in 1..100 {
+        let path = fixture._temp.path().join(format!("inventory-{index}"));
+        fixture.run(&[
+            "worktree",
+            "add",
+            "-b",
+            &format!("inventory-{index}"),
+            path.to_str().ok_or("path")?,
+        ])?;
+    }
+    let test = TestContext::new(&fixture)?;
+    let mut context = test.context();
+    let git = CountingGit {
+        inner: context.executor,
+        listings: AtomicUsize::new(0),
+    };
+    context.executor = &git;
+    let path = fixture._temp.path().join("inventory-1");
+    assert_eq!(
+        doctor(&context, &path, &cancel())?.state,
+        WorktreeDiagnosisState::Clean
+    );
+    assert_eq!(git.listings.load(Ordering::SeqCst), 1);
+    assert_eq!(list(&context, &cancel())?.len(), 100);
+    assert_eq!(git.listings.load(Ordering::SeqCst), 1);
+    let tree = verify_worktree(context.repo, &path)?;
+    let branch = GitRefName::branch("inventory-1")?;
+    let _custody = writer_custody(
+        context.project_state,
+        &tree,
+        &branch,
+        fixture.head()?,
+        || {
+            context.facts.writer_inventory(
+                context.repo,
+                context.executor,
+                context.utility,
+                context.utility_budget,
+                &cancel(),
+            )
+        },
+    )?;
+    assert_eq!(git.listings.load(Ordering::SeqCst), 1);
+    Ok(())
+}
+
+#[test]
 fn gc_does_not_inspect_status_of_out_of_scope_worktrees() -> Result<(), Box<dyn Error>> {
     use std::sync::atomic::{AtomicUsize, Ordering};
     struct CountingGit<'a> {

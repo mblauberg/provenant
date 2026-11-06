@@ -7,7 +7,15 @@ use super::*;
 pub struct RepoFacts {
     inventory_limit: usize,
     scalar_limit: usize,
+    raw_inventories: std::sync::Arc<std::sync::Mutex<BTreeMap<PathBuf, RawInventorySnapshot>>>,
     inventories: std::sync::Arc<std::sync::Mutex<BTreeMap<PathBuf, InventorySnapshot>>>,
+}
+
+struct RawInventorySnapshot {
+    device: u64,
+    inode: u64,
+    budget: UtilityBudget,
+    bytes: Vec<u8>,
 }
 
 struct InventorySnapshot {
@@ -22,6 +30,7 @@ impl Default for RepoFacts {
         Self {
             inventory_limit: provenant_os::exec::DEFAULT_CAPTURE_LIMIT,
             scalar_limit: provenant_os::git::REPO_FACT_SCALAR_LIMIT,
+            raw_inventories: Default::default(),
             inventories: std::sync::Arc::new(std::sync::Mutex::new(BTreeMap::new())),
         }
     }
@@ -472,6 +481,24 @@ impl RepoFacts {
         budget: UtilityBudget,
         cancel: &CancelToken,
     ) -> Result<Vec<u8>, WorktreeError> {
+        repo.revalidate()?;
+        if cancel.is_cancelled() {
+            return Err(UtilityError::Cancelled.into());
+        }
+        let budget = budget.with_stdout_cap(self.inventory_limit)?;
+        let path = repo.common_git_dir();
+        let metadata = std::fs::metadata(path).map_err(|_| WorktreeError::IdentityChanged)?;
+        let mut snapshots = self
+            .raw_inventories
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        if let Some(snapshot) = snapshots.get(path)
+            && snapshot.device == metadata.dev()
+            && snapshot.inode == metadata.ino()
+            && snapshot.budget == budget
+        {
+            return Ok(snapshot.bytes.clone());
+        }
         let outcome = run_utility(
             executor,
             GitRead::WorktreeList,
@@ -483,16 +510,40 @@ impl RepoFacts {
         if exit_code(&outcome)? != 0 {
             return Err(WorktreeError::InvalidOutput);
         }
+        snapshots.insert(
+            path.to_owned(),
+            RawInventorySnapshot {
+                device: metadata.dev(),
+                inode: metadata.ino(),
+                budget,
+                bytes: outcome.stdout.bytes.clone(),
+            },
+        );
         Ok(outcome.stdout.bytes)
     }
 
-    /// Read inventory afresh and invalidate any older advisory snapshot.
+    /// Refresh inventory for mutation checks, discarding the command snapshot.
+    pub(super) fn fresh_inventory(
+        &self,
+        context: &WorktreeContext<'_>,
+        cancel: &CancelToken,
+    ) -> Result<Vec<GitWorktree>, WorktreeError> {
+        self.invalidate_inventory(context);
+        let result = self.read_inventory(context, cancel);
+        self.invalidate_inventory(context);
+        result
+    }
+
+    /// Read this command's inventory and invalidate an older parsed advisory snapshot.
     pub(super) fn read_inventory(
         &self,
         context: &WorktreeContext<'_>,
         cancel: &CancelToken,
     ) -> Result<Vec<GitWorktree>, WorktreeError> {
-        let _ = self.take_inventory(context);
+        self.inventories
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .remove(context.repo.common_git_dir());
         let bytes = self.writer_inventory(
             context.repo,
             context.executor,
@@ -569,6 +620,10 @@ impl RepoFacts {
     }
 
     pub(super) fn take_inventory(&self, context: &WorktreeContext<'_>) -> Option<Vec<GitWorktree>> {
+        self.raw_inventories
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .remove(context.repo.common_git_dir());
         let snapshot = self
             .inventories
             .lock()

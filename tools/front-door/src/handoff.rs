@@ -106,7 +106,7 @@ fn git(dir: &Path, args: &[&str], timeout: Duration) -> Result<(bool, String), R
     let mut options = ExecOptions::new(&argv, dir, timeout);
     options.env = Some(&environment);
     options.stdin = Some(b"");
-    let limit = 64 * 1024;
+    let limit = provenant_os::git::fact_capture_limit(args, 64 * 1024);
     options.stdout = StreamPolicy::Capture { limit };
     options.stderr = StreamPolicy::Capture { limit: 4096 };
     let out = SystemExecutor::new(1)?.execute(options)?;
