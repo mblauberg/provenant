@@ -2,8 +2,7 @@ use super::*;
 
 pub(super) fn nodes_have_v2(nodes: &[GraphNode]) -> bool {
     nodes.iter().any(|node| {
-        node.review.is_some()
-            || node.extra.contains_key("review_base")
+        node.extra.contains_key("review_base")
             || node.family_group.is_some()
             || node
                 .inputs
@@ -52,7 +51,6 @@ fn value_has_v2(value: &serde_json::Value) -> bool {
                 || map
                     .get("required_outputs")
                     .is_some_and(|value| value.as_array().is_none_or(|values| !values.is_empty()))
-                || map.get("review").is_some_and(serde_json::Value::is_object)
                 || map.values().any(value_has_v2)
         }
         serde_json::Value::Array(values) => values.iter().any(value_has_v2),
@@ -338,24 +336,7 @@ pub(super) fn validate_flat_plan(
         {
             return Err(reason);
         }
-        if node.review.is_some()
-            && (node.kind != Some(NodeKind::Plan)
-                || node.plan.is_some()
-                || node.access != AccessMode::ReadOnly
-                || node.source.is_none())
-        {
-            return Err("review requires a read-only plan node with a source and no plan");
-        }
-        if node
-            .review
-            .as_ref()
-            .is_some_and(|review| review.max_nodes == 0)
-        {
-            return Err("review max_nodes must be positive");
-        }
-        if node.review.is_none() {
-            plans::validate_spec(node)?;
-        }
+        plans::validate_spec(node)?;
         let is_composite = node.kind == Some(NodeKind::Composite);
         if is_composite != node.composite.is_some() {
             return Err("composite requires nodes and exports");
@@ -515,13 +496,7 @@ pub(super) fn validate_flat_plan(
         if document.delivery == Some(DeliveryMode::Pr) && node.delivery == Some(DeliveryMode::Pr) {
             return Err("graph PR is exclusive with node PRs");
         }
-        if !is_gate
-            && !is_loop
-            && !is_composite
-            && !is_decide
-            && !is_land
-            && node.review.is_none()
-            && node.prompt.is_empty()
+        if !is_gate && !is_loop && !is_composite && !is_decide && !is_land && node.prompt.is_empty()
             || plans::prompt(node).len() > limits.node_prompt_bytes
         {
             return Err("prompt size");
@@ -540,14 +515,7 @@ pub(super) fn validate_flat_plan(
         }
 
         let routes = match (&node.route, &node.routes) {
-            (None, None)
-                if is_gate
-                    || is_loop
-                    || is_composite
-                    || is_decide
-                    || is_land
-                    || node.review.is_some() =>
-            {
+            (None, None) if is_gate || is_loop || is_composite || is_decide || is_land => {
                 Vec::new()
             }
             (Some(route), None) => vec![route.clone()],
@@ -649,7 +617,6 @@ pub(super) fn validate_flat_plan(
         let mut depends_on = node.depends_on.clone();
         depends_on.sort();
         nodes.push(PlannedNode {
-            review: node.review.clone(),
             family_group: node.family_group.clone(),
             context: node.context.clone(),
             extra: node.extra.clone(),
@@ -1070,41 +1037,6 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
         .enumerate()
         .map(|(i, node)| (node.id.clone(), i))
         .collect();
-    for expansion in &checkpoint.expansions {
-        if let Some(review) = &expansion.review {
-            let progress = positions
-                .get(&expansion.source)
-                .map(|index| &checkpoint.nodes[*index])
-                .ok_or_else(|| GraphError::BadCheckpoint {
-                    node: expansion.source.clone(),
-                    invariant: "review expansion must retain its source",
-                })?;
-            let expected = progress
-                .review_base
-                .as_deref()
-                .or(checkpoint.bound_review_base.as_deref())
-                .or(checkpoint.bound_integration_base.as_deref());
-            if expected.is_some_and(|base| review.base.to_string() != base)
-                || progress.review_base.as_deref().is_some_and(|base| {
-                    expansion
-                        .nodes
-                        .iter()
-                        .filter(|node| node.composite.is_none())
-                        .any(|node| {
-                            node.extra
-                                .get("review_base")
-                                .and_then(serde_json::Value::as_str)
-                                != Some(base)
-                        })
-                })
-            {
-                return Err(GraphError::BadCheckpoint {
-                    node: expansion.source.clone(),
-                    invariant: "review expansion must retain its bound base",
-                });
-            }
-        }
-    }
     for (index, (progress, node)) in checkpoint.nodes.iter().zip(&plan.nodes).enumerate() {
         let mut historical;
         let checkpoint = if progress.state.settled() {
@@ -1473,15 +1405,6 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
                     attempt.state == AttemptState::Terminal
                         && attempt.outcome == Some(AttemptOutcome::Succeeded)
                 }) || fallback_settled(node, progress, document, checkpoint)
-                    || (node.review.is_some()
-                        && progress.source_commit.as_ref().is_some_and(|subject| {
-                            checkpoint.expansions.iter().any(|expansion| {
-                                expansion.source == node.id
-                                    && expansion.review.as_ref().is_some_and(|review| {
-                                        review.subject.to_string() == *subject
-                                    })
-                            })
-                        }))
             }
             NodeState::Failed if progress.advance_error.is_some() => last.is_none_or(|attempt| {
                 attempt.state == AttemptState::Terminal
@@ -1509,31 +1432,6 @@ pub(super) fn validate_checkpoint<R: Error + 'static, J: Error + 'static>(
             return Err(bad(
                 "node state must agree with terminal attempt outcome or validated planner fallback",
             ));
-        }
-    }
-    for expansion in &checkpoint.expansions {
-        let Some(review) = &expansion.review else {
-            continue;
-        };
-        let mut expected = Vec::new();
-        for (index, member) in plan.nodes.iter().enumerate() {
-            if review_panel_contains(expansion, member, plan, &positions) {
-                for attempt in checkpoint.nodes[index].recorded_attempts() {
-                    if attempt.review_substitution {
-                        expected.push(ReviewSubstitution {
-                            member: member.id.clone(),
-                            route_index: attempt.key.route_index,
-                        });
-                    }
-                }
-            }
-        }
-        expected.sort();
-        if review.substitutions != expected {
-            return Err(GraphError::BadCheckpoint {
-                node: expansion.source.clone(),
-                invariant: "review substitutions must match member attempts",
-            });
         }
     }
     Ok(())

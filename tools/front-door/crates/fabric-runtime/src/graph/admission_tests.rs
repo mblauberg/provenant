@@ -145,11 +145,6 @@ fn admission_schema_matrix() {
         assert_eq!(validate_schema(&review_base).is_ok(), expected);
     }
 
-    let review = json!({"shape":null,"risk_tier":null,"kind":null,"size":null,"risk_tags":[],"worktree":null,"lenses":[],"min_successful":null,"max_nodes":1});
-    let review_node = json!({"id":"p","kind":"plan","access":"read_only","source":{"type":"commit","commit":"abc"},"review":review,"plan":null});
-    assert!(validate_schema(&document(1, json!([review_node.clone()]))).is_err());
-    assert!(validate_schema(&document(2, json!([review_node]))).is_ok());
-
     let v2_node = json!({"id":"n","prompt":"x","access":"read_only","family_group":"g"});
     assert!(validate_schema(&document(1, json!([v2_node.clone()]))).is_err());
     assert!(validate_schema(&document(2, json!([v2_node]))).is_ok());
@@ -159,9 +154,6 @@ fn admission_schema_matrix() {
         json!({"id":"l","kind":"loop","access":"read_only","loop":{"body":[{"id":"n","prompt":"x","access":"read_only","family_group":"g"}],"until":"done","max_rounds":1}}),
         json!({"id":"p","kind":"plan","access":"read_only","plan":{"kinds":[],"max_nodes":1,"patterns":[],"fallback":{"nodes":[{"id":"n","prompt":"x","access":"read_only","family_group":"g"}],"exports":[]}}}),
         json!({"id":"p","kind":"plan","access":"read_only","plan":{"kinds":[],"max_nodes":1,"patterns":[{"name":"p","nodes":[{"id":"x","family_group":"g"}],"exports":[]}]} }),
-        json!({"id":"c","kind":"composite","access":"read_only","composite":{"nodes":[{"id":"n","kind":"plan","access":"read_only","source":{"type":"commit","commit":"abc"},"review":review.clone()}],"exports":[{"node":"n","outputs":["result"]}]}}),
-        json!({"id":"l","kind":"loop","access":"read_only","loop":{"body":[{"id":"n","kind":"plan","access":"read_only","source":{"type":"commit","commit":"abc"},"review":review.clone()}],"until":"done","max_rounds":1}}),
-        json!({"id":"p","kind":"plan","access":"read_only","plan":{"kinds":[],"max_nodes":1,"patterns":[],"fallback":{"nodes":[{"id":"n","kind":"plan","access":"read_only","source":{"type":"commit","commit":"abc"},"review":review.clone()}],"exports":[]}}}),
     ];
     for node in nested {
         assert!(validate_schema(&document(1, json!([node.clone()]))).is_err());

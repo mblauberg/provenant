@@ -326,7 +326,6 @@ fn admit_patch_for_retry(
         }
         graph.checkpoint.expansions.push(Expansion {
             extra: Default::default(),
-            review: None,
             source: String::new(),
             continuation: false,
             nodes: Vec::new(),
@@ -1014,7 +1013,6 @@ pub(super) fn prepare(
 
     let revision = current + 1;
     let expansion = Expansion {
-        review: None,
         extra: Default::default(),
         source: parent.map(|node| node.id.clone()).unwrap_or_default(),
         continuation: false,

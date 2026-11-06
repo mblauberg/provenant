@@ -164,6 +164,7 @@ fn graph_envelope_reason(
     )
 }
 
+#[cfg(test)]
 fn graph_envelope_bound(
     document: &GraphDocument,
     expansions: &[Expansion],
@@ -228,14 +229,6 @@ pub trait CiStatus {
 /// is, never resubmit. Without one, the submission replays under `launch_actor`
 /// (the actor recorded before the first submit) so a changed actor cannot
 /// launch duplicate work. Provider launch and terminal publication remain run's responsibility.
-#[derive(Debug, Error)]
-pub enum ReviewResolveError {
-    #[error("review resolution is unsupported by this host")]
-    Unsupported,
-    #[error("review resolution failed: {0}")]
-    Failed(String),
-}
-
 pub trait AttemptOwner {
     type Error: Error + 'static;
 
@@ -277,15 +270,6 @@ pub trait AttemptOwner {
         _reference: &str,
     ) -> Result<Option<PreparationFallbackEvidence>, Self::Error> {
         Ok(None)
-    }
-
-    /// Resolve a deferred review; hosts without support fail closed.
-    fn resolve_review(
-        &mut self,
-        _node: &GraphNode,
-        _subject: &str,
-    ) -> Result<Expansion, ReviewResolveError> {
-        Err(ReviewResolveError::Unsupported)
     }
 
     /// Resolve a node-specific review base in its bound execution context.
@@ -549,8 +533,6 @@ struct PlannedGraph {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 struct PlannedNode {
     #[serde(skip_serializing_if = "Option::is_none")]
-    review: Option<ReviewSpec>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     family_group: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     context: Option<provenant_records::run::WorkContext>,
@@ -705,18 +687,6 @@ fn source_worktree<'a>(
     positions: &std::collections::BTreeMap<String, usize>,
 ) -> Option<&'a str> {
     let mut current = node;
-    if matches!(node.source, Some(SourceBinding::Commit { .. }))
-        && let Some(origin) = checkpoint
-            .expansions
-            .iter()
-            .find(|expansion| {
-                expansion.review.is_some()
-                    && expansion.nodes.iter().any(|member| member.id == node.id)
-            })
-            .and_then(|expansion| positions.get(&expansion.source))
-    {
-        current = &plan.nodes[*origin];
-    }
     for _ in 0..plan.nodes.len() {
         let source = match &current.source {
             Some(SourceBinding::Node { node } | SourceBinding::Head { node }) => node,
@@ -732,41 +702,6 @@ fn source_worktree<'a>(
         }
     }
     None
-}
-
-/// The verifier belongs to the same panel when it follows the deferred lens
-/// group in the same composite scope. Lens members belong directly.
-fn review_panel_contains(
-    expansion: &Expansion,
-    node: &PlannedNode,
-    plan: &PlannedGraph,
-    positions: &std::collections::BTreeMap<String, usize>,
-) -> bool {
-    if expansion.review.is_none() {
-        return false;
-    }
-    if expansion.nodes.iter().any(|member| member.id == node.id) {
-        return true;
-    }
-    if node.role.as_deref() != Some("review.verify")
-        || node.id.rsplit_once("--").map(|(scope, _)| scope)
-            != expansion.source.rsplit_once("--").map(|(scope, _)| scope)
-    {
-        return false;
-    }
-    let mut pending: Vec<&String> = node.dependencies().collect();
-    let mut seen = std::collections::BTreeSet::new();
-    while let Some(id) = pending.pop() {
-        if id == &expansion.source {
-            return true;
-        }
-        if let Some(index) = positions.get(id)
-            && seen.insert(*index)
-        {
-            pending.extend(plan.nodes[*index].dependencies());
-        }
-    }
-    false
 }
 
 /// Advance all currently ready nodes once. Independent nodes can progress
@@ -1507,11 +1442,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
         let structural_pause = if checkpoint.nodes.iter().all(|node| node.state.settled()) {
             None
         } else {
-            structural_limit_reason(&expanded, &plan, limits).or_else(|| {
-                let reserved = plan.nodes.iter().filter(|node| !checkpoint.expansions.iter().any(|expansion| expansion.source == node.id))
-                    .filter_map(|node| node.review.as_ref()).fold(expanded.nodes.len(), |total, review| total.saturating_add(review.max_nodes));
-                (reserved > limits.nodes).then(|| format!("limits.nodes={} reached ({reserved} including deferred review reservations); set by domains.fabric.graph.limits", limits.nodes))
-            })
+            structural_limit_reason(&expanded, &plan, limits)
         };
         if let Some(reason) = &structural_pause {
             checkpoint.pause_reason = Some(bounded(reason, PAUSE_REASON_BYTES));
@@ -1821,192 +1752,6 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     checkpoint.nodes[node_index].review_base = Some(base);
                     checkpoint.nodes[node_index].review_base_pending = false;
                     journal.save(&checkpoint).map_err(GraphError::Journal)?;
-                }
-            }
-            if node.review.is_some() {
-                if structural_pause.is_some() || checkpoint.pause_reason.is_some() {
-                    continue;
-                }
-                if checkpoint.nodes[node_index].source_commit.is_none() {
-                    let commit = match node.source.as_ref() {
-                        Some(SourceBinding::Commit { commit }) => Some(commit.clone()),
-                        Some(SourceBinding::Node { node: source }) => positions
-                            .get(source)
-                            .and_then(|index| checkpoint.nodes[*index].outputs.as_ref())
-                            .and_then(|outputs| outputs.commit.clone()),
-                        Some(SourceBinding::Head { node: writer }) => {
-                            land::chain_head(&plan, &checkpoint, &positions, &node.id, writer)
-                        }
-                        Some(SourceBinding::Integration) => {
-                            owner.integration_head().map_err(GraphError::Run)?
-                        }
-                        None => None,
-                    };
-                    if commit
-                        .as_ref()
-                        .is_none_or(|value| value.parse::<provenant_core::GitOid>().is_err())
-                    {
-                        let progress = &mut checkpoint.nodes[node_index];
-                        progress.state = NodeState::Failed;
-                        progress.advance_error_code = Some("source_commit_unavailable".into());
-                        progress.advance_error = Some(format!(
-                            "node {}: source commit unavailable or invalid",
-                            node.id
-                        ));
-                        journal.save(&checkpoint).map_err(GraphError::Journal)?;
-                        continue;
-                    }
-                    if matches!(node.source, Some(SourceBinding::Integration))
-                        && checkpoint.integration_pin.is_none()
-                    {
-                        checkpoint.integration_pin = commit.clone();
-                    }
-                    checkpoint.nodes[node_index].source_commit = commit;
-                    journal.save(&checkpoint).map_err(GraphError::Journal)?;
-                }
-                let subject = checkpoint.nodes[node_index]
-                    .source_commit
-                    .as_deref()
-                    .ok_or_else(|| GraphError::BadCheckpoint {
-                        node: node.id.clone(),
-                        invariant: "deferred review node must have a source commit",
-                    })?;
-                let mut original = expanded
-                    .nodes
-                    .iter()
-                    .find(|candidate| candidate.id == node.id)
-                    .cloned()
-                    .ok_or_else(|| GraphError::BadCheckpoint {
-                        node: node.id.clone(),
-                        invariant: "deferred review node must exist in the expanded plan",
-                    })?;
-                if let Some(base) = &checkpoint.nodes[node_index].review_base {
-                    original
-                        .extra
-                        .insert("review_base".into(), serde_json::json!(base));
-                }
-                let mut resolution_error_code = "review_resolution_failed";
-                let result = owner
-                    .resolve_review(&original, subject)
-                    .map_err(|error| {
-                        if matches!(error, ReviewResolveError::Unsupported) {
-                            resolution_error_code = "review_resolution_unsupported";
-                        }
-                        error.to_string()
-                    })
-                    .and_then(|mut addition| {
-                        if let Some(review) = &mut addition.review {
-                            if !review.substitutions.is_empty() {
-                                return Err("new review resolution cannot contain substitutions".into());
-                            }
-                            let source = bounded(&review.source, MAX_ADVANCE_ERROR_BYTES - 32);
-                            if source.len() < review.source.len() {
-                                review.source = format!("{source} [truncated]");
-                            }
-                        }
-                        for child in &mut addition.nodes {
-                            if child.composite.is_none() {
-                                child.source = Some(SourceBinding::Commit {
-                                    commit: subject.to_owned(),
-                                });
-                                if let Some(base) = &checkpoint.nodes[node_index].review_base {
-                                    child.extra.insert("review_base".into(), serde_json::json!(base));
-                                }
-                            }
-                        }
-                        let expected_base = checkpoint.nodes[node_index].review_base.as_deref()
-                            .or(checkpoint.bound_review_base.as_deref())
-                            .or(checkpoint.bound_integration_base.as_deref());
-                        if expected_base.is_some_and(|base| addition.review.as_ref().is_none_or(|review| review.base.to_string() != base)) {
-                            return Err("review expansion base does not match its bound base".into());
-                        }
-                        plans::validate_review_addition(&expanded, &addition)?;
-                        if addition.source != node.id
-                            || addition
-                                .review
-                                .as_ref()
-                                .is_none_or(|review| review.subject.to_string() != subject)
-                        {
-                            return Err("review expansion subject or source mismatch".into());
-                        }
-                        // Flat validation otherwise reports only `node id`.
-                        let mut ids: std::collections::BTreeSet<&str> =
-                            expanded.nodes.iter().map(|item| item.id.as_str()).collect();
-                        for child in &addition.nodes {
-                            if !valid_node_identifier(&child.id) {
-                                return Err(format!(
-                                    "expanded review node id {:?} is invalid; use at most 200 ASCII letters, digits, dots, underscores or hyphens; shorten the composite or lens name",
-                                    bounded(&child.id, 256)
-                                ));
-                            }
-                            if !ids.insert(child.id.as_str()) {
-                                return Err(format!(
-                                    "expanded review node id {:?} is duplicated; use distinct composite and lens names",
-                                    bounded(&child.id, 256)
-                                ));
-                            }
-                        }
-                        let mut preview = expanded.clone();
-                        plans::append(&mut preview, &addition);
-                        let (next_plan, next_positions) =
-                            validate_flat_plan(&preview, &plans::generous())
-                                .map_err(str::to_owned)?;
-                        if let Some(reason) = structural_limit_reason(&preview, &next_plan, limits)
-                        {
-                            return Err(reason);
-                        }
-                        let mut additions = checkpoint.expansions.clone();
-                        additions.push(addition.clone());
-                        if let Some(reason) = graph_envelope_reason(
-                            document,
-                            &additions,
-                            &checkpoint.extensions,
-                            &next_plan,
-                        ) {
-                            return Err(reason);
-                        }
-                        let before = graph_envelope_bound(document, &checkpoint.expansions, &checkpoint.extensions, &plan);
-                        let after = graph_envelope_bound(document, &additions, &checkpoint.extensions, &next_plan);
-                        if after > before {
-                            return Err(format!(
-                                "review {} would project {after} checkpoint bytes, exceeding its reserved allowance of {before} bytes; split the graph into smaller batches or use a smaller review",
-                                node.id
-                            ));
-                        }
-                        Ok((addition, preview, next_plan, next_positions))
-                    });
-                match result {
-                    Ok((addition, preview, next_plan, next_positions)) => {
-                        let mut prospective = checkpoint.clone();
-                        prospective.nodes[node_index].state = NodeState::Succeeded;
-                        prospective.expansions.push(addition);
-                        loops::reconcile(&mut prospective, &next_plan);
-                        for (progress, planned) in
-                            prospective.nodes.iter_mut().zip(&next_plan.nodes)
-                        {
-                            progress.children.clone_from(&planned.composite_members);
-                        }
-                        plans::remaining(&mut prospective, &preview, limits);
-                        validate_expanded_rows(&prospective, &next_plan)?;
-                        owner
-                            .validate_expansion(&preview, &prospective)
-                            .map_err(GraphError::Run)?;
-                        journal.save(&prospective).map_err(GraphError::Journal)?;
-                        checkpoint = prospective;
-                        (expanded, plan, positions) = (preview, next_plan, next_positions);
-                        continue 'schedule;
-                    }
-                    Err(reason) => {
-                        let progress = &mut checkpoint.nodes[node_index];
-                        progress.state = NodeState::Failed;
-                        progress.advance_error_code = Some(resolution_error_code.into());
-                        progress.advance_error = Some(bounded(
-                            &format!("node {}: {reason}", node.id),
-                            MAX_ADVANCE_ERROR_BYTES,
-                        ));
-                        journal.save(&checkpoint).map_err(GraphError::Journal)?;
-                        continue;
-                    }
                 }
             }
             loop {
@@ -2368,19 +2113,6 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                             review_substitution(node, attempt)
                                 || review_preparation_substitution(node, attempt)
                         });
-                    if review_substitution {
-                        for expansion in &mut checkpoint.expansions {
-                            if review_panel_contains(expansion, node, &plan, &positions)
-                                && let Some(review) = &mut expansion.review
-                            {
-                                review.substitutions.push(ReviewSubstitution {
-                                    member: node.id.clone(),
-                                    route_index: key.route_index,
-                                });
-                                review.substitutions.sort();
-                            }
-                        }
-                    }
                     checkpoint.nodes[node_index].attempts.push(GraphAttempt {
                         extra: Default::default(),
                         review_substitution,
@@ -2520,20 +2252,6 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                     distinct_attempts.dedup();
                 } else if node.distinct_from == Some(DistinctFrom::Writer) {
                     let mut current = node;
-                    // A resolved review lens is pinned to a commit, so its writer
-                    // is found through the deferred node it was expanded from.
-                    if matches!(node.source, Some(SourceBinding::Commit { .. }))
-                        && let Some(origin) = checkpoint
-                            .expansions
-                            .iter()
-                            .find(|expansion| {
-                                expansion.review.is_some()
-                                    && expansion.nodes.iter().any(|n| n.id == node.id)
-                            })
-                            .and_then(|expansion| positions.get(&expansion.source))
-                    {
-                        current = &plan.nodes[*origin];
-                    }
                     while let Some(
                         binding @ (SourceBinding::Node { node: source }
                         | SourceBinding::Head { node: source }),

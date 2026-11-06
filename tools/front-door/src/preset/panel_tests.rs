@@ -1,6 +1,4 @@
-use super::{
-    PENDING_REVIEW_SIZE, ShapeQuery, append_plan_additions, review_selector_with_git, size_text,
-};
+use super::{ShapeQuery, append_plan_additions, review_selector_with_git};
 use crate::preset::{Layers, StageBuilder};
 use provenant_routing::ReviewConfig;
 use serde_json::{Value, json};
@@ -124,80 +122,6 @@ fn select_items_names_the_family_group_of_each_slot() {
 }
 
 #[test]
-fn review_spec_states_only_what_the_stage_sets() {
-    let mut layers = Layers::empty();
-    let mut review = ReviewConfig::default();
-    review.lenses.by_paths.insert(
-        "**/special/**".into(),
-        provenant_routing::PathLenses {
-            add: vec!["special-review".into()],
-        },
-    );
-    layers.review = Some(selector(review));
-    let spec = |parameters: Value| {
-        let (mut stack, mut origins, mut repo_files) = (Vec::new(), BTreeMap::new(), Vec::new());
-        if parameters.get("lenses").is_some() {
-            origins.insert("parameters.lenses".into(), "cli".into());
-        }
-        StageBuilder {
-            layers: &layers,
-            name: "review",
-            prompt: "",
-            parameters,
-            roles: None,
-            stack: &mut stack,
-            origins: &mut origins,
-            repo_files: &mut repo_files,
-            scope: "",
-        }
-        .review_spec(
-            json!({"min_successful":"${min_reviews}", "reduce_verdict":true, "export_first":["commit"]})
-                .as_object()
-                .unwrap(),
-        )
-        .map(|spec| serde_json::to_value(spec).unwrap())
-        .unwrap()
-    };
-    let table = json!({"model": "claude-sonnet"});
-    let spec_json = spec(json!({
-        "review_shape": "deep",
-        "risk_tier": "crucial",
-        "risk_tags": ["security"],
-        "min_reviews": 0,
-        "lenses": [
-            {"name": "correctness-spec", "tier": table, "when": ""},
-            {"name": "security-privacy", "tier": "", "when": "security"},
-        ],
-    }));
-    assert_eq!(spec_json["shape"], "deep");
-    assert_eq!(spec_json["risk_tier"], "crucial");
-    // The host measures an unset size at launch; no placeholder is recorded as an override.
-    assert!(spec_json["size"].is_null());
-    assert_eq!(spec_json["min_successful"], 2);
-    assert_eq!(spec_json["reduce_verdict"], true);
-    assert_eq!(spec_json["export_first"], json!(["commit"]));
-    assert_eq!(spec_json["lenses"][0]["tier"], table);
-    assert!(spec_json["lenses"][1]["tier"].is_null());
-    assert_eq!(spec_json["lenses"][1]["when"], "security");
-    // The reservation includes the root and potential path-floor additions.
-    assert!(spec_json["max_nodes"].as_u64().unwrap() >= 5);
-
-    let sized = spec(json!({"size": "large", "min_reviews": 2}));
-    assert_eq!(sized["size"], "large");
-    assert_eq!(sized["min_successful"], 2);
-    // An empty list selects the configured default lenses at launch.
-    assert!(sized["max_nodes"].as_u64().unwrap() > 2);
-}
-
-#[test]
-fn unknown_size_reads_pending_only_when_launch_measures_it() {
-    assert_eq!(size_text(Some("small"), true), "small");
-    assert_eq!(size_text(None, false), "unknown");
-    assert_eq!(size_text(None, true), PENDING_REVIEW_SIZE);
-    assert_eq!(PENDING_REVIEW_SIZE, "pending (measured at review launch)");
-}
-
-#[test]
 fn default_preset_uses_configured_path_shape_and_test_lens() {
     let mut review = ReviewConfig::default();
     review
@@ -317,13 +241,6 @@ fn selector_explains_protected_floor_and_pending_subject() {
         hint.required_floor_lenses
             .contains(&"security-privacy".into())
     );
-    let pending = selector(&ShapeQuery {
-        shape: Some("quick"),
-        defer: true,
-        ..Default::default()
-    })
-    .unwrap();
-    assert!(pending.source.contains("floors=pending"));
 }
 
 #[test]
@@ -404,4 +321,118 @@ fn unreadable_paths_raise_resolved_review_and_explain() {
         hint.required_floor_lenses
             .contains(&"security-privacy".into())
     );
+}
+
+/// The panel for a risk tier and tags is the same list whether the stage
+/// narrows the default lenses or the host resolves `@review-panel` at launch.
+#[test]
+fn the_review_panel_resolver_gives_the_lenses_a_tier_and_tags_select() {
+    let cases: [(Option<&str>, &[&str], &[&str]); 7] = [
+        (
+            None,
+            &[],
+            &[
+                "correctness-spec",
+                "tests",
+                "design-fit-reuse",
+                "simplicity",
+                "reliability",
+            ],
+        ),
+        (Some("routine"), &[], &["correctness-spec"]),
+        (
+            Some("substantial"),
+            &[],
+            &[
+                "correctness-spec",
+                "tests",
+                "design-fit-reuse",
+                "simplicity",
+                "reliability",
+            ],
+        ),
+        (
+            Some("crucial"),
+            &[],
+            &[
+                "correctness-spec",
+                "tests",
+                "design-fit-reuse",
+                "simplicity",
+                "reliability",
+                "conventions-readability",
+                "refactor-cleanup",
+                "flexibility",
+            ],
+        ),
+        (
+            Some("crucial"),
+            &["security"],
+            &[
+                "correctness-spec",
+                "tests",
+                "design-fit-reuse",
+                "simplicity",
+                "reliability",
+                "conventions-readability",
+                "refactor-cleanup",
+                "flexibility",
+                "security-privacy",
+            ],
+        ),
+        (
+            Some("routine"),
+            &["security"],
+            &["correctness-spec", "security-privacy"],
+        ),
+        (
+            Some("terminal"),
+            &[],
+            &[
+                "correctness-spec",
+                "tests",
+                "design-fit-reuse",
+                "simplicity",
+                "reliability",
+                "conventions-readability",
+                "refactor-cleanup",
+                "flexibility",
+                "adversarial",
+            ],
+        ),
+    ];
+    let review = ReviewConfig::default();
+    for (tier, tags, expected) in cases {
+        let resolved: Vec<String> = review
+            .resolve_panel(
+                &provenant_routing::ReviewRequest {
+                    risk_tier: tier.map(str::to_owned),
+                    risk_tags: tags.iter().map(|tag| (*tag).to_owned()).collect(),
+                    ..Default::default()
+                },
+                None,
+                &[],
+                false,
+            )
+            .unwrap()
+            .slots
+            .into_iter()
+            .map(|slot| slot.lens)
+            .collect();
+        assert_eq!(resolved, expected, "resolver for {tier:?} {tags:?}");
+        let mut parameters = json!({"risk_tags": tags});
+        if let Some(tier) = tier {
+            parameters["risk_tier"] = json!(tier);
+        }
+        let (config, _) = Layers::empty().resolve("review").unwrap();
+        let stage_default = config["parameters"]["lenses"]["default"]
+            .as_array()
+            .cloned()
+            .unwrap();
+        let selected: Vec<String> = select(parameters, stage_default, false)
+            .iter()
+            .filter_map(|lens| lens["name"].as_str().map(str::to_owned))
+            .collect();
+        assert_eq!(selected, expected, "stage selection for {tier:?} {tags:?}");
+    }
 }
