@@ -873,7 +873,12 @@ mod tests {
             let error = exchange(&mut client, &invalid, &CancelToken::new()).unwrap_err();
             let value = error.structured_error();
             assert_eq!(value["code"], "invalid_input");
-            assert!(value["detail"].as_str().unwrap().contains("arguments.brief"));
+            assert!(
+                value["detail"]
+                    .as_str()
+                    .unwrap()
+                    .contains("arguments.brief")
+            );
             assert!(!value.to_string().contains("TOKEN_SENTINEL"));
             serving.join().unwrap().unwrap();
         });

@@ -44,9 +44,7 @@ use provenant_fabric_mcp::{
     stdio,
     tools::{Service, ServiceError},
 };
-use provenant_fabric_runtime::runs::{
-    AttemptPage, RunCapabilities, RunEventsPage, RunResult,
-};
+use provenant_fabric_runtime::runs::{AttemptPage, RunCapabilities, RunEventsPage, RunResult};
 use provenant_fabric_runtime::{
     coordination::{facade::*, *},
     hosts::*,

@@ -1105,7 +1105,9 @@ impl BinaryRunOwner<'_> {
                     attempt: service.status(target.attempt, &call).map_err(run_error)?,
                 })
             }
-            RunInput::Resume { .. } => Err(FacadeError::invalid(InvalidInputDetail::Field("retry requires a graph target".into()))),
+            RunInput::Resume { .. } => Err(FacadeError::invalid(InvalidInputDetail::Field(
+                "retry requires a graph target".into(),
+            ))),
             RunInput::List { after, limit, .. } => {
                 if !(1..=100).contains(&limit) {
                     return Err(FacadeError::InvalidInput { detail: None });

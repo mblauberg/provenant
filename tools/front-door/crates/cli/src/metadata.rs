@@ -94,7 +94,6 @@ impl CatalogueArg for Arg {
         requirements.0.extend(ids.iter().map(|id| (*id).to_owned()));
         self.requires_all(ids).add(requirements)
     }
-
 }
 
 /// Compact-help marker and example; descriptions remain clap's `about` text.
