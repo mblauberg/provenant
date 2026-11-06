@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 use std::{
     path::Path,
     process::{Child, Command},
-    time::{Duration, Instant},
+    time::Duration,
 };
 use support::{Result, TestRig};
 struct Provider {
@@ -177,15 +177,13 @@ fn start(rig: &TestRig, attempt: AttemptId, recover: bool) -> Result<Host> {
         command.env("RELAY_CRASH_RECOVER", "1");
     }
     let mut host = Host(command.spawn()?);
-    let deadline = Instant::now() + Duration::from_secs(20);
-    while !ready.exists() {
-        assert!(
-            host.0.try_wait()?.is_none(),
-            "relay host exited before ready"
-        );
-        assert!(Instant::now() < deadline, "relay host did not start");
-        std::thread::sleep(Duration::from_millis(10));
-    }
+    let (ready, exited) = provenant_test_support::wait_for(
+        "relay host readiness",
+        Duration::from_secs(20),
+        || (ready.exists(), host.0.try_wait()),
+        |(ready, exited)| *ready || !matches!(exited, Ok(None)),
+    )?;
+    assert!(ready, "relay host exited before ready: {:?}", exited?);
     Ok(host)
 }
 #[test]
