@@ -4138,6 +4138,9 @@ if (process.argv[2] === 'child') {
                     "unlink \"$lane_root/.fixture-git-probe\""
                 ),
             ),
+            // This is a native confined-shell probe of the lane's PATH Git
+            // wrapper. fixture::run_git deliberately bypasses that wrapper and
+            // cannot establish this boundary behaviour.
             (
                 "git commit",
                 concat!(

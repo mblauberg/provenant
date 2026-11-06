@@ -14,6 +14,48 @@ use std::{
 type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
 
 #[test]
+fn cancellation_keeps_a_genuine_launch_preparation_failure() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let run = input();
+    let id = run.attempts[0].attempt_id;
+    store.create(&run, &call)?;
+    let started = store.start(
+        run.run_id,
+        &Ready,
+        &|record, _| {
+            let attempt = store.attempt_dir(record.run_id, record.attempt_id, false)?;
+            artifacts::seal(
+                &attempt,
+                "cancel.json",
+                &crate::db::bytes(&serde_json::json!({
+                    "scope": RunStore::scope(record)
+                }))?,
+                RECORD_LIMIT,
+            )?;
+            Err(RunError::Validation("fixture preparation broke"))
+        },
+        &call,
+    )?;
+    assert!(matches!(started.as_slice(), [Started::Refused { .. }]));
+    let record = store.record(id, &call)?;
+    assert!(matches!(record.state, AttemptState::Terminal {
+        outcome: Outcome::Cancelled, ref reason, ..
+    } if reason.as_deref().is_some_and(|reason| reason.contains("fixture preparation broke"))));
+    let AttemptState::Terminal { extra, .. } = &record.state else {
+        return Err("cancelled attempt is not terminal".into());
+    };
+    assert_eq!(
+        extra.get("terminal_cause"),
+        Some(&serde_json::to_value(TerminalCause::HandoffRefused)?)
+    );
+    assert_eq!(record.provider_launched, Some(false));
+    Ok(())
+}
+
+#[test]
 fn cloud_attempt_never_enters_local_supervisor() -> TestResult {
     let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());
