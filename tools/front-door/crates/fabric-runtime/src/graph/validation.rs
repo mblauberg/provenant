@@ -956,6 +956,71 @@ pub(super) fn route_is_bounded(route: &GraphRoute) -> bool {
 /// A findings block must parse, each finding needs a disposition from the
 /// declared list with a non-empty reason, and every selected upstream finding
 /// identity must appear exactly once.
+pub(super) fn review_verification_error(
+    node: &PlannedNode,
+    upstream: &[Finding],
+    required: &[Finding],
+    overflow: &[(String, String)],
+    outputs: &NodeOutputs,
+) -> Option<(&'static str, String)> {
+    if !template::review_verifier(node) {
+        return None;
+    }
+    if template::review_behaviour(node).is_some()
+        && outputs.findings.iter().any(|finding| {
+            !upstream.iter().any(|source| source.id == finding.id)
+                && !overflow.iter().any(|(id, _)| id == &finding.id)
+                && (finding
+                    .extra
+                    .get("verification")
+                    .and_then(serde_json::Value::as_str)
+                    != Some("new")
+                    || finding
+                        .reason
+                        .as_ref()
+                        .is_none_or(|reason| reason.trim().is_empty()))
+        })
+    {
+        return Some((
+            "verification_invalid",
+            "new verifier findings need verification=new and an evidence reason".into(),
+        ));
+    }
+    for finding in required {
+        let matches: Vec<_> = outputs
+            .findings
+            .iter()
+            .filter(|output| output.id == finding.id)
+            .collect();
+        if matches.len()
+            != required
+                .iter()
+                .filter(|source| source.id == finding.id)
+                .count()
+            || matches.iter().any(|output| {
+                !output
+                    .extra
+                    .get("verification")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|value| matches!(value, "upheld" | "falsified" | "unverifiable"))
+                    || output
+                        .reason
+                        .as_ref()
+                        .is_none_or(|reason| reason.trim().is_empty())
+            })
+        {
+            return Some((
+                "verification_incomplete",
+                format!(
+                    "finding {} needs exactly one verification and an evidence reason",
+                    finding.id
+                ),
+            ));
+        }
+    }
+    None
+}
+
 pub(super) fn disposition_error(
     dispositions: &[String],
     upstream: &[Finding],

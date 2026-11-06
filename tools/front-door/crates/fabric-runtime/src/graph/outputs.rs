@@ -454,7 +454,7 @@ fn parse_findings(
         for source in copies {
             let mut entry = entry.clone();
             if let Some(source) = source {
-                if entry.contains_key("disposition")
+                if (entry.contains_key("disposition") || entry.contains_key("verification"))
                     && !entry.contains_key("propagates")
                     && let Some(marker) = source.extra.get("propagates")
                 {
@@ -644,6 +644,19 @@ pub(super) fn compact_findings(
     }
 }
 
+/// Use the same input projection at settlement and checkpoint replay.
+pub(super) fn upstream_finding(node: &PlannedNode, source: &str, mut finding: Finding) -> Finding {
+    if template::review_behaviour(node) == Some(template::ReviewBehaviour::Verify) {
+        // A delta verifier replaces prior verification; synthesis inherits it.
+        finding.extra.remove("verification");
+    }
+    finding.extra.insert(
+        "propagates".into(),
+        format!("{source}:{}", finding.id).into(),
+    );
+    finding
+}
+
 /// Reject malformed compacted records on checkpoint replay.
 pub(super) fn valid_compacted_findings(
     index: usize,
@@ -662,19 +675,14 @@ pub(super) fn valid_compacted_findings(
     };
     if block.len() > 16 * 1024
         || !outputs.findings.is_empty()
-        || plan.nodes[index].dispositions.is_empty()
+        || (plan.nodes[index].dispositions.is_empty()
+            && !template::review_verifier(&plan.nodes[index]))
     {
         return false;
     }
     let upstream: Vec<_> = selected_findings(&plan.nodes[index], plan, checkpoint, positions)
         .into_iter()
-        .map(|(source, mut finding)| {
-            finding.extra.insert(
-                "propagates".into(),
-                format!("{source}:{}", finding.id).into(),
-            );
-            finding
-        })
+        .map(|(source, finding)| upstream_finding(&plan.nodes[index], &source, finding))
         .collect();
     !upstream.is_empty() && parse_findings(block, &upstream).is_ok()
 }
@@ -699,13 +707,7 @@ pub(super) fn materialised_findings(
     };
     let upstream: Vec<_> = selected_findings(&plan.nodes[index], plan, checkpoint, positions)
         .into_iter()
-        .map(|(source, mut finding)| {
-            finding.extra.insert(
-                "propagates".into(),
-                format!("{source}:{}", finding.id).into(),
-            );
-            finding
-        })
+        .map(|(source, finding)| upstream_finding(&plan.nodes[index], &source, finding))
         .collect();
     parse_findings(block, &upstream)
         .map(|(findings, _, _)| findings)
@@ -1119,16 +1121,15 @@ pub(super) fn render_input(
         return (node.prompt.clone(), false);
     }
     let mut prompt = prefix(&node.prompt, cap).to_owned();
-    let proof_dispositions =
-        if node.dispositions.is_empty() && node.role.as_deref() == Some("review.verify") {
-            vec![
-                "upheld".to_owned(),
-                "falsified".to_owned(),
-                "unverifiable".to_owned(),
-            ]
-        } else {
-            node.dispositions.clone()
-        };
+    let proof_dispositions = if node.dispositions.is_empty() && template::review_verifier(node) {
+        vec![
+            "upheld".to_owned(),
+            "falsified".to_owned(),
+            "unverifiable".to_owned(),
+        ]
+    } else {
+        node.dispositions.clone()
+    };
     if !proof_dispositions.is_empty()
         && node.inputs.iter().any(|input| {
             input

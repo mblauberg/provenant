@@ -64,11 +64,75 @@ impl ParameterKind {
     }
 }
 
+/// Review protocol selected by a template, inherited by dotted flavours.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewBehaviour {
+    Lens,
+    Verify,
+    Synthesis,
+}
+
+impl ReviewBehaviour {
+    fn apply(self, node: &mut Map<String, Value>) {
+        let instruction = match self {
+            Self::Lens => {
+                "Report concrete defects against the pinned subject and base. Include id, severity, file, line, summary, status, evidence and proposed_fix for each finding."
+            }
+            Self::Verify => {
+                "Try to falsify every input finding against the pinned subject. Preserve its qualified id and evidence, set verification to upheld, falsified or unverifiable, and give a reason. Mark newly discovered findings verification=new."
+            }
+            Self::Synthesis => {
+                "Reconcile every input finding by evidence. Preserve qualified ids and assign each finding disposition accepted, rejected or deferred with a non-empty reason. Never decide by majority vote."
+            }
+        };
+        node.remove("role");
+        node.insert("review_behaviour".into(), serde_json::json!(self));
+        node.insert("access".into(), "read_only".into());
+        node.insert("require_findings".into(), true.into());
+        node.insert("required_verdict".into(), "VERDICT: PASS".into());
+        if self != Self::Lens {
+            node.remove("review_lens");
+        }
+        if self == Self::Synthesis {
+            node.insert("kind".into(), "synthesise".into());
+            node.insert(
+                "dispositions".into(),
+                serde_json::json!(["accepted", "rejected", "deferred"]),
+            );
+        }
+        let prompt = node.entry("prompt").or_insert_with(|| "".into());
+        let brief = prompt.as_str().unwrap_or_default();
+        *prompt = format!("{brief}\n{instruction}\nReturn a fenced findings JSON block with schema_version 1 and a findings array (at most 32 entries). Use [] when clean. Keep qualified IDs and propagation markers. Read full member results and the input index when bounded exports are truncated; disclose unavailable evidence and lenses. For overflow, follow the supplied DISPOSITION protocol. End with exactly one final non-empty line: VERDICT: PASS, VERDICT: FAIL or VERDICT: INCONCLUSIVE. PASS requires complete acceptance evidence and no unresolved blocking or accepted findings; missing evidence is INCONCLUSIVE.").into();
+    }
+}
+
+pub(super) fn review_behaviour(node: &PlannedNode) -> Option<ReviewBehaviour> {
+    node.extra
+        .get("review_behaviour")
+        .and_then(|value| serde_json::from_value(value.clone()).ok())
+}
+
+pub(super) fn review_verifier(node: &PlannedNode) -> bool {
+    review_behaviour(node) == Some(ReviewBehaviour::Verify)
+        || node.role.as_deref() == Some("review.verify")
+}
+
+pub(super) fn review_node(node: &PlannedNode) -> bool {
+    review_behaviour(node).is_some()
+        || node.role.as_deref().is_some_and(|role| {
+            role == "lens" || role.starts_with("lens.") || role.starts_with("review.")
+        })
+}
+
 /// One template document. A leaf sets `brief` (and usually `tier`); a
 /// composite sets `nodes`. Nodes stay JSON until their parameters are bound,
 /// because a typed list field such as `write_scope` may be one `${scope}`.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Template {
+    /// Review output protocol, enforced independently of the brief.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review: Option<ReviewBehaviour>,
     #[serde(flatten)]
     pub extra: provenant_records::ExtraFields,
     /// Set when templates travel as a list, as in a planner catalogue.
@@ -120,7 +184,9 @@ impl Template {
         if let Some(name) = self.extra.keys().next() {
             return Err(format!("unknown template field {name}"));
         }
-        if self.is_composite() && (self.brief.is_some() || self.tier.is_some()) {
+        if self.is_composite()
+            && (self.brief.is_some() || self.tier.is_some() || self.review.is_some())
+        {
             return Err("a template sets either a leaf brief and tier or nodes, not both".into());
         }
         for (name, parameter) in &self.parameters {
@@ -312,6 +378,7 @@ impl Template {
     /// A flavour over its base: set fields win, parameters and leaf fields merge.
     fn flavour(mut base: Self, own: &Self) -> Self {
         base.extra.extend(own.extra.clone());
+        base.review = own.review.or(base.review);
         base.name = own.name.clone().or(base.name);
         base.doc = own.doc.clone().or(base.doc);
         base.parameters.extend(own.parameters.clone());
@@ -370,6 +437,14 @@ const BUNDLED: &[(&str, &str)] = &[
         include_str!("../../assets/templates/implement.fix.toml"),
     ),
     ("review", include_str!("../../assets/templates/review.toml")),
+    (
+        "review.verify",
+        include_str!("../../assets/templates/review.verify.toml"),
+    ),
+    (
+        "review.synthesis",
+        include_str!("../../assets/templates/review.synthesis.toml"),
+    ),
     (
         "review.security",
         include_str!("../../assets/templates/review.security.toml"),
@@ -1079,6 +1154,9 @@ impl<'a> Compiler<'a> {
             && let Some(brief) = leaf.get("prompt").cloned()
         {
             leaf.insert("acceptance_checks".into(), Value::Array(vec![brief]));
+        }
+        if let Some(review) = template.review {
+            review.apply(&mut leaf);
         }
         self.finish(leaf, stack)
     }

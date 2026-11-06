@@ -2343,7 +2343,7 @@ fn repair_replan_preserves_full_topology_and_single_reviewer_flattens() {
         let initial = repair_finding(false);
         let growth = initial.replace("\"design_defect\":false", "\"design_defect\":false,\"scope_grew\":true");
         let pass = "```findings\n{\"schema_version\":1,\"findings\":[]}\n```\nVERDICT: PASS";
-        let verifier = "```findings\n{\"schema_version\":1,\"findings\":[]}\n```";
+        let verifier = pass;
         let mut results = vec![initial.as_str(), "fixed", growth.as_str()];
         if lens_count > 1 { results.push("framing only, no findings or verdict"); }
         results.extend(std::iter::repeat_n(pass, lens_count));

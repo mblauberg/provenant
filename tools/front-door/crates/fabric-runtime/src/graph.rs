@@ -3016,32 +3016,27 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                         _ => None,
                     };
                 // Synthesis retains qualified evidence even without a disposition contract.
-                let upstream_findings: Vec<Finding> =
-                    if node.dispositions.is_empty() && node.kind != Some(NodeKind::Synthesise) {
-                        Default::default()
-                    } else {
-                        selected_findings(node, &plan, &checkpoint, &positions)
-                            .into_iter()
-                            .map(|(source, mut finding)| {
-                                finding.extra.insert(
-                                    "propagates".into(),
-                                    format!("{source}:{}", finding.id).into(),
-                                );
-                                finding
-                            })
-                            .collect()
-                    };
-                let proof_dispositions = if node.dispositions.is_empty()
-                    && node.role.as_deref() == Some("review.verify")
+                let upstream_findings: Vec<Finding> = if node.dispositions.is_empty()
+                    && node.kind != Some(NodeKind::Synthesise)
+                    && !template::review_verifier(node)
                 {
-                    vec![
-                        "upheld".to_owned(),
-                        "falsified".to_owned(),
-                        "unverifiable".to_owned(),
-                    ]
+                    Default::default()
                 } else {
-                    node.dispositions.clone()
+                    selected_findings(node, &plan, &checkpoint, &positions)
+                        .into_iter()
+                        .map(|(source, finding)| upstream_finding(node, &source, finding))
+                        .collect()
                 };
+                let proof_dispositions =
+                    if node.dispositions.is_empty() && template::review_verifier(node) {
+                        vec![
+                            "upheld".to_owned(),
+                            "falsified".to_owned(),
+                            "unverifiable".to_owned(),
+                        ]
+                    } else {
+                        node.dispositions.clone()
+                    };
                 let overflow_ids = if proof_dispositions.is_empty() {
                     Vec::new()
                 } else {
@@ -3132,11 +3127,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                                 outputs.warnings.extend(marker_warnings);
                             }
                             if node.access == AccessMode::ReadOnly
-                                && node.role.as_deref().is_some_and(|role| {
-                                    role == "lens"
-                                        || role.starts_with("lens.")
-                                        || role.starts_with("review.")
-                                })
+                                && template::review_node(node)
                                 && let Some(reference) = attempt.attempt_ref.as_deref()
                             {
                                 let explicit_base = node
@@ -3161,6 +3152,24 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                                         outputs.warnings.push(format!("equal_base_and_head: review range is empty (base {base}, head {head})"));
                                     }
                                     _ => {}
+                                }
+                            }
+                            if template::review_behaviour(node).is_some()
+                                && outputs.verdict.as_deref() == Some("VERDICT: PASS")
+                            {
+                                if outputs.findings_available != Some(true) {
+                                    outputs.verdict = Some("VERDICT: INCONCLUSIVE".into());
+                                } else if outputs.findings.iter().any(|finding| {
+                                    (repair::blocking(finding)
+                                        && finding.disposition.as_deref() != Some("deferred")
+                                        && finding
+                                            .extra
+                                            .get("verification")
+                                            .and_then(serde_json::Value::as_str)
+                                            != Some("falsified"))
+                                        || finding.disposition.as_deref() == Some("accepted")
+                                }) {
+                                    outputs.verdict = Some("VERDICT: FAIL".into());
                                 }
                             }
                             outputs.warnings.truncate(MAX_WARNINGS);
@@ -3199,6 +3208,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                                     .cloned()
                                     .collect();
                                 disposition_error(&node.dispositions, &required_findings, &outputs)
+                                    .or_else(|| review_verification_error(node, &upstream_findings, &required_findings, &overflow_ids, &outputs))
                                     .or_else(|| {
                                         (!overflow_ids.is_empty() && result.as_ref().is_none_or(|capture| !capture.disposition_proof.matches(&overflow_ids, &proof_dispositions))).then(|| (
                                             "disposition_overflow_incomplete",
@@ -3207,7 +3217,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                                     })
                                     .or_else(|| {
                                         let proof = &result.as_ref()?.disposition_proof;
-                                        let verifier = node.dispositions.is_empty() && node.role.as_deref() == Some("review.verify");
+                                        let verifier = node.dispositions.is_empty() && template::review_verifier(node);
                                         let mismatch = outputs.findings.iter().any(|finding| {
                                             if !overflow_ids.iter().any(|(id, _)| id == &finding.id) { return false; }
                                             let status = if verifier { finding.extra.get("verification").and_then(serde_json::Value::as_str) } else { finding.disposition.as_deref() };
@@ -3216,10 +3226,11 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                                         mismatch.then(|| ("disposition_overflow_inconsistent", "structured findings disagree with their DISPOSITION lines".to_owned()))
                                     })
                             };
+                            if template::review_behaviour(node).is_some() {
+                                retain_synthesis_findings(&mut outputs, &upstream_findings);
+                            }
                             let review_result = node.access == AccessMode::ReadOnly
-                                && node.role.as_deref().is_some_and(|role| {
-                                    role.starts_with("lens.") || role.starts_with("review.")
-                                })
+                                && template::review_node(node)
                                 && outputs.verdict.is_some()
                                 && outputs.verdict_error.is_none()
                                 && outputs.result.is_some()

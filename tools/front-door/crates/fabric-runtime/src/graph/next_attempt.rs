@@ -286,9 +286,12 @@ pub(super) fn review_substitution(node: &PlannedNode, attempt: &GraphAttempt) ->
 
 pub(super) fn review_member(node: &PlannedNode) -> bool {
     node.access == AccessMode::ReadOnly
-        && node.role.as_deref().is_some_and(|role| {
+        && (matches!(
+            template::review_behaviour(node),
+            Some(template::ReviewBehaviour::Lens | template::ReviewBehaviour::Verify)
+        ) || node.role.as_deref().is_some_and(|role| {
             role == "lens" || role.starts_with("lens.") || role == "review.verify"
-        })
+        }))
 }
 
 /// Preparation fallback still needs live evidence before a new route starts.
