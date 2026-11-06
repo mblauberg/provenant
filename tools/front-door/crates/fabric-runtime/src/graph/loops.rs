@@ -105,6 +105,9 @@ pub(super) fn expanded_node_count(
         let Some(spec) = &node.loop_body else {
             continue;
         };
+        if repair::spec_is_repair(spec) && !(1..=3).contains(&spec.max_rounds) {
+            return Err("review repair max_rounds must be between one and three".into());
+        }
         if spec.max_rounds == 0 {
             return Err(format!(
                 "node {}: loop.max_rounds must be positive",
@@ -167,6 +170,9 @@ pub(super) fn validate_extension(
         .iter()
         .find(|n| n.id == name && n.loop_body.is_some())
         .ok_or("unknown loop")?;
+    if node.loop_body.as_ref().is_some_and(repair::spec_is_repair) {
+        return Err("review repair cycles cannot be extended or accepted without review".into());
+    }
     match field {
         "rounds" if value.parse::<usize>().is_ok_and(|n| n > node.loop_body.as_ref().map_or(0, |s| s.max_rounds) && n <= 1024) => Ok(()),
         "decision" if matches!(value, "stop" | "accept") => Ok(()),
@@ -301,7 +307,7 @@ fn expand_loops(document: &GraphDocument, extensions: &[String]) -> Result<Graph
             || node.worktree.is_some()
             || node.delivery.is_some()
             || node.condition.is_some()
-            || node.on_fail.is_some()
+            || node.on_fail.is_some() && !repair::spec_is_repair(spec)
             || node.route.is_some()
             || node.routes.is_some()
             || !node.prompt.is_empty()
@@ -521,6 +527,19 @@ fn expand_loops(document: &GraphDocument, extensions: &[String]) -> Result<Graph
                         child.depends_on.push(input.node.clone());
                     }
                 }
+                if repair::spec_is_repair(spec) && child.extra.contains_key("repair_lens") {
+                    // The raising lenses are known only after review settles.
+                    // Carry the qualified initial findings to every candidate
+                    // reviewer, whose launch policy selects the needed lenses.
+                    for input in &node.inputs {
+                        if !child.inputs.iter().any(|own| own.node == input.node) {
+                            child.inputs.push(input.clone());
+                        }
+                        if !child.depends_on.contains(&input.node) {
+                            child.depends_on.push(input.node.clone());
+                        }
+                    }
+                }
                 if round == 1
                     && spec
                         .body
@@ -563,9 +582,13 @@ fn expand_loops(document: &GraphDocument, extensions: &[String]) -> Result<Graph
 
 pub(super) fn inactive_round(
     node: &PlannedNode,
+    plan: &PlannedGraph,
     checkpoint: &GraphCheckpoint,
     positions: &BTreeMap<String, usize>,
 ) -> bool {
+    if repair::inactive_round(node, plan, checkpoint, positions) {
+        return true;
+    }
     node.round
         .as_ref()
         .and_then(|r| r.previous_gate.as_ref())
@@ -595,7 +618,7 @@ pub(super) fn handled_gate(checkpoint: &GraphCheckpoint, progress: &NodeProgress
                 && checkpoint
                     .nodes
                     .iter()
-                    .any(|n| n.id == r.loop_id && n.state == NodeState::Succeeded)
+                    .any(|n| n.id == r.loop_id && checkpoint.node_successful(n))
         })
 }
 
@@ -665,7 +688,7 @@ pub(super) fn validate_progress(
 ) -> Result<(), ()> {
     if checkpoint.ask_actor.is_none()
         || !progress.attempts.is_empty()
-        || progress.gate.is_some()
+        || progress.gate.is_some() && !repair::is_repair(node)
         || progress.advance_error.is_some()
     {
         return Err(());
@@ -687,6 +710,8 @@ pub(super) fn validate_progress(
         return Err(());
     }
 
+    let clean = repair::clean_start(node, checkpoint, positions);
+    let escalated = repair::escalation(node, checkpoint, positions);
     let passed = body
         .iter()
         .any(|n| n.round.as_ref().is_some_and(|r| r.until) && n.state == NodeState::Succeeded);
@@ -702,7 +727,7 @@ pub(super) fn validate_progress(
         .extensions
         .contains(&format!("loop.{}.decision=stop", node.id));
     let matches_output = |passed| {
-        let mut expected = gate_outputs(passed);
+        let mut expected = repair::terminal_outputs(node, checkpoint, positions, passed);
         if progress
             .outputs
             .as_ref()
@@ -713,8 +738,13 @@ pub(super) fn validate_progress(
         progress.outputs == Some(expected)
     };
     let valid = match progress.state {
-        NodeState::Succeeded => !failed && settled && (passed || accepted) && matches_output(true),
-        NodeState::Failed => (failed || stopped) && matches_output(false),
+        NodeState::Succeeded => {
+            !failed && settled && (passed || accepted || clean) && matches_output(true)
+        }
+        NodeState::Failed => {
+            (failed || stopped || escalated.is_some() || repair::is_repair(node) && settled)
+                && matches_output(false)
+        }
         NodeState::Pending => progress.outputs.is_none(),
         NodeState::Blocked | NodeState::Skipped => {
             progress.outputs.is_none()
@@ -727,6 +757,17 @@ pub(super) fn validate_progress(
         }
         NodeState::Running => false,
     };
+    let valid = valid
+        && (!repair::is_repair(node)
+            || match (&progress.gate, progress.state) {
+                (Some(gate), NodeState::Succeeded | NodeState::Failed) => {
+                    gate.passed == (progress.state == NodeState::Succeeded)
+                        && gate.on_fail == node.on_fail
+                        && gate.reason.is_none() == gate.passed
+                }
+                (None, NodeState::Pending | NodeState::Skipped | NodeState::Blocked) => true,
+                _ => false,
+            });
     if valid { Ok(()) } else { Err(()) }
 }
 
@@ -760,6 +801,8 @@ pub(super) fn settle<R: AttemptOwner, J: GraphJournal>(
         matches!(n.state, NodeState::Failed | NodeState::Blocked)
             && !n.round.as_ref().is_some_and(|r| r.until)
     });
+    let clean = repair::clean_start(node, checkpoint, positions);
+    let escalation = repair::escalation(node, checkpoint, positions);
     let passed = body
         .iter()
         .any(|n| n.round.as_ref().is_some_and(|r| r.until) && n.state == NodeState::Succeeded);
@@ -775,17 +818,35 @@ pub(super) fn settle<R: AttemptOwner, J: GraphJournal>(
         .rev()
         .find_map(|e| e.strip_prefix(&format!("loop.{}.decision=", node.id)))
         .map(str::to_owned);
-    let state = if failed || decision.as_deref() == Some("stop") {
+    let state = if failed
+        || decision.as_deref() == Some("stop")
+        || repair::is_repair(node) && settled && !passed && !clean
+    {
         Some(NodeState::Failed)
-    } else if passed || decision.as_deref() == Some("accept") && settled {
+    } else if passed || clean && settled || decision.as_deref() == Some("accept") && settled {
         Some(NodeState::Succeeded)
     } else {
         None
     };
     if let Some(state) = state {
+        let outputs =
+            repair::terminal_outputs(node, checkpoint, positions, state == NodeState::Succeeded);
         let progress = &mut checkpoint.nodes[index];
         progress.state = state;
-        progress.outputs = Some(gate_outputs(state == NodeState::Succeeded));
+        progress.outputs = Some(outputs);
+        if repair::is_repair(node) {
+            let passed = state == NodeState::Succeeded;
+            progress.gate = Some(GateResult {
+                extra: Default::default(),
+                passed,
+                reason: (!passed).then(|| {
+                    escalation
+                        .unwrap_or("repair cycle limit reached")
+                        .to_owned()
+                }),
+                on_fail: node.on_fail.clone(),
+            });
+        }
         checkpoint.nodes[index].loop_pause = None;
         checkpoint.nodes[index].loop_pause_code = None;
         refresh_pause(checkpoint);

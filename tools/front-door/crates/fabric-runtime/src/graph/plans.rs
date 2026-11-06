@@ -1520,7 +1520,14 @@ fn fragment(
             "fragment requires 1..{model_limit} nodes and schema_version 1"
         ));
     }
-    let resolvers = BTreeMap::new();
+    let resolvers: BTreeMap<String, Vec<String>> = spec
+        .extra
+        .get("resolvers")
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|error| format!("invalid planner resolvers: {error}"))?
+        .unwrap_or_default();
     let context = super::patch::PatchContext {
         library: bundled_templates(),
         resolvers: &resolvers,
