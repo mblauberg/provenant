@@ -2575,38 +2575,37 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                     .map(|(_, receipt)| receipt)
                     .or(attempt.delivery.as_ref());
                 let launched = attempt.provider_launched.unwrap_or(true);
-                let (result, result_warning) = if attempt.result.is_some()
-                    || outcome == Outcome::Succeeded
-                {
-                    let captured = if remote {
-                        remote_graph_result(
-                            &mut owner,
-                            &target,
-                            node.required_verdict,
-                            self.budget,
-                            self.cancel,
-                        )
-                        .map_err(|_| provenant_run::RunError::NotFound)
-                    } else {
-                        store.stream_result(attempt.attempt_id, &call, node.required_verdict)
-                    };
-                    match captured {
-                        Ok(mut result) => {
-                            if remote && let Some(artifact) = &attempt.result {
-                                // Output pages prove the redacted stream. Graph evidence
-                                // still identifies the peer's sealed original artifact.
-                                result.digest = artifact.digest.to_string();
-                                result.source_truncated = artifact.bytes
+                let (result, result_warning) =
+                    if attempt.result.is_some() || outcome == Outcome::Succeeded {
+                        let captured = if remote {
+                            remote_graph_result(
+                                &mut owner,
+                                &target,
+                                node.required_verdict,
+                                self.budget,
+                                self.cancel,
+                            )
+                            .map_err(|_| provenant_run::RunError::NotFound)
+                        } else {
+                            store.stream_result(attempt.attempt_id, &call, node.required_verdict)
+                        };
+                        match captured {
+                            Ok(mut result) => {
+                                if remote && let Some(artifact) = &attempt.result {
+                                    // Output pages prove the redacted stream. Graph evidence
+                                    // still identifies the peer's sealed original artifact.
+                                    result.digest = artifact.digest.to_string();
+                                    result.source_truncated = artifact.bytes
                                     > provenant_records::result_capture::ResultCapture::HEAD_BYTES
                                         as u64;
+                                }
+                                (Some(Box::new(result)), None)
                             }
-                            (Some(Box::new(result)), None)
+                            Err(error) => (None, Some(graph_result_warning(&error).to_owned())),
                         }
-                        Err(error) => (None, Some(graph_result_warning(&error).to_owned())),
-                    }
-                } else {
-                    (None, None)
-                };
+                    } else {
+                        (None, None)
+                    };
                 // An unverifiable artifact is an integrity failure regardless
                 // of the provider outcome. In particular, it must not trigger
                 // route fallback for authentication or quota failures.
