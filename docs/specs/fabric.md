@@ -274,8 +274,9 @@ have no operation ID yet (#2149).
 Each tool takes a tagged `op` enum that rejects unknown fields, with no
 coercion or synonym repair. Compact `tools/list` schemas accept every valid
 strict probe, and runtime validation still rejects empty, NUL and oversized
-text with the field path, before side effects. MCP submission rejects
-`new_worktree`, and `resume` cannot change route, account or authority.
+text with the field path, before side effects. MCP graph submission uses the same typed document and template compiler as the
+CLI. A node retry may replace its brief; a graph retry may raise a limit or budget.
+Both retain the graph authority.
 - Why: a lenient parser turns a model's typo into a different request.
 - Test: `crates/fabric-mcp/src/schema_tests.rs::generated_schema_values_match_strict_serde_for_every_operation_and_field`;
   `::peer_worktree_requests_are_not_mcp_submit_inputs`
@@ -379,210 +380,26 @@ is unavailable, advancement returns a refusal and leaves the prior checkpoint.
 - Owner: `crates/fabric-runtime/src/graph.rs`
 
 
-### Pipeline presets
+### Templates
 
-`provenant run --preset NAME --prompt-file FILE` expands a preset into an
-ordinary graph and submits it through the graph owner; run flags are in
-[`docs/reference/cli.md`](../reference/cli.md). Writer worktrees must already exist and be registered; presets
-do not provision branches or checkouts. The [preset runbook](../runbooks/presets.md)
-contains starting points and batch preparation guidance.
+`provenant run --use NAME --file BRIEF` compiles a layered template into an
+ordinary graph and submits it through the graph owner. `provenant templates`
+lists effective templates; `provenant templates NAME` shows one. User and
+repository templates are layered over bundled definitions. The generated
+[CLI reference](../reference/cli.md) owns flags and bounds; the
+[graph design](../adr/0039-graph-of-templates.md) owns template composition.
 
-`--explain` prints the admission result, inspection metrics and live checks
-still pending, followed by a compact tree of roles, tiers, scopes, worktrees,
-inputs, concurrency, attempt bounds, acceptance and effective limits. It does
-not write a graph or open graph state. Pending ids are `source` (an unresolved
-source binding), `worktree` (a writer), `delivery_target` (push or integrate),
-`planner_authority` (a plan node) and `route_readiness` (an agent node).
-JSON output includes the exact submitted graph
-and effective value origins, bounded by the 8 MiB graph document limit rather
-than the ordinary 1 MiB result limit. Identical expanded graphs use the same
-graph ID and a private, content-addressed document in project scratch, so
-retrying the same submission observes the existing graph. Change the prompt or
-parameters for a separate graph.
+A template is a leaf or a composite containing nodes. A node selects `use`,
+binds parameters with `with`, and may use `over` to copy work across items.
+`task` handles one assignment, `plan` shapes work, `batch` integrates parallel
+slices and `deliver` carries implementation through landing. Review is a
+template with a panel resolved at launch. `--set NAME=TOML_VALUE` binds a
+parameter, `--tier` selects a route tier, and `--over` supplies named items.
 
-Every preset is a list of `stages` lowered by one path. `single`, `chain`,
-`fan-out` and `fan-out-synthesise` are bundled stage presets with read-only
-tasks, a `parameters.route` pool (default `senior`) and the supplied prompt;
-the fan-out presets also accept `parameters.width` (1 to 32, default 2). A
-chain passes the first result to the second; synthesis receives each branch
-result. A stage can run any preset.
-
-A settled graph reports `succeeded`, `partial` or `failed` alongside its
-settlement status. A partial graph has failures covered by successful groups
-that declared a minimum and no other unhandled failures. It returns success to
-the caller, but graph-level pull-request delivery still requires every node to
-succeed.
-
-A preset declares ordered `stages`. A stage selects a role, another
-preset or heterogeneous `parallel` entries. `count` repeats an entry, from 1
-to 32. Role profiles supply node defaults, and an entry may override them:
-
-```toml
-stages = [
-  { id = "scouts", parallel = [{ role = "scout", count = 3 }] },
-  { id = "summary", role = "synthesiser" },
-]
-exports = [{ node = "summary", outputs = ["result", "findings"] }]
-
-[roles.scout]
-tier = "junior"
-title = "Scout ${index}"
-prompt = "Map assignment ${index}; cite call sites and uncertainty.\n${prompt}"
-
-[roles.synthesiser]
-tier = "senior"
-kind = "synthesise"
-prompt = "Reconcile evidence and identify the next slice.\n${prompt}"
-```
-
-Roles can configure `prompt`, `title`, `tier` or `route`, `effort`, `access`,
-`worktree`, `write_scope`, `read_roots`, `acceptance_checks`, selected `inputs`,
-`required_verdict`, `source` and existing node-kind configuration. Access
-remains read-only unless explicitly changed. Tier names resolve through named
-routing pools; profiles do not hard-code a model. A curated `high-junior`
-pool is a chair-supplied configuration, not a bundled alias for high effort.
-`tier` and `route` are alternatives; `route` accepts a pool name or graph route
-table, and `effort` configures the chosen route.
-
-`${prompt}` inserts the run brief and `${index}` is the one-based repeated
-entry number. `[parameters]` defines editable values: an exact `${name}`
-placeholder retains the parameter's TOML type, including arrays; placeholders
-inside text insert scalar values. Unknown parameters and unresolved bindings
-are rejected. Stage IDs form local dependency and export names; expansion
-namespaces nested children. Child presets have their own parameters and roles;
-an entry's `parameters` and `roles` tables override that child's defaults.
-Typed parameters may declare `bind = "risk_tier"` or `bind = "kind"` to
-receive the corresponding request flag. An unbound request flag warns and is
-dropped; parameter files and dispatch overrides retain their precedence.
-
-Composite nodes retain their children, expose declared outputs and report
-one grouped status. Their internal attempts and evidence remain available in
-the graph checkpoint. `exports` uses ordinary graph input selectors; by
-default a preset exports result and findings from its final stage. Parallel
-groups combine labelled, bounded results and findings. Scalar outputs such as
-a commit or verdict require an unambiguous named export. Stage inputs select
-the preceding result by default; an entry's `outputs` chooses other preceding
-output kinds. Composites use no provider attempt of their own. An entry can
-declare `loop = { stages = [...], until = "accept", max_rounds = 2 }` to reuse
-roles and presets inside bounded repair. Existing `loop.body` configuration
-also remains available. Planner fragments do not resolve named presets.
-Parallel groups may declare `min_successful`, `zero_minimum`, `reduce_verdict`
-and `export_first` on the group; the [preset runbook](../runbooks/presets.md#composition-rules)
-describes their accepted values.
-Preset compilation uses the runtime's composite expansion and loop count when
-it checks the host depth and node bounds, so admission checks the same graph.
-
-Bundled `scout-swarm`, `generator-evaluator`, `review`, `big-batch`,
-`scope-then-run` and `deliver` express scouting, implementation with
-evaluating lenses, combined review, a full batch, scouting and scoping before
-a run, and delivery through CI to land respectively. Scouts use junior tiers and remain read-only;
-implementation uses senior tiers; the end-of-batch refactor uses principal.
-The `generator-evaluator` uses the `review` shape and lens defaults; an
-explicit `lenses` list replaces the default selection. Junior reviews on senior or principal work are
-advisory. Counted acceptance reviews must meet the author's tier under
-`HARNESS.md`; add principal coverage for high-risk areas and principal-authored
-refactors. Synthesis reconciles evidence rather than taking a majority vote.
-
-`deliver` runs a `write.implement` writer with `delivery = "pr"`, then a
-composite `ci` holding a CI gate bound to the writer's pushed head and a
-repair loop the gate routes to on failure. Each loop round runs a fresh
-`repairer` that `continues` the writer's branch, whose inputs are the failed
-gate's findings (check names with log excerpts), the writer's `result` and
-`remaining` handoff items in every round and the previous repair's, never a
-transcript,
-followed by the CI gate again. The composite
-succeeds on either path. A `review` then reviews a `head` source
-binding to the writer, so it judges the newest repaired head; a verdict gate
-and a `land` node merge that head under the host's tier policy. No model runs
-while a gate is pending. `max_iterations` bounds the rounds; exhaustion raises
-the loop ask when `decision_session` is set and otherwise pauses the graph.
-The repairer's tier selector may supply ordered routes with a named
-`host-native` entry. Each such route requires a later non-native fallback,
-checked before graph execution.
-Fallback retains the existing rule that a launched writer never switches routes.
-A host-native repair's delivered commit passes through the same CI gate before
-review or land; a host completion status cannot replace that observation.
-See [host-native repairs](../runbooks/presets.md#host-native-repairs).
-The same session is bound to the land node's `session`, so a nested `deliver`
-still asks it, and the chair lands by hand; with none, a tier that asks fails
-the land node with guidance to land by hand. A repository preset layer never
-lowers a land tier: when repository layers take part, the expansion is
-repeated without them, and each land node takes the stricter tier of the two.
-A land node with no counterpart there, or any land node when the preset has
-no non-repository layers, takes `terminal`. Command-line values take part in
-both expansions, so `--set` and `--params-file` still set the tier. Preset leaves may set `continues`, `land` and
-`kind = "land"`. A preset's top-level `decision_session` sets the graph's
-decision session; an empty value, here, on a loop or as a land session, leaves
-it unset.
-
-Preset TOML files are named `NAME.toml` under
-`$XDG_CONFIG_HOME/provenant/presets/` (or `~/.config/provenant/presets/`)
-and `.provenant/presets/` in the selected project. Values merge in bundled,
-user, repository and `--set PATH=TOML_VALUE` order. `preset list` lists names
-with each pattern's level, summary and cost; `preset show NAME` displays merged
-values and a typed parameter table; `--full` includes origins. `preset explain NAME` lists parameter names, with the pattern, typed parameters, stages and roles under `--full`, without creating state. `extends` selects
-another preset's defaults. A same-name override omits `extends` and supplies
-only its changes. Stage roles come from a role library (bundled `roles.toml`,
-then user and repository `roles.toml`, then a preset's own `[roles.*]`), listed
-by `preset show --roles`. A role may declare `card`, `family`, `extends` and
-`skill:` `references`; the compiler records each reference's content digest on
-the node, so a replayed graph names the exact guidance it ran with. See the
-presets runbook. For example:
-
-```toml
-extends = "chain"
-stages = [
-  { id = "first", preset = "fan-out", parameters = { width = 3 } },
-  { id = "second" },
-]
-```
-
-A parameter is either a bare value or a typed table with `type` (`string`,
-`integer`, `number`, `boolean`, `list` or `table`), `default`, `min`, `max`
-(numeric value, or list or text length), `enum` and `doc`. A bare value that
-overrides a typed parameter replaces its default and keeps the schema. A
-refused value names the parameter and the layer it came from. A same-name
-override of a bundled preset may add parameters of its own. An optional `[pattern]` table holds `level` (`default`,
-`recommended` or `experimental`), `summary`, `citations`, `cost`,
-`select_when` and `tags`. Parents pass `risk_tier` and `subject` to a child
-that declares them unless the entry sets them; `prompt` is always available.
-
-`--set PATH+=VALUE` appends to a list parameter and is refused on a scalar.
-Composite `inputs` and `exports` are typed by output kind: lowering refuses a
-selection its source node cannot supply (`commit` needs write access or a
-pinned source, inherited from an enclosing composite; `branch` needs write
-access; loops supply neither), with an error naming both nodes. Selections
-resolve against the enclosing scopes, and `previous.X` against the loop body.
-`--set` addresses a top-level stage by id (`sN` by position when it has none):
-`--set first.width=3` sets a parameter of the preset that stage runs, and on a
-role stage `--set task.tier=junior` sets that entry field. Stage `id` and
-`preset` cannot be overridden.
-
-A preset run announces every repository preset file used in resolution order,
-including inherited files and files whose values are overridden. Each file is
-listed once; bundled and user layers are excluded.
-
-Named child presets use their own route defaults. Expansion is static,
-limited to eight levels and 512 nodes including children, and refuses cycles
-and invalid fields. Parameter values passed on the command line use TOML
-syntax, for example `--set 'parameters.route="utility"'`; unquoted bare words
-are rejected with a quoting hint. Invalid files appear in `preset list` and do
-not prevent use of unrelated presets. Runtime limits and host ceilings still
-apply.
-
-- Why: editable roles and nested compositions reuse graph admission,
-  settlement, writer exclusion and delivery.
-- Test: `src/preset_tests.rs::bundled_expansions_match_golden_graphs`,
-  `::layering_composition_and_refusals`, `::named_presets_inherit_and_cycles_are_refused`,
-  `src/preset_deliver_tests.rs::a_red_gate_repairs_from_the_failure_excerpt_and_the_repaired_head_is_reviewed_and_landed`,
-  `::an_exhausted_repair_loop_asks_the_decision_session_or_pauses`,
-  `::pending_ci_runs_no_model_and_status_shows_the_waiting_gate`,
-  `::remaining_work_at_the_end_of_a_long_report_reaches_every_repair_round`,
-  `::reviewers_route_away_from_the_writer_and_every_repair_author`,
-  `::a_council_pinned_to_the_writer_commit_never_lands_the_repaired_head`,
-  `::deliver_nests_inside_another_preset`,
-  `crates/cli/src/lib.rs::tests::preset_runs_accept_graph_controls_without_dispatch_writer_mode`.
-- Owner: `src/preset.rs`, `src/fabric.rs`
+`--explain` prints the compiled graph without starting work. `run --file GRAPH`
+also accepts a hand-written graph document. `status`, `output --trace`, `steer`,
+`stop`, `retry` and revisioned `edit --file PATCH` operate on the retained graph.
+Old presets must be ported by hand; there is no converter.
 
 A graph must obey the configured structural limits and budgets. Each attempt
 is also bounded by `limits.graph_timeout_seconds`. The [host runbook](../runbooks/fabric-hosts.md#configure-hosts)
@@ -594,7 +411,7 @@ The ordinary dependency-depth limit remains four; the default host ceiling is
 Each node has an optional task `title`, defaulting to its ID; titles use the
 shared task title validation and appear in lanes and graph status. A node may
 specify a single `route` or an ordered `routes` list for agent work. A route can name a pool
-with just `alias`, resolved as for `dispatch --route`, or supply an explicit
+with just `alias`, resolved as for `run --tier`, or supply an explicit
 adapter. Routes require an adapter or alias and may mix these forms in a list.
 
 ### Sources and read roots
@@ -616,11 +433,8 @@ attachments beyond its planner node's list.
 
 A graph document may set a top-level `network` of `"on"` or `"off"`. Every
 node lane the graph launches receives that network reach; without it, lanes
-default to open network. `run --network` binds it into a preset graph, with an
-explicit `--preset` or under automatic selection. Automatic selection refuses
-single-lane flags a graph cannot apply, such as `--account`, `--effort`,
-`--write-root` and `--host`, before it selects a preset, and its `next:` names
-`--model` or `--route`.
+default to open network. A template's access settings bind the effective
+network reach before admission; child work cannot widen its parent's authority.
 
 An optional `source` pins a node's subject before its first attempt:
 
@@ -1014,7 +828,7 @@ replay; recreating state for the same document gets a new instance and cannot
 reuse an old answer. A checkpoint written before node asks, whose nodes still
 carry `loop_asks`, `loop_inbox_error` or `loop_decision_actor`, is not
 migrated: advancing or resuming it is refused with a message that names
-`graph cancel`, which still works on it, and a rerun under a new `graph_id`.
+`stop GRAPH`, which still works on it, and a rerun under a new `graph_id`.
 Cancelling it also supersedes each open loop request under the inbox operation
 it was first sent with, without rewriting the checkpoint.
 
@@ -1051,7 +865,7 @@ again under a new ask ID, and the new body ends with that reason.
 With a graph `decision_session`, a non-loop pause such as a budget pause
 raises ask `pause-N` with options `resume` and `cancel`. A reply of
 `{"decision":"extend","extensions":["budget.KEY=VALUE"]}` raises budgets
-first; it is checked like `graph resume --extend` and against the envelope.
+first; it is checked like `retry GRAPH --extend KEY=VALUE` and against the envelope.
 Other extensions still need an explicit resume. An answer that cannot be
 applied keeps the pause and the next ask names the reason. One pause ask is
 open at a time, and the newest eight closed pause asks are kept as history.
@@ -1528,7 +1342,7 @@ advances the matching graph from its retained document. If the hint is absent
 or does not match, the next tick can advance the graph. Pending markers make
 tick discovery independent of the number of terminal checkpoints; a missing
 sentinel or daily collection rebuilds them. A failed advance is recorded as
-`advance_error` until the next success; `resume` is the manual path. A lane
+`advance_error` until the next success; `retry` is the manual path. A lane
 settlement error is recorded on its matching graph. When a pending graph's
 worktree is missing, tick reports the graph once and continues with other
 work; restoring the worktree or cancelling the graph resolves the condition.
@@ -1745,4 +1559,4 @@ launches are auto-resolved.
   `crates/run/src/delivery_tests.rs::local_integration_conflict_dirty_and_checked_out_refuse_without_partial_state`.
 - Owner: `crates/fabric-runtime/src/graph.rs`, `src/fabric.rs`
 
-`fabric graph wait GRAPH --wait DURATION` observes the retained status until it settles or the budget expires. It does not advance the graph. A pending graph at the deadline returns `waiting`; a paused graph returns immediately.
+`status GRAPH --wait=DURATION` observes the retained status until it settles or the budget expires. It does not advance the graph. A pending graph at the deadline returns `waiting`; a paused graph returns immediately.

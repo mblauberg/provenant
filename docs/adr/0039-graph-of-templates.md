@@ -129,7 +129,8 @@ documents, not file paths.
 Deleted: `dispatch`, `review`, `lanes`, `resume`, `cancel`, `preset`, `fabric graph`,
 `fabric_graph`, `PRESET_INCOMPATIBLE`, the policy successors and tail chase (#2869),
 child stores, `pattern_plan.rs`, per-preset `[plan]`, `shape_stages`,
-`review_lenses`; review uses a panel resolved at launch.
+`review_lenses`, automatic preset rules and pipeline experiments; review uses a
+panel resolved at launch.
 
 ## Consequences
 
@@ -137,9 +138,10 @@ Delivery is one integration branch and one release, after a drain. Pending graph
 finish or are cancelled first and live lanes drain. Terminal checkpoints stay
 decodable or take the existing `retire_unreadable` path, and the release note reports
 any that do. Records that cannot be read are preserved and reported, never dropped.
-User presets are ported by hand. Old child stores stop being written and
-are ingested into telemetry before `gc` decides. All hosts upgrade together, then real
-launches run on each.
+User presets are ported by hand. Old child stores stop being written. Their
+records drop out of statistics: this cutover does not ingest child-store history
+into telemetry. The stores remain on disk for inspection; the cutover never
+deletes them. All hosts upgrade together, then real launches run on each.
 
 Rejected: event sourcing with the checkpoint as a projection, because rewriting
 recovery adds risk for no present need; a state converter, because a drain leaves

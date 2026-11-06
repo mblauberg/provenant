@@ -12,8 +12,8 @@ lists every leaf, flag and bound. Paths are relative to `tools/front-door/`.
 Numeric range and requirement builders in `crates/cli/src/metadata.rs` install
 clap rules and retain their catalogue metadata from the same declaration;
 clap does not expose those rules through public getters. Compact help uses
-command markers and the grammar's descriptions. Explicit and automatic
-preset selection share one incompatible-flag table.
+command markers and the grammar's descriptions. Graph submission uses the same
+template compiler for CLI and MCP.
 
 Waits, lane watches and time-based `--since` filters share a whole-number span
 grammar: bare seconds or the suffix `s`, `m`, `h` or `d`. Waits and watches
@@ -23,7 +23,7 @@ their own types.
 
 ## Lane projections
 
-`lanes`, `status`, `output`, `cancel` and `land` use the shared lane row for
+`status`, `output`, `stop` and `land` use the shared lane row for
 attempt identity, state, typed settlement cause and retry lineage. A missing
 historical fact remains unavailable. A host path is the tagged structured path
 used by `worktree list --json`, including its native-byte encoding when needed.
@@ -37,8 +37,8 @@ Ordinary human results default to a compact summary. The command's owner
 supplies it as typed data: a headline with counts by state, then action rows
 first (failed, review required, uncommitted, running) with IDs and states, at
 most 12 rows of 200 bytes, a count of rows held back, and one typed `next`
-command. `status`, `lanes`, `route list`, `quota show`, `pr status`,
-`accounts list` and `fabric graph status` do this. A command without an owner
+command. `status`, `route list`, `quota show`, `pr status`,
+and `accounts list` do this. A command without an owner
 summary falls back to a generic truncator that shows text of up to 2 KiB whole
 and otherwise says how many lines it omitted. `next` is the only source of the
 next command: when a command has none, none is printed. Errors keep their
@@ -60,14 +60,13 @@ locally or over the existing peer paging protocol. Peer tail scans share a
 30-second budget and reject changed artifact digests. The JSON envelope keeps
 `bytes`.
 
-The core verbs remain `run`, `status`, `land` and `quota`. `dispatch` is the
-advanced submission-only operation; `run` adds waiting and a result summary.
-A `run` wait that ends before the run settles returns status `waiting` with exit
-0: the lanes keep running, and the human line names the command that keeps
-waiting. Route resolution accepts a pool or exact model positionally. Account selection
-uses `--account` on `run` or `dispatch`; peer output uses
-`output ATTEMPT --host HOST`. Nearby command and flag spellings receive a
-scoped suggestion, and common malformed forms receive an invocation example.
+The core verbs are `run`, `status`, `output`, `steer`, `stop`, `retry`,
+`edit`, `templates`, `land` and `quota`. `run [BRIEF] --use TEMPLATE` submits a
+graph; `--file` accepts a graph document or text brief and `--explain` inspects
+compilation without starting work. `--wait` observes settlement. Inside a lane,
+`run` adds a child node. `retry` continues or redoes a target; `stop` requests
+cancellation. `output --trace` shows the timeline and `edit --file PATCH`
+applies a revisioned graph patch. The help catalogue owns exact arguments.
 
 ## Console catalogue and peer coverage
 
@@ -350,7 +349,7 @@ rejects conflicting task settings rather than silently choosing a source.
 `status` lists active lanes and the twenty most recent settled lanes. An optional
 run, qualified task or attempt target uses the shared ID resolver and includes
 older terminal records. `--all` includes full records and supports pagination;
-`lanes --all --id ID` is also valid. The output ends with the project's
+`status ID --all` is also valid. The output ends with the project's
 `review-exempt paths:` line (`review_exempt` in `--json`), the paths a writer
 may leave uncommitted without that path causing an `uncommitted` outcome.
 - Test: `tests/parser.rs::core_run_reports_generated_operation_and_status_is_newest_first`
@@ -755,6 +754,5 @@ allowlist require review.
 
 ## Not provided
 
-- Separate `batch`, `reap` or `fabric dispatch` commands: run submission covers them.
 - `worktree remove --force` or remote branch deletion.
 - `commit-msg`, Codex or OpenCode hooks: no recorded protocol.

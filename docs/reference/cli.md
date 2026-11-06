@@ -2826,7 +2826,7 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 
 | Argument | Contract |
 |---|---|
-| `id` | `{"description": "Experiment name from domains.fabric.pipelines.experiment", "name": "id", "positional": true, "required": true}` |
+| `id` | `{"description": "Historical experiment name recorded in offline outcomes", "name": "id", "positional": true, "required": true}` |
 | `--main-ref` | `{"defaults": ["main"], "description": "Local main-line ref to analyse; no fetch is performed", "name": "main_ref"}` |
 | `--ci-file` | `{"description": "Recorded gh main-branch run list JSON; absent means CI not_measured", "name": "ci_file"}` |
 | `--outcome-days` | `{"bounds": [1, 3650], "defaults": ["14"], "description": "Days after a merge to attribute escaped defects", "name": "outcome_days"}` |

@@ -148,19 +148,23 @@ def schema_files(data):
         files[f"schemas/{name}"] = json.dumps(data[name], ensure_ascii=False, indent=2, sort_keys=True) + "\n"
     text = header("Published JSON Schemas", "provenant-records print-wire-schemas")
     text += (
-        "These JSON Schemas (draft 2020-12) describe the `--json` envelope the CLI emits\n"
-        "today (`schema_version` 1) for `lanes`, `status`, `output`, `cancel` and `land`.\n"
-        "Their lane rows share the same projection. MCP schemas describe planned\n"
+        "These JSON Schemas (draft 2020-12) describe retained version 1 wire records.\n"
+        "Their lane rows share the same projection. Historical schema filenames and\n"
+        "titles are record identifiers, not current command guidance. Use the\n"
+        "[CLI reference](cli.md) for the graph commands. MCP schemas describe planned\n"
         "structuredContent; version 2 is not emitted yet.\n\n"
-        "A non-ok status may carry `error: null` (for example a `lanes --wait` timeout or an\n"
-        "unobservable cancel) and partial `data`, so the command schemas check `data` only\n"
-        "for `ok`, `pending` and `waiting`. A failed cancel carries `data: {operation_id}`\n"
-        "with no `receipts`. Validate failures that carry an `error` object against\n"
+        "A non-ok status may carry `error: null` and partial `data`, so the schemas\n"
+        "check `data` only for `ok`, `pending` and `waiting`. An unobserved stop may\n"
+        "carry only `data: {operation_id}` without `receipts`. Validate failures\n"
+        "that carry an `error` object against\n"
         "[`error.schema.json`](schemas/error.schema.json).\n\n"
         "| Schema | Describes |\n|---|---|\n"
     )
     for name in names:
-        text += f"| [`{name}`](schemas/{name}) | {data[name].get('title', '')} |\n"
+        title = data[name].get('title', '')
+        if name in ("cancel.schema.json", "lanes.schema.json"):
+            title = "Historical " + name.removesuffix(".schema.json") + " record envelope"
+        text += f"| [`{name}`](schemas/{name}) | {title} |\n"
     text += (
         "\n## Edge error codes\n\n"
         "Stable `error.code` values emitted outside the run owner (those are listed in the\n"

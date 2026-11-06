@@ -343,7 +343,7 @@ latest file, withholds stale content and caps output at 8 KiB.
 lanes, the lanes settled since the chair last saved, and `pr status` for the
 pull requests the chair named in the checkpoint. The digest is at most 3 KiB,
 read-only and shares the 8 KiB output cap, so the checkpoint excerpt shrinks
-first. Lane, PR and worktree facts come from the read commands (`lanes`,
+first. Lane, PR and worktree facts come from the read commands (`status`,
 `pr status`, `worktree list`) under one 4 second deadline. A command that is
 missing, slow or failing marks its section unavailable and never reads as
 empty. Record fields are stripped of markers, backticks and control
@@ -470,29 +470,6 @@ authority.
 - Merging, syncing or conflict-free replication of checkpoint revisions; the
   history is one writer's bounded chain.
 
-## Pipeline experiments
-
-Projects may opt into named experiments at
-`domains.fabric.pipelines.experiment.NAME`. Each experiment names a control,
-candidate preset arms and a `hash` or `epsilon` assignment strategy. Experiments
-apply only to automatic selection with `--task-id`, because `--preset` cannot
-be combined with `--task-id`. The control must be the rule-selected preset, and
-each arm must pass the same selection and expansion as an ordinary run. Assignment
-is skipped for work without a risk tier and for terminal-tier work. It stops at
-expiry, and at the configured spend budget or cost ratio, using outcome rows from
-the last 14 days read once per run. Unreadable spend skips the experiment.
-
-Graph context retains the experiment ID, assignment seed, executed arm and, in
-shadow mode, the candidate as `shadow_of`. The executed arm is the outcome label
-in ordinary work-context telemetry.
-
-Shadow mode assigns the candidate for comparison but expands and runs the
-control graph, so candidate work cannot gate acceptance. The shadow graph is
-the same as a plain control run, and its outcomes are recorded as control.
-`telemetry experiments show ID` uses the offline pipeline outcomes and ranking
-inputs; arm comparisons remain advisory and are stratified by risk tier and
-task kind. It cannot yet pair shadow runs with their candidate.
-
 ## Lane delivery evidence
 
 Lane delivery modes and later `lane deliver` pickup use the run owner's sealed
@@ -563,78 +540,15 @@ integer parameter whose `max` is the graph timeout
 `deadline_seconds`; the runtime applies the smaller of it and the graph timeout
 to the lane's run deadline. When omitted, a node uses the graph timeout.
 
-### Preset planner front-end
+### Template planner front door
 
-`provenant run --preset P --plan auto|on|off` puts a principal planner in front
-of a preset that declares a `[plan]` table: `big-batch`, `review`,
-`scout-swarm`, `fan-out`, `fan-out-synthesise` and `scope-then-run`. The default is
-`[domains.fabric.plan] mode`, `auto`. `on` replaces the preset's named stage
-with a read-only `plan` node (role `plan.shape`, route `principal`) that carries
-the preset's catalogue and retains the static stage as a fallback subgraph. A
-planned writer lane keeps the static `generator-evaluator` lane's review: the
-writer, the default lens legs and the evaluator, as flat nodes because a
-pattern cannot nest composites; a test compares them with the independently
-expanded static preset. The pattern names and parameters are recorded. The
-planner's position is per preset:
-`big-batch` plans after `scout`, so the plan uses the research; the research
-presets plan first and set the swarm's width.
+`provenant run --use plan` starts the planning template. Planners return bounded
+node fragments using the same leaf and composite templates as static graphs.
+Their catalogue and authority bound every expansion; a fragment cannot widen
+access, budgets or delivery authority. `provenant run --explain` inspects the
+compiled graph without starting work.
 
-The other catalogues are narrow. `scout-swarm` and `scope-then-run` offer a
-codebase `scout` (a `question` and a closed-list `route`) and an
-`external-scout` (a `question` only, on the `web` route); `fan-out` and `fan-out-synthesise` offer a `worker`, with
-a `question` and a `route`. `scope-then-run` also offers `no-scout`, a junior
-note with a `reason`, so the planner decides whether to scout at all (an empty
-fragment is refused). The planner's fragment replaces the preset's static
-scout stage. A consumer of the planned stage reads what the fragment's pattern
-instances export (each scout's, worker's or lens's selected outputs), added to
-its inputs beside the planner's own result, as it would read the static
-composite; the plan node declares this with `wire_exports`, so a hand-written
-plan keeps exactly the inputs it declared. `scope-then-run` gets a `plan.research` synthesis after its planned
-scouts, so scoping works from reconciled evidence as before. A catalogue entry
-with `enabled_by = "external"` is offered only while that parameter is
-non-zero, so `external = 0` removes the external scout. Planned scouts keep the
-caller's `read_roots`, and the planner holds the same roots because a fragment
-cannot widen its planner. `review` offers one pattern per lens, and the
-catalogue is built by the routing review panel (#2527), not by the preset:
-the panel drops risk-gated lenses whose tag is absent, applies the review
-shape's slot limit and lens order, and sets each lens's default tier. The
-planner can only pick among those lenses and choose a tier from the closed
-list; it cannot name a lens the panel did not select. A lens leg pins the
-review commit itself, so a `review` whose `subject` is not a commit
-keeps its static lenses and records the reason. The council's verifier and
-synthesis still run after the planned lenses.
-
-`auto` decides in order: a shape parameter with any origin other than the
-bundled default (`--set`, `--params-file` or a project or user preset) stays
-off; a catalogue with `by_size` (`review`) plans only when the review
-panel sizes the subject `large`, so a small change keeps its fixed lenses;
-more than `auto.acceptance_items` acceptance items in the brief (nested
-sub-bullets are not counted), a write scope over `auto.write_crates` crates, or
-at least `auto.batch_issues` distinct issue references (`#N`, decimal, at most
-six digits, not a hex colour) turn it on; so does no explicit lanes. For
-`big-batch` unset lanes always force `on`, so the size thresholds only change
-the recorded reason; they are kept for catalogues whose shape has a default.
-
-`--plan on` on a preset with no catalogue is an error only when given on the
-command line; a configured `on` records `off (preset declares no planner
-patterns)`. `--plan on` warns when it discards explicit lanes. The planner
-route is resolved with the dispatch resolver at expansion, honouring `--exclude`,
-configured exclusions and cached account evidence and quota; when no account
-can serve it, or an extending preset inherits `[plan]` without the stage it
-replaces, the run keeps the preset's static graph, records
-`provenance.plan.degraded` and warns; it never substitutes a weaker planner. A
-plan node that fails at run time runs the retained static stage and records
-`plan.fallback_reason` in its output. The graph succeeds only when that stage
-settles successfully. The registered writer
-worktrees default to the project's linked worktrees unless `parameters.worktrees`
-is set. The chair plans only what it states in the brief; the planner plans
-what the brief leaves open (lane shapes, scout questions and width, lens
-tiers). A chair that already knows the shape passes the parameter and `auto`
-stays off. `--explain` prints `plan: MODE -> on|off (reason)` and the planner
-route. `--plan off` and hand-written graphs are unchanged.
-
-`deliver` gets no catalogue, by decision of the chair: planned delivery stays
-with `big-batch`. `deliver`'s single `write` stage is referenced by name by the
-CI gate, the review subject and the land step, and planned lanes would need an
-integration branch and no pull requests.
-
+Template composition and planner constraints are specified in
+[ADR 0039](../adr/0039-graph-of-templates.md). Review panels resolve at launch;
+`provenant run --use review` starts that template. The generated
+[CLI reference](../reference/cli.md) owns current flags.

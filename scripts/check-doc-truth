@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Warn on unresolved inline provenant commands, long flags, repo paths and ADRs.
 
-Warnings are advisory. Fenced examples, runtime absolute paths and templates are
+Reference warnings are advisory; deleted commands in current command guides fail.
+Fenced examples, runtime absolute paths and templates are
 excluded. Commands scope flags to
 their own help; flags are checked only after a provenant command. Lines that
 say removed, replaced or retired are skipped. Documentation snippets are never executed.
@@ -133,7 +134,7 @@ def path_reference(word):
     return word
 
 
-RETIRED = re.compile(r"\b(?:removed|replaced|retired|deprecated)\b", re.I)
+RETIRED = re.compile(r"\b(?:deleted|removed|replaced|retired|deprecated)\b", re.I)
 # Internal commands hidden from `help --json` (clap `hide = true`).
 HIDDEN = {"provenant fabric peer", "provenant fabric peer-agent"}
 
@@ -195,16 +196,102 @@ def inventory(root, document):
     return missing
 
 
+# Cutover surfaces are explicit so archived ADRs, release notes and source-symbol
+# citations remain usable evidence. These are the maintained command guides.
+COMMAND_GUIDES = (
+    "README.md", "docs/worktrees.md", "docs/specs/cli.md", "docs/specs/fabric.md",
+    "docs/specs/run.md", "docs/specs/workflow.md", "docs/specs/routing.md",
+    "docs/specs/supervisor.md", "docs/reference/schemas.md",
+    "tools/front-door/crates/run/README.md", "docs/runbooks/ci.md",
+)
+DELETED_VERBS = r"(?:dispatch|review|lanes|resume|cancel|preset|fabric_graph)"
+GLOBAL_SWITCHES = {"--json", "--full", "--help", "--version", "-h", "-V"}
+GLOBAL_VALUES = {"--project", "--state-dir"}
+
+
+def deleted_command(reference):
+    """Read only the command path, consuming global option values as shell words."""
+    lexer = shlex.shlex(reference.split("`", 1)[0], posix=True)
+    lexer.whitespace_split = True
+    lexer.commenters = ""
+    words = iter(lexer)
+    try:
+        for word in words:
+            option, equal, _ = word.partition("=")
+            if option in GLOBAL_VALUES:
+                if not equal:
+                    next(words)  # A quoted path is one value, even if it names a verb.
+                continue
+            if option in GLOBAL_SWITCHES:
+                continue
+            if word == "help":
+                continue
+            verb = word.rstrip(".,;:)")
+            if re.fullmatch(DELETED_VERBS, verb):
+                return "provenant " + verb
+            if verb == "fabric":
+                child = next(words).rstrip(".,;:)")
+                if child in ("graph", "dispatch"):
+                    return "provenant fabric " + child
+            return None
+    except (ValueError, StopIteration):
+        # Malformed examples remain visible to the advisory reference check.
+        pass
+    return None
+
+
+def check_deleted_commands(root):
+    """Fail on command uses, keeping template names, wire fields and prose valid."""
+    count = 0
+    for relative in COMMAND_GUIDES:
+        document = root / relative
+        if not document.exists():
+            continue
+        text = document.read_text()
+        findings = {}
+        # Explicit commands include fenced shell examples and table cells.
+        for number, line in enumerate(text.splitlines(), 1):
+            if RETIRED.search(line):
+                continue
+            for match in re.finditer(r"\bprovenant\s+", line):
+                if command := deleted_command(line[match.end():]):
+                    findings.setdefault(number, set()).add(command)
+        for number, reference, context in inline_code(text):
+            if RETIRED.search(context):
+                continue
+            # Bare names may be template names or structured field values. A
+            # following argument, or an explicit command/tool label, makes the
+            # command intent unambiguous. Symbols and file paths do not match.
+            shorthand = re.match(
+                r"^(?:fabric\s+graph|graph\s+(?:resume|cancel))(?=\s|$)"
+                r"|^fabric_graph$|^" + DELETED_VERBS + r"\s+\S", reference,
+            )
+            labelled = (re.fullmatch(DELETED_VERBS, reference)
+                        and re.search(
+                            r"(?:\b(?:command|verb|tool|run|use|invoke|call)\s+`"
+                            + re.escape(reference) + r"`(?!\s+(?:template|field|parameter)\b)"
+                            r"|`" + re.escape(reference) + r"`\s+(?:command|verb|tool)\b)",
+                            context, re.I))
+            if shorthand or labelled:
+                findings.setdefault(number, set()).add(reference)
+        for number, references in sorted(findings.items()):
+            for reference in sorted(references):
+                print(f"{relative}:{number}: error: deleted command `{reference}`; use the graph CLI")
+                count += 1
+    return count
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parent.parent)
     source = parser.add_mutually_exclusive_group()
     source.add_argument("--binary", help="worktree-built CLI (reuses the CI build)")
     source.add_argument("--help-json", help="CLI help catalogue fixture, with or without result envelope")
-    parser.add_argument("--inventory-only", action="store_true", help="only check Owner/Anchor headers")
+    parser.add_argument("--inventory-only", action="store_true", help="check Owner/Anchor headers and deleted commands only")
     parser.add_argument("--strict-inventory", action="store_true", help="fail on missing headers; reference warnings remain advisory")
     args = parser.parse_args()
     root = args.root.resolve()
+    command_errors = check_deleted_commands(root)
     commands = None if args.inventory_only else catalogue(args, root)
     adrs = {int(match[1]) for path in (root / "docs/adr").glob("*.md")
             if (match := re.match(r"(\d+)-", path.name))}
@@ -228,7 +315,7 @@ def main():
         agents = [root / name for name in ("AGENTS.md", "GLOBAL-AGENTS.md")]
         for document in [path for path in agents if path.exists()] + documents:
             check_references(root, document, commands, adrs, gone)
-    return int(args.strict_inventory and bool(missing))
+    return int(bool(command_errors) or (args.strict_inventory and bool(missing)))
 
 
 if __name__ == "__main__":

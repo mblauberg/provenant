@@ -4,23 +4,24 @@
 
 Source: `provenant-records print-wire-schemas`.
 
-These JSON Schemas (draft 2020-12) describe the `--json` envelope the CLI emits
-today (`schema_version` 1) for `lanes`, `status`, `output`, `cancel` and `land`.
-Their lane rows share the same projection. MCP schemas describe planned
+These JSON Schemas (draft 2020-12) describe retained version 1 wire records.
+Their lane rows share the same projection. Historical schema filenames and
+titles are record identifiers, not current command guidance. Use the
+[CLI reference](cli.md) for the graph commands. MCP schemas describe planned
 structuredContent; version 2 is not emitted yet.
 
-A non-ok status may carry `error: null` (for example a `lanes --wait` timeout or an
-unobservable cancel) and partial `data`, so the command schemas check `data` only
-for `ok`, `pending` and `waiting`. A failed cancel carries `data: {operation_id}`
-with no `receipts`. Validate failures that carry an `error` object against
+A non-ok status may carry `error: null` and partial `data`, so the schemas
+check `data` only for `ok`, `pending` and `waiting`. An unobserved stop may
+carry only `data: {operation_id}` without `receipts`. Validate failures
+that carry an `error` object against
 [`error.schema.json`](schemas/error.schema.json).
 
 | Schema | Describes |
 |---|---|
-| [`cancel.schema.json`](schemas/cancel.schema.json) | provenant cancel --json |
+| [`cancel.schema.json`](schemas/cancel.schema.json) | Historical cancel record envelope |
 | [`error.schema.json`](schemas/error.schema.json) | provenant error envelope |
 | [`land.schema.json`](schemas/land.schema.json) | provenant land --json |
-| [`lanes.schema.json`](schemas/lanes.schema.json) | provenant lanes --json |
+| [`lanes.schema.json`](schemas/lanes.schema.json) | Historical lanes record envelope |
 | [`mcp/fabric_output.schema.json`](schemas/mcp/fabric_output.schema.json) | fabric_output structuredContent |
 | [`mcp/fabric_run.schema.json`](schemas/mcp/fabric_run.schema.json) | fabric_run structuredContent |
 | [`output.schema.json`](schemas/output.schema.json) | provenant output --json |

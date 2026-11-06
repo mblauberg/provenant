@@ -1639,7 +1639,7 @@ impl Factory {
                 Ok(checkpoint) => checkpoint.ok_or(FacadeError::NotFound)?,
                 Err(error) if error.is_unreadable() => {
                     return Ok(unreadable_snapshot(format!(
-                        "Graph {id} record is unreadable ({error}); cancel it to retire the record. Inspect active attempts and writer fences."
+                        "Graph {id} record is unreadable ({error}); use `provenant stop {id}` to retire the record. Inspect active attempts and writer fences."
                     )));
                 }
                 Err(error) => return Err(graph_journal_error(error)),
