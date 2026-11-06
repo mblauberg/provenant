@@ -61,8 +61,15 @@ pub fn serve(
                 })
         })
         .ok_or_else(not_a_node)?;
-    let mut journal = FileJournal::open(state, project, &graph_id, budget, cancel, clock)
-        .map_err(journal_error)?;
+    let mut journal = match FileJournal::open(state, project, &graph_id, budget, cancel, clock) {
+        Ok(journal) => journal,
+        Err(provenant_fabric_runtime::graph::JournalError::Filesystem(
+            provenant_os::fs::FsError::LockTimeout { .. },
+        )) if matches!(&op, RelayOp::Wait { waiting: false }) => {
+            return Ok(json!({"graph_id": graph_id, "waiting": true, "reclaiming": true}));
+        }
+        Err(error) => return Err(journal_error(error)),
+    };
     let mut checkpoint = journal
         .load(&graph_id)
         .map_err(journal_error)?
@@ -165,9 +172,10 @@ pub fn serve(
                 actor_id: context.identity.inbox.actor,
                 read_prompts: false,
             };
-            let store = provenant_run::RunStore::open(&execution, &call).map_err(journal_error)?;
             let id = provenant_core::AttemptId::parse(attempt).map_err(journal_error)?;
-            let admitted = match store.set_child_wait(id, waiting, &call) {
+            let admission = provenant_run::RunStore::open(&execution, &call)
+                .and_then(|store| store.set_child_wait(id, waiting, &call));
+            let admitted = match admission {
                 Ok(admitted) => admitted,
                 // Store/ledger locks are another admission wait. Preserve the
                 // completed child result and retry after releasing the journal.
