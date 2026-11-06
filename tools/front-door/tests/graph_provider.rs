@@ -3005,6 +3005,9 @@ fn graph_settlement_records_a_failed_advance_for_status() -> Result {
 
 #[cfg(target_os = "macos")]
 fn graph_launch_proceeds_when_provider_update_is_busy() -> Result {
+    if !graph_fixture_available()? {
+        return Ok(());
+    }
     let mut rig = TestRig::new()?;
     let _cleanup = rig.process_cleanup();
     let bin = rig.root.join("provider/bin");
