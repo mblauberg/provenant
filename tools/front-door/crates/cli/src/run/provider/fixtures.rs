@@ -75,7 +75,7 @@ pub fn prepare_fixture(
 /// The attempt determines the actor, regardless of request or environment labels.
 pub(crate) fn start_fabric_relay(
     context: &run::HolderContext,
-    graph_wake: Option<std::sync::Arc<super::super::children::GraphWake>>,
+    graph_wake: Option<std::sync::Arc<super::super::holder::GraphWake>>,
 ) -> Result<provenant_fabric_mcp::lane::HostRelay, String> {
     use provenant_core::CancelToken;
     use provenant_fabric_runtime::{coordination::CoordinationService, identity::Address};

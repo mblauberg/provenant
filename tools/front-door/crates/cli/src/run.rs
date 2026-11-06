@@ -27,7 +27,7 @@ use std::{
 };
 
 mod cancel;
-mod children;
+mod holder;
 pub mod cloud_owner;
 pub mod cloud_store;
 mod dispatch;
@@ -44,7 +44,7 @@ mod wait;
 mod watch;
 mod worktree;
 pub use cancel::*;
-pub use children::HostHolder;
+pub use holder::HostHolder;
 pub use dispatch::*;
 pub use output::*;
 pub(crate) use provider::find_executable as provider_executable;
