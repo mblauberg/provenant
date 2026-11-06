@@ -78,11 +78,17 @@ Any agent may add nodes, inline templates, composites or further planners in a
 patch. `edit` applies patches with an expected revision and idempotency key;
 skip or replace only unstarted nodes. Admission is atomic, checks cycles and
 conflicting edits, scans for secrets and journals the change. Started attempts
-are immutable. Child depth defaults to eight and limits are overridable within
-authority. MCP uses the same service and JSON with documents rather than paths.
+are immutable. Planner fragments and edits may omit a writer's `worktree`; the
+host provisions one before launch and recovers interrupted provisioning. Explicit
+worktrees must already be registered. Child depth defaults to eight and limits
+are overridable within authority. MCP uses the same service and JSON with documents rather than paths.
 
 Inside a worker, `run --use TEMPLATE` adds children to the same graph. They share
-budget, stopping and trace and may write into the parent's integration branch.
+budget, stopping and trace. Template access determines whether a child writes;
+a read-only parent can launch a writer. Writers use separate worktrees and may
+integrate into the parent's branch. `--over`, `--set` and inline documents also
+work inside a worker. Repeating the same launch under the same logical parent
+returns its existing children, including after a retry or continuation.
 A waiting parent yields its slot. A composite completes when its dynamic
 producers close and its join condition holds.
 
