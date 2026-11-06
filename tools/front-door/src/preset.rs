@@ -25,6 +25,7 @@ pub(super) fn human_for_test(data: &Value, full: bool) -> String {
 #[path = "preset_plan.rs"]
 pub mod planner;
 
+pub mod composites;
 mod panel;
 #[cfg(test)]
 #[allow(unused_imports, reason = "preset tests construct a selector result")]
@@ -4102,6 +4103,15 @@ pub(crate) fn bind_run_context(
         if let Some(candidate) = &experiment.shadow_of {
             expansion.document["context"]["shadow_of"] = json!(candidate);
         }
+    }
+    if !request.explain
+        && let Some(branch) = expansion.document["integration_branch"]
+            .as_str()
+            .filter(|branch| !branch.starts_with("origin/"))
+    {
+        // Bind the identity to the created head on the first run as well as
+        // on retries; an absent-head digest would otherwise launch twice.
+        composites::ensure_integration_branch(directory, branch)?;
     }
     expansion.document["graph_id"] = json!("");
     // An integration source resolves at run time, so fold the current head into
