@@ -442,16 +442,19 @@ mod ceiling_tests {
 /// Whether a field belongs to the compact agent-facing configuration surface.
 /// Full schema validation always includes advanced fields.
 pub fn documented_field(path: &str) -> bool {
-    registry().is_ok_and(|registry| registry.documented_fields.iter().any(|field| {
-        let mut expected = field.split('.');
-        let mut actual = path.split('.');
-        loop {
-            match (expected.next(), actual.next()) {
-                (None, None) => return true,
-                (Some(pattern), Some(value))
-                    if pattern == value || (pattern.starts_with('{') && pattern.ends_with('}')) => {}
-                _ => return false,
+    registry().is_ok_and(|registry| {
+        registry.documented_fields.iter().any(|field| {
+            let mut expected = field.split('.');
+            let mut actual = path.split('.');
+            loop {
+                match (expected.next(), actual.next()) {
+                    (None, None) => return true,
+                    (Some(pattern), Some(value))
+                        if pattern == value
+                            || (pattern.starts_with('{') && pattern.ends_with('}')) => {}
+                    _ => return false,
+                }
             }
-        }
-    }))
+        })
+    })
 }

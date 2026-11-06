@@ -393,7 +393,9 @@ fn sync_registered_account(
 /// What a config command does: show, describe the schema, edit, or list history.
 enum ConfigAction<'a> {
     Show,
-    Schema { all: bool },
+    Schema {
+        all: bool,
+    },
     Edit(provenant_config::KnobEdit<'a>),
     Apply {
         patch: &'a std::path::Path,
@@ -438,7 +440,9 @@ fn config_command(command: &str, action: ConfigAction, globals: &provenant_cli::
                 let (resolved, revision) = config::show(&roots, sections)?;
                 let mut schema = config::schema(&resolved, sections, revision)?;
                 if !all {
-                    schema.fields.retain(|field| config::documented_field(&field.path));
+                    schema
+                        .fields
+                        .retain(|field| config::documented_field(&field.path));
                 }
                 serde_json::to_value(schema)?
             }

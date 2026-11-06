@@ -398,15 +398,25 @@ fn config_commands_report_graph_checkpoint_retention_and_source() -> Result {
     let schema = rig.command(&["config", "schema", "--json"])?;
     assert_eq!(code(&schema), 0);
     let schema: serde_json::Value = serde_json::from_slice(&schema.stdout.bytes)?;
-    let compact = schema["data"]["fields"].as_array().ok_or("compact fields")?;
+    let compact = schema["data"]["fields"]
+        .as_array()
+        .ok_or("compact fields")?;
     assert!(compact.len() < 40);
-    assert!(!compact.iter().any(|field| field["path"] == "config.history_max_bytes"));
+    assert!(
+        !compact
+            .iter()
+            .any(|field| field["path"] == "config.history_max_bytes")
+    );
     let all = rig.command(&["config", "schema", "--all", "--json"])?;
     assert_eq!(code(&all), 0);
     let all: serde_json::Value = serde_json::from_slice(&all.stdout.bytes)?;
     let advanced = all["data"]["fields"].as_array().ok_or("advanced fields")?;
     assert!(advanced.len() > compact.len());
-    assert!(advanced.iter().any(|field| field["path"] == "config.history_max_bytes"));
+    assert!(
+        advanced
+            .iter()
+            .any(|field| field["path"] == "config.history_max_bytes")
+    );
     let field = schema["data"]["fields"]
         .as_array()
         .ok_or("schema fields")?
