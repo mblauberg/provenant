@@ -1728,11 +1728,15 @@ pub(super) fn dispatch_inner(
                     }
                 }
                 Submitted {
-                    cloud: cloud.clone(),
+                    attempt: provenant_fabric_runtime::graph::AttemptSpec {
+                        placement: cloud.clone(),
+                        account,
+                        build_heavy,
+                        ..Default::default()
+                    },
                     require_skill_location,
                     settlement_retry_limit: None,
                     context,
-                    build_heavy,
                     title,
                     base,
                     pinned_base,
@@ -1741,7 +1745,6 @@ pub(super) fn dispatch_inner(
                     prompt,
                     route,
                     fallback,
-                    account,
                     provider_timeout: command.provider_timeout,
                     delivery_id,
                     deliver,
@@ -1779,7 +1782,8 @@ pub(super) fn dispatch_inner(
     let cloud_prompts: Vec<_> = tasks
         .iter()
         .filter_map(|task| {
-            task.cloud
+            task.attempt
+                .placement
                 .as_ref()
                 .map(|_| (task.task_id, task.prompt.clone()))
         })

@@ -343,4 +343,3 @@ pub(crate) fn remote_base(
         .and_then(|oid| provenant_core::GitOid::parse(oid.trim()).ok())
         .ok_or(FacadeError::BaseUnreachable)
 }
-

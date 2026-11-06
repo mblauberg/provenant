@@ -1279,6 +1279,9 @@ pub struct NodeInput<'a> {
     pub attachments: &'a [String],
     pub capabilities: Option<&'a [String]>,
     pub capability_sources: Option<&'a serde_json::Value>,
+    /// The node's attempt spec: an account for routes that name none, and
+    /// build weight. Capabilities are already folded into `capabilities`.
+    pub attempt: Option<&'a AttemptSpec>,
     /// Attempts of the source writer whose model families must be avoided.
     pub distinct_from_attempts: &'a [String],
     /// Refuse a route inside distinct_from_attempts' families. family_peers

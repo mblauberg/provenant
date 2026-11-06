@@ -280,7 +280,9 @@ pub(crate) fn graph_inbox_close(
     }
 }
 
-pub(crate) fn load_graph_prices(assets: &std::path::Path) -> Result<provenant_telemetry::PriceTable, String> {
+pub(crate) fn load_graph_prices(
+    assets: &std::path::Path,
+) -> Result<provenant_telemetry::PriceTable, String> {
     let path = assets.join("config/telemetry-prices.toml");
     let text =
         std::fs::read_to_string(&path).map_err(|error| format!("{}: {error}", path.display()))?;
@@ -367,7 +369,9 @@ pub(crate) fn decode_graph_document(
     }
 }
 
-pub(crate) fn graph_journal_error(error: provenant_fabric_runtime::graph::JournalError) -> FacadeError {
+pub(crate) fn graph_journal_error(
+    error: provenant_fabric_runtime::graph::JournalError,
+) -> FacadeError {
     use provenant_fabric_runtime::graph::JournalError;
     match error {
         JournalError::Decode(provenant_records::DecodeError::UnsupportedVersion {
@@ -403,7 +407,6 @@ pub(crate) fn graph_result_warning(error: &provenant_run::RunError) -> &'static 
         _ => "result artifact could not be verified",
     }
 }
-
 
 impl BoundGraphOwner<'_> {
     pub(crate) fn prior_models(&self, attempts: &[String]) -> Result<Vec<String>, FacadeError> {
@@ -513,7 +516,10 @@ impl provenant_fabric_runtime::graph::CiStatus for BoundGraphOwner<'_> {
 
 // Review roles come from the shared role library. The framing role
 // `plan.review` prepares the subject and is not an independent review.
-pub(crate) fn graph_review_node(document: &provenant_fabric_runtime::graph::GraphDocument, id: &str) -> bool {
+pub(crate) fn graph_review_node(
+    document: &provenant_fabric_runtime::graph::GraphDocument,
+    id: &str,
+) -> bool {
     document.nodes.iter().any(|node| {
         node.id == id
             && node.access == provenant_fabric_runtime::graph::AccessMode::ReadOnly
@@ -2260,10 +2266,13 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                         .unwrap_or(node.require_skill_location),
                     context,
                     extra: Default::default(),
-                    build_heavy: false,
+                    build_heavy: node.attempt.is_some_and(|spec| spec.build_heavy),
                     base,
                     head: node.source_commit.map(str::to_owned),
-                    account: route.account.clone(),
+                    account: route
+                        .account
+                        .clone()
+                        .or_else(|| node.attempt.and_then(|spec| spec.account.clone())),
                     access,
                     capabilities: None,
                     capability_sources: Default::default(),
@@ -2772,7 +2781,11 @@ pub(crate) fn exact_model(adapter: Option<&str>, model: &str) -> String {
 /// Whether required family separation refuses an exact route before launch.
 /// As for routed reviews, a model whose family is unknown is treated as
 /// excluded once any family is.
-pub(crate) fn exact_route_refused(model: &str, excluded_families: &[String], require_distinct: bool) -> bool {
+pub(crate) fn exact_route_refused(
+    model: &str,
+    excluded_families: &[String],
+    require_distinct: bool,
+) -> bool {
     require_distinct
         && !excluded_families.is_empty()
         && provenant_cli::run::model_family(model)
@@ -2805,4 +2818,3 @@ pub(crate) fn restore_scratch_source(
         Err(_) => Err(FacadeError::io("access graph scratch")),
     }
 }
-

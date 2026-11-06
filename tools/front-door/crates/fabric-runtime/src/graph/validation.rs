@@ -331,6 +331,13 @@ pub(super) fn validate_flat_plan(
         if node.deadline_seconds == Some(0) {
             return Err("node deadline_seconds must be positive");
         }
+        if let Some(reason) = node
+            .attempt
+            .as_ref()
+            .and_then(|spec| attempt_error(node, spec))
+        {
+            return Err(reason);
+        }
         if node.review.is_some()
             && (node.kind != Some(NodeKind::Plan)
                 || node.plan.is_some()
@@ -650,7 +657,14 @@ pub(super) fn validate_flat_plan(
             dispositions: node.dispositions.clone(),
             read_roots: node.read_roots.clone(),
             attachments: node.attachments.clone(),
-            capabilities: node.capabilities.clone(),
+            // An explicit node set wins; a nonempty attempt set stands in for it.
+            capabilities: node.capabilities.clone().or_else(|| {
+                node.attempt
+                    .as_ref()
+                    .filter(|spec| !spec.capabilities.is_empty())
+                    .map(|spec| spec.capabilities.clone())
+            }),
+            attempt: node.attempt.clone().filter(|spec| !spec.is_empty()),
             source: node.source.clone(),
             after_expansion: node.after_expansion.clone(),
             plan: node.plan.clone(),
@@ -791,6 +805,41 @@ pub(crate) fn valid_identifier(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+}
+
+/// Why a node's attempt spec cannot launch through the graph, if it cannot.
+/// The graph launches local attempts in a worktree it binds itself, so it
+/// honours account, capabilities and build weight only.
+fn attempt_error(node: &GraphNode, spec: &AttemptSpec) -> Option<&'static str> {
+    if spec.placement.is_some() || spec.new_worktree.is_some() || !spec.write_roots.is_empty() {
+        return Some("graph attempts do not support placement, new_worktree or write_roots");
+    }
+    if node.capabilities.is_some() && !spec.capabilities.is_empty() {
+        return Some("set capabilities on the node or its attempt, not both");
+    }
+    if spec.capabilities.iter().any(|capability| {
+        capability.is_empty() || capability.len() > 64 || capability.contains('\0')
+    }) {
+        return Some("attempt capability must be a bounded name");
+    }
+    let account = spec.account.as_deref()?;
+    if account.is_empty() || account.len() > 64 || account.contains('\0') {
+        return Some("attempt account must be a bounded name");
+    }
+    if node
+        .route
+        .iter()
+        .chain(node.routes.iter().flatten())
+        .any(|route| {
+            route
+                .account
+                .as_deref()
+                .is_some_and(|pinned| pinned != account)
+        })
+    {
+        return Some("attempt account conflicts with a route account");
+    }
+    None
 }
 
 pub(super) fn route_is_bounded(route: &GraphRoute) -> bool {
