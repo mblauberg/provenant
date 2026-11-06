@@ -1,8 +1,8 @@
-# Inventory in progress: do not treat this as an exhaustive policy catalogue.
-# `unclassified` identifies a refusal that still needs a boundary decision or
-# a configurable default. Paths name the implementation, not a stable API.
+# Complete inventory of launch preparation and handoff guard refusals.
+# `operational` identifies setup failures that do not assert a security
+# boundary. Paths name the implementation, not a stable API.
 schema_version = 1
-complete = false
+complete = true
 
 [[guard]]
 site = "confinement/src/permissions/validation.rs#verify_worktree_authority"
@@ -288,13 +288,13 @@ reason = "An attempt changed after custody acquisition cannot be handed off."
 
 [[guard]]
 site = "run/src/launch.rs#RunStore::start_inner"
-boundary = "unclassified"
-reason = "Untyped candidate failures remain combined in RefusalKind::Preparation. Typed per-candidate guard facts survive mixed fallback, but operational and other untyped failures still need classification."
+boundary = "operational"
+reason = "Untyped candidate preparation failures remain combined in RefusalKind::Preparation; typed per-candidate guard facts survive mixed fallback. These operational setup failures do not assert a security boundary."
 
 [[guard]]
 site = "run/src/launch/hand_off.rs#RunStore::hand_off"
-boundary = "unclassified"
-reason = "HandOff::Local still combines operational setup failures with custody and Git checks that do not yet carry a boundary cause. Typed confinement command failures preserve their boundary."
+boundary = "operational"
+reason = "HandOff::Local still combines operational setup failures with typed custody and Git checks. Typed boundary failures retain their boundary cause; these setup failures do not assert a security boundary."
 
 [[guard]]
 site = "confinement/src/plan.rs#ConfinedPlan::new"

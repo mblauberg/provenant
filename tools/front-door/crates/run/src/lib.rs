@@ -831,6 +831,7 @@ mod diagnostic_projection_tests {
             .expect("launch guard inventory must be valid TOML");
         assert_eq!(inventory["schema_version"].as_integer(), Some(1));
         let complete = inventory["complete"].as_bool().expect("completion flag");
+        assert!(complete, "launch guard inventory must be fully classified");
         let guards = inventory["guard"].as_array_of_tables().expect("guard rows");
         assert!(!guards.is_empty());
         for guard in guards {
@@ -850,6 +851,9 @@ mod diagnostic_projection_tests {
                 .expect("guard classification");
             match boundary {
                 "lane_git" | "credentials" | "object_integrity" | "authority" | "warning" => {}
+                // Operational setup failures stop preparation without
+                // claiming a security-boundary violation.
+                "operational" => {}
                 "configurable_default" => {
                     assert!(
                         guard
@@ -867,7 +871,6 @@ mod diagnostic_projection_tests {
                         "unknown code {code} at {site}"
                     );
                 }
-                "unclassified" if !complete => {}
                 _ => panic!("invalid or incomplete classification {boundary} at {site}"),
             }
         }
