@@ -852,6 +852,24 @@ struct SyncOptions {
 }
 
 pub(super) fn run_install(args: cli::Install, globals: &cli::Globals) -> u8 {
+    if args.upgrade_preflight {
+        return match upgrade_preflight(globals) {
+            Ok(findings) if findings.is_empty() => 0,
+            Ok(findings) => {
+                for finding in findings {
+                    println!("{finding}");
+                }
+                println!(
+                    "Finish or cancel pending graphs, drain lanes and port presets by hand; rerun with --yes to proceed anyway."
+                );
+                2
+            }
+            Err(error) => {
+                eprintln!("Upgrade preflight failed: {error}");
+                1
+            }
+        };
+    }
     match apply_install(args, globals, true, SyncOptions::default()) {
         Ok(applied) => output_install(
             "install",
@@ -1090,6 +1108,7 @@ fn sync_accounts(
         hooks: None,
         adopt_existing: false,
         dry_run,
+        upgrade_preflight: false,
     };
     apply_install(args, globals, false, options).map(Some)
 }
@@ -1318,6 +1337,105 @@ struct UpgradeRunner {
     environment: Vec<(std::ffi::OsString, std::ffi::OsString)>,
     cwd: PathBuf,
 }
+
+/// Inspect the old state with the staged release before it replaces the binary.
+fn upgrade_preflight(globals: &cli::Globals) -> Result<Vec<String>, String> {
+    let (environment, targets) = selected_targets(globals, &[]).map_err(|e| format!("{e:?}"))?;
+    let mut findings = Vec::new();
+    let projects = targets.roots.state.as_path().join("fabric/graphs");
+    let entries = match std::fs::read_dir(&projects) {
+        Ok(entries) => Some(entries),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+        Err(error) => return Err(format!("{}: {error}", projects.display())),
+    };
+    if let Some(entries) = entries {
+        for entry in entries {
+            let entry = entry.map_err(|e| e.to_string())?;
+            let Some(project) = entry
+                .file_name()
+                .to_str()
+                .and_then(|s| provenant_core::ProjectId::parse(s).ok())
+            else {
+                continue;
+            };
+            let ids = provenant_fabric_runtime::graph::FileJournal::pending_graph_ids(
+                &targets.roots.state,
+                project,
+            )
+            .map_err(|e| e.to_string())?;
+            for id in ids {
+                findings.push(format!("Pending graph {project}/{id}"));
+            }
+        }
+    }
+    let mut stores = vec![targets.roots.state.as_path().to_path_buf()];
+    while let Some(store) = stores.pop() {
+        let children = store.join("children");
+        match std::fs::read_dir(&children) {
+            Ok(entries) => {
+                for entry in entries {
+                    let entry = entry.map_err(|e| e.to_string())?;
+                    if entry.file_type().map_err(|e| e.to_string())?.is_dir() {
+                        stores.push(entry.path());
+                    }
+                }
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(format!("{}: {error}", children.display())),
+        }
+        let database = store.join("run.sqlite3");
+        if !database
+            .try_exists()
+            .map_err(|e| format!("{}: {e}", database.display()))?
+        {
+            continue;
+        }
+        let db = provenant_sqlite::open_read_only_connection(&database)
+            .map_err(|e| format!("{}: {e}", database.display()))?;
+        let mut query = db
+            .prepare(
+                "SELECT project, run, id FROM attempts WHERE terminal=0 ORDER BY project, run, id",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = query
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .map_err(|e| e.to_string())?;
+        for row in rows {
+            let (project, run, attempt) = row.map_err(|e| e.to_string())?;
+            findings.push(format!(
+                "Live lane {project}/{run}/{attempt} ({})",
+                store.display()
+            ));
+        }
+    }
+    let config = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| environment.home.join(".config"));
+    if !config.is_absolute() {
+        return Err("XDG_CONFIG_HOME must be absolute".into());
+    }
+    let presets = config.join("provenant/presets");
+    match std::fs::read_dir(&presets) {
+        Ok(entries) => {
+            for entry in entries {
+                let entry = entry.map_err(|e| e.to_string())?;
+                if entry.path().extension().is_some_and(|ext| ext == "toml") {
+                    findings.push(format!("User preset to port: {}", entry.path().display()));
+                }
+            }
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(format!("{}: {error}", presets.display())),
+    }
+    findings.sort();
+    Ok(findings)
+}
 impl UpgradeRunner {
     fn execute(
         &self,
@@ -1394,7 +1512,10 @@ pub(super) fn run_upgrade(args: cli::Upgrade, globals: &cli::Globals) -> u8 {
             cwd: targets.home.clone(),
         };
         // Resolve latest once so every host downloads the same tag, even during a release.
-        let mut install_args: Vec<std::ffi::OsString> = vec!["--yes".into(), "--upgrade".into()];
+        let mut install_args: Vec<std::ffi::OsString> = vec!["--upgrade".into()];
+        if args.yes {
+            install_args.push("--yes".into());
+        }
         let mut source_archive = None;
         let script;
         if let Some(source) = &args.from_source {
@@ -1504,7 +1625,13 @@ pub(super) fn run_upgrade(args: cli::Upgrade, globals: &cli::Globals) -> u8 {
         // SSH uses Fabric's validated destination, batch mode and connection deadline.
         for (name, peer) in fabric.peers {
             let (command, input) = if let Some(archive) = &source_archive {
-                ("set -eu; scratch=$(mktemp -d); trap 'rm -rf \"$scratch\"' 0; tar -xzf - -C \"$scratch\"; git -C \"$scratch\" init -q </dev/null; git -C \"$scratch\" add -f . </dev/null; sh \"$scratch/install.sh\" --yes --upgrade --from-source \"$scratch\" </dev/null".to_owned(), archive.as_slice())
+                (
+                    format!(
+                        "set -eu; scratch=$(mktemp -d); trap 'rm -rf \"$scratch\"' 0; tar -xzf - -C \"$scratch\"; git -C \"$scratch\" init -q </dev/null; git -C \"$scratch\" add -f . </dev/null; sh \"$scratch/install.sh\" --upgrade {} --from-source \"$scratch\" </dev/null",
+                        if args.yes { "--yes" } else { "" }
+                    ),
+                    archive.as_slice(),
+                )
             } else {
                 let command = format!(
                     "sh -c '{}' install.sh {} </dev/null",
