@@ -496,6 +496,29 @@ fn secret_input_is_refused_before_publication() -> TestResult {
 }
 
 #[test]
+fn later_secret_is_refused_before_preparing_any_writer() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let mut input = submission("ordinary first task");
+    // A missing writer would fail if preparation ran before the later scan.
+    input.tasks[0].worktree = Some(temp.path().join("missing-writer"));
+    let mut later = submission("sk-abcdefghijklmnopqrstuvwxyz123456")
+        .tasks
+        .remove(0);
+    later.task_id = TaskId::from_bytes([4; 16]);
+    input.tasks.push(later);
+    let operation = input.operation_id.clone();
+    assert!(matches!(
+        Service::new(&store).dispatch(input, temp.path(), &call),
+        Err(RunError::RecordedRefusal(ref diagnostic)) if diagnostic.code == ErrorKind::SecretInput.code()
+    ));
+    assert!(store.operation(&operation, &call)?.is_some());
+    Ok(())
+}
+
+#[test]
 fn named_adapter_routes_preserve_configuration_name_without_a_model() -> TestResult {
     let route: RequestedRoute = serde_json::from_value(serde_json::json!({
         "kind": "adapter", "provider": "command", "name": "fmt-check",

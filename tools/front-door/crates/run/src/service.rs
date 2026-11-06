@@ -431,11 +431,9 @@ impl<'a> Service<'a> {
         if saved.state != OperationState::Refused {
             return Err(RunError::OperationConflict);
         }
-        return Err(RunError::RecordedRefusal(
-            saved
-                .refusal
-                .ok_or(RunError::Validation("refusal diagnostic missing"))?,
-        ));
+        Err(RunError::RecordedRefusal(saved.refusal.ok_or(
+            RunError::Validation("refusal diagnostic missing"),
+        )?))
     }
     /// Canonical model IDs carry the provider prefix in every stored request.
     pub fn route(route: RequestedRoute) -> Result<RequestedRoute> {
