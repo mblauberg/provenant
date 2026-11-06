@@ -600,8 +600,7 @@ provider has already stopped consuming host build capacity and live custody.
 An import failure preserves an already established failed, timed-out or lost
 provider outcome and its reason. A potential success with unverified writer
 facts becomes `unsettled`; even after import recovery it requires a fresh attempt
-or manual host recovery to obtain success or delivery eligibility. Effect
-completion alone does not approve protected changes.
+or manual host recovery to obtain success or delivery eligibility.
 
 Unresolved imports also seal a scoped `import-retained.json` marker beside the
 custody reservation. Run checks predecessor markers after acquiring the normal
@@ -679,7 +678,7 @@ Peers sharing a state root must upgrade together: schema 7 and the version 2 att
 
 `cancel` durably records the request and signals the supervisor without waiting
 for a writer lock. The settlement driver checks it between phases and polls it
-every 50 ms during import, instruction checks and optional automatic delivery,
+every 50 ms during import and optional automatic delivery,
 stopping the owned Git child when required.
 Public `reconcile` starts the same binary's detached `internal settle` worker
 only when a non-terminal attempt needs settlement. A run-scoped queued claim
@@ -701,20 +700,12 @@ or an existing settlement owner; the supervisor owns this work after return.
 
 Success needs a supervisor-observed exit 0, a matching provider identity and
 a complete, validated, non-empty result; capture bytes are never completion
-evidence. A dead owner is not a failed provider. A completed writer whose
-protected changes need review ends `review_required`, and one with only
-uncommitted edits ends `uncommitted`; neither delivers. Paths in the project's
-`[domains.run] review_exempt` list (release-note fragments, specs, lock files
-and `.tracker-input` by default) never count toward either, and Git metadata,
-hooks and provider control roots can never be listed. Run reads no provider
-transcript except Codex's post-exit identity projection.
+evidence. A dead owner is not a failed provider. A writer with only
+uncommitted edits ends `uncommitted` and does not deliver, unless those paths
+are review-exempt. Run reads no provider transcript except Codex's post-exit
+identity projection.
 - Why: a crash, truncation or impostor must never read as success.
 - Test: `crates/run/src/dispatch_tests.rs::holder_commits_decoded_success_only_with_exit_zero_and_observed_identity`;
-  `crates/run/src/tests.rs::protected_review_retains_candidate_and_paths_without_delivery`;
-  `crates/confinement/src/quarantine.rs::exempt_instruction_tree_paths_settle_without_review`;
-  `::hard_controls_stay_under_review_even_when_listed`;
-  `::a_staged_rename_of_exempt_paths_does_not_force_review`;
-  `::ordinary_project_paths_never_need_review`;
   `crates/confinement/src/git_evidence.rs::exempt_paths_left_uncommitted_do_not_count`
 - Owner: `crates/run/src/holder.rs`, `crates/run/src/writer.rs`, `crates/confinement/src/review_exempt.rs`
 
@@ -962,10 +953,7 @@ a peak-disk measurement.
 Git owns hashing, parsing, pack checks and quarantine. There is no custom
 object verifier, full-store generation scan, verification cache or separate
 verification deadline/retry mechanism. SHA-1 and SHA-256 repositories use the
-same Git receive boundary. The host restores the private index for instruction
-quarantine only after import succeeds, clearing skip-worktree and
-assume-unchanged flags so an uncommitted edit remains visible. The host
-publishes the real branch with a
+same Git receive boundary. The host publishes the real branch with a
 compare-and-swap against the pinned launch base. Replaying the same head is
 idempotent; a branch already containing that head also satisfies publication. A diverged shared ref refuses publication. A published tip
 must descend from the lane base or the current `origin` default branch, which
@@ -986,8 +974,7 @@ for host recovery.
 - Why: Git already owns the receive boundary; private Git state removes the
   fragile list of individual write exceptions under the shared repository.
 - Test: `crates/confinement/tests/lane_git_conformance.rs`;
-  `crates/run/src/objects_tests.rs`;
-  `crates/run/src/delivery_tests.rs::terminal_imports_private_objects_before_quarantine_reads_the_lane`
+  `crates/run/src/objects_tests.rs`
 - Owner: `crates/confinement/src/permissions.rs`, `crates/providers/src/launch.rs`,
   `crates/providers/src/lane.rs`, `crates/run/src/objects.rs`,
   `crates/run/src/writer.rs`, `crates/run/src/delivery.rs`
@@ -1321,10 +1308,7 @@ origin push when the settled lane recorded none. An explicit `integrate:`
 override naming the recorded target keeps a recorded fast-forward-only guard,
 so pickup cannot merge a refused loop round. It requires a succeeded
 writer, released custody, no new reservation, a clean tree and the exact
-receipt head. After reviewing a `review_required` writer, the chair can use
-`lane deliver --accept-review ATTEMPT` to accept its protected changes and
-deliver the same exact head. The delivery receipt records the acceptance and
-protected paths. Lanes and peers cannot accept review. Delivery persists a
+receipt head. Delivery persists a
 keyed host pickup receipt separately from the immutable terminal record.
 Successful pickup replays without repeating
 external effects, while failures remain explicitly retryable. A worktree

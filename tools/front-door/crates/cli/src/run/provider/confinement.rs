@@ -224,10 +224,7 @@ pub(super) fn confinement_request(
                     scope: PathScope::Exact,
                 }))
                 .collect(),
-            protected_roots: vec![PathGrant {
-                path: roots.cwd.join("AGENTS.md"),
-                scope: PathScope::Exact,
-            }],
+            protected_roots: Vec::new(),
             secret_roots: Vec::new(),
             selected_authentication: AdapterSpec::get(adapter)
                 .and_then(|spec| spec.authentication)

@@ -667,10 +667,6 @@ impl RunStore {
                                 self.context.state_root.as_path(),
                                 attempt,
                                 recovery,
-                                task.deliver
-                                    .as_ref()
-                                    .map_or("origin", |delivery| delivery.remote.as_str()),
-                                task.base.as_deref(),
                                 &mut driver,
                             )
                         },
@@ -1247,12 +1243,11 @@ impl RunStore {
         if cancelled {
             decoded.outcome = Outcome::Cancelled;
         }
-        let mut review_required = false;
         if let Some(writer) = &task.writer {
             let refusal = object_import_refused(attempt, exit.scope)?;
             let refused = refusal.is_some();
             let check = if cancelled {
-                Ok(false)
+                Ok(())
             } else if settlement.is_none() {
                 Err(RunError::ObjectImportLimit(
                     "settlement exhausted three attempts; private Git retained for host recovery",
@@ -1260,7 +1255,7 @@ impl RunStore {
             } else if let Some(reason) = refusal {
                 decoded.outcome = Outcome::Failed;
                 decoded.reason = Some(reason);
-                Ok(false)
+                Ok(())
             } else {
                 crate::prepare_writer(writer, &self.writer_registry, record.project_id).and_then(
                     |writer| {
@@ -1273,10 +1268,6 @@ impl RunStore {
                                 recovery.ok_or(RunError::Validation(
                                     "writer terminal custody missing",
                                 ))?,
-                                task.deliver
-                                    .as_ref()
-                                    .map_or("origin", |deliver| deliver.remote.as_str()),
-                                task.base.as_deref(),
                                 driver,
                             )
                         })
@@ -1349,7 +1340,7 @@ impl RunStore {
                         )?;
                         decoded.outcome = Outcome::Cancelled;
                         decoded.reason = Some("cancelled during Git import".into());
-                        Ok(false)
+                        Ok(())
                     } else if settlement
                         .as_ref()
                         .is_some_and(crate::settlement::Driver::exhausted)
@@ -1380,7 +1371,7 @@ impl RunStore {
                                 retryable: true,
                             },
                         ));
-                        Ok(false)
+                        Ok(())
                     }
                 }
                 other => other,
@@ -1439,7 +1430,7 @@ impl RunStore {
                         ),
                     );
                 }
-                Ok(false) if decoded.outcome == Outcome::Succeeded => {
+                Ok(_) if decoded.outcome == Outcome::Succeeded => {
                     // Edits with no commit are not a success, and nothing is delivered.
                     let left =
                         crate::prepare_writer(writer, &self.writer_registry, record.project_id)
@@ -1483,13 +1474,9 @@ impl RunStore {
                         });
                     }
                 }
-                Ok(false) => {}
-                Ok(true) => {
-                    review_required = true;
-                }
+                Ok(_) => {}
                 Err(error) => {
-                    // Incomplete quarantine is retryable, never a terminal
-                    // intent that permanently prevents a later archive commit.
+                    // An incomplete manifest remains retryable.
                     let archive = crate::artifacts::subdir(
                         attempt,
                         std::ffi::OsStr::new("quarantine"),
@@ -1619,10 +1606,6 @@ impl RunStore {
                     _ => reason.into(),
                 });
             }
-        }
-        if decoded.outcome == Outcome::Succeeded && review_required {
-            decoded.outcome = Outcome::ReviewRequired;
-            decoded.reason = Some("protected changes require review".into());
         }
         let frozen_policy = self.staged_policy_retry(&record)?;
         let frozen_policy_retry = frozen_policy

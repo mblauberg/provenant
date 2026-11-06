@@ -192,6 +192,7 @@ pub enum DispatchRefusalFact {
 pub enum InvalidInputDetail {
     Schema,
     LandingLock,
+    UnresolvableBase(String),
     Field(String),
     FieldTooLarge { field: String, limit: usize },
     FieldTitle(String),
@@ -206,6 +207,8 @@ impl InvalidInputDetail {
         match self {
             Self::Schema => Some("graph document schema_version is invalid".into()),
             Self::LandingLock => Some("landing lock required".into()),
+            Self::UnresolvableBase(name) => safe_base_ref(name)
+                .map(|name| format!("unresolvable base `{name}`")),
             Self::InputUnreadable => {
                 Some("input file is unreadable or is not a regular file".into())
             }
@@ -662,6 +665,21 @@ fn invalid_detail(detail: &Option<InvalidInputDetail>) -> String {
         .unwrap_or_default()
 }
 
+// Refs are caller input and actionable, but cannot contain terminal controls
+// or quoting characters when disclosed in diagnostics or on the peer wire.
+fn safe_base_ref(name: &str) -> Option<&str> {
+    (!name.is_empty()
+        && name.len() <= 256
+        && name.bytes().all(|b| {
+            b.is_ascii_alphanumeric()
+                || matches!(
+                    b,
+                    b'/' | b'.' | b'_' | b'-' | b'~' | b'^' | b'@' | b'{' | b'}'
+                )
+        }))
+    .then_some(name)
+}
+
 pub(super) fn safe_input_field(field: &str) -> Option<&str> {
     let allowed = [
         "scope",
@@ -761,6 +779,11 @@ fn deserialise_invalid_detail<'de, D: serde::Deserializer<'de>>(
         {
             Some(InvalidInputDetail::GraphDocumentTooLarge)
         }
+        _ if detail.starts_with("unresolvable base `") => detail
+            .strip_prefix("unresolvable base `")
+            .and_then(|name| name.strip_suffix('`'))
+            .and_then(safe_base_ref)
+            .map(|name| InvalidInputDetail::UnresolvableBase(name.to_owned())),
         _ => detail
             .strip_prefix("invalid input field `")
             .and_then(|rest| {
@@ -966,6 +989,34 @@ impl From<&provenant_fabric_store::Error> for FacadeError {
 #[cfg(test)]
 mod diagnostic_tests {
     use super::FacadeError;
+
+    #[test]
+    fn an_unresolvable_base_is_named_but_unsafe_text_is_not() {
+        use super::InvalidInputDetail;
+        let named = FacadeError::invalid(InvalidInputDetail::UnresolvableBase(
+            "refs/heads/batch/graph".into(),
+        ));
+        assert_eq!(
+            named.diagnostic().detail.as_deref(),
+            Some("unresolvable base `refs/heads/batch/graph`")
+        );
+        let encoded = serde_json::to_value(&named).expect("encode error");
+        let decoded: FacadeError = serde_json::from_value(encoded).expect("decode error");
+        assert_eq!(decoded, named);
+        for name in ["x\u{1b}[31m", "x`forged", "", &"x".repeat(257)] {
+            let forged = FacadeError::invalid(InvalidInputDetail::UnresolvableBase(name.into()));
+            assert_eq!(forged.diagnostic().detail, None);
+            assert_eq!(
+                serde_json::to_value(&forged).expect("encode error")["detail"],
+                serde_json::Value::Null
+            );
+            let incoming: FacadeError = serde_json::from_value(serde_json::json!({
+                "code": "invalid_input", "detail": format!("unresolvable base `{name}`")
+            }))
+            .expect("decode peer error");
+            assert_eq!(incoming, FacadeError::InvalidInput { detail: None });
+        }
+    }
 
     #[test]
     fn future_schema_requires_upgrade_with_version_diagnostics() {

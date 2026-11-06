@@ -587,9 +587,6 @@ fn protected_review_retains_candidate_and_paths_without_delivery() -> TestResult
     seal_exit_fixture(&store, &input)?;
     let id = input.attempts[0].attempt_id;
     let head = provenant_core::GitOid::parse(&"a".repeat(40))?;
-    let path = provenant_records::PathWire::from_relative(&provenant_core::RelativePath::parse(
-        ".github/workflows/ci.yml",
-    )?)?;
     let attempt = store.attempt_dir(input.run_id, id, false)?;
     artifacts::seal(
         &attempt,
@@ -597,7 +594,6 @@ fn protected_review_retains_candidate_and_paths_without_delivery() -> TestResult
         &db::bytes(&writer::WriterTerminal {
             schema_version: 1,
             head,
-            protected_paths: vec![path.clone()],
         })?,
         RECORD_LIMIT,
     )?;
@@ -612,7 +608,7 @@ fn protected_review_retains_candidate_and_paths_without_delivery() -> TestResult
     ));
     let record = store.publish_terminal(id, 1, &publication, &exit(), &call)?;
     assert_eq!(record.head, Some(head));
-    assert_eq!(record.protected_paths, vec![path]);
+    assert!(record.protected_paths.is_empty());
     assert!(record.delivery.is_none());
     assert!(matches!(
         record.state,

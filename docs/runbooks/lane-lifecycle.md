@@ -198,17 +198,6 @@ provenant lane deliver ATTEMPT --deliver pr
 
 This refuses a dirty checkout, a changed head or live custody. Repeating a
 successful delivery returns its receipt, including after checkout cleanup.
-When a writer settles as `review_required`, the chair can review its protected
-changes and then deliver the reviewed head with (paths the project lists in
-[`review_exempt`](configuration.md#writer-review-exempt-paths) never cause this):
-
-```sh
-provenant lane deliver --accept-review ATTEMPT
-```
-
-The delivery receipt records who accepted the review and the protected paths.
-Lanes and peers cannot accept review. The same clean checkout and exact head
-checks apply.
 PR bodies contain bounded commit messages and run and attempt IDs. Default
 and primary checkout branches require PR delivery. Owned checkout cleanup
 requires a succeeded lane and successful requested delivery, with the recorded
@@ -310,7 +299,7 @@ See [publication order](../specs/run.md#publication-order) and
 [lane Git and import](../specs/run.md#lane-git-and-import).
 
 Writer rebases use the lane's private Git directory and pass through host object
-import, ancestry checks and instruction quarantine at settlement. If Git cannot
+import and ancestry checks at settlement. If Git cannot
 write rebase state, stop with `needs_host_rebase`; do not create a clone or
 second checkout to bypass the permission failure. A host-authorised merge of
 `origin/main` is an alternative when rebasing is blocked.

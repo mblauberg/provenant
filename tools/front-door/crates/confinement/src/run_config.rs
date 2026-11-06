@@ -31,9 +31,8 @@ grant_limit = 128
 /// Each directory is read-write for writer lanes only; read-only lanes ignore
 /// it. Plan compilation still refuses any overlap with protected roots.
 ///
-/// `review_exempt` lists repository-relative paths a writer may commit without
-/// the lane ending `review_required`, and may leave uncommitted without it
-/// ending `uncommitted`: `dir/` for a directory at the root, a bare name for a
+/// `review_exempt` lists repository-relative paths a writer may leave
+/// uncommitted without the lane ending `uncommitted`: `dir/` for a directory at the root, a bare name for a
 /// file at any depth, otherwise one exact path. A project can replace the list
 /// under `[domains.run.projects."PROJECT_ID"]`. Git metadata, hooks and
 /// provider control roots can never be listed.
@@ -159,7 +158,7 @@ impl RunConfig {
     }
 
     /// The matcher a writer settlement uses. A config that cannot be read
-    /// exempts nothing, which only adds review.
+    /// exempts nothing, which may report uncommitted changes.
     pub fn review_exempt_at(state: &Path, project: &str) -> ReviewExempt {
         Self::read(state).map_or_else(
             |_| ReviewExempt::none(),

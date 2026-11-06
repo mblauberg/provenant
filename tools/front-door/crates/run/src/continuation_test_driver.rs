@@ -431,7 +431,6 @@ fn launches(cause: PolicyCause) -> TestResult {
         &crate::db::bytes(&crate::writer::WriterTerminal {
             schema_version: 1,
             head,
-            protected_paths: Vec::new(),
         })?,
         RECORD_LIMIT,
     )?;

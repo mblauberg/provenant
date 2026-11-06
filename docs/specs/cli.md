@@ -352,7 +352,7 @@ run, qualified task or attempt target uses the shared ID resolver and includes
 older terminal records. `--all` includes full records and supports pagination;
 `lanes --all --id ID` is also valid. The output ends with the project's
 `review-exempt paths:` line (`review_exempt` in `--json`), the paths a writer
-may change without ending `review_required`.
+may leave uncommitted without that path causing an `uncommitted` outcome.
 - Test: `tests/parser.rs::core_run_reports_generated_operation_and_status_is_newest_first`
 - Owner: `crates/cli/src/run.rs`
 
@@ -682,9 +682,9 @@ denial cannot be written it exits 2. It never echoes or persists input.
 
 The guard refuses only irreversible actions, naming the alternative with an
 accepted one-line example: a force
-push to the default branch, and recursive `rm` of the home directory, the
-repository root or the Provenant state directory (or a parent of any). It
-applies the configured rule IDs `force-push`, `rm-root` and `rm-state` to every
+push to the default branch, and recursive `rm` of the Provenant state
+directory or a parent of it. It
+applies the configured rule IDs `force-push` and `rm-state` to every
 simple command, looking through wrappers and shells. Process control, dynamic
 command names, `sleep`, `git stash`, `reset --hard`, `clean -f` and branch
 changes are allowed. Unreadable or invalid config keeps the default rules on.

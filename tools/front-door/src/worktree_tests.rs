@@ -809,24 +809,31 @@ fn writer_protected_changes_wait_for_review_and_ignore_upstream() -> Result {
         )
         .unwrap_or_else(|error| error.to_string());
         assert_eq!(
-            value["state"]["outcome"],
-            if own_change {
-                "review_required"
-            } else {
-                "succeeded"
-            },
+            value["state"]["outcome"], "succeeded",
             "unexpected writer terminal record: {value:#}; settlement progress: {progress}"
         );
-        if own_change {
-            assert_eq!(value["head"], head);
-            assert_eq!(
-                value["protected_paths"],
-                serde_json::json!([
-                    {"encoding": "utf8", "path": ".github/workflows/check.yml"}
-                ])
-            );
-            assert!(terminal.delivery.is_none());
-        }
+        assert_eq!(value["head"], head);
+        assert_eq!(value["protected_paths"], serde_json::json!([]));
+        assert_eq!(
+            git(
+                &rig,
+                &[
+                    "-C",
+                    path.to_str().ok_or("worktree path")?,
+                    "rev-parse",
+                    "HEAD"
+                ]
+            )?,
+            head
+        );
+        assert_eq!(
+            fs::read(path.join(".github/workflows/check.yml"))?,
+            if own_change {
+                b"writer workflow".as_slice()
+            } else {
+                b"upstream workflow".as_slice()
+            }
+        );
         wait_for_writer_release(&store)?;
         cleanup.disarm();
     }
@@ -896,12 +903,10 @@ fn writer_terminal_refuses_sequencer_state() -> Result {
         .join(attempt.to_string())
         .join("quarantine");
     let manifest: Value = serde_json::from_slice(&fs::read(quarantine.join("manifest.json"))?)?;
-    assert_eq!(manifest["review_required"], true);
-    let evidence: Value = serde_json::from_slice(&fs::read(quarantine.join("evidence.json"))?)?;
-    assert_eq!(evidence["review_required"], true);
+    assert_eq!(manifest["disposition"], "writer_settled");
     wait_for_writer_release(&store)?;
 
-    // A private rewind may publish through CAS, retaining instruction review.
+    // A private rewind may publish through CAS.
     fs::remove_file(
         writer
             .worktree
@@ -961,22 +966,18 @@ fn writer_terminal_refuses_sequencer_state() -> Result {
     // A lane now rewinds its private ref. Rewinding the shared ref instead is
     // a competing host update, which correctly blocks CAS publication.
     let previous = git(&rig, &["-C", path_text, "rev-parse", "HEAD^"])?;
-    let private_ref = context
+    let scratch = context
         .state_root
         .as_path()
         .join("runs")
         .join(record.run_id.to_string())
         .join("attempts")
         .join(attempt.to_string())
-        .join("tmp/candidate-0/git-common")
-        .join(writer.branch.as_str());
-    fs::write(private_ref, format!("{previous}\n"))?;
+        .join("tmp/candidate-0");
+    lane_git(&rig, &scratch, &path, &["reset", "--hard", &previous])?;
     fs::write(release, b"release")?;
     let terminal = await_terminal(&store, attempt, &call)?;
-    assert_terminal_outcome(&terminal, provenant_run::Outcome::ReviewRequired)?;
-    assert!(
-        matches!(terminal.state, provenant_run::AttemptState::Terminal { reason: Some(reason), .. } if reason == "protected changes require review; handoff declared done but settlement was not successful")
-    );
+    assert_terminal_outcome(&terminal, provenant_run::Outcome::Succeeded)?;
     assert_eq!(
         git(&rig, &["-C", path_text, "rev-parse", "HEAD"])?,
         previous
@@ -1139,11 +1140,10 @@ fn writer_reconcile_refuses_unfinished_cherry_pick_and_releases() -> Result {
         store.record(attempt, &call)?.state,
         provenant_run::AttemptState::Terminal { .. }
     ));
-    // Incomplete quarantine cannot verify writer facts: the sealed decision is
-    // unsettled, with a retryable import and the custody fence retained.
-    let snapshot_path = attempt_path.join("quarantine/snapshot.json");
-    let baseline = fs::read(&snapshot_path)?;
-    fs::write(&snapshot_path, b"{}")?;
+    // Temporarily hide the private objects to force a retryable import failure.
+    let objects = attempt_path.join("tmp/candidate-0/git-objects");
+    let hidden_objects = attempt_path.join("tmp/candidate-0/git-objects-hidden");
+    fs::rename(&objects, &hidden_objects)?;
     let settling = store.reconcile_for_fixture(record.run_id, &provider, &call)?;
     assert!(
         matches!(settling.as_slice(), [(id, provenant_run::Reconciled::Settling { .. })] if *id == attempt),
@@ -1154,7 +1154,7 @@ fn writer_reconcile_refuses_unfinished_cherry_pick_and_releases() -> Result {
         provenant_run::Outcome::Unsettled,
     )?;
     assert!(!attempt_path.join("quarantine/manifest.json").exists());
-    fs::write(snapshot_path, baseline)?;
+    fs::rename(hidden_objects, objects)?;
     // The operation remains unfinished when the durable exit is recovered.
     fs::write(
         writer
@@ -1165,7 +1165,7 @@ fn writer_reconcile_refuses_unfinished_cherry_pick_and_releases() -> Result {
         b"unfinished cherry-pick",
     )?;
     // The backoff itself has unit coverage. Emulate its expiry so this fixture
-    // can exercise recovery of the repaired archive without a real-time wait.
+    // can exercise recovery of the private objects without a real-time wait.
     let progress = attempt_path.join("settlement-progress.json");
     let mut journal: Value = serde_json::from_slice(&fs::read(&progress)?)?;
     journal["retry_after_ms"] = 0.into();
