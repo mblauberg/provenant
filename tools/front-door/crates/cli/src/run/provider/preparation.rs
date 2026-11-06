@@ -2441,11 +2441,14 @@ pub(super) fn prepare_candidates(
         // available. The token travels only in the live launch environment.
         if writer.is_none()
             && task.access.network(true) == NetworkAccess::Open
-            && matches!(adapter.id(), "codex" | "claude")
+            && adapter_spec.is_some_and(|spec| spec.github_auth.is_some())
             && let Ok(gh) = locate("gh")
         {
             super::gh_auth::inject(&executor, &gh, &home, cancel, &mut spec.env);
-            if adapter.id() == "codex" && spec.env.iter().any(|(key, _)| key == "GH_TOKEN") {
+            if adapter_spec.is_some_and(|spec| {
+                spec.github_auth == Some(provenant_records::GithubAuth::ShellEnvironment)
+            }) && spec.env.iter().any(|(key, _)| key == "GH_TOKEN")
+            {
                 super::gh_auth::codex_shell_environment(&spec.env, &mut spec.argv);
             }
         }
