@@ -778,12 +778,7 @@ impl LaunchConfinement {
     ) -> Result<Vec<OsString>> {
         let executor =
             SystemExecutor::new(1).map_err(error("initialise writer system executor", None))?;
-        let config = provenant_confinement::run_config::RunConfig::read(&self.state_root)
-            .map_err(error("read launch resource limits", None))?;
-        let limits = ProfileLimits {
-            grant_limit: config.grant_limit,
-            profile_limit_bytes: config.profile_limit_bytes,
-        };
+        let limits = launch_resource_limits(&self.state_root);
         let backend = system_backend_with_limits(
             &BackendContext {
                 executor: &executor,
@@ -791,7 +786,7 @@ impl LaunchConfinement {
                 #[cfg(target_os = "macos")]
                 env: &[],
             },
-            limits,
+            limits.limits,
         )
         .map_err(RunError::Confinement)?;
         let writer = self.writer.as_ref().map(|w| (&w.worktree, &w.branch));

@@ -1700,7 +1700,7 @@ mod tests {
         lane.codex(&mut codex)?;
         assert!(codex.is_empty());
         let mut claude = Vec::new();
-        let setup = lane.claude(Path::new("/fixture/scratch"), &mut claude, "Bash")?;
+        let setup = lane.claude(Path::new("/fixture/scratch"), &mut claude, "Bash", &[])?;
         let documents: Vec<Value> = setup
             .iter()
             .filter_map(|step| match step {

@@ -2384,6 +2384,7 @@ mod user_skills_tests {
                         route: &route,
                         confined: &plan,
                         prompt: &prompt,
+                        images: &[],
                         command: None,
                         continuation: None,
                         grant_digest: "fixture",
