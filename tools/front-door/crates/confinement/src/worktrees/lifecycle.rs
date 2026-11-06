@@ -283,6 +283,7 @@ fn list_impl(
             }
         };
         let info = WorktreeInfo {
+            warnings: Vec::new(),
             path,
             branch: branch_text,
             head: entry.head,
@@ -304,6 +305,15 @@ pub fn create(
     context: &WorktreeContext<'_>,
     request: WorktreeCreate,
     cancel: &CancelToken,
+) -> Result<WorktreeInfo, WorktreeError> {
+    create_with_default(context, request, cancel, None)
+}
+
+fn create_with_default(
+    context: &WorktreeContext<'_>,
+    request: WorktreeCreate,
+    cancel: &CancelToken,
+    default: Option<(GitOid, Vec<String>)>,
 ) -> Result<WorktreeInfo, WorktreeError> {
     validate_binding(context)?;
     let branch = GitRefName::branch(&request.branch).map_err(|_| WorktreeError::InvalidRequest)?;
@@ -352,6 +362,15 @@ pub fn create(
         }
     }
     let create_branch = existing.is_none();
+    if create_branch && request.base.is_none() && default.is_none() {
+        // Network discovery does not own the repository registry. Re-enter all
+        // inventory, collision and branch checks after it completes, retaining
+        // only the exact commit the remote fetch proved.
+        drop(_lock);
+        let default = default_creation_base(context, facts, cancel)?;
+        return create_with_default(context, request, cancel, Some(default));
+    }
+
     if create_branch {
         let remote = run_git(context, context.repo, GitRead::RemoteBranchTips, cancel)?;
         if exit_code(&remote)? != 0 {
@@ -382,7 +401,7 @@ pub fn create(
     } else if let Some(base) = request.base.as_deref() {
         pin_revision(context, facts, base, cancel)?
     } else {
-        default_creation_base(context, facts, cancel)?
+        default.as_ref().ok_or(WorktreeError::InvalidRequest)?.0
     };
     let worktree_root = match context
         .repo
@@ -485,6 +504,11 @@ pub fn create(
         Occupancy::census_unknown(target.clone(), context.workers.incomplete_census_detail())
     });
     Ok(WorktreeInfo {
+        warnings: if create_branch && request.base.is_none() {
+            default.map_or_else(Vec::new, |(_, warnings)| warnings)
+        } else {
+            Vec::new()
+        },
         path: target.clone(),
         branch: Some(branch.as_str().to_owned()),
         head: entry.head,
@@ -499,7 +523,7 @@ fn default_creation_base(
     context: &WorktreeContext<'_>,
     facts: &RepoFacts,
     cancel: &CancelToken,
-) -> Result<GitOid, WorktreeError> {
+) -> Result<(GitOid, Vec<String>), WorktreeError> {
     match crate::utility::fetch_missing_remote_branch(
         context.executor,
         context.repo,
@@ -513,7 +537,7 @@ fn default_creation_base(
             let revision =
                 GitRevision::new(oid.to_string()).map_err(|_| WorktreeError::InvalidOutput)?;
             if let Ok(pinned) = facts.resolve_revision(context, revision, cancel) {
-                return Ok(pinned);
+                return Ok((pinned, Vec::new()));
             }
         }
         Err(crate::utility::UtilityError::Cancelled)
@@ -532,18 +556,20 @@ fn default_creation_base(
                 error
             }
         })?;
+    let warning = default_base_warning(oid);
     let _ = write_default_base_warning(&mut std::io::stderr().lock(), oid);
-    Ok(oid)
+    Ok((oid, vec![warning]))
+}
+
+fn default_base_warning(oid: GitOid) -> String {
+    format!("could not fetch origin's default branch; using local HEAD {oid}")
 }
 
 pub(super) fn write_default_base_warning(
     output: &mut impl std::io::Write,
     oid: GitOid,
 ) -> std::io::Result<()> {
-    writeln!(
-        output,
-        "warning: could not fetch origin's default branch; using local HEAD {oid}"
-    )
+    writeln!(output, "warning: {}", default_base_warning(oid))
 }
 
 /// Undo a `worktree add` that failed or was killed part-way. Only what this
@@ -969,6 +995,7 @@ pub(super) fn remove_tree_when(
     // Keep writer exclusion through cache detachment and verified deletion.
     // Cleanup remains best-effort after Git has removed the worktree.
     let info = WorktreeInfo {
+        warnings: Vec::new(),
         path: canonical,
         branch: entry
             .branch

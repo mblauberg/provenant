@@ -392,3 +392,29 @@ fn writer_disk_policy_refusal_keeps_disk_facts_and_safe_recovery() -> Result<(),
     );
     Ok(())
 }
+
+#[test]
+fn retained_tree_diagnostics_preserve_condition_and_occupancy() {
+    use provenant_confinement::worktrees::{Occupancy, WorktreeCondition};
+    for (condition, label) in [
+        (WorktreeCondition::Clean, "clean checkout"),
+        (WorktreeCondition::Ignored, "ignored files present"),
+        (WorktreeCondition::Dirty, "uncommitted edits present"),
+        (
+            WorktreeCondition::GitOperationInProgress,
+            "Git operation in progress",
+        ),
+        (WorktreeCondition::Unknown, "cleanliness unknown"),
+    ] {
+        let note = dispatch::created_tree_state(condition, &Occupancy::Held);
+        assert_eq!(note, format!("{label}; writer custody held"));
+    }
+    let note = dispatch::created_tree_state(
+        WorktreeCondition::Clean,
+        &Occupancy::census_unknown("/fixture".into(), "census incomplete"),
+    );
+    assert!(note.contains("clean checkout; writer occupancy unknown"));
+    assert!(note.contains("census incomplete"));
+    assert!(!note.contains("live writer"));
+    assert!(!note.contains("for gc"));
+}

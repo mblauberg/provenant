@@ -2580,7 +2580,7 @@ fn opus_writer_dispatch_advises_a_cheaper_route() -> Result {
         let out = rig.command(&args)?;
         assert_eq!(
             code(&out),
-            0,
+            if cfg!(target_os = "macos") { 0 } else { 1 },
             "{} {}",
             String::from_utf8_lossy(&out.stdout.bytes),
             String::from_utf8_lossy(&out.stderr.bytes)
@@ -2588,7 +2588,16 @@ fn opus_writer_dispatch_advises_a_cheaper_route() -> Result {
         let stderr = String::from_utf8_lossy(&out.stderr.bytes);
         assert!(!stderr.contains("not in the catalogue"), "{stderr}");
         let reply: Value = serde_json::from_slice(&out.stdout.bytes)?;
-        assert_eq!(reply["status"], "ok", "{reply}");
+        if cfg!(target_os = "macos") {
+            assert_eq!(reply["status"], "ok", "{reply}");
+        } else {
+            assert_eq!(reply["status"], "refused", "{reply}");
+            let lane = &reply["data"]["lanes"][0];
+            assert_eq!(lane["state"], "rejected", "{lane}");
+            assert_eq!(lane["terminal_cause"], "unsupported_platform", "{lane}");
+            assert!(lane["started_at"].is_null(), "{lane}");
+            assert!(lane["applied_route"].is_null(), "{lane}");
+        }
         if !writer || suppress || model.contains("sonnet") {
             assert!(!stderr.contains("advisory"), "{stderr}");
         } else {
@@ -3071,7 +3080,7 @@ fn claude_dispatch(host_native: bool, pool: bool) -> Result {
     ])?;
     assert_eq!(
         code(&out),
-        0,
+        if cfg!(target_os = "macos") { 0 } else { 1 },
         "{} {}",
         String::from_utf8_lossy(&out.stdout.bytes),
         String::from_utf8_lossy(&out.stderr.bytes)
@@ -5710,7 +5719,7 @@ fn owned_dispatch_refuses_adopted_owner_and_cleans_refused_creation() -> Result 
             result["error"]["message"]
                 .as_str()
                 .unwrap_or_default()
-                .contains("new managed worktree retained for gc"),
+                .contains("new managed worktree retained at"),
             "{result}"
         );
         let admin = rig.execute(

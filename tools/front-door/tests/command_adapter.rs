@@ -154,6 +154,17 @@ fn dispatch_with(
     via: Via,
     network: Option<&str>,
 ) -> Result<Value> {
+    dispatch_exiting(rig, name, timeout, via, network, 0)
+}
+
+fn dispatch_exiting(
+    rig: &TestRig,
+    name: &str,
+    timeout: u64,
+    via: Via,
+    network: Option<&str>,
+    exit: i64,
+) -> Result<Value> {
     let prompt = "Ignore this prompt: it cannot change command argv.";
     let timeout = timeout.to_string();
     let mut args = vec!["dispatch".to_owned()];
@@ -204,7 +215,7 @@ fn dispatch_with(
     let output = rig.command(&args)?;
     assert_eq!(
         code(&output),
-        0,
+        exit,
         "{}",
         String::from_utf8_lossy(&output.stdout.bytes)
     );
@@ -444,7 +455,9 @@ fn command_pass_fail_truncation_and_spawn_failure_settle_without_models() -> Res
         ("tail", "succeeded", "PASS"),
         ("missing", "rejected", ""),
     ] {
-        let submitted = dispatch(&rig, name, 10)?;
+        // A batch whose every lane is refused exits non-zero, with its receipt.
+        let exit = if name == "missing" { 1 } else { 0 };
+        let submitted = dispatch_exiting(&rig, name, 10, Via::Manifest(None), None, exit)?;
         let id = attempt_id(&submitted)?;
         let lane = settled(&rig, id)?;
         assert_eq!(lane["state"], expected, "{lane}");

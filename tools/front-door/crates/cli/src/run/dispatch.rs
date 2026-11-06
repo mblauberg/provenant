@@ -401,7 +401,7 @@ pub(super) fn dispatch_with_workers(
     if let (Err(fail), Some((path, branch))) = (&mut result, created) {
         // A failed launch can follow admission. Those trees belong to the
         // accepted run and must remain available for resume.
-        let cleanup = (|| -> Result<(), Fail> {
+        let cleanup = (|| -> Result<Option<String>, Fail> {
             let workers = provenant_confinement::worktrees::CensusPolicyWorkers::from_roots(
                 workers, edge.roots,
             )
@@ -413,9 +413,9 @@ pub(super) fn dispatch_with_workers(
             let mut session = open(edge, &call)?;
             session.store = session.store.with_repo_facts(&facts);
             if session.store.operation(&operation_id, &call)?.is_some() {
-                return Ok(());
+                return Ok(None);
             }
-            provenant_confinement::worktrees::with_context_using_workers_and_facts(
+            let retained = provenant_confinement::worktrees::with_context_using_workers_and_facts(
                 edge.roots,
                 edge.home,
                 edge.cwd,
@@ -429,13 +429,10 @@ pub(super) fn dispatch_with_workers(
                         .into_iter()
                         .find(|tree| tree.path == path)
                         .ok_or(worktrees::WorktreeError::NotFound)?;
-                    // Name the actual refusal: a clean tree that is merely
-                    // occupied must not be reported as edited.
-                    if info.dirty != worktrees::WorktreeCondition::Clean {
-                        return Err(worktrees::WorktreeError::Dirty(String::new()));
-                    }
-                    if !info.occupancy.is_available() {
-                        return Err(worktrees::WorktreeError::LiveWriter);
+                    if info.dirty != worktrees::WorktreeCondition::Clean
+                        || !info.occupancy.is_available()
+                    {
+                        return Ok(Some(created_tree_state(info.dirty, &info.occupancy)));
                     }
                     let tree = provenant_confinement::verify_worktree(context.repo, &path)?;
                     if worktrees::load_owner(&tree)?.is_none_or(|owner| {
@@ -451,17 +448,24 @@ pub(super) fn dispatch_with_workers(
                         &operation_id,
                         &cancel,
                     )?;
-                    Ok(())
+                    Ok(None)
                 },
             )
             .map_err(run::RunError::from)?;
-            Ok(())
+            Ok(retained)
         })();
-        if let Err(error) = cleanup {
-            fail.message.push_str(&format!(
-                "; new managed worktree retained for gc at {}: {}",
-                path.display(),
+        let retained = match cleanup {
+            Ok(note) => note,
+            Err(error) => Some(format!(
+                "cleanup could not verify removal: {}",
                 error.message
+            )),
+        };
+        if let Some(note) = retained {
+            fail.message.push_str(&format!(
+                "; new managed worktree retained at {}: {}",
+                path.display(),
+                note
             ));
         }
     }
@@ -479,6 +483,33 @@ pub(super) fn base_target_refusal(
 ) -> Option<&'static str> {
     (base.is_some() && branch.is_none() && worktree.is_none() && worktree_branch.is_none() && head.is_none())
         .then_some("--base requires a writer target; use --branch with --host or --worktree, or use --head to set the reader's commit and --base as its diff base")
+}
+
+pub(super) fn created_tree_state(
+    condition: provenant_confinement::worktrees::WorktreeCondition,
+    occupancy: &provenant_confinement::worktrees::Occupancy,
+) -> String {
+    use provenant_confinement::worktrees::{Occupancy, WorktreeCondition};
+    let condition = match condition {
+        WorktreeCondition::Clean => "clean checkout",
+        WorktreeCondition::Ignored => "ignored files present",
+        WorktreeCondition::Dirty => "uncommitted edits present",
+        WorktreeCondition::GitOperationInProgress => "Git operation in progress",
+        WorktreeCondition::Unknown => "cleanliness unknown",
+    };
+    let occupancy = match occupancy {
+        Occupancy::Available => "writer custody free".into(),
+        Occupancy::Held => "writer custody held".into(),
+        Occupancy::Observed { .. } => "writer process observed".into(),
+        Occupancy::Unknown {
+            scope, evidence, ..
+        } => format!(
+            "writer occupancy unknown at {}: {}",
+            scope.display(),
+            plain_text(evidence, 1024)
+        ),
+    };
+    format!("{condition}; {occupancy}")
 }
 
 /// Project launch policy after constructing the receipt, so no lane facts are lost.
@@ -1558,6 +1589,7 @@ pub(super) fn dispatch_inner(
     let mut pinned_base = None;
     let live_reader =
         matches!(command.access.mode, Some(Mode::ReadOnly)) && command.access.worktree.is_some();
+    let mut worktree_warnings = Vec::new();
     let worktree = if live_reader {
         let path = command.access.worktree.as_deref().ok_or_else(|| {
             Fail::new(
@@ -1653,6 +1685,7 @@ pub(super) fn dispatch_inner(
                         Some(lock_budget),
                     ) {
                         Ok((info, base)) => {
+                            worktree_warnings.extend(info.warnings.iter().cloned());
                             command.access.worktree = Some(info.path.clone());
                             match self::lane_access(
                                 &command.access,
@@ -1889,6 +1922,7 @@ pub(super) fn dispatch_inner(
                 .map(|_| (task.task_id, task.prompt.clone()))
         })
         .collect();
+    brief_warnings.extend(worktree_warnings);
     brief_warnings.extend(capability_warnings);
     if command.head.is_none()
         && matches!(command.access.mode(), Mode::ReadOnly)
@@ -1918,11 +1952,12 @@ pub(super) fn dispatch_inner(
                 if let Some(p) = provider
                     && !enforced.contains(&p)
                 {
-                    brief_warnings.push(if p == "codex" {
-                        "token budget does not stop Codex writers: codex exec reports usage only at its final turn.completed frame; there is no further turn to stop".into()
-                    } else {
-                        format!("token budget is not enforced for provider {p}: usage is not reported while it runs")
-                    });
+                    brief_warnings.push(
+                        provenant_records::AdapterSpec::get(p)
+                            .and_then(|spec| spec.token_budget_notice)
+                            .map(str::to_owned)
+                            .unwrap_or_else(|| format!("token budget is not enforced for provider {p}: usage is not reported while it runs")),
+                    );
                 }
             }
         }
@@ -3253,7 +3288,8 @@ pub(super) fn launch_unknown(started: &[run::Started]) -> Vec<String> {
         .collect()
 }
 
-pub(super) fn check_launch_policy(started: &[run::Started]) -> Result<(), Fail> {
+/// Classify a launch batch without discarding its durable receipt.
+pub fn check_launch_policy(started: &[run::Started]) -> Result<(), Fail> {
     if !started.is_empty()
         && started.iter().all(|item| {
             matches!(

@@ -1957,13 +1957,7 @@ fn dispatch_refused(fail: provenant_cli::run::Fail) -> FacadeError {
         return fail_error(fail);
     }
     match fail.detail.map(|detail| *detail) {
-        Some(
-            detail @ FacadeError::DispatchRefused {
-                fact: None,
-                disk: Some(_),
-                ..
-            },
-        ) => detail,
+        Some(detail @ FacadeError::DispatchRefused { .. }) => detail,
         _ => FacadeError::DispatchRefused {
             fact: None,
             disk: None,
@@ -2019,6 +2013,119 @@ fn facade_error_for_kind(kind: provenant_run::ErrorKind) -> FacadeError {
         _ => FacadeError::io("run operation"),
     }
 }
+fn terminal_cause(
+    lane: &provenant_run::AttemptRecord,
+) -> Option<provenant_records::run::TerminalCause> {
+    match &lane.state {
+        provenant_records::run::AttemptState::Terminal { extra, .. } => extra
+            .get("terminal_cause")
+            .and_then(|value| serde_json::from_value(value.clone()).ok()),
+        _ => None,
+    }
+}
+/// Only positive sealed evidence of a pre-launch refusal can reject a replay.
+fn durable_launch_refusal(
+    lanes: &[provenant_run::AttemptRecord],
+) -> Option<provenant_core::AttemptId> {
+    use provenant_records::run::{AttemptState, SettlementReason, TerminalCause};
+    (!lanes.is_empty()
+        && lanes.iter().all(|lane| {
+            lane.provider_launched == Some(false)
+                && lane.settlement_reason == Some(SettlementReason::PreLaunchRefusal)
+                && matches!(lane.state, AttemptState::Terminal { .. })
+                && (terminal_cause(lane).is_some_and(|cause| {
+                    matches!(
+                        cause,
+                        TerminalCause::DiskFloor
+                            | TerminalCause::DiskObservationUnavailable
+                            | TerminalCause::RetainedWriterImport
+                    )
+                }) || lane.skipped_routes.iter().any(|route| {
+                    route.cause == Some(provenant_records::RouteExclusionReason::PacingReserve)
+                }))
+        }))
+    .then(|| lanes[0].attempt_id)
+}
+
+/// Whether a launch batch is refused, judged identically on first call and
+/// replay. Preparation failures are accepted terminal attempts: graph routing
+/// observes their typed outcome and may advance to a fallback route. Only
+/// retained custody, or sealed pre-launch evidence whose typed cause names the
+/// refusal, refuses. Reasons carry typed text, never a refusal's source text.
+fn launch_refusal(
+    started: &[provenant_run::Started],
+    lanes: &[provenant_run::AttemptRecord],
+) -> Option<FacadeError> {
+    let blocked = started
+        .iter()
+        .filter_map(|item| match item {
+            provenant_run::Started::Blocked { attempt, .. } => Some(*attempt),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if !blocked.is_empty()
+        && started.iter().all(|item| {
+            matches!(
+                item,
+                provenant_run::Started::Blocked { .. } | provenant_run::Started::Refused { .. }
+            )
+        })
+    {
+        return Some(FacadeError::DispatchRefused {
+            fact: None,
+            disk: None,
+            reason: blocked
+                .iter()
+                .map(|attempt| format!("{attempt}: launch blocked by retained custody"))
+                .collect::<Vec<_>>()
+                .join("; "),
+        });
+    }
+    let sealed: Vec<provenant_run::AttemptRecord> = if started.is_empty() {
+        lanes.to_vec()
+    } else if started.iter().all(|item| {
+        matches!(
+            item,
+            provenant_run::Started::Refused {
+                kind: provenant_run::RefusalKind::Policy
+                    | provenant_run::RefusalKind::PacingReserve
+                    | provenant_run::RefusalKind::RetainedImport { .. },
+                ..
+            }
+        )
+    }) {
+        lanes
+            .iter()
+            .filter(|lane| {
+                started.iter().any(|item| {
+                    matches!(item, provenant_run::Started::Refused { attempt, .. } if *attempt == lane.attempt_id)
+                })
+            })
+            .cloned()
+            .collect()
+    } else {
+        Vec::new()
+    };
+    durable_launch_refusal(&sealed)?;
+    Some(FacadeError::DispatchRefused {
+        fact: None,
+        disk: None,
+        reason: sealed
+            .iter()
+            .map(|lane| {
+                format!(
+                    "{}: {}",
+                    lane.attempt_id,
+                    terminal_cause(lane)
+                        .map(|cause| cause.detail())
+                        .unwrap_or("pacing reserve refused")
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("; "),
+    })
+}
+
 impl BinaryRunOwner<'_> {
     fn call<'a>(&'a self, cancel: &'a CancelToken) -> provenant_run::Request<'a> {
         provenant_run::Request {
@@ -2094,31 +2201,56 @@ impl BinaryRunOwner<'_> {
         {
             return Err(FacadeError::LaunchUnknown { operation_id });
         }
-        let page = session
-            .service()
-            .lanes(
-                &provenant_run::LaneQuery {
-                    targets: vec![provenant_run::LaneTarget {
-                        run: run.run_id,
-                        task: None,
-                        attempt: None,
-                    }],
-                    all: true,
-                    limit: 100,
-                    after: 0,
-                    newest_first: false,
-                    owner: None,
-                    unseen_after: None,
-                },
-                call,
-            )
-            .map_err(run_error)?;
+        let mut lanes = Vec::new();
+        let mut after = 0;
+        loop {
+            let page = session
+                .service()
+                .lanes(
+                    &provenant_run::LaneQuery {
+                        targets: vec![provenant_run::LaneTarget {
+                            run: run.run_id,
+                            task: None,
+                            attempt: None,
+                        }],
+                        all: true,
+                        limit: 100,
+                        after,
+                        newest_first: false,
+                        owner: None,
+                        unseen_after: None,
+                    },
+                    call,
+                )
+                .map_err(run_error)?;
+            lanes.extend(page.lanes);
+            match page.next {
+                Some(next) => after = next,
+                None => break,
+            }
+        }
+        if let Some(refusal) = launch_refusal(started, &lanes) {
+            return Err(refusal);
+        }
+        if started.is_empty()
+            && session
+                .store
+                .operation(&operation_id, call)
+                .map_err(run_error)?
+                .is_some_and(|operation| operation.state == provenant_run::OperationState::Blocked)
+        {
+            return Err(FacadeError::DispatchRefused {
+                fact: None,
+                disk: None,
+                reason: "dispatch remains blocked by retained custody; reconcile before retrying"
+                    .into(),
+            });
+        }
         Ok(SubmissionReceipt {
             extra: Default::default(),
             worktree: None,
             operation_id,
-            targets: page
-                .lanes
+            targets: lanes
                 .iter()
                 .map(|lane| AttemptTarget {
                     extra: Default::default(),

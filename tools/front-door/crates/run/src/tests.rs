@@ -539,6 +539,82 @@ fn refusal_notice_obligation_survives_restart_and_completes_only_for_same_facts(
     Ok(())
 }
 #[test]
+fn corrupt_refusal_notices_do_not_hide_valid_notices_after_a_full_page() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let context = context(temp.path())?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context, &call)?;
+    let mut input = input();
+    input.request.chair = Some(ChairBinding {
+        extra: Default::default(),
+        host: provenant_core::HostId::from_bytes([1; 16]),
+        actor: ActorId::from_bytes([2; 16]),
+        session: None,
+    });
+    let mut expected = Vec::new();
+    for n in 0_u8..164 {
+        input.operation_id = OperationId::parse(&format!("corrupt-notice-{n}"))?;
+        input.run_id = RunId::from_bytes([n; 16]);
+        let record = store.record_refusal(
+            &input,
+            provenant_records::diagnostic::Diagnostic::new("REFUSED"),
+            None,
+            &call,
+        )?;
+        if n >= 81 {
+            expected.push(record);
+            continue;
+        }
+        let mut value = serde_json::to_value(&record)?;
+        let mut operation = input.operation_id.to_string();
+        let raw = if n == 0 {
+            b"{malformed JSON".to_vec()
+        } else {
+            match n % 3 {
+                0 => {
+                    value["schema_version"] = serde_json::json!(999);
+                    serde_json::to_vec(&value)?
+                }
+                1 => {
+                    operation = format!("invalid id {n}");
+                    serde_json::to_vec(&value)?
+                }
+                _ => {
+                    value["operation_id"] = serde_json::json!("another-operation");
+                    serde_json::to_vec(&value)?
+                }
+            }
+        };
+        store.db.execute(
+            "UPDATE operations SET operation=?1,record=?2 WHERE operation=?3",
+            rusqlite::params![operation, raw, input.operation_id.as_str()],
+        )?;
+    }
+    let first = store.pending_refusal_notices_after(80, 0, &call)?;
+    assert_eq!(first.len(), 80);
+    assert_eq!(
+        first
+            .iter()
+            .map(|(_, record)| record.clone())
+            .collect::<Vec<_>>(),
+        expected[..80]
+    );
+    let tail = store.pending_refusal_notices_after(80, first[79].0, &call)?;
+    assert_eq!(
+        tail.into_iter()
+            .map(|(_, record)| record)
+            .collect::<Vec<_>>(),
+        expected[80..]
+    );
+    for record in &expected {
+        store.complete_refusal_notice(record, &call)?;
+    }
+    assert!(store.pending_refusal_notices(80, &call)?.is_empty());
+    Ok(())
+}
+
+#[test]
 fn recorded_refusal_freezes_the_notice_setting() -> TestResult {
     let temp = tempfile::tempdir()?;
     let context = context(temp.path())?;
