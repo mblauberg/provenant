@@ -1,4 +1,30 @@
 #[test]
+fn structured_errors_use_the_same_owner_projection_for_all_envelopes() {
+    use provenant_fabric_runtime::coordination::InputError;
+    let errors = [
+        ServiceError::Invalid(InputError::new("tasks[1].title")),
+        ServiceError::Facade(FacadeError::invalid(
+            provenant_fabric_runtime::coordination::facade::InvalidInputDetail::Schema,
+        )),
+        ServiceError::ResultTooLarge,
+        ServiceError::Cli {
+            code: "CLI_FAILED".into(),
+            message: "TOKEN_SENTINEL".into(),
+            data: serde_json::Value::Null,
+        },
+    ];
+    for error in errors {
+        let projection = error.diagnostic();
+        let wire = error.structured_error();
+        assert_eq!(wire["code"], projection.code);
+        assert_eq!(wire["detail"].as_str(), projection.detail.as_deref());
+        assert_eq!(wire["next"].as_str(), projection.next.as_deref());
+        assert_eq!(wire["hint"].as_str(), projection.next.as_deref());
+        assert!(!wire.to_string().contains("TOKEN_SENTINEL"));
+    }
+}
+
+#[test]
 fn graph_admission_error_has_safe_field_and_action() {
     let template = ServiceError::Facade(FacadeError::invalid(
         provenant_fabric_runtime::coordination::facade::InvalidInputDetail::TemplateInvalid,
@@ -30,6 +56,22 @@ fn graph_admission_error_has_safe_field_and_action() {
     );
     assert!(value["next"].is_string());
     assert!(!value.to_string().contains("TOKEN_SENTINEL"));
+}
+
+#[test]
+fn malformed_document_admission_reaches_mcp_projection() {
+    use provenant_fabric_runtime::graph::GraphDocument;
+    let document: GraphDocument = serde_json::from_value(serde_json::json!({
+        "schema_version": 99, "graph_id": "invalid", "nodes": []
+    }))
+    .unwrap();
+    let cause = document.admit(&Default::default()).unwrap_err();
+    let error = ServiceError::Facade(FacadeError::graph_admission(cause));
+    let projection = error.diagnostic();
+    let wire = error.structured_error();
+    assert_eq!(wire["code"], projection.code);
+    assert!(wire["detail"].as_str().unwrap().contains("schema_version"));
+    assert_eq!(wire["next"].as_str(), projection.next.as_deref());
 }
 
 #[test]

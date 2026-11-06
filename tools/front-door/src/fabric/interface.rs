@@ -2139,6 +2139,19 @@ mod tests {
         let path = directory.join("review.typo.toml");
         std::fs::write(&path, "accesz = \"read_only\"\n")?;
         let error = factory.template_library(None).unwrap_err();
+        let structured =
+            provenant_fabric_mcp::tools::ServiceError::Facade(error.clone()).structured_error();
+        assert_eq!(structured["code"], error.diagnostic().code);
+        assert!(
+            structured["detail"]
+                .as_str()
+                .is_some_and(|detail| detail.contains("accesz")),
+            "{structured}"
+        );
+        assert_eq!(
+            structured["next"].as_str(),
+            error.diagnostic().next.as_deref()
+        );
         let diagnostic = error.diagnostic();
         let text = diagnostic.detail.ok_or("agent diagnostic")?;
         assert!(text.contains("review.typo.toml"), "{text}");
