@@ -1586,6 +1586,13 @@ impl HostDeliveryContext {
         } else {
             None
         };
+        if checkout.is_some() {
+            // An index lock only excludes Git, not the parent's editor or
+            // provider process. Never read-tree into a checkout we do not own:
+            // even a clean preflight can race an overlapping file write.
+            // Keep the child's sealed commit available for explicit pickup.
+            return Err(RunError::IntegrationParentBusy { child_head: head });
+        }
         let candidate = if self
             .command(
                 &writer.worktree,
@@ -1617,7 +1624,10 @@ impl HostDeliveryContext {
                 "git",
                 &["merge-tree", "--write-tree", &expected, &head.to_string()],
                 stage,
-            )?;
+            ).map_err(|error| match error {
+                RunError::Delivery(Stage::Integrate) => RunError::IntegrationConflict { child_head: head },
+                error => error,
+            })?;
             let tree = GitOid::parse(tree.lines().next().unwrap_or_default())
                 .map_err(|_| RunError::Delivery(stage))?;
             let commit = self.command(
@@ -1693,150 +1703,6 @@ impl HostDeliveryContext {
             if verified != candidate.to_string() {
                 return Err(RunError::Delivery(Stage::Verify));
             }
-        } else if let Some(checkout) = checkout {
-            let parent_git_dir = self.command(
-                &writer.worktree,
-                "git",
-                &[
-                    "rev-parse",
-                    "--resolve-git-dir",
-                    checkout
-                        .join(".git")
-                        .to_str()
-                        .ok_or(RunError::Delivery(stage))?,
-                ],
-                stage,
-            )?;
-            let parent_git_dir =
-                std::fs::canonicalize(parent_git_dir).map_err(|_| RunError::Delivery(stage))?;
-            let common = self.common_git_dir(&writer.project, stage)?;
-            if !parent_git_dir.starts_with(common.join("worktrees")) {
-                return Err(RunError::Delivery(stage));
-            }
-            let mut parent = self.clone();
-            let parent_bound = parent.bound.as_mut().ok_or(RunError::Delivery(stage))?;
-            parent_bound.git_dir = parent_git_dir.clone();
-            parent_bound.host_cwd = checkout.clone();
-            parent
-                .environment
-                .retain(|(key, _)| key != b"GIT_COMMON_DIR");
-            parent.environment.push((
-                b"GIT_COMMON_DIR".to_vec(),
-                common.as_os_str().as_encoded_bytes().to_vec(),
-            ));
-            // Hold Git's index lock across checkout and explicit ref CAS so
-            // a concurrent checkout cannot redirect publication to another ref.
-            let index = parent_git_dir.join("index");
-            let lock = parent_git_dir.join("index.lock");
-            let mut held = std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&lock)
-                .map_err(|_| RunError::Delivery(stage))?;
-            let mut retain_recovery = false;
-            let operation = (|| {
-                use std::io::Write;
-                held.write_all(&std::fs::read(&index).map_err(|_| RunError::Delivery(stage))?)
-                    .map_err(|_| RunError::Delivery(stage))?;
-                if parent.command(&checkout, "git", &["rev-parse", "HEAD"], stage)? != expected
-                    || parent.command(&checkout, "git", &["symbolic-ref", "HEAD"], stage)?
-                        != destination
-                {
-                    return Err(RunError::IntegrationHeadMoved);
-                }
-                parent
-                    .environment
-                    .retain(|(key, _)| key != b"GIT_INDEX_FILE");
-                parent.environment.push((
-                    b"GIT_INDEX_FILE".to_vec(),
-                    lock.as_os_str().as_encoded_bytes().to_vec(),
-                ));
-                if self
-                    .cancellation
-                    .as_ref()
-                    .is_some_and(|cancel| cancel.is_cancelled())
-                {
-                    return Err(RunError::Delivery(stage));
-                }
-                // Once files can change, finish or roll back independently of
-                // request cancellation. Leave the index lock on uncertain I/O.
-                parent.cancellation = None;
-                let mut publisher = self.clone();
-                publisher.cancellation = None;
-                // A previous refused publication may have restored identical
-                // bytes with new stat data. Refresh the private index first.
-                parent.command(
-                    &checkout,
-                    "git",
-                    &["update-index", "-q", "--refresh"],
-                    stage,
-                )?;
-                parent.command(
-                    &checkout,
-                    "git",
-                    &[
-                        "read-tree",
-                        "--dry-run",
-                        "-m",
-                        "-u",
-                        &expected,
-                        &candidate.to_string(),
-                    ],
-                    stage,
-                )?;
-                retain_recovery = true;
-                // The two-tree merge keeps staged/unstaged edits and refuses
-                // overlap without stashing or resetting any parent work.
-                parent.command(
-                    &checkout,
-                    "git",
-                    &["read-tree", "-m", "-u", &expected, &candidate.to_string()],
-                    stage,
-                )?;
-                if let Err(error) = publisher.command(
-                    &writer.worktree,
-                    "git",
-                    &[
-                        "update-ref",
-                        "--no-deref",
-                        &destination,
-                        &candidate.to_string(),
-                        &expected,
-                    ],
-                    stage,
-                ) {
-                    let observed = publisher.command(
-                        &writer.worktree,
-                        "git",
-                        &["rev-parse", "--verify", &destination],
-                        stage,
-                    )?;
-                    if observed == expected {
-                        parent.command(
-                            &checkout,
-                            "git",
-                            &["read-tree", "-m", "-u", &candidate.to_string(), &expected],
-                            stage,
-                        )?;
-                        retain_recovery = false;
-                        return Err(error);
-                    }
-                    if observed != candidate.to_string() {
-                        return Err(error);
-                    }
-                    // An uncertain reply followed a successful ref update.
-                    // Finish publishing the prepared index instead of undoing it.
-                }
-                std::fs::rename(&lock, &index).map_err(|_| RunError::Delivery(stage))?;
-                retain_recovery = false;
-                Ok(())
-            })();
-            drop(held);
-            // Retain an uncertain checkout's index for operator recovery.
-            if !retain_recovery {
-                let _ = std::fs::remove_file(&lock);
-            }
-            operation?;
         } else {
             self.command(
                 &writer.worktree,
@@ -2287,6 +2153,9 @@ pub(crate) fn failed_state(error: &RunError) -> WriterDeliveryState {
             (Stage::PullRequest, Some(prepare_reason(error)))
         }
         RunError::IntegrationHeadMoved => (Stage::Integrate, None),
+        RunError::IntegrationParentBusy { .. } | RunError::IntegrationConflict { .. } => {
+            (Stage::Integrate, Some(prepare_reason(error)))
+        }
         RunError::DeliveryLimit { stage, .. } => (*stage, Some(prepare_reason(error))),
         RunError::DeliveryPrepare { .. } => (Stage::Prepare, Some(prepare_reason(error))),
         _ => (Stage::Push, None),
