@@ -501,8 +501,13 @@ impl RunStore {
                             tenths(left),
                             tenths(spacing)
                         )
-                    } else if let Some(hit) = self.writer_cap_hit(&ticket, call) {
-                        format!("host capacity: {} lane cap: {} of {} lanes active", hit.scope, hit.active, hit.limit)
+                    } else if let Some(hit) = self.lane_cap_hit(&ticket, call) {
+                        format!(
+                            "host capacity: {}: {} of {} active",
+                            hit.kind.description(),
+                            hit.active,
+                            hit.limit
+                        )
                     } else {
                         match resources.pressure() {
                             Ok(Some(pressure)) if pressure_threshold.defers(pressure) => {

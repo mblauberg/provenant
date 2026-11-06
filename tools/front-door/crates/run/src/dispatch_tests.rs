@@ -9611,7 +9611,7 @@ fn admission_wait_reason_names_the_reached_writer_cap() -> TestResult {
     );
     assert_eq!(
         waits[0].waiting_for,
-        "host capacity: host lane cap: 1 of 1 lanes active"
+        "host capacity: host writer lanes: 1 of 1 active"
     );
     Ok(())
 }
