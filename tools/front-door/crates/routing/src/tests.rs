@@ -6272,14 +6272,6 @@ fn alias_skips_known_spent_members_and_refuses_all_with_resets()
         resolve(&request("codex/gpt-6-luna")?, &ctx)?.model,
         "gpt-6-luna"
     );
-    let mut partial = spent("codex/gpt-6-luna", 400)?;
-    partial.snapshot.status = QuotaStatus::Available;
-    let partial_readings = [partial];
-    let partial_ctx = RoutingContext {
-        quota: &partial_readings,
-        ..ctx
-    };
-    assert_eq!(resolve(&alias, &partial_ctx)?.model, "gpt-6.1-sol");
     let readings = [first, spent("codex/gpt-6.1-sol", 300)?];
     let ctx = RoutingContext {
         quota: &readings,
@@ -6298,5 +6290,65 @@ fn alias_skips_known_spent_members_and_refuses_all_with_resets()
             .iter()
             .any(|e| e.contains("codex/gpt-6.1-sol") && e.contains("300"))
     );
+    Ok(())
+}
+
+#[test]
+fn alias_skips_stale_go_allowance_exhaustion() -> Result<(), Box<dyn std::error::Error>> {
+    let catalogue = Catalogue::bundled()?;
+    let config: RoutingConfig = serde_json::from_value(serde_json::json!({"pools":{"trial":[
+        {"model":"opencode/opencode-go/deepseek-v4.1-flash","weight":100},
+        {"model":"codex/gpt-6-luna","weight":1}
+    ]}}))?;
+    let records = [
+        availability(),
+        AvailabilityRecord {
+            adapter: "opencode".into(),
+            account_key: Some("go".into()),
+            ..availability()
+        },
+    ];
+    let access = [
+        AccessContext {
+            adapter: "codex",
+            disclosure_ref: "fixture",
+            confinement_ref: "fixture",
+        },
+        AccessContext {
+            adapter: "opencode",
+            disclosure_ref: "fixture",
+            confinement_ref: "fixture",
+        },
+    ];
+    let mut q = quota(
+        "opencode/opencode-go/deepseek-v4.1-flash",
+        "go",
+        provenant_quota::QuotaStatus::Available,
+        1,
+        50,
+        60,
+    )?;
+    q.snapshot.account.adapter = "opencode".into();
+    q.snapshot.windows.push(provenant_quota::QuotaWindow {
+        pool: "five_hour".into(),
+        window_seconds: Some(18000),
+        used_basis_points: 10000,
+        resets_unix_seconds: Some(400),
+    });
+    let readings = [q];
+    let ctx = RoutingContext {
+        availability: &records,
+        access: &access,
+        quota: &readings,
+        ..context(&catalogue, &config, now()?)
+    };
+    let mut alias = request("codex/gpt-6-luna")?;
+    alias.choice = RouteChoice::NamedRoute(RouteName::parse("trial")?);
+    for seed in 0..20 {
+        assert_eq!(
+            resolve_with_seed(&alias, &ctx, "go-exhaustion", seed)?.model,
+            "gpt-6-luna"
+        );
+    }
     Ok(())
 }
