@@ -1207,7 +1207,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
         &mut self,
         document: &provenant_fabric_runtime::graph::GraphDocument,
         subject: &str,
-    ) -> Result<Vec<String>, String> {
+    ) -> Result<Vec<provenant_fabric_runtime::graph::RepairPanelSlot>, String> {
         let subject = provenant_core::GitOid::parse(subject).map_err(|error| error.to_string())?;
         let base = self
             .integration_base
@@ -1245,7 +1245,22 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
         let panel = routing
             .review
             .resolve_panel(&request, None, &paths, false)?;
-        Ok(panel.slots.into_iter().map(|slot| slot.lens).collect())
+        panel
+            .slots
+            .into_iter()
+            .map(|slot| {
+                let (key, route) = crate::preset::tier_route(&slot.lens, &slot.tier, None, true)?;
+                let mut fields = serde_json::Map::new();
+                fields.insert(key.into(), route);
+                Ok(provenant_fabric_runtime::graph::RepairPanelSlot {
+                    lens: slot.lens,
+                    route: fields.into(),
+                    family_group: slot
+                        .distinct_families
+                        .then(|| crate::preset::format_family_group(slot.group_index)),
+                })
+            })
+            .collect()
     }
 
     fn input_cap_source(&self) -> provenant_fabric_runtime::graph::InputCapSource {

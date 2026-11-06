@@ -123,11 +123,19 @@ impl AttemptOwner for FakeOwner {
         self.repair_growth_calls += 1;
         Ok(self.repair_growth)
     }
-    fn resolve_repair_panel(&mut self, _: &GraphDocument, _: &str) -> Result<Vec<String>, String> {
+    fn resolve_repair_panel(
+        &mut self,
+        _: &GraphDocument,
+        _: &str,
+    ) -> Result<Vec<RepairPanelSlot>, String> {
         self.repair_panel_calls += 1;
         self.repair_panel
             .clone()
             .ok_or_else(|| "fixture has no panel".into())
+            .map(|lenses| lenses.into_iter().enumerate().map(|(index, lens)| RepairPanelSlot {
+                lens, route: serde_json::json!({"route":{"alias":if index == 0 {"senior"} else {"principal"}}}),
+                family_group: Some("group-0".into()),
+            }).collect())
     }
     fn input_cap_source(&self) -> InputCapSource {
         self.input_cap_source
