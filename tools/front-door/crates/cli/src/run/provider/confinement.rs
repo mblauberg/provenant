@@ -1,4 +1,5 @@
 use super::*;
+use std::io::Write;
 
 /// Bind declared lane capabilities to the provider's confinement profile.
 pub(in crate::run) fn apply_lane_capabilities(
@@ -392,6 +393,12 @@ pub(super) fn read_only_plan(
             .ok()
             .and_then(|out| String::from_utf8(out.stdout.bytes).ok())
             .and_then(|text| provenant_core::GitOid::parse(text.trim()).ok());
+            if let Some(head) = head
+                && let Some(warning) =
+                    read_only_staleness_warning(&executor, &repo, &utility, budget, &cancel, head)
+            {
+                let _ = writeln!(std::io::stderr().lock(), "warning: {warning}");
+            }
             let plan = if live {
                 run::live_read_only_plan(&repo, &binding, request)
             } else if isolated {
@@ -415,6 +422,65 @@ pub(super) fn read_only_plan(
             .map(|plan| (plan, None, None, None))
             .map_err(|error| error.to_string()),
     }
+}
+
+/// Compare this checkout with the last fetched origin default ref. This is an
+/// advisory read only: no fetch occurs here, and absent or unusable Git data
+/// must not block a reader from launching.
+pub(super) fn read_only_staleness_warning(
+    executor: &dyn provenant_os::exec::Executor,
+    repo: &provenant_confinement::ReadOnlyRepo,
+    utility: &provenant_confinement::UtilityRuntime,
+    budget: provenant_confinement::UtilityBudget,
+    cancel: &provenant_core::CancelToken,
+    head: provenant_core::GitOid,
+) -> Option<String> {
+    use provenant_confinement::GitRead;
+    use provenant_os::exec::Termination;
+
+    let default = provenant_confinement::run_read_utility(
+        executor,
+        GitRead::ResolveRevision {
+            revision: provenant_confinement::repo::GitRevision::new("refs/remotes/origin/HEAD")
+                .ok()?,
+        },
+        repo,
+        utility,
+        budget,
+        cancel,
+    )
+    .ok()?;
+    if default.termination != Termination::Exit(0) {
+        return None;
+    }
+    let default =
+        provenant_core::GitOid::parse(std::str::from_utf8(&default.stdout.bytes).ok()?.trim())
+            .ok()?;
+    let behind = provenant_confinement::run_read_utility(
+        executor,
+        GitRead::AncestorCount {
+            base: head,
+            head: default,
+        },
+        repo,
+        utility,
+        budget,
+        cancel,
+    )
+    .ok()?;
+    if behind.termination != Termination::Exit(0) {
+        return None;
+    }
+    let count = std::str::from_utf8(&behind.stdout.bytes)
+        .ok()?
+        .trim()
+        .parse::<u64>()
+        .ok()?;
+    (count > 0).then(|| {
+        format!(
+            "checkout is {count} commits behind origin's default branch; read-only lane will read {head}"
+        )
+    })
 }
 
 /// Publishing hands the lane the GitHub credential, so it needs the explicit

@@ -1,5 +1,26 @@
 use super::*;
 
+#[test]
+fn base_requires_a_writer_branch_or_worktree_target() {
+    let refusal = dispatch::base_target_refusal(Some("main"), None, None, None)
+        .expect("base without target should refuse");
+    assert!(refusal.contains("--branch"), "{refusal}");
+    assert!(refusal.contains("--worktree"), "{refusal}");
+    assert!(
+        dispatch::base_target_refusal(Some("main"), Some("feature/review"), None, None,).is_none()
+    );
+    assert!(
+        dispatch::base_target_refusal(
+            Some("main"),
+            None,
+            Some(Path::new(".worktrees/review")),
+            None,
+        )
+        .is_none()
+    );
+    assert!(dispatch::base_target_refusal(None, None, None, None).is_none());
+}
+
 fn reexec_test_in_lane(name: &str) -> Result<bool, Box<dyn std::error::Error>> {
     if !crate::fabric::in_lane() {
         return Ok(false);

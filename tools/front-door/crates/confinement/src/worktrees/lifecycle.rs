@@ -511,7 +511,7 @@ fn default_creation_base(
     ) {
         Ok(crate::utility::RemoteBase::Found(oid)) => {
             let revision =
-                GitRevision::new(&oid.to_string()).map_err(|_| WorktreeError::InvalidOutput)?;
+                GitRevision::new(oid.to_string()).map_err(|_| WorktreeError::InvalidOutput)?;
             if let Ok(pinned) = facts.resolve_revision(context, revision, cancel) {
                 return Ok(pinned);
             }

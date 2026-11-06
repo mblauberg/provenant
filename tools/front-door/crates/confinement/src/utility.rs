@@ -291,6 +291,12 @@ pub enum GitRead {
         base: GitOid,
         head: GitOid,
     },
+    /// Count commits reachable from `head` but not `base` without emitting the
+    /// commit list. Used for bounded, advisory checkout freshness warnings.
+    AncestorCount {
+        base: GitOid,
+        head: GitOid,
+    },
     TreeEntries {
         oid: GitOid,
         prefix: RepoPath,
@@ -1412,6 +1418,12 @@ fn git_args(
         ],
         GitRead::AncestorRange { base, head } => vec![
             "rev-list".into(),
+            format!("{base}..{head}").into(),
+            "--".into(),
+        ],
+        GitRead::AncestorCount { base, head } => vec![
+            "rev-list".into(),
+            "--count".into(),
             format!("{base}..{head}").into(),
             "--".into(),
         ],

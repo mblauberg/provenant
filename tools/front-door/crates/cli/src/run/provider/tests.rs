@@ -3824,6 +3824,170 @@ fn writer_continuation_dirty_brief(committed: bool) -> Result<(), Box<dyn std::e
 }
 
 #[test]
+fn read_only_staleness_uses_only_the_last_fetched_origin_default()
+-> Result<(), Box<dyn std::error::Error>> {
+    use provenant_confinement::{UtilityBudget, UtilityRuntime};
+    use provenant_os::exec::{ExecOptions, Executor, SystemExecutor, Termination};
+
+    fn git(
+        executor: &SystemExecutor,
+        executable: &Path,
+        repo: &Path,
+        env: &[(std::ffi::OsString, std::ffi::OsString)],
+        args: &[&str],
+    ) -> Result<String, Box<dyn std::error::Error>> {
+        let argv: Vec<_> = std::iter::once(executable.as_os_str().to_owned())
+            .chain(args.iter().map(std::ffi::OsString::from))
+            .collect();
+        let mut options = ExecOptions::new(&argv, repo, std::time::Duration::from_secs(10));
+        options.env = Some(env);
+        let output = executor.execute(options)?;
+        if output.termination != Termination::Exit(0) {
+            return Err(format!(
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&output.stderr.bytes)
+            )
+            .into());
+        }
+        Ok(String::from_utf8(output.stdout.bytes)?.trim().to_owned())
+    }
+
+    let temp = tempfile::tempdir()?;
+    let root = temp.path();
+    let repo = root.join("repo");
+    let home = root.join("git-home");
+    std::fs::create_dir_all(&repo)?;
+    std::fs::create_dir_all(&home)?;
+    let executable = provenant_os::git::git_executable().ok_or("git unavailable")?;
+    let executor = SystemExecutor::new(1)?;
+    let env: Vec<_> = std::env::vars_os()
+        .filter(|(key, _)| !key.to_string_lossy().starts_with("GIT_"))
+        .chain(provenant_os::fixture::fixture_git_settings())
+        .collect();
+    git(&executor, &executable, &repo, &env, &["init", "-b", "main"])?;
+    git(
+        &executor,
+        &executable,
+        &repo,
+        &env,
+        &["config", "user.name", "Test"],
+    )?;
+    git(
+        &executor,
+        &executable,
+        &repo,
+        &env,
+        &["config", "user.email", "test@example.invalid"],
+    )?;
+    std::fs::write(repo.join("file"), "one\n")?;
+    git(&executor, &executable, &repo, &env, &["add", "file"])?;
+    git(
+        &executor,
+        &executable,
+        &repo,
+        &env,
+        &["commit", "-m", "one"],
+    )?;
+    let old = git(&executor, &executable, &repo, &env, &["rev-parse", "HEAD"])?;
+    std::fs::write(repo.join("file"), "two\n")?;
+    git(
+        &executor,
+        &executable,
+        &repo,
+        &env,
+        &["commit", "-am", "two"],
+    )?;
+    let default = git(&executor, &executable, &repo, &env, &["rev-parse", "HEAD"])?;
+    git(
+        &executor,
+        &executable,
+        &repo,
+        &env,
+        &["update-ref", "refs/remotes/origin/main", &default],
+    )?;
+    git(
+        &executor,
+        &executable,
+        &repo,
+        &env,
+        &[
+            "symbolic-ref",
+            "refs/remotes/origin/HEAD",
+            "refs/remotes/origin/main",
+        ],
+    )?;
+
+    let utility = UtilityRuntime::new(&executable, &home)?;
+    let budget = UtilityBudget::bounded(std::time::Duration::from_secs(5))?;
+    let cancel = provenant_core::CancelToken::new();
+    let read_repo = utility.open_read_repo(&executor, &repo, budget, &cancel)?;
+    let warning = confinement::read_only_staleness_warning(
+        &executor,
+        &read_repo,
+        &utility,
+        budget,
+        &cancel,
+        old.parse()?,
+    );
+    let warning = warning.ok_or("behind checkout did not warn")?;
+    assert!(warning.contains("1 commits behind"), "{warning}");
+    assert!(warning.contains(&old), "{warning}");
+
+    assert!(
+        confinement::read_only_staleness_warning(
+            &executor,
+            &read_repo,
+            &utility,
+            budget,
+            &cancel,
+            default.parse()?,
+        )
+        .is_none()
+    );
+
+    std::fs::write(repo.join("file"), "three\n")?;
+    git(
+        &executor,
+        &executable,
+        &repo,
+        &env,
+        &["commit", "-am", "three"],
+    )?;
+    let ahead = git(&executor, &executable, &repo, &env, &["rev-parse", "HEAD"])?;
+    assert!(
+        confinement::read_only_staleness_warning(
+            &executor,
+            &read_repo,
+            &utility,
+            budget,
+            &cancel,
+            ahead.parse()?,
+        )
+        .is_none()
+    );
+
+    git(
+        &executor,
+        &executable,
+        &repo,
+        &env,
+        &["symbolic-ref", "--delete", "refs/remotes/origin/HEAD"],
+    )?;
+    assert!(
+        confinement::read_only_staleness_warning(
+            &executor,
+            &read_repo,
+            &utility,
+            budget,
+            &cancel,
+            old.parse()?,
+        )
+        .is_none()
+    );
+    Ok(())
+}
+
+#[test]
 fn read_only_plan_runs_host_git_with_a_private_home_outside_the_child_store()
 -> Result<(), Box<dyn std::error::Error>> {
     use provenant_confinement::permissions::{NetworkAccess, PlanPermissions};

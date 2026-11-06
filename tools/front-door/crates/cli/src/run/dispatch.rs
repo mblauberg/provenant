@@ -381,6 +381,19 @@ pub(super) fn dispatch_with_workers(
     workers: &dyn provenant_confinement::worktrees::WorkerObserver,
 ) -> Reply {
     let operation_id = command.operation_id.clone();
+    if let Some(message) = base_target_refusal(
+        command.base.as_deref(),
+        command.branch.as_deref(),
+        command.access.worktree.as_deref(),
+        command.worktree_branch.as_deref(),
+    ) {
+        let mut out = reply(
+            "dispatch",
+            Err(Fail::new(Status::Invalid, ErrorKind::Invalid, message)),
+        );
+        operation_reply(&mut out, &operation_id);
+        return out;
+    }
     let mut created = None;
     let facts = provenant_confinement::worktrees::RepoFacts::default();
     let mut result = dispatch_inner(command, edge, &mut created, workers, &facts);
@@ -454,6 +467,16 @@ pub(super) fn dispatch_with_workers(
     let mut out = reply_waited("dispatch", result);
     operation_reply(&mut out, &operation_id);
     out
+}
+
+pub(super) fn base_target_refusal(
+    base: Option<&str>,
+    branch: Option<&str>,
+    worktree: Option<&Path>,
+    worktree_branch: Option<&str>,
+) -> Option<&'static str> {
+    (base.is_some() && branch.is_none() && worktree.is_none() && worktree_branch.is_none())
+        .then_some("--base requires a writer target; use --branch with --host or --worktree")
 }
 
 /// Project launch policy after constructing the receipt, so no lane facts are lost.
