@@ -15,6 +15,18 @@ fn uniform_candidate_boundary(
     classes.all(|class| class == first).then_some(first)
 }
 
+fn uniform_candidate_resource(
+    count: usize,
+    resources: &std::collections::BTreeMap<usize, provenant_records::diagnostic::ResourceFact>,
+) -> Option<provenant_records::diagnostic::ResourceFact> {
+    if count == 0 || resources.len() != count {
+        return None;
+    }
+    let mut facts = resources.values().copied();
+    let first = facts.next()?;
+    facts.all(|fact| fact == first).then_some(first)
+}
+
 pub(super) fn image_input_warning(adapter: &str, attachments: &[PathBuf]) -> Option<String> {
     (!attachments.is_empty()
         && !AdapterSpec::get(adapter).is_some_and(|spec| spec.launch.image_input))
@@ -398,6 +410,7 @@ pub(super) enum PrepareError {
         message: String,
         plans: Vec<provenant_confinement::PlanError>,
         candidate_boundary: Option<provenant_records::diagnostic::BoundaryClass>,
+        candidate_resource: Option<provenant_records::diagnostic::ResourceFact>,
         skipped_routes: Vec<SkippedRoute>,
         fallback_outcome: Option<provenant_records::run::PreparationFailure>,
     },
@@ -432,6 +445,7 @@ impl PrepareError {
                 fallback_outcome,
                 plans,
                 candidate_boundary,
+                candidate_resource,
             } => {
                 // Only classify the aggregate when every refused candidate
                 // has a typed plan failure and all establish the same boundary.
@@ -444,9 +458,7 @@ impl PrepareError {
                             == Some(provenant_records::RouteExclusionReason::DisclosureDenied)
                     })
                 {
-                    let mut classes = plans
-                        .into_iter()
-                        .map(|error| run::RunError::Plan(error).boundary_class());
+                    let mut classes = plans.iter().map(|error| error.boundary_class());
                     let first = classes.next().unwrap();
                     if classes.all(|class| class == first) {
                         first
@@ -458,7 +470,7 @@ impl PrepareError {
                 };
                 run::PrepareRefusal {
                     boundary_class,
-                    resource: None,
+                    resource: candidate_resource,
                     terminal_cause: None,
                     terminal_note: None,
                     message,
@@ -539,6 +551,7 @@ fn preparation_preserves_typed_boundaries_without_classifying_other_errors() {
             message: "candidate refusal".into(),
             plans: vec![provenant_confinement::PlanError::InvalidRoots],
             candidate_boundary: None,
+            candidate_resource: None,
             skipped_routes,
             fallback_outcome: None,
         }
@@ -562,6 +575,14 @@ fn preparation_preserves_typed_boundaries_without_classifying_other_errors() {
     assert_eq!(uniform_candidate_boundary(2, &boundaries), None);
     boundaries.insert(1, BoundaryClass::Credentials);
     assert_eq!(uniform_candidate_boundary(2, &boundaries), None);
+    let mut resources = std::collections::BTreeMap::new();
+    let fact = provenant_records::diagnostic::ResourceFact::ArgvPromptLimit {
+        limit: 3,
+        origin: provenant_records::diagnostic::SettingSource::Configuration,
+    };
+    resources.insert(0, fact);
+    assert_eq!(uniform_candidate_resource(1, &resources), Some(fact));
+    assert_eq!(uniform_candidate_resource(2, &resources), None);
 }
 impl From<String> for PrepareError {
     fn from(message: String) -> Self {
@@ -1042,7 +1063,13 @@ pub(super) fn prepare_candidates(
         return prepare_command(registry, task, paths, resume, locate, provider, name);
     }
     let default_limit = provenant_confinement::run_config::DEFAULT_ARGV_PROMPT_LIMIT_BYTES;
-    check_launch_prompt(prompt_text, paths, None, default_limit, "compiled default")?;
+    check_launch_prompt(
+        prompt_text,
+        paths,
+        None,
+        default_limit,
+        provenant_records::diagnostic::SettingSource::ShippedDefault,
+    )?;
     let loaded_config = registry
         .roots
         .map(|roots| provenant_config::read_with_domains(roots, &crate::domains::SECTIONS));
@@ -1051,9 +1078,9 @@ pub(super) fn prepare_candidates(
         Some(Ok(config)) => {
             let origin = config.origins.get(ARGV_LIMIT_KEY);
             let label = if matches!(origin, Some(provenant_config::Origin::User { .. })) {
-                "host configuration"
+                provenant_records::diagnostic::SettingSource::Configuration
             } else {
-                "compiled default"
+                provenant_records::diagnostic::SettingSource::ShippedDefault
             };
             (
                 config.domains.run.argv_prompt_limit_bytes,
@@ -1072,13 +1099,13 @@ pub(super) fn prepare_candidates(
             );
             (
                 default_limit,
-                "compiled default",
+                provenant_records::diagnostic::SettingSource::ShippedDefault,
                 serde_json::json!({"kind": "compiled"}),
             )
         }
         None => (
             default_limit,
-            "compiled default",
+            provenant_records::diagnostic::SettingSource::ShippedDefault,
             serde_json::json!({"kind": "compiled"}),
         ),
     };
@@ -1346,6 +1373,7 @@ pub(super) fn prepare_candidates(
     let mut availability = Vec::new();
     let mut reasons: Vec<SkippedRoute> = Vec::new();
     let mut reason_boundaries = std::collections::BTreeMap::new();
+    let mut reason_resources = std::collections::BTreeMap::new();
     let mut auth_failures = std::collections::BTreeMap::new();
     let mut observation_failures = std::collections::BTreeMap::new();
     let probe = Probe {
@@ -1993,6 +2021,16 @@ pub(super) fn prepare_candidates(
                         format!("confinement plan: {error}")
                     },
                 );
+            if matches!(
+                reason,
+                provenant_records::RouteExclusionReason::DisclosureDenied
+            ) && let Some(PlanCheckError::Plan(error)) = plan_errors.get(route.adapter.as_str())
+            {
+                let class = error.boundary_class();
+                if class != provenant_records::diagnostic::BoundaryClass::None {
+                    reason_boundaries.insert(reasons.len(), class);
+                }
+            }
             let mut skipped = skip(&label, SkipKind::Unavailable, detail);
             skipped.set_cause(reason.clone());
             reasons.push(skipped);
@@ -2325,6 +2363,13 @@ pub(super) fn prepare_candidates(
             Ok(spec) => spec,
             Err(error) => {
                 previous_outcome = provider_preparation_fallback(&error);
+                let class = error.boundary_class();
+                if class != provenant_records::diagnostic::BoundaryClass::None {
+                    reason_boundaries.insert(reasons.len(), class);
+                }
+                if let Some(fact) = error.resource_fact() {
+                    reason_resources.insert(reasons.len(), fact);
+                }
                 let kind = if previous_outcome == provenant_routing::FallbackOutcome::AuthRequired {
                     SkipKind::AuthRequired
                 } else {
@@ -2345,6 +2390,13 @@ pub(super) fn prepare_candidates(
                 Ok(spec) => spec,
                 Err(error) => {
                     previous_outcome = provider_preparation_fallback(&error);
+                    let class = error.boundary_class();
+                    if class != provenant_records::diagnostic::BoundaryClass::None {
+                        reason_boundaries.insert(reasons.len(), class);
+                    }
+                    if let Some(fact) = error.resource_fact() {
+                        reason_resources.insert(reasons.len(), fact);
+                    }
                     let kind =
                         if previous_outcome == provenant_routing::FallbackOutcome::AuthRequired {
                             SkipKind::AuthRequired
@@ -2645,6 +2697,7 @@ pub(super) fn prepare_candidates(
         });
     }
     let candidate_boundary = uniform_candidate_boundary(reasons.len(), &reason_boundaries);
+    let candidate_resource = uniform_candidate_resource(reasons.len(), &reason_resources);
     Err(PrepareError::Candidates {
         fallback_outcome: match previous_outcome {
             provenant_routing::FallbackOutcome::AuthRequired => {
@@ -2672,6 +2725,7 @@ pub(super) fn prepare_candidates(
             })
             .collect(),
         candidate_boundary,
+        candidate_resource,
         skipped_routes: reasons,
     })
 }

@@ -56,7 +56,10 @@ fn provider_preparation_fallback_preserves_authority_and_identity_failures() {
         ProviderError::IsolatedKeychainUnavailable("fixture".into()),
         ProviderError::ProbeDirectory("fixture".into()),
         ProviderError::CredentialReadFailed("fixture".into()),
-        ProviderError::PromptTooLarge,
+        ProviderError::PromptTooLarge {
+            limit: 1,
+            origin: provenant_records::diagnostic::SettingSource::ShippedDefault,
+        },
         ProviderError::Overflow,
         ProviderError::Malformed,
     ] {
@@ -1003,14 +1006,28 @@ fn launch_prompt_preserves_small_text_and_refuses_more_than_one_mib()
     for entry in REGISTRY {
         let adapter = entry.adapter.id();
         for text in ["small prompt".to_owned(), "a".repeat(65_536)] {
-            let prompt = launch_prompt(&text, &paths, &attempt, adapter, 65_536, "test")?;
+            let prompt = launch_prompt(
+                &text,
+                &paths,
+                &attempt,
+                adapter,
+                65_536,
+                provenant_records::diagnostic::SettingSource::Configuration,
+            )?;
             assert_eq!(prompt.text(), text);
             assert!(prompt.file().is_none());
         }
         let text = format!("Durable output instructions\n\n{}", "a".repeat(1024 * 1024));
-        let error = launch_prompt(&text, &paths, &attempt, adapter, 65_536, "test")
-            .err()
-            .ok_or("oversized launch accepted")?;
+        let error = launch_prompt(
+            &text,
+            &paths,
+            &attempt,
+            adapter,
+            65_536,
+            provenant_records::diagnostic::SettingSource::Configuration,
+        )
+        .err()
+        .ok_or("oversized launch accepted")?;
         assert!(
             matches!(error, LaunchPromptError::TooLarge),
             "{adapter}: {error}"
@@ -1031,7 +1048,14 @@ fn launch_prompt_keeps_oversized_stdin_prompts_in_memory() -> Result<(), Box<dyn
         paths.lane_depth = depth;
         for adapter in ["claude", "codex", "opencode"] {
             for text in [&text, &"a".repeat(1024 * 1024)] {
-                let prompt = launch_prompt(text, &paths, &attempt, adapter, 65_536, "test")?;
+                let prompt = launch_prompt(
+                    text,
+                    &paths,
+                    &attempt,
+                    adapter,
+                    65_536,
+                    provenant_records::diagnostic::SettingSource::Configuration,
+                )?;
                 assert_eq!(prompt.text(), text);
                 assert!(prompt.file().is_none());
             }
@@ -1051,9 +1075,16 @@ fn launch_prompt_spills_only_top_level_argv_and_refuses_conflicting_file()
         let mut paths = prompt_paths(&attempt)?;
         let text = format!("Durable output instructions\n\n{}", "é".repeat(75_000));
         paths.lane_depth = 2;
-        let error = launch_prompt(&text, &paths, &attempt, adapter, 65_536, "test")
-            .err()
-            .ok_or("nested argv spill accepted")?;
+        let error = launch_prompt(
+            &text,
+            &paths,
+            &attempt,
+            adapter,
+            65_536,
+            provenant_records::diagnostic::SettingSource::Configuration,
+        )
+        .err()
+        .ok_or("nested argv spill accepted")?;
         assert!(
             matches!(error, LaunchPromptError::NestedArgvTooLarge { .. }),
             "{error}"
@@ -1062,7 +1093,14 @@ fn launch_prompt_spills_only_top_level_argv_and_refuses_conflicting_file()
 
         paths.lane_depth = 1;
         for _ in 0..2 {
-            let prompt = launch_prompt(&text, &paths, &attempt, adapter, 65_536, "test")?;
+            let prompt = launch_prompt(
+                &text,
+                &paths,
+                &attempt,
+                adapter,
+                65_536,
+                provenant_records::diagnostic::SettingSource::Configuration,
+            )?;
             assert_eq!(prompt.file(), Some(attempt.join("prompt.md").as_path()));
             assert!(prompt.text().len() < 1024);
             assert_eq!(std::fs::read_to_string(attempt.join("prompt.md"))?, text);
@@ -1075,7 +1113,17 @@ fn launch_prompt_spills_only_top_level_argv_and_refuses_conflicting_file()
             );
         }
         std::fs::write(attempt.join("prompt.md"), "conflicting prompt")?;
-        assert!(launch_prompt(&text, &paths, &attempt, adapter, 65_536, "test").is_err());
+        assert!(
+            launch_prompt(
+                &text,
+                &paths,
+                &attempt,
+                adapter,
+                65_536,
+                provenant_records::diagnostic::SettingSource::Configuration
+            )
+            .is_err()
+        );
         assert_eq!(
             std::fs::read_to_string(attempt.join("prompt.md"))?,
             "conflicting prompt"
@@ -1092,10 +1140,24 @@ fn nested_argv_prompt_respects_configured_byte_limit() -> Result<(), Box<dyn std
     paths.lane_depth = 2;
     let text = "a".repeat(65_537);
     assert!(matches!(
-        launch_prompt(&text, &paths, &attempt, "cursor", 65_536, "test"),
+        launch_prompt(
+            &text,
+            &paths,
+            &attempt,
+            "cursor",
+            65_536,
+            provenant_records::diagnostic::SettingSource::Configuration
+        ),
         Err(LaunchPromptError::NestedArgvTooLarge { limit: 65_536, .. })
     ));
-    let prompt = launch_prompt(&text, &paths, &attempt, "cursor", 131_072, "test")?;
+    let prompt = launch_prompt(
+        &text,
+        &paths,
+        &attempt,
+        "cursor",
+        131_072,
+        provenant_records::diagnostic::SettingSource::Configuration,
+    )?;
     assert_eq!(prompt.text(), text);
     assert!(prompt.file().is_none());
     Ok(())
@@ -1115,7 +1177,7 @@ fn launch_prompt_refuses_symlinked_attempt_ancestors() -> Result<(), Box<dyn std
             &state,
             "cursor",
             65_536,
-            "test"
+            provenant_records::diagnostic::SettingSource::Configuration
         )
         .is_err()
     );

@@ -516,14 +516,7 @@ impl RunError {
             Self::WriterHeadNotLaneBranch | Self::WriterSourceMismatch { .. } => B::LaneGit,
             Self::WriterLineage(_) => B::Authority,
             Self::Confinement(error) => error.boundary_class(),
-            Self::Plan(provenant_confinement::PlanError::Permission(error)) => {
-                error.boundary_class()
-            }
-            Self::Plan(
-                provenant_confinement::PlanError::UnconfinedExtensions
-                | provenant_confinement::PlanError::InvalidRoots,
-            ) => B::Authority,
-            Self::Plan(_) => B::None,
+            Self::Plan(error) => error.boundary_class(),
             _ => ErrorKind::from(self).boundary_class(),
         }
     }

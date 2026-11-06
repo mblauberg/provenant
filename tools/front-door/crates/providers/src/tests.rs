@@ -1958,14 +1958,30 @@ fn argv_prompt_limit_counts_utf8_bytes() {
     assert!(Prompt::new("a".repeat(65_536)).check_argv().is_ok());
     assert!(
         Prompt::new("a".repeat(65_537))
-            .with_argv_limit(131_072)
+            .with_argv_limit(
+                131_072,
+                provenant_records::diagnostic::SettingSource::Configuration
+            )
             .check_argv()
             .is_ok()
     );
     assert!(matches!(
         Prompt::new("é".repeat(32_769)).check_argv(),
-        Err(ProviderError::PromptTooLarge)
+        Err(ProviderError::PromptTooLarge { .. })
     ));
+    let error = Prompt::new("abcd".into())
+        .with_argv_limit(
+            3,
+            provenant_records::diagnostic::SettingSource::Configuration,
+        )
+        .check_argv()
+        .expect_err("configured limit must be enforced");
+    assert!(
+        error
+            .to_string()
+            .contains("domains.run.argv_prompt_limit_bytes")
+    );
+    assert!(error.to_string().contains("host configuration"));
 }
 
 pub(super) fn read_only_plan(
@@ -3159,7 +3175,7 @@ fn cursor_launches_fresh_and_resume_with_edits_only_for_writers() -> Result<(), 
             Path::new("/fixture/repo"),
             None
         )),
-        Err(ProviderError::PromptTooLarge)
+        Err(ProviderError::PromptTooLarge { .. })
     ));
     Ok(())
 }

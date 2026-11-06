@@ -431,7 +431,7 @@ pub(super) fn check_launch_prompt(
     paths: &run::LaunchPaths,
     adapter: Option<&str>,
     argv_limit: usize,
-    argv_origin: &'static str,
+    argv_origin: provenant_records::diagnostic::SettingSource,
 ) -> Result<(), LaunchPromptError> {
     if text.len() as u64 > super::PROMPT_LIMIT {
         return Err(LaunchPromptError::TooLarge);
@@ -441,13 +441,16 @@ pub(super) fn check_launch_prompt(
             .and_then(AdapterSpec::get)
             .is_some_and(|spec| spec.argv_prompt)
         && Prompt::new(text.to_owned())
-            .with_argv_limit(argv_limit)
+            .with_argv_limit(argv_limit, argv_origin)
             .check_argv()
             .is_err()
     {
         return Err(LaunchPromptError::NestedArgvTooLarge {
             limit: argv_limit,
-            origin: argv_origin,
+            origin: match argv_origin {
+                provenant_records::diagnostic::SettingSource::Configuration => "host configuration",
+                provenant_records::diagnostic::SettingSource::ShippedDefault => "compiled default",
+            },
         });
     }
     Ok(())
@@ -459,10 +462,10 @@ pub(super) fn launch_prompt(
     state_root: &Path,
     adapter: &str,
     argv_limit: usize,
-    argv_origin: &'static str,
+    argv_origin: provenant_records::diagnostic::SettingSource,
 ) -> Result<Prompt, LaunchPromptError> {
     check_launch_prompt(text, paths, Some(adapter), argv_limit, argv_origin)?;
-    let prompt = Prompt::new(text.to_owned()).with_argv_limit(argv_limit);
+    let prompt = Prompt::new(text.to_owned()).with_argv_limit(argv_limit, argv_origin);
     if !AdapterSpec::get(adapter).is_some_and(|spec| spec.argv_prompt)
         || prompt.check_argv().is_ok()
     {
@@ -505,7 +508,7 @@ pub(super) fn launch_prompt(
         Err(error) if error.is_exists() && matches(name)? => {}
         Err(error) => return Err(error.to_string().into()),
     }
-    let prompt = Prompt::from_file(attempt.join(name)).with_argv_limit(argv_limit);
+    let prompt = Prompt::from_file(attempt.join(name)).with_argv_limit(argv_limit, argv_origin);
     prompt.check_argv().map_err(|error| error.to_string())?;
     Ok(prompt)
 }

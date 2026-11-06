@@ -5,6 +5,7 @@ fn unavailable(message: String) -> PrepareError {
         message,
         plans: Vec::new(),
         candidate_boundary: None,
+        candidate_resource: None,
         skipped_routes: Vec::new(),
         fallback_outcome: Some(provenant_records::run::PreparationFailure::AdapterUnavailable),
     }

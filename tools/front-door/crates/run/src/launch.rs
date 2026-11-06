@@ -235,6 +235,8 @@ impl PrepareRefusal {
             route.cause == Some(provenant_records::RouteExclusionReason::PacingReserve)
         }) {
             RefusalKind::PacingReserve
+        } else if let Some(fact) = self.resource {
+            RefusalKind::PreparationResource(fact)
         } else if self.boundary_class != provenant_records::diagnostic::BoundaryClass::None {
             RefusalKind::PreparationBoundary(self.boundary_class)
         } else {
@@ -272,11 +274,40 @@ impl From<&str> for PrepareRefusal {
 #[cfg(test)]
 #[test]
 fn preparation_refusal_retains_its_typed_boundary() {
-    use provenant_records::diagnostic::BoundaryClass;
+    use provenant_records::diagnostic::{BoundaryClass, ResourceFact, SettingSource};
     let mut refusal = PrepareRefusal::from("opaque source");
     assert_eq!(refusal.kind().boundary_class(), BoundaryClass::None);
     refusal.boundary_class = BoundaryClass::Credentials;
     assert_eq!(refusal.kind().boundary_class(), BoundaryClass::Credentials);
+    refusal.boundary_class = BoundaryClass::None;
+    refusal.resource = Some(ResourceFact::ArgvPromptLimit {
+        limit: 3,
+        origin: SettingSource::Configuration,
+    });
+    let diagnostic = refusal.kind().diagnostic().expect("resource diagnostic");
+    assert_eq!(diagnostic.code, "INVALID");
+    let detail = diagnostic.detail.unwrap();
+    assert!(detail.contains("domains.run.argv_prompt_limit_bytes"));
+    assert!(detail.contains("host configuration"));
+    let inventory = include_str!("../assets/launch-guards.toml")
+        .parse::<toml_edit::DocumentMut>()
+        .unwrap();
+    assert!(
+        inventory["guard"]
+            .as_array_of_tables()
+            .unwrap()
+            .iter()
+            .any(|row| {
+                row.get("site").and_then(|v| v.as_str())
+                    == Some("providers/src/contract.rs#Prompt::check_argv")
+                    && row.get("code").and_then(|v| v.as_str()) == Some(diagnostic.code.as_str())
+                    && row.get("boundary").and_then(|v| v.as_str()) == Some("configurable_default")
+                    && row
+                        .get("setting")
+                        .and_then(|v| v.as_str())
+                        .is_some_and(|setting| detail.contains(setting))
+            })
+    );
 }
 /// Run-owned per-attempt paths. Allocated once, shared by explicit fallback candidates.
 pub struct LaunchPaths {
@@ -639,6 +670,7 @@ pub enum RefusalKind {
     PolicyResource(provenant_records::diagnostic::ResourceFact),
     Preparation,
     PreparationBoundary(provenant_records::diagnostic::BoundaryClass),
+    PreparationResource(provenant_records::diagnostic::ResourceFact),
     PacingReserve,
     WorktreeBusy,
     PriorityUnavailable,
@@ -660,11 +692,14 @@ impl RefusalKind {
     pub fn diagnostic(&self) -> Option<provenant_records::diagnostic::Diagnostic> {
         use provenant_records::diagnostic::{Diagnostic, ResourceFact};
         let fact = match self {
-            Self::HandoffResource(fact) | Self::PolicyResource(fact) => fact,
+            Self::HandoffResource(fact)
+            | Self::PolicyResource(fact)
+            | Self::PreparationResource(fact) => fact,
             _ => return None,
         };
         let kind = match fact {
             ResourceFact::Disk { .. } => ErrorKind::DiskFloor,
+            ResourceFact::ArgvPromptLimit { .. } => ErrorKind::Invalid,
             ResourceFact::MemoryPressure { .. } => ErrorKind::MemoryPressure,
             ResourceFact::Processes { .. } => ErrorKind::Processes,
             ResourceFact::LaneCap { .. } => ErrorKind::LaneCap,
@@ -690,6 +725,7 @@ impl RefusalKind {
             | Self::WriteGrantsLimit
             | Self::Handoff
             | Self::HandoffResource(_)
+            | Self::PreparationResource(_)
             | Self::PolicyResource(_) => B::None,
         }
     }

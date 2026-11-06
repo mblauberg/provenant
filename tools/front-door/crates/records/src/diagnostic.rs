@@ -106,6 +106,10 @@ pub enum ResourceFact {
         floor: u64,
         origin: SettingSource,
     },
+    ArgvPromptLimit {
+        limit: u64,
+        origin: SettingSource,
+    },
     MemoryPressure {
         level: PressureLevel,
         threshold: PressureThreshold,
@@ -130,6 +134,9 @@ impl ResourceFact {
             Self::Disk { free, floor, origin } => diagnostic
                 .detail(format!("disk space: {free} bytes available; gc.free_floor is {floor} bytes (source: {})", origin.description()))
                 .next("free disk space above gc.free_floor before retrying"),
+            Self::ArgvPromptLimit { limit, origin } => diagnostic
+                .detail(format!("argv prompt exceeds domains.run.argv_prompt_limit_bytes ({limit} bytes; source: {})", origin.description()))
+                .next("shorten the prompt or adjust domains.run.argv_prompt_limit_bytes"),
             Self::MemoryPressure { level, threshold, origin } => diagnostic
                 .detail(format!("host memory pressure is {}; domains.fabric.lanes.memory_pressure_threshold is {} (source: {})", level.name(), threshold.name(), origin.description()))
                 .next("reduce host memory pressure before retrying"),

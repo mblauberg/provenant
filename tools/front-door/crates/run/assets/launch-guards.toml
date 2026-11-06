@@ -39,6 +39,7 @@ reason = "Bounds rendered sandbox profile size; the refusal identifies the effec
 [[guard]]
 site = "providers/src/contract.rs#Prompt::check_argv"
 boundary = "configurable_default"
+code = "INVALID"
 setting = "domains.run.argv_prompt_limit_bytes"
 reason = "The argv prompt byte threshold defaults to 65536 and can be overridden; top-level launches spill above it."
 
@@ -227,7 +228,7 @@ reason = "A writer continuation cannot discard uncommitted predecessor edits, an
 [[guard]]
 site = "run/src/launch.rs#RunStore::start_inner"
 boundary = "unclassified"
-reason = "Mixed or untyped candidate failures remain combined in RefusalKind::Preparation. Typed run errors, nested argv prompt guards including fallback candidates, protected host stores, and uniformly classified plan failures retain their boundaries."
+reason = "Mixed or untyped candidate failures remain combined in RefusalKind::Preparation. Typed run errors, provider boundaries, nested argv prompt guards, protected host stores, and uniformly classified plan failures retain their boundaries."
 
 [[guard]]
 site = "run/src/launch/hand_off.rs#RunStore::hand_off"
