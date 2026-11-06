@@ -69,6 +69,9 @@ fn graph(rig: &TestRig, delivered: bool) -> Result {
     let mut inputs = RootInputs::new(rig.home.clone(), rig.project.clone());
     inputs.state_dir = Some(rig.state.clone());
     let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+    // Graph status resolves through the host Fabric identity, as real graph
+    // submission does. A raw Run store alone does not initialise that identity.
+    provenant_cli::fabric::Context::open(roots.clone(), &rig.home, &rig.project)?;
     let project = provenant_config::bind_project(
         &roots,
         provenant_config::ProjectLocation::new(rig.project.join(".git"))?,
