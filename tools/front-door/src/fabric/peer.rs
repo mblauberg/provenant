@@ -629,37 +629,71 @@ pub fn peer(
                     }
                 }
             }
-            PeerAction::Receipt { operation_id, .. } => peer_result((|| {
-                let store_request = provenant_fabric_store::Request {
-                    clock: &clock,
-                    cancel: &cancel,
-                };
-                let deadline = std::time::Instant::now() + std::time::Duration::from_micros(budget.remaining(clock.mono_now()).as_micros());
-                let stored = match provenant_fabric_store::Store::open_read_only(&context.roots.state, deadline)
-                    .map_err(|error| FacadeError::from(&error))? {
-                    Some(store) => store.coordination_receipt_with_input::<Mutation, serde_json::Value>(
-                        context.identity.project,
-                        request.actor().map_err(|_| FacadeError::ConfinementRefused { resource: None })?,
-                        operation_id, &store_request,
-                    ).map_err(|error| FacadeError::from(&error))?,
-                    None => None,
-                };
-                Ok(match stored {
-                    Some((input, value)) => peer_result(
-                        CoordinationResult::from_stored(&input, value)
-                            .map_err(|_| FacadeError::StateCorrupt),
-                        |data| PeerResult::Coordination { data, extra: Default::default() },
-                    ),
-                    None => {
-                        let graph_agent = request.agent.strip_prefix("graph-")
-                            .and_then(|actor| actor.parse::<provenant_core::ActorId>().ok()).is_some();
-                        let receipt = if graph_agent { owner.retained_graph_receipt(operation_id, &cancel) } else { Ok(None) };
-                        peer_result(receipt.and_then(|receipt| receipt.ok_or_else(|| FacadeError::LaunchUnknown {
-                            operation_id: operation_id.clone(),
-                        })), |data| PeerResult::Submitted { data, extra: Default::default() })
-                    },
-                })
-            })(), |result| result),
+            PeerAction::Receipt { operation_id, .. } => peer_result(
+                (|| {
+                    let store_request = provenant_fabric_store::Request {
+                        clock: &clock,
+                        cancel: &cancel,
+                    };
+                    let deadline = std::time::Instant::now()
+                        + std::time::Duration::from_micros(
+                            budget.remaining(clock.mono_now()).as_micros(),
+                        );
+                    let stored =
+                        match provenant_fabric_store::Store::open_read_only(
+                            &context.roots.state,
+                            deadline,
+                        )
+                        .map_err(|error| FacadeError::from(&error))?
+                        {
+                            Some(store) => store
+                                .coordination_receipt_with_input::<Mutation, serde_json::Value>(
+                                    context.identity.project,
+                                    request.actor().map_err(|_| {
+                                        FacadeError::ConfinementRefused { resource: None }
+                                    })?,
+                                    operation_id,
+                                    &store_request,
+                                )
+                                .map_err(|error| FacadeError::from(&error))?,
+                            None => None,
+                        };
+                    Ok(match stored {
+                        Some((input, value)) => peer_result(
+                            CoordinationResult::from_stored(&input, value)
+                                .map_err(|_| FacadeError::StateCorrupt),
+                            |data| PeerResult::Coordination {
+                                data,
+                                extra: Default::default(),
+                            },
+                        ),
+                        None => {
+                            let graph_agent = request
+                                .agent
+                                .strip_prefix("graph-")
+                                .and_then(|actor| actor.parse::<provenant_core::ActorId>().ok())
+                                .is_some();
+                            let receipt = if graph_agent {
+                                owner.retained_graph_receipt(operation_id, &cancel)
+                            } else {
+                                Ok(None)
+                            };
+                            peer_result(
+                                receipt.and_then(|receipt| {
+                                    receipt.ok_or_else(|| FacadeError::LaunchUnknown {
+                                        operation_id: operation_id.clone(),
+                                    })
+                                }),
+                                |data| PeerResult::Submitted {
+                                    data,
+                                    extra: Default::default(),
+                                },
+                            )
+                        }
+                    })
+                })(),
+                |result| result,
+            ),
             PeerAction::Coordination {
                 input,
                 operation_id,

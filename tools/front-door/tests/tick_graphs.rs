@@ -218,10 +218,11 @@ fn deadline_free_graph_tick_launches_waiting_fake_provider() -> Result {
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
     let budget = WaitBudget::cli(clock.mono_now(), 10)?;
-    let document: graph::GraphDocument =
-        serde_json::from_value(json!({"schema_version":1,"graph_id":"waiter","template_library":{},
+    let document: graph::GraphDocument = serde_json::from_value(
+        json!({"schema_version":1,"graph_id":"waiter","template_library":{},
         "nodes":[{"id":"one","prompt":"reply OK","access":"read_only",
-        "route":{"adapter":"claude","model":"claude/claude-sonnet-5-5","account":"pro"}}]}))?;
+        "route":{"adapter":"claude","model":"claude/claude-sonnet-5-5","account":"pro"}}]}),
+    )?;
     let mut journal = FileJournal::open(&state, project, "waiter", budget, &cancel, &clock)?;
     journal.bind(GraphExecution {
         extra: Default::default(),
@@ -278,9 +279,18 @@ fn tick_refuses_new_graph_attempts_while_unrelated_legacy_work_is_pending() -> R
     struct Seed(String);
     impl graph::AttemptOwner for Seed {
         type Error = std::convert::Infallible;
-        fn actor(&self) -> String { self.0.clone() }
-        fn observe_or_start(&mut self, _: &graph::AttemptKey, _: graph::NodeInput<'_>, _: &graph::GraphRoute,
-            _: graph::AccessMode, _: Option<&str>, _: graph::Replay<'_>) -> std::result::Result<graph::AttemptObservation, Self::Error> {
+        fn actor(&self) -> String {
+            self.0.clone()
+        }
+        fn observe_or_start(
+            &mut self,
+            _: &graph::AttemptKey,
+            _: graph::NodeInput<'_>,
+            _: &graph::GraphRoute,
+            _: graph::AccessMode,
+            _: Option<&str>,
+            _: graph::Replay<'_>,
+        ) -> std::result::Result<graph::AttemptObservation, Self::Error> {
             Ok(graph::AttemptObservation::Pending { attempt_ref: None })
         }
     }
@@ -303,13 +313,30 @@ fn tick_refuses_new_graph_attempts_while_unrelated_legacy_work_is_pending() -> R
             "route":{"adapter":"codex","model":"codex/gpt-6-luna"}}]
     }))?;
     {
-        let mut journal = FileJournal::open(&state, project, "current-waiter", budget, &cancel, &clock)?;
-        journal.bind(GraphExecution { extra: Default::default(), integration_base: None, review_base: None,
-            directory: rig.project.clone(), document: document.clone() })?;
-        graph::advance_with_budget(&document, &mut Seed(actor.into()), &mut journal, &Default::default(), &Default::default())?;
+        let mut journal =
+            FileJournal::open(&state, project, "current-waiter", budget, &cancel, &clock)?;
+        journal.bind(GraphExecution {
+            extra: Default::default(),
+            integration_base: None,
+            review_base: None,
+            directory: rig.project.clone(),
+            document: document.clone(),
+        })?;
+        graph::advance_with_budget(
+            &document,
+            &mut Seed(actor.into()),
+            &mut journal,
+            &Default::default(),
+            &Default::default(),
+        )?;
     }
-    let legacy_directory = rig.state.join("fabric/graphs/11111111111111111111111111111111");
-    std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&legacy_directory)?;
+    let legacy_directory = rig
+        .state
+        .join("fabric/graphs/11111111111111111111111111111111");
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&legacy_directory)?;
     let legacy_path = legacy_directory.join("graph-old-pending-fixture.json");
     let legacy = include_bytes!("fixtures/install/old-pending-checkpoint.json");
     std::fs::write(&legacy_path, legacy)?;
@@ -319,15 +346,37 @@ fn tick_refuses_new_graph_attempts_while_unrelated_legacy_work_is_pending() -> R
     let tick: Value = serde_json::from_slice(&tick.stdout.bytes)?;
     assert_eq!(tick["status"], "error", "{tick}");
     assert_eq!(tick["data"]["graphs"]["advanced"], 0, "{tick}");
-    let errors = tick["data"]["graphs"]["errors"].as_array().ok_or("graph errors")?;
+    let errors = tick["data"]["graphs"]["errors"]
+        .as_array()
+        .ok_or("graph errors")?;
     assert_eq!(errors.len(), 1, "{tick}");
-    assert!(errors[0].as_str().is_some_and(|error| error.contains("current-waiter") && error.contains("UPGRADE_DRAIN_REQUIRED")), "{tick}");
-    let checkpoint = FileJournal::read_checkpoint(&state, project, "current-waiter")?.ok_or("checkpoint")?;
-    assert!(checkpoint.nodes[0].attempts.iter().all(|attempt| attempt.attempt_ref.is_none()));
+    assert!(
+        errors[0]
+            .as_str()
+            .is_some_and(|error| error.contains("current-waiter")
+                && error.contains("UPGRADE_DRAIN_REQUIRED")),
+        "{tick}"
+    );
+    let checkpoint =
+        FileJournal::read_checkpoint(&state, project, "current-waiter")?.ok_or("checkpoint")?;
+    assert!(
+        checkpoint.nodes[0]
+            .attempts
+            .iter()
+            .all(|attempt| attempt.attempt_ref.is_none())
+    );
     if rig.state.join("run.sqlite3").exists() {
         let db = graph::cutover::read_connection(&rig.state.join("run.sqlite3"))?;
-        assert_eq!(db.query_row("SELECT COUNT(*) FROM operations", [], |row| row.get::<_, i64>(0))?, 0);
-        assert_eq!(db.query_row("SELECT COUNT(*) FROM attempts", [], |row| row.get::<_, i64>(0))?, 0);
+        assert_eq!(
+            db.query_row("SELECT COUNT(*) FROM operations", [], |row| row
+                .get::<_, i64>(0))?,
+            0
+        );
+        assert_eq!(
+            db.query_row("SELECT COUNT(*) FROM attempts", [], |row| row
+                .get::<_, i64>(0))?,
+            0
+        );
     }
     assert!(!rig.state.join("runs").exists());
     assert_eq!(std::fs::read(&legacy_path)?, legacy);

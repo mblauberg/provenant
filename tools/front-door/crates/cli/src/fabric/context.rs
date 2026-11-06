@@ -472,22 +472,23 @@ impl Context {
         // the attempt, even when another agent later resumes its graph.
         // Keep that namespace under the authenticated sending host rather
         // than adopting a caller-supplied actor ID on the receiving host.
-        let agent = if let PeerAction::Submit { extra, .. } | PeerAction::Receipt { extra, .. } = &action {
-            match extra.get("graph_launch_actor") {
-                Some(value) => {
-                    let actor = value
-                        .as_str()
-                        .and_then(|value| value.parse::<provenant_core::ActorId>().ok())
-                        .ok_or_else(|| {
-                            PeerFailure::from(FacadeError::InvalidInput { detail: None })
-                        })?;
-                    format!("graph-{actor}")
+        let agent =
+            if let PeerAction::Submit { extra, .. } | PeerAction::Receipt { extra, .. } = &action {
+                match extra.get("graph_launch_actor") {
+                    Some(value) => {
+                        let actor = value
+                            .as_str()
+                            .and_then(|value| value.parse::<provenant_core::ActorId>().ok())
+                            .ok_or_else(|| {
+                                PeerFailure::from(FacadeError::InvalidInput { detail: None })
+                            })?;
+                        format!("graph-{actor}")
+                    }
+                    None => self.identity.inbox.agent.clone(),
                 }
-                None => self.identity.inbox.agent.clone(),
-            }
-        } else {
-            self.identity.inbox.agent.clone()
-        };
+            } else {
+                self.identity.inbox.agent.clone()
+            };
         let request = PeerRequest::new(host, self.identity.host, agent, project, action);
         let executable =
             discover_ssh_executable(self.config.ssh_executable.as_deref()).map_err(|_| {

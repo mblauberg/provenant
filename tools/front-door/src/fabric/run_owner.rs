@@ -577,7 +577,10 @@ impl BinaryRunOwner<'_> {
             Err(FacadeError::NotFound) => return Ok(false),
             Err(error) => return Err(error),
         };
-        Ok(session.store.operation(operation_id, &self.call(cancel)).map_err(run_error)?
+        Ok(session
+            .store
+            .operation(operation_id, &self.call(cancel))
+            .map_err(run_error)?
             .is_some_and(|operation| operation.state != provenant_run::OperationState::Prepared))
     }
 
@@ -593,27 +596,64 @@ impl BinaryRunOwner<'_> {
             Err(error) => return Err(error),
         };
         let call = self.call(cancel);
-        let Some(operation) = session.store.operation(operation_id, &call).map_err(run_error)?
+        let Some(operation) = session
+            .store
+            .operation(operation_id, &call)
+            .map_err(run_error)?
             .filter(|operation| operation.state != provenant_run::OperationState::Prepared)
-        else { return Ok(None); };
-        let request = session.store.request(operation.run_id, &call).map_err(run_error)?;
-        if request.tasks.is_empty() || request.tasks.iter().any(|task| {
-            task.context.as_ref().is_none_or(|context| !context.graph_template_launch
-                || context.graph_id.as_ref().is_none_or(|id| id.is_empty())
-                || context.node_id.as_ref().is_none_or(|id| id.is_empty()))
-        }) {
+        else {
+            return Ok(None);
+        };
+        let request = session
+            .store
+            .request(operation.run_id, &call)
+            .map_err(run_error)?;
+        if request.tasks.is_empty()
+            || request.tasks.iter().any(|task| {
+                task.context.as_ref().is_none_or(|context| {
+                    !context.graph_template_launch
+                        || context.graph_id.as_ref().is_none_or(|id| id.is_empty())
+                        || context.node_id.as_ref().is_none_or(|id| id.is_empty())
+                })
+            })
+        {
             return Ok(None);
         }
-        let page = session.service().lanes(&provenant_run::LaneQuery {
-            targets: vec![provenant_run::LaneTarget { run: operation.run_id, task: None, attempt: None }],
-            all: true, limit: 100, after: 0, newest_first: false, owner: None, unseen_after: None,
-        }, &call).map_err(run_error)?;
-        if page.lanes.is_empty() { return Ok(None); }
+        let page = session
+            .service()
+            .lanes(
+                &provenant_run::LaneQuery {
+                    targets: vec![provenant_run::LaneTarget {
+                        run: operation.run_id,
+                        task: None,
+                        attempt: None,
+                    }],
+                    all: true,
+                    limit: 100,
+                    after: 0,
+                    newest_first: false,
+                    owner: None,
+                    unseen_after: None,
+                },
+                &call,
+            )
+            .map_err(run_error)?;
+        if page.lanes.is_empty() {
+            return Ok(None);
+        }
         Ok(Some(SubmissionReceipt {
-            extra: Default::default(), operation_id: operation_id.clone(), worktree: None,
-            targets: page.lanes.into_iter().map(|attempt| AttemptTarget {
-                extra: Default::default(), host: Some(self.factory.context.identity.host), attempt: attempt.attempt_id,
-            }).collect(),
+            extra: Default::default(),
+            operation_id: operation_id.clone(),
+            worktree: None,
+            targets: page
+                .lanes
+                .into_iter()
+                .map(|attempt| AttemptTarget {
+                    extra: Default::default(),
+                    host: Some(self.factory.context.identity.host),
+                    attempt: attempt.attempt_id,
+                })
+                .collect(),
         }))
     }
 
@@ -624,12 +664,17 @@ impl BinaryRunOwner<'_> {
         budget: WaitBudget,
         cancel: &CancelToken,
     ) -> Result<(), FacadeError> {
-        let refusal = match crate::install::cutover_admission_guard(&self.factory.context.roots.state) {
-            Ok(()) => return Ok(()),
-            Err(error) => error,
-        };
-        let retained = if let Some(host) = host.filter(|host| *host != self.factory.context.identity.host) {
-            let actor = self.actor.unwrap_or(self.factory.context.identity.inbox.actor);
+        let refusal =
+            match crate::install::cutover_admission_guard(&self.factory.context.roots.state) {
+                Ok(()) => return Ok(()),
+                Err(error) => error,
+            };
+        let retained = if let Some(host) =
+            host.filter(|host| *host != self.factory.context.identity.host)
+        {
+            let actor = self
+                .actor
+                .unwrap_or(self.factory.context.identity.inbox.actor);
             matches!(self.peer(host, PeerAction::Receipt {
                 extra: [("graph_launch_actor".into(), serde_json::json!(actor))].into(),
                 operation_id: operation_id.clone(),
