@@ -383,7 +383,10 @@ fn outputs(
     let finding_exports: Vec<_> = spec
         .exports
         .iter()
-        .filter(|export| export.outputs.contains(&OutputKind::Findings))
+        .filter(|export| {
+            export.outputs.contains(&OutputKind::Findings)
+                && !repair::intentionally_skipped_lens(positions[&export.node], plan, checkpoint)
+        })
         .collect();
     if !finding_exports.is_empty() {
         selected.findings_available = Some(finding_exports.iter().all(|export| {
@@ -399,6 +402,9 @@ fn outputs(
         }));
     }
     for export in &spec.exports {
+        if repair::intentionally_skipped_lens(positions[&export.node], plan, checkpoint) {
+            continue;
+        }
         let member = &checkpoint.nodes[positions[&export.node]];
         // A partial composite exports only members that succeeded: a failed
         // member's output, such as a result without findings, is not evidence.

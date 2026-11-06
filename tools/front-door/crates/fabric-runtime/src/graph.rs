@@ -40,6 +40,7 @@ pub mod patch;
 mod plans;
 mod prompt_store;
 pub mod relay;
+mod repair;
 pub mod template;
 #[cfg(test)]
 mod template_tests;
@@ -1578,7 +1579,8 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                 .extra
                 .get("retry_generation")
                 .is_none()
-                && loops::inactive_round(node, &checkpoint, &positions)
+                && (loops::inactive_round(node, &plan, &checkpoint, &positions)
+                    || repair::inactive_lens(node, &plan, &checkpoint, &positions))
             {
                 checkpoint.nodes[node_index].state = NodeState::Skipped;
                 journal.save(&checkpoint).map_err(GraphError::Journal)?;

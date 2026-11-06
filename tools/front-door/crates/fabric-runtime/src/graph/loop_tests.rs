@@ -1873,3 +1873,238 @@ fn loop_reply_rejects_zero_unknown_fields_and_unstructured_text() {
         Ok(LoopDecision::Extend { rounds: 2 })
     );
 }
+
+fn review_repair_document() -> GraphDocument {
+    serde_json::from_value(serde_json::json!({
+        "schema_version":1,"graph_id":"review-repair","nodes":[
+            {"id":"initial","access":"read_only","prompt":"review", "route":{"alias":"senior"},"require_findings":true},
+            {"id":"repair","kind":"loop","access":"read_only","depends_on":["initial"],"on_fail":"design",
+                "inputs":[{"node":"initial","outputs":["findings","verdict"]}],
+                "loop":{"review_repair":true,"max_rounds":3,"until":"accepted","body":[
+                    {"id":"fix","access":"worktree_write","worktree":"/fixture/writer","prompt":"repair", "route":{"alias":"senior"}},
+                    {"id":"check","access":"read_only","depends_on":["fix"],"prompt":"delta", "route":{"alias":"senior"},"require_findings":true},
+                    {"id":"accepted","kind":"gate","access":"read_only","depends_on":["check"],"inputs":[{"node":"check","outputs":["verdict"]}],
+                        "condition":{"type":"verdict","expected":"VERDICT: PASS","threshold":"all"}}
+                ]}},
+            {"id":"design","access":"read_only","depends_on":["repair"],"prompt":"principal", "route":{"alias":"principal"}}
+        ]
+    })).unwrap()
+}
+
+fn repair_finding(design: bool) -> String {
+    format!(
+        "```findings\n{}\n```\nVERDICT: FAIL",
+        serde_json::json!({"schema_version":1,"findings":[{
+            "id":"F1","lens":"correctness","severity":"high","file":"a.rs","line":1,
+            "summary":"constraint","status":"open","evidence":"counterexample","proposed_fix":"repair",
+            "design_defect":design
+        }]})
+    )
+}
+
+#[test]
+fn clean_initial_review_starts_no_repair_attempt() {
+    let document = review_repair_document();
+    let mut owner =
+        reviews(&["```findings\n{\"schema_version\":1,\"findings\":[]}\n```\nVERDICT: PASS"]);
+    let mut journal = MemoryJournal::default();
+    let run = advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(run.status, GraphStatus::Complete);
+    assert!(run.checkpoint.successful());
+    assert_eq!(owner.calls.len(), 1);
+    assert_eq!(
+        run.checkpoint
+            .nodes
+            .iter()
+            .find(|node| node.id == "repair")
+            .unwrap()
+            .outputs
+            .as_ref()
+            .unwrap()
+            .verdict
+            .as_deref(),
+        Some("PASS")
+    );
+    assert_eq!(
+        advance(&document, &mut FakeOwner::default(), &mut journal)
+            .unwrap()
+            .checkpoint,
+        run.checkpoint
+    );
+}
+
+#[test]
+fn recurring_review_finding_escalates_before_second_repair() {
+    let document = review_repair_document();
+    let finding = repair_finding(false);
+    let mut owner = reviews(&[&finding, "fixed", &finding, "root constraint and options"]);
+    let mut journal = MemoryJournal::default();
+    let run = advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(run.status, GraphStatus::Complete);
+    assert!(run.checkpoint.successful());
+    assert_eq!(owner.calls.len(), 4);
+    assert_eq!(owner.calls.last().unwrap().0.node_id, "design");
+    let repair = run
+        .checkpoint
+        .nodes
+        .iter()
+        .find(|node| node.id == "repair")
+        .unwrap();
+    assert_eq!(
+        repair.gate.as_ref().unwrap().reason.as_deref(),
+        Some("recurring finding after repair")
+    );
+    assert_eq!(
+        advance(&document, &mut FakeOwner::default(), &mut journal)
+            .unwrap()
+            .checkpoint,
+        run.checkpoint
+    );
+}
+
+#[test]
+fn concrete_design_defect_escalates_without_repair_attempt() {
+    let document = review_repair_document();
+    let finding = repair_finding(true);
+    let mut owner = reviews(&[&finding, "root constraint and options"]);
+    let mut journal = MemoryJournal::default();
+    let run = advance(&document, &mut owner, &mut journal).unwrap();
+    assert!(run.checkpoint.successful());
+    assert_eq!(owner.calls.len(), 2);
+    assert_eq!(owner.calls.last().unwrap().0.node_id, "design");
+}
+
+#[test]
+fn repair_cycle_budget_cannot_exceed_three_or_be_accepted_without_review() {
+    let mut document = review_repair_document();
+    assert!(
+        loops::validate_extension(&document, "loop.repair.rounds=4", &Default::default()).is_err()
+    );
+    assert!(
+        loops::validate_extension(
+            &document,
+            "loop.repair.decision=accept",
+            &Default::default()
+        )
+        .is_err()
+    );
+    document.nodes[1].loop_body.as_mut().unwrap().max_rounds = 4;
+    assert!(loops::expanded_node_count(&document, &[]).is_err());
+}
+
+#[test]
+fn delta_review_runs_only_the_lens_that_raised_findings() {
+    let mut document = review_repair_document();
+    let check = serde_json::from_value(serde_json::json!({
+        "id":"check","kind":"composite","access":"read_only","depends_on":["fix"],
+        "composite":{"nodes":[
+            {"id":"correctness","repair_lens":"correctness","access":"read_only","prompt":"correctness delta","route":{"alias":"senior"},"require_findings":true},
+            {"id":"security","repair_lens":"security","access":"read_only","prompt":"security delta","route":{"alias":"senior"},"require_findings":true}
+        ],"exports":[{"node":"correctness","outputs":["findings","verdict"]},{"node":"security","outputs":["findings"]}]}
+    })).unwrap();
+    document.nodes[1].loop_body.as_mut().unwrap().body[1] = check;
+    let finding = repair_finding(false);
+    let pass = "```findings\n{\"schema_version\":1,\"findings\":[]}\n```\nVERDICT: PASS";
+    let mut owner = reviews(&[&finding, "fixed", pass]);
+    let mut journal = MemoryJournal::default();
+    let run = advance(&document, &mut owner, &mut journal).unwrap();
+    assert!(run.checkpoint.successful());
+    assert_eq!(owner.calls.len(), 3);
+    assert!(
+        owner
+            .calls
+            .last()
+            .unwrap()
+            .0
+            .node_id
+            .ends_with("check--correctness")
+    );
+    let skipped = run
+        .checkpoint
+        .nodes
+        .iter()
+        .find(|node| node.id == "repair--r1--check--security")
+        .unwrap();
+    assert_eq!(skipped.state, NodeState::Skipped);
+    assert!(skipped.attempts.is_empty());
+    assert_eq!(
+        advance(&document, &mut FakeOwner::default(), &mut journal)
+            .unwrap()
+            .checkpoint,
+        run.checkpoint
+    );
+}
+
+#[test]
+fn review_repair_exhaustion_runs_principal_instead_of_owner_wait() {
+    let document = review_repair_document();
+    let initial = repair_finding(false);
+    let second = initial.replace("F1", "F2");
+    let third = initial.replace("F1", "F3");
+    let fourth = initial.replace("F1", "F4");
+    let mut owner = reviews(&[
+        &initial,
+        "fix one",
+        &second,
+        "fix two",
+        &third,
+        "fix three",
+        &fourth,
+        "principal options",
+    ]);
+    let mut journal = MemoryJournal::default();
+    let run = advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(run.status, GraphStatus::Complete);
+    assert!(run.checkpoint.successful());
+    assert_eq!(owner.calls.len(), 8);
+    assert_eq!(owner.calls.last().unwrap().0.node_id, "design");
+    assert!(run.checkpoint.asks.is_empty());
+    assert_eq!(
+        advance(&document, &mut FakeOwner::default(), &mut journal)
+            .unwrap()
+            .checkpoint,
+        run.checkpoint
+    );
+}
+
+#[test]
+fn principal_recovery_completes_enclosing_composite_and_delivery_continues() {
+    let mut document = review_repair_document();
+    let members = std::mem::take(&mut document.nodes);
+    document.nodes.push(GraphNode::composite(
+        "assurance".into(),
+        vec![],
+        CompositeSpec {
+            nodes: members,
+            min_successful: None,
+            reduce_verdict: false,
+            exports: vec![],
+        },
+    ));
+    document.nodes.push(serde_json::from_value(serde_json::json!({
+        "id":"next","access":"read_only","depends_on":["assurance"],"prompt":"continue", "route":{"alias":"senior"}
+    })).unwrap());
+    let finding = repair_finding(true);
+    let mut owner = reviews(&[&finding, "principal options", "continued delivery"]);
+    let mut journal = MemoryJournal::default();
+    let run = advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(run.status, GraphStatus::Complete);
+    assert!(run.checkpoint.successful());
+    assert_eq!(owner.calls.last().unwrap().0.node_id, "next");
+    let escalation = run
+        .checkpoint
+        .nodes
+        .iter()
+        .find(|node| node.id == "assurance--repair")
+        .unwrap();
+    let findings = &escalation.outputs.as_ref().unwrap().findings;
+    assert_eq!(findings[0].extra["lens"], "correctness");
+    assert_eq!(findings[0].extra["evidence"], "counterexample");
+    assert_eq!(findings[0].extra["proposed_fix"], "repair");
+    assert_eq!(
+        advance(&document, &mut FakeOwner::default(), &mut journal)
+            .unwrap()
+            .checkpoint,
+        run.checkpoint
+    );
+}
