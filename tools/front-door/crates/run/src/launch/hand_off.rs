@@ -289,6 +289,7 @@ impl RunStore {
                 &record.project_id.to_string(),
             )
             .tokens,
+            provider,
         );
         // Held before launch: an unconfirmed handoff may still have a guardian.
         if let Some((held, custody)) = held {

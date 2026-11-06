@@ -48,16 +48,18 @@ fn execute(
     execute_bounded(git, git_dir, cwd, arguments, cancel, Execution::default())
 }
 
-struct Execution<'a> {
-    timeout: Duration,
-    discard: bool,
-    input: Option<&'a [u8]>,
-    clean_stderr: bool,
+pub(crate) struct Execution<'a> {
+    pub(crate) object_directory: Option<&'a Path>,
+    pub(crate) timeout: Duration,
+    pub(crate) discard: bool,
+    pub(crate) input: Option<&'a [u8]>,
+    pub(crate) clean_stderr: bool,
 }
 
 impl Default for Execution<'_> {
     fn default() -> Self {
         Self {
+            object_directory: None,
             timeout: Duration::from_secs(120),
             discard: false,
             input: None,
@@ -66,7 +68,7 @@ impl Default for Execution<'_> {
     }
 }
 
-fn execute_bounded(
+pub(crate) fn execute_bounded(
     git: &Path,
     git_dir: &Path,
     cwd: &Path,
@@ -74,7 +76,7 @@ fn execute_bounded(
     cancel: Option<&CancelToken>,
     settings: Execution<'_>,
 ) -> Result<Vec<u8>> {
-    let env: Vec<(OsString, OsString)> = [
+    let mut env: Vec<(OsString, OsString)> = [
         ("PATH", "/usr/bin:/bin"),
         ("GIT_CONFIG_NOSYSTEM", "1"),
         ("GIT_CONFIG_GLOBAL", "/dev/null"),
@@ -89,6 +91,9 @@ fn execute_bounded(
     .into_iter()
     .map(|(k, v)| (k.into(), v.into()))
     .collect();
+    if let Some(objects) = settings.object_directory {
+        env.push(("GIT_OBJECT_DIRECTORY".into(), objects.as_os_str().to_owned()));
+    }
     // argv confines GIT_DIR to the sender; receive-pack opens the destination.
     let argv: Vec<OsString> = std::iter::once(git.into())
         .chain([OsString::from("--git-dir"), git_dir.into()])

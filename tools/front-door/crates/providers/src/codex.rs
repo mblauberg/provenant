@@ -29,7 +29,7 @@ pub const REGISTRATION: crate::Registration = crate::Registration {
 
 crate::adapter!(Codex, "codex", prepare);
 
-/// Live token usage for a token budget. `codex exec --json` reports each
+/// Completion usage; this is not a mid-turn budget signal. `codex exec --json` reports each
 /// turn's usage in its `turn.completed` event; `input_tokens` holds cached
 /// reads and writes, so cache reads (`cached_input_tokens`) are subtracted to
 /// count fresh tokens only. Every turn is a distinct call, so each gets its
@@ -372,6 +372,8 @@ mod live_usage_tests {
         assert_ne!(key, next);
         for other in [
             &br#"{"type":"turn.started"}"#[..],
+            br#"{"type":"item.started","item":{"id":"item_0","type":"command_execution","command":"pwd","status":"in_progress"}}"#,
+            br#"{"type":"item.completed","item":{"id":"item_0","type":"command_execution","command":"pwd","aggregated_output":"/tmp\n","exit_code":0,"status":"completed"}}"#,
             br#"{"type":"item.completed","item":{"type":"agent_message","text":"turn.completed"}}"#,
             b"turn.completed but not json",
         ] {

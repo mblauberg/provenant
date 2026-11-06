@@ -92,7 +92,7 @@ pub fn token_budget(
         .writer_token_budget_for(project, None)
 }
 
-pub fn capture_plan(task: &TaskRequest, runtime_seconds: u64, token_budget: u64) -> CapturePlan {
+pub fn capture_plan(task: &TaskRequest, runtime_seconds: u64, token_budget: u64, provider: &str) -> CapturePlan {
     CapturePlan {
         stdout: if matches!(&task.route, crate::RequestedRoute::Adapter { provider, .. } if provider == "command")
         {
@@ -108,7 +108,7 @@ pub fn capture_plan(task: &TaskRequest, runtime_seconds: u64, token_budget: u64)
             .knob_u64("lanes.silence_seconds")
             .unwrap_or(1800)
             .saturating_mul(1000),
-        token_budget,
+        token_budget: if crate::token_budget::enforces(provider) { token_budget } else { 0 },
         slot_wait_ms: task
             .profile
             .knob_u64("lanes.slot_wait_seconds")

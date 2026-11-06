@@ -3170,7 +3170,7 @@ impl PrepareFixture {
         base_ref: Option<&str>,
         write: impl FnOnce() -> std::result::Result<(), Box<dyn std::error::Error>>,
     ) -> std::result::Result<bool, Box<dyn std::error::Error>> {
-        self.terminal_via_inner(remote, base_ref, false, false, write)
+        self.terminal_via_inner(remote, base_ref, false, false, false, write)
     }
     fn terminal_via_inner(
         &self,
@@ -3178,6 +3178,7 @@ impl PrepareFixture {
         _base_ref: Option<&str>,
         resume_after_publish: bool,
         advance_after_publish: bool,
+        budget_stop: bool,
         write: impl FnOnce() -> std::result::Result<(), Box<dyn std::error::Error>>,
     ) -> std::result::Result<bool, Box<dyn std::error::Error>> {
         use provenant_confinement::{GitRead, UtilityBudget, UtilityRuntime};
@@ -3335,7 +3336,7 @@ impl PrepareFixture {
                 .ok_or("no claim attempted")??
                 .ok_or_else(|| format!("resumed owner: {observation}"))?;
         }
-        launch.terminal(&state, &attempt, &recovery, &mut settlement)?;
+        launch.terminal(&state, &attempt, &recovery, &mut settlement, budget_stop)?;
         let archive = attempt.open_verified_directory(OsStr::new("quarantine"))?;
         let manifest: serde_json::Value = serde_json::from_slice(
             &archive.read_bounded(OsStr::new("manifest.json"), RECORD_LIMIT)?,
@@ -3427,6 +3428,17 @@ fn terminal_ignores_protected_changes_present_at_lane_start()
 #[test]
 fn terminal_imports_a_stopped_merge_into_the_worktree()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
+    stopped_merge_is_restored(false)
+}
+
+#[test]
+fn budget_stop_preserves_a_stopped_merge_without_committing_conflict_markers()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    stopped_merge_is_restored(true)
+}
+
+fn stopped_merge_is_restored(budget_stop: bool)
+-> std::result::Result<(), Box<dyn std::error::Error>> {
     use provenant_confinement::{UtilityBudget, UtilityRuntime};
     use provenant_core::CancelToken;
     let fixture = PrepareFixture::new()?;
@@ -3477,7 +3489,7 @@ fn terminal_imports_a_stopped_merge_into_the_worktree()
             )?;
             Ok(scratch)
         };
-    fixture.terminal(|| {
+    fixture.terminal_via_inner("origin", None, false, false, budget_stop, || {
         let scratch = prepare_private()?;
         let output = provenant_os::fixture::git_command_at(&git)
             .env_clear()
@@ -3493,6 +3505,17 @@ fn terminal_imports_a_stopped_merge_into_the_worktree()
         Ok(())
     })?;
     assert!(fixture.root.join("attempt/merge-restored.json").is_file());
+    if budget_stop {
+        let note: serde_json::Value = serde_json::from_slice(&std::fs::read(
+            fixture.root.join("attempt/budget-commit.json"))?)?;
+        assert!(note["note"].as_str().ok_or("note")?.contains("in-progress merge preserved"));
+        let head = provenant_os::fixture::git_command_at(&git)
+            .env_clear().envs(fixture.environment.iter().map(|(k,v)| (k,v)))
+            .current_dir(&fixture.writer.worktree).args(["log", "-1", "--pretty=%s"]).output()?;
+        assert!(head.status.success());
+        assert_eq!(head.stdout, b"ours\n");
+        assert_eq!(std::fs::read_to_string(fixture.writer.project.join(".git/worktrees/lane/MERGE_HEAD"))?.trim(), theirs);
+    }
     let output = provenant_os::fixture::git_command_at(&git)
         .env_clear()
         .envs(fixture.environment.iter().map(|(key, value)| (key, value)))
@@ -4533,7 +4556,7 @@ fn landed_writer_fence_fixture(
 fn terminal_resumes_after_branch_publication_before_its_phase_checkpoint()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
     let fixture = PrepareFixture::new()?;
-    let review = fixture.terminal_via_inner("origin", None, true, false, || {
+    let review = fixture.terminal_via_inner("origin", None, true, false, false, || {
         std::fs::write(
             fixture.writer.worktree.join("resumed.txt"),
             "durable branch\n",
@@ -4555,7 +4578,7 @@ fn terminal_resumes_after_branch_publication_before_its_phase_checkpoint()
 fn terminal_attributes_only_the_pinned_head_after_branch_advances()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
     let fixture = PrepareFixture::new()?;
-    let review = fixture.terminal_via_inner("origin", None, true, true, || {
+    let review = fixture.terminal_via_inner("origin", None, true, true, false, || {
         std::fs::write(fixture.writer.worktree.join("writer.txt"), "writer\n")?;
         fixture.lane_git(&["add", "writer.txt"])?;
         fixture.commit(&fixture.writer.worktree, "writer")
@@ -4997,5 +5020,28 @@ fn existing_pr_delivery_only_creates_after_positive_absence()
             assert_eq!(calls.lines().count(), creates, "{state}");
         }
     }
+    Ok(())
+}
+
+#[test]
+fn budget_commit_uses_bounded_git_without_running_hooks()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    use std::os::unix::fs::PermissionsExt;
+    let fixture = PrepareFixture::new()?;
+    let sentinel = fixture.root.join("hook-ran");
+    fixture.terminal_via_inner("origin", None, false, false, true, || {
+        std::fs::write(fixture.writer.worktree.join("budget.txt"), "saved\n")?;
+        let hook = fixture.writer.project.join(".git/hooks/pre-commit");
+        std::fs::write(&hook, format!("#!/bin/sh\ntouch '{}'\nexit 1\n", sentinel.display()))?;
+        std::fs::set_permissions(hook, std::fs::Permissions::from_mode(0o700))?;
+        Ok(())
+    })?;
+    assert!(!sentinel.exists());
+    let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
+    let output = provenant_os::fixture::git_command_at(&git)
+        .env_clear().envs(fixture.environment.iter().map(|(k,v)| (k,v)))
+        .current_dir(&fixture.writer.worktree).args(["show", "HEAD:budget.txt"]).output()?;
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert_eq!(output.stdout, b"saved\n");
     Ok(())
 }

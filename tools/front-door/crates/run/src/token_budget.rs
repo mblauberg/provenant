@@ -16,9 +16,10 @@ pub enum Verdict {
 }
 
 /// Whether `provider` reports live token usage while running, allowing
-/// the guardian to enforce a writer token budget. Claude and Codex enforce it.
+/// the guardian to enforce a writer token budget. Codex exec reports usage only
+/// at turn completion, after the opportunity to stop this launch.
 pub fn enforces(provider: &str) -> bool {
-    matches!(provider, "claude" | "codex")
+    provider == "claude"
 }
 
 /// Fresh tokens the provider reported, summed. Cache reads do not count:
@@ -117,9 +118,17 @@ mod tests {
     }
 
     #[test]
-    fn enforced_providers_are_claude_and_codex() {
+    fn budget_capture_disables_completion_only_usage_for_the_applied_provider() {
+        let input = crate::tests::input();
+        let task = &input.request.tasks[0];
+        assert_eq!(crate::launch::capture_plan(task, 60, 500, "codex").token_budget, 0);
+        assert_eq!(crate::launch::capture_plan(task, 60, 500, "claude").token_budget, 500);
+    }
+
+    #[test]
+    fn budget_enforcement_requires_mid_turn_usage() {
         assert!(enforces("claude"));
-        assert!(enforces("codex"));
+        assert!(!enforces("codex"));
         assert!(!enforces("opencode"));
         assert!(!enforces("cursor"));
     }

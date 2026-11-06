@@ -823,11 +823,7 @@ pub(super) fn dispatch_inner(
                     );
                     let enforced: Vec<&str> = provenant_providers::REGISTRY
                         .iter()
-                        .filter(|entry| {
-                            entry
-                                .stdout_decoder
-                                .is_some_and(|decoder| decoder.reports_usage())
-                        })
+                        .filter(|entry| provenant_run::token_budget::enforces(entry.adapter.id()))
                         .map(|entry| entry.adapter.id())
                         .collect();
                     data["token_budget"] = json!({
@@ -1823,11 +1819,7 @@ pub(super) fn dispatch_inner(
         if budget.tokens > 0 {
             let enforced: Vec<&str> = provenant_providers::REGISTRY
                 .iter()
-                .filter(|entry| {
-                    entry
-                        .stdout_decoder
-                        .is_some_and(|decoder| decoder.reports_usage())
-                })
+                .filter(|entry| provenant_run::token_budget::enforces(entry.adapter.id()))
                 .map(|entry| entry.adapter.id())
                 .collect();
             for task in &tasks {

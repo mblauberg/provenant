@@ -12,7 +12,7 @@ use provenant_confinement::{
 };
 use provenant_core::{CancelToken, GitOid, ProjectId};
 use provenant_os::{
-    exec::{ExecOptions, Executor, SystemExecutor, Termination},
+    exec::SystemExecutor,
     fs::{Directory, FsError, canonicalize},
 };
 use provenant_supervisor::custody::WriterBinding;
@@ -300,95 +300,48 @@ impl WriterLaunch {
 
     /// When a writer lane passes its token budget and stops, commit its
     /// uncommitted work in the lane's worktree so it ends up committed on its branch.
-    pub(crate) fn commit_budget_stop(&self, attempt: &Directory) -> Result<()> {
+    fn commit_budget_stop(&self, attempt: &Directory) -> Result<&'static str> {
         let repo = self.worktree.repo();
         let git = provenant_os::git::git_executable().ok_or(RunError::GitUnavailable)?;
         let source = crate::objects::bound_source(attempt)?;
-
-        let (git_dir, common_dir, obj_dir) = match &source {
-            Some(source) => {
-                let git_dir = source.refs.current_path()?;
-                let obj_dir = source.objects.current_path()?;
-                (git_dir.clone(), git_dir, Some(obj_dir))
-            }
-            None => {
-                let p = repo.private_git_dir().to_path_buf();
-                (p.clone(), p, None)
-            }
+        let git_dir = match &source {
+            Some(source) => source.refs.current_path()?,
+            None => repo.private_git_dir().to_path_buf(),
         };
-
-        let mut identity = provenant_os::sys::git_identity(&git, repo.root_path());
-        if !identity.iter().any(|(k, _)| k == "GIT_AUTHOR_NAME") {
-            identity.push(("GIT_AUTHOR_NAME".into(), "provenant".into()));
-            identity.push(("GIT_COMMITTER_NAME".into(), "provenant".into()));
-            identity.push(("GIT_AUTHOR_EMAIL".into(), "provenant@invalid".into()));
-            identity.push(("GIT_COMMITTER_EMAIL".into(), "provenant@invalid".into()));
-        }
-
-        let run_git = |args: &[&str]| -> Result<Vec<u8>> {
-            let mut env = vec![
-                ("PATH".into(), "/usr/bin:/bin".into()),
-                ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
-                ("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()),
-                ("GIT_CONFIG_SYSTEM".into(), "/dev/null".into()),
-                ("GIT_NO_REPLACE_OBJECTS".into(), "1".into()),
-                ("GIT_GRAFT_FILE".into(), "/dev/null".into()),
-                ("GIT_NO_LAZY_FETCH".into(), "1".into()),
-                ("GIT_TERMINAL_PROMPT".into(), "0".into()),
-                ("LC_ALL".into(), "C".into()),
-                ("GIT_DIR".into(), git_dir.as_os_str().to_owned()),
-                ("GIT_COMMON_DIR".into(), common_dir.as_os_str().to_owned()),
-                ("GIT_WORK_TREE".into(), repo.root_path().as_os_str().to_owned()),
-            ];
-            if let Some(obj_dir) = &obj_dir {
-                env.push(("GIT_OBJECT_DIRECTORY".into(), obj_dir.as_os_str().to_owned()));
-            }
-            env.extend(identity.iter().cloned());
-
-            let mut argv = vec![
-                git.as_os_str().to_owned(),
-                "-c".into(),
-                "core.hooksPath=/dev/null".into(),
-                "-c".into(),
-                "core.fsmonitor=false".into(),
-                "-c".into(),
-                "gc.auto=0".into(),
-                "-c".into(),
-                "maintenance.auto=false".into(),
-            ];
-            for arg in args {
-                argv.push(OsString::from(arg));
-            }
-
-            let executor = SystemExecutor::new(1)
-                .map_err(|_| RunError::Validation("initialise executor"))?;
-            let mut options = ExecOptions::new(&argv, repo.root_path(), Duration::from_secs(60));
-            options.env = Some(&env);
-            let output = executor.execute(options).map_err(|error| {
-                RunError::Io(std::io::Error::other(format!("git execution failed: {error}")))
-            })?;
-            if output.termination != Termination::Exit(0) {
-                return Err(RunError::Io(std::io::Error::other(format!(
-                    "git command failed: {}",
-                    String::from_utf8_lossy(&output.stderr.bytes)
-                ))));
-            }
-            Ok(output.stdout.bytes)
+        let objects = source.as_ref().map(|s| s.objects.current_path()).transpose()?;
+        let run_git = |args: &[&str]| {
+            let argv = [OsString::from("--work-tree"), repo.root_path().into()].into_iter()
+                .chain(args.iter().map(OsString::from)).collect::<Vec<_>>();
+            crate::objects::execute_bounded(
+                &git, &git_dir, repo.root_path(), &argv, None,
+                crate::objects::Execution {
+                    object_directory: objects.as_deref(),
+                    ..Default::default()
+                },
+            )
         };
-
-        let status = run_git(&["status", "--porcelain", "-z"])?;
-        if status.is_empty() {
-            return Ok(());
+        let head = run_git(&["symbolic-ref", "HEAD"])?;
+        if head != format!("{}\n", self.branch.as_str()).as_bytes() {
+            return Err(RunError::WriterHeadNotLaneBranch);
         }
-
+        // Never stage away conflict stages or finish a merge on the lane's
+        // behalf. The existing stopped-merge import restores this state.
+        let directory = source.as_ref().map(|s| &s.refs).unwrap_or(repo.private_dir());
+        let merging = match directory.read_stable(OsStr::new("MERGE_HEAD"), 1024 * 1024) {
+            Ok(_) => true,
+            Err(error) if error.is_not_found() => false,
+            Err(error) => return Err(error.into()),
+        };
+        if merging || !run_git(&["ls-files", "--unmerged", "-z"])?.is_empty() {
+            return Ok("budget commit skipped: in-progress merge preserved for stopped-merge handling");
+        }
+        if run_git(&["status", "--porcelain", "-z"])?.is_empty() {
+            return Ok("budget stop: worktree already clean");
+        }
         run_git(&["add", "-A"])?;
-        let status_after_add = run_git(&["status", "--porcelain", "-z"])?;
-        if status_after_add.is_empty() {
-            return Ok(());
-        }
-
-        run_git(&["commit", "-m", "stopped on budget"])?;
-        Ok(())
+        run_git(&["-c", "user.name=provenant", "-c", "user.email=provenant@invalid",
+            "-c", "commit.gpgsign=false", "commit", "-m", "stopped on budget"])?;
+        Ok("work committed on its branch")
     }
 }
 
@@ -2074,6 +2027,7 @@ impl WriterLaunch {
         attempt: &Directory,
         custody: &provenant_supervisor::custody::Recovery,
         settlement: &mut crate::settlement::Driver,
+        budget_stop: bool,
     ) -> Result<()> {
         if custody.observe() != provenant_supervisor::custody::RecoveryState::Absent {
             return Err(RunError::Validation(
@@ -2099,19 +2053,6 @@ impl WriterLaunch {
         // hash-checked. Do this before ancestry checks.
         let source = crate::objects::bound_source(attempt)?;
         let git_executable = provenant_os::git::git_executable().ok_or(RunError::GitUnavailable)?;
-        let shared_tip = crate::objects::resolve_ref(
-            &git_executable,
-            self.worktree.repo(),
-            self.branch.as_str(),
-        )?;
-        let verified_tip = match settlement.head() {
-            Some(head) => head,
-            None => match &source {
-                Some(source) => crate::objects::private_tip(source, self.branch.as_str())?,
-                None => shared_tip,
-            },
-        };
-        settlement.set_head(verified_tip)?;
         let head = self
             .worktree
             .repo()
@@ -2122,6 +2063,26 @@ impl WriterLaunch {
         {
             return Err(RunError::WriterHeadNotLaneBranch);
         }
+        if budget_stop && settlement.head().is_none()
+            && crate::artifacts::read_sealed(attempt, "budget-commit.json", crate::RECORD_LIMIT)?.is_none()
+        {
+            // Recovery holds writer exclusion and custody is absent. Commit
+            // failure is diagnostic and must not replace the budget outcome.
+            let note = match self.commit_budget_stop(attempt) {
+                Ok(note) => note.to_owned(),
+                Err(error) => format!("budget commit failed: {error}"),
+            };
+            crate::artifacts::seal(attempt, "budget-commit.json",
+                &crate::db::bytes(&serde_json::json!({"schema_version":1,"note":note}))?, crate::RECORD_LIMIT)?;
+        }
+        let verified_tip = match settlement.head() {
+            Some(head) => head,
+            None => match &source {
+                Some(source) => crate::objects::private_tip(source, self.branch.as_str())?,
+                None => crate::objects::resolve_ref(&git_executable, self.worktree.repo(), self.branch.as_str())?,
+            },
+        };
+        settlement.set_head(verified_tip)?;
         let import_cancel = settlement.cancellation();
         let merge_objects = source
             .as_ref()

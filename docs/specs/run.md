@@ -779,20 +779,32 @@ provider call; cache reads do not count. When the sum passes the budget it stops
 the provider with the typed stop `token_budget`, and the attempt settles
 `timed_out` with a reason naming the budget and its source (`project`, `host` or
 `default`); a host setting equal to the default still reports `host`. If the
-lane stopped with uncommitted work, the host commits it in the lane's worktree
-with the message `stopped on budget` before publishing the branch. At 90% of the
-budget the lane itself is told, through whatever delivers a steer to a running
-lane, so it can commit first. `provenant run --explain` shows the budget, its
-source and the providers it is enforced for. Claude and Codex enforce the
-budget from live turn usage; for any other provider the budget is not enforced,
-and launch warnings or receipt notes report this. Time a lane spends queued for
+lane stopped with uncommitted work, the host attempts a bounded commit with
+message `stopped on budget`, after custody proves no provider process can still
+write, and before publishing the branch. An in-progress merge is left to the
+existing stopped-merge handling. Settlement reports a skipped or failed commit;
+a Git error does not replace the budget outcome. At 90% the host uses the
+existing steer capability matrix. All current lane adapters are
+`continuation_only` or `unsupported`: the warning records an unsupported
+control receipt, and is not delivered to the lane. `provenant run --explain`
+shows the budget, its source and the providers it is enforced for. Claude
+enforces the budget from live usage. Codex exec emits tool and message item
+events within a turn, but reports usage only at terminal `turn.completed`;
+it cannot be stopped mid-turn by this budget. The version-matched Codex
+[JSONL processor](https://github.com/openai/codex/blob/f2ed5dc90e514b59c2334f3bafb9b0250cc3e038/codex-rs/exec/src/event_processor_with_jsonl_output.rs)
+(`rust-v0.166.0-alpha.1`) stores `ThreadTokenUsageUpdated` internally without
+emitting a JSON frame, and emits usage at `TurnCompleted` before shutdown. This launch path has no further
+turn to stop, so Codex's budget is not enforced. Its completed-turn accounting
+still subtracts cached input per turn. Other providers without live usage are
+also not enforced, and launch warnings or receipt notes report this.
+Time a lane spends queued for
 a build slot stays off the wall deadline, up to `lanes.slot_wait_seconds`
 (default 7200) in total.
 - Why: a long writer should stop on what it spends, and a stuck lane must not
   wait or run forever.
 - Test: `crates/supervisor/src/machine.rs::tests::a_token_budget_stop_is_a_typed_stop`;
   `crates/providers/src/claude.rs::tests::live_usage_counts_each_call_once_with_fresh_input`;
-  `crates/providers/src/codex.rs::tests::a_completed_turn_reports_its_fresh_input_and_output`;
+  `crates/providers/src/codex.rs::live_usage_tests::a_completed_turn_reports_its_fresh_input_and_output`;
   `crates/run/src/token_budget.rs::tests::fresh_tokens_count_towards_the_budget_and_cache_reads_are_ignored`;
   `crates/run/src/token_budget.rs::tests::a_fake_provider_passing_the_budget_ends_the_attempt_and_silence_only_warns`;
   `crates/run/src/holder.rs::writer_recovery_tests::writer_token_budget_stop_commits_uncommitted_work_and_publishes_branch`;
