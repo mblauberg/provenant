@@ -64,6 +64,20 @@ impl<'a> Service<'a> {
         // Reuse the originally resolved boundary before consulting Git. Retrying
         // the same operation must work even after its caller-supplied ref vanishes.
         let operation = self.store.operation(&input.operation_id, call)?;
+        if let Some(operation) = &operation
+            && operation.state == OperationState::Refused
+            && operation.extra.get("preflight_digest_version") == Some(&serde_json::json!(1))
+        {
+            if operation.request_digest != preflight_digest(&input, cwd)? {
+                return Err(RunError::OperationConflict);
+            }
+            return Err(RunError::RecordedRefusal(
+                operation
+                    .refusal
+                    .clone()
+                    .ok_or(RunError::Validation("refusal diagnostic missing"))?,
+            ));
+        }
         let previous = match &operation {
             Some(operation) if operation.state == OperationState::Refused => None,
             Some(operation) => match self.store.request(operation.run_id, call) {
@@ -81,7 +95,52 @@ impl<'a> Service<'a> {
         // Refuse every task's unsupported launch before any task prepares a writer.
         for task in &input.tasks {
             let route = Self::route(task.route.clone())?;
-            check_launch_capabilities(task, &route)?;
+            if let Err(error) = check_launch_capabilities(task, &route) {
+                // A nested run's ID is derived from its canonical request,
+                // which is not available until parent validation completes.
+                if input.parent_attempt.is_some() {
+                    return Err(error);
+                }
+                let mut extra = provenant_records::ExtraFields::default();
+                extra.insert("preflight_digest_version".into(), serde_json::json!(1));
+                let diagnostic = ErrorKind::from(&error)
+                    .diagnostic()
+                    .detail(error.to_string());
+                let worktree = task
+                    .worktree
+                    .as_ref()
+                    .and_then(|path| path.file_name())
+                    .and_then(|name| name.to_str())
+                    .map(str::to_owned);
+                let record = OperationRecord {
+                    extra,
+                    schema_version: 1,
+                    project_id: self.store.context.project_id,
+                    actor_id: self.store.context.actor_id,
+                    operation_id: input.operation_id.clone(),
+                    kind: OperationKind::Dispatch,
+                    request_digest: preflight_digest(&input, cwd)?,
+                    run_id: fresh(RunId::from_bytes)?,
+                    state: OperationState::Refused,
+                    blocked_reason: None,
+                    refusal: Some(diagnostic),
+                    worktree,
+                    refused_at: Some(
+                        call.clock
+                            .wall_now()
+                            .map_err(|_| RunError::Validation("wall clock"))?,
+                    ),
+                };
+                let saved = self.store.insert_refusal(record, call)?;
+                if saved.state != OperationState::Refused {
+                    return Err(RunError::OperationConflict);
+                }
+                return Err(RunError::RecordedRefusal(
+                    saved
+                        .refusal
+                        .ok_or(RunError::Validation("refusal diagnostic missing"))?,
+                ));
+            }
         }
         for mut task in input.tasks {
             if task
@@ -830,6 +889,7 @@ impl From<&RunError> for ErrorKind {
 }
 
 /// Prepared transport-independent dispatch input.
+#[derive(serde::Serialize)]
 pub struct DispatchTask {
     pub cloud: Option<provenant_records::run::CloudPlacement>,
     pub context: Option<provenant_records::run::WorkContext>,
@@ -858,6 +918,20 @@ pub struct DispatchRequest {
     pub concurrency: u64,
     pub lane_depth: u64,
     pub parent_attempt: Option<AttemptId>,
+}
+/// Bind an early refusal to all supplied inputs without persisting prompt bytes.
+fn preflight_digest(input: &DispatchRequest, cwd: &Path) -> Result<provenant_core::Digest> {
+    Ok(CanonicalV1::record_digest(
+        "dispatch-preflight",
+        1,
+        &(
+            &input.tasks,
+            input.concurrency,
+            input.lane_depth,
+            input.parent_attempt,
+            cwd,
+        ),
+    )?)
 }
 fn input_error(kind: ErrorKind, message: impl Into<String>) -> RunError {
     RunError::Input {

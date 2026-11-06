@@ -126,6 +126,16 @@ impl RunStore {
             worktree,
             refused_at: Some(input.created_at),
         };
+        self.insert_refusal(operation, call)
+    }
+
+    /// Commit a preflight refusal whose request has not reached canonical admission.
+    pub(crate) fn insert_refusal(
+        &self,
+        operation: OperationRecord,
+        call: &Request<'_>,
+    ) -> Result<OperationRecord> {
+        let digest = operation.request_digest;
         self.write(call, |tx| {
             let prior: Option<Vec<u8>> = tx
                 .query_row(
@@ -133,7 +143,7 @@ impl RunStore {
                     params![
                         self.context.project_id.to_string(),
                         self.context.actor_id.to_string(),
-                        input.operation_id.as_str()
+                        operation.operation_id.as_str()
                     ],
                     |row| row.get(0),
                 )
@@ -150,9 +160,9 @@ impl RunStore {
                 params![
                     self.context.project_id.to_string(),
                     self.context.actor_id.to_string(),
-                    input.operation_id.as_str(),
+                    operation.operation_id.as_str(),
                     digest.to_string(),
-                    input.run_id.to_string(),
+                    operation.run_id.to_string(),
                     bytes(&operation)?
                 ],
             )?;

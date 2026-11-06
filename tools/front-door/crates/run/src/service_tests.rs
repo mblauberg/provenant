@@ -601,10 +601,7 @@ fn unsupported_launch_is_refused_before_any_run_exists() -> TestResult {
         let result = Service::new(&store).dispatch(input, temp.path(), &call);
         let recorded = store.operation(&operation, &call)?.is_some();
         assert_eq!(result.is_ok(), accepted, "{provider} {effort:?}");
-        assert_eq!(
-            recorded, accepted,
-            "{provider} {effort:?} left an operation"
-        );
+        assert!(recorded, "{provider} {effort:?} left no operation");
         if let Err(error) = result {
             assert_eq!(
                 error.to_string(),
@@ -612,6 +609,42 @@ fn unsupported_launch_is_refused_before_any_run_exists() -> TestResult {
             );
         }
     }
+    Ok(())
+}
+
+#[test]
+fn preflight_refusal_replays_and_rejects_changed_inputs() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let store = RunStore::open(&context(temp.path())?, &call)?;
+    let make = |prompt| {
+        let mut input = submission(prompt);
+        input.tasks[0].route = RequestedRoute::Model {
+            extra: Default::default(),
+            provider: "cursor".into(),
+            model: "cursor/m".into(),
+            effort: Some("high".into()),
+        };
+        input
+    };
+    let first = Service::new(&store)
+        .dispatch(make("first"), temp.path(), &call)
+        .unwrap_err();
+    let second = Service::new(&store)
+        .dispatch(make("first"), temp.path(), &call)
+        .unwrap_err();
+    assert_eq!(first.to_string(), second.to_string());
+    assert!(
+        matches!(second, RunError::RecordedRefusal(ref diagnostic) if diagnostic.code == "UNSUPPORTED")
+    );
+    assert!(matches!(
+        Service::new(&store).dispatch(make("changed"), temp.path(), &call),
+        Err(RunError::OperationConflict)
+    ));
+    assert_eq!(store.recent_refusals(10, &call)?.len(), 1);
+    let saved = store.recent_refusals(10, &call)?.remove(0);
+    assert!(!serde_json::to_string(&saved)?.contains("first"));
     Ok(())
 }
 
@@ -649,7 +682,7 @@ fn explicit_skill_location_is_rechecked_before_dispatch() -> TestResult {
             accepted,
             "{provider} required={required}: {result:?}"
         );
-        assert_eq!(store.operation(&operation, &call)?.is_some(), accepted);
+        assert!(store.operation(&operation, &call)?.is_some());
         if let Err(error) = result {
             assert_eq!(error.to_string(), "command does not support skill location");
         }
@@ -682,7 +715,13 @@ fn every_task_is_checked_before_any_writer_is_prepared() -> TestResult {
         .dispatch(input, temp.path(), &call)
         .unwrap_err();
     assert_eq!(error.to_string(), "cursor does not support effort");
-    assert!(store.operation(&operation, &call)?.is_none());
+    assert_eq!(
+        store
+            .operation(&operation, &call)?
+            .ok_or("missing operation")?
+            .state,
+        OperationState::Refused
+    );
     Ok(())
 }
 

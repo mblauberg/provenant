@@ -321,7 +321,7 @@ impl std::fmt::Display for ArtifactProvenance {
 
 #[derive(Debug, Error)]
 pub enum RunError {
-    #[error("dispatch was refused: {0:?}")]
+    #[error("{}", .0.detail.as_deref().unwrap_or("dispatch was refused"))]
     RecordedRefusal(provenant_records::diagnostic::Diagnostic),
     #[error("continuation preparation refused: {}", cause.reason())]
     ContinuationRefused {
