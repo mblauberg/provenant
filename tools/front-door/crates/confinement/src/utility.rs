@@ -2136,7 +2136,14 @@ fn mutation_args(mutation: GitMutation) -> Result<(Vec<OsString>, Option<Vec<u8>
             create_branch,
         } => {
             let path = validate_absolute_mutation_path(&path)?;
-            args.extend(["worktree".into(), "add".into()]);
+            // Relative worktree paths can make Git upgrade the shared repository
+            // format during add, invalidating the configuration we verified.
+            args.extend([
+                "-c".into(),
+                "worktree.useRelativePaths=false".into(),
+                "worktree".into(),
+                "add".into(),
+            ]);
             if create_branch {
                 args.push("-b".into());
                 args.push(branch.short_name().into());
