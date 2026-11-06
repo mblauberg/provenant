@@ -934,3 +934,42 @@ fn bound_document_child_preserves_explicit_worktree_and_upstream_source() {
     assert_eq!(node.source, Some(SourceBinding::Node { node:"a".into() }));
     assert_eq!(node.delivery, Some(provenant_records::run::DeliveryMode::Push));
 }
+
+#[test]
+fn planner_native_child_runs_before_parent_settles_and_final_fragment_closes_once() {
+    let document: GraphDocument = serde_json::from_value(json!({
+        "schema_version":1, "graph_id":"planning-parent", "nodes":[
+            {"id":"parent", "kind":"plan", "access":"read_only", "prompt":"Plan", "route":{"alias":"senior"},
+                "source":{"type":"commit", "commit":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+                "plan":{"kinds":["task"], "max_nodes":1, "planned_review":true}}
+        ]
+    })).unwrap();
+    let mut owner = FakeOwner::default();
+    owner.observations.push_back(AttemptObservation::Pending { attempt_ref:Some("planner-attempt".into()) });
+    let mut journal = MemoryJournal::default();
+    let mut checkpoint = advance(&document, &mut owner, &mut journal).unwrap().checkpoint;
+    let receipt = add(&document, &mut checkpoint, "parent", &child("scout", "scout")).unwrap();
+    let expanded = plans::expand(&document, &checkpoint.extensions, &checkpoint.expansions, &plans::generous()).unwrap();
+    assert!(expanded.nodes.iter().find(|node| node.id == receipt.node).unwrap().depends_on.is_empty());
+    journal.0 = Some(checkpoint);
+    owner.observations.extend([
+        AttemptObservation::Pending { attempt_ref:Some("planner-attempt".into()) },
+        AttemptObservation::Pending { attempt_ref:Some("scout-attempt".into()) },
+    ]);
+    let run = advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(parent_of_attempt(&run.checkpoint, "scout-attempt"), Some("parent--scout"));
+    assert_eq!(progress(&run.checkpoint, "parent").state, NodeState::Running);
+    journal.0 = Some(serde_json::from_slice(&serde_json::to_vec(&run.checkpoint).unwrap()).unwrap());
+    owner.observations.extend([
+        terminal_from("```fragment\n{\"schema_version\":1,\"nodes\":[{\"id\":\"final\",\"brief\":\"Finish\",\"source\":{\"type\":\"commit\",\"commit\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"acceptance_checks\":[\"Done\"],\"after\":[]}]}\n```", "planner-attempt"),
+        terminal_from("Scout done", "scout-attempt"),
+        terminal_from("Finished", "final-attempt"),
+    ]);
+    let run = advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(run.status, GraphStatus::Complete, "{:?}", run.checkpoint.pause_reason);
+    assert!(run.checkpoint.successful());
+    assert_eq!(run.checkpoint.expansions.len(), 2);
+    assert_eq!(run.checkpoint.expansions[1].extra.get("final_fragment"), Some(&json!(true)));
+    assert!(ids(&document, &run.checkpoint).contains(&"parent--final".into()));
+    assert_eq!(advance(&document, &mut owner, &mut journal).unwrap().checkpoint, run.checkpoint);
+}

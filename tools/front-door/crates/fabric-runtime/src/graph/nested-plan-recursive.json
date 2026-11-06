@@ -1,6 +1,7 @@
 {
   "expansions": [
     {
+      "final_fragment": true,
       "source": "plan",
       "continuation": false,
       "nodes": [
@@ -31,6 +32,7 @@
       ]
     },
     {
+      "final_fragment": true,
       "source": "plan--nested",
       "continuation": false,
       "nodes": [

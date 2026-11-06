@@ -119,6 +119,13 @@ pub struct Expansion {
     pub patch: Option<PatchRecord>,
 }
 
+impl Expansion {
+    /// Live children and edits leave their producer open for its final output.
+    pub(super) fn closes_producer(&self) -> bool {
+        self.patch.is_none() || self.extra.get("final_fragment") == Some(&serde_json::Value::Bool(true))
+    }
+}
+
 // Documents and untrusted fragments cannot set computed topology. Flattened
 // expansion records, however, must retain it across a journal JSON round trip.
 mod expanded_nodes {
@@ -518,6 +525,9 @@ fn check_patch_topology(
             ));
         }
     }
+    if !addition.closes_producer() {
+        return Ok(());
+    }
     let Some(planner) = expanded
         .nodes
         .iter()
@@ -640,7 +650,7 @@ pub(super) fn append(document: &mut GraphDocument, expansion: &Expansion) {
                     .map(|n| n.id.clone()),
             );
 
-            if !expansion.continuation {
+            if !expansion.continuation && expansion.closes_producer() {
                 wire_exports(node, &expansion.source, &exported);
                 if let Some(composite) = &mut node.composite
                     && (composite.reduce_verdict || review_minimum.is_some())
@@ -1129,7 +1139,7 @@ fn fragment(
         Some(node),
         &patch,
         &context,
-        None,
+        super::patch::Preparation::FinalFragment,
     )
     .map_err(|error| {
         *safe_reason = error.cause.unwrap_or(PlanFailureFact::InvalidFragment);
@@ -1259,7 +1269,7 @@ pub(super) fn flatten_fragment(
     // A host or lane patch may wait on nodes already in the graph; a planner
     // names only its own fragment's nodes. External nodes stand in as plain
     // read-only placeholders while the fragment is checked, then drop out.
-    let external: BTreeSet<String> = if parent.is_none_or(|parent| parent.plan.is_none()) {
+    let external: BTreeSet<String> = if spec.is_none() {
         units
             .values()
             .flatten()
@@ -1397,7 +1407,7 @@ pub(super) fn flatten_fragment(
             child.depends_on = child.depends_on.iter().map(|name| id(name)).collect();
             // A planner's patch consumes its plan; a lane's children do not
             // wait for the lane that spawned them.
-            if child.depends_on.is_empty() && parent.plan.is_some() {
+            if child.depends_on.is_empty() && spec.is_some() {
                 child.depends_on.push(parent.id.clone());
             }
             child.after_expansion = child.after_expansion.iter().map(|name| id(name)).collect();
@@ -1670,7 +1680,8 @@ pub(super) fn settle(
     if checkpoint
         .expansions
         .iter()
-        .any(|e| e.source == node.id && e.extra.get("retry_generation") == generation.as_ref())
+        .any(|e| e.source == node.id && e.extra.get("retry_generation") == generation.as_ref()
+            && e.closes_producer())
     {
         return None;
     }
