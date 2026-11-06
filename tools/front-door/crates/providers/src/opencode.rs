@@ -1,5 +1,5 @@
 use crate::launch::{
-    Access, PrepareInput, Session, SetupStep, Stdin, base_env, exact, package_root, subtree,
+    Access, PrepareInput, Session, SetupStep, Stdin, base_env, exact, package_grant, subtree,
 };
 use crate::{LaunchSpec, ProviderError, ProviderEvent as E, StreamState, stream::wire};
 use provenant_confinement::permissions::{NetworkEndpoint, ProviderProfile, ProviderProfileSpec};
@@ -130,11 +130,14 @@ fn prepare(
     if plan.selected_authentication.is_some() {
         return Err(ProviderError::UnsupportedPolicy);
     }
-    let private = &plan
-        .private_state
-        .as_ref()
-        .ok_or(ProviderError::UnsupportedPolicy)?
-        .path;
+    let private = plan.private_state.as_ref().map_or_else(
+        || {
+            use std::io::Write;
+            let _ = writeln!(std::io::stderr().lock(), "warning: OpenCode private state is unavailable; using the attempt scratch directory");
+            &plan.scratch.path
+        },
+        |state| &state.path,
+    );
     let mut argv: Vec<OsString> = [
         input.executable.as_os_str(),
         "run".as_ref(),
@@ -163,16 +166,6 @@ fn prepare(
         Access::ReadOnly => "deny",
         Access::WorktreeWrite => "allow",
     };
-    // Scratch is outside the workspace; headless runs cannot answer the
-    // external-directory prompt. Keep the exception inside its existing grant.
-    // https://opencode.ai/docs/permissions/#external-directories
-    let scratch = format!(
-        "{}/**",
-        plan.scratch
-            .path
-            .to_str()
-            .ok_or(ProviderError::InvalidPath)?
-    );
     let staged_skills = input.stage_user_skills();
     let user_skills = staged_skills.root.clone();
     let skill_reads = user_skills.iter().map(subtree).collect::<Vec<_>>();
@@ -185,6 +178,16 @@ fn prepare(
     let mut external = serde_json::Map::new();
     let mut reads = serde_json::Map::new();
     if input.git_context {
+        // Scratch is outside the workspace; headless runs cannot answer the
+        // external-directory prompt. Keep the exception inside its existing grant.
+        // https://opencode.ai/docs/permissions/#external-directories
+        let scratch = format!(
+            "{}/**",
+            plan.scratch
+                .path
+                .to_str()
+                .ok_or(ProviderError::InvalidPath)?
+        );
         external.insert(scratch.clone(), "allow".into());
         reads.insert(scratch, "allow".into());
     }
@@ -195,22 +198,9 @@ fn prepare(
         reads.insert(pattern, "allow".into());
     }
     for grant in &skill_reads {
-        let directory = match grant.scope {
-            provenant_confinement::permissions::PathScope::Exact => {
-                grant.path.parent().ok_or(ProviderError::InvalidPath)?
-            }
-            provenant_confinement::permissions::PathScope::Subtree => &grant.path,
-        };
-        external.insert(format!("{}/**", directory.display()), "allow".into());
-        let path = match grant.scope {
-            provenant_confinement::permissions::PathScope::Exact => {
-                grant.path.display().to_string()
-            }
-            provenant_confinement::permissions::PathScope::Subtree => {
-                format!("{}/**", grant.path.display())
-            }
-        };
-        reads.insert(path, "allow".into());
+        let pattern = format!("{}/**", grant.path.display());
+        external.insert(pattern.clone(), "allow".into());
+        reads.insert(pattern, "allow".into());
     }
     if !external.is_empty() {
         permission["external_directory"] = external.into();
@@ -224,25 +214,26 @@ fn prepare(
         "permission": permission,
     })
     .to_string();
-    let package = package_root(input.executable)?;
+    let package = package_grant(input.executable, &mut omitted_discovery);
     // Bypass Apple's Git shim, including when the selected binary is Homebrew's.
     let bin = plan.scratch.path.join("bin");
     let shell = access == Access::WorktreeWrite;
-    let cargo_bin = input.home.join(".cargo/bin");
-    let mut path_entries = vec![bin.as_path()];
-    if shell {
-        path_entries.push(cargo_bin.as_path());
-    }
-    path_entries.extend([
-        std::path::Path::new("/usr/bin"),
-        std::path::Path::new("/bin"),
-    ]);
-    let path = std::env::join_paths(path_entries).map_err(|_| ProviderError::InvalidPath)?;
-    let mut env = base_env(
-        input,
-        &plan.scratch.path,
-        path.to_str().ok_or(ProviderError::InvalidPath)?,
-    );
+    let defaults = crate::launch::tool_search_path(input.home, shell);
+    let path = match std::env::join_paths(
+        std::iter::once(bin.clone()).chain(std::env::split_paths(&defaults)),
+    ) {
+        Ok(path) => path,
+        Err(_) if !shell => {
+            use std::io::Write;
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "warning: the OpenCode Git launcher cannot be included in PATH; continuing without it"
+            );
+            defaults
+        }
+        Err(_) => return Err(ProviderError::InvalidPath),
+    };
+    let mut env = base_env(input, &plan.scratch.path, path);
     let xdg = |key, fallback| {
         (input.host_var)(key)
             .map(PathBuf::from)
@@ -252,7 +243,7 @@ fn prepare(
     let config_home = xdg("XDG_CONFIG_HOME", ".config");
     let data_home = xdg("XDG_DATA_HOME", ".local/share");
     let data = data_home.join("opencode");
-    let mut runtime_reads = vec![subtree(package), subtree(&data)];
+    let mut runtime_reads = vec![package.clone(), subtree(&data)];
     if access == Access::WorktreeWrite {
         let start = runtime_reads.len();
         runtime_reads.extend(crate::launch::git_global_files(&config_home));
@@ -356,7 +347,7 @@ fn prepare(
     // Writers' system roots do not cover a host-selected Homebrew Git.
     let process_executables = vec![exact(input.executable), exact(input.provenant.git)];
     let mut tool_exec_roots = if shell {
-        vec![subtree("/bin"), subtree("/usr/bin"), subtree(package)]
+        vec![subtree("/bin"), subtree("/usr/bin"), package.clone()]
     } else {
         Vec::new()
     };
@@ -1315,6 +1306,22 @@ mod tests {
                 .iter()
                 .any(|reason| matches!(reason, crate::IncompleteReason::Malformed(_)))
         );
+        for path in &tool.dependency_closure.libraries {
+            assert_eq!(std::fs::canonicalize(path)?, *path);
+            assert!(spec.profile.spec.runtime_reads.iter().any(|grant| {
+                grant.path == *path
+                    && grant.scope == provenant_confinement::permissions::PathScope::Exact
+            }));
+            assert!(spec.profile.spec.runtime_reads.iter().all(|grant| {
+                grant.scope != provenant_confinement::permissions::PathScope::Subtree
+                    || !path.starts_with(&grant.path)
+            }));
+            assert!(
+                provenant_confinement::write_grants(plan.permissions(), &spec.profile)
+                    .iter()
+                    .all(|grant| !path.starts_with(&grant.path))
+            );
+        }
         for path in [&first, &second, &denied[2], &hidden] {
             assert!(
                 tool.dependency_closure.libraries.contains(path),
@@ -1563,6 +1570,104 @@ mod tests {
     }
 
     #[test]
+    fn read_only_search_path_skips_unencodable_git_directory() {
+        use provenant_confinement::{CodexPolicy, ConfinedPlan, ExtensionPolicy, PlanRequest};
+        let base = crate::tests::read_only_plan("/fixture", None);
+        let mut permissions = base.permissions().clone();
+        permissions.scratch.path = "/fixture/scratch:other".into();
+        let plan = ConfinedPlan::new(PlanRequest {
+            scope: base.scope(),
+            permissions,
+            codex: CodexPolicy::Clean,
+            extensions: ExtensionPolicy::Deny,
+            agy_state: None,
+        })
+        .unwrap();
+        let route = crate::tests::route("opencode", "fixture-model");
+        let prompt = crate::Prompt::new("fixture".into());
+        let input = crate::tests::fixture_input(
+            &route,
+            &plan,
+            &prompt,
+            std::path::Path::new("/fixture/repo"),
+            None,
+        );
+        let spec = prepare(
+            &input,
+            Access::ReadOnly,
+            Session::Fresh,
+            OpenCode.stream(None).unwrap(),
+        )
+        .unwrap();
+        let path = &spec.env.iter().find(|(key, _)| key == "PATH").unwrap().1;
+        assert_eq!(
+            std::env::split_paths(path).collect::<Vec<_>>(),
+            [PathBuf::from("/usr/bin"), PathBuf::from("/bin")]
+        );
+        assert!(matches!(
+            prepare(
+                &input,
+                Access::WorktreeWrite,
+                Session::Fresh,
+                OpenCode.stream(None).unwrap()
+            ),
+            Err(ProviderError::InvalidPath)
+        ));
+    }
+
+    #[test]
+    fn writer_search_path_preserves_non_utf8_home() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let plan = crate::tests::read_only_plan("/fixture", None);
+        let route = crate::tests::route("opencode", "fixture-model");
+        let prompt = crate::Prompt::new("fixture".into());
+        let home = PathBuf::from(OsString::from_vec(b"/fixture/home-\xff".to_vec()));
+        let mut input = crate::tests::fixture_input(
+            &route,
+            &plan,
+            &prompt,
+            std::path::Path::new("/fixture/repo"),
+            None,
+        );
+        input.home = &home;
+        let spec = prepare(
+            &input,
+            Access::WorktreeWrite,
+            Session::Fresh,
+            OpenCode.stream(None).unwrap(),
+        )
+        .unwrap();
+        let path = spec.env.iter().find(|(key, _)| key == "PATH").unwrap();
+        assert!(std::env::split_paths(&path.1).any(|entry| entry == home.join(".cargo/bin")));
+    }
+
+    #[test]
+    fn writer_search_path_skips_home_with_path_separator() {
+        let plan = crate::tests::read_only_plan("/fixture", None);
+        let route = crate::tests::route("opencode", "fixture-model");
+        let prompt = crate::Prompt::new("fixture".into());
+        let home = std::path::Path::new("/fixture/home:with-separator");
+        let mut input = crate::tests::fixture_input(
+            &route,
+            &plan,
+            &prompt,
+            std::path::Path::new("/fixture/repo"),
+            None,
+        );
+        input.home = home;
+        let spec = prepare(
+            &input,
+            Access::WorktreeWrite,
+            Session::Fresh,
+            OpenCode.stream(None).unwrap(),
+        )
+        .unwrap();
+        let path = spec.env.iter().find(|(key, _)| key == "PATH").unwrap();
+        assert!(!std::env::split_paths(&path.1).any(|entry| entry == home.join(".cargo/bin")));
+    }
+
+    #[test]
     fn git_discovery_exec_is_exact_in_both_access_modes() {
         let plan = crate::tests::read_only_plan("/fixture", None);
         let route = crate::tests::route("opencode", "fixture-model");
@@ -1633,7 +1738,7 @@ mod tests {
                     [
                         subtree("/bin"),
                         subtree("/usr/bin"),
-                        subtree(package_root(input.executable).unwrap()),
+                        subtree(crate::launch::package_root(input.executable).unwrap()),
                     ]
                 );
             }

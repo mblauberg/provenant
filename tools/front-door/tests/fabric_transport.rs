@@ -4862,6 +4862,12 @@ fn peer_writer_reports_delivery_prepare_failure() -> Result {
     assert_eq!(lane["state"], "rejected", "{placed}");
     let reason = lane["reason"].as_str().ok_or("peer refusal reason")?;
     assert_eq!(lane["cause"], "pre_launch_refusal", "{placed}");
+    assert_eq!(
+        lane["terminal_cause"], "delivery_prepare_credential_helper",
+        "{placed}"
+    );
+    assert!(reason.contains("Prepare (credential helper)"), "{placed}");
+    assert!(!reason.contains("receipt"), "{placed}");
     assert!(lane["started_at"].is_null(), "{placed}");
     assert!(lane["applied_route"].is_null(), "{placed}");
     assert!(!reason.contains("missing-helper-gh"), "{placed}");

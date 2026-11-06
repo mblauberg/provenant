@@ -461,7 +461,7 @@ impl RunStore {
                 next.run_id.to_string()
             ],
         )?;
-        tx.execute("INSERT INTO attempts(id,run,project,task,number,revision,terminal,record) VALUES (?1,?2,?3,?4,?5,1,0,?6)", params![next.attempt_id.to_string(), next.run_id.to_string(), next.project_id.to_string(), next.task_id.to_string(), sql_int(next.attempt_number)?, bytes(next)?])?;
+        tx.execute("INSERT INTO attempts(id,run,project,task,number,revision,terminal,record) VALUES (?1,?2,?3,?4,?5,1,0,?6)", params![next.attempt_id.to_string(), next.run_id.to_string(), next.project_id.to_string(), next.task_id.to_string(), sql_int(next.attempt_number)?, crate::db::attempt_bytes(next)?])?;
         insert_event(tx, next)?;
         self.queue_ticket(
             tx,

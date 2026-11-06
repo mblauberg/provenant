@@ -783,6 +783,7 @@ fn run_leaves_accept_control_and_report_work_refused_per_task() -> Result {
         .ok_or("pinned lane")?;
     assert_eq!(lane["state"], "rejected", "{lanes}");
     assert_eq!(lane["cause"], "pre_launch_refusal", "{lanes}");
+    assert_eq!(lane["terminal_cause"], "unregistered_account", "{lanes}");
     assert!(lane["started_at"].is_null(), "{lanes}");
     assert!(lane["applied_route"].is_null(), "{lanes}");
     // The same pin reaches a writer lane beside the access flags.
@@ -856,6 +857,7 @@ fn run_leaves_accept_control_and_report_work_refused_per_task() -> Result {
         .ok_or("pinned writer lane")?;
     assert_eq!(lane["state"], "rejected", "{lanes}");
     assert_eq!(lane["cause"], "pre_launch_refusal", "{lanes}");
+    assert_eq!(lane["terminal_cause"], "unregistered_account", "{lanes}");
     assert!(lane["started_at"].is_null(), "{lanes}");
     assert!(lane["applied_route"].is_null(), "{lanes}");
     // Replaying the operation returns the same run.
@@ -1031,6 +1033,12 @@ fn run_leaves_accept_control_and_report_work_refused_per_task() -> Result {
             "{value}"
         );
         assert_eq!(value["data"]["operation_id"], operation, "{value}");
+        assert!(
+            value["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("account is not registered")),
+            "{value}"
+        );
         let after = rig.command(&["lanes", "--all", "--json"])?;
         let after: serde_json::Value = serde_json::from_slice(&after.stdout.bytes)?;
         assert_eq!(after["data"]["lanes"], before["data"]["lanes"], "{value}");

@@ -1415,26 +1415,6 @@ fn admissible<'c>(
     }
     Ok(entry)
 }
-/// OpenCode accepts only its catalogued routes. An explicit model outside the
-/// four flash entries is refused with the admitted routes named.
-fn refuse_unlisted_opencode(model: &ModelId, catalogue: &Catalogue) -> Result<(), RoutingError> {
-    if !provenant_records::AdapterSpec::get(model.adapter())
-        .is_some_and(|spec| spec.catalogue_models_only)
-        || catalogue.model(model).is_some()
-    {
-        return Ok(());
-    }
-    let admitted = catalogue
-        .models()
-        .iter()
-        .filter(|entry| entry.model.adapter() == model.adapter())
-        .map(|entry| entry.model.as_str())
-        .collect::<Vec<_>>();
-    Err(RoutingError::UnlistedOpenCodeModel {
-        model: model.as_str().to_owned(),
-        admitted: admitted.join(", "),
-    })
-}
 fn cooling(model: &ModelId, account: Option<&str>, context: &ValidatedContext<'_>) -> bool {
     let now = context.now_seconds();
     context.capacity_cooldowns.iter().any(|record| {
@@ -1807,7 +1787,6 @@ fn resolve_inner(
 ) -> Result<ResolvedRoute, RoutingError> {
     let (primary, pool_selection) = match &request.choice {
         RouteChoice::Model(model) => {
-            refuse_unlisted_opencode(model, context.catalogue)?;
             if !privacy_allowed(model, request.confidential, context.catalogue) {
                 return Err(RoutingError::ConfidentialModel);
             }
@@ -1830,9 +1809,7 @@ fn resolve_inner(
                     .preferred_model(request, risk, kind, context.now)
             });
             let mut pool = effective_pool(context, name);
-            if let Some(model) = preference
-                .filter(|model| refuse_unlisted_opencode(model, context.catalogue).is_ok())
-            {
+            if let Some(model) = preference {
                 if pool.is_none() {
                     pool = context
                         .config
@@ -1942,7 +1919,6 @@ fn resolve_inner(
         // pinned model's own fallback is never filtered.
         .filter(|model| !named_route || excluded_members.reason(model, context).is_none())
         .map(|model| {
-            refuse_unlisted_opencode(model, context.catalogue)?;
             candidate(
                 model,
                 primary.effort.as_deref(),

@@ -295,7 +295,11 @@ pub fn required_anchors(
         .chain(&spec.process_executables)
         .chain(&spec.runtime_reads)
         .chain(spec.fabric_socket.iter())
-        .chain(&spec.discovery_reads)
+        .chain(
+            spec.discovery_reads
+                .iter()
+                .filter(|grant| super::validation::valid_discovery_read(grant)),
+        )
         .chain(&spec.state_writes)
         .chain(&spec.tool_exec_roots)
         .chain(

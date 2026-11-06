@@ -6,9 +6,29 @@ use provenant_core::{
 };
 use serde::{Deserialize, Serialize};
 
+/// Compiled scheduling defaults, also used when configured priority is unavailable.
+pub const DEFAULT_WRITER_PRIORITY: u8 = 10;
+pub const DEFAULT_READER_PRIORITY: u8 = 5;
+pub const DEFAULT_BUILD_HEAVY_PRIORITY: u8 = 15;
+
+pub fn default_lane_priority(writer: bool, build_heavy: bool) -> u8 {
+    if build_heavy {
+        DEFAULT_BUILD_HEAVY_PRIORITY
+    } else if writer {
+        DEFAULT_WRITER_PRIORITY
+    } else {
+        DEFAULT_READER_PRIORITY
+    }
+}
+
 pub const RECORD_LIMIT: u64 = 1024 * 1024;
 /// Encoded write grants an attempt may record, leaving terminal headroom.
 pub const MAX_WRITE_GRANT_BYTES: u64 = 256 * 1024;
+/// Maximum configurable encoded grants; terminal records retain at least the
+/// same amount of headroom for their other fields.
+pub const MAX_WRITE_GRANT_BYTES_CEILING: u64 = 8 * RECORD_LIMIT;
+/// Host-owned terminal decisions can contain the full applied grant ledger.
+pub const TERMINAL_RECORD_LIMIT: u64 = 16 * RECORD_LIMIT;
 pub const RESULT_LIMIT: u64 = 4 * 1024 * 1024;
 pub const CAPTURE_LIMIT: u64 = 64 * 1024 * 1024;
 pub const OUTPUT_LIMIT: u64 = 65536;
@@ -766,6 +786,10 @@ impl From<Outcome> for crate::AttemptOutcome {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TerminalCause {
+    UnsupportedPlatform,
+    UnknownPacingAccount,
+    UnregisteredAccount,
+    DeliveryPrepareCredentialHelper,
     SpawnFailure,
     ProcessCrash,
     SettlementFailure,
@@ -776,6 +800,16 @@ pub enum TerminalCause {
 impl TerminalCause {
     pub fn reason(self) -> &'static str {
         match self {
+            Self::UnsupportedPlatform => "sandbox backend is unavailable: UnsupportedPlatform",
+            Self::UnknownPacingAccount => {
+                "pacing deadline reset_of references an unregistered account; correct the pacing profile"
+            }
+            Self::UnregisteredAccount => {
+                "the selected account is not registered for the requested route; run `provenant accounts list`"
+            }
+            Self::DeliveryPrepareCredentialHelper => {
+                "host writer delivery failed at Prepare (credential helper); check the host credential helper configuration"
+            }
             Self::SpawnFailure => "the provider could not start; inspect local launch evidence",
             Self::ProcessCrash => {
                 "the provider process crashed; inspect local evidence before retrying"

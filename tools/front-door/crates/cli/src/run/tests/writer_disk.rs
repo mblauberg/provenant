@@ -27,25 +27,6 @@ fn retained_import_refusal_names_worktree_attempt_and_recovery() {
 }
 
 #[test]
-fn setup_timeout_is_promoted_only_without_a_progressing_sibling() {
-    let refused = || run::Started::Refused {
-        attempt: AttemptId::from_bytes([1; 16]),
-        kind: run::RefusalKind::SetupLockTimeout { seconds: 42 },
-        reason: "setup timed out".into(),
-    };
-    let failure = check_launch_policy(&[refused()]).expect_err("timeout must be reported");
-    assert_eq!(failure.kind.code(), "SETUP_LOCK_TIMEOUT");
-    assert!(failure.message.contains("42s"));
-    assert!(
-        check_launch_policy(&[
-            refused(),
-            run::Started::Launched(AttemptId::from_bytes([2; 16]))
-        ])
-        .is_ok()
-    );
-}
-
-#[test]
 fn dispatch_policy_refusal_preserves_launched_sibling() -> Result<(), String> {
     check_launch_policy(&[
         run::Started::Refused {
@@ -130,6 +111,18 @@ fn blocked_custody_is_reported_without_hiding_a_running_sibling() -> Result<(), 
 }
 
 #[test]
+fn writer_gc_settings_use_defaults_when_configuration_is_unreadable()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    std::os::unix::fs::symlink(temp.path().join("missing"), temp.path().join("config.toml"))?;
+    assert_eq!(
+        writer_gc_settings(temp.path()),
+        provenant_config::GcSettings::default()
+    );
+    Ok(())
+}
+
+#[test]
 fn writer_requires_space_on_every_output_volume() -> Result<(), String> {
     let settings = provenant_config::GcSettings {
         free_floor: Some("100B".into()),
@@ -181,7 +174,7 @@ fn writer_disk_default_floor_names_its_source() -> Result<(), String> {
 }
 
 #[test]
-fn writer_disk_observation_failure_is_not_low_disk() -> Result<(), String> {
+fn writer_disk_observation_failure_warns_and_continues() -> Result<(), String> {
     let settings = provenant_config::GcSettings {
         free_floor: Some("100B".into()),
         ..Default::default()
@@ -193,13 +186,7 @@ fn writer_disk_observation_failure_is_not_low_disk() -> Result<(), String> {
         Path::new("/home"),
         |_| Err("Not a directory".into()),
     );
-    match result {
-        Err(DiskCheck::Unobserved(message)) => {
-            assert!(message.contains("Not a directory"), "{message}");
-            Ok(())
-        }
-        other => Err(format!("observation failure misclassified: {other:?}")),
-    }
+    result.map_err(String::from)
 }
 
 #[test]

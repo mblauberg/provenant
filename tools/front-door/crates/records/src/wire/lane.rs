@@ -65,6 +65,7 @@ lane_row! {
         transcript: Option<LaneTranscript> => nullable(object(&[("adapter", string()), ("session", string()), ("path", nullable(super::schema::worktree_path()))], &[]));
     }
     optional {
+        terminal_cause: crate::run::TerminalCause => choices(&["unsupported_platform", "unknown_pacing_account", "unregistered_account", "delivery_prepare_credential_helper", "spawn_failure", "process_crash", "settlement_failure", "provider_early_stop", "free_pool_quota"]);
         host: String => string();
         resolved_route: Value => any();
         title: String => string();
@@ -304,6 +305,12 @@ impl LaneRow {
                 .or(lane.superseded_by)
                 .map(|id| id.to_string()),
             cause: lane.settlement_reason,
+            terminal_cause: match &lane.state {
+                AttemptState::Terminal { extra, .. } => extra
+                    .get("terminal_cause")
+                    .and_then(|value| serde_json::from_value(value.clone()).ok()),
+                _ => None,
+            },
             state,
             exit_code,
             reason,
@@ -446,6 +453,10 @@ mod terminal_cause_tests {
     #[test]
     fn terminal_reasons_use_typed_causes_without_provider_text() {
         for cause in [
+            TerminalCause::UnsupportedPlatform,
+            TerminalCause::UnknownPacingAccount,
+            TerminalCause::UnregisteredAccount,
+            TerminalCause::DeliveryPrepareCredentialHelper,
             TerminalCause::SpawnFailure,
             TerminalCause::ProcessCrash,
             TerminalCause::SettlementFailure,

@@ -375,6 +375,9 @@ pub fn continue_attempt_mode(
         None
     };
     let run = accepted.map_err(|error| {
+        if matches!(error, run::RunError::ContinuationRefused { .. }) {
+            return Fail::from(error);
+        }
         Fail::new(
             Status::Refused,
             ErrorKind::ContinuationUnsupported,

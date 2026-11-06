@@ -713,10 +713,17 @@ impl HostDeliveryContext {
     }
     /// Refresh origin under writer custody with delivery's host credential and
     /// executable checks, while constraining the refspec and transport helpers.
-    pub(crate) fn refresh_origin(writer: &WriterRequest, git_dir: &Path) -> Result<()> {
-        Self::capture().refresh_origin_with(writer, git_dir)
+    pub(crate) fn refresh_origin(
+        writer: &WriterRequest,
+        git_dir: &Path,
+        cancel: &provenant_core::CancelToken,
+    ) -> Result<()> {
+        let mut host = Self::capture();
+        host.cancellation = Some(cancel.clone());
+        host.refresh_origin_with(writer, git_dir)
     }
     pub(super) fn refresh_origin_with(self, writer: &WriterRequest, git_dir: &Path) -> Result<()> {
+        let requested = OriginRefreshRequest::capture()?;
         let mut host = self;
         host.host_environment(writer)?;
         host.environment
@@ -744,10 +751,23 @@ impl HostDeliveryContext {
             return Ok(());
         }
         host.validate_transport_helpers(writer)?;
-        host.refresh_remote(
-            writer,
-            &["--git-dir", git_dir, "--work-tree", worktree],
-            "origin",
+        // A refresh completed since this request began also satisfies it,
+        // including one which started during transport validation. The fetch
+        // lock is independent of the short upstream-config lock.
+        let common = host.common_git_dir(&writer.project, Stage::Prepare)?;
+        let common = Directory::open_anchor(&common)?;
+        let cancel = provenant_core::CancelToken::new();
+        coalesced_origin_refresh(
+            &common,
+            &requested,
+            host.cancellation.as_ref().unwrap_or(&cancel),
+            || {
+                host.refresh_remote(
+                    writer,
+                    &["--git-dir", git_dir, "--work-tree", worktree],
+                    "origin",
+                )
+            },
         )
     }
 
@@ -1948,6 +1968,119 @@ fn spelled(name: &str) -> String {
         }
     }
     format!("\"{name}\" ({out})")
+}
+
+pub(super) fn coalesced_origin_refresh(
+    common: &Directory,
+    requested: &OriginRefreshRequest,
+    cancel: &provenant_core::CancelToken,
+    refresh: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    use provenant_core::{Clock, WaitBudget};
+    use provenant_os::clock::SystemClock;
+    let clock = SystemClock::new();
+    coalesced_origin_refresh_with_budget(
+        common,
+        requested,
+        cancel,
+        WaitBudget::cli(clock.mono_now(), 60)
+            .map_err(|error| prepare_error("origin refresh", error))?,
+        refresh,
+    )
+}
+
+pub(super) fn coalesced_origin_refresh_with_budget(
+    common: &Directory,
+    requested: &OriginRefreshRequest,
+    cancel: &provenant_core::CancelToken,
+    lock_budget: provenant_core::WaitBudget,
+    refresh: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    use provenant_os::{
+        clock::SystemClock,
+        fs::{FsError, LockMode},
+    };
+    let _fetch = match common.lock(
+        OsStr::new("provenant-lane-origin-refresh.lock"),
+        LockMode::Exclusive,
+        lock_budget,
+        cancel,
+        &SystemClock::new(),
+    ) {
+        Ok(lock) => lock,
+        Err(FsError::LockTimeout { .. }) => {
+            use std::io::Write;
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "warning: origin refresh is still busy; launching with existing tracking refs"
+            );
+            return Ok(());
+        }
+        Err(error) => return Err(error.into()),
+    };
+    let latest = origin_refresh_completion(common)?;
+    if latest
+        .as_ref()
+        .is_some_and(|latest| latest.boot == requested.boot && latest.micros >= requested.micros)
+    {
+        return Ok(());
+    }
+    match refresh() {
+        Ok(()) => {
+            common
+                .atomic_write(
+                    OsStr::new("provenant-lane-origin-refresh"),
+                    ".origin-refresh-",
+                    &serde_json::to_vec(&OriginRefreshRequest::capture()?)
+                        .map_err(|error| prepare_error("origin refresh", error))?,
+                    provenant_os::fs::PublishMode::Replace,
+                )?
+                .require_durable()?;
+            Ok(())
+        }
+        // Another Git client can win a tracking-ref transaction without
+        // participating in our fetch lock. Do not record failed refreshes.
+        Err(RunError::DeliveryPrepare {
+            step: "fetch",
+            ref reason,
+        }) if (reason.contains("cannot lock ref ")
+            && reason.contains(" is at ")
+            && reason.contains(" but expected "))
+            || (reason.contains("Unable to create ")
+                && reason.contains(".lock")
+                && reason.contains("File exists"))
+            || (reason.contains("fetching ref refs/remotes/")
+                && reason.contains(" failed: reference already exists")) =>
+        {
+            Ok(())
+        }
+        Err(error) => Err(error),
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+pub(super) struct OriginRefreshRequest {
+    boot: String,
+    micros: u64,
+}
+impl OriginRefreshRequest {
+    pub(super) fn capture() -> Result<Self> {
+        Ok(Self {
+            boot: provenant_os::clock::boot_identity()
+                .map_err(|error| prepare_error("origin refresh", error))?,
+            micros: provenant_os::clock::host_monotonic_micros()
+                .map_err(|error| prepare_error("origin refresh", error))?,
+        })
+    }
+}
+fn origin_refresh_completion(common: &Directory) -> Result<Option<OriginRefreshRequest>> {
+    match common.read_bounded(OsStr::new("provenant-lane-origin-refresh"), 4096) {
+        Ok(bytes) => serde_json::from_slice(&bytes)
+            .map(Some)
+            .map_err(|error| prepare_error("origin refresh", error)),
+        Err(error) if error.is_not_found() => Ok(None),
+        Err(error) => Err(error.into()),
+    }
 }
 
 pub(super) fn prepare_error(step: &'static str, detail: impl std::fmt::Display) -> RunError {

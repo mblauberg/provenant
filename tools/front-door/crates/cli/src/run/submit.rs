@@ -607,6 +607,7 @@ pub(super) fn check_writer_disk_with(
     check_writer_disk_with_collection(settings, state, worktree, home, available, || 0)
 }
 
+#[allow(clippy::print_stderr)]
 pub(super) fn check_writer_disk_with_collection(
     settings: &provenant_config::GcSettings,
     state: &Path,
@@ -615,20 +616,12 @@ pub(super) fn check_writer_disk_with_collection(
     mut available: impl FnMut(&Path) -> Result<u64, String>,
     mut collect: impl FnMut() -> u64,
 ) -> Result<(), DiskCheck> {
-    let floor = settings
-        .free_floor_bytes(state)
-        .map_err(|error| DiskCheck::Unobserved(error.to_string()))?;
-    let cache = home.join("Library/Caches/provenant-lane-cargo");
-    let (mut limiting, mut minimum) = (worktree, u64::MAX);
-    for path in [worktree, state, cache.as_path()] {
-        let bytes = available(path).map_err(DiskCheck::Unobserved)?;
-        if bytes < minimum {
-            (limiting, minimum) = (path, bytes);
-        }
-    }
-    if minimum < floor {
-        let reclaimed = if settings.schedule { collect() } else { 0 };
-        minimum = u64::MAX;
+    let observed = (|| -> Result<(), DiskCheck> {
+        let floor = settings
+            .free_floor_bytes(state)
+            .map_err(|error| DiskCheck::Unobserved(error.to_string()))?;
+        let cache = home.join("Library/Caches/provenant-lane-cargo");
+        let (mut limiting, mut minimum) = (worktree, u64::MAX);
         for path in [worktree, state, cache.as_path()] {
             let bytes = available(path).map_err(DiskCheck::Unobserved)?;
             if bytes < minimum {
@@ -636,20 +629,39 @@ pub(super) fn check_writer_disk_with_collection(
             }
         }
         if minimum < floor {
-            return Err(DiskCheck::Low {
-                path: limiting.to_path_buf(),
-                available: minimum,
-                floor,
-                reclaimed,
-                origin: if settings.free_floor.is_some() {
-                    provenant_records::diagnostic::SettingSource::Configuration
-                } else {
-                    provenant_records::diagnostic::SettingSource::ShippedDefault
-                },
-            });
+            let reclaimed = if settings.schedule { collect() } else { 0 };
+            minimum = u64::MAX;
+            for path in [worktree, state, cache.as_path()] {
+                let bytes = available(path).map_err(DiskCheck::Unobserved)?;
+                if bytes < minimum {
+                    (limiting, minimum) = (path, bytes);
+                }
+            }
+            if minimum < floor {
+                return Err(DiskCheck::Low {
+                    path: limiting.to_path_buf(),
+                    available: minimum,
+                    floor,
+                    reclaimed,
+                    origin: if settings.free_floor.is_some() {
+                        provenant_records::diagnostic::SettingSource::Configuration
+                    } else {
+                        provenant_records::diagnostic::SettingSource::ShippedDefault
+                    },
+                });
+            }
         }
+        Ok(())
+    })();
+    match observed {
+        Err(DiskCheck::Unobserved(message)) => {
+            eprintln!(
+                "provenant: writer disk observation unavailable; continuing without the disk floor check: {message}"
+            );
+            Ok(())
+        }
+        result => result,
     }
-    Ok(())
 }
 
 /// Reuse the host's pinned launch inputs after its guardian has settled.

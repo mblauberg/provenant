@@ -67,8 +67,8 @@ pub use git_context::{
 pub use holder::{HolderContext, HostLaunchContext, RootSeed, RunHolder, SealedTask};
 pub use launch::{
     Decoded, LaunchPaths, PrepareRefusal, PreparedLaunch, PreparedStart, Providers,
-    QUEUED_RUNS_PAGE_SIZE, RefusalKind, Started, ValidatedChild, access_root_allowed, capture_plan,
-    concurrency,
+    QUEUED_RUNS_PAGE_SIZE, RefusalKind, Started, ValidatedChild, WriteGrantLimit,
+    access_root_allowed, capture_plan, concurrency,
 };
 pub use overview::{OverviewAttempt, OverviewState, RunOverview};
 pub use plan::{isolated_read_only_plan, live_read_only_plan, read_only_plan};
@@ -320,6 +320,10 @@ impl std::fmt::Display for ArtifactProvenance {
 
 #[derive(Debug, Error)]
 pub enum RunError {
+    #[error("continuation preparation refused: {}", cause.reason())]
+    ContinuationRefused {
+        cause: provenant_records::run::TerminalCause,
+    },
     #[error("{0}")]
     InvalidTaskTitle(String),
     #[error("{message}")]
@@ -365,8 +369,6 @@ pub enum RunError {
     },
     #[error("Git executable unavailable")]
     GitUnavailable,
-    #[error("lane Git setup lock acquisition timed out")]
-    LaneSetupLockTimeout,
     #[error("provider evidence could not be committed: {0}")]
     ProviderEvidence(String),
     #[error("confinement refused: {0}")]
@@ -388,12 +390,6 @@ pub enum RunError {
     WorktreeMissing(std::path::PathBuf),
     #[error("worktree {0} is not listed by Git; run `git worktree list --porcelain`")]
     WorktreeUnregistered(std::path::PathBuf),
-    #[error("writer Git ref lock {} already exists; check for a running Git process, then remove the stale lock before retrying", .0.display())]
-    WriterRefLocked(std::path::PathBuf),
-    #[error(
-        "Git setup lock provenant-lane-setup.lock timed out after {seconds}s; increase domains.fabric.lanes.setup_lock_wait_seconds"
-    )]
-    SetupLockTimeout { seconds: u64 },
     #[error("writer import retained for worktree {}, run {run}, attempt {attempt}", worktree.display())]
     RetainedWriterImport {
         worktree: std::path::PathBuf,
@@ -534,6 +530,9 @@ impl RunError {
         let kind = ErrorKind::from(self);
         let mut diagnostic = Diagnostic::new(kind.code()).category(kind.category());
         match self {
+            Self::ContinuationRefused { cause } => {
+                diagnostic = diagnostic.detail(cause.reason());
+            }
             Self::PromptTooLarge { task_index, limit } => {
                 let field = task_index.map_or_else(
                     || "tasks".to_owned(),
@@ -758,11 +757,6 @@ impl RunError {
                 diagnostic = fact
                     .project(diagnostic)
                     .fact(DiagnosticFact::Resource(fact));
-            }
-            Self::SetupLockTimeout { seconds } => {
-                diagnostic = diagnostic
-                    .detail(format!("provenant-lane-setup.lock was held for the {seconds}s wait"))
-                    .next("retry after the current Git setup finishes, or increase domains.fabric.lanes.setup_lock_wait_seconds");
             }
             Self::RetainedWriterImport {
                 run,

@@ -339,6 +339,70 @@ fn serialised_digest_cannot_authorise_without_a_verified_worktree() {
 }
 
 #[test]
+#[allow(clippy::disallowed_methods)]
+fn concurrent_writers_prepare_their_caches_in_one_home() -> Result<(), Box<dyn std::error::Error>> {
+    let fixture = crate::test_support::Fixture::new()?;
+    let home = provenant_os::fs::canonicalize(&fixture.home)?;
+    let writers = (0..8)
+        .map(|index| -> Result<_, Box<dyn std::error::Error>> {
+            let branch = format!("concurrent-cache-{index}");
+            let path = fixture._temp.path().join(&branch);
+            fixture.run(&[
+                "worktree",
+                "add",
+                "-b",
+                &branch,
+                path.to_str().ok_or("path")?,
+            ])?;
+            let worktree = crate::repo::verify_worktree(&fixture.repo, &path)?;
+            let branch = GitRefName::branch(&branch)?;
+            let authority = WorktreeWriteAuthority::for_worktree(&worktree, &branch, &home)?;
+            Ok((worktree, branch, authority))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    // Repeat with missing shared parents to exercise the mkdir race rather
+    // than only the already-created lane cache paths.
+    for _ in 0..8 {
+        let shared = home.join("Library");
+        if shared.exists() {
+            std::fs::remove_dir_all(&shared)?;
+        }
+        let ready = std::sync::Barrier::new(writers.len());
+        std::thread::scope(|scope| -> Result<(), Box<dyn std::error::Error>> {
+            let threads = writers
+                .iter()
+                .map(|(worktree, branch, authority)| {
+                    let ready = &ready;
+                    let home = &home;
+                    scope.spawn(move || {
+                        ready.wait();
+                        prepare_writer_directories(worktree, branch, authority, home)
+                    })
+                })
+                .collect::<Vec<_>>();
+            for thread in threads {
+                thread
+                    .join()
+                    .map_err(|_| "directory preparation panicked")??;
+            }
+            Ok(())
+        })?;
+        for (_, _, authority) in &writers {
+            let cache = Directory::open_anchor(&authority.cargo_cache.path)?;
+            verify_cache_metadata(&cache.metadata()?)?;
+            assert!(
+                authority
+                    .cargo_cache
+                    .path
+                    .join(crate::cache::CARGO_CACHE_OWNER)
+                    .is_file()
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn writer_cache_is_private_and_bound_to_repository_and_worktree_identity()
 -> Result<(), Box<dyn std::error::Error>> {
     use crate::repo::verify_worktree;

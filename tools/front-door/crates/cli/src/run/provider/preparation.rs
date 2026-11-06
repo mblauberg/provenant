@@ -151,6 +151,21 @@ pub(super) fn login_dependency_path(
     ))
 }
 
+pub(super) fn dependency_preparation_refusal(
+    error: String,
+    enabled: bool,
+    profile: &provenant_records::run::HarnessProfile,
+) -> String {
+    let origin = if profile.knobs.contains_key("lanes.prepare_deps") {
+        format!("sealed profile {}", profile.name)
+    } else {
+        "compiled default".to_owned()
+    };
+    format!(
+        "{error}; lanes.prepare_deps={enabled} ({origin}); set lanes.prepare_deps=false to skip dependency preparation"
+    )
+}
+
 pub(super) fn prepare_writer_dependencies(
     worktree: &Path,
     enabled: bool,
@@ -345,6 +360,11 @@ pub(super) fn available_provider_leases(
 
 #[derive(Debug, thiserror::Error)]
 pub(super) enum PrepareError {
+    #[error("{message}")]
+    Refusal {
+        message: String,
+        cause: provenant_records::run::TerminalCause,
+    },
     #[error(transparent)]
     Prompt(#[from] LaunchPromptError),
     #[error(transparent)]
@@ -362,12 +382,21 @@ pub(super) enum PrepareError {
 impl PrepareError {
     fn into_refusal(self) -> run::PrepareRefusal {
         match self {
+            Self::Refusal { message, cause } => run::PrepareRefusal {
+                terminal_cause: Some(cause),
+                message,
+                skipped_routes: Vec::new(),
+                fallback_outcome: (cause
+                    == provenant_records::run::TerminalCause::UnregisteredAccount)
+                    .then_some(provenant_records::run::PreparationFailure::AdapterUnavailable),
+            },
             Self::Candidates {
                 message,
                 skipped_routes,
                 fallback_outcome,
                 ..
             } => run::PrepareRefusal {
+                terminal_cause: None,
                 message,
                 skipped_routes,
                 fallback_outcome,
@@ -851,12 +880,52 @@ pub(super) fn prepare_candidates(
     if let run::RequestedRoute::Adapter { provider, name, .. } = &task.route {
         return prepare_command(registry, task, paths, resume, locate, provider, name);
     }
-    check_launch_prompt(prompt_text, paths, None)?;
+    let default_limit = provenant_confinement::run_config::DEFAULT_ARGV_PROMPT_LIMIT_BYTES;
+    check_launch_prompt(prompt_text, paths, None, default_limit, "compiled default")?;
+    let loaded_config = registry
+        .roots
+        .map(|roots| provenant_config::read_with_domains(roots, &crate::domains::SECTIONS));
+    const ARGV_LIMIT_KEY: &str = "domains.run.argv_prompt_limit_bytes";
+    let (argv_limit, argv_origin, argv_origin_record) = match &loaded_config {
+        Some(Ok(config)) => {
+            let origin = config.origins.get(ARGV_LIMIT_KEY);
+            let label = if matches!(origin, Some(provenant_config::Origin::User { .. })) {
+                "host configuration"
+            } else {
+                "compiled default"
+            };
+            (
+                config.domains.run.argv_prompt_limit_bytes,
+                label,
+                origin.map_or_else(
+                    || serde_json::json!({"kind": "compiled"}),
+                    |value| serde_json::json!(value),
+                ),
+            )
+        }
+        Some(Err(error)) => {
+            use std::io::Write;
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "warning: {ARGV_LIMIT_KEY} unavailable ({error}); using compiled default"
+            );
+            (
+                default_limit,
+                "compiled default",
+                serde_json::json!({"kind": "compiled"}),
+            )
+        }
+        None => (
+            default_limit,
+            "compiled default",
+            serde_json::json!({"kind": "compiled"}),
+        ),
+    };
     if task.fallback.is_empty()
         && let run::RequestedRoute::Model { model, .. } = &task.route
         && let Some((adapter, _)) = model.split_once('/')
     {
-        check_launch_prompt(prompt_text, paths, Some(adapter))?;
+        check_launch_prompt(prompt_text, paths, Some(adapter), argv_limit, argv_origin)?;
     }
     // Only fixture builds may stand a supplied token in for host authority.
     #[cfg(not(feature = "fixture"))]
@@ -971,8 +1040,9 @@ pub(super) fn prepare_candidates(
     let executor =
         provenant_providers::host::HostProbeExecutor::new(&executor, roots.state.as_path())
             .map_err(|e| e.to_string())?;
-    let config = provenant_config::read_with_domains(roots, &crate::domains::SECTIONS)
-        .map_err(|e| e.to_string())?;
+    let config = loaded_config
+        .ok_or("routing context is unavailable")?
+        .map_err(|error| error.to_string())?;
     // Continue the applied decision rather than redrawing the named pool
     // using the new operation seed.
     let mut request = match resume {
@@ -1289,13 +1359,9 @@ pub(super) fn prepare_candidates(
                 (e.label == label || e.key == label)
                     && requested_adapter.is_none_or(|adapter| e.adapter == adapter)
             });
-            let entry = matching.next().ok_or_else(|| PrepareError::Candidates {
+            let entry = matching.next().ok_or_else(|| PrepareError::Refusal {
                 message: "the selected account is not registered for the requested route; run `provenant accounts list`".into(),
-                plans: Vec::new(),
-                skipped_routes: Vec::new(),
-                fallback_outcome: Some(
-                    provenant_records::run::PreparationFailure::AdapterUnavailable,
-                ),
+                cause: provenant_records::run::TerminalCause::UnregisteredAccount,
             })?;
             if matching.any(|other| other.key != entry.key || other.adapter != entry.adapter) {
                 return Err(PrepareError::Other(
@@ -1358,7 +1424,19 @@ pub(super) fn prepare_candidates(
             }),
         )
     };
-    let resolved = resolve(&availability, &[]).map_err(|error| error.to_string())?;
+    let resolved = resolve(&availability, &[]).map_err(|error| match error {
+        crate::route::DispatchError::Edge(error) => match *error {
+            crate::route::EdgeError::AccountProfile {
+                kind: crate::route::AccountProfileError::Unknown,
+                message,
+            } => PrepareError::Refusal {
+                message,
+                cause: provenant_records::run::TerminalCause::UnknownPacingAccount,
+            },
+            other => PrepareError::Other(other.to_string()),
+        },
+        other => PrepareError::Other(other.to_string()),
+    })?;
     let named_pool = resolved.pool_selection.is_some() && resume.is_none();
     if let Some(selection) = &resolved.pool_selection {
         for redraw in &selection.redraws {
@@ -1885,7 +1963,14 @@ pub(super) fn prepare_candidates(
                 &private_state.join("handoff.json")
             )
         );
-        let prompt = match launch_prompt(&text, paths, state_root, adapter.id()) {
+        let prompt = match launch_prompt(
+            &text,
+            paths,
+            state_root,
+            adapter.id(),
+            argv_limit,
+            argv_origin,
+        ) {
             Ok(prompt) => prompt,
             Err(error) => {
                 reasons.push(skip(&label, SkipKind::Refused, error.to_string()));
@@ -2138,7 +2223,7 @@ pub(super) fn prepare_candidates(
             scratch,
             &provenant_executable,
             roots.state.as_path(),
-        )?;
+        );
         if !host_indexes_protected(
             roots.state.as_path(),
             &provenant_confinement::write_grants(plan.permissions(), &spec.profile),
@@ -2172,8 +2257,7 @@ pub(super) fn prepare_candidates(
             build_settings.jobs(),
         );
         if let Some(adapter_spec) = adapter_spec {
-            spec.configure_shell(scratch, adapter_spec)
-                .map_err(|error| error.to_string())?;
+            spec.configure_shell(scratch, adapter_spec);
         }
         if let Some(gh) = publishing_gh.as_ref() {
             let policy = provenant_config::GithubPolicy::read(&roots.state, project_id)
@@ -2280,12 +2364,17 @@ pub(super) fn prepare_candidates(
                     .get("lanes.prepare_deps")
                     .and_then(serde_json::Value::as_bool)
                     .unwrap_or(true);
-                Some(prepare_writer_dependencies(
-                    writer.worktree.path(),
-                    enabled,
-                    &|| host_dependency_path(cancel),
-                    cancel,
-                )?)
+                Some(
+                    prepare_writer_dependencies(
+                        writer.worktree.path(),
+                        enabled,
+                        &|| host_dependency_path(cancel),
+                        cancel,
+                    )
+                    .map_err(|error| {
+                        dependency_preparation_refusal(error, enabled, &task.profile)
+                    })?,
+                )
             }
             None => None,
         };
@@ -2308,6 +2397,12 @@ pub(super) fn prepare_candidates(
             account_source(resume.is_some(), task.account.is_some()).into(),
         );
         provider.extra.insert("project_paths".into(), project_paths);
+        provider.extra.insert(
+            "argv_prompt_limit".into(),
+            serde_json::json!({
+                "value": argv_limit, "key": ARGV_LIMIT_KEY, "origin": argv_origin_record.clone(),
+            }),
+        );
         if let Some(event) = &dependency_event {
             provider
                 .extra
@@ -2566,13 +2661,28 @@ mod receipt_tests {
 
 /// One warning line for an omitted grant, shown relative to the home directory.
 pub(super) fn omission_warning(entry: &provenant_providers::OmittedGrant, home: &Path) -> String {
-    let display = entry
+    let display = if entry
         .path
-        .strip_prefix(home)
-        .map(|relative| format!("~/{}", relative.display()))
-        .unwrap_or_else(|_| "<external path; inspect on host>".into());
+        .to_str()
+        .is_none_or(|text| text.chars().any(char::is_control))
+    {
+        "<unrepresentable path; inspect on host>".into()
+    } else {
+        entry
+            .path
+            .strip_prefix(home)
+            .map(|relative| format!("~/{}", relative.display()))
+            .unwrap_or_else(|_| "<external path; inspect on host>".into())
+    };
+    if entry.source == provenant_providers::OmissionSource::ProviderPackage {
+        return format!(
+            "omitted shared provider package grant {display}; using the executable only"
+        );
+    }
     let guard = if provenant_confinement::refuses_lane_root(&entry.path, true, Some(home)) {
         "credential root guard"
+    } else if !provenant_confinement::permissions::profile_path_representable(&entry.path) {
+        "path cannot be represented in the sandbox profile"
     } else {
         "protected root guard"
     };
@@ -2642,6 +2752,223 @@ fn user_skills_exposure(
 mod user_skills_tests {
     use super::*;
     #[test]
+    fn user_skills_receipt_matches_each_prepared_adapter() -> Result<(), Box<dyn std::error::Error>>
+    {
+        use provenant_confinement::permissions::{
+            AccessMode, NetworkAccess, PathGrant, PathScope, PlanPermissions,
+        };
+        use provenant_confinement::{CodexPolicy, ConfinedPlan, ExtensionPolicy, PlanRequest};
+        use provenant_core::{AttemptId, ProjectId, WorkScope};
+        use provenant_providers::{LaneRuntime, PrepareInput, Prompt, SetupStep};
+        use provenant_records::{
+            ResolvedRoute, RouteConfidentiality, RouteEligibility, RouteReadiness, UserSkillsMode,
+        };
+        let temp = tempfile::tempdir()?;
+        let base = temp.path().canonicalize()?;
+        let token = provenant_providers::claude::OauthToken::fixture()?;
+        let prompt = Prompt::new("fixture".into());
+        for adapter in provenant_records::ADAPTER_SPECS
+            .iter()
+            .filter(|entry| entry.skills.is_some())
+        {
+            let root = base.join(adapter.name);
+            let home = root.join("home");
+            let skills = match adapter.name {
+                "claude" => home.join(".claude/skills"),
+                "codex" => home.join(".agents/skills"),
+                "cursor" => home.join(".cursor/skills"),
+                "agy" => home.join(".gemini/skills"),
+                "opencode" => home.join(".config/opencode/skills"),
+                other => panic!("missing skills fixture for {other}"),
+            };
+            std::fs::create_dir_all(&home)?;
+            let executable = base.join("package/bin/provider");
+            std::fs::create_dir_all(executable.parent().ok_or("package")?)?;
+            std::fs::write(&executable, b"fixture")?;
+            let grant = |path| PathGrant {
+                path,
+                scope: PathScope::Subtree,
+            };
+            let auth = match adapter.name {
+                "codex" | "cursor" => Some("login".into()),
+                "agy" => Some("keychain".into()),
+                _ => None,
+            };
+            let plan = ConfinedPlan::new(PlanRequest {
+                scope: WorkScope::Project(ProjectId::from_bytes([1; 16])),
+                codex: CodexPolicy::Clean,
+                extensions: ExtensionPolicy::Deny,
+                agy_state: None,
+                permissions: PlanPermissions {
+                    mode: AccessMode::ReadOnly,
+                    read_only: None,
+                    scratch: grant(root.join("scratch")),
+                    private_state: Some(grant(root.join("state"))),
+                    read_roots: vec![grant(root.join("repo"))],
+                    protected_roots: vec![],
+                    secret_roots: vec![],
+                    selected_authentication: auth,
+                    include_continuation: false,
+                    write_roots: vec![],
+                    network: NetworkAccess::Provider,
+                    nested_confinement: false,
+                },
+            })?;
+            let mut route = ResolvedRoute {
+                extra: Default::default(),
+                adapter: adapter.name.into(),
+                model: "fixture".into(),
+                effort: None,
+                catalogue_revision: "fixture".into(),
+                account_key: None,
+                host: "fixture".into(),
+                alternatives: Default::default(),
+                exclusions: vec![],
+                eligibility: RouteEligibility::Eligible,
+                readiness: RouteReadiness::Ready {
+                    extra: Default::default(),
+                    availability_ref: "fixture".into(),
+                    expires_unix_seconds: 100,
+                },
+                confidentiality: RouteConfidentiality {
+                    extra: Default::default(),
+                    evidence_ref: "fixture".into(),
+                },
+                pool_selection: None,
+            };
+            let provider = provenant_providers::REGISTRY
+                .iter()
+                .find(|entry| entry.adapter.id() == adapter.name)
+                .ok_or("adapter")?
+                .adapter;
+            for writer in [false, true] {
+                let mut permissions = plan.permissions().clone();
+                if writer {
+                    permissions.mode = AccessMode::WorktreeWrite(Box::new(serde_json::from_value(
+                        serde_json::json!({
+                            "git_grants_digest": vec![0; 32], "publishing": false,
+                            "common_git_dir": root.join("repo/.git"),
+                            "cargo_cache": {"path": root.join("cache"), "scope": "subtree"}
+                        }),
+                    )?));
+                }
+                let plan = ConfinedPlan::new(PlanRequest {
+                    scope: plan.scope(),
+                    codex: CodexPolicy::Clean,
+                    extensions: ExtensionPolicy::Deny,
+                    agy_state: None,
+                    permissions,
+                })?;
+                for state in ["missing", "discover", "off"] {
+                    if state == "discover" {
+                        std::fs::create_dir_all(&skills)?;
+                        std::fs::write(skills.join("SKILL.md"), b"fixture")?;
+                    }
+                    route.set_user_skills(state != "off");
+                    let input = PrepareInput {
+                        route: &route,
+                        confined: &plan,
+                        prompt: &prompt,
+                        images: &[],
+                        command: None,
+                        continuation: None,
+                        grant_digest: "fixture",
+                        executable: &executable,
+                        home: &home,
+                        user: "fixture".as_ref(),
+                        host_var: &|_| None,
+                        skill_stage_max_bytes: 16 * 1024 * 1024,
+                        account: None,
+                        token: Some(&token),
+                        cwd: &root.join("repo"),
+                        git_context: false,
+                        nonce: [9; 16],
+                        provenant: LaneRuntime {
+                            executable: &executable,
+                            git: &executable,
+                            state: &root,
+                            child_state: &root,
+                            home: &home,
+                            depth: 1,
+                            attempt: AttemptId::from_bytes([7; 16]),
+                            assets: &root,
+                        },
+                    };
+                    let spec = provider.prepare(input)?;
+                    let mode = if state == "off" {
+                        UserSkillsMode::Off
+                    } else {
+                        UserSkillsMode::Discover
+                    };
+                    let receipt =
+                        user_skills_exposure(mode, serde_json::Value::Null, &spec.user_skills);
+                    assert_eq!(
+                        receipt["exposed"],
+                        state == "discover",
+                        "{} {state}",
+                        adapter.name
+                    );
+                    if let Some(stage) = &spec.user_skills.root {
+                        assert!(
+                            spec.profile
+                                .spec
+                                .runtime_reads
+                                .contains(&grant(stage.clone()))
+                        );
+                        assert!(
+                            spec.profile
+                                .spec
+                                .runtime_reads
+                                .iter()
+                                .all(|read| read.path != skills
+                                    && (read.scope != PathScope::Subtree
+                                        || !skills.starts_with(&read.path))),
+                            "{}: {:?}",
+                            adapter.name,
+                            spec.profile.spec.runtime_reads
+                        );
+                        assert!(spec.setup.iter().any(
+                        |step| matches!(step, SetupStep::Symlink { target, .. } if target == stage)
+                    ));
+                    }
+                }
+                std::fs::remove_dir_all(&skills)?;
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn shared_provider_package_omission_reports_narrow_fallback() {
+        let entry = provenant_providers::OmittedGrant {
+            path: PathBuf::from("/usr/local"),
+            source: provenant_providers::OmissionSource::ProviderPackage,
+        };
+        let warnings = discovery_warnings(&[entry], Path::new("/fixture/home"), false);
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("executable only"));
+    }
+
+    #[test]
+    fn unrepresentable_discovery_reports_why_it_was_omitted() {
+        use std::os::unix::ffi::OsStringExt;
+        let entry = provenant_providers::OmittedGrant {
+            path: PathBuf::from(std::ffi::OsString::from_vec(b"/fixture/tool-\xff".to_vec())),
+            source: provenant_providers::OmissionSource::Toolchain,
+        };
+        let warnings = discovery_warnings(&[entry], Path::new("/fixture/home"), false);
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("cannot be represented"));
+        let control = provenant_providers::OmittedGrant {
+            path: PathBuf::from("/fixture/home/tool-\u{1}"),
+            source: provenant_providers::OmissionSource::Toolchain,
+        };
+        let warning = omission_warning(&control, Path::new("/fixture/home"));
+        assert!(warning.contains("unrepresentable path"));
+        assert!(!warning.contains('\u{1}'));
+    }
+
+    #[test]
     fn staging_setup_failure_continues_without_skills() {
         let mut staged = provenant_providers::StagedUserSkills::default();
         staged.root = Some(PathBuf::from("/attempt/skills"));
@@ -2669,6 +2996,32 @@ mod user_skills_tests {
     }
 
     #[test]
+    fn user_skills_receipt_reports_each_skipped_reason() {
+        let mut staged = provenant_providers::StagedUserSkills::default();
+        staged.root = Some(PathBuf::from("/attempt/skills"));
+        for reason in ["credential_root", "cycle", "changed_during_copy"] {
+            staged.warnings.push(provenant_providers::SkillWarning {
+                path: PathBuf::from(reason),
+                reason,
+            });
+        }
+        let receipt = user_skills_exposure(
+            provenant_records::UserSkillsMode::Discover,
+            serde_json::Value::Null,
+            &staged,
+        );
+        assert_eq!(receipt["exposed"], true);
+        for (warning, reason) in receipt["warnings"].as_array().unwrap().iter().zip([
+            "credential_root",
+            "cycle",
+            "changed_during_copy",
+        ]) {
+            assert_eq!(warning["code"], "user_skill_skipped");
+            assert_eq!(warning["reason"], reason);
+        }
+    }
+
+    #[test]
     fn receipt_uses_prepared_skill_facts() {
         let staged = provenant_providers::StagedUserSkills::default();
         let origin = serde_json::json!({"key": "domains.lanes.user_skills", "origin": "compiled"});
@@ -2680,6 +3033,13 @@ mod user_skills_tests {
         assert_eq!(record["exposed"], false);
         assert_eq!(record["staged_file_count"], 0);
         assert_eq!(record["source"], origin);
+        let off = user_skills_exposure(
+            provenant_records::UserSkillsMode::Off,
+            serde_json::Value::Null,
+            &staged,
+        );
+        assert_eq!(off["exposed"], false);
+        assert_eq!(off["staged_file_count"], 0);
     }
 }
 

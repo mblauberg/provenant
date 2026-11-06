@@ -60,9 +60,6 @@ pub struct LaneBuildSettings {
     /// Minutes a build waits for a build slot or a Cargo lock before giving up.
     #[serde(default, deserialize_with = "deserialize_auto")]
     pub build_wait_minutes: Option<u64>,
-    /// Seconds a writer waits for its repository's Git setup lock.
-    #[serde(default, deserialize_with = "deserialize_auto")]
-    pub setup_lock_wait_seconds: Option<u64>,
     /// First port of the range split into per-writer-lane blocks.
     #[serde(default, deserialize_with = "deserialize_auto")]
     pub lane_port_base: Option<u64>,
@@ -97,7 +94,6 @@ pub struct LaneBuildSettings {
 pub const DEFAULT_MAX_WRITER_LANES: u64 = 40;
 pub const DEFAULT_MAX_PROJECT_WRITER_LANES: u64 = 30;
 pub const DEFAULT_BUILD_WAIT_MINUTES: u64 = 30;
-pub const DEFAULT_SETUP_LOCK_WAIT_SECONDS: u64 = 14400;
 /// Default lane port space: 64 blocks of 16 ports from 30000, below the
 /// ephemeral ranges of macOS and Linux and one block per possible writer lane.
 pub const DEFAULT_LANE_PORT_BASE: u64 = 30000;
@@ -191,12 +187,6 @@ impl LaneBuildSettings {
         }
         if !in_range(self.build_wait_minutes, 1440) {
             invalid.push("build_wait_minutes");
-        }
-        if !in_range(
-            self.setup_lock_wait_seconds,
-            provenant_core::MAX_LANE_RUNTIME_SECONDS,
-        ) {
-            invalid.push("setup_lock_wait_seconds");
         }
         if self
             .lane_port_base
@@ -309,11 +299,6 @@ impl LaneBuildSettings {
                 .unwrap_or(DEFAULT_BUILD_WAIT_MINUTES)
                 .clamp(1, 1440),
         )
-    }
-    pub fn setup_lock_wait_seconds(&self) -> u64 {
-        self.setup_lock_wait_seconds
-            .unwrap_or(DEFAULT_SETUP_LOCK_WAIT_SECONDS)
-            .clamp(1, provenant_core::MAX_LANE_RUNTIME_SECONDS)
     }
     pub fn jobs(&self) -> u64 {
         self.cargo_build_jobs.unwrap_or_else(|| {
@@ -714,21 +699,6 @@ mod tests {
 #[cfg(test)]
 mod build_tests {
     use super::LaneBuildSettings;
-    #[test]
-    fn setup_lock_wait_validates_bounds_and_automatic_default() {
-        let defaults: LaneBuildSettings =
-            toml_edit::de::from_str("setup_lock_wait_seconds = -1").unwrap();
-        assert_eq!(defaults.setup_lock_wait_seconds(), 14400);
-        let configured: LaneBuildSettings =
-            toml_edit::de::from_str("setup_lock_wait_seconds = 17").unwrap();
-        assert!(configured.invalid_keys().is_empty());
-        assert_eq!(configured.setup_lock_wait_seconds(), 17);
-        for value in [0, 14401] {
-            let invalid: LaneBuildSettings =
-                toml_edit::de::from_str(&format!("setup_lock_wait_seconds = {value}")).unwrap();
-            assert_eq!(invalid.invalid_keys(), ["setup_lock_wait_seconds"]);
-        }
-    }
     #[test]
     fn memory_pressure_accepts_host_policy() {
         use provenant_os::sys::resources::MemoryPressure;

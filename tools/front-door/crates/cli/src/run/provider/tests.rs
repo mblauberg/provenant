@@ -1003,12 +1003,12 @@ fn launch_prompt_preserves_small_text_and_refuses_more_than_one_mib()
     for entry in REGISTRY {
         let adapter = entry.adapter.id();
         for text in ["small prompt".to_owned(), "a".repeat(65_536)] {
-            let prompt = launch_prompt(&text, &paths, &attempt, adapter)?;
+            let prompt = launch_prompt(&text, &paths, &attempt, adapter, 65_536, "test")?;
             assert_eq!(prompt.text(), text);
             assert!(prompt.file().is_none());
         }
         let text = format!("Durable output instructions\n\n{}", "a".repeat(1024 * 1024));
-        let error = launch_prompt(&text, &paths, &attempt, adapter)
+        let error = launch_prompt(&text, &paths, &attempt, adapter, 65_536, "test")
             .err()
             .ok_or("oversized launch accepted")?;
         assert!(
@@ -1031,7 +1031,7 @@ fn launch_prompt_keeps_oversized_stdin_prompts_in_memory() -> Result<(), Box<dyn
         paths.lane_depth = depth;
         for adapter in ["claude", "codex", "opencode"] {
             for text in [&text, &"a".repeat(1024 * 1024)] {
-                let prompt = launch_prompt(text, &paths, &attempt, adapter)?;
+                let prompt = launch_prompt(text, &paths, &attempt, adapter, 65_536, "test")?;
                 assert_eq!(prompt.text(), text);
                 assert!(prompt.file().is_none());
             }
@@ -1051,18 +1051,18 @@ fn launch_prompt_spills_only_top_level_argv_and_refuses_conflicting_file()
         let mut paths = prompt_paths(&attempt)?;
         let text = format!("Durable output instructions\n\n{}", "é".repeat(75_000));
         paths.lane_depth = 2;
-        let error = launch_prompt(&text, &paths, &attempt, adapter)
+        let error = launch_prompt(&text, &paths, &attempt, adapter, 65_536, "test")
             .err()
             .ok_or("nested argv spill accepted")?;
         assert!(
-            matches!(error, LaunchPromptError::NestedArgvTooLarge),
+            matches!(error, LaunchPromptError::NestedArgvTooLarge { .. }),
             "{error}"
         );
         assert!(!attempt.join("prompt.md").exists());
 
         paths.lane_depth = 1;
         for _ in 0..2 {
-            let prompt = launch_prompt(&text, &paths, &attempt, adapter)?;
+            let prompt = launch_prompt(&text, &paths, &attempt, adapter, 65_536, "test")?;
             assert_eq!(prompt.file(), Some(attempt.join("prompt.md").as_path()));
             assert!(prompt.text().len() < 1024);
             assert_eq!(std::fs::read_to_string(attempt.join("prompt.md"))?, text);
@@ -1075,12 +1075,29 @@ fn launch_prompt_spills_only_top_level_argv_and_refuses_conflicting_file()
             );
         }
         std::fs::write(attempt.join("prompt.md"), "conflicting prompt")?;
-        assert!(launch_prompt(&text, &paths, &attempt, adapter).is_err());
+        assert!(launch_prompt(&text, &paths, &attempt, adapter, 65_536, "test").is_err());
         assert_eq!(
             std::fs::read_to_string(attempt.join("prompt.md"))?,
             "conflicting prompt"
         );
     }
+    Ok(())
+}
+
+#[test]
+fn nested_argv_prompt_respects_configured_byte_limit() -> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let attempt = canonical(temp.path())?;
+    let mut paths = prompt_paths(&attempt)?;
+    paths.lane_depth = 2;
+    let text = "a".repeat(65_537);
+    assert!(matches!(
+        launch_prompt(&text, &paths, &attempt, "cursor", 65_536, "test"),
+        Err(LaunchPromptError::NestedArgvTooLarge { limit: 65_536, .. })
+    ));
+    let prompt = launch_prompt(&text, &paths, &attempt, "cursor", 131_072, "test")?;
+    assert_eq!(prompt.text(), text);
+    assert!(prompt.file().is_none());
     Ok(())
 }
 
@@ -1091,7 +1108,17 @@ fn launch_prompt_refuses_symlinked_attempt_ancestors() -> Result<(), Box<dyn std
     std::fs::create_dir_all(state.join("actual/attempt"))?;
     std::os::unix::fs::symlink(state.join("actual"), state.join("runs"))?;
     let paths = prompt_paths(&state.join("runs/attempt"))?;
-    assert!(launch_prompt(&"a".repeat(65_537), &paths, &state, "cursor").is_err());
+    assert!(
+        launch_prompt(
+            &"a".repeat(65_537),
+            &paths,
+            &state,
+            "cursor",
+            65_536,
+            "test"
+        )
+        .is_err()
+    );
     assert!(!state.join("actual/attempt/prompt.md").exists());
     Ok(())
 }
@@ -1167,11 +1194,61 @@ fn launch_prompt_refuses_invalid_input_before_account_resolution()
             assert!(
                 matches!(
                     error,
-                    PrepareError::Prompt(LaunchPromptError::NestedArgvTooLarge)
+                    PrepareError::Prompt(LaunchPromptError::NestedArgvTooLarge { .. })
                 ),
                 "{error}"
             );
             assert!(!attempt.join("prompt.md").exists());
+            if adapter == "cursor" {
+                let home = attempt.join("fixture-home");
+                let checkout = attempt.join("fixture-checkout");
+                let state = attempt.join("fixture-state");
+                for path in [&home, &checkout, &state] {
+                    std::fs::create_dir_all(path)?;
+                }
+                std::fs::write(
+                    state.join("config.toml"),
+                    "schema_version = 1\n[domains.run]\nargv_prompt_limit_bytes = 262144\n",
+                )?;
+                let mut inputs = provenant_core::RootInputs::new(home, checkout);
+                inputs.state_dir = Some(state.clone());
+                let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+                let configured = Registry {
+                    roots: Some(&roots),
+                    ..Registry::default()
+                };
+                let error = prepare_with(
+                    &configured,
+                    &requested,
+                    &full,
+                    &nested,
+                    None,
+                    |_| unreachable!("missing home must precede executable probing"),
+                    None,
+                )
+                .err()
+                .ok_or("missing home accepted")?;
+                assert!(
+                    error.to_string().contains("home directory is unavailable"),
+                    "{error}"
+                );
+                std::fs::write(
+                    state.join("config.toml"),
+                    "schema_version = 1\n[domains.run]\nargv_prompt_limit_bytes = 65536\n",
+                )?;
+                let error = prepare_with(
+                    &configured,
+                    &requested,
+                    &full,
+                    &nested,
+                    None,
+                    |_| unreachable!("nested threshold must precede probing"),
+                    None,
+                )
+                .err()
+                .ok_or("nested threshold accepted")?;
+                assert!(error.to_string().contains("host configuration"), "{error}");
+            }
         }
     }
     Ok(())
@@ -2227,7 +2304,24 @@ fn writer_plan_stages_scratch_in_private_temporary_directory()
         std::fs::create_dir_all(login.parent().unwrap())?;
         std::fs::write(&login, b"fixture")?;
         let fake_agy = assets.join("agy");
-        std::fs::write(&fake_agy, b"#!/bin/sh\nprintf 'agy 1.0.0\\n'\n")?;
+        std::fs::write(
+            &fake_agy,
+            br##"#!/bin/sh
+if [ "${IDENTITY_PROBE:-}" = writer ]; then
+  [ "$PROVENANT_PRIMARY_CHECKOUT" = "$EXPECTED_PRIMARY" ] || exit 10
+  [ "$PROVENANT_WORKTREE_GITDIR" = "$EXPECTED_ADMIN" ] || exit 11
+  [ "$(git rev-parse --git-common-dir)" = "$EXPECTED_PRIVATE" ] || exit 12
+  ! /usr/bin/touch "$PROVENANT_WORKTREE_GITDIR/identity-probe" || exit 13
+elif [ "${IDENTITY_PROBE:-}" = reader ]; then
+  [ "$PROVENANT_PRIMARY_CHECKOUT" = "$EXPECTED_PRIMARY" ] || exit 14
+  [ -z "${PROVENANT_WORKTREE_GITDIR+x}" ] || exit 15
+elif [ "${IDENTITY_PROBE:-}" = linked ]; then
+  [ "$PROVENANT_PRIMARY_CHECKOUT" = "$EXPECTED_PRIMARY" ] || exit 16
+  [ "$PROVENANT_WORKTREE_GITDIR" = "$EXPECTED_ADMIN" ] || exit 17
+fi
+printf 'agy 1.0.0\n'
+"##,
+        )?;
         std::fs::set_permissions(&fake_agy, std::fs::Permissions::from_mode(0o700))?;
         std::fs::write(state.join("config.toml"), "schema_version = 1\n")?;
         let backend = system_backend(&BackendContext {
@@ -2240,7 +2334,7 @@ fn writer_plan_stages_scratch_in_private_temporary_directory()
                 "agy fixture execution requires native sandbox: {error}"
             ))?;
         }
-        for (n, write) in [(7u8, true), (8u8, false)] {
+        for (n, write, linked) in [(7u8, true, false), (8u8, false, false), (9u8, false, true)] {
             let mut request = task.clone();
             request.route = run::RequestedRoute::Model {
                 extra: Default::default(),
@@ -2269,8 +2363,13 @@ fn writer_plan_stages_scratch_in_private_temporary_directory()
             for path in [&paths.scratch, &paths.provider_state, &paths.temporary] {
                 std::fs::create_dir_all(path)?;
             }
+            let linked_cwd = project.join(".worktrees/writer");
+            let selected_registry = Registry {
+                cwd: Some(if linked { &linked_cwd } else { &project }),
+                ..registry
+            };
             let prepared = prepare_with(
-                &registry,
+                &selected_registry,
                 &request,
                 "fixture",
                 &paths,
@@ -2336,9 +2435,39 @@ fn writer_plan_stages_scratch_in_private_temporary_directory()
             if backend.is_err() {
                 continue;
             }
+            let mut environment = prepared.environment.clone();
+            environment.push(("EXPECTED_PRIMARY".into(), project.as_os_str().to_owned()));
+            if write {
+                let worktree = &request.writer.as_ref().ok_or("writer")?.worktree;
+                let admin = String::from_utf8(provenant_os::fixture::run_git(
+                    worktree,
+                    &["rev-parse", "--absolute-git-dir"],
+                )?)?;
+                let admin = std::fs::canonicalize(admin.trim())?;
+                let private = paths.temporary.join("candidate-0/git-common");
+                std::fs::create_dir_all(private.join("objects"))?;
+                std::fs::create_dir_all(private.join("refs"))?;
+                std::fs::write(private.join("HEAD"), b"ref: refs/heads/writer\n")?;
+                std::fs::copy(project.join(".git/config"), private.join("config"))?;
+                environment.push(("IDENTITY_PROBE".into(), "writer".into()));
+                environment.push(("EXPECTED_ADMIN".into(), admin.into_os_string()));
+                environment.push(("EXPECTED_PRIVATE".into(), private.into_os_string()));
+            } else if linked {
+                let admin = String::from_utf8(provenant_os::fixture::run_git(
+                    &linked_cwd,
+                    &["rev-parse", "--absolute-git-dir"],
+                )?)?;
+                environment.push(("IDENTITY_PROBE".into(), "linked".into()));
+                environment.push((
+                    "EXPECTED_ADMIN".into(),
+                    std::fs::canonicalize(admin.trim())?.into_os_string(),
+                ));
+            } else {
+                environment.push(("IDENTITY_PROBE".into(), "reader".into()));
+            }
             let argv = compiled.command(&prepared.argv, &attempt_id)?;
             let mut options = ExecOptions::new(&argv, &prepared.cwd, Duration::from_secs(10));
-            options.env = Some(&prepared.environment);
+            options.env = Some(&environment);
             let result = executor.execute(options)?;
             assert_eq!(result.termination, Termination::Exit(0), "{result:?}");
             assert!(String::from_utf8_lossy(&result.stdout.bytes).contains("agy 1.0.0"));
@@ -2469,7 +2598,7 @@ fn writer_plan_stages_scratch_in_private_temporary_directory()
     std::fs::write(
         state.join("config.toml"),
         format!(
-            "schema_version = 1\n[domains.accounts.entries.unrelated]\nadapter = 'claude'\nlabel = 'other'\nkey = 'fixture-other'\ndirectory = '{}'\n",
+            "schema_version = 1\n[domains.run]\nargv_prompt_limit_bytes = 60000\n[domains.accounts.entries.unrelated]\nadapter = 'claude'\nlabel = 'other'\nkey = 'fixture-other'\ndirectory = '{}'\n",
             home.join(".claude-other").display()
         ),
     )?;
@@ -2485,6 +2614,15 @@ fn writer_plan_stages_scratch_in_private_temporary_directory()
         },
         None,
     )?;
+    assert_eq!(launch.route.extra["argv_prompt_limit"]["value"], 60_000);
+    assert_eq!(
+        launch.route.extra["argv_prompt_limit"]["key"],
+        "domains.run.argv_prompt_limit_bytes"
+    );
+    assert_eq!(
+        launch.route.extra["argv_prompt_limit"]["origin"]["kind"],
+        "user"
+    );
     assert!(
         launch
             .environment
@@ -2588,7 +2726,22 @@ fn writer_plan_stages_scratch_in_private_temporary_directory()
         &confinement.plan.permissions().scratch.path,
         &codex_runtime,
         &state,
-    )?;
+    );
+    // An unrepresentable shim input warns and leaves the prepared lane intact.
+    let env_before = codex.env.clone();
+    let profile_before = codex.profile.spec.clone();
+    let setup_count = codex.setup.len();
+    configure_build_slots(
+        &mut codex,
+        &provenant_config::LaneBuildSettings::default(),
+        &home,
+        &confinement.plan.permissions().scratch.path,
+        Path::new("relative-runtime"),
+        &state,
+    );
+    assert_eq!(codex.env, env_before);
+    assert_eq!(codex.profile.spec, profile_before);
+    assert_eq!(codex.setup.len(), setup_count);
     let slots = state.join(provenant_os::build_slots::DIRECTORY.join("/"));
     assert!(
         codex
@@ -2681,7 +2834,7 @@ fn writer_plan_stages_scratch_in_private_temporary_directory()
         .profile
         .knobs
         .insert("lanes.publish".into(), serde_json::json!(true));
-    let _publishing = prepare_with(
+    let publishing = prepare_with(
         &registry,
         &publishing_task,
         "publishing policy fixture",
@@ -2701,6 +2854,23 @@ fn writer_plan_stages_scratch_in_private_temporary_directory()
         .as_ref()
         .ok_or("writer missing")?
         .worktree;
+    let gitdir = String::from_utf8(provenant_os::fixture::run_git(
+        worktree,
+        &["rev-parse", "--absolute-git-dir"],
+    )?)?;
+    let expected_gitdir = std::fs::canonicalize(gitdir.trim())?;
+    let variable = |name: &str| {
+        publishing
+            .environment
+            .iter()
+            .find(|(key, _)| key == name)
+            .map(|(_, value)| PathBuf::from(value))
+    };
+    assert_eq!(
+        variable("PROVENANT_PRIMARY_CHECKOUT"),
+        Some(project.canonicalize()?)
+    );
+    assert_eq!(variable("PROVENANT_WORKTREE_GITDIR"), Some(expected_gitdir));
     // The runtime populates this private Git directory after preparation.
     let private_common = publishing_paths.temporary.join("candidate-0/git-common");
     std::fs::create_dir_all(private_common.join("objects"))?;
@@ -5592,5 +5762,50 @@ fn graph_read_only_snapshot_survives_moving_and_replaced_checkout()
             .unwrap_err()
             .contains("identity changed")
     );
+    Ok(())
+}
+
+#[test]
+fn writer_preparation_refusal_names_setting_and_origin() {
+    let mut profile = provenant_records::run::HarnessProfile::default();
+    let default = super::dependency_preparation_refusal("missing pnpm".into(), true, &profile);
+    assert!(default.contains("lanes.prepare_deps=true (compiled default)"));
+    profile.name = "focused".into();
+    profile
+        .knobs
+        .insert("lanes.prepare_deps".into(), true.into());
+    let configured = super::dependency_preparation_refusal("missing pnpm".into(), true, &profile);
+    assert!(configured.contains("lanes.prepare_deps=true (sealed profile focused)"));
+    assert!(configured.contains("lanes.prepare_deps=false"));
+}
+
+#[test]
+fn write_grant_limit_reports_configured_value_and_origin() -> Result<(), Box<dyn std::error::Error>>
+{
+    use provenant_run::Providers;
+    let temp = tempfile::tempdir()?;
+    let home = temp.path().join("home");
+    let checkout = temp.path().join("checkout");
+    let state = temp.path().join("state");
+    for path in [&home, &checkout, &state] {
+        std::fs::create_dir_all(path)?;
+    }
+    let mut inputs = provenant_core::RootInputs::new(home.clone(), checkout.clone());
+    inputs.state_dir = Some(state.clone());
+    let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+    let registry = Registry {
+        roots: Some(&roots),
+        ..Registry::default()
+    };
+    let default = registry.write_grant_limit();
+    assert_eq!(default.bytes, provenant_records::run::MAX_WRITE_GRANT_BYTES);
+    assert_eq!(default.origin, "compiled default");
+    std::fs::write(
+        state.join("config.toml"),
+        "schema_version=1\n[domains.run]\nwrite_grant_limit_bytes=1048576\n",
+    )?;
+    let configured = registry.write_grant_limit();
+    assert_eq!(configured.bytes, 1048576);
+    assert_eq!(configured.origin, "host configuration");
     Ok(())
 }

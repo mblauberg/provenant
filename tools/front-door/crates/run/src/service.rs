@@ -674,8 +674,6 @@ error_kinds! {
     BuildSettings => "BUILD_SETTINGS", "The host lane build settings are invalid.";
     GuardianIdentity => "GUARDIAN_IDENTITY", "The guardian process identity could not be observed.";
     HostClock => "HOST_CLOCK", "Startup spacing cannot be judged: the monotonic clock or boot identity is unreadable.";
-    WriterRefLocked => "WRITER_REF_LOCKED", "A writer Git ref lock already exists.";
-    SetupLockTimeout => "SETUP_LOCK_TIMEOUT", "The writer Git setup lock wait expired.";
     RetainedWriterImport => "WRITER_IMPORT_RETAINED", "A predecessor writer import remains unresolved.";
     ObjectImportLimit => "OBJECT_IMPORT_LIMIT", "A lane's Git object import exceeded its limits.";
 }
@@ -720,7 +718,6 @@ impl ErrorKind {
             | Self::WriterBusy
             | Self::WriterLockBusy
             | Self::WriterUnknown
-            | Self::SetupLockTimeout
             | Self::RetainedWriterImport
             | Self::CredentialRoot
             | Self::WriterProjectMismatch
@@ -748,9 +745,7 @@ impl ErrorKind {
         match self {
             Self::CredentialRoot | Self::SharedSettingsNeverSynced => B::Credentials,
             Self::ObjectImportLimit | Self::StateCorrupt => B::Integrity,
-            Self::WriterRefLocked | Self::SetupLockTimeout | Self::RetainedWriterImport => {
-                B::LaneGit
-            }
+            Self::RetainedWriterImport => B::LaneGit,
             Self::WriterScope
             | Self::WriterBusy
             | Self::WriterLockBusy
@@ -765,6 +760,7 @@ impl From<&RunError> for ErrorKind {
     fn from(error: &RunError) -> Self {
         match error {
             RunError::Input { kind, .. } => *kind,
+            RunError::ContinuationRefused { .. } => Self::ContinuationUnsupported,
             RunError::InvalidTaskTitle(_) | RunError::AttemptReservationRetained => Self::Invalid,
             RunError::WorktreeMissing(_) => Self::WorktreeMissing,
             RunError::WorktreeUnregistered(_) => Self::WorktreeUnregistered,
@@ -799,8 +795,6 @@ impl From<&RunError> for ErrorKind {
             RunError::Admission(AdmissionError::BuildSettings) => Self::BuildSettings,
             RunError::Admission(AdmissionError::GuardianIdentity) => Self::GuardianIdentity,
             RunError::Admission(AdmissionError::Clock) => Self::HostClock,
-            RunError::WriterRefLocked(_) => Self::WriterRefLocked,
-            RunError::SetupLockTimeout { .. } => Self::SetupLockTimeout,
             RunError::RetainedWriterImport { .. } => Self::RetainedWriterImport,
             RunError::GitUnavailable => Self::Git,
             RunError::ObjectImportLimit(_) => Self::ObjectImportLimit,

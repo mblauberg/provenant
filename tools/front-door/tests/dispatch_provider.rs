@@ -2154,6 +2154,7 @@ fn codex_dispatch_observes_rollout() -> Result {
         if !cfg!(target_os = "macos") {
             assert_eq!(lane["state"], "rejected", "{lane}");
             assert_eq!(lane["cause"], "pre_launch_refusal", "{lane}");
+            assert_eq!(lane["terminal_cause"], "unsupported_platform", "{lane}");
             assert!(lane["started_at"].is_null(), "{lane}");
             assert!(lane["applied_route"].is_null(), "{lane}");
             rig.assert_legacy_unchanged()?;
@@ -2456,6 +2457,7 @@ fn opus_writer_dispatch_advises_a_cheaper_route() -> Result {
         let lane = &result["data"]["lanes"][0];
         assert_eq!(lane["state"], "rejected", "{lane}");
         assert_eq!(lane["cause"], "pre_launch_refusal", "{lane}");
+        assert_eq!(lane["terminal_cause"], "unknown_pacing_account", "{lane}");
         assert!(lane["started_at"].is_null(), "{lane}");
         assert!(lane["applied_route"].is_null(), "{lane}");
         cleanup.disarm();
@@ -3014,6 +3016,7 @@ fn claude_dispatch(host_native: bool, pool: bool) -> Result {
     if !cfg!(target_os = "macos") {
         assert_eq!(lane["state"], "rejected", "{lane}");
         assert_eq!(lane["cause"], "pre_launch_refusal", "{lane}");
+        assert_eq!(lane["terminal_cause"], "unsupported_platform", "{lane}");
         assert!(lane["started_at"].is_null(), "{lane}");
         assert!(lane["applied_route"].is_null(), "{lane}");
         assert!(account.join("refreshed").exists());
