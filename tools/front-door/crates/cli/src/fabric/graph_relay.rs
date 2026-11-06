@@ -167,9 +167,13 @@ pub fn serve(
             };
             let store = provenant_run::RunStore::open(&execution, &call).map_err(journal_error)?;
             let id = provenant_core::AttemptId::parse(attempt).map_err(journal_error)?;
-            let admitted = store
-                .set_child_wait(id, waiting, &call)
-                .map_err(journal_error)?;
+            let admitted = match store.set_child_wait(id, waiting, &call) {
+                Ok(admitted) => admitted,
+                // Store/ledger locks are another admission wait. Preserve the
+                // completed child result and retry after releasing the journal.
+                Err(provenant_run::RunError::Contention) if !waiting => false,
+                Err(error) => return Err(journal_error(error)),
+            };
             // Keep the graph slot yielded until host admission is reclaimed.
             // Each retry releases the journal lock so children can settle.
             if !admitted {
