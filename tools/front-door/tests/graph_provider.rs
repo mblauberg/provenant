@@ -2772,6 +2772,9 @@ fn output_names_the_attempt_it_reads_and_writes_or_locates_parts() -> Result {
     let output = rig.command(&["output", &target, "--json"])?;
     let data: Value = serde_json::from_slice(&output.stdout.bytes)?;
     assert_eq!(code(&output), 0, "{data}");
+    assert!(data["data"]["changed_files"].is_null(), "{data}");
+    let human = rig.command(&["output", &target])?;
+    assert!(String::from_utf8_lossy(&human.stdout.bytes).contains("changed files: unavailable"));
     assert_eq!(data["data"]["state"], "failed");
     assert_eq!(
         data["data"]["provider_error"],
@@ -3506,6 +3509,29 @@ fn writer_shell_edits_instructions_and_redacts_logs() -> Result {
         assert_eq!(head.stdout.bytes, b"edited by lane shell\n");
         let run = lane["run_id"].as_str().ok_or("run")?;
         let id = lane["attempt_id"].as_str().ok_or("attempt")?;
+        let output = rig.command(&["output", id, "--json"])?;
+        let data: Value = serde_json::from_slice(&output.stdout.bytes)?;
+        assert_eq!(code(&output), 0, "{data}");
+        let paths = data["data"]["changed_files"]
+            .as_array()
+            .ok_or("changed files")?;
+        let paths = paths
+            .iter()
+            .map(|path| {
+                let path: provenant_records::StructuredPathWire =
+                    serde_json::from_value(path.clone())?;
+                path.to_path_buf().map_err(Into::into)
+            })
+            .collect::<Result<Vec<std::path::PathBuf>>>()?;
+        for name in ["AGENTS.md", "CLAUDE.md", "HARNESS.md"] {
+            assert!(paths.contains(&tree.join(name)), "{paths:?}");
+        }
+        let human = rig.command(&["output", id])?;
+        let human = String::from_utf8_lossy(&human.stdout.bytes);
+        assert!(
+            human.contains(&tree.join("AGENTS.md").display().to_string()),
+            "{human}"
+        );
         let attempt = rig.state.join("runs").join(run).join("attempts").join(id);
         let result = fs::read_to_string(attempt.join("result.md"))?;
         assert!(result.contains("shell completed\n[REDACTED]"), "{result}");
