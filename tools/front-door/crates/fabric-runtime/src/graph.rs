@@ -938,6 +938,7 @@ pub fn cancel_node_subtree(
         .ok_or_else(|| format!("unknown node {id}"))?;
     let mut effect = relay::cancel_subtree(document, checkpoint, id)?;
     let node = &mut checkpoint.nodes[index];
+    no_work::fence_stopped(node);
     if !node.state.settled() {
         if node
             .attempts
