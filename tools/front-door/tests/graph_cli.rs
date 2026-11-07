@@ -840,6 +840,7 @@ fn assert_compile_refusal_matches(
         );
     }
     for arguments in [
+        json!({"op":"run","use":name}),
         json!({"op":"run","use":name,"explain":true}),
         json!({"op":"run","document":document}),
     ] {
@@ -977,6 +978,23 @@ fn oversized_graph_expansion_is_refused_before_journalling() -> Result {
                 "exports":[{"node":third,"outputs":["result"]}]
             }}],
             "exports":[{"node":second,"outputs":["result"]}]
+        }}]}),
+        "schema_version = 1\n",
+        "graph composite or loop expansion is invalid",
+    )?;
+
+    // Composite expansion refuses duplicate exports of one member.
+    assert_compile_refusal_matches(
+        &rig,
+        &[(
+            "duplicate-export",
+            "nodes = [{ id = 'member', use = 'task' }]\nexports = [{ node = 'member', outputs = ['result'] }, { node = 'member', outputs = ['result'] }]\n"
+                .into(),
+        )],
+        "duplicate-export",
+        &json!({"schema_version":1,"graph_id":"duplicate-export","nodes":[{"id":"duplicate-export","kind":"composite","access":"read_only","composite":{
+            "nodes":[{"id":"member","prompt":"work","access":"read_only","route":{"alias":"senior"}}],
+            "exports":[{"node":"member","outputs":["result"]},{"node":"member","outputs":["result"]}]
         }}]}),
         "schema_version = 1\n",
         "graph composite or loop expansion is invalid",
