@@ -75,13 +75,14 @@ not (
 serial-process = { max-threads = 1 }
 
 # These graph fixtures perform durable settlement and, for paging, repeatedly
-# read a large checkpoint. Allow for shared-runner filesystem contention.
+# read a large checkpoint. The eight-lane fixture also serialises and checks a
+# large graph and its stored prompts. Allow for shared-runner contention.
 [[profile.default.overrides]]
-filter = 'package(=provenant) & (test(=fabric::peer_tests::peer_graph_submission::graph_submission_pins_the_integration_base_across_replay) | test(=fabric::peer_tests::peer_graph_tests::peer_hosted_lane_collection_preserves_origin_status) | test(=fabric::peer_tests::peer_graph_tests::peer_hosted_lane_subtree_pages_are_bounded_complete_and_private))'
+filter = 'package(=provenant) & (test(=fabric::interface::tests::eight_lane_composite_with_a_file_brief_fits_the_checkpoint_limit) | test(=fabric::peer_tests::peer_graph_submission::graph_submission_pins_the_integration_base_across_replay) | test(=fabric::peer_tests::peer_graph_tests::peer_hosted_lane_collection_preserves_origin_status) | test(=fabric::peer_tests::peer_graph_tests::peer_hosted_lane_subtree_pages_are_bounded_complete_and_private))'
 slow-timeout = { period = "30s", terminate-after = 4 }
 
 [[profile.ci.overrides]]
-filter = 'package(=provenant) & (test(=fabric::peer_tests::peer_graph_submission::graph_submission_pins_the_integration_base_across_replay) | test(=fabric::peer_tests::peer_graph_tests::peer_hosted_lane_collection_preserves_origin_status) | test(=fabric::peer_tests::peer_graph_tests::peer_hosted_lane_subtree_pages_are_bounded_complete_and_private))'
+filter = 'package(=provenant) & (test(=fabric::interface::tests::eight_lane_composite_with_a_file_brief_fits_the_checkpoint_limit) | test(=fabric::peer_tests::peer_graph_submission::graph_submission_pins_the_integration_base_across_replay) | test(=fabric::peer_tests::peer_graph_tests::peer_hosted_lane_collection_preserves_origin_status) | test(=fabric::peer_tests::peer_graph_tests::peer_hosted_lane_subtree_pages_are_bounded_complete_and_private))'
 slow-timeout = { period = "30s", terminate-after = 4 }
 
 # This fixture provisions and replays four graph-control variants.

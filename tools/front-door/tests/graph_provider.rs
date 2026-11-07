@@ -11,6 +11,42 @@ use std::{
 };
 use support::{Result, TestRig, code};
 
+// Medium: a real shell inherits the provider's lane environment and native
+// confinement. No network, provider login, compiler or sleeps are involved.
+fn writer_shell_probe() -> Result<String> {
+    let script = r#"set -eu
+for name in AGENTS.md CLAUDE.md HARNESS.md; do
+    test -f "$name"
+    printf 'edited by lane shell\n' > "$name"
+done
+mkdir -p shell-scratch/build
+printf disposable > shell-scratch/build/file
+rm -rf shell-scratch/build
+test ! -e shell-scratch/build
+rmdir shell-scratch
+git add AGENTS.md CLAUDE.md HARNESS.md
+git commit -qm 'test: edit root instructions'
+printf 'shell completed\n'
+printf 'ghp_abcdefghijklmnopqrstuvwxyz0123456789\n'
+printf 'shell stderr ghp_abcdefghijklmnopqrstuvwxyz0123456789\n' >&2
+"#;
+    // Claude uses the generated shell prefix; Codex runs an ordinary shell.
+    let output = if let Some(prefix) = std::env::var_os("CLAUDE_CODE_SHELL_PREFIX") {
+        std::process::Command::new(prefix).arg(script).output()?
+    } else {
+        std::process::Command::new("/bin/sh")
+            .args(["-c", script])
+            .output()?
+    };
+    assert!(
+        output.status.success(),
+        "shell failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    io::stderr().write_all(&output.stderr)?;
+    Ok(String::from_utf8(output.stdout)?)
+}
+
 const HANDOFF_SECRET: &str = "sk-abcdefghijklmnopqrstuvwx";
 
 #[cfg(target_os = "macos")]
@@ -335,6 +371,8 @@ fn fixture() -> Result {
             } else {
                 "subject framed\nVERDICT: PASS\n".to_owned()
             }
+        } else if prompt.contains("fixture writer shell") {
+            writer_shell_probe()?
         } else if prompt.contains("fixture large result") {
             // Far past the 4 KiB excerpt a consuming node's prompt carries.
             let mut text: String = (0..2000)
@@ -433,7 +471,7 @@ fn fixture() -> Result {
             format!(
                 "{}\n{}\n{}\n",
                 json!({"type":"session_meta","payload":{"id":recorded_session}}),
-                json!({"type":"turn_context","payload":{"model": if prompt.contains("fixture policy result") || prompt.contains("fixture policy continuation") || prompt.contains("fixture graph redraw") || prompt.contains("fixture partial quota redraw") { policy_model.unwrap_or("gpt-6-luna") } else if prompt.contains("fixture pool result") { "gpt-6.1-sol" } else { "gpt-6-luna" },"effort":"low"}}),
+                json!({"type":"turn_context","payload":{"model": if prompt.contains("fixture uncatalogued") || prompt.contains("fixture policy result") || prompt.contains("fixture policy continuation") || prompt.contains("fixture graph redraw") || prompt.contains("fixture partial quota redraw") { policy_model.unwrap_or("gpt-6-luna") } else if prompt.contains("fixture pool result") { "gpt-6.1-sol" } else { "gpt-6-luna" },"effort":"low"}}),
                 json!({"type":"response_item","payload":{"content":recorded}})
             ),
         )?;
@@ -495,6 +533,11 @@ fn fixture() -> Result {
         )?;
         return Ok(());
     }
+    if prompt.contains("fixture uncatalogued refusal") {
+        assert_eq!(policy_model, Some("uncatalogued-fixture-model"));
+        writeln!(io::stderr(), "fixture provider rejected uncatalogued model")?;
+        return Err("fixture provider rejected uncatalogued model".into());
+    }
     if prompt.contains("fixture capacity") {
         writeln!(
             io::stdout(),
@@ -528,7 +571,9 @@ fn fixture() -> Result {
         }
         return Ok(());
     }
-    let answer = if prompt.contains("fixture council findings") {
+    let answer = if prompt.contains("fixture writer shell") {
+        writer_shell_probe()?
+    } else if prompt.contains("fixture council findings") {
         let entries = if prompt.contains("Frame the immutable review subject for:") {
             json!([])
         } else if prompt.contains("Reconcile independent review findings") {
@@ -2877,6 +2922,154 @@ fn opencode_stderr_live_quota() -> Result {
     Ok(())
 }
 
+/// Medium: real confined writer shells for both primary adapters. The files
+/// are tracked before launch so quarantine/protected-root regressions cannot
+/// hide behind a newly created, unprotected instruction filename.
+fn writer_shell_edits_instructions_and_redacts_logs() -> Result {
+    if !graph_fixture_available()? {
+        return Ok(());
+    }
+    for adapter in ["codex", "claude"] {
+        let rig = if adapter == "claude" {
+            claude_fixture()?
+        } else {
+            policy_codex_fixture()?
+        };
+        let cleanup = rig.process_cleanup();
+        let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
+        for name in ["AGENTS.md", "CLAUDE.md", "HARNESS.md"] {
+            fs::write(rig.project.join(name), "original instructions\n")?;
+        }
+        for args in [
+            vec!["add", "AGENTS.md", "CLAUDE.md", "HARNESS.md"],
+            vec!["commit", "-qm", "instructions"],
+        ] {
+            let out = rig.execute(&git, &args, None)?;
+            assert_eq!(code(&out), 0, "{out:?}");
+        }
+        let created = rig.command(&[
+            "worktree",
+            "create",
+            "shell-evidence",
+            "--base",
+            "HEAD",
+            "--json",
+        ])?;
+        assert_eq!(code(&created), 0, "{created:?}");
+        let mut node = json!({
+            "id":"writer", "prompt":"fixture writer shell", "access":"worktree_write",
+            "worktree":".worktrees/shell-evidence", "delivery":"none",
+            "route": if adapter == "claude" {
+                json!({"adapter":"claude","model":"claude-sonnet-5-5","effort":"medium"})
+            } else {
+                json!({"adapter":"codex","model":"gpt-6-luna","effort":"low"})
+            }
+        });
+        if adapter == "claude" {
+            node["attempt"] = json!({"account":"pro"});
+        }
+        let lane = run_graph_provider_with_wait(&rig, "shell-evidence", node, "30s")?;
+        assert_eq!(lane["state"], "succeeded", "{lane}");
+        let tree = rig.project.join(".worktrees/shell-evidence");
+        for name in ["AGENTS.md", "CLAUDE.md", "HARNESS.md"] {
+            assert_eq!(
+                fs::read_to_string(tree.join(name))?,
+                "edited by lane shell\n"
+            );
+        }
+        assert!(!tree.join("shell-scratch").exists());
+        // Settlement must import the shell's private Git commit intact.
+        let head = rig.execute(
+            &git,
+            &["-C", tree.to_str().ok_or("tree")?, "show", "HEAD:AGENTS.md"],
+            None,
+        )?;
+        assert_eq!(code(&head), 0, "{head:?}");
+        assert_eq!(head.stdout.bytes, b"edited by lane shell\n");
+        let run = lane["run_id"].as_str().ok_or("run")?;
+        let id = lane["attempt_id"].as_str().ok_or("attempt")?;
+        let attempt = rig.state.join("runs").join(run).join("attempts").join(id);
+        let result = fs::read_to_string(attempt.join("result.md"))?;
+        assert!(result.contains("shell completed\n[REDACTED]"), "{result}");
+        assert_eq!(
+            fs::read_to_string(attempt.join("stderr.log"))?,
+            "shell stderr [REDACTED]\n"
+        );
+        assert_no_printed_credential(&rig.state.join("runs").join(run))?;
+        cleanup.disarm();
+    }
+    Ok(())
+}
+
+/// Medium: the public --model front door must warn, launch and preserve the
+/// provider's failure rather than refusing the uncatalogued ID at admission.
+fn uncatalogued_cli_model_launches_and_surfaces_provider_failure() -> Result {
+    if !graph_fixture_available()? {
+        return Ok(());
+    }
+    let rig = policy_codex_fixture()?;
+    let cleanup = rig.process_cleanup();
+    let auth = br#"{"tokens":{"account_id":"fixture-one"}}"#;
+    let key = provenant_providers::identity::codex_account(auth).ok_or("account key")?;
+    support::register_account(&rig, "codex", "fixture", &key, &rig.root.join("codex"))?;
+    for (prompt, expected) in [
+        ("fixture uncatalogued success", 0),
+        ("fixture uncatalogued refusal", 1),
+    ] {
+        let out = rig.command(&[
+            "run",
+            prompt,
+            "--model",
+            "codex/uncatalogued-fixture-model",
+            "--wait=30s",
+            "--json",
+        ])?;
+        assert_eq!(code(&out), expected, "{out:?}");
+        assert!(
+            String::from_utf8_lossy(&out.stderr.bytes).contains("not in the catalogue"),
+            "{out:?}"
+        );
+        let response: Value = serde_json::from_slice(&out.stdout.bytes)?;
+        let reference = response["data"]["checkpoint"]["nodes"][0]["attempts"][0]["attempt_ref"]
+            .as_str()
+            .ok_or("attempt reference")?;
+        let output = rig.command(&["output", reference, "--part", "stderr", "--json"])?;
+        assert_eq!(code(&output), 0, "{output:?}");
+        if expected == 1 {
+            assert!(
+                String::from_utf8_lossy(&output.stdout.bytes)
+                    .contains("fixture provider rejected uncatalogued model"),
+                "{output:?}"
+            );
+        }
+    }
+    cleanup.disarm();
+    Ok(())
+}
+
+fn assert_no_printed_credential(root: &std::path::Path) -> Result {
+    let mut pending = vec![root.to_owned()];
+    while let Some(path) = pending.pop() {
+        for entry in fs::read_dir(path)? {
+            let entry = entry?;
+            let kind = entry.file_type()?;
+            if kind.is_dir() {
+                pending.push(entry.path());
+            } else if kind.is_file() {
+                let bytes = fs::read(entry.path())?;
+                assert!(
+                    !bytes
+                        .windows(40)
+                        .any(|window| window == b"ghp_abcdefghijklmnopqrstuvwxyz0123456789"),
+                    "plaintext in {}",
+                    entry.path().display()
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 fn printed_credentials_leave_no_plaintext_in_run_files() -> Result {
     if !graph_fixture_available()? {
         return Ok(());
@@ -2911,25 +3104,7 @@ fn printed_credentials_leave_no_plaintext_in_run_files() -> Result {
         } else {
             r"\u0067hp_"
         }));
-        let mut pending = vec![run_dir];
-        while let Some(path) = pending.pop() {
-            for entry in fs::read_dir(path)? {
-                let entry = entry?;
-                let kind = entry.file_type()?;
-                if kind.is_dir() {
-                    pending.push(entry.path());
-                } else if kind.is_file() {
-                    let bytes = fs::read(entry.path())?;
-                    assert!(
-                        !bytes
-                            .windows(40)
-                            .any(|window| window == b"ghp_abcdefghijklmnopqrstuvwxyz0123456789"),
-                        "plaintext in {}",
-                        entry.path().display()
-                    );
-                }
-            }
-        }
+        assert_no_printed_credential(&run_dir)?;
     }
     cleanup.disarm();
     Ok(())
@@ -3242,6 +3417,14 @@ fn main() -> ExitCode {
     } else {
         type NamedTest = (&'static str, fn() -> Result);
         let tests: &[NamedTest] = &[
+            (
+                "writer_shell_edits_instructions_and_redacts_logs",
+                writer_shell_edits_instructions_and_redacts_logs,
+            ),
+            (
+                "uncatalogued_cli_model_launches_and_surfaces_provider_failure",
+                uncatalogued_cli_model_launches_and_surfaces_provider_failure,
+            ),
             (
                 "remote_only_writer_cli_starts_at_remote_tip",
                 remote_only_writer_cli_starts_at_remote_tip,

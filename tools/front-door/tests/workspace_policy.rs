@@ -339,7 +339,7 @@ fn check_fixture_git_sources(path: &Path, pattern: &regex::Regex) -> Result<(), 
     for path in sources {
         let source = fs::read_to_string(&path)?;
         let name = path.to_string_lossy();
-        let test_file = name.contains("/tests/") || name.ends_with("_tests.rs");
+        let test_file = is_test_source(&name);
         if fixture_git_violation(&source, test_file, pattern) {
             return Err(format!("{} spawns Git without the fixture helper", path.display()).into());
         }
@@ -418,15 +418,31 @@ fn fixture_git_violation(source: &str, test_file: bool, pattern: &regex::Regex) 
         .any(|scope| pattern.is_match(scope))
 }
 
-// Whether a path names a test source: a `tests` directory, or a stem of `tests`,
-// `*_test` or `*_tests`.
+// Whether a path names a test source, including split test modules and files
+// beneath a test module directory.
 fn is_test_source(name: &str) -> bool {
-    let stem = Path::new(name)
+    let path = Path::new(name);
+    let path = if path.is_absolute() {
+        let Ok(relative) = path.strip_prefix(env!("CARGO_MANIFEST_DIR")) else {
+            return false;
+        };
+        relative
+    } else {
+        path
+    };
+    let stem = path
         .file_stem()
         .and_then(|stem| stem.to_str())
         .unwrap_or_default();
-    name.contains("/tests/")
-        || stem == "tests"
+    path.parent().is_some_and(|parent| {
+        parent.components().any(|component| {
+            component
+                .as_os_str()
+                .to_str()
+                .is_some_and(|name| name == "tests" || name.ends_with("_tests"))
+        })
+    }) || stem == "tests"
+        || stem.starts_with("tests_")
         || stem.ends_with("_test")
         || stem.ends_with("_tests")
 }
@@ -735,17 +751,28 @@ fn executor_git_policy_flags_only_inherited_env() {
         ),
         true
     ));
-    // Test files named `tests.rs` or `*_test.rs` are scanned in full.
+    // Split test files and nested test modules are scanned in full too.
     for name in [
         "crates/run/src/tests.rs",
         "crates/cli/src/run/provider/confinement_test.rs",
         "crates/x/src/foo_tests.rs",
         "tools/front-door/tests/graph_cli.rs",
+        "crates/cli/src/run/provider/tests_prompt_and_registry.rs",
+        "crates/cli/src/route/tests_3.rs",
+        "src/worktree_tests/lane_cases.rs",
+        "src/worktree_tests/nested/support.rs",
     ] {
         assert!(is_test_source(name), "{name}");
         assert!(executor_git_violation(offending, is_test_source(name)));
     }
-    for name in ["crates/run/src/controls.rs", "crates/run/src/contests.rs"] {
+    for name in [
+        "crates/run/src/controls.rs",
+        "crates/run/src/contests.rs",
+        "src/worktree_tests_support/production.rs",
+        "src/test_support.rs",
+        "/tmp/g11_tests/provenant/src/route/config.rs",
+        "/tmp/tests/provenant/src/route/config.rs",
+    ] {
         assert!(!is_test_source(name), "{name}");
     }
     for source in [
@@ -806,7 +833,25 @@ fn fixture_git_commands_use_the_scrubbed_helper() -> Result<(), Box<dyn Error>> 
     assert!(pattern.is_match(concat!("Command::new(", "\"git\")")));
     assert!(pattern.is_match(concat!("Command::new(", "&fixture.git)")));
     assert!(!pattern.is_match("provenant_os::fixture::git_command()"));
+    let helper = concat!("fn helper() { Command::new(", "\"git\"); }");
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    for name in [
+        "crates/cli/src/run/provider/tests_prompt_and_registry.rs",
+        "crates/cli/src/route/tests_3.rs",
+        "src/worktree_tests/lane_cases.rs",
+    ] {
+        let path = root.join(name);
+        assert!(is_test_source(&path.to_string_lossy()), "{name}");
+        assert!(fixture_git_violation(
+            helper,
+            is_test_source(&path.to_string_lossy()),
+            &pattern,
+        ));
+    }
+    assert!(!is_test_source(
+        &root.join("src/route/config.rs").to_string_lossy()
+    ));
+    assert!(!fixture_git_violation(helper, false, &pattern));
     for path in [
         root.join("src"),
         root.join("tests"),
