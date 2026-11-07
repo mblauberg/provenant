@@ -149,6 +149,20 @@ fn inventory_links(
                 } else {
                     PathScope::Exact
                 };
+                // Provider stores also link to their own executables and to
+                // installed instructions and skills. Those are not secrets:
+                // denying them stops the provider starting or loading its
+                // instructions, and state keeps its own boundary.
+                let executable = !metadata.is_dir()
+                    && std::os::unix::fs::PermissionsExt::mode(&metadata.permissions()) & 0o111
+                        != 0;
+                if executable
+                    || std::iter::once(mandatory.state())
+                        .chain(mandatory.state_aliases())
+                        .any(|state| target.starts_with(&state.path))
+                {
+                    continue;
+                }
                 if scope == PathScope::Subtree && !target.starts_with(home) {
                     let _ = writeln!(
                         std::io::stderr().lock(),
@@ -564,6 +578,46 @@ mod tests {
                 .iter()
                 .any(|grant| grant.path == missed)
         );
+        Ok(())
+    }
+
+    #[test]
+    fn inventory_leaves_provider_executables_and_installed_state_usable()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir()?;
+        let root = std::fs::canonicalize(temp.path())?;
+        let roots = fixture_roots(&root)?;
+        let home = root.join("home");
+        let store = home.join(".codex");
+        std::fs::create_dir_all(store.join("tmp"))?;
+        let provider = root.join("codex");
+        std::fs::write(&provider, b"fixture")?;
+        std::fs::set_permissions(&provider, std::fs::Permissions::from_mode(0o755))?;
+        std::os::unix::fs::symlink(&provider, store.join("tmp/apply_patch"))?;
+        let installed = root.join("state/releases/skill");
+        std::fs::create_dir_all(&installed)?;
+        std::os::unix::fs::symlink(&installed, store.join("skill"))?;
+        let secret = root.join("dotfiles-token");
+        std::fs::write(&secret, b"fixture")?;
+        std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(0o600))?;
+        std::os::unix::fs::symlink(&secret, store.join("token"))?;
+
+        let mandatory =
+            MandatoryRoots::for_host(&roots, &home, &root.join("source"), &[], &[], &[])?;
+        let denied = |path: &Path| {
+            mandatory
+                .credentials()
+                .iter()
+                .any(|credential| credential.path == path)
+        };
+        assert!(!denied(&provider), "a provider executable must still run");
+        assert!(
+            !denied(&installed),
+            "installed state keeps its own boundary"
+        );
+        assert!(denied(&secret), "a linked secret stays protected");
         Ok(())
     }
 

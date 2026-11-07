@@ -292,6 +292,8 @@ scratch are skipped with a warning. Links introduced after inventory, or links
 that cannot be resolved or represented during the walk, cannot be covered by
 this walk. Unresolved declared endpoint links are also skipped with a warning.
 Directory targets outside the host home are skipped with a warning; file targets remain inventoried.
+Executable targets and targets inside Provenant state are skipped without a warning: provider stores link to their own binaries and installed instructions.
+`com.apple.SecurityServer` stays reachable unless a profile denies keychain or credential access, because TLS root lookup on macOS needs it. Keychain files keep their own denials.
 
 ## Consequences
 

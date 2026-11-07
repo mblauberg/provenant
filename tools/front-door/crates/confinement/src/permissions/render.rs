@@ -759,14 +759,16 @@ fn render_profile_with_limit(
         "(deny mach-lookup (global-name \"com.apple.securityd\") (global-name \"com.apple.securityd.xpc\"))\n",
         "(deny mach-lookup (global-name-prefix \"com.apple.securityd\") (global-name-prefix \"com.apple.security.cloudkeychain\") (global-name-prefix \"com.apple.keychainsharing\"))\n",
     ));
-    if keychain {
-        source.push_str("(deny mach-lookup (require-all (global-name-prefix \"com.apple.SecurityServer\") (require-not (global-name \"com.apple.SecurityServer\"))))\n");
-    } else {
+    // TLS root lookup on macOS needs this one service: denying it stops every
+    // provider reaching its API. Keychain files keep their own denials.
+    if profile.spec.deny_keychain_access || profile.spec.deny_credential_access {
         source.push_str("(deny mach-lookup (global-name-prefix \"com.apple.SecurityServer\"))\n");
-        source.push_str(concat!(
-            "(deny process-exec (literal \"/usr/bin/security\"))\n",
-            "(deny mach-lookup (global-name \"com.apple.SecurityServer\"))\n",
-        ));
+        source.push_str("(deny mach-lookup (global-name \"com.apple.SecurityServer\"))\n");
+    } else {
+        source.push_str("(deny mach-lookup (require-all (global-name-prefix \"com.apple.SecurityServer\") (require-not (global-name \"com.apple.SecurityServer\"))))\n");
+    }
+    if !keychain {
+        source.push_str("(deny process-exec (literal \"/usr/bin/security\"))\n");
     }
     for grant in &profile.spec.state_writes {
         for operation in ["file-read*", "file-write*"] {

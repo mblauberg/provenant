@@ -226,7 +226,7 @@ const HOST_MEMORY_PROBE: &str = r#"
 #include <util.h>
 
 static const char *keychain_services[] = {
-    "com.apple.SecurityServer", "com.apple.securityd", "com.apple.securityd.xpc",
+    "com.apple.securityd", "com.apple.securityd.xpc",
     "com.apple.securityd.systemkeychain", "com.apple.securityd.ckks",
     "com.apple.securityd.general", "com.apple.securityd.aps", "com.apple.securitydservice",
     "com.apple.security.cloudkeychainproxy3", "com.apple.keychainsharingmessagingd"

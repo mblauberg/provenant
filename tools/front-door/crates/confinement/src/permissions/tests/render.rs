@@ -1139,11 +1139,11 @@ fn keychain_ipc_requires_the_selected_isolated_typed_mechanism() -> Result<(), P
         );
         assert_eq!(
             source.contains("(deny mach-lookup (global-name \"com.apple.SecurityServer\"))"),
-            !permitted
+            explicit_deny
         );
         assert_eq!(
             source.contains("(require-not (global-name \"com.apple.SecurityServer\"))"),
-            permitted
+            !explicit_deny
         );
         for prefix in [
             "com.apple.securityd",
@@ -1234,7 +1234,7 @@ fn mandatory_alias_categories_cannot_become_authentication_exceptions()
                 "non-exempt alias {relative}: {denial}"
             );
         }
-        assert!(source.contains("(deny mach-lookup (global-name \"com.apple.SecurityServer\"))"));
+        assert!(source.contains("(deny process-exec (literal \"/usr/bin/security\"))"));
     }
     Ok(())
 }
