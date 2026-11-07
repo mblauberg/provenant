@@ -194,8 +194,14 @@ pub fn read_connection(path: &Path) -> rusqlite::Result<rusqlite::Connection> {
 
 /// Refuse new admission while legacy graphs or lanes still require draining.
 pub fn pending_guard(state: &provenant_core::StateRoot) -> Result<(), String> {
+    use provenant_core::{CancelToken, Clock, WaitBudget};
+    use provenant_os::clock::SystemClock;
     use provenant_os::fs::{Directory, FsError, LockMode, PublishMode};
-    use std::{ffi::OsStr, os::unix::fs::DirBuilderExt};
+    use std::{ffi::OsStr, io::Write, os::unix::fs::DirBuilderExt};
+
+    let warn = |message: &str| {
+        let _ = writeln!(io::stderr().lock(), "Warning: {message}");
+    };
 
     const MARKER: &str = "graph-template-cutover-complete";
     let path = state.as_path();
@@ -213,22 +219,32 @@ pub fn pending_guard(state: &provenant_core::StateRoot) -> Result<(), String> {
     let directory = match directory {
         Ok(directory) => Some(directory),
         Err(error) => {
-            eprintln!("Warning: cannot write cutover marker: {error}");
+            warn(&format!("cannot write cutover marker: {error}"));
             None
         }
     };
     let _lock = if let Some(directory) = &directory {
+        let clock = SystemClock::new();
+        let cancel = CancelToken::new();
         loop {
-            match directory.try_lock(
+            let budget = match WaitBudget::cli(clock.mono_now(), 60) {
+                Ok(budget) => budget,
+                Err(error) => {
+                    warn(&format!("cannot wait for cutover marker lock: {error}"));
+                    break None;
+                }
+            };
+            match directory.lock(
                 OsStr::new("graph-template-cutover.lock"),
                 LockMode::Exclusive,
+                budget,
+                &cancel,
+                &clock,
             ) {
                 Ok(lock) => break Some(lock),
-                Err(FsError::LockTimeout { .. }) => {
-                    std::thread::sleep(std::time::Duration::from_millis(50))
-                }
+                Err(FsError::LockTimeout { .. }) => continue,
                 Err(error) => {
-                    eprintln!("Warning: cannot lock cutover marker: {error}");
+                    warn(&format!("cannot lock cutover marker: {error}"));
                     break None;
                 }
             }
@@ -251,7 +267,7 @@ pub fn pending_guard(state: &provenant_core::StateRoot) -> Result<(), String> {
                 PublishMode::Replace,
             )
         {
-            eprintln!("Warning: cannot write cutover marker: {error}");
+            warn(&format!("cannot write cutover marker: {error}"));
         }
         return Ok(());
     }
@@ -305,6 +321,30 @@ mod tests {
         let state = StateRoot::resolve(&inputs, &SystemPathResolver).unwrap();
         std::fs::create_dir(base.join("graph-template-cutover-complete")).unwrap();
         assert!(pending_guard(&state).is_ok());
+    }
+
+    #[test]
+    fn concurrent_first_guards_all_pass_and_publish_marker() {
+        let temp = crate::test_support::tempdir().unwrap();
+        let base = std::fs::canonicalize(temp.path()).unwrap();
+        let mut inputs = RootInputs::new(base.join("home"), base.join("checkout"));
+        inputs.state_dir = Some(base.clone());
+        let state = StateRoot::resolve(&inputs, &SystemPathResolver).unwrap();
+        let barrier = std::sync::Barrier::new(8);
+        std::thread::scope(|scope| {
+            let threads: Vec<_> = (0..8)
+                .map(|_| {
+                    scope.spawn(|| {
+                        barrier.wait();
+                        pending_guard(&state)
+                    })
+                })
+                .collect();
+            for thread in threads {
+                thread.join().unwrap().unwrap();
+            }
+        });
+        assert!(base.join("graph-template-cutover-complete").is_file());
     }
 
     #[test]
