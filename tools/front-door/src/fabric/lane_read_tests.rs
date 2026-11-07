@@ -61,7 +61,7 @@ fn lane_command_with_launch(
         "fabric::lane_read_tests::lane_reader_process".into(),
         "--nocapture".into(),
     ];
-    let argv = if let Some(launch) = launch {
+    let confined = if let Some(launch) = launch {
         environment.push((
             "PROVENANT_TEST_JOURNAL_DENIED".into(),
             rig.state.join("fabric/graphs").into_os_string(),
@@ -73,15 +73,20 @@ fn lane_command_with_launch(
             .and_then(|(_, value)| value.to_str())
             .ok_or("lane parent attempt")?
             .parse()?;
-        launch.command(&argv, &attempt)?
+        Some(launch.command(
+            &argv,
+            &attempt,
+            &provenant_os::fs::Directory::open_anchor(&rig.state)?,
+        )?)
     } else {
-        argv
+        None
     };
     let mut options = provenant_os::exec::ExecOptions::new(
-        &argv,
+        confined.as_ref().map(|c| &c.argv[..]).unwrap_or(&argv),
         &rig.project,
         std::time::Duration::from_secs(30),
     );
+    options.inherited_profile = confined.as_ref().map(|c| c.profile.file());
     options.env = Some(&environment);
     let output = SystemExecutor::new(1)?.execute(options)?;
     assert_eq!(

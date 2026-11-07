@@ -83,6 +83,7 @@ pub struct SpawnSpec<'a> {
     pub input: bool,
     pub secret_input: Option<&'a crate::exec::SecretInput>,
     pub inherited_lease: Option<&'a crate::fs::LockGuard>,
+    pub inherited_profile: Option<&'a std::fs::File>,
     /// A second descriptor the child and its descendants keep open; the lane
     /// port block, so it lasts as long as the process tree does.
     pub inherited_ports: Option<&'a crate::fs::LockGuard>,
@@ -164,6 +165,9 @@ impl OwnedPid {
             .flatten()
         {
             pass.push(lease.handoff_file().as_fd());
+        }
+        if let Some(profile) = spec.inherited_profile {
+            pass.push(profile.as_fd());
         }
         if let (Some(pipe), Some(input)) = (&secret, spec.secret_input) {
             environment = pipe.environment(input, &environment);

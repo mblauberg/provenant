@@ -309,6 +309,7 @@ impl Executor for HostProbeExecutor<'_> {
             stdin: options.stdin,
             secret_input: options.secret_input,
             inherited_lease: options.inherited_lease,
+            inherited_profile: options.inherited_profile,
             process_group: options.process_group,
             cleanup_process_group: options.cleanup_process_group,
             stdout: options.stdout,

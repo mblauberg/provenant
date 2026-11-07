@@ -457,8 +457,12 @@ fn compile(
 fn launch(context: &Context<'_>, plan: &ConfinedPlan, spec: &LaunchSpec) -> Result<Run> {
     setup(&spec.setup)?;
     let compiled = compile(context, plan, &spec.profile)?;
-    let command = compiled.command(&spec.argv, &provenant_core::AttemptId::from_bytes([0; 16]))?;
-    let mut options = ExecOptions::new(&command, &spec.cwd, Duration::from_secs(300));
+    let command = compiled.command(
+        &spec.argv,
+        &provenant_core::AttemptId::from_bytes([0; 16]),
+        &provenant_os::fs::Directory::open_anchor(context.home)?,
+    )?;
+    let mut options = command.options(&spec.cwd, Duration::from_secs(300))?;
     options.env = Some(&spec.env);
     options.secret_input = spec.secret_input.as_ref();
     options.stdin = match &spec.stdin {
@@ -697,14 +701,16 @@ fn narrowed_denials(home: &Path, plan: &ConfinedPlan) -> Vec<(String, Probe)> {
 
 fn observe(
     context: &Context<'_>,
-    command_prefix: &[OsString],
+    command_prefix: &provenant_confinement::permissions::ConfinedCommand,
     cwd: &Path,
     env: &[(OsString, OsString)],
     item: &Probe,
 ) -> Result<(FixtureOutcome, String)> {
+    command_prefix.profile.verify()?;
     let mut argv = command_prefix.to_vec();
     argv.extend(item.argv.iter().cloned());
     let mut options = ExecOptions::new(&argv, cwd, Duration::from_secs(20));
+    options.inherited_profile = Some(command_prefix.profile.file());
     options.env = Some(env);
     options.stdin = item.stdin;
     options.stdout = StreamPolicy::Capture { limit: 4096 };
@@ -1325,13 +1331,23 @@ fn main() -> Result<()> {
         observations: profile.observations.clone(),
     };
     let compiled = compile(&context, &plan, &probe_profile)?;
-    let prefix = compiled.command(&[], &provenant_core::AttemptId::from_bytes([0; 16]))?;
+    let prefix = compiled.command(
+        &[],
+        &provenant_core::AttemptId::from_bytes([0; 16]),
+        &provenant_os::fs::Directory::open_anchor(context.home)?,
+    )?;
     if args.skip_live {
         // Debugging aid: the probe profile, for ad hoc sandbox-exec checks.
         std::fs::write(
             args.root.join("probe-profile.sb"),
-            prefix[2].as_encoded_bytes(),
+            std::fs::read(prefix[2].clone())?,
         )?;
+        use std::io::{Seek, SeekFrom};
+        prefix
+            .profile
+            .file()
+            .try_clone()?
+            .seek(SeekFrom::Start(0))?;
     }
     let env = [
         ("HOME".into(), home.clone().into_os_string()),

@@ -473,8 +473,8 @@ printf 'agy 1.0.0\n'
             } else {
                 environment.push(("IDENTITY_PROBE".into(), "reader".into()));
             }
-            let argv = compiled.command(&prepared.argv, &attempt_id)?;
-            let mut options = ExecOptions::new(&argv, &prepared.cwd, Duration::from_secs(10));
+            let argv = compiled.command(&prepared.argv, &attempt_id, &provenant_os::fs::Directory::open_anchor(&std::env::temp_dir())?)?;
+            let mut options = argv.options(&prepared.cwd, Duration::from_secs(10))?;
             options.env = Some(&environment);
             let result = executor.execute(options)?;
             assert_eq!(result.termination, Termination::Exit(0), "{result:?}");
@@ -1018,7 +1018,7 @@ printf 'agy 1.0.0\n'
             &confinement.profile,
             &anchors,
         )?;
-        let confined_command = compiled.command(&publishing.argv, &attempt_id)?;
+        let confined_command = compiled.command(&publishing.argv, &attempt_id, &provenant_os::fs::Directory::open_anchor(&std::env::temp_dir())?)?;
         assert!(!confined_command.is_empty());
     }
     for name in ["ignore", "attributes"] {

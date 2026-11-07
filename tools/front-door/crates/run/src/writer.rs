@@ -850,7 +850,7 @@ impl LaunchConfinement {
         argv: &[OsString],
         attempt: &provenant_core::AttemptId,
         cancel: &CancelToken,
-    ) -> Result<Vec<OsString>> {
+    ) -> Result<provenant_confinement::permissions::ConfinedCommand> {
         let executor =
             SystemExecutor::new(1).map_err(error("initialise writer system executor", None))?;
         let limits = launch_resource_limits(&self.state_root);
@@ -886,7 +886,12 @@ impl LaunchConfinement {
         self.plan
             .compile(backend.as_ref(), &self.profile, &anchors)
             .map_err(|error| RunError::Confinement(limits.annotate(error)))?
-            .command(argv, attempt)
+            .command(
+                argv,
+                attempt,
+                &Directory::open_anchor(&self.state_root)
+                    .map_err(error("open profile staging directory", None))?,
+            )
             .map_err(RunError::Confinement)
     }
 }

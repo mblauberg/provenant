@@ -234,6 +234,7 @@ fn guardian_missing_attempt_finishes_unresolved_group_cleanup() {
         ..CapturePlan::default()
     };
     let message = LaunchMessage {
+        profile: None,
         schema_version: 1,
         priority: 0,
         scope,
@@ -680,6 +681,7 @@ fn spawn_missing_attempt_guardian(
     .unwrap();
     let executable_snapshot = snapshot_executable(OsStr::from_bytes(&argv[0])).unwrap();
     let message = LaunchMessage {
+        profile: None,
         schema_version: 1,
         priority: 0,
         scope,
@@ -1254,6 +1256,7 @@ fn successful_terminal_publication_does_not_wait() {
 #[test]
 fn handoff_round_trips_one_mib_stdin_with_claude_argv_and_environment() {
     let message = LaunchMessage {
+        profile: None,
         priority: 0,
         schema_version: 1,
         scope: Scope {
@@ -1641,6 +1644,52 @@ fn unavailable_port_allocation_warns_and_does_not_claim_a_block()
             blocks: 1,
             origin: provenant_records::diagnostic::PortSettingSource::Configuration
         }
+    );
+    Ok(())
+}
+
+// Medium: descriptor pairing is checked before ACK or provider spawn.
+#[test]
+fn profile_handoff_requires_the_verified_file_and_matching_command()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let root = tempfile::tempdir()?;
+    let directory = Directory::open_anchor(root.path())?;
+    let profile = crate::ProfileFile::create(b"(version 1)\n(deny default)\n", &directory)?;
+    let argv = vec![
+        "/usr/bin/sandbox-exec".into(),
+        "-f".into(),
+        profile.path(),
+        "/usr/bin/true".into(),
+    ];
+    assert!(adopt_profile(None, Some(profile.identity().clone()), &argv).is_err());
+    assert!(adopt_profile(Some(profile.file().try_clone()?), None, &argv).is_err());
+    assert!(adopt_profile(None, None, &argv).is_err());
+    let mut substituted = argv.clone();
+    substituted[2] = "/tmp/replaceable.sb".into();
+    assert!(
+        adopt_profile(
+            Some(profile.file().try_clone()?),
+            Some(profile.identity().clone()),
+            &substituted
+        )
+        .is_err()
+    );
+    let inherited = profile.file().try_clone()?;
+    use std::os::fd::AsRawFd;
+    let mut inherited_argv = argv.clone();
+    inherited_argv[2] = format!("/dev/fd/{}", inherited.as_raw_fd()).into();
+    let mut changed = profile.identity().clone();
+    changed.sha256 = [0; 32];
+    assert!(adopt_profile(Some(inherited), Some(changed), &inherited_argv).is_err());
+    let inherited = profile.file().try_clone()?;
+    inherited_argv[2] = format!("/dev/fd/{}", inherited.as_raw_fd()).into();
+    assert!(
+        adopt_profile(
+            Some(inherited),
+            Some(profile.identity().clone()),
+            &inherited_argv
+        )?
+        .is_some()
     );
     Ok(())
 }
