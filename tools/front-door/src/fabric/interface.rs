@@ -218,7 +218,11 @@ fn override_launch(
     Ok(())
 }
 
-fn bind_submission_subject(node: &mut provenant_fabric_runtime::graph::GraphNode, head: &str) {
+fn bind_submission_subject(
+    node: &mut provenant_fabric_runtime::graph::GraphNode,
+    head: &str,
+    subject_missing: bool,
+) {
     // An explicit composite source is inherited by its members. Loops resolve
     // their own subjects as writers advance, rather than freezing every round.
     if node.source.is_some() || node.loop_body.is_some() {
@@ -226,9 +230,12 @@ fn bind_submission_subject(node: &mut provenant_fabric_runtime::graph::GraphNode
     }
     if let Some(composite) = &mut node.composite {
         for child in &mut composite.nodes {
-            bind_submission_subject(child, head);
+            bind_submission_subject(child, head, subject_missing);
         }
     } else if node.extra.contains_key("review_behaviour") {
+        if subject_missing {
+            node.prompt.insert_str(0, "No review subject was supplied on the command line; no host diff range is available. Request a pinned subject and base if the brief requires a diff.\n\n");
+        }
         node.prompt.push_str("\n\nWhen a review range is supplied, the host pins its commits and supplies Git context. The review lane has read-only Git metadata and cannot fetch; read the supplied commits and context.");
         node.source = Some(provenant_fabric_runtime::graph::SourceBinding::Commit {
             commit: head.into(),
@@ -1307,7 +1314,7 @@ impl Factory {
         }
         if let Some(head) = &resolved_head {
             for node in &mut document.nodes {
-                bind_submission_subject(node, head);
+                bind_submission_subject(node, head, review_launch && subject.is_none());
             }
             document.schema_version = document.schema_version.max(u64::from(
                 provenant_fabric_runtime::graph::minimum_schema_version(&document),
@@ -2165,6 +2172,12 @@ mod tests {
             })
         );
         assert_eq!(review["document"]["review_subject_missing"], true);
+        assert!(
+            review["document"]["nodes"][0]["prompt"]
+                .as_str()
+                .unwrap()
+                .contains("No review subject was supplied")
+        );
         let base = crate::worktree_tests::git(&rig, &["rev-parse", "HEAD"])?;
         crate::worktree_tests::git(&rig, &["commit", "--allow-empty", "-m", "review subject"])?;
         let head = crate::worktree_tests::git(&rig, &["rev-parse", "HEAD"])?;

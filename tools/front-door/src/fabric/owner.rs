@@ -2774,11 +2774,6 @@ impl BoundGraphOwner<'_> {
                     .and_then(|v| v.as_bool())
                     == Some(true)
             });
-            if review_subject_missing {
-                submission_prompt = format!(
-                    "No review subject was supplied on the command line; no host diff range is available. Review lanes have read-only Git metadata and cannot fetch. Request a pinned subject and base if the brief requires a diff.\n\n{submission_prompt}"
-                );
-            }
             let review_base = if access == provenant_fabric_runtime::graph::AccessMode::ReadOnly {
                 provenant_fabric_runtime::graph::FileJournal::execution(
                     &self.factory.context.roots.state,
