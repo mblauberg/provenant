@@ -1090,11 +1090,16 @@ impl SkippedRoute {
 
     /// Project typed facts only; `detail` may contain provider or OS text.
     pub fn diagnostic(&self) -> crate::diagnostic::Diagnostic {
-        let diagnostic = self
+        let mut diagnostic = self
             .cause
             .as_ref()
             .map(|cause| cause.diagnostic("REFUSED"))
             .unwrap_or_else(|| self.kind.diagnostic());
+        if let Some(failure) = self.extra.get("plan_error").and_then(|value| {
+            serde_json::from_value::<crate::diagnostic::PlanFailure>(value.clone()).ok()
+        }) {
+            diagnostic.detail = Some(failure.detail().into());
+        }
         match self.extra.get("guard_resource").and_then(|value| {
             serde_json::from_value::<crate::diagnostic::ResourceFact>(value.clone()).ok()
         }) {
@@ -1573,6 +1578,26 @@ pub struct RunEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn preparation_plan_diagnostics_use_closed_facts_after_round_trip()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut skipped: SkippedRoute = serde_json::from_value(serde_json::json!({
+            "route": "fixture", "kind": "refused", "detail": "SECRET_SENTINEL",
+            "plan_error": "protected_overlap", "guard_boundary": "authority"
+        }))?;
+        skipped = serde_json::from_slice(&serde_json::to_vec(&skipped)?)?;
+        assert_eq!(skipped.extra["guard_boundary"], "authority");
+        assert_eq!(
+            skipped.diagnostic().detail.as_deref(),
+            Some(crate::diagnostic::PlanFailure::ProtectedOverlap.detail())
+        );
+        skipped
+            .extra
+            .insert("plan_error".into(), "SECRET_SENTINEL".into());
+        assert!(!serde_json::to_string(&skipped.diagnostic())?.contains("SECRET_SENTINEL"));
+        Ok(())
+    }
 
     #[test]
     fn graph_launch_provenance_is_typed_bound_and_canonical()
