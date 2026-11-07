@@ -1827,7 +1827,7 @@ mod tests {
             let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
             let input = json!({
                 "op":"run", "brief":"Inspect the parser", "operation_id":"stop-by-attempt",
-                "document":{"use":"task", "tier":[
+                "document":{"use":"task", "routes":[
                     {"adapter":"fixture", "model":"fixture/first"},
                     {"adapter":"fixture", "model":"fixture/fallback"}
                 ]}
@@ -1902,15 +1902,27 @@ mod tests {
             assert_eq!(after.nodes[0].attempts, node.attempts);
             let events =
                 FileJournal::read_events(&roots.state, factory.context.identity.project, graph)?;
+            // A reservation and its later saved reference both emit `started`.
+            // Count route identities, rather than observations of the same one.
+            let started: std::collections::BTreeSet<_> = events
+                .iter()
+                .filter(|event| {
+                    event.kind == provenant_fabric_runtime::graph::GraphEventKind::Attempt
+                        && event.code == "started"
+                })
+                .map(|event| {
+                    (
+                        event.subject.as_str(),
+                        event
+                            .details
+                            .as_ref()
+                            .and_then(|details| details["route_index"].as_u64()),
+                    )
+                })
+                .collect();
             assert_eq!(
-                events
-                    .iter()
-                    .filter(|event| {
-                        event.kind == provenant_fabric_runtime::graph::GraphEventKind::Attempt
-                            && event.code == "started"
-                    })
-                    .count(),
-                1
+                started,
+                std::collections::BTreeSet::from([(node.id.as_str(), Some(0))])
             );
         }
         Ok(())

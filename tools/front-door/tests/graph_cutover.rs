@@ -185,7 +185,10 @@ fn seed(rig: &TestRig, name: &str, outcomes: &[provenant_run::Outcome]) -> Resul
             stderr: CaptureTotals::default(),
         };
         let mut sealed = serde_json::to_value(&exit)?;
-        sealed.as_object_mut().unwrap().remove("publication");
+        sealed
+            .as_object_mut()
+            .ok_or("sealed exit object")?
+            .remove("publication");
         sealed["schema_version"] = json!(1);
         fs::write(
             directory.join("process-exit.json"),
@@ -241,7 +244,12 @@ fn seed(rig: &TestRig, name: &str, outcomes: &[provenant_run::Outcome]) -> Resul
             assert_eq!(sealed_request.lane_depth, Some(1));
             assert_eq!(terminal.trace.parent, Some(parent));
             assert_eq!(
-                terminal.context.as_ref().unwrap().parent_node.as_deref(),
+                terminal
+                    .context
+                    .as_ref()
+                    .ok_or("nested work context")?
+                    .parent_node
+                    .as_deref(),
                 Some("parent")
             );
         }
@@ -251,7 +259,11 @@ fn seed(rig: &TestRig, name: &str, outcomes: &[provenant_run::Outcome]) -> Resul
                 Some("2".repeat(40))
             );
             assert_eq!(
-                terminal.context.as_ref().unwrap().writer_predecessor,
+                terminal
+                    .context
+                    .as_ref()
+                    .ok_or("writer work context")?
+                    .writer_predecessor,
                 attempts.first().copied()
             );
         }
@@ -323,7 +335,7 @@ fn seed(rig: &TestRig, name: &str, outcomes: &[provenant_run::Outcome]) -> Resul
     if name == "peer" {
         assert_eq!(
             FileJournal::execution(&roots.state, context.identity.project, name)?
-                .unwrap()
+                .ok_or("peer execution")?
                 .extra["peer_origin_context"],
             origin
         );
