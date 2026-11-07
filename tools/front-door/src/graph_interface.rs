@@ -182,7 +182,7 @@ fn invoke(
 /// Observe a local checkout only after graph admission has reported a writer
 /// binding failure. This advisory reading never changes replay or custody.
 pub(crate) fn local_branch_action(factory: &fabric::Factory, branch: &str) -> Option<String> {
-    use provenant_confinement::worktrees::{self, WorktreeCondition};
+    use provenant_confinement::worktrees;
     let reference = provenant_confinement::repo::GitRefName::branch(branch).ok()?;
     let cancel = CancelToken::new();
     let path = worktrees::with_context_using_workers(
@@ -193,15 +193,23 @@ pub(crate) fn local_branch_action(factory: &fabric::Factory, branch: &str) -> Op
         &cancel,
         factory.workers,
         |context| {
-            Ok(worktrees::list(context, &cancel)?
-                .into_iter()
-                .find(|entry| {
-                    entry.is_unowned()
-                        && entry.dirty == WorktreeCondition::Clean
-                        && entry.branch.as_deref() == Some(reference.as_str())
-                        && entry.path.is_absolute()
-                })
-                .map(|entry| entry.path))
+            let candidate = worktrees::list_for_gc_matching(context, &cancel, |_, branch| {
+                branch == Some(reference.as_str())
+            })?
+            .into_iter()
+            .find(|entry| {
+                entry.is_unowned()
+                    && entry.branch.as_deref() == Some(reference.as_str())
+                    && entry.path.is_absolute()
+            });
+            let Some(entry) = candidate else {
+                return Ok(None);
+            };
+            let mut tree = provenant_confinement::verify_worktree(context.repo, &entry.path)?;
+            let _guard = worktrees::cache_writer_guard(context.project_state, tree.path())
+                .map_err(worktrees::custody_refusal)?;
+            worktrees::require_clean_worktree(context, &mut tree, &cancel)?;
+            Ok(Some(entry.path))
         },
     )
     .ok()??;

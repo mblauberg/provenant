@@ -2218,7 +2218,7 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 | `--file` | `{"description": "Read a graph document (JSON or TOML), or a plain text brief", "name": "file"}` |
 | `--detached` | `{"defaults": ["false"], "description": "Let this child outlive parent and graph cancellation (inside a lane only)", "name": "detached", "values": ["true", "false"]}` |
 | `--explain` | `{"defaults": ["false"], "description": "Explain the compiled graph without starting work", "name": "explain", "values": ["true", "false"]}` |
-| `--wait` | `{"bounds": [1, 14400], "description": "Wait for settlement (default 1 hour; use --wait=30m for a duration)", "name": "wait"}` |
+| `--wait` | `{"bounds": [1, 14400], "description": "Wait for settlement (default 1 hour; use --wait=30m for a duration). Writer binding can block beyond this wait: each binding gets at least domains.fabric.graph.writer_launch_seconds (default 55s). Expiry leaves work running", "name": "wait"}` |
 | `--help` | `{"description": "Print help", "name": "help"}` |
 | `--version` | `{"description": "Print version", "name": "version"}` |
 
@@ -2461,7 +2461,7 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 | `--node` | `{"conflicts": ["no_fallback"], "description": "Retry only the named node rather than recovering its graph", "name": "node"}` |
 | `--brief` | `{"conflicts": ["prompt_file", "prompt_stdin"], "description": "Replace the target brief", "name": "brief"}` |
 | `--extend` | `{"description": "Raise a graph limit or budget (KEY=VALUE); may be repeated", "name": "extend", "repeatable": true}` |
-| `attempt` | `{"description": "Attempt ID, or RUN/ATTEMPT or RUN/TASK/ATTEMPT", "name": "attempt", "positional": true, "required": true}` |
+| `attempt` | `{"description": "Graph ID, node ID, GRAPH/NODE, attempt ID, HOST/ATTEMPT, RUN/ATTEMPT or RUN/TASK/ATTEMPT", "name": "attempt", "positional": true, "required": true}` |
 | `--operation-id` | `{"defaults": [""], "description": "Caller-chosen ID that makes retries idempotent", "name": "operation_id"}` |
 | `--no-fallback` | `{"defaults": ["false"], "description": "Refuse instead of starting fresh when provider continuation is unavailable", "name": "no_fallback", "values": ["true", "false"]}` |
 | `--prompt-file` | `{"description": "Read the prompt from this file", "name": "prompt_file"}` |

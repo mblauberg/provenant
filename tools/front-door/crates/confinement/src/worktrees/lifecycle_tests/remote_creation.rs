@@ -872,6 +872,49 @@ fn doctor_admission_and_list_share_one_inventory_with_100_worktrees() -> Result<
 }
 
 #[test]
+fn selected_inventory_observes_only_the_matching_checkout() -> Result<(), Box<dyn Error>> {
+    use std::sync::Mutex;
+    #[derive(Default)]
+    struct Roots(Mutex<Vec<PathBuf>>);
+    impl WorkerObserver for Roots {
+        fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, Occupancy> {
+            *self.0.lock().unwrap() = roots.to_vec();
+            roots
+                .iter()
+                .cloned()
+                .map(|root| (root, Occupancy::Available))
+                .collect()
+        }
+    }
+    let fixture = Fixture::new()?;
+    let test = TestContext::new(&fixture)?;
+    let mut context = test.context();
+    let selected = create(
+        &context,
+        WorktreeCreate {
+            branch: "selected".into(),
+            base: None,
+        },
+        &cancel(),
+    )?;
+    create(
+        &context,
+        WorktreeCreate {
+            branch: "sibling".into(),
+            base: None,
+        },
+        &cancel(),
+    )?;
+    let roots = Roots::default();
+    context.workers = &roots;
+    let rows = list_for_gc_matching(&context, &cancel(), |path, _| path == selected.path)?;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].path, selected.path);
+    assert_eq!(*roots.0.lock().unwrap(), vec![selected.path]);
+    Ok(())
+}
+
+#[test]
 fn gc_does_not_inspect_status_of_out_of_scope_worktrees() -> Result<(), Box<dyn Error>> {
     use std::sync::atomic::{AtomicUsize, Ordering};
     struct CountingGit<'a> {

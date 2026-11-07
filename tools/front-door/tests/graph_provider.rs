@@ -1627,7 +1627,7 @@ fn writer_registry_timeout_is_bounded_and_reported() -> Result {
         "launch did not wait for the held registry: {elapsed:?}"
     );
     assert!(
-        elapsed < std::time::Duration::from_secs(4),
+        elapsed < std::time::Duration::from_secs(30),
         "launch exceeded its configured binding allowance: {elapsed:?}"
     );
     assert_ne!(code(&output), 0, "{output:?}");

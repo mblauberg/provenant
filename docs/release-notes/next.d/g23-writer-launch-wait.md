@@ -8,5 +8,5 @@
   existing worktrees, later custody and registry checks, and launch retries.
   Child relays honour configured allowances longer than 55 seconds and return
   the launch receipt or named refusal. Settlement expiry leaves accepted attempts running.
-- Concurrent writer provisioning avoids probing sibling worktrees for cleanliness,
-  preventing transient inspection handles from being mistaken for live writers.
+- Concurrent writer launches avoid inspecting sibling checkouts and recheck transient
+  held paths within the launch allowance before refusing a live writer.

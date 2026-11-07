@@ -211,7 +211,7 @@ pub fn prune_owned(
     if !is_ancestor(context, head, upstream, cancel)? {
         return Err(WorktreeError::InvalidRequest);
     }
-    let lanes = list(context, cancel)?
+    let lanes = list_for_gc_matching(context, cancel, |candidate, _| candidate == path)?
         .into_iter()
         .filter(|lane| lane.path == path && lane.head == head)
         .collect::<Vec<_>>();

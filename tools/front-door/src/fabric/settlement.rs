@@ -483,10 +483,12 @@ pub(crate) fn settle_owned_worktree(
                 // A failed pre-prune step must not replace a retained lane's
                 // real reason, so record it and carry on.
                 let pre_prune = || -> Result<(), Box<dyn std::error::Error>> {
-                    let lane = worktrees::list(context, cancel)?
-                        .into_iter()
-                        .find(|lane| lane.path == writer.worktree)
-                        .ok_or(worktrees::WorktreeError::NotFound)?;
+                    let lane = worktrees::list_for_gc_matching(context, cancel, |path, _| {
+                        path == writer.worktree
+                    })?
+                    .into_iter()
+                    .find(|lane| lane.path == writer.worktree)
+                    .ok_or(worktrees::WorktreeError::NotFound)?;
                     worktrees::collect(
                         context,
                         std::slice::from_ref(&lane),
