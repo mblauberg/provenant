@@ -303,6 +303,15 @@ impl MandatoryRoots {
             .iter()
             .filter(|(path, target)| {
                 path != target
+                    && !std::iter::once(&self.state)
+                        .chain(&self.state_aliases)
+                        .chain(&self.non_exempt)
+                        .any(|root| {
+                            root.overlaps(&PathGrant {
+                                path: target.clone(),
+                                scope: PathScope::Exact,
+                            })
+                        })
                     && reads.iter().any(|grant| match grant.scope {
                         PathScope::Subtree => path.starts_with(&grant.path),
                         PathScope::Exact => path == &grant.path,

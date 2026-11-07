@@ -290,8 +290,8 @@ links, up to a depth and entry limit per root. Hitting a limit warns and leaves
 the remaining links uninventoried. Links whose targets cover the lane source or
 scratch are skipped with a warning. Links introduced after inventory, or links
 that cannot be resolved or represented during the walk, cannot be covered by
-this walk. Existing declared endpoint validation still rejects unresolved
-dangling endpoint links.
+this walk. Unresolved declared endpoint links are also skipped with a warning.
+Directory targets outside the host home are skipped with a warning; file targets remain inventoried.
 
 ## Consequences
 
