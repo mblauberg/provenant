@@ -372,7 +372,7 @@ fn fixture() -> Result {
                 "subject framed\nVERDICT: PASS\n".to_owned()
             }
         } else if prompt.contains("fixture writer shell") {
-            format!("{}{DONE_FENCE}", writer_shell_probe()?)
+            writer_shell_probe()?
         } else if prompt.contains("fixture large result") {
             // Far past the 4 KiB excerpt a consuming node's prompt carries.
             let mut text: String = (0..2000)
