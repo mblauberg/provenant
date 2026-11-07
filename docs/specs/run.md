@@ -11,7 +11,7 @@ disconnected caller. Routing resolves models ([routing](routing.md));
 supervisor owns every process and signal ([supervisor](supervisor.md)); Fabric
 stores chair associations, with execution facts owned by Run ([fabric](fabric.md)). Run starts no process
 itself. Grammar and bounds are in the generated [CLI
-reference](../reference/cli.md). Paths are relative to `tools/front-door/`.
+reference](../reference/cli-all.md). Paths are relative to `tools/front-door/`.
 
 Templates bind route and access controls before admission. The receipt reports
 the applied effort and effective network access.

@@ -223,7 +223,7 @@ invoke no model, provider probe, polling loop or background process.
 
 The tool catalogue is generated reference in
 [`docs/reference/mcp-tools.md`](../reference/mcp-tools.md); CLI leaves are in
-the [CLI reference](../reference/cli.md).
+the [CLI reference](../reference/cli-all.md).
 
 The default MCP catalogue exposes run and output operations, messaging and
 identity, plus `fabric_discover`. Discovery returns the schemas for graph,
@@ -388,7 +388,7 @@ is unavailable, advancement returns a refusal and leaves the prior checkpoint.
 ordinary graph and submits it through the graph owner. `provenant templates`
 lists effective templates; `provenant templates NAME` shows one. User and
 repository templates are layered over bundled definitions. The generated
-[CLI reference](../reference/cli.md) owns flags and bounds; the
+[CLI reference](../reference/cli-all.md) owns flags and bounds; the
 [graph design](../adr/0039-graph-of-templates.md) owns template composition.
 
 A leaf template puts compiled node fields in `[node]`; unknown fields fail compilation.
