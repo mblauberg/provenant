@@ -35,6 +35,15 @@ class Selection(unittest.TestCase):
         self.assertEqual(crates, ["child"])
         self.assertEqual(targets, [("root", "child_integration", [path])])
 
+    def test_non_rust_package_mapping_selects_t0_crate(self):
+        packages = [{"name": "provenant", "manifest_path": "tools/front-door/Cargo.toml"}]
+        package_paths = [{"paths": ["scripts/verify-nextest"], "package": "provenant"}]
+        crates, targets = verify.select(
+            ["scripts/verify-nextest"], packages, [], package_paths
+        )
+        self.assertEqual(crates, ["provenant"])
+        self.assertEqual(targets, [])
+
     def test_override_preserves_other_defaults(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

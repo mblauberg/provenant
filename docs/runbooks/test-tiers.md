@@ -7,9 +7,10 @@ Run `scripts/verify-tier` for T0 and `scripts/verify-tier --tier 1` for T1.
 It prints the selected crates, integration targets and matching paths. Selection
 compares committed and working-tree changes against `origin/main`. Configure the
 base, workspace, commands, integration mappings, warning threshold and
-runner hosts in `.provenant/verify.json`. T0 formats, checks and runs unit
-tests for touched crates; T1 runs mapped integration binaries. Add mappings as
-integration ownership is identified.
+runner hosts in `.provenant/verify.json`. `package_paths` maps non-Rust paths
+that affect a crate's unit-test harness to that package for T0 selection. T0
+formats, checks and runs unit tests for touched crates; T1 runs mapped
+integration binaries. Add mappings as integration ownership is identified.
 
 T2 runs the unpartitioned CI nextest suite with the same quarantine exclusions and runs its example test unconditionally. CI differs in three ways: it narrows a pull request's tests to the affected set, runs the example test only when affected, and reruns quarantined tests in a separate advisory step. T3 repeats the
 suite and runs the advisory mutation script; the CI native jobs additionally

@@ -647,7 +647,7 @@ mod tests {
 
     #[test]
     fn daily_cadence_survives_restart_and_fires_at_the_deadline() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = provenant_os::fixture::tempdir(|root| tempfile::tempdir_in(root)).unwrap();
         let directory = provenant_config::private_directory(temp.path(), true).unwrap();
         let now = WallTime::from_micros(1_000_000).unwrap();
         let cadence = read_cadence(&directory).unwrap();

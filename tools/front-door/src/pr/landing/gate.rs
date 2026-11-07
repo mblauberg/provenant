@@ -678,22 +678,17 @@ mod tests {
         ));
         let dir = tempfile::tempdir().unwrap();
         for (suffix, expected_success) in [("0", true), ("1", false)] {
-            let pid_path = dir.path().join(format!("pid-{suffix}"));
+            let marker_path = dir.path().join(format!("background-{suffix}"));
             let command = format!(
-                "sleep 60 & echo $! > '{}'; test -z \"$GH_TOKEN$GITHUB_TOKEN$GH_ENTERPRISE_TOKEN\"; exit {suffix}",
-                pid_path.display()
+                "(sleep 0.5; echo alive > '{}') & test -z \"$GH_TOKEN$GITHUB_TOKEN$GH_ENTERPRISE_TOKEN\"; exit {suffix}",
+                marker_path.display()
             );
             let result = run_command(dir.path(), &command, deadline, &[]).unwrap();
             assert!(matches!(result, Run::Passed) == expected_success);
-            let pid = std::fs::read_to_string(pid_path).unwrap();
-            let status = Command::new("ps")
-                .args(["-o", "stat=", "-p", pid.trim()])
-                .output()
-                .unwrap();
-            let state = String::from_utf8_lossy(&status.stdout);
+            std::thread::sleep(Duration::from_millis(700));
             assert!(
-                state.trim().is_empty() || state.trim().starts_with('Z'),
-                "background process still running: {state}"
+                !marker_path.exists(),
+                "background process outlived command completion"
             );
         }
     }

@@ -20,6 +20,7 @@ DEFAULTS = {
         "2": ["scripts/verify-nextest --profile ci --workspace --locked"],
         "3": ["scripts/verify-nextest --profile ci --workspace --locked --stress-count 20"],
     },
+    "package_paths": [],
     "integrations": [],
     "remote": "origin",
     "runners": {},
@@ -47,13 +48,17 @@ def changed_paths(root, base):
     return sorted(paths)
 
 
-def select(paths, packages, mappings):
+def select(paths, packages, mappings, package_mappings=()):
     touched = set()
     for path in paths:
         candidates = [(p["manifest_path"], p["name"]) for p in packages
                       if path == p["manifest_path"] or path.startswith(str(Path(p["manifest_path"]).parent) + "/")]
         if candidates:
             touched.add(max(candidates, key=lambda p: len(p[0]))[1])
+    for rule in package_mappings:
+        if any(fnmatch.fnmatchcase(path, pattern)
+               for path in paths for pattern in rule["paths"]):
+            touched.add(rule["package"])
     selected = []
     for rule in mappings:
         matches = [path for path in paths if any(fnmatch.fnmatchcase(path, pattern) for pattern in rule["paths"])]
@@ -107,7 +112,9 @@ def main():
         metadata = json.loads(subprocess.check_output(["cargo", "metadata", "--no-deps", "--format-version", "1"], cwd=workspace, text=True))
         packages = [{"name": p["name"], "manifest_path": str(Path(p["manifest_path"]).relative_to(ROOT))} for p in metadata["packages"] if p["id"] in metadata["workspace_members"]]
         paths = changed_paths(ROOT, cfg["base"])
-        touched, integrations = select(paths, packages, cfg["integrations"])
+        touched, integrations = select(
+            paths, packages, cfg["integrations"], cfg["package_paths"]
+        )
     print(f"tier T{args.tier} on local, commit {commit}; touched crates: {', '.join(touched) or 'none'}", flush=True)
     for package, binary, matches in integrations:
         print(f"integration {package}/{binary}: {', '.join(matches)}", flush=True)
