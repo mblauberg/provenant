@@ -1,4 +1,4 @@
-## Behaviour changes
+## Breaking changes
 ### Telemetry and providers
 
-- Cursor, OpenCode and Claude lane sessions now use attempt-private provider state. Older attempts whose sessions were stored on the host cannot be resumed and report that retained continuation is missing or expired.
+- **Attempts from before this release using Cursor, OpenCode or read-only Claude cannot resume.** These adapters now require attempt-private session state. Start a new lane.

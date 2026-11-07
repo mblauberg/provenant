@@ -492,7 +492,7 @@ fn missing_legacy_sessions_fail_and_retained_codex_remains_resumable() -> Result
     use provenant_records::{
         FileDigest, RouteAlternatives, RouteConfidentiality, RouteEligibility, RouteReadiness,
     };
-    for adapter in ["cursor", "opencode", "codex"] {
+    for adapter in ["cursor", "opencode", "claude", "codex"] {
         let route = ResolvedRoute {
             extra: Default::default(),
             adapter: adapter.into(),
@@ -842,7 +842,13 @@ fn missing_legacy_sessions_fail_and_retained_codex_remains_resumable() -> Result
                 transcript
             );
         } else {
-            assert!(result.unwrap_err().to_string().contains("retained provider continuation is missing or expired"));
+            let error = result.unwrap_err().to_string();
+            assert!(error.contains("retained provider continuation is missing or expired"));
+            assert!(error.contains("attempt-private state"));
+            assert!(error.contains("start a new lane"));
+            let error = continuation_available(&prior, state, state).unwrap_err().to_string();
+            assert!(error.contains("host-backed sessions from before this release cannot resume"));
+            assert!(error.contains("start a new lane"));
             if adapter == "opencode" {
                 let temp = tempfile::tempdir()?;
                 let root = temp.path().canonicalize()?;

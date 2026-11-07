@@ -93,6 +93,18 @@ fn settlement_scrubs_provider_session_history() -> TestResult {
     std::fs::create_dir_all(&claude)?;
     let session = claude.join("session.jsonl");
     std::fs::write(&session, format!("{{\"message\":\"{token}\"}}\n"))?;
+    let cursor = attempt.join("provider-state/candidate-0/.cursor/chats/project/session");
+    let opencode = attempt.join("provider-state/candidate-0/data/opencode/log");
+    for tree in [&cursor, &opencode] {
+        std::fs::create_dir_all(tree)?;
+        std::fs::write(tree.join("text.log"), format!("{token}\n"))?;
+        // Force a streaming filter refusal in each relocated store. Settlement
+        // still succeeds and scrubs the other text in that store.
+        std::fs::write(
+            tree.join("overlong.log"),
+            format!("https://{}\n", "a".repeat(128 * 1024)),
+        )?;
+    }
     let mut observed = exit();
     observed.scope = RunStore::scope(&store.record(id, &call)?);
     seal_exit(&store, &observed)?;
@@ -110,7 +122,12 @@ fn settlement_scrubs_provider_session_history() -> TestResult {
             ..
         }
     ));
-    for path in [&rollout, &session] {
+    for path in [
+        &rollout,
+        &session,
+        &cursor.join("text.log"),
+        &opencode.join("text.log"),
+    ] {
         let text = std::fs::read_to_string(path)?;
         assert!(
             !text.contains(token),

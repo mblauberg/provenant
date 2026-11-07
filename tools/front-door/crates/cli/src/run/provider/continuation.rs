@@ -170,9 +170,17 @@ pub(super) fn continuation_for(
             policy,
             AdapterSpec::get(&route.adapter).is_some_and(|spec| spec.copy_sessions_only),
         )?,
-        None => return Err("retained provider continuation is missing or expired".into()),
+        None => return Err(missing_continuation(&route.adapter)),
     }
     Ok(continuation)
+}
+
+fn missing_continuation(provider: &str) -> ContinuationError {
+    if matches!(provider, "cursor" | "opencode" | "claude") {
+        format!("retained provider continuation is missing or expired; {provider} sessions now require attempt-private state, so host-backed sessions from before this release cannot resume; start a new lane").into()
+    } else {
+        "retained provider continuation is missing or expired; start a new lane".into()
+    }
 }
 
 /// Configurable budgets shared by retained-state search and copy. A leftover
@@ -320,11 +328,11 @@ pub(crate) fn continuation_available(
     if provider == "opencode" {
         return super::observation::observe_opencode_session(&state, session)
             .map(|_| ())
-            .map_err(|_| "retained provider continuation is missing or expired".into());
+            .map_err(|_| missing_continuation(provider));
     }
     match find_session_state_within(&state, session, policy.limits) {
         Ok(Some(_)) => Ok(()),
-        Ok(None) => Err("retained provider continuation is missing or expired".into()),
+        Ok(None) => Err(missing_continuation(provider)),
         Err(exhausted) => {
             Err(StateCopyError::resource(policy.fact(exhausted.limit(), None)).into())
         }

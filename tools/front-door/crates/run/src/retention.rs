@@ -31,6 +31,7 @@ const CREDENTIALS: &[&str] = &[
     "credentials.json",
     "credentials.toml",
     "claude-config/.credentials.json",
+    "data/opencode/auth.json",
     "Library/Keychains/login.keychain-db",
 ];
 
@@ -832,6 +833,37 @@ fn expire(
                     candidate.rename_noreplace(&part, &archive, &part)?;
                     archive.sync()?;
                     candidate.sync()?;
+                }
+            }
+            for (parent, artifact) in [(".cursor", "chats"), ("data", "opencode")] {
+                if let Some(source) = existing(&candidate, parent)? {
+                    match source.metadata_at(OsStr::new(artifact), false) {
+                        Ok(_) => {
+                            if artifact == "opencode"
+                                && let Some(data) = existing(&source, artifact)?
+                            {
+                                // The launcher places an authentication link here.
+                                // Never archive it if earlier credential cleanup was refused.
+                                let first = report.removed.len();
+                                dispose(&data, OsStr::new("auth.json"), false, report)?;
+                                prefix_removals(
+                                    report,
+                                    first,
+                                    &PathBuf::from(STATE).join(name).join(parent).join(artifact),
+                                );
+                            }
+                            let target = subdir(&archive, OsStr::new(parent), true)?;
+                            source.rename_noreplace(
+                                OsStr::new(artifact),
+                                &target,
+                                OsStr::new(artifact),
+                            )?;
+                            target.sync()?;
+                            source.sync()?;
+                        }
+                        Err(error) if error.is_not_found() => {}
+                        Err(error) => return Err(error.into()),
+                    }
                 }
             }
             if let Some(config) = existing_config(&candidate, name, dry_run, report)? {
@@ -1913,6 +1945,82 @@ mod tests {
                 .removed
                 .is_empty()
         );
+        Ok(())
+    }
+
+    #[test]
+    fn gc_archives_cursor_chats_before_disposing_private_state() -> TestResult {
+        relocated_history_lifecycle(
+            "cursor",
+            ".cursor/chats",
+            &["project/session/store.db", "project/session/store.db-wal"],
+        )
+    }
+
+    #[test]
+    fn gc_archives_opencode_data_before_disposing_private_state() -> TestResult {
+        relocated_history_lifecycle(
+            "opencode",
+            "data/opencode",
+            &[
+                "opencode.db",
+                "opencode.db-wal",
+                "log/session.log",
+                "storage/message/session.json",
+                "snapshot/project/HEAD",
+                "shell/session.sh",
+            ],
+        )
+    }
+
+    fn relocated_history_lifecycle(provider: &str, layout: &str, artifacts: &[&str]) -> TestResult {
+        let (_temp, context, store, input, attempt) = seeded()?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        withdraw(&store, &input, &call)?;
+        let candidate = attempt.join("provider-state/candidate-0");
+        fs::write(candidate.join("provider.txt"), provider)?;
+        for artifact in artifacts {
+            let path = candidate.join(layout).join(artifact);
+            fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(path.parent().ok_or("parent")?)?;
+            fs::write(path, format!("retained {artifact}"))?;
+        }
+        let host_auth = attempt.join("synthetic-host-credential");
+        if provider == "opencode" {
+            fs::write(&host_auth, "synthetic credential")?;
+            std::os::unix::fs::symlink(&host_auth, candidate.join(layout).join("auth.json"))?;
+        }
+        let disposable = if provider == "cursor" {
+            ".cursor/settings.json"
+        } else {
+            "data/other"
+        };
+        fs::write(candidate.join(disposable), "disposable")?;
+        let preview = sweep(&store, &context, 7, 7 * DAY_MICROS, true, &call)?;
+        assert!(preview.errors.is_empty(), "{:?}", preview.errors);
+        assert!(candidate.join(layout).exists());
+        assert!(!attempt.join(HISTORY).exists());
+        let report = sweep(&store, &context, 7, 7 * DAY_MICROS, false, &call)?;
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        assert!(!attempt.join(STATE).exists());
+        let archive = attempt.join("provider-history/candidate-0");
+        for artifact in artifacts {
+            assert_eq!(
+                fs::read_to_string(archive.join(layout).join(artifact))?,
+                format!("retained {artifact}")
+            );
+        }
+        assert!(!archive.join(disposable).exists());
+        if provider == "opencode" {
+            assert!(fs::symlink_metadata(archive.join(layout).join("auth.json")).is_err());
+            assert_eq!(fs::read_to_string(&host_auth)?, "synthetic credential");
+        }
+        let repeated = sweep(&store, &context, 7, 8 * DAY_MICROS, false, &call)?;
+        assert!(repeated.errors.is_empty(), "{:?}", repeated.errors);
+        assert!(repeated.removed.is_empty());
         Ok(())
     }
 
