@@ -364,7 +364,7 @@ fn upgrading_a_version_1_ledger_is_atomic() -> TestResult {
 fn reconcile_retries_busy_store_and_keeps_judging_other_records() -> TestResult {
     use std::{sync::mpsc, time::Duration};
     for clears in [true, false] {
-        provenant_sqlite::with_busy_timeout(Duration::from_millis(80), || -> TestResult {
+        provenant_sqlite::with_busy_timeout(Duration::from_millis(300), || -> TestResult {
             let temp = tempfile::tempdir()?;
             let clock = provenant_os::clock::SystemClock::new();
             let cancel = CancelToken::new();
@@ -392,7 +392,7 @@ fn reconcile_retries_busy_store_and_keeps_judging_other_records() -> TestResult 
             let (release, released) = mpsc::channel();
             let holder = std::thread::spawn(move || {
                 if clears {
-                    std::thread::sleep(Duration::from_millis(20));
+                    let _ = released.recv_timeout(Duration::from_millis(150));
                 } else {
                     released.recv().unwrap();
                 }

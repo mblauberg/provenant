@@ -1613,18 +1613,23 @@ pub(crate) fn retry_reconcile<T>(
     }
     let timeout = provenant_sqlite::busy_timeout();
     let _restore = Restore(db, timeout);
-    let started = std::time::Instant::now();
+    let budget = call.lock_budget();
     loop {
         call.check()?;
-        let remaining = timeout.saturating_sub(started.elapsed());
-        db.busy_timeout(remaining.min(std::time::Duration::from_millis(100)))?;
+        let remaining = budget.remaining(call.clock.mono_now()).as_micros();
+        db.busy_timeout(
+            std::time::Duration::from_micros(remaining).min(std::time::Duration::from_millis(100)),
+        )?;
         match action() {
-            Err(RunError::Contention) if started.elapsed() < timeout => {
-                std::thread::sleep(
-                    timeout
-                        .saturating_sub(started.elapsed())
-                        .min(std::time::Duration::from_millis(10)),
-                );
+            Err(RunError::Contention) if !budget.deadline().is_expired(call.clock.mono_now()) => {
+                let now = call.clock.mono_now();
+                let delay = budget.remaining(now).as_micros().min(10_000);
+                let next = now
+                    .checked_add(provenant_core::DurationMicros::from_micros(delay))
+                    .map_err(|_| RunError::Validation("reconcile retry deadline"))?;
+                call.clock
+                    .wait_until(next)
+                    .map_err(|_| RunError::Validation("reconcile retry wait"))?;
             }
             result => return result,
         }
@@ -3455,6 +3460,12 @@ impl RunStore {
                 }));
             }
         };
+        // Released refused-import scratch is recovery evidence, even for a
+        // launched writer settled after reboot. It is no longer cleanup debt.
+        if crate::holder::object_import_refused(&attempt, scope)?.is_some() {
+            self.set_temporary_retained(id, false, call)?;
+            return Ok(None);
+        }
         let remove = || -> Result<()> {
             match attempt.metadata_at(std::ffi::OsStr::new("tmp"), false) {
                 Err(error) if error.is_not_found() => return Ok(()),

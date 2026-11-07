@@ -16,6 +16,7 @@ pub(super) fn output_with(
         .then_some(command.tail)
         .flatten();
     let headed = matches!(command.part, Part::Result) && !command.trace;
+    let warn_human = headed && !command.path && command.to.is_none();
     let to = command.to.clone();
     let mut out = reply(
         "output",
@@ -48,6 +49,17 @@ pub(super) fn output_with(
     out.read_only = true;
     if out.result.error.is_none() {
         out.summary = Some(output_summary(&out.result.data, &out.human, headed));
+        if warn_human
+            && out
+                .result
+                .data
+                .get("git_import_failure")
+                .is_some_and(|value| !value.is_null())
+            && let Some(reason) = out.result.data["reason"].as_str()
+            && out.human.trim() != reason
+        {
+            out.human = format!("{reason}\n\n{}", out.human);
+        }
     }
     out
 }

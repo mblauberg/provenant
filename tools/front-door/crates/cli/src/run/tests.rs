@@ -1254,7 +1254,7 @@ fn reconcile_reports_publish_error_and_explicitly_abandons_a_writer_fence()
                     );
                     for command in ["status", "output"] {
                         let crate::ParseOutcome::Invocation(inv) = crate::parse(
-                            [command.to_owned(), id.to_string(), "--json".into()]
+                            [command.to_owned(), id.to_string(), "--full".into()]
                                 .into_iter()
                                 .map(std::ffi::OsString::from),
                         ) else {
@@ -1285,12 +1285,24 @@ fn reconcile_reports_publish_error_and_explicitly_abandons_a_writer_fence()
                             .as_ref()
                             .map(|summary| summary.lines.join("\n"))
                             .unwrap_or_default();
-                        let texts = if command == "status" {
-                            vec![&reply.human, &summary]
-                        } else {
-                            vec![&summary]
-                        };
-                        for text in texts {
+                        let mut rendered = Vec::new();
+                        crate::render(
+                            &reply.result,
+                            inv.globals.render_mode(
+                                &reply.human,
+                                reply.read_only,
+                                reply.summary.as_ref(),
+                            ),
+                            &mut rendered,
+                        )?;
+                        let rendered = String::from_utf8(rendered)?;
+                        if command == "output" {
+                            assert_eq!(
+                                reply.result.data["bytes"]["data"],
+                                "retained provider evidence"
+                            );
+                        }
+                        for text in [&reply.human, &summary, &rendered] {
                             assert!(
                                 text.contains("commits may not have reached its branch"),
                                 "{command}: {text}"

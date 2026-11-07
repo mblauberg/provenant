@@ -1637,7 +1637,8 @@ impl RunStore {
                             decoded.outcome,
                             Outcome::Succeeded | Outcome::ReviewRequired | Outcome::Uncommitted
                         ) {
-                            decoded.outcome = Outcome::Unsettled;
+                            decoded.outcome = Outcome::Failed;
+                            decoded.terminal_cause = Some(TerminalCause::SettlementFailure);
                         }
                         let reason = match decoded.reason.take() {
                             Some(reason) => {
@@ -3582,7 +3583,7 @@ mod writer_recovery_tests {
     #[test]
     fn reconcile_settles_failed_import_once_and_keeps_evidence()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
-        settlement_fault_modes(&["reconcile_failed", "reconcile_new"])
+        settlement_fault_modes(&["reconcile_failed", "reconcile_new", "reconcile_reboot"])
     }
 
     #[test]
@@ -3810,7 +3811,11 @@ mod writer_recovery_tests {
             crate::writer::FAIL_IMPORT.with(|fault| {
                 fault.set(matches!(
                     mode,
-                    "normal" | "release_boundary" | "archived_fault" | "reconcile_failed"
+                    "normal"
+                        | "release_boundary"
+                        | "archived_fault"
+                        | "reconcile_failed"
+                        | "reconcile_reboot"
                 ))
             });
             let first = store.finish_in_custody(
@@ -3967,7 +3972,46 @@ mod writer_recovery_tests {
                     .is_err(),
                 "retained reservation excludes competing writer"
             );
-            if mode == "reconcile_failed" {
+            if matches!(mode, "reconcile_failed" | "reconcile_reboot") {
+                struct Reboot;
+                impl provenant_supervisor::census::ProcessObserver for Reboot {
+                    fn boot_identity(
+                        &self,
+                    ) -> std::result::Result<String, provenant_supervisor::census::CensusError>
+                    {
+                        Ok("darwin:11111111-1111-1111-1111-111111111111".into())
+                    }
+                    fn observe(&self, _: i64) -> provenant_supervisor::census::ProcessObservation {
+                        provenant_supervisor::census::ProcessObservation::Absent
+                    }
+                    fn census(
+                        &self,
+                        _: usize,
+                    ) -> std::result::Result<
+                        provenant_supervisor::census::Census,
+                        provenant_supervisor::census::CensusError,
+                    > {
+                        unreachable!("reboot proof needs only the boot identity")
+                    }
+                }
+                let observer: &dyn provenant_supervisor::census::ProcessObserver =
+                    if mode == "reconcile_reboot" {
+                        // A real bound reservation survives the failed import;
+                        // only its boot changes, as across a machine restart.
+                        let reservation = store
+                            .writer_fences()?
+                            .into_iter()
+                            .find(|fence| fence.scope == scope)
+                            .ok_or("retained fence")?
+                            .reservation;
+                        let mut value: serde_json::Value =
+                            serde_json::from_slice(&std::fs::read(&reservation)?)?;
+                        value["boot"] = "darwin:00000000-0000-0000-0000-000000000000".into();
+                        std::fs::write(&reservation, serde_json::to_vec(&value)?)?;
+                        &Reboot
+                    } else {
+                        &provenant_supervisor::census::SystemProcessObserver
+                    };
                 let sealed = read_sealed(&attempt, "terminal-pending.json", RECORD_LIMIT)?;
                 let result = read_sealed(&attempt, "result.md", RESULT_LIMIT)?;
                 let retained = std::fs::read(candidate.join("git-common/HEAD"))?;
@@ -3989,12 +4033,7 @@ mod writer_recovery_tests {
                 // earlier error snapshot must disappear from the final report.
                 let found = store.queue_reconcile_with(run.run_id, &call, |_, _| {
                     let found = store
-                        .reconcile_with_observer(
-                            run.run_id,
-                            &providers,
-                            &call,
-                            &provenant_supervisor::census::SystemProcessObserver,
-                        )
+                        .reconcile_with_observer(run.run_id, &providers, &call, observer)
                         .expect("recovery");
                     assert!(
                         found.contains(&(id, crate::Reconciled::Finished)),
@@ -4003,6 +4042,11 @@ mod writer_recovery_tests {
                     Ok(())
                 })?;
                 assert!(found.is_empty(), "{found:?}");
+                if mode == "reconcile_reboot" {
+                    let cleanup = crate::controls::REBOOT_TEMPORARY_CLEANUP
+                        .with(|result| result.borrow_mut().take());
+                    assert_eq!(cleanup, Some(Ok(None)));
+                }
                 assert!(
                     matches!(store.record(id, &call)?.settlement_receipts.unwrap().git_import,
                     EffectDisposition::Failed { retryable: false, ref reason }
@@ -4395,7 +4439,7 @@ mod writer_recovery_tests {
                 assert!(matches!(
                     finished.record.state,
                     AttemptState::Terminal {
-                        outcome: Outcome::Unsettled,
+                        outcome: Outcome::Failed,
                         ..
                     }
                 ));
@@ -4413,7 +4457,7 @@ mod writer_recovery_tests {
                 assert!(matches!(
                     finished.record.state,
                     AttemptState::Terminal {
-                        outcome: Outcome::Unsettled,
+                        outcome: Outcome::Failed,
                         ..
                     }
                 ));

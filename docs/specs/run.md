@@ -610,7 +610,7 @@ consume another import attempt. Import claims back off for 5 seconds, 30 seconds
 and 2 minutes instead of retrying immediately. Exhaustion records explicit
 import-refusal evidence naming the limit and
 retained private Git. If an import fails before writer facts can be verified,
-the validated terminal decision is `unsettled`, with a retryable `GitImport`
+the validated terminal decision is `failed`, with a retryable `GitImport`
 failure. Its private inputs, reservation and custody fence remain retained.
 A retry can complete the import receipt or reach explicit refusal, but cannot
 upgrade or replace that sealed outcome. When reconcile proves the guardian is
@@ -628,8 +628,10 @@ provider has already stopped consuming host build capacity and live custody.
 
 An import failure preserves an already established failed, timed-out or lost
 provider outcome and its reason. A potential success with unverified writer
-facts becomes `unsettled`; even after import recovery it requires a fresh attempt
-or manual host recovery to obtain success or delivery eligibility.
+facts becomes `failed`; even after import recovery it requires a fresh attempt
+or manual host recovery to obtain success or delivery eligibility. Older sealed
+`unsettled` decisions remain immutable and project as failed through the final
+import receipt.
 
 Unresolved imports also seal a scoped `import-retained.json` marker beside the
 custody reservation. Run checks predecessor markers after acquiring the normal
