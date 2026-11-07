@@ -36,9 +36,8 @@ fn response_outcome(command: &str, data: &Value) -> Outcome {
 fn launch_error_node(data: &Value, outcome: Outcome) -> Option<&Value> {
     data["checkpoint"]["nodes"].as_array()?.iter().find(|node| {
         node["advance_error"].is_string()
-            && (matches!(outcome, Outcome::Failed | Outcome::Refused)
-                || (node["state"] == "failed"
-                    && node["attempts"].as_array().is_some_and(Vec::is_empty)))
+            && node["attempts"].as_array().is_some_and(Vec::is_empty)
+            && (matches!(outcome, Outcome::Failed | Outcome::Refused) || node["state"] == "failed")
     })
 }
 
@@ -581,6 +580,14 @@ mod tests {
             launch_error_node(&timed_out, Outcome::Waiting).map(|node| &node["id"]),
             Some(&json!("writer"))
         );
+    }
+
+    #[test]
+    fn failed_attempt_does_not_project_launch_error() {
+        let data = json!({"checkpoint":{"nodes":[
+            {"id":"task", "state":"failed", "attempts":[{}], "advance_error":"fallback_route_pinned"}
+        ]}});
+        assert!(launch_error_node(&data, Outcome::Failed).is_none());
     }
 
     #[test]
