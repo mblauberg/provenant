@@ -454,6 +454,11 @@ mod tests {
         for name in ["home", "state", "source"] {
             std::fs::create_dir_all(root.join(name))?;
         }
+        // The registry only reads a private state directory, whatever the umask.
+        std::fs::set_permissions(
+            root.join("state"),
+            std::os::unix::fs::PermissionsExt::from_mode(0o700),
+        )?;
         let mut input = provenant_core::RootInputs::new(root.join("home"), root.join("source"));
         input.state_dir = Some(root.join("state"));
         Ok(input.resolve(&provenant_os::fs::SystemPathResolver)?)
