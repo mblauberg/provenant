@@ -72,7 +72,7 @@ fn collect_entries(
                 root.unlink(&name)?;
             }
         } else if is_staging && metadata.kind == FileKind::Directory {
-            let tree = PayloadTree::claim(&root, &name, &metadata)?;
+            let tree = PayloadTree::claim(root, &name, &metadata)?;
             if !dry_run {
                 clear(&tree, 0)?;
                 root.rmdir(&name)?;
@@ -86,6 +86,7 @@ fn collect_entries(
 mod tests {
     #[test]
     fn filters_before_metadata_and_skips_vanished_entries() {
+        use super::*;
         let temp = tempfile::tempdir().unwrap();
         let root = Directory::open_anchor(temp.path()).unwrap();
         std::fs::write(temp.path().join(".ingest-survivor"), b"data").unwrap();
