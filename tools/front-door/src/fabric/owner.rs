@@ -161,6 +161,14 @@ fn selected_writer_project(
     } else {
         factory.cwd.join(given)
     };
+    if !selected
+        .try_exists()
+        .map_err(|_| FacadeError::io("inspect writer worktree"))?
+    {
+        return Err(run_error(provenant_run::RunError::WorktreeMissing(
+            selected,
+        )));
+    }
     let mut checked = provenant_records::run::LaneAccess::default();
     bind_child_directory(
         &mut checked,
