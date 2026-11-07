@@ -2,6 +2,38 @@ use super::*;
 
 const DEPENDENCY_INSTALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
 
+/// Repeated preparation must never reuse a lane's mutable Git state. Keep the
+/// allocation number separate from the route index used for fallback receipts.
+pub(super) fn fresh_scratch_directory(
+    root: &Path,
+    prefix: &str,
+    mut candidate: Option<usize>,
+) -> Result<(Directory, String), String> {
+    let parent = Directory::open_anchor(root).map_err(|error| error.to_string())?;
+    loop {
+        let name = match candidate {
+            Some(candidate) => format!("{prefix}-{candidate}"),
+            None => prefix.to_owned(),
+        };
+        match parent.mkdir(std::ffi::OsStr::new(&name), 0o700) {
+            Ok(()) => {
+                parent.sync().map_err(|error| error.to_string())?;
+                let directory = parent
+                    .open_verified_directory(std::ffi::OsStr::new(&name))
+                    .map_err(|error| error.to_string())?;
+                return Ok((directory, name));
+            }
+            Err(error) if error.is_exists() => {
+                candidate = Some(match candidate {
+                    Some(candidate) => candidate.checked_add(1).ok_or("scratch exhausted")?,
+                    None => 1,
+                });
+            }
+            Err(error) => return Err(error.to_string()),
+        }
+    }
+}
+
 fn uniform_candidate_boundary(
     count: usize,
     boundaries: &std::collections::BTreeMap<usize, provenant_records::diagnostic::BoundaryClass>,
@@ -2305,27 +2337,28 @@ pub(super) fn prepare_candidates(
         // Every lane stages temporary files under tmp for terminal cleanup.
         // A failed setup never poisons the next explicit fallback candidate.
         let staging = &paths.temporary;
-        let scratch = staging.join(format!("candidate-{current_candidate}"));
-        let private_state = paths
-            .provider_state
-            .join(format!("candidate-{current_candidate}"));
-        // Retain the handle opened while creating scratch: a parent lane can
-        // rename tmp and redirect its pathname before context is published.
-        let scratch_directory =
-            match apply_setup_directory(&[staging], &scratch).and_then(|directory| {
-                apply_setup(
-                    &[SetupStep::CreateDir(private_state.clone())],
-                    &[&paths.provider_state],
-                    None,
-                )?;
-                Ok(directory)
-            }) {
-                Ok(directory) => directory,
+        // Retain the handle opened while claiming fresh scratch: a parent
+        // lane can rename tmp before context is published.
+        let (scratch_directory, scratch_name) =
+            match fresh_scratch_directory(staging, "candidate", Some(current_candidate)) {
+                Ok(scratch) => scratch,
                 Err(error) => {
                     reasons.push(skip(&label, SkipKind::Setup, error));
                     continue;
                 }
             };
+        let scratch = scratch_directory
+            .current_path()
+            .map_err(|error| error.to_string())?;
+        let private_state = paths.provider_state.join(&scratch_name);
+        if let Err(error) = apply_setup(
+            &[SetupStep::CreateDir(private_state.clone())],
+            &[&paths.provider_state],
+            None,
+        ) {
+            reasons.push(skip(&label, SkipKind::Setup, error));
+            continue;
+        }
         let continuation = match resume {
             Some(prior) => match continuation_for(
                 prior,
@@ -2650,11 +2683,7 @@ pub(super) fn prepare_candidates(
             spec.user_skills = skills;
         }
         if let Some(alias) = &paths.temporary_alias {
-            alias_temporary_env(
-                &mut spec.env,
-                scratch,
-                &alias.join(format!("candidate-{current_candidate}")),
-            );
+            alias_temporary_env(&mut spec.env, scratch, &alias.join(&scratch_name));
         }
         apply_lane_capabilities(&mut spec.profile.spec, &task.access);
         let common_git_path = repository

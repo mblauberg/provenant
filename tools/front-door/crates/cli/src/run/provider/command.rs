@@ -106,37 +106,11 @@ pub(super) fn prepare_command(
         Some(host) => host.git.clone(),
         None => provenant_os::git::git_executable().ok_or("Git unavailable")?,
     })?;
-    // A retry must not reuse mutable Git state from an earlier preparation.
-    // Claim a fresh child atomically, keeping every view inside this attempt.
-    let temporary = Directory::open_anchor(&paths.temporary).map_err(|error| error.to_string())?;
-    let mut candidate = 0u64;
-    let (scratch, scratch_name) = loop {
-        let name = if candidate == 0 {
-            "command".to_owned()
-        } else {
-            format!("command-{candidate}")
-        };
-        match temporary.mkdir(std::ffi::OsStr::new(&name), 0o700) {
-            Ok(()) => {
-                temporary.sync().map_err(|error| error.to_string())?;
-                let directory = temporary
-                    .open_verified_directory(std::ffi::OsStr::new(&name))
-                    .map_err(|error| error.to_string())?;
-                break (
-                    directory
-                        .current_path()
-                        .map_err(|error| error.to_string())?,
-                    name,
-                );
-            }
-            Err(error) if error.is_exists() => {
-                candidate = candidate
-                    .checked_add(1)
-                    .ok_or("command scratch exhausted")?;
-            }
-            Err(error) => return Err(error.to_string().into()),
-        }
-    };
+    let (scratch_directory, scratch_name) =
+        super::preparation::fresh_scratch_directory(&paths.temporary, provider, None)?;
+    let scratch = scratch_directory
+        .current_path()
+        .map_err(|error| error.to_string())?;
     let mut access = task.access.clone();
     // With no API endpoints, provider-only reach is network off.
     access.network.get_or_insert(
