@@ -347,7 +347,7 @@ fn command_runtimes_include_only_exact_linked_library_reads()
 }
 
 #[test]
-fn prepared_writer_git_environment_is_private_for_every_adapter() -> Result<(), ProviderError> {
+fn prepared_git_binding_is_not_ambient_for_every_adapter() -> Result<(), ProviderError> {
     use provenant_confinement::plan::ReadOnlyGrants;
     use provenant_confinement::{CodexPolicy, ConfinedPlan, ExtensionPolicy, PlanRequest};
     let prompt = Prompt::new("fixture".into());
@@ -385,6 +385,13 @@ fn prepared_writer_git_environment_is_private_for_every_adapter() -> Result<(), 
                 Path::new("/fixture/repo"),
                 (id == "claude").then_some(&token),
             ))?;
+            assert!(
+                spec.env
+                    .iter()
+                    .any(|(key, value)| key == "PROVENANT_GIT"
+                        && value == "/fixture/scratch/bin/git"),
+                "{id}"
+            );
             let bound = spec.git_wrapper.bound.as_ref();
             assert!(bound.is_some(), "{id}");
             if let Some(bound) = bound {
@@ -395,7 +402,10 @@ fn prepared_writer_git_environment_is_private_for_every_adapter() -> Result<(), 
                     ("GIT_WORK_TREE", "/fixture/repo"),
                     ("GIT_OBJECT_DIRECTORY", "/fixture/scratch/git-objects"),
                 ] {
-                    assert!(spec.env.iter().any(|(name, value)| name == key && value == path), "{id} {key}");
+                    assert!(
+                        spec.env.iter().all(|(name, _)| name != key),
+                        "{id} {access:?} {key}"
+                    );
                     assert_eq!(
                         bound
                             .env
@@ -731,7 +741,7 @@ fn prepared_private_git_supports_commits_fetch_merge_and_push()
         }
         let lane_git = |args: &[&std::ffi::OsStr]| {
             let output = Command::new("/bin/sh")
-                .arg(scratch.join("bin/git"))
+                .args(["-c", "exec git \"$@\"", "lane-git"])
                 .current_dir(&linked)
                 .env_clear()
                 .envs(spec.env.iter().cloned())
@@ -762,16 +772,14 @@ fn prepared_private_git_supports_commits_fetch_merge_and_push()
         );
         lane_git(&["cat-file".as_ref(), "-e".as_ref(), "HEAD^{commit}".as_ref()]);
         let other_head = host_git(&other, &["rev-parse".as_ref(), "HEAD".as_ref()]);
-        // Native Git can inspect a second repository by explicitly removing
-        // the lane's repository selectors; no command-routing parser is needed.
+        // Absolute Git calls retain normal repository selection under the
+        // complete production environment, including when -C changes repository.
         let other_read = provenant_os::fixture::git_command_at(git)
-            .current_dir(&other)
+            .current_dir(&linked)
             .env_clear()
             .envs(spec.env.iter().cloned())
-            .env_remove("GIT_DIR")
-            .env_remove("GIT_COMMON_DIR")
-            .env_remove("GIT_WORK_TREE")
-            .env_remove("GIT_OBJECT_DIRECTORY")
+            .arg("-C")
+            .arg(&other)
             .args(["log", "-1", "--format=%H"])
             .output()?;
         assert!(other_read.status.success());
@@ -781,11 +789,53 @@ fn prepared_private_git_supports_commits_fetch_merge_and_push()
         let other_via_wrapper = Command::new(scratch.join("bin/git"))
             .current_dir(&linked)
             .env_clear()
-            .env("PATH", "/usr/bin:/bin")
-            .args(["-C", other.to_str().ok_or("other path")?, "rev-parse", "HEAD"])
+            .envs(spec.env.iter().cloned())
+            .args([
+                "-C",
+                other.to_str().ok_or("other path")?,
+                "rev-parse",
+                "HEAD",
+            ])
             .output()?;
         assert!(other_via_wrapper.status.success());
         assert_eq!(other_via_wrapper.stdout, other_head);
+        assert_eq!(
+            lane_git(&[
+                "-C".as_ref(),
+                other.as_os_str(),
+                "rev-parse".as_ref(),
+                "HEAD".as_ref()
+            ]),
+            other_head
+        );
+        let clone = scratch.join("clone");
+        lane_git(&[
+            "clone".as_ref(),
+            "--quiet".as_ref(),
+            "--no-hardlinks".as_ref(),
+            other.as_os_str(),
+            clone.as_os_str(),
+        ]);
+        assert_eq!(
+            lane_git(&[
+                "-C".as_ref(),
+                clone.as_os_str(),
+                "rev-parse".as_ref(),
+                "HEAD".as_ref()
+            ]),
+            other_head
+        );
+        let clone_object = lane_git(&[
+            "-C".as_ref(),
+            clone.as_os_str(),
+            "hash-object".as_ref(),
+            "-w".as_ref(),
+            "--stdin".as_ref(),
+        ]);
+        let clone_object = std::str::from_utf8(&clone_object)?.trim();
+        let relative = PathBuf::from(&clone_object[..2]).join(&clone_object[2..]);
+        assert!(clone.join(".git/objects").join(&relative).is_file());
+        assert!(!scratch.join("git-objects").join(&relative).exists());
         let explicit_other = Command::new(scratch.join("bin/git"))
             .current_dir(&linked)
             .env_clear()
@@ -798,15 +848,59 @@ fn prepared_private_git_supports_commits_fetch_merge_and_push()
         if access == Access::ReadOnly {
             std::fs::write(other.join("reader-upstream"), "fetched content")?;
             host_git(&other, &["add".as_ref(), "reader-upstream".as_ref()]);
-            host_git(&other, &["commit".as_ref(), "-qm".as_ref(), "reader upstream".as_ref()]);
-            let direct = provenant_os::fixture::git_command_at(git)
-                .current_dir(&linked).env_clear().envs(spec.env.iter().cloned())
+            host_git(
+                &other,
+                &[
+                    "commit".as_ref(),
+                    "-qm".as_ref(),
+                    "reader upstream".as_ref(),
+                ],
+            );
+            let selected_git = &spec
+                .env
+                .iter()
+                .find(|(key, _)| key == "PROVENANT_GIT")
+                .ok_or("PROVENANT_GIT missing")?
+                .1;
+            let wrapped = Command::new(selected_git)
+                .current_dir(&linked)
+                .env_clear()
+                .envs(spec.env.iter().cloned())
                 .envs(provenant_os::fixture::fixture_git_settings())
-                .args(["-c", "protocol.file.allow=always", "fetch", "--quiet", "origin", "HEAD:refs/remotes/origin/reader"])
+                .args([
+                    "-c",
+                    "protocol.file.allow=always",
+                    "fetch",
+                    "--quiet",
+                    "origin",
+                    "HEAD:refs/remotes/origin/reader",
+                ])
                 .output()?;
-            assert!(direct.status.success(), "{id}: {}", String::from_utf8_lossy(&direct.stderr));
-            assert_eq!(lane_git(&["rev-parse".as_ref(), "FETCH_HEAD".as_ref()]), host_git(&other, &["rev-parse".as_ref(), "HEAD".as_ref()]));
-            assert_eq!(host_git(&linked, &["rev-parse".as_ref(), "HEAD".as_ref()]), bound_head);
+            assert!(
+                wrapped.status.success(),
+                "{id}: {}",
+                String::from_utf8_lossy(&wrapped.stderr)
+            );
+            assert_eq!(
+                lane_git(&["rev-parse".as_ref(), "FETCH_HEAD".as_ref()]),
+                host_git(&other, &["rev-parse".as_ref(), "HEAD".as_ref()])
+            );
+            assert_eq!(
+                host_git(&linked, &["rev-parse".as_ref(), "HEAD".as_ref()]),
+                bound_head
+            );
+            assert!(scratch.join("git-common/FETCH_HEAD").is_file());
+            assert!(
+                scratch
+                    .join("git-common/refs/remotes/origin/reader")
+                    .is_file()
+            );
+            assert!(!repo.join(".git/worktrees/linked/FETCH_HEAD").exists());
+            assert!(!repo.join(".git/refs/remotes/origin/reader").exists());
+            assert_eq!(
+                lane_git(&["show".as_ref(), "FETCH_HEAD:reader-upstream".as_ref()]),
+                b"fetched content"
+            );
         }
         let input = scratch.join("input");
         std::fs::write(&input, "lane scratch object")?;

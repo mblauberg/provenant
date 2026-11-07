@@ -460,14 +460,19 @@ retained in the route record under `dependency_preparation`. Corepack neither fo
 as a non-executable `@pnpm/exe` placeholder. The native install uses the host's
 shared pnpm store; a lane cannot write that store from inside its sandbox.
 
-Read-only lanes with a verified Git checkout use a private scratch object
-directory, with the host's common object store as a read-only alternate. The
-shell Git wrapper selects it only for the bound repository and its linked
-worktrees, for `show`, `log`, `diff`, `merge-tree` and `hash-object`; other
-repositories retain their own stores. Aliases and external subcommands receive
-no override; direct absolute-path Git calls bypass the wrapper. Git can create
-temporary objects for commands such as `show --remerge-diff` without writing
-the shared store. Scratch objects
+Repository lanes use a private scratch Git directory, index and object store,
+with the host's common object store as a read-only alternate. The PATH Git
+wrapper binds commands targeting the lane checkout to that private state,
+including fetches in read-only lanes. Other repositories and scratch clones
+retain normal Git selection and their own stores. Repository selectors
+(`GIT_DIR`, `GIT_COMMON_DIR`, `GIT_WORK_TREE` and `GIT_OBJECT_DIRECTORY`) are
+absent from the launch environment. `PROVENANT_GIT` names the wrapper; the
+wrapper embeds the real executable path so it cannot call itself in a loop.
+
+A deliberate absolute call to the real Git binary bypasses that binding. On
+the lane checkout it discovers the host `.git`; confinement denies its writes
+and host metadata stays unchanged. Such calls are outside the private Git
+contract: use PATH Git or `PROVENANT_GIT` for lane operations. Scratch objects
 and alternates are lane-controlled, so lane Git output is not trusted host
 evidence. Scratch is removed at normal settlement; lost attempts retain it
 until later cleanup.

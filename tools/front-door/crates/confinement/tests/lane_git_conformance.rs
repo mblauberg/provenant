@@ -1131,6 +1131,56 @@ fn read_only_lane_fetches_into_private_git_with_host_metadata_denied() -> Result
         upstream
     );
     assert_eq!(ok(run(&private, &["rev-parse", "HEAD"])), head);
+    // An absolute call bypasses the wrapper and discovers the host .git marker.
+    // Confinement must deny its writes rather than redirecting them to scratch.
+    fn metadata_tree(
+        path: &Path,
+    ) -> std::io::Result<std::collections::BTreeMap<PathBuf, Option<Vec<u8>>>> {
+        let mut tree = std::collections::BTreeMap::new();
+        for entry in fs::read_dir(path)? {
+            let path = entry?.path();
+            if path.is_dir() {
+                tree.insert(path.clone(), None);
+                tree.extend(metadata_tree(&path)?);
+            } else {
+                tree.insert(path.clone(), Some(fs::read(path)?));
+            }
+        }
+        Ok(tree)
+    }
+    let before_metadata = metadata_tree(&source_git)?;
+    let absolute = |args: &[&str]| {
+        let mut cmd = Command::new("/usr/bin/sandbox-exec");
+        provenant_os::fixture::scrub_git_env(&mut cmd);
+        cmd.args(["-p", sbpl])
+            .arg(&git_path)
+            .args(args)
+            .current_dir(&lane)
+            .env("HOME", &home)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .output()
+            .expect("absolute Git")
+    };
+    assert_eq!(
+        ok(absolute(&["rev-parse", "--absolute-git-dir"])).trim(),
+        repo.private_git_dir()
+            .to_str()
+            .ok_or("host Git directory")?
+    );
+    let denied = absolute(&[
+        "-c",
+        "protocol.file.allow=always",
+        "fetch",
+        remote,
+        "refs/heads/main:refs/remotes/origin/absolute",
+    ]);
+    assert!(
+        !denied.status.success(),
+        "absolute Git unexpectedly wrote host metadata"
+    );
+    assert_eq!(metadata_tree(&source_git)?, before_metadata);
+
     assert!(
         !run(
             repo.private_git_dir(),
