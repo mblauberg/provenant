@@ -1096,6 +1096,10 @@ fn legacy_writer_replay_preserves_sealed_request_and_authority() -> TestResult {
     let call = call(&clock, &cancel);
     let mut context = context(&root)?;
     std::fs::create_dir_all(context.state_root.as_path())?;
+    std::fs::set_permissions(
+        context.state_root.as_path(),
+        std::os::unix::fs::PermissionsExt::from_mode(0o700),
+    )?;
     let mut roots = provenant_core::RootInputs::new(root.join("home"), root.join("checkout"));
     roots.state_dir = Some(context.state_root.as_path().to_owned());
     let roots = roots.resolve(&provenant_os::fs::SystemPathResolver)?;
