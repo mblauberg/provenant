@@ -101,6 +101,7 @@ fn invoke(
                     nodes.iter().any(|node| {
                         node["state"] == "failed"
                             && node["advance_error_code"] == "writer_binding_unavailable"
+                            && node["advance_owner_code"] != "writer_lock_busy"
                     })
                 })
             && let Some(action) = local_branch_action(&factory, branch)
