@@ -84,7 +84,6 @@ fn collect_entries(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     #[test]
     fn filters_before_metadata_and_skips_vanished_entries() {
         let temp = tempfile::tempdir().unwrap();
@@ -122,6 +121,7 @@ mod tests {
 
     #[test]
     fn old_scratch_is_removed_only_with_owner_locks() {
+        use super::*;
         let temp = tempfile::tempdir().unwrap();
         let root = Directory::open_anchor(temp.path()).unwrap();
         std::fs::create_dir(temp.path().join("install")).unwrap();
