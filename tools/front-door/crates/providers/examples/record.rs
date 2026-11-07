@@ -748,7 +748,11 @@ struct Redactor {
 }
 impl Redactor {
     fn text(&self, value: &str) -> String {
-        let mut out = value.to_owned();
+        // Apply the capture redactor to every value, including executable paths.
+        let mut out = match provenant_confinement::redact::known_shapes(value.as_bytes()) {
+            Ok(bytes) => String::from_utf8(bytes).unwrap_or_else(|_| "[REDACTED]".into()),
+            Err(_) => "[REDACTED]".into(),
+        };
         for (from, to) in &self.literals {
             out = out.replace(from.as_str(), to);
         }
@@ -816,6 +820,14 @@ impl Redactor {
         }
         Ok(out)
     }
+}
+
+#[test]
+fn recording_redacts_known_tokens_in_argv_zero() {
+    let redactor = Redactor { literals: vec![] };
+    let argv = ["/tools/ghp_abcdefghijklmnopqrst", "--help"];
+    let recorded: Vec<_> = argv.iter().map(|arg| redactor.text(arg)).collect();
+    assert_eq!(recorded, ["/tools/[REDACTED]", "--help"]);
 }
 
 fn platform() -> Result<String> {
