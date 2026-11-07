@@ -129,9 +129,11 @@ pub enum HostNativeConfig {
     },
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct GraphConfig {
+    /// Minimum allowance for one writer binding, independent of settlement wait.
+    pub writer_launch_seconds: u64,
     pub limits: GraphLimits,
     pub budget: GraphBudget,
     /// Backoff for pending CI observations; node overrides take precedence.
@@ -142,6 +144,20 @@ pub struct GraphConfig {
     pub allowed_read_roots: Vec<String>,
     /// What a graph `land` node does at each risk tier.
     pub land: GraphLand,
+}
+
+impl Default for GraphConfig {
+    fn default() -> Self {
+        Self {
+            writer_launch_seconds: 55,
+            limits: Default::default(),
+            budget: Default::default(),
+            ci_poll_backoff: Default::default(),
+            ci_poll_overrides: Default::default(),
+            allowed_read_roots: Default::default(),
+            land: Default::default(),
+        }
+    }
 }
 
 /// What a graph `land` node does once its PR is reviewed and green.
@@ -793,6 +809,9 @@ impl DomainConfig for FabricConfig {
                 reject(format!("plan.auto.{name}"));
             }
         }
+        if !(1..=14_400).contains(&self.graph.writer_launch_seconds) {
+            reject("graph.writer_launch_seconds".into());
+        }
         let limits = &self.graph.limits;
         for (name, value) in [
             ("nodes", limits.nodes),
@@ -855,6 +874,7 @@ fn defaults(_profile: Profile) -> &'static str {
 /// boundary: recovery could raise a cap, lift a budget or swap a binary. Labels,
 /// peers' addresses and lane tuning recover to defaults.
 pub const FIELD_METADATA: &[FieldMetadata] = &[
+    FieldMetadata::int("graph.writer_launch_seconds", 1, 14_400),
     FieldMetadata::enumeration(
         "lanes.memory_pressure_threshold",
         &["warning", "critical", "never"],
@@ -901,6 +921,7 @@ fn boundary_existing(error: &SectionError) -> bool {
     };
     [
         "limits",
+        "graph.writer_launch_seconds",
         "graph.limits",
         "graph.budget",
         "graph.allowed_read_roots",
@@ -920,6 +941,23 @@ fn boundary_existing(error: &SectionError) -> bool {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[test]
+    fn writer_launch_allowance_defaults_and_validates() {
+        let mut config = config();
+        assert_eq!(config.graph.writer_launch_seconds, 55);
+        for seconds in [0, 14_401] {
+            config.graph.writer_launch_seconds = seconds;
+            assert!(
+                config
+                    .validate()
+                    .iter()
+                    .any(|e| e.field == "graph.writer_launch_seconds")
+            );
+        }
+        config.graph.writer_launch_seconds = 2;
+        assert!(config.validate().is_empty());
+    }
 
     #[test]
     fn graph_document_bound_reports_its_name_and_owner() {

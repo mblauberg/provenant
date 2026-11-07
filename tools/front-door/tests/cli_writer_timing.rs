@@ -16,19 +16,7 @@ fn run_wait_admits_after_registry_lock_is_released() -> Result {
     use provenant_fabric_runtime::graph::FileJournal;
     use std::time::{Duration, Instant};
 
-    let executor = provenant_os::exec::SystemExecutor::new(1)?;
     let cancel = CancelToken::new();
-    if let Err(error) = provenant_confinement::permissions::system_backend(
-        &provenant_confinement::permissions::BackendContext {
-            executor: &executor,
-            cancel: &cancel,
-            #[cfg(target_os = "macos")]
-            env: &[],
-        },
-    ) {
-        provenant_test_support::skip_sandbox_dependent_test(format!("writer fixture: {error}"))?;
-        return Ok(());
-    }
     let rig = TestRig::new()?;
     let _cleanup = rig.process_cleanup();
     let git = provenant_os::git::git_executable().ok_or("git")?;
@@ -73,17 +61,14 @@ fn run_wait_admits_after_registry_lock_is_released() -> Result {
     let path = document.to_str().ok_or("document")?;
     std::thread::scope(|scope| -> Result {
         let worker = scope.spawn(|| {
-            rig.command(&["run", "--file", path, "--wait=30s", "--json"])
+            rig.command(&["run", "--file", path, "--wait=1s", "--json"])
                 .map_err(|error| error.to_string())
         });
         let deadline = Instant::now() + Duration::from_secs(20);
         let observed = loop {
             if let Ok(Some(checkpoint)) =
                 FileJournal::read_checkpoint(&roots.state, project, "released-lock")
-                && checkpoint.nodes[0]
-                    .launch_retry
-                    .as_ref()
-                    .is_some_and(|retry| retry.failures > 0)
+                && !checkpoint.nodes[0].attempts.is_empty()
             {
                 break true;
             }
@@ -92,12 +77,16 @@ fn run_wait_admits_after_registry_lock_is_released() -> Result {
             }
             std::thread::yield_now();
         };
+        // The later fast_forward registry wait must survive both the one-second
+        // settlement deadline and the old five-second context budget.
+        std::thread::sleep(Duration::from_secs(6));
+        assert!(!worker.is_finished(), "launch ended before its allowance");
         drop(guard);
         let output = worker
             .join()
             .map_err(|_| "CLI thread panicked")?
             .map_err(|error| format!("CLI: {error}"))?;
-        assert!(observed, "CLI never recorded registry contention");
+        assert!(observed, "CLI never reached writer launch");
         let value: Value = serde_json::from_slice(&output.stdout.bytes)?;
         let node = &value["data"]["checkpoint"]["nodes"][0];
         assert_ne!(node["state"], "blocked", "{value}");
@@ -111,6 +100,10 @@ fn run_wait_admits_after_registry_lock_is_released() -> Result {
 #[test]
 fn run_wait_reports_the_held_registry_lock() -> Result {
     let rig = TestRig::new()?;
+    std::fs::write(
+        rig.state.join("config.toml"),
+        "schema_version=1\n[domains.fabric.graph]\nwriter_launch_seconds=2\n",
+    )?;
     let git = provenant_os::git::git_executable().ok_or("git")?;
     let commit = rig.execute(&git, &["commit", "--allow-empty", "-qm", "base"], None)?;
     assert_eq!(code(&commit), 0, "{commit:?}");
@@ -142,6 +135,7 @@ fn run_wait_reports_the_held_registry_lock() -> Result {
             }]
         }))?,
     )?;
+    let started = std::time::Instant::now();
     let output = rig.command(&[
         "run",
         "--file",
@@ -149,11 +143,18 @@ fn run_wait_reports_the_held_registry_lock() -> Result {
         "--wait=1s",
         "--json",
     ])?;
+    assert!(started.elapsed() >= std::time::Duration::from_secs(2));
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(15),
+        "elapsed={:?} output={output:?}",
+        started.elapsed()
+    );
     let value: Value = serde_json::from_slice(&output.stdout.bytes)?;
     assert_ne!(code(&output), 0, "{value}");
     let wire = serde_json::to_string(&value)?;
     assert!(wire.contains("writer_lock_busy"), "{value}");
     assert!(wire.contains("writer lock"), "{value}");
+    assert!(wire.contains("then retry"), "{value}");
     let node = &value["data"]["checkpoint"]["nodes"][0];
     assert_eq!(node["state"], "blocked", "{value}");
     assert_eq!(

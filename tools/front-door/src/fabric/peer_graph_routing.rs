@@ -322,7 +322,7 @@ fn graph_owner_fails_node_when_result_integrity_is_lost()
             &Default::default(),
             &Default::default(),
         )?;
-        let mut owner = BoundGraphOwner { admission_timeout: None, launch_warnings: Vec::new(), repo_facts: Default::default(),
+        let mut owner = BoundGraphOwner { writer_launch_budget: None, admission_timeout: None, launch_warnings: Vec::new(), repo_facts: Default::default(),
             factory: &factory,
             integration_base: None,
             integration_branch: None,
@@ -433,7 +433,7 @@ fn graph_owner_fails_node_when_result_integrity_is_lost()
         &Default::default(),
         &Default::default(),
     )?;
-    let mut owner = BoundGraphOwner { admission_timeout: None, launch_warnings: Vec::new(), repo_facts: Default::default(),
+    let mut owner = BoundGraphOwner { writer_launch_budget: None, admission_timeout: None, launch_warnings: Vec::new(), repo_facts: Default::default(),
         factory: &factory,
         integration_base: None,
         integration_branch: None,
@@ -634,7 +634,7 @@ fn exact_route_in_an_excluded_family_is_refused_before_launch()
         &Default::default(),
         &Default::default(),
     )?;
-    let mut owner = BoundGraphOwner { admission_timeout: None, launch_warnings: Vec::new(), repo_facts: Default::default(),
+    let mut owner = BoundGraphOwner { writer_launch_budget: None, admission_timeout: None, launch_warnings: Vec::new(), repo_facts: Default::default(),
         factory: &factory,
         integration_base: None,
         integration_branch: None,
@@ -756,7 +756,7 @@ fn production_owner_panel_uses_distinct_families_and_synthesises()
         &document.graph_id, budget, &cancel, &factory.clock).map_err(|error| format!("open journal: {error}"))?;
     journal.bind(graph::GraphExecution { review_base: None, extra: Default::default(),
         integration_base: None, directory: fixture.rig.project.clone(), document: document.clone() })?;
-    let mut owner = BoundGraphOwner { admission_timeout: None, launch_warnings: Vec::new(), repo_facts: Default::default(), factory: &factory, integration_base: None, integration_branch: None,
+    let mut owner = BoundGraphOwner { writer_launch_budget: None, admission_timeout: None, launch_warnings: Vec::new(), repo_facts: Default::default(), factory: &factory, integration_base: None, integration_branch: None,
         network: None, capability_overrides: Default::default(), exclude: Vec::new(), budget, cancel: &cancel, prices: None, tick: false };
     let catalogue = Catalogue::bundled()?;
     let models = ["codex/gpt-6-luna", "claude/claude-haiku-5-5", "agy/gemini-3.8-flash", "opencode/opencode-go/glm-5.3-flash"];

@@ -27,10 +27,10 @@ impl Default for LaunchRetryPolicy {
     }
 }
 
-/// Persisted retry wait on a node whose launch failed with a transient kind.
-/// The wait belongs to the node's current attempt: it is recorded under the
-/// attempt key, so a later retry observes or relaunches exactly that attempt,
-/// never a duplicate.
+/// Persisted launch allowance, sealed before writer binding, with an optional
+/// retry wake after a transient failure. The allowance is retained for the
+/// node's current attempt, so a retry observes or relaunches that attempt
+/// without renewing its deadline or launching a duplicate.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LaunchRetry {
     #[serde(flatten)]

@@ -845,7 +845,9 @@ pub(super) fn begin_attempt(
         usage: None,
     });
     checkpoint.nodes[node_index].state = NodeState::Running;
-    if let Some(timing) = timing {
+    if let Some(timing) = timing
+        && checkpoint.nodes[node_index].launch_retry.is_none()
+    {
         let deadline = timing.clock.and_then(|now| {
             DurationMicros::from_seconds(timing.admission_seconds)
                 .ok()
