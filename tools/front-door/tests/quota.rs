@@ -134,6 +134,64 @@ fn show_is_read_only_and_tick_publishes_partial_coverage() -> Result {
 }
 
 #[test]
+fn no_flags_compact_view_shows_all_configured_accounts_including_exhausted() -> Result {
+    use std::os::unix::fs::PermissionsExt;
+
+    let rig = quota_rig()?;
+    for index in 0..13 {
+        let label = format!("work-{index}");
+        let key = format!("claude-{index}");
+        support::register_account(&rig, "claude", &label, &key, &rig.root.join(&key))?;
+    }
+
+    let account_dir = rig.state.join("quota/claude-0");
+    std::fs::create_dir_all(&account_dir)?;
+    std::fs::set_permissions(&account_dir, std::fs::Permissions::from_mode(0o700))?;
+    let account = serde_json::json!({
+        "adapter":"claude", "account_key":"claude-0", "label":"work-0"
+    });
+    let observed = jiff_time()?;
+    let record = serde_json::json!({
+        "schema_version":1,
+        "account":account,
+        "revision":1,
+        "snapshot":{
+            "schema_version":1,
+            "account":account,
+            "revision":1,
+            "status":"exhausted",
+            "observed_unix_seconds":observed,
+            "source_ref":"fixture",
+            "authority_ref":null,
+            "windows":[]
+        },
+        "claim":null,
+        "last_attempt_unix_seconds":observed,
+        "backoff_until_unix_seconds":null,
+        "failures":0,
+        "last_error":null,
+        "refusals":[]
+    });
+    let path = account_dir.join("claude.json");
+    std::fs::write(&path, serde_json::to_vec(&record)?)?;
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+
+    let output = rig.command(&["quota"])?;
+    assert_eq!(code(&output), 0);
+    let compact = String::from_utf8(output.stdout.bytes)?;
+    assert!(compact.contains("work-0 [claude]: exhausted"), "{compact}");
+    for index in 1..13 {
+        assert!(
+            compact.contains(&format!("work-{index} [claude]: unknown")),
+            "missing work-{index} row in {compact}"
+        );
+    }
+    assert!(compact.contains("default [codex]:"), "{compact}");
+    assert!(!compact.contains("more not shown"), "{compact}");
+    rig.assert_legacy_unchanged()
+}
+
+#[test]
 fn readiness_write_failure_warns_and_keeps_the_account_commit() -> Result {
     let rig = quota_rig()?;
     std::fs::write(rig.state.join("readiness"), b"blocked directory")?;
