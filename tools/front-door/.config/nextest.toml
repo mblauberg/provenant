@@ -45,7 +45,7 @@ not (
         test(=permissions::tests::escape::native_sandbox_blocks_path_escape_probes)
     )) |
     (package(=provenant-fabric-runtime) & test(=fetch::tests::cleanup_refuses_hard_links)) |
-    (package(=provenant-supervisor) & (
+    (package(=provenant-os) & (
         test(=disk::tests::measurement_counts_hard_links_once_and_sizes_target_contents) |
         test(=fs::tests::owner_lock_refuses_cancelled_requests_hardlinks_and_writable_anchors)
     )) |
@@ -54,9 +54,9 @@ not (
         test(=run::provider::tests::retained_state_copy_refuses_a_file_swapped_for_a_hard_link)
     )) |
     (package(=provenant-supervisor) & (
-        binary(=process) | binary(=custody) |
-        test(=fs::tests::process_crash_at_publication_boundaries_leaves_old_or_new_complete_bytes)
+        binary(=process) | binary(=custody)
     )) |
+    (package(=provenant-os) & test(=fs::tests::process_crash_at_publication_boundaries_leaves_old_or_new_complete_bytes)) |
     (package(=provenant-workflow) & test(=store::tests::concurrency::concurrent_process_writers_on_one_revision_have_one_winner)) |
     (package(=provenant-cli) & test(=run::provider::tests::retained_state_copy_skips_entries_swapped_after_their_check)) |
     (package(=provenant-fabric-runtime) & (

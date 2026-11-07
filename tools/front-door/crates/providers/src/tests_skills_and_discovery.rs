@@ -916,7 +916,7 @@ fn staged_skills_native_probes() -> Result<(), Box<dyn std::error::Error>> {
             let output = std::process::Command::new("/usr/bin/sandbox-exec")
                 .args(["-p", &profile])
                 .arg(&executable)
-                .args(["--exact", "tests::staged_skills_probe_child", "--nocapture"])
+                .args(["--exact", "tests::staged_skills_probe_child", "--ignored", "--nocapture"])
                 .env_clear()
                 .env("PROVENANT_PROBE_STAGE", stage.join("SKILL.md"))
                 .env("PROVENANT_PROBE_HOST", skills.join("SKILL.md"))
@@ -944,10 +944,9 @@ fn staged_skills_native_probes() -> Result<(), Box<dyn std::error::Error>> {
 
 #[cfg(target_os = "macos")]
 #[test]
+#[ignore = "invoked by staged_skills_native_probes"]
 fn staged_skills_probe_child() {
-    let Some(stage) = std::env::var_os("PROVENANT_PROBE_STAGE") else {
-        return;
-    };
+    let stage = std::env::var_os("PROVENANT_PROBE_STAGE").expect("stage path");
     let host = std::env::var_os("PROVENANT_PROBE_HOST").expect("host path");
     let secret = std::env::var_os("PROVENANT_PROBE_SECRET").expect("secret path");
     assert_eq!(std::fs::read(&stage).unwrap(), b"fixture skill");
