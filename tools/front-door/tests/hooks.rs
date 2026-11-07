@@ -176,6 +176,56 @@ fn shell_commands_are_left_to_confinement_even_with_unreadable_config() -> Resul
     }
     Ok(())
 }
+/// Medium: the production PreToolUse protocol permits the exact command that
+/// a real shell then executes. Each disposable root has the same role in the
+/// hook's context as in the shell; no host HOME, state or checkout is touched.
+#[test]
+fn removed_shell_rules_allow_real_commands_on_disposable_roots() -> Result {
+    for root in ["home", "state", "project"] {
+        let rig = TestRig::new()?;
+        let target = match root {
+            "home" => &rig.home,
+            "state" => &rig.state,
+            _ => &rig.project,
+        };
+        let sentinel = target.join("disposable-sentinel");
+        fs::write(&sentinel, "must be removed by the shell")?;
+        let retained = rig.root.join("retained-sentinel");
+        fs::write(&retained, "outside the selected root")?;
+        // Literal operands also exercise the former table's path resolution.
+        // Quote fixture paths as shell words, including any apostrophe.
+        let command = format!(
+            "rm -rf '{}'",
+            target.to_str().ok_or("target")?.replace('\'', "'\\''")
+        );
+        let event = serde_json::json!({
+            "hook_event_name":"PreToolUse", "tool_name":"Bash",
+            "tool_input":{"command":command}, "session_id":"shell-evidence",
+            "cwd":rig.project,
+        });
+        let allowed = rig.execute(
+            Path::new(env!("CARGO_BIN_EXE_provenant")),
+            &["hook", "claude", "pre-tool-use"],
+            Some(&serde_json::to_vec(&event)?),
+        )?;
+        assert_eq!(code(&allowed), 0, "{root}: {allowed:?}");
+        if !allowed.stdout.bytes.is_empty() {
+            let response: serde_json::Value = serde_json::from_slice(&allowed.stdout.bytes)?;
+            assert_ne!(
+                response["hookSpecificOutput"]["permissionDecision"], "deny",
+                "{root}: {response}"
+            );
+        }
+        // Hook approval alone is insufficient: execute its exact command.
+        assert!(sentinel.is_file());
+        let output = rig.execute(Path::new("/bin/sh"), &["-c", &command], None)?;
+        assert_eq!(code(&output), 0, "{root}: {output:?}");
+        assert!(!target.exists(), "shell did not remove fixture {root}");
+        assert_eq!(fs::read_to_string(retained)?, "outside the selected root");
+    }
+    Ok(())
+}
+
 #[test]
 fn denial_write_failure_uses_recorded_exit_two_fallback() -> Result {
     let rig = TestRig::new()?;
