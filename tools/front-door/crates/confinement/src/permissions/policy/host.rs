@@ -104,6 +104,7 @@ fn inventory_links(
     home: &Path,
     source: &Path,
     scratch: &Path,
+    warnings: &mut impl Write,
 ) -> Result<(), PermissionError> {
     let mut pending = vec![(root.path.clone(), 0)];
     let mut count = 0;
@@ -120,7 +121,7 @@ fn inventory_links(
             }
             Err(_) => {
                 let _ = writeln!(
-                    std::io::stderr().lock(),
+                    warnings,
                     "warning: cannot inspect credential directory {}",
                     directory.display()
                 );
@@ -130,7 +131,7 @@ fn inventory_links(
         for entry in entries {
             let Ok(entry) = entry else {
                 let _ = writeln!(
-                    std::io::stderr().lock(),
+                    warnings,
                     "warning: cannot inspect an entry in credential directory {}",
                     directory.display()
                 );
@@ -138,7 +139,7 @@ fn inventory_links(
             };
             if count == CREDENTIAL_WALK_MAX_ENTRIES {
                 let _ = writeln!(
-                    std::io::stderr().lock(),
+                    warnings,
                     "warning: credential symlink inventory entry limit reached at {}",
                     root.path.display()
                 );
@@ -147,7 +148,7 @@ fn inventory_links(
             count += 1;
             let Ok(kind) = entry.file_type() else {
                 let _ = writeln!(
-                    std::io::stderr().lock(),
+                    warnings,
                     "warning: cannot inspect credential entry in {}",
                     directory.display()
                 );
@@ -159,7 +160,7 @@ fn inventory_links(
                     (resolve_boundary_path(&path), std::fs::metadata(&path))
                 else {
                     let _ = writeln!(
-                        std::io::stderr().lock(),
+                        warnings,
                         "warning: cannot resolve credential symlink {}",
                         path.display()
                     );
@@ -186,7 +187,7 @@ fn inventory_links(
                 }
                 if scope == PathScope::Subtree && !target.starts_with(home) {
                     let _ = writeln!(
-                        std::io::stderr().lock(),
+                        warnings,
                         "warning: skipping credential symlink directory outside home: {}",
                         path.display()
                     );
@@ -196,7 +197,7 @@ fn inventory_links(
                     && (source.starts_with(&target) || scratch.starts_with(&target))
                 {
                     let _ = writeln!(
-                        std::io::stderr().lock(),
+                        warnings,
                         "warning: skipping credential symlink target covering source or scratch: {}",
                         path.display()
                     );
@@ -218,7 +219,7 @@ fn inventory_links(
                     .is_err()
                 {
                     let _ = writeln!(
-                        std::io::stderr().lock(),
+                        warnings,
                         "warning: cannot represent credential symlink target: {}",
                         path.display()
                     );
@@ -228,9 +229,21 @@ fn inventory_links(
                     mandatory.add_credentials_alias(root, PathGrant { path, scope })?;
                 }
             } else if kind.is_dir() {
+                // OpenCode keeps session data here, separately from its root
+                // credential endpoints. Do not spend the inventory budget on
+                // logs, messages or Git snapshots. Inspect links at these names
+                // above, and keep walking similarly named trees in other stores.
+                if depth == 0
+                    && root.path.file_name() == Some(OsStr::new("opencode"))
+                    && ["log", "storage", "snapshot", "shell"]
+                        .iter()
+                        .any(|name| entry.file_name() == *name)
+                {
+                    continue;
+                }
                 if depth + 1 >= CREDENTIAL_WALK_MAX_DEPTH {
                     let _ = writeln!(
-                        std::io::stderr().lock(),
+                        warnings,
                         "warning: credential symlink inventory depth limit reached at {}",
                         path.display()
                     );
@@ -338,6 +351,7 @@ impl MandatoryRoots {
                     &resolved_home,
                     &resolved_source,
                     &resolved_scratch,
+                    &mut std::io::stderr().lock(),
                 )?;
                 for endpoint in &endpoints {
                     let path = root.path.join(endpoint);
@@ -603,6 +617,121 @@ mod tests {
         Ok(())
     }
 
+    // Medium: real filesystem inventory, no native sandbox required.
+    #[test]
+    fn inventory_skips_opencode_runtime_trees() -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().canonicalize()?;
+        let store = root.join("opencode");
+        let target = root.join("credential");
+        std::fs::write(&target, b"fixture")?;
+        for name in ["log", "storage", "snapshot", "shell"] {
+            let directory = store.join(name);
+            std::fs::create_dir_all(&directory)?;
+            for index in 0..=CREDENTIAL_WALK_MAX_ENTRIES {
+                std::fs::File::create(directory.join(index.to_string()))?;
+            }
+        }
+        // A symlink at a runtime directory name must still be inventoried.
+        std::fs::remove_dir_all(store.join("shell"))?;
+        std::os::unix::fs::symlink(&target, store.join("shell"))?;
+        let mut mandatory = MandatoryRoots::new(
+            &root.join("home"),
+            &root.join("state"),
+            &root.join("source"),
+        )?;
+        let mut warnings = Vec::new();
+        inventory_links(
+            &mut mandatory,
+            &PathGrant {
+                path: store,
+                scope: PathScope::Subtree,
+            },
+            &root,
+            &root.join("source"),
+            &root.join("scratch"),
+            &mut warnings,
+        )?;
+        assert!(
+            warnings.is_empty(),
+            "{}",
+            String::from_utf8_lossy(&warnings)
+        );
+        assert!(mandatory.credentials().contains(&PathGrant {
+            path: target,
+            scope: PathScope::Exact
+        }));
+        Ok(())
+    }
+
+    // Medium: exceed the real budget without depending on directory entry order.
+    #[test]
+    fn inventory_root_limit_warns_and_preserves_later_roots()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().canonicalize()?;
+        let roots = fixture_roots(&root)?;
+        let home = root.join("home");
+        let huge = home.join("huge");
+        let later = home.join("later");
+        let target = home.join("credential");
+        let missed = home.join("beyond-budget");
+        for directory in [&huge, &later, &huge.join("storage")] {
+            std::fs::create_dir_all(directory)?;
+        }
+        for index in 0..=CREDENTIAL_WALK_MAX_ENTRIES {
+            std::fs::File::create(huge.join(index.to_string()))?;
+        }
+        for path in [&target, &missed] {
+            std::fs::write(path, b"fixture")?;
+        }
+        std::os::unix::fs::symlink(&target, later.join("link"))?;
+        std::os::unix::fs::symlink(&missed, huge.join("storage/link"))?;
+        let subtree = |path| PathGrant {
+            path,
+            scope: PathScope::Subtree,
+        };
+        let huge = subtree(huge);
+        let mut mandatory = MandatoryRoots::new(&home, &root.join("state"), &root.join("source"))?;
+        let mut warnings = Vec::new();
+        inventory_links(
+            &mut mandatory,
+            &huge,
+            &home,
+            &root.join("source"),
+            &root.join("scratch"),
+            &mut warnings,
+        )?;
+        let warnings = String::from_utf8(warnings)?;
+        assert!(warnings.contains("credential symlink inventory entry limit reached"));
+        assert!(warnings.contains(&huge.path.display().to_string()));
+        assert!(
+            !mandatory
+                .credentials()
+                .iter()
+                .any(|grant| grant.path == missed)
+        );
+        let inventory = MandatoryRoots::for_host(
+            &roots,
+            &home,
+            &root.join("source"),
+            &[huge, subtree(later)],
+            &[],
+            &[],
+        )?;
+        assert!(inventory.credentials().contains(&PathGrant {
+            path: target,
+            scope: PathScope::Exact
+        }));
+        assert!(
+            !inventory
+                .credentials()
+                .iter()
+                .any(|grant| grant.path == missed)
+        );
+        Ok(())
+    }
+
     #[test]
     fn inventory_depth_limit_keeps_earlier_links() -> Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
@@ -635,6 +764,7 @@ mod tests {
             &root.join("home"),
             &root.join("source"),
             &root.join("scratch"),
+            &mut std::io::stderr().lock(),
         )?;
         assert!(
             mandatory
