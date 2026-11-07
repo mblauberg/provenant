@@ -202,15 +202,21 @@ impl AttemptOwner for Owner {
             branch: replay.branch.map(str::to_owned),
         });
         let (result, branch, commit) = match key.node_id.as_str() {
-            "write" => (None, self.writer_branch.clone(), Some(WRITE_HEAD)),
+            "write" | "delivery--implement" => (None, self.writer_branch.clone(), Some(WRITE_HEAD)),
             "repair" => (None, replay.branch.map(str::to_owned), Some(REPAIR_HEAD)),
             id if self.repair_fixture && id.ends_with("--fix") => {
                 (None, replay.branch.map(str::to_owned), Some(REPAIR_HEAD))
             }
             _ => {
-                let verdict = if self.repair_fixture && key.node_id == "initial--lens" {
+                let verdict = if self.repair_fixture
+                    && (key.node_id == "initial--lens"
+                        || key.node_id == "delivery--initial-review--lenses--correctness")
+                {
                     "```findings\n{\"schema_version\":1,\"findings\":[{\"id\":\"F1\",\"severity\":\"high\",\"file\":\"a.rs\",\"line\":1,\"summary\":\"defect\",\"status\":\"open\",\"evidence\":\"counterexample\",\"proposed_fix\":\"repair\"}]}\n```\nVERDICT: FAIL"
-                } else if self.repair_fixture && key.node_id == "initial--synthesis" {
+                } else if self.repair_fixture
+                    && (key.node_id == "initial--synthesis"
+                        || key.node_id == "delivery--initial-review--synthesis")
+                {
                     "```findings\n{\"schema_version\":1,\"findings\":[{\"id\":\"F1\",\"disposition\":\"accepted\",\"reason\":\"confirmed\"}]}\n```\nVERDICT: FAIL"
                 } else if self.repair_fixture {
                     "```findings\n{\"schema_version\":1,\"risk_tier\":\"substantial\",\"findings\":[]}\n```\nVERDICT: PASS"
@@ -374,6 +380,73 @@ fn findings_panels_feed_repair_and_land_the_reviewed_head() {
             run.checkpoint
         );
     }
+}
+
+#[test]
+fn bundled_deliver_repairs_findings_before_landing() {
+    let library = template::TemplateLibrary::bundled();
+    let resolvers = std::collections::BTreeMap::from([
+        ("review-topology".to_owned(), vec!["f0-v0-s0".to_owned()]),
+        ("review-panel".to_owned(), vec!["correctness".to_owned()]),
+        ("review-advice-correctness".to_owned(), vec![String::new()]),
+    ]);
+    let delivery = template::Compiler {
+        library: &library,
+        resolvers: &resolvers,
+    }
+    .compile(&json!({"id":"delivery","use":"deliver",
+            "with":{"worktree":"/wt/feature","write_scope":["src"]}}))
+    .unwrap();
+    let mut document: GraphDocument =
+        serde_json::from_value(json!({"schema_version":1,"graph_id":"bundled-deliver",
+        "context":{"risk_tier":"substantial"},"nodes":[]}))
+        .unwrap();
+    document.nodes.push(delivery);
+    let mut owner = owner();
+    owner.repair_fixture = true;
+    owner.repair_alternative = true;
+    owner.policy = Some(LandChoice {
+        policy: LandPolicy::Auto,
+        source: LandSource::Default,
+    });
+    let mut journal = Journal::default();
+    let run = advance(&document, &mut owner, &mut journal).unwrap();
+    assert!(
+        run.checkpoint.successful(),
+        "{:?}",
+        run.checkpoint
+            .nodes
+            .iter()
+            .map(|n| (&n.id, n.state, &n.advance_error))
+            .collect::<Vec<_>>()
+    );
+    let fix = owner
+        .launches
+        .iter()
+        .position(|launch| launch.node.ends_with("--fix"))
+        .unwrap();
+    for field in [
+        "F1",
+        "\"lens\":\"correctness\"",
+        "\"severity\":\"high\"",
+        "\"file\":\"a.rs\"",
+        "\"line\":1",
+        "\"evidence\":\"counterexample\"",
+        "\"proposed_fix\":\"repair\"",
+    ] {
+        assert!(
+            owner.repair_prompts[fix].contains(field),
+            "missing {field} in {}",
+            owner.repair_prompts[fix]
+        );
+    }
+    assert!(
+        owner
+            .launches
+            .iter()
+            .any(|launch| launch.node.contains("--check--correctness"))
+    );
+    assert_eq!(owner.lands[0].1, REPAIR_HEAD);
 }
 
 fn nodes(tier: &str) -> serde_json::Value {
