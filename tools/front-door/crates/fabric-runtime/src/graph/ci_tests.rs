@@ -581,7 +581,7 @@ fn ci_check_names_are_validated() {
         *names = checks.into_iter().map(str::to_owned).collect();
         assert_eq!(
             validate_plan(&doc).err(),
-            Some("invalid CI gate check names")
+            Some("node ci: invalid CI gate check names")
         );
     }
 }
@@ -656,7 +656,7 @@ fn ci_validation_rejects_bad_targets_and_timeouts() {
         });
         assert_eq!(
             validate_plan(&doc).err(),
-            Some("invalid CI gate target or timeout")
+            Some("node ci: invalid CI gate target or timeout")
         );
     }
     let doc = document();
@@ -723,7 +723,7 @@ fn ci_node_target_requires_a_delivered_branch_and_upstream_dependency() {
     doc.nodes[1].depends_on.clear();
     assert_eq!(
         validate_plan(&doc).err(),
-        Some("CI target node must be an upstream dependency")
+        Some("node ci: CI target node must be an upstream dependency")
     );
 }
 
