@@ -931,7 +931,8 @@ pub(super) fn changed_file_evidence(
             .tasks
             .into_iter()
             .find(|task| task.task_id == record.task_id)?;
-        let project = task.writer?.project;
+        let writer = task.writer?;
+        let project = writer.project;
         let base: provenant_core::GitOid = task.base?.parse().ok()?;
         let head = record.head?;
         let git = provenant_os::git::git_executable()?;
@@ -967,7 +968,7 @@ pub(super) fn changed_file_evidence(
                 .take(limits::OUTPUT_PATHS)
                 .map(|path| {
                     (path.len() <= limits::PATH_BYTES)
-                        .then(|| project.join(path))
+                        .then(|| writer.worktree.join(path))
                         .and_then(|path| {
                             provenant_records::StructuredPathWire::from_path(&path).ok()
                         })
