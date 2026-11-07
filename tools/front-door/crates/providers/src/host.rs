@@ -312,6 +312,7 @@ impl Executor for HostProbeExecutor<'_> {
             inherited_profile: options.inherited_profile,
             process_group: options.process_group,
             cleanup_process_group: options.cleanup_process_group,
+            group_watchdog: options.group_watchdog,
             stdout: options.stdout,
             stderr: options.stderr,
             stdout_decoder: options.stdout_decoder,

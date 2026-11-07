@@ -52,6 +52,25 @@ pub fn configure_command(
     env: Option<&[(OsString, OsString)]>,
     new_session: bool,
 ) -> io::Result<()> {
+    configure_command_with_watchdog(command, pass_fds, env, new_session, None)
+}
+
+pub(crate) fn configure_command_with_watchdog(
+    command: &mut Command,
+    pass_fds: &[BorrowedFd<'_>],
+    env: Option<&[(OsString, OsString)]>,
+    new_session: bool,
+    watchdog: Option<std::time::Duration>,
+) -> io::Result<()> {
+    if watchdog.is_some() && !new_session {
+        return Err(io::Error::from_raw_os_error(libc::EINVAL));
+    }
+    let watchdog = watchdog
+        .map(|timeout| {
+            i64::try_from(timeout.as_secs()).map(|seconds| (seconds, timeout.subsec_nanos()))
+        })
+        .transpose()
+        .map_err(|_| io::Error::from_raw_os_error(libc::EINVAL))?;
     let pass: Vec<_> = pass_fds.iter().map(AsRawFd::as_raw_fd).collect();
     let spec = prepare(command, env)?;
     // SAFETY: callers use this configured command only with spawn, never exec
@@ -62,12 +81,17 @@ pub fn configure_command(
     // through spawn. Rust's exec-error pipe is already CLOEXEC. Failures
     // return errno through that pipe and std reaps the failed child.
     unsafe {
-        command.pre_exec(move || run_pre_exec(&pass, new_session, &spec));
+        command.pre_exec(move || run_pre_exec(&pass, new_session, &spec, watchdog));
     }
     Ok(())
 }
 
-fn run_pre_exec(pass: &[i32], new_session: bool, spec: &ExecSpec) -> io::Result<()> {
+fn run_pre_exec(
+    pass: &[i32],
+    new_session: bool,
+    spec: &ExecSpec,
+    watchdog: Option<(i64, u32)>,
+) -> io::Result<()> {
     reset_signals()?;
     if new_session {
         // SAFETY: called only in the forked child before exec; setsid reads no
@@ -75,6 +99,9 @@ fn run_pre_exec(pass: &[i32], new_session: bool, spec: &ExecSpec) -> io::Result<
         if unsafe { libc::setsid() } < 0 {
             return Err(io::Error::last_os_error());
         }
+    }
+    if let Some(timeout) = watchdog {
+        start_group_watchdog(timeout)?;
     }
     cloexec_descriptors()?;
     for &fd in pass {
@@ -91,6 +118,120 @@ fn run_pre_exec(pass: &[i32], new_session: bool, spec: &ExecSpec) -> io::Result<
         }
     }
     Err(spec.exec())
+}
+
+/// The watchdog belongs to the new private group, reserving its PGID until
+/// it kills that group. It cannot accidentally signal a recycled identity.
+/// It holds no descriptors, so it cannot extend unrelated locks or pipes.
+fn start_group_watchdog(timeout: (i64, u32)) -> io::Result<()> {
+    let mut now = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: writable stack timespec; clock_gettime retains no pointer and
+    // is async-signal-safe in this post-fork child.
+    if unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut now) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let nanos = now.tv_nsec + i64::from(timeout.1);
+    let deadline = libc::timespec {
+        tv_sec: now
+            .tv_sec
+            .checked_add(timeout.0)
+            .and_then(|seconds| seconds.checked_add(nanos / 1_000_000_000))
+            .ok_or_else(|| io::Error::from_raw_os_error(libc::EINVAL))?,
+        tv_nsec: nanos % 1_000_000_000,
+    };
+    // SAFETY: this post-fork process has no other threads. The watchdog below
+    // calls only async-signal-safe syscalls and never unwinds or allocates.
+    let pid = unsafe { libc::fork() };
+    if pid < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if pid != 0 {
+        let mut status = 0;
+        loop {
+            // SAFETY: pid names the exact unreaped child created above and
+            // status is live writable stack storage. No pointer escapes.
+            let waited = unsafe { libc::waitpid(pid, &mut status, 0) };
+            if waited == pid {
+                return if libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0 {
+                    Ok(())
+                } else {
+                    Err(io::Error::from_raw_os_error(libc::EIO))
+                };
+            }
+            if waited < 0 && io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+                continue;
+            }
+            return Err(io::Error::last_os_error());
+        }
+    }
+    if close_watchdog_descriptors().is_err() {
+        // SAFETY: the intermediate must never unwind. Its exact parent
+        // observes failure above and refuses before starting mutation.
+        unsafe { libc::_exit(126) };
+    }
+    // SAFETY: the intermediate has no other threads or live descriptors.
+    // Double-fork so the updater never inherits an unexpected child that
+    // a waitpid(-1) or wait-all operation could block on.
+    let watcher = unsafe { libc::fork() };
+    if watcher != 0 {
+        // SAFETY: report fork success/failure to the exact synchronous wait
+        // above without running destructors in this intermediate process.
+        unsafe { libc::_exit(if watcher > 0 { 0 } else { 127 }) };
+    }
+    loop {
+        // SAFETY: writable stack storage; no pointer escapes.
+        if unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut now) } != 0
+            || (now.tv_sec, now.tv_nsec) >= (deadline.tv_sec, deadline.tv_nsec)
+        {
+            break;
+        }
+        let mut remaining = libc::timespec {
+            tv_sec: deadline.tv_sec - now.tv_sec,
+            tv_nsec: deadline.tv_nsec - now.tv_nsec,
+        };
+        if remaining.tv_nsec < 0 {
+            remaining.tv_sec -= 1;
+            remaining.tv_nsec += 1_000_000_000;
+        }
+        // SAFETY: live read-only stack timespec, null remaining output.
+        // Interrupted sleeps re-sample the absolute deadline above.
+        if unsafe { libc::nanosleep(&remaining, std::ptr::null_mut()) } != 0
+            && io::Error::last_os_error().raw_os_error() != Some(libc::EINTR)
+        {
+            break;
+        }
+    }
+    // SAFETY: zero targets our own private group, whose identity this
+    // watchdog still reserves. Kill mutation processes before custody drops.
+    unsafe { libc::kill(0, libc::SIGKILL) };
+    // SAFETY: the watchdog must never unwind into the forked Rust runtime.
+    unsafe { libc::_exit(127) };
+}
+
+fn close_watchdog_descriptors() -> io::Result<()> {
+    let directory = if cfg!(target_os = "linux") {
+        c"/proc/self/fd"
+    } else {
+        c"/dev/fd"
+    };
+    // SAFETY: static path, no-create flags; async-signal-safe open.
+    let fd = unsafe {
+        libc::open(
+            directory.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let result = visit_directory_fds(fd, true);
+    // SAFETY: this child owns its private descriptor table; only this
+    // directory descriptor was retained during enumeration.
+    unsafe { libc::close(fd) };
+    result
 }
 
 /// Attempt exec in the current process without running the post-fork reset.
@@ -250,6 +391,10 @@ fn cloexec_descriptors() -> io::Result<()> {
 }
 
 fn mark_directory_fds(directory: i32) -> io::Result<()> {
+    visit_directory_fds(directory, false)
+}
+
+fn visit_directory_fds(directory: i32, close: bool) -> io::Result<()> {
     let mut buffer = [0_u8; 8192];
     loop {
         #[cfg(target_os = "linux")]
@@ -307,7 +452,16 @@ fn mark_directory_fds(directory: i32) -> io::Result<()> {
                 .iter()
                 .position(|&byte| byte == 0)
                 .ok_or_else(|| io::Error::from_raw_os_error(libc::EIO))?;
-            if let Some(fd) = descriptor_number(&name[..end]).filter(|&fd| fd > 2) {
+            if let Some(fd) = descriptor_number(&name[..end])
+                .filter(|&fd| if close { fd != directory } else { fd > 2 })
+            {
+                if close {
+                    // SAFETY: the watchdog owns its private fd table and
+                    // retains only the enumeration descriptor until return.
+                    unsafe { libc::close(fd) };
+                    offset += length;
+                    continue;
+                }
                 // SAFETY: fcntl acts only on the forked child's integral fd;
                 // F_GETFD reads its flags and retains no pointer.
                 let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };

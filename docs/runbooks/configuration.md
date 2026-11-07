@@ -505,17 +505,29 @@ known or a command override is configured.
 Provider preparation takes shared leases; updates need an exclusive lease.
 Busy providers are excluded from a lane's candidates without delaying other
 providers. When every candidate is busy, preparation waits up to the caller's
-`--wait`, capped at 30 seconds, then proceeds with the installed provider.
+`--wait`, capped at 30 seconds (30 seconds by default), then refuses with
+`provider_updating`. A busy provider is never probed without its shared lease.
+Skipped routes and pool candidates report the update rather than a disclosure
+denial. An absent confinement plan reports `confinement_unavailable`;
+`disclosure_denied` requires an explicit disclosure-policy refusal.
 Cancellation interrupts this wait. Preparation releases its leases before
 launching the provider; providers and their children inherit no update lease.
 Nested launches retry missing executable discovery under the preparation lease
 using the host's sealed search directories.
 
-The updater inherits the exclusive lease, keeping it held if the worker is
-killed. On timeout the worker kills the updater's whole process group. The
-lease remains held until the last inheriting process exits. A descendant that
-leaves the group with `setsid` or daemonises also keeps the lease until it exits;
-the group timeout cannot terminate it. Kernel lock release covers crashes;
+The detached update worker holds the exclusive lease across its version
+probes, update command and record writes. The scheduling check also briefly
+takes an exclusive lease to test availability. Version probes take at most
+four seconds each; the update command can take minutes (300 seconds by
+default). The updater inherits the lease, keeping it held if the worker is
+killed. An independent watchdog enforces the command's configured timeout even
+after worker death. Every command exit also kills remaining members of its
+private process group, so successful commands cannot leave background children
+holding the lease. The lease remains held until the last inheriting process
+exits. Custom update commands must remain in that group and must not daemonise:
+a descendant that escapes with `setsid` or `setpgid` cannot be killed by a group
+timeout and retains the fence until it exits, preventing concurrent mutation.
+Kernel lock release covers crashes;
 stable `.lock` files remain in
 `<state>/provider-updates/` to avoid inode replacement races. An interrupted
 update is recorded as failed and retried after the configured interval, as are

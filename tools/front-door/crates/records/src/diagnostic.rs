@@ -53,6 +53,71 @@ impl PlanFailure {
     }
 }
 
+/// Closed confinement refusal facts. No paths, provider output or OS text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfinementGuard {
+    CacheSweepDepthExceeded,
+    CacheSweepFailed,
+    ConfinementFilesystemFailed,
+    CredentialRootRefused,
+    GitControlEntriesExceeded,
+    GitControlHardLinked,
+    GitHeadReadFailed,
+    GitWriteAuthorityMissing,
+    GrantLimitExceeded,
+    InvalidPermissionPath,
+    InvalidPlanRoots,
+    InvalidPrivateHomeRecipe,
+    InvalidProfileFixture,
+    InvalidReadOnlyPolicy,
+    NestedConfinementUnsupported,
+    PathAnchorChanged,
+    PathNotUtf8,
+    PermissionNotRecorded,
+    PermissionRootTooBroad,
+    PinnedSourceRequiresGit,
+    PrivateHomeConflict,
+    PrivateHomeDurabilityUnconfirmed,
+    PrivateHomeFilesystemFailed,
+    PrivateHomeLimitExceeded,
+    PrivateHomeReadFailed,
+    PrivateHomeStateUnsupported,
+    ProcessPolicyMissing,
+    ProfileLimitExceeded,
+    ProfileTransportFailed,
+    ProjectBindingMismatch,
+    ProjectBindingMissing,
+    ProtectedPathOverlap,
+    ReadOnlyPreparationFailed,
+    ReadOnlyRunRefused,
+    RepositoryAuthorityRevalidationFailed,
+    SandboxBackendUnavailable,
+    SandboxExecutableMissing,
+    SandboxExecutableUntrusted,
+    SandboxExecutionFailed,
+    SandboxProbeCancelled,
+    SandboxProbeFailed,
+    SourceHeadInvalid,
+    SourceHeadMissing,
+    SourceHeadMoved,
+    UnconfinedExtensions,
+    UnsafePrivateHomeEntry,
+    UnsupportedSandboxPlatform,
+}
+
+impl ConfinementGuard {
+    pub fn project(self, diagnostic: Diagnostic) -> Diagnostic {
+        // Unit variants serialise to their stable snake_case guard code.
+        let Ok(serde_json::Value::String(code)) = serde_json::to_value(self) else {
+            return diagnostic;
+        };
+        diagnostic
+            .detail(format!("confinement plan: {}", code.replace('_', " ")))
+            .next("repair the requested grants or host confinement setup before retrying")
+    }
+}
+
 /// Where a configurable admission threshold came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -625,6 +690,7 @@ mod tests {
         for cause in [
             Cause::Disabled,
             Cause::MissingExecutable,
+            Cause::ProviderUpdating,
             Cause::UnknownAvailability,
             Cause::StaleAvailability,
             Cause::UnknownAccount,
@@ -676,6 +742,21 @@ mod tests {
         route.extra.insert(
             "guard_resource".into(),
             serde_json::json!({"kind": "TOKEN_SENTINEL", "detail": "/private/source"}),
+        );
+        let invalid = serde_json::to_string(&route.diagnostic()).unwrap();
+        assert!(!invalid.contains("TOKEN_SENTINEL"));
+        assert!(!invalid.contains("/private/source"));
+        route.extra.insert(
+            "confinement_guard".into(),
+            serde_json::json!(ConfinementGuard::ProtectedPathOverlap),
+        );
+        route.set_cause(RouteExclusionReason::ConfinementUnavailable);
+        let projected = route.diagnostic();
+        assert!(projected.detail.unwrap().contains("protected path overlap"));
+        assert!(!route.detail.contains("TOKEN_SENTINEL"));
+        route.extra.insert(
+            "confinement_guard".into(),
+            serde_json::json!("TOKEN_SENTINEL /private/source"),
         );
         let invalid = serde_json::to_string(&route.diagnostic()).unwrap();
         assert!(!invalid.contains("TOKEN_SENTINEL"));

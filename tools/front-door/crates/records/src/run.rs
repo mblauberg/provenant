@@ -1095,6 +1095,14 @@ impl SkippedRoute {
             .as_ref()
             .map(|cause| cause.diagnostic("REFUSED"))
             .unwrap_or_else(|| self.kind.diagnostic());
+        if self.cause == Some(crate::RouteExclusionReason::ConfinementUnavailable)
+            && let Some(guard) = self.extra.get("confinement_guard").and_then(|value| {
+                serde_json::from_value::<crate::diagnostic::ConfinementGuard>(value.clone()).ok()
+            })
+        {
+            diagnostic = guard.project(diagnostic);
+        }
+        // Preserve the preparation diagnostic when both typed fact sets exist.
         if let Some(failure) = self.extra.get("plan_error").and_then(|value| {
             serde_json::from_value::<crate::diagnostic::PlanFailure>(value.clone()).ok()
         }) {
@@ -1584,7 +1592,8 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let mut skipped: SkippedRoute = serde_json::from_value(serde_json::json!({
             "route": "fixture", "kind": "refused", "detail": "SECRET_SENTINEL",
-            "plan_error": "protected_overlap", "guard_boundary": "authority"
+            "plan_error": "protected_overlap", "guard_boundary": "authority",
+            "cause": "confinement_unavailable", "confinement_guard": "protected_path_overlap"
         }))?;
         skipped = serde_json::from_slice(&serde_json::to_vec(&skipped)?)?;
         assert_eq!(skipped.extra["guard_boundary"], "authority");

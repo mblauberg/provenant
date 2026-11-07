@@ -230,10 +230,20 @@ fn availability_access_and_scoped_quota_are_independent_gates()
     context.availability = &records;
     assert_eq!(
         reason(&resolve(&query, &context)?),
-        Some(&RouteExclusionReason::DisclosureDenied)
+        Some(&RouteExclusionReason::ConfinementUnavailable)
     );
     let records = [availability()];
     context.availability = &records;
+    assert_eq!(
+        reason(&resolve(&query, &context)?),
+        Some(&RouteExclusionReason::ConfinementUnavailable)
+    );
+    let denied = [AccessContext {
+        adapter: "codex",
+        disclosure_ref: "",
+        confinement_ref: "grant",
+    }];
+    context.access = &denied;
     assert_eq!(
         reason(&resolve(&query, &context)?),
         Some(&RouteExclusionReason::DisclosureDenied)

@@ -301,10 +301,13 @@ fn check_inner(
     );
     options.stdout = StreamPolicy::Discard;
     options.stderr = StreamPolicy::Discard;
-    // Inheritance keeps the fence intact if housekeeping is killed. A child
-    // that daemonises out of this group also keeps the lease until it exits.
+    // Inheritance keeps the fence intact if housekeeping is killed. The
+    // independent watchdog still kills this private group at its deadline;
+    // ordinary completion also cleans up background descendants.
     options.inherited_lease = Some(lease);
     options.process_group = true;
+    options.cleanup_process_group = true;
+    options.group_watchdog = true;
     let result = executor.execute(options);
     let succeeded =
         result.is_ok_and(|out| out.termination == Termination::Exit(0) && !out.timed_out);
@@ -339,6 +342,8 @@ mod tests {
                 assert_eq!(options.timeout, Duration::from_secs(300));
                 assert!(options.inherited_lease.is_some());
                 assert!(options.process_group);
+                assert!(options.cleanup_process_group);
+                assert!(options.group_watchdog);
                 assert!(matches!(
                     provenant_os::provider_fence::acquire(self.state, "claude", LockMode::Shared),
                     Err(provenant_os::fs::FsError::LockTimeout { .. })
@@ -536,10 +541,13 @@ mod tests {
             return Ok(());
         };
         let state = Path::new(&state);
+        let _unrelated =
+            provenant_os::provider_fence::acquire(state, "unrelated", LockMode::Exclusive)?;
         let settings = ProviderSettings {
             update: ProviderUpdate::Command {
                 command: vec![state.join("provider").to_string_lossy().into_owned()],
             },
+            update_timeout_seconds: 2,
             ..Default::default()
         };
         check(
@@ -555,7 +563,7 @@ mod tests {
 
     #[test]
     #[allow(clippy::disallowed_methods)] // A separate runner must be killed without unwinding.
-    fn killed_runner_keeps_exclusive_lease_until_updater_group_exits()
+    fn killed_runner_keeps_exclusive_lease_until_watchdog_stops_updater_group()
     -> Result<(), Box<dyn std::error::Error>> {
         if std::env::var_os("PROVENANT_TEST_UPDATER_STATE").is_some() {
             return updater_runner_fixture();
@@ -577,12 +585,12 @@ mod tests {
             .read(true)
             .write(true)
             .open(&fifo)?;
-        std::fs::write(&executable, b"#!/bin/sh\nif [ \"$1\" = --version ]; then echo 1.0; exit; fi\n(IFS= read -r release < release) &\necho ready > ready\nwait\n")?;
+        std::fs::write(&executable, b"#!/bin/sh\nif [ \"$1\" = --version ]; then echo 1.0; exit; fi\n(IFS= read -r release < release; echo mutated > survived) &\necho ready > ready\nwait\n")?;
         std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700))?;
         let mut runner = std::process::Command::new(std::env::current_exe()?)
             .args([
                 "--exact",
-                "update::tests::killed_runner_keeps_exclusive_lease_until_updater_group_exits",
+                "update::tests::killed_runner_keeps_exclusive_lease_until_watchdog_stops_updater_group",
                 "--nocapture",
             ])
             .env("PROVENANT_TEST_UPDATER_STATE", temp.path())
@@ -597,21 +605,94 @@ mod tests {
         runner.kill()?;
         runner.wait()?;
         let busy = provenant_os::provider_fence::acquire(temp.path(), "claude", LockMode::Shared);
-        // Always release the fixture even if the regression assertion fails.
-        writeln!(release, "exit")?;
-        ready?;
-        assert!(matches!(
-            busy,
-            Err(provenant_os::fs::FsError::LockTimeout { .. })
-        ));
-        let _lane = provenant_os::provider_fence::wait(
+        // The watchdog must not retain unrelated descriptors from the runner.
+        let unrelated =
+            provenant_os::provider_fence::acquire(temp.path(), "unrelated", LockMode::Shared);
+        let recovered = provenant_os::provider_fence::wait(
             temp.path(),
             "claude",
             LockMode::Shared,
             WaitBudget::cli(clock.mono_now(), 5)?,
             &CancelToken::new(),
             &clock,
-        )?;
+        );
+        // Always release the fixture even if the regression assertion fails.
+        writeln!(release, "exit")?;
+        ready?;
+        let _unrelated = unrelated?;
+        assert!(matches!(
+            busy,
+            Err(provenant_os::fs::FsError::LockTimeout { .. })
+        ));
+        let _lane = recovered?;
+        assert!(!temp.path().join("survived").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn successful_updater_cleans_background_descendants_before_releasing_fence()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let executable = temp.path().join("provider");
+        std::fs::write(&executable, b"#!/bin/sh\nif [ \"$1\" = --version ]; then echo 1.0; exit; fi\n(trap '' TERM; while [ ! -f continue ]; do :; done; echo mutated > survived) &\nexit 0\n")?;
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700))?;
+        let settings = ProviderSettings {
+            update: ProviderUpdate::Command {
+                command: vec![executable.to_string_lossy().into_owned()],
+            },
+            update_timeout_seconds: 2,
+            ..Default::default()
+        };
+        let record = check(
+            temp.path(),
+            "claude",
+            &executable,
+            &settings,
+            &provenant_os::exec::SystemExecutor::new(1)?,
+            100,
+        )?
+        .ok_or("no update")?;
+        assert_eq!(record.outcome, "updated");
+        let clock = provenant_os::clock::SystemClock::new();
+        use provenant_core::Clock;
+        let recovered = provenant_os::provider_fence::wait(
+            temp.path(),
+            "claude",
+            LockMode::Shared,
+            provenant_core::WaitBudget::cli(clock.mono_now(), 1)?,
+            &provenant_core::CancelToken::new(),
+            &clock,
+        );
+        std::fs::write(temp.path().join("continue"), b"continue")?;
+        let _lane = recovered?;
+        assert!(!temp.path().join("survived").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn updater_wait_all_does_not_wait_for_the_watchdog() -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let settings = ProviderSettings {
+            update: ProviderUpdate::Command {
+                command: vec![
+                    "python3".into(),
+                    "-c".into(),
+                    "import os\ntry:\n os.waitpid(-1, 0)\nexcept ChildProcessError:\n pass\nelse:\n raise SystemExit(1)".into(),
+                ],
+            },
+            update_timeout_seconds: 2,
+            ..Default::default()
+        };
+        let record = check(
+            temp.path(),
+            "claude",
+            Path::new("/usr/bin/true"),
+            &settings,
+            &provenant_os::exec::SystemExecutor::new(1)?,
+            100,
+        )?
+        .ok_or("no update")?;
+        assert_eq!(record.outcome, "updated");
         Ok(())
     }
 
