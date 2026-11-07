@@ -951,3 +951,49 @@ fn extensions_cannot_supply_compiled_node_fields() {
     template.nodes[0] = json!({"id":"work", "use":"task", "extensions":{"custom":"${root}"}});
     template.check_authority().unwrap();
 }
+
+#[test]
+fn leaf_node_tables_reject_instance_only_syntax() {
+    for field in ["use", "with", "over", "repeat", "min_ok", "reduce_verdict"] {
+        let mut library = library();
+        library
+            .insert(
+                Layer::Inline,
+                "invalid",
+                serde_json::from_value(json!({
+                    "node":{field:"ignored"}
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        let error = Compiler::new(&library)
+            .compile(&json!({"id":"stage", "use":"invalid"}))
+            .unwrap_err();
+        assert!(error.contains("stage") && error.contains(field), "{error}");
+    }
+}
+
+#[test]
+fn parameterised_composite_members_reject_unknown_fields() {
+    let mut library = library();
+    library
+        .insert(
+            Layer::Inline,
+            "local",
+            serde_json::from_value(json!({
+                "parameters":{"members":{"type":"list"}},
+                "node":{"kind":"composite", "composite":{"nodes":"${members}"}}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    let error = Compiler::new(&library)
+        .compile(&json!({"id":"stage", "use":"local", "with":{"members":[
+            {"id":"work", "access":"read_only", "deadine_seconds":30}
+        ]}}))
+        .unwrap_err();
+    assert!(
+        error.contains("work") && error.contains("deadine_seconds"),
+        "{error}"
+    );
+}

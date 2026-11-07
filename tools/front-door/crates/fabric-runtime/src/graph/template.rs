@@ -66,13 +66,17 @@ fn template_syntax(field: &str) -> bool {
     )
 }
 
-fn check_authored_fields(node: &Map<String, Value>, stage: &str) -> Result<(), String> {
+fn check_authored_fields(
+    node: &Map<String, Value>,
+    stage: &str,
+    instance: bool,
+) -> Result<(), String> {
     check_extensions(node).map_err(|error| format!("node {stage}: {error}"))?;
     for field in node.keys() {
         // This control selects findings collection for review-panel instances.
         if field != "extensions"
-            && !template_syntax(field)
-            && field != "repair_panel"
+            && !matches!(field.as_str(), "after" | "tier")
+            && !(instance && (template_syntax(field) || field == "repair_panel"))
             && !compiled_field(field)
         {
             return Err(format!("node {stage}: unknown field {field}"));
@@ -87,9 +91,36 @@ fn check_authored_fields(node: &Map<String, Value>, stage: &str) -> Result<(), S
             for child in children {
                 let fields = child.as_object().ok_or("template node must be a table")?;
                 let stage = fields.get("id").and_then(Value::as_str).unwrap_or(stage);
-                check_authored_fields(fields, stage)?;
+                check_authored_fields(fields, stage, true)?;
             }
         }
+    }
+    Ok(())
+}
+
+/// Turn an already compiled node back into authored input without presenting
+/// retained provenance or runtime metadata as undeclared node fields.
+pub(super) fn preserve_compiled_metadata(node: &mut Value) -> Result<(), String> {
+    for pointer in ["/composite/nodes", "/loop/body"] {
+        if let Some(children) = node.pointer_mut(pointer).and_then(Value::as_array_mut) {
+            for child in children {
+                preserve_compiled_metadata(child)?;
+            }
+        }
+    }
+    let fields = node
+        .as_object_mut()
+        .ok_or("compiled node must be a table")?;
+    let metadata: Map<String, Value> = fields
+        .iter()
+        .filter(|(field, _)| !compiled_field(field))
+        .map(|(field, value)| (field.clone(), value.clone()))
+        .collect();
+    for field in metadata.keys() {
+        fields.remove(field);
+    }
+    if !metadata.is_empty() {
+        fields.insert("extensions".into(), Value::Object(metadata));
     }
     Ok(())
 }
@@ -846,6 +877,7 @@ impl<'a> Compiler<'a> {
                     .get("id")
                     .and_then(Value::as_str)
                     .unwrap_or("<unknown>"),
+                true,
             )?;
         }
         if let Some(over) = object.get("over") {
@@ -860,6 +892,15 @@ impl<'a> Compiler<'a> {
                 interpolate(value, bindings)?
             };
             node.insert(key.clone(), value);
+        }
+        if object.contains_key("use") || !stack.is_empty() {
+            check_authored_fields(
+                &node,
+                node.get("id")
+                    .and_then(Value::as_str)
+                    .unwrap_or("<unknown>"),
+                true,
+            )?;
         }
         if let Some(repeat) = node.remove("repeat") {
             return self.lower_repeat(node, repeat, stack);
@@ -1167,8 +1208,8 @@ impl<'a> Compiler<'a> {
             .get("id")
             .and_then(Value::as_str)
             .unwrap_or("<unknown>");
-        check_authored_fields(&template.node, stage)?;
-        check_authored_fields(&overrides, stage)?;
+        check_authored_fields(&template.node, stage, false)?;
+        check_authored_fields(&overrides, stage, true)?;
         if template.is_composite() {
             if let Some(key) = ["brief", "goal", "prompt", "tier", "route", "routes"]
                 .into_iter()
@@ -1275,16 +1316,7 @@ impl<'a> Compiler<'a> {
                     .remove("id");
                 // Re-authoring a compiled writer must retain its provenance as
                 // explicit metadata, rather than as unknown authored fields.
-                let fields = fix.as_object_mut().ok_or("repair writer must be a node")?;
-                let metadata: Map<String, Value> = fields
-                    .iter()
-                    .filter(|(field, _)| !compiled_field(field))
-                    .map(|(field, value)| (field.clone(), value.clone()))
-                    .collect();
-                for field in metadata.keys() {
-                    fields.remove(field);
-                }
-                fields.insert("extensions".into(), Value::Object(metadata));
+                preserve_compiled_metadata(&mut fix)?;
                 children[2]["plan"]["max_nodes"] = serde_json::json!(32);
                 children[2]["plan"]["patterns"] = serde_json::json!([{
                     "name": "repair-slice", "brief": prompt, "access": access, "node": fix
@@ -1350,6 +1382,7 @@ impl<'a> Compiler<'a> {
         for (key, value) in &template.node {
             leaf.insert(key.clone(), interpolate(value, parameters)?);
         }
+        check_authored_fields(&leaf, stage, false)?;
         if let Some(brief) = &template.brief {
             leaf.insert(
                 "prompt".into(),

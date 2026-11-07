@@ -505,7 +505,7 @@ fn detached_children_do_not_gate_their_parents_dependants() {
         Some("a"),
         &patch::Patch {
             schema_version: patch::PATCH_SCHEMA_VERSION,
-            nodes: vec![json!({"id":"keep", "use":"branch", "detached":true})],
+            nodes: vec![json!({"id":"keep", "use":"branch", "extensions":{"detached":true}})],
             ..Default::default()
         },
         &context,

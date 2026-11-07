@@ -569,7 +569,7 @@ fn child_patch(
         });
     }
     if request.detached {
-        node.insert(DETACHED.into(), true.into());
+        node.insert("extensions".into(), serde_json::json!({DETACHED:true}));
     }
     if let Ok(template) = context.library.resolve(&request.template)
         && template.is_composite()
@@ -603,6 +603,12 @@ fn child_patch(
         if !template.parameters.contains_key("brief") && !request.brief.is_empty() {
             append_child_brief(&mut compiled, &request.brief);
         }
+        template::preserve_compiled_metadata(&mut compiled).map_err(|message| PatchError {
+            cause: None,
+            admission: None,
+            code: "invalid",
+            message,
+        })?;
         // Keep `use` and its effective parameters for admission evidence. The
         // compiled members override the template's default members on admission.
         if let Some(composite) = compiled.get("composite") {
