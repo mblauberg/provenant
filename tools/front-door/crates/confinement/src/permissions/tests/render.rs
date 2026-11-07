@@ -143,11 +143,19 @@ fn profiles_between_the_old_and_new_limits_compile_and_larger_ones_name_their_si
     Ok(())
 }
 
+#[cfg(any(target_os = "macos", feature = "snapshot"))]
 #[test]
 fn launch_command_allows_only_the_attempts_own_mach_name() -> Result<(), PermissionError> {
+    let (plan, profile) = write_grants_fixture();
+    let rendered = render(&GrantSet::build(
+        &plan,
+        &profile,
+        Path::new("/fixture/home"),
+        None,
+    )?)?;
     let launch = ConfinedLaunch {
         enforcement: Enforcement::MacOsSandboxExec,
-        profile: b"(version 1)\n(deny default)\n".to_vec(),
+        profile: rendered.into_bytes(),
         profile_digest: [0; 32],
         native_controls: Vec::new(),
     };
@@ -155,7 +163,10 @@ fn launch_command_allows_only_the_attempts_own_mach_name() -> Result<(), Permiss
     let command = launch.command(&["tool".into()], &attempt)?;
     assert_eq!(command[3], "tool");
     let profile = command[2].to_string_lossy();
-    assert!(profile.starts_with("(version 1)\n(deny default)\n"));
+    assert!(profile.starts_with("(version 1)\n(allow default)\n"));
+    assert!(
+        profile.contains("(deny mach-lookup (global-name-prefix \"dev.provenant.attempt.\"))\n")
+    );
     assert!(profile.ends_with(&format!(
         "(allow mach-lookup (global-name \"dev.provenant.attempt.{attempt}\"))\n"
     )));

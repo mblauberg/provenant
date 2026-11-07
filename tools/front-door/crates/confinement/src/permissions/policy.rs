@@ -66,6 +66,7 @@ pub struct MandatoryRoots {
     github: Vec<PathGrant>,
     state_aliases: Vec<PathGrant>,
     source_aliases: Vec<PathGrant>,
+    credential_endpoints: Vec<(PathBuf, PathBuf)>,
 }
 
 impl MandatoryRoots {
@@ -115,6 +116,7 @@ impl MandatoryRoots {
                 .to_vec(),
             state_aliases: Vec::new(),
             source_aliases: Vec::new(),
+            credential_endpoints: Vec::new(),
         };
         for grant in roots
             .credentials
@@ -142,7 +144,10 @@ impl MandatoryRoots {
     ) -> Result<(), PermissionError> {
         self.add_credentials(alias.clone())?;
         if self.non_exempt.contains(original) {
-            self.non_exempt.push(alias);
+            self.non_exempt.push(alias.clone());
+        }
+        if self.github.contains(original) {
+            self.github.push(alias);
         }
         Ok(())
     }
@@ -207,6 +212,14 @@ impl MandatoryRoots {
     /// a newly introduced symlink target must already be denied in this family.
     #[cfg(target_os = "macos")]
     pub(crate) fn revalidate_paths(&self) -> Result<(), PermissionError> {
+        for (path, target) in &self.credential_endpoints {
+            if resolve_boundary_path(path).as_ref().ok() != Some(target) {
+                return Err(super::anchors::anchor_at(
+                    path,
+                    "credential endpoint changed",
+                ));
+            }
+        }
         let families: Vec<Vec<&PathGrant>> = vec![
             self.credentials.iter().collect(),
             std::iter::once(&self.state)
@@ -263,6 +276,24 @@ impl MandatoryRoots {
 
     pub fn credentials(&self) -> &[PathGrant] {
         &self.credentials
+    }
+    /// A selected subtree login retains reads of its declared endpoints when
+    /// those files resolve outside the store. This confers no refresh writes.
+    #[cfg(any(target_os = "macos", feature = "snapshot"))]
+    pub(crate) fn credential_alias_reads(&self, reads: &[PathGrant]) -> Vec<PathGrant> {
+        self.credential_endpoints
+            .iter()
+            .filter(|(path, target)| {
+                path != target
+                    && reads.iter().any(|grant| {
+                        grant.scope == PathScope::Subtree && path.starts_with(&grant.path)
+                    })
+            })
+            .map(|(_, target)| PathGrant {
+                path: target.clone(),
+                scope: PathScope::Exact,
+            })
+            .collect()
     }
     pub fn state(&self) -> &PathGrant {
         &self.state

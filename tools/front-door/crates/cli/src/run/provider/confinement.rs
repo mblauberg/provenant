@@ -398,6 +398,22 @@ pub(super) fn credential_roots(
             scope: PathScope::Subtree,
         })
         .collect();
+    // Claude declares a sibling JSON profile as well as files inside its
+    // account directory. Keep this exact endpoint for every registered
+    // spelling, including identities this attempt did not select.
+    for entry in settings.entries.values() {
+        if AdapterSpec::get(&entry.adapter).is_some_and(|spec| spec.credential_profile_sibling) {
+            grants.extend(
+                std::iter::once(&entry.directory)
+                    .chain(&entry.directories)
+                    .filter(|path| path.as_path() != home)
+                    .map(|path| PathGrant {
+                        path: path.with_extension("json"),
+                        scope: PathScope::Exact,
+                    }),
+            );
+        }
+    }
     grants.extend(
         registry
             .host

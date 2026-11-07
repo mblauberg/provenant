@@ -64,6 +64,37 @@ const REPOSITORY_LOCK: &str = "worktrees.lock";
 const WRITER_LOCK: &str = "writer.lock";
 const WORKTREE_ROOT: &str = ".worktrees";
 
+/// Allocation root for a host-registered Git common directory, including a
+/// bare repository. Protect it before any individual checkout is created.
+pub(crate) fn allocation_directory(common: &Path) -> Result<PathBuf, WorktreeError> {
+    let parent = common.parent().ok_or(WorktreeError::InvalidRequest)?;
+    if common.file_name() == Some(OsStr::new(".git")) {
+        return Ok(parent.join(WORKTREE_ROOT));
+    }
+    // The lifecycle also supports a primary whose gitfile names a separate
+    // common directory inside that checkout. A bare location has no such
+    // backlink and retains its own allocation root.
+    let directory = Directory::open_anchor(parent)?;
+    match directory.metadata_at(OsStr::new(".git"), false) {
+        Ok(metadata) if metadata.kind == provenant_os::fs::FileKind::Regular => {
+            let bytes = inventory::read_bounded(&directory, OsStr::new(".git"), 4096)?;
+            let target = crate::repo::parse_git_path(&bytes, b"gitdir: ")
+                .ok_or(WorktreeError::InvalidRequest)?;
+            let target = crate::repo::resolve_git_path(parent, &target)?;
+            if crate::permissions::resolve_boundary_path(&target)
+                .map_err(|_| WorktreeError::InvalidRequest)?
+                == common
+            {
+                return Ok(parent.join(WORKTREE_ROOT));
+            }
+        }
+        Ok(_) => {}
+        Err(error) if error.is_not_found() => {}
+        Err(error) => return Err(error.into()),
+    }
+    Ok(common.join(WORKTREE_ROOT))
+}
+
 impl From<provenant_config::ConfigError> for WorktreeError {
     fn from(error: provenant_config::ConfigError) -> Self {
         Self::Configuration(Box::new(error))
