@@ -139,6 +139,17 @@ impl ProcessObserver for SystemProcessObserver {
     fn census(&self, max_entries: usize) -> Result<Census, CensusError> {
         system_census(max_entries)
     }
+    fn census_while(
+        &self,
+        max_entries: usize,
+        keep_going: &dyn Fn() -> bool,
+    ) -> Result<Census, CensusError> {
+        if !keep_going() {
+            return Err(CensusError::Interrupted);
+        }
+        let boot = system_boot_identity()?;
+        census_with_boot_while(max_entries, &boot, keep_going)
+    }
 
     #[cfg(target_os = "macos")]
     fn live_census(
@@ -335,8 +346,16 @@ fn system_census(max_entries: usize) -> Result<Census, CensusError> {
     NativeProcessObserver::for_boot(boot)?.census(max_entries)
 }
 
-#[cfg(target_os = "linux")]
 pub(crate) fn census_with_boot(max_entries: usize, boot: &str) -> Result<Census, CensusError> {
+    census_with_boot_while(max_entries, boot, &|| true)
+}
+
+#[cfg(target_os = "linux")]
+fn census_with_boot_while(
+    max_entries: usize,
+    boot: &str,
+    keep_going: &dyn Fn() -> bool,
+) -> Result<Census, CensusError> {
     use std::os::unix::ffi::OsStrExt;
     if max_entries == 0 || max_entries > crate::census::MAX_CENSUS_ENTRIES {
         return Err(CensusError::InvalidBound);
@@ -350,6 +369,9 @@ pub(crate) fn census_with_boot(max_entries: usize, boot: &str) -> Result<Census,
     let mut list_complete = true;
     let mut truncated = false;
     for entry in directory {
+        if !keep_going() {
+            return Err(CensusError::Interrupted);
+        }
         let entry = match entry {
             Ok(entry) => entry,
             Err(_) => {
@@ -382,6 +404,9 @@ pub(crate) fn census_with_boot(max_entries: usize, boot: &str) -> Result<Census,
     let mut unknown = BTreeMap::new();
     let mut absent = BTreeSet::new();
     for pid in pids {
+        if !keep_going() {
+            return Err(CensusError::Interrupted);
+        }
         let Ok(pid_i32) = i32::try_from(pid) else {
             unknown.insert(pid, ObservationIssue::Malformed);
             continue;
@@ -408,7 +433,11 @@ pub(crate) fn census_with_boot(max_entries: usize, boot: &str) -> Result<Census,
 }
 
 #[cfg(target_os = "macos")]
-pub(crate) fn census_with_boot(max_entries: usize, boot: &str) -> Result<Census, CensusError> {
+fn census_with_boot_while(
+    max_entries: usize,
+    boot: &str,
+    keep_going: &dyn Fn() -> bool,
+) -> Result<Census, CensusError> {
     if max_entries == 0 || max_entries > crate::census::MAX_CENSUS_ENTRIES {
         return Err(CensusError::InvalidBound);
     }
@@ -423,6 +452,9 @@ pub(crate) fn census_with_boot(max_entries: usize, boot: &str) -> Result<Census,
     let mut unknown = BTreeMap::new();
     let mut absent = BTreeSet::new();
     for pid in pids {
+        if !keep_going() {
+            return Err(CensusError::Interrupted);
+        }
         match darwin_process(pid, boot, false) {
             ProcessObservation::Present(fact) => facts.push(fact),
             ProcessObservation::Absent => {
@@ -437,7 +469,11 @@ pub(crate) fn census_with_boot(max_entries: usize, boot: &str) -> Result<Census,
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-pub(crate) fn census_with_boot(_max_entries: usize, _boot: &str) -> Result<Census, CensusError> {
+fn census_with_boot_while(
+    _max_entries: usize,
+    _boot: &str,
+    _keep_going: &dyn Fn() -> bool,
+) -> Result<Census, CensusError> {
     Err(CensusError::Unsupported)
 }
 
@@ -1283,4 +1319,15 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         assert!(matches!(result, Err(CustodyProofError::Unknown)));
     }
+}
+
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+#[test]
+fn bounded_native_census_stops_between_process_reads() {
+    let polls = std::cell::Cell::new(0);
+    let observed = SystemProcessObserver.census_while(65_536, &|| {
+        polls.set(polls.get() + 1);
+        polls.get() <= 2
+    });
+    assert!(matches!(observed, Err(CensusError::Interrupted)));
 }

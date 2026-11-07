@@ -241,6 +241,36 @@ impl<'a> CensusSession<'a> {
 }
 
 impl WorkerObserver for CensusSession<'_> {
+    fn observe_roots_while(
+        &self,
+        roots: &[PathBuf],
+        keep_going: &dyn Fn() -> bool,
+    ) -> Option<WorkerObservations> {
+        self.invalidate();
+        let before = root_identities(roots);
+        let policy = self.inner.epoch_policy()?;
+        let (mut states, details) = self
+            .inner
+            .observe_roots_with_policy_while(roots, &policy, keep_going)?;
+        if before.is_none()
+            || root_identities(roots) != before
+            || self.inner.epoch_policy().as_ref() != Some(&policy)
+        {
+            for root in roots {
+                if !states.get(root).is_some_and(Occupancy::is_observed) {
+                    states.insert(
+                        root.clone(),
+                        Occupancy::census_unknown(
+                            root.clone(),
+                            "root identity or census policy changed during census",
+                        ),
+                    );
+                }
+            }
+        }
+        keep_going().then_some((states, details))
+    }
+
     fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, Occupancy> {
         self.evidence(roots, false).states
     }
@@ -291,6 +321,34 @@ impl WorkerObserver for CensusSession<'_> {
 /// state per canonical candidate root; they never grant signal authority.
 pub trait WorkerObserver: Send + Sync {
     fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, Occupancy>;
+
+    /// Fresh retry evidence, discarded if the caller's deadline expires.
+    /// Native observers also poll the bound between process reads.
+    fn observe_roots_while(
+        &self,
+        roots: &[PathBuf],
+        keep_going: &dyn Fn() -> bool,
+    ) -> Option<WorkerObservations> {
+        if !keep_going() {
+            return None;
+        }
+        let evidence = self.observe_roots_with_details(roots);
+        keep_going().then_some(evidence)
+    }
+
+    fn observe_roots_with_policy_while(
+        &self,
+        roots: &[PathBuf],
+        policy: &CensusEpochPolicy,
+        keep_going: &dyn Fn() -> bool,
+    ) -> Option<WorkerObservations> {
+        if !keep_going() {
+            return None;
+        }
+        let evidence =
+            self.observe_roots_with_policy(roots, &policy.entries, policy.exclude_ancestors);
+        keep_going().then_some(evidence)
+    }
 
     /// Effective policy defining the current epoch; `None` prevents reuse.
     fn epoch_policy(&self) -> Option<CensusEpochPolicy> {
@@ -495,6 +553,28 @@ impl<'a> CensusPolicyWorkers<'a> {
     }
 }
 impl WorkerObserver for CensusPolicyWorkers<'_> {
+    fn observe_roots_while(
+        &self,
+        roots: &[PathBuf],
+        keep_going: &dyn Fn() -> bool,
+    ) -> Option<WorkerObservations> {
+        if !keep_going() {
+            return None;
+        }
+        let policy = self.epoch_policy()?;
+        self.inner
+            .observe_roots_with_policy_while(roots, &policy, keep_going)
+    }
+    fn observe_roots_with_policy_while(
+        &self,
+        roots: &[PathBuf],
+        policy: &CensusEpochPolicy,
+        keep_going: &dyn Fn() -> bool,
+    ) -> Option<WorkerObservations> {
+        self.inner
+            .observe_roots_with_policy_while(roots, policy, keep_going)
+    }
+
     fn epoch_policy(&self) -> Option<CensusEpochPolicy> {
         let config = provenant_config::read_knobs(&self.roots).ok()?;
         Some(CensusEpochPolicy {
@@ -621,6 +701,31 @@ pub fn live_refusal(workers: &dyn WorkerObserver, root: &Path) -> WorktreeError 
 pub struct SystemWorkerObserver;
 
 impl WorkerObserver for SystemWorkerObserver {
+    fn observe_roots_while(
+        &self,
+        roots: &[PathBuf],
+        keep_going: &dyn Fn() -> bool,
+    ) -> Option<WorkerObservations> {
+        self.observe_roots_with_policy_while(roots, &CensusEpochPolicy::default(), keep_going)
+    }
+    fn observe_roots_with_policy_while(
+        &self,
+        roots: &[PathBuf],
+        policy: &CensusEpochPolicy,
+        keep_going: &dyn Fn() -> bool,
+    ) -> Option<WorkerObservations> {
+        if !keep_going() {
+            return None;
+        }
+        let evidence = system_worker_evidence_while(
+            roots,
+            policy.exclude_ancestors,
+            &policy.entries,
+            Some(keep_going),
+        );
+        keep_going().then_some((evidence.states, evidence.details))
+    }
+
     fn observe_evidence_with_policy(
         &self,
         roots: &[PathBuf],
@@ -729,6 +834,13 @@ impl CwdObserver for PolicyCwdObserver<'_> {
     fn occupancy(&self, pid: i64) -> provenant_os::pid::OccupancyObservation {
         SystemCwdObserver.occupancy(pid)
     }
+    fn occupancy_while(
+        &self,
+        pid: i64,
+        keep_going: &dyn Fn() -> bool,
+    ) -> provenant_os::pid::OccupancyObservation {
+        SystemCwdObserver.occupancy_while(pid, keep_going)
+    }
     fn executable(&self, pid: i64) -> Option<PathBuf> {
         SystemCwdObserver.executable(pid)
     }
@@ -770,6 +882,15 @@ fn system_worker_evidence(
     ancestors: bool,
     entries: &[CensusIgnoreEntry],
 ) -> WorkerEvidence {
+    system_worker_evidence_while(roots, ancestors, entries, None)
+}
+
+fn system_worker_evidence_while(
+    roots: &[PathBuf],
+    ancestors: bool,
+    entries: &[CensusIgnoreEntry],
+    keep_going: Option<&dyn Fn() -> bool>,
+) -> WorkerEvidence {
     let ProcessObservation::Present(current) = current_process() else {
         let detail = process_detail(
             &PolicyCwdObserver(entries),
@@ -805,13 +926,14 @@ fn system_worker_evidence(
                 .collect(),
         };
     };
-    let (states, holders, details, taints) = observe_worker_holders_with_taints_and_audit(
+    let (states, holders, details, taints) = observe_worker_holders_while(
         roots,
         &SystemProcessObserver,
         &PolicyCwdObserver(entries),
         &current,
         ancestors,
         &mut |_, _| {},
+        keep_going,
     );
     WorkerEvidence {
         states,
@@ -954,6 +1076,27 @@ pub(super) fn observe_worker_holders_with_taints_and_audit(
     ancestors: bool,
     unplaceable: &mut dyn FnMut(Option<i64>, Option<&'static str>),
 ) -> WorkerHolderAudit {
+    observe_worker_holders_while(
+        roots,
+        observer,
+        cwd_observer,
+        current,
+        ancestors,
+        unplaceable,
+        None,
+    )
+}
+
+fn observe_worker_holders_while(
+    roots: &[PathBuf],
+    observer: &dyn ProcessObserver,
+    cwd_observer: &dyn CwdObserver,
+    current: &ProcessFact,
+    ancestors: bool,
+    unplaceable: &mut dyn FnMut(Option<i64>, Option<&'static str>),
+    keep_going: Option<&dyn Fn() -> bool>,
+) -> WorkerHolderAudit {
+    let within_budget = || keep_going.is_none_or(|check| check());
     let mut states: BTreeMap<_, _> = roots
         .iter()
         .cloned()
@@ -965,9 +1108,12 @@ pub(super) fn observe_worker_holders_with_taints_and_audit(
     if roots.is_empty() {
         return (states, holders, details, taints);
     }
-    let census = match observer.census(65_536) {
+    let census = match observer.census_while(65_536, &within_budget) {
         Ok(census) => census,
         Err(error) => {
+            if !within_budget() {
+                return (states, holders, details, taints);
+            }
             unplaceable(None, Some("complete process census unavailable"));
             let detail = if matches!(
                 error,
@@ -1009,6 +1155,9 @@ pub(super) fn observe_worker_holders_with_taints_and_audit(
     // unknown. Current credentials and permissions cannot disprove a retained
     // cwd, including one acquired before a permission or credential change.
     for (&pid, &issue) in census.unknown_pids() {
+        if !within_budget() {
+            return (states, holders, details, taints);
+        }
         unplaceable(Some(pid), Some("stable process identity unavailable"));
         let detail = process_detail(cwd_observer, pid, &format!("{issue:?}"));
         record_unknown_all_with_taint(
@@ -1026,6 +1175,9 @@ pub(super) fn observe_worker_holders_with_taints_and_audit(
     if ancestors {
         let mut child = current;
         while child.identity.pid != current.identity.session_id {
+            if !within_budget() {
+                return (states, holders, details, taints);
+            }
             let ProcessLookup::Present(parent) = census.process(child.parent_pid) else {
                 break;
             };
@@ -1042,6 +1194,9 @@ pub(super) fn observe_worker_holders_with_taints_and_audit(
     let mut excused_gap_detail = None;
     // An incomplete census must not hide positively observed live workers.
     for fact in census.facts() {
+        if !within_budget() {
+            return (states, holders, details, taints);
+        }
         // A zombie holds no cwd, executable or descriptor.
         if excluded.contains(&fact.identity) || fact.zombie {
             continue;
@@ -1058,7 +1213,13 @@ pub(super) fn observe_worker_holders_with_taints_and_audit(
             let policy_exception = matches!(&cwd, NativeCwd::PolicyExcluded(excusal)
                 if excusal_applies(excusal, roots));
             let before = observer.observe(pid);
-            let occupancy = cwd_observer.occupancy(pid);
+            let occupancy = keep_going.map_or_else(
+                || cwd_observer.occupancy(pid),
+                |check| cwd_observer.occupancy_while(pid, check),
+            );
+            if !within_budget() {
+                return (states, holders, details, taints);
+            }
             let after = observer.observe(pid);
             // A process that exited during the occupancy query (absent, or a
             // zombie of the same identity) now holds no cwd or open file, even
@@ -1088,6 +1249,9 @@ pub(super) fn observe_worker_holders_with_taints_and_audit(
             }
             if stable {
                 for path in &occupancy.paths {
+                    if !within_budget() {
+                        return (states, holders, details, taints);
+                    }
                     let Some(canonical) = canonical_cwd(path) else {
                         let detail = process_detail(
                             cwd_observer,

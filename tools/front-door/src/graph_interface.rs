@@ -33,6 +33,14 @@ fn response_outcome(command: &str, data: &Value) -> Outcome {
     Outcome::Ok
 }
 
+fn launch_error_node(data: &Value, outcome: Outcome) -> Option<&Value> {
+    data["checkpoint"]["nodes"].as_array()?.iter().find(|node| {
+        node["advance_error"].is_string()
+            && node["attempts"].as_array().is_some_and(Vec::is_empty)
+            && (matches!(outcome, Outcome::Failed | Outcome::Refused) || node["state"] == "failed")
+    })
+}
+
 fn cli_input_error(detail: &str) -> Box<provenant_records::diagnostic::Diagnostic> {
     Box::new(
         provenant_records::diagnostic::Diagnostic::new("invalid_input")
@@ -101,6 +109,7 @@ fn invoke(
                     nodes.iter().any(|node| {
                         node["state"] == "failed"
                             && node["advance_error_code"] == "writer_binding_unavailable"
+                            && node["advance_owner_code"] != "writer_lock_busy"
                     })
                 })
             && let Some(action) = local_branch_action(&factory, branch)
@@ -112,8 +121,27 @@ fn invoke(
     match result {
         Ok(data) => {
             let human = serde_json::to_string_pretty(&data).unwrap_or_default() + "\n";
+            let mut result = CommandResult::new(command, response_outcome(command, &data), data);
+            if command == "run"
+                && let Some(node) = launch_error_node(&result.data, result.status)
+            {
+                result.error = Some(provenant_records::CommandError {
+                    code: node["advance_owner_code"]
+                        .as_str()
+                        .or_else(|| node["advance_error_code"].as_str())
+                        .unwrap_or("launch_failed")
+                        .into(),
+                    message: node["advance_error"]
+                        .as_str()
+                        .unwrap_or("launch failed")
+                        .into(),
+                    diagnostic: None,
+                    cause: None,
+                    repair: None,
+                });
+            }
             crate::emit(
-                &CommandResult::new(command, response_outcome(command, &data), data),
+                &result,
                 globals,
                 &human,
                 matches!(command, "templates" | "status" | "stats"),
@@ -531,6 +559,35 @@ mod tests {
                 serde_json::from_value(serde_json::json!({"cloud": value})).unwrap();
             assert_eq!(attempt.placement.unwrap().target, "t");
         }
+    }
+
+    #[test]
+    fn pending_graph_projects_failed_pre_attempt_node() {
+        let data = json!({"status":"pending", "checkpoint":{"nodes":[
+            {"id":"retry", "state":"blocked", "attempts":[], "advance_error":"retrying"},
+            {"id":"writer", "state":"failed", "attempts":[], "advance_error":"binding failed"},
+            {"id":"other", "state":"running", "attempts":[{}]}
+        ]}});
+        assert_eq!(response_outcome("run", &data), Outcome::Waiting);
+        assert_eq!(
+            launch_error_node(&data, Outcome::Waiting).map(|node| &node["id"]),
+            Some(&json!("writer"))
+        );
+        let mut timed_out = data.clone();
+        timed_out["timed_out"] = json!(true);
+        assert_eq!(response_outcome("run", &timed_out), Outcome::Waiting);
+        assert_eq!(
+            launch_error_node(&timed_out, Outcome::Waiting).map(|node| &node["id"]),
+            Some(&json!("writer"))
+        );
+    }
+
+    #[test]
+    fn failed_attempt_does_not_project_launch_error() {
+        let data = json!({"checkpoint":{"nodes":[
+            {"id":"task", "state":"failed", "attempts":[{}], "advance_error":"fallback_route_pinned"}
+        ]}});
+        assert!(launch_error_node(&data, Outcome::Failed).is_none());
     }
 
     #[test]

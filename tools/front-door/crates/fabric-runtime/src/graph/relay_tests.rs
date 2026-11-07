@@ -505,7 +505,7 @@ fn detached_children_do_not_gate_their_parents_dependants() {
         Some("a"),
         &patch::Patch {
             schema_version: patch::PATCH_SCHEMA_VERSION,
-            nodes: vec![json!({"id":"keep", "use":"branch", "detached":true})],
+            nodes: vec![json!({"id":"keep", "use":"branch", "extensions":{"detached":true}})],
             ..Default::default()
         },
         &context,
@@ -668,6 +668,8 @@ fn composite_child_timeout_reaches_every_provider_leaf_and_retains_template_evid
     for leaf in leaves {
         assert_eq!(leaf.deadline_seconds, Some(23));
         assert_eq!(leaf.prompt, request.brief);
+        assert_eq!(leaf.extra[template::TEMPLATE_FIELD], "task");
+        assert!(!leaf.extra.contains_key("extensions"));
     }
     let evidence = &checkpoint.expansions[0].uses[0];
     assert_eq!(evidence.name, "task-chain");
@@ -1343,4 +1345,30 @@ fn rich_detached_children_keep_their_subtree_after_parent_and_graph_cancellation
     let protected = relay::fence_detached_cancellation(&document, &mut checkpoint).unwrap();
     assert_eq!(protected.into_iter().collect::<Vec<_>>(), ["a--detached", "a--detached--work"]);
     assert_eq!(progress(&checkpoint, "a--detached--work").state, NodeState::Pending);
+}
+
+#[test]
+fn composite_child_preserves_compiled_review_metadata() {
+    let (document, mut checkpoint) = live(None);
+    let mut library = template::TemplateLibrary::bundled();
+    library.insert_toml(template::Layer::Repository, "checks", r#"
+nodes = [{id = "lens", use = "review", with = {lens = "tests"}}]
+"#).unwrap();
+    let resolvers = Default::default();
+    let limits = plans::generous();
+    let context = patch::PatchContext {
+        journal: None, library: &library, resolvers: &resolvers,
+        scan: &|_| Ok(()), limits: &limits,
+    };
+    let mut request = child("review", "review-metadata");
+    request.template = "checks".into();
+    admit_child(&mut patch::LiveGraph {document:&document, checkpoint:&mut checkpoint},
+        "a", &request, &context).unwrap();
+    let expanded = plans::expand(&document, &checkpoint.extensions,
+        &checkpoint.expansions, &limits).unwrap();
+    let lens = expanded.nodes.iter().find(|node| node.id == "a--review--lens").unwrap();
+    assert_eq!(lens.extra[template::TEMPLATE_FIELD], "review");
+    assert_eq!(lens.extra["review_lens"], "tests");
+    assert_eq!(lens.extra["review_behaviour"], "lens");
+    assert!(!lens.extra.contains_key("extensions"));
 }

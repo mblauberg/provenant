@@ -1302,10 +1302,26 @@ fn with_graph_failures(
 /// MCP callers retain the owner's path-free diagnostic.
 fn localise_worktree_actions(factory: &Factory, graph: &str, rows: &mut [Value]) {
     if !rows.iter().any(|row| {
-        row["kind"] == "node"
-            && row["state"] == "failed"
-            && row["cause_code"] == "writer_binding_unavailable"
+        row["kind"] == "node" && row["state"] == "failed" && row["cause_code"] != "writer_lock_busy"
     }) {
+        return;
+    }
+    let Ok(Some(checkpoint)) = FileJournal::read_status_checkpoint(
+        &factory.context.roots.state,
+        factory.context.identity.project,
+        graph,
+    ) else {
+        return;
+    };
+    // Rows expose the owner code; the checkpoint retains the binding phase.
+    let binding_failed = |row: &Value| {
+        checkpoint.nodes.iter().any(|node| {
+            Some(node.id.as_str()) == row["node_id"].as_str()
+                && node.advance_error_code.as_deref() == Some("writer_binding_unavailable")
+                && node.advance_owner_code.as_deref() != Some("writer_lock_busy")
+        })
+    };
+    if !rows.iter().any(binding_failed) {
         return;
     }
     let Ok(Some(execution)) = FileJournal::execution(
@@ -1315,11 +1331,10 @@ fn localise_worktree_actions(factory: &Factory, graph: &str, rows: &mut [Value])
     ) else {
         return;
     };
-    for row in rows.iter_mut().filter(|row| {
-        row["kind"] == "node"
-            && row["state"] == "failed"
-            && row["cause_code"] == "writer_binding_unavailable"
-    }) {
+    for row in rows
+        .iter_mut()
+        .filter(|row| row["kind"] == "node" && row["state"] == "failed" && binding_failed(row))
+    {
         let Some(node) = execution
             .document
             .nodes

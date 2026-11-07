@@ -12,7 +12,6 @@ pub fn fast_forward(
     cancel: &CancelToken,
 ) -> Result<(), WorktreeError> {
     validate_binding(context)?;
-    let _registry = repository_lock(context, LockMode::Exclusive, cancel)?;
     context.repo.revalidate()?;
     let path = canonicalize(path)?;
     if path == canonicalize(context.repo.root_path())? {
@@ -24,7 +23,10 @@ pub fn fast_forward(
         .find(|entry| canonicalize(&entry.path).ok().as_ref() == Some(&path))
         .ok_or(WorktreeError::NotFound)?;
     let branch = entry.branch.as_ref().ok_or(WorktreeError::InvalidRequest)?;
-    let locked = lock_worktree_for_mutation(context, entry, cancel)?;
+    // Inventory is advisory until custody and registry exclusion are both held.
+    // Waiting for a sibling's transient handle must not hold the registry.
+    let locked = lock_worktree_for_launch(context, entry, cancel)?;
+    let _registry = repository_lock(context, LockMode::Exclusive, cancel)?;
     let fresh = context.facts.fresh_inventory(context, cancel)?;
     let current = matching_worktree(&fresh, branch, context.repo.root_path())?
         .ok_or(WorktreeError::IdentityChanged)?;
@@ -528,6 +530,12 @@ fn create_with_default(
     if worktree_dirty_at(context, verified.repo(), cancel)? != WorktreeCondition::Clean {
         return Err(WorktreeError::RegistrationUnconfirmed);
     }
+    // Release the verified checkout descriptors before allowing a sibling
+    // launcher to inspect this newly created worktree.
+    drop(verified);
+    // The mutation and registration checks are complete. The advisory census
+    // must not keep other branches from acquiring the repository registry.
+    drop(_lock);
     let worker = context.workers.observe_roots(std::slice::from_ref(&target));
     let writer = worker.get(&target).cloned().unwrap_or_else(|| {
         Occupancy::census_unknown(target.clone(), context.workers.incomplete_census_detail())

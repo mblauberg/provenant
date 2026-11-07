@@ -489,6 +489,31 @@ impl Factory {
         if raw.is_some_and(|value| !value.is_object()) {
             return Err(invalid());
         }
+        // ChildLaunch carries nodes and templates, not graph-wide controls.
+        if let Some(document) = raw {
+            provenant_fabric_runtime::graph::template::validate_document_schema_version(document)
+                .map_err(|_| {
+                FacadeError::invalid(InvalidInputDetail::Field("schema_version".into()))
+            })?;
+            for field in [
+                "integration_branch",
+                "limits",
+                "delivery",
+                "review_base",
+                "decision_session",
+                "retry",
+                "exclude",
+                "network",
+                "capability",
+                "no_capability",
+            ] {
+                if document.get(field).is_some() {
+                    return Err(FacadeError::invalid(InvalidInputDetail::Field(
+                        field.into(),
+                    )));
+                }
+            }
+        }
         // Distinct calls create distinct children; callers opt into replay with a key.
         let idempotency_key = match input
             .get("operation_id")
@@ -537,7 +562,14 @@ impl Factory {
             json!({"access":"read_only", "composite":{"nodes":document["nodes"], "exports":[]}})
         } else {
             match raw {
-                Some(document) if document.get("use").is_some() => document.clone(),
+                Some(document) if document.get("use").is_some() => {
+                    let mut node = document.clone();
+                    provenant_fabric_runtime::graph::template::separate_document_fields(&mut node)
+                        .map_err(|_| {
+                            FacadeError::invalid(InvalidInputDetail::Field("schema_version".into()))
+                        })?;
+                    node
+                }
                 Some(document) => {
                     inline["lane-document"] = document.clone();
                     json!({"use":"lane-document"})
@@ -857,6 +889,12 @@ impl Factory {
             crate::install::cutover_admission_guard(&self.context.roots.state)?;
         }
         let raw = input.get("document");
+        if let Some(document) = raw {
+            provenant_fabric_runtime::graph::template::validate_document_schema_version(document)
+                .map_err(|_| {
+                FacadeError::invalid(InvalidInputDetail::Field("schema_version".into()))
+            })?;
+        }
         if raw.is_some_and(|document| !document.is_object()) {
             return Err(FacadeError::invalid(InvalidInputDetail::Field(
                 "document".into(),
@@ -894,27 +932,10 @@ impl Factory {
             .unwrap_or_else(|| json!({}));
         if let Some(document) = lane_document.filter(|document| document.get("use").is_none()) {
             let mut template = document.clone();
-            if let Some(fields) = template.as_object_mut() {
-                for key in [
-                    "schema_version",
-                    "graph_id",
-                    "templates",
-                    "integration_branch",
-                    "limits",
-                    "delivery",
-                    "review_base",
-                    "context",
-                    "decision_session",
-                    "review",
-                    "retry",
-                    "exclude",
-                    "network",
-                    "capability",
-                    "no_capability",
-                ] {
-                    fields.remove(key);
-                }
-            }
+            provenant_fabric_runtime::graph::template::separate_document_fields(&mut template)
+                .map_err(|_| {
+                    FacadeError::invalid(InvalidInputDetail::Field("schema_version".into()))
+                })?;
             inline["lane-document"] = template;
         }
         let library = self.template_library(Some(&inline))?;
@@ -990,7 +1011,14 @@ impl Factory {
             }
         } else {
             let mut node = match lane_document {
-                Some(document) if document.get("use").is_some() => document.clone(),
+                Some(document) if document.get("use").is_some() => {
+                    let mut node = document.clone();
+                    provenant_fabric_runtime::graph::template::separate_document_fields(&mut node)
+                        .map_err(|_| {
+                            FacadeError::invalid(InvalidInputDetail::Field("schema_version".into()))
+                        })?;
+                    node
+                }
                 Some(_) => json!({"id":"task", "use":"lane-document"}),
                 None => json!({"id":"task", "use":"task"}),
             };
@@ -2907,6 +2935,56 @@ mod tests {
             bound.launch.as_ref().unwrap().node["worktree"],
             ".worktrees/existing"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn authored_documents_validate_schema_version_before_compilation() -> Result {
+        let rig = TestRig::new()?;
+        let factory = factory(&rig)?;
+        let cancel = CancelToken::new();
+        let budget = WaitBudget::cli(factory.clock.mono_now(), 10)?;
+        for document in [
+            json!({"schema_version":3, "use":"task"}),
+            json!({"schema_version":3, "graph_id":"invalid-version", "nodes":[]}),
+            json!({"schema_version":3, "graph_id":"invalid-version", "templates":{}, "nodes":[{"id":"task", "use":"task"}]}),
+        ] {
+            let input = json!({"op":"run", "document":document, "explain":true});
+            let error = factory.child_request(&input).unwrap_err();
+            assert!(error.to_string().contains("schema_version"), "{error}");
+            let error = factory.graph_document(input, budget, &cancel).unwrap_err();
+            assert!(error.to_string().contains("schema_version"), "{error}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn child_document_refuses_unapplied_controls_by_field_name() -> Result {
+        let rig = TestRig::new()?;
+        let factory = factory(&rig)?;
+        for field in [
+            "network",
+            "capability",
+            "no_capability",
+            "integration_branch",
+            "limits",
+            "delivery",
+            "review_base",
+            "decision_session",
+            "retry",
+            "exclude",
+        ] {
+            for mut document in [
+                json!({"use":"task", "brief":"Inspect"}),
+                json!({"graph_id":"child", "schema_version":2, "nodes":[]}),
+            ] {
+                document[field] = json!(null);
+                let error = factory
+                    .child_request(&json!({"op":"run", "document":document}))
+                    .unwrap_err();
+                assert!(error.to_string().contains(field), "{field}: {error}");
+            }
+        }
         Ok(())
     }
 
