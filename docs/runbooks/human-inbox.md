@@ -147,7 +147,7 @@ items conflict. Concurrent replacements have one winner. Saved answers, their
 delivery state and historical request revisions remain visible; supersession
 does not retract an answer already queued or consumed. The old item's closure
 reason names the replacement; the new request retains the backward link. See generated
-[CLI](../reference/cli.md) and [MCP](../reference/mcp-tools.md) references for syntax.
+[CLI](../reference/cli-all.md) and [MCP](../reference/mcp-tools.md) references for syntax.
 
 ## Work links
 

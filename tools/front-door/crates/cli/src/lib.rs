@@ -34,10 +34,6 @@ use provenant_records::{HelpArgument, HelpCatalogue, HelpCommand, HelpErrorCode,
 pub use render::*;
 use std::ffi::OsString;
 
-const COMPACT_ARGUMENTS: &[&str] = &[
-    "json", "full", "project", "use", "tier", "model", "effort", "host", "file", "wait", "set",
-    "over", "all",
-];
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -107,14 +103,11 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> ParseOutcome {
                         } else {
                             error.to_string()
                         },
-                        catalog: scoped(
-                            if matches!(scope.as_str(), "provenant" | "provenant run") {
-                                catalog(&model)
-                            } else {
-                                catalog(&expanded_model())
-                            },
-                            &scope,
-                        ),
+                        catalog: if scope == "provenant" {
+                            catalog(&model)
+                        } else {
+                            scoped_catalogue(compact_help_model(), &scope)
+                        },
                         globals,
                     },
                     None => ParseOutcome::Invalid {
@@ -171,7 +164,8 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> ParseOutcome {
         let mut scope = String::from("provenant");
         for component in command {
             selected = match selected.find_subcommand_mut(component) {
-                Some(child) if !child.is_hide_set() => {
+                Some(child) if !child.is_hide_set() || scope == "provenant quota" => {
+                    *child = child.clone().hide(false);
                     scope = format!("{scope} {}", child.get_name());
                     child
                 }
@@ -189,7 +183,7 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> ParseOutcome {
             } else {
                 if command.is_empty() && *all {
                     format!(
-                        "{}\nFor advanced options, run provenant help COMMAND.\n",
+                        "{}\nFor advanced options, run provenant help COMMAND --all.\n",
                         selected.render_long_help()
                     )
                 } else {
@@ -469,12 +463,27 @@ fn expanded_model() -> clap::Command {
     build_model(false, true)
 }
 fn hide_compact_arguments(mut command: clap::Command) -> clap::Command {
+    // Day-to-day controls only; visibility never changes the parsing grammar.
+    let visible: &[&str] = match command.get_name() {
+        "run" => &[
+            "use", "tier", "model", "effort", "file", "set", "wait", "explain",
+        ],
+        "status" => &["all", "wait", "target", "until", "follow"],
+        "output" => &["part", "tail", "trace"],
+        "steer" => &["text-stdin"],
+        "edit" | "templates" => &["file"],
+        "stop" => &["wait", "reason"],
+        "retry" => &["node", "brief", "extend", "wait"],
+        "land" => &["wait", "explain"],
+        "help" => &["all"],
+        _ => &[],
+    };
     let hidden: Vec<_> = command
         .get_arguments()
         .filter(|arg| {
             !arg.is_positional()
-                && !COMPACT_ARGUMENTS.contains(&arg.get_id().as_str())
-                && !(command.get_name() == "retry" && arg.get_id() == "node")
+                && !matches!(arg.get_id().as_str(), "json" | "full" | "project")
+                && !arg.get_long().is_some_and(|long| visible.contains(&long))
         })
         .map(|arg| arg.get_id().clone())
         .collect();
@@ -487,9 +496,13 @@ fn compact_help_model() -> clap::Command {
     fn hide_arguments(mut command: clap::Command) -> clap::Command {
         command = hide_compact_arguments(command);
         let children: Vec<_> = command.get_subcommands().cloned().collect();
+        let quota = command.get_name() == "quota";
         for child in children {
             let name = child.get_name();
-            command = command.mut_subcommand(name, |_| hide_arguments(child.clone()));
+            command = command.mut_subcommand(name, |_| {
+                let child = hide_arguments(child.clone());
+                if quota { child.hide(true) } else { child }
+            });
         }
         command
     }
@@ -534,50 +547,9 @@ fn build_model(passive: bool, advanced: bool) -> clap::Command {
                     .required(true),
             );
         }
-        if !advanced && matches!(path.as_str(), "provenant retry") {
-            let visible = [
-                "full",
-                "json",
-                "host",
-                "account",
-                "prompt_file",
-                "prompt_stdin",
-                "brief",
-                "node",
-                "extend",
-                "tier",
-                "over",
-                "file",
-                "preset",
-                "preset_set",
-                "preset_params_file",
-                "preset_plan",
-                "fresh",
-                "explain",
-                "route",
-                "model",
-                "effort",
-                "mode",
-                "network",
-                "worktree",
-                "branch",
-                "base",
-                "wait",
-                "all",
-                "id",
-            ];
-            let advanced: Vec<_> = command
-                .get_arguments()
-                .filter(|arg| !arg.is_positional() && !visible.contains(&arg.get_id().as_str()))
-                .map(|arg| arg.get_id().clone())
-                .collect();
-            for id in advanced {
-                command = command.mut_arg(id, |arg| arg.hide(true));
-            }
-        }
         if !advanced
-            && parent == "provenant"
-            && command.get::<metadata::CoreCommand>().is_none()
+            && (parent == "provenant quota"
+                || (parent == "provenant" && command.get::<metadata::CoreCommand>().is_none()))
             && command.get_name() != "help"
         {
             command = command.hide(true);
@@ -697,7 +669,8 @@ fn validate(inv: &Invocation) -> Result<(), CliError> {
 }
 /// The subcommand path named before the first `--help`, such as
 /// `provenant fabric mail`. Flags are skipped, along with the values of the
-/// global `--state-dir` and `--project`. A hidden command is unknown.
+/// global `--state-dir` and `--project`. Explicit quota subcommands remain
+/// addressable even though they are omitted from the compact listing.
 fn help_scope(model: &clap::Command, argv: &[OsString]) -> Option<String> {
     let mut scope = String::from("provenant");
     let mut current = model;
@@ -709,7 +682,10 @@ fn help_scope(model: &clap::Command, argv: &[OsString]) -> Option<String> {
         if arg == "--state-dir" || arg == "--project" {
             words.next();
         } else if let Some(child) = arg.to_str().and_then(|name| current.find_subcommand(name)) {
-            if child.get_name() == "internal" || (child.is_hide_set() && scope != "provenant") {
+            if child.get_name() == "internal"
+                || (child.is_hide_set()
+                    && !matches!(scope.as_str(), "provenant" | "provenant quota"))
+            {
                 return None;
             }
             scope = format!("{scope} {}", child.get_name());
@@ -717,6 +693,19 @@ fn help_scope(model: &clap::Command, argv: &[OsString]) -> Option<String> {
         }
     }
     Some(scope)
+}
+// Explicit help can address quota maintenance without advertising it in the
+// default catalogue. Only the validated scope is revealed, never its siblings.
+fn scoped_catalogue(mut model: clap::Command, scope: &str) -> HelpCatalogue {
+    let mut selected = &mut model;
+    for component in scope.split_whitespace().skip(1) {
+        let Some(child) = selected.find_subcommand_mut(component) else {
+            return scoped(catalog(&model), scope);
+        };
+        *child = child.clone().hide(false);
+        selected = child;
+    }
+    scoped(catalog(&model), scope)
 }
 /// Keep the named command and its descendants; `help` alone keeps all,
 /// including the error codes.
@@ -1107,18 +1096,25 @@ mod tests {
         let ParseOutcome::Help { catalog, .. } = parsed(&["help", "--json"]) else {
             panic!("compact help")
         };
-        let flags: std::collections::BTreeSet<_> = catalog
+        let mut globals = std::collections::BTreeSet::new();
+        let rows = catalog
             .commands
             .iter()
-            .flat_map(|command| command.arguments.iter())
-            .filter_map(|argument| argument.long.as_deref())
-            .filter(|flag| !matches!(*flag, "help" | "version"))
-            .collect();
-        assert!(
-            flags.len() + 26 < 40,
-            "{} flags plus 26 config keys",
-            flags.len()
-        );
+            .flat_map(|command| &command.arguments)
+            .filter(|argument| {
+                let Some(flag) = argument.long.as_deref() else {
+                    return false;
+                };
+                if matches!(flag, "help" | "version") {
+                    return false;
+                }
+                if matches!(flag, "json" | "full" | "project" | "state-dir") {
+                    return globals.insert(flag);
+                }
+                true
+            })
+            .count();
+        assert!(rows < 40, "{rows} documented flag rows");
     }
     #[test]
     fn catalogue_paths_exist_in_command_model() {
@@ -2037,6 +2033,11 @@ mod tests {
                 .collect::<Vec<_>>(),
             other => panic!("{words:?}: {other:?}"),
         };
+        assert_eq!(
+            names(&["help", "quota", "history", "--json"]),
+            names(&["quota", "history", "--help", "--json"])
+        );
+        assert!(!names(&["quota", "history", "--help", "--json"]).is_empty());
         let mail = names(&["help", "fabric", "mail", "--json"]);
         assert!(mail.contains(&"provenant fabric mail send".to_owned()));
         assert!(mail.iter().all(|c| c.starts_with("provenant fabric mail")));
