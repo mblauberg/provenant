@@ -738,6 +738,79 @@ fn deterministic_graph_wait_status_trace_and_replay_share_one_journal() -> Resul
 }
 
 #[test]
+fn trace_reports_recorded_patch_and_attempt_in_text_and_json() -> Result {
+    use std::io::Write;
+    let rig = GraphProject::new()?;
+    let path = rig.document(&json!({"schema_version":1,"graph_id":"trace-test","nodes":[{"id":"gate","kind":"gate","access":"read_only","condition":{"type":"budget"}}]}))?;
+    let output = rig
+        .command()
+        .args(["run", "--file"])
+        .arg(path)
+        .arg("--wait=10s")
+        .output()?;
+    assert!(output.status.success(), "{output:?}");
+    let journal = graph_records(&rig.state())?
+        .into_iter()
+        .find(|p| p.ends_with("trace-test.events.jsonl"))
+        .ok_or("journal missing")?;
+    let mut file = std::fs::OpenOptions::new().append(true).open(journal)?;
+    for event in [
+        json!({"timestamp_micros":1,"kind":"patch","subject":"host","code":"admitted","digest":"d","details":{"revision":2,"patch_digest":"p"}}),
+        json!({"timestamp_micros":2,"kind":"attempt","subject":"gate","code":"settled","digest":"d","details":{"state":"terminal"},"attempt":{"identity":"a","tier":"senior","template":"raw","tokens":100,"cost_micro_usd":null,"wall_time_seconds":5,"has_usage":true,"cache_read_tokens":20,"input_tokens":40,"queue_time_ms":12,"outcome":"succeeded","route":{"model":"m"}}}),
+        json!({"timestamp_micros":3,"kind":"attempt","subject":"gate","code":"started","digest":"d","details":{"state":"running"},"attempt":{"identity":"b","tier":"junior","template":"raw","tokens":null,"cost_micro_usd":null,"wall_time_seconds":null,"has_usage":false,"cache_read_tokens":null,"input_tokens":null,"queue_time_ms":null,"outcome":null,"route":{}}}),
+    ] {
+        writeln!(file, "{event}")?;
+    }
+    let (output, help) = rig.run(&["help", "--all"])?;
+    assert!(output.status.success());
+    assert!(
+        help["data"]["commands"]
+            .as_array()
+            .ok_or("commands")?
+            .iter()
+            .any(|c| c["command"] == "provenant trace")
+    );
+    let (output, envelope) = rig.run(&["trace", "trace-test"])?;
+    assert!(output.status.success(), "{envelope}");
+    assert_eq!(envelope["command"], "trace");
+    let events = envelope["data"]["events"].as_array().ok_or("events")?;
+    assert!(events.iter().any(|e| e["details"]["revision"] == 2));
+    let attempt = events
+        .iter()
+        .find(|e| e["attempt"]["identity"] == "a")
+        .ok_or("attempt")?;
+    assert_eq!(attempt["attempt"]["cache_read_share"], 0.5);
+    assert_eq!(attempt["attempt"]["route"]["model"], "m");
+    assert_eq!(attempt["attempt"]["tier"], "senior");
+    assert_eq!(attempt["details"]["state"], "terminal");
+    assert_eq!(attempt["attempt"]["tokens"], 100);
+    assert_eq!(attempt["attempt"]["wall_time_seconds"], 5);
+    assert_eq!(attempt["attempt"]["queue_time_ms"], 12);
+    assert_eq!(attempt["attempt"]["outcome"], "succeeded");
+    let unknown = events
+        .iter()
+        .find(|e| e["attempt"]["identity"] == "b")
+        .ok_or("unknown attempt")?;
+    assert!(unknown["attempt"]["cache_read_share"].is_null());
+    assert!(unknown["attempt"]["tokens"].is_null());
+    let output = fixture_cli()
+        .current_dir(&rig.project)
+        .env("PROVENANT_ROOT", &rig.root)
+        .env("XDG_CONFIG_HOME", rig.temp.path().join("config"))
+        .arg("--state-dir")
+        .arg(rig.state())
+        .args(["trace", "trace-test"])
+        .output()?;
+    assert!(output.status.success(), "{output:?}");
+    let lines: Vec<Value> = String::from_utf8(output.stdout)?
+        .lines()
+        .map(serde_json::from_str)
+        .collect::<std::result::Result<_, _>>()?;
+    assert_eq!(&lines, events);
+    Ok(())
+}
+
+#[test]
 fn content_rerun_reattaches_and_fresh_run_after_cancel_has_a_new_identity() -> Result {
     let rig = GraphProject::new()?;
     let templates = rig.project.join(".provenant/templates");
