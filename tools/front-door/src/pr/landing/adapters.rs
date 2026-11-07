@@ -1645,43 +1645,54 @@ mod tests {
     }
 
     #[test]
-    fn documented_async_stack_responses_drive_real_forge() {
+    fn captured_async_stack_responses_drive_real_forge() {
         use std::os::unix::fs::PermissionsExt;
         use std::process::Command;
         const MARKER: &str = "PROVENANT_ASYNC_STACK_CHILD";
-        const HEAD: &str = "1111111111111111111111111111111111111111";
+        const HEAD: &str = "54ada5f7a8573a53c2b69947e5c41a7e7530999a";
         if let Some(path) = std::env::var_os(MARKER) {
             let project = PathBuf::from(path);
             let mut forge = GhForge::new(&project);
             assert_eq!(
-                forge.merge_stack(7, HEAD, MergeMethod::Squash).unwrap(),
-                HEAD
+                forge.merge_stack(7, HEAD, MergeMethod::Merge).unwrap(),
+                "f9c664e1f37e3afb6e899701acc85805db124757"
             );
             let calls = std::fs::read_to_string(project.join("calls")).unwrap();
             assert!(rest_calls::rest_only(&calls), "{calls}");
             assert!(calls.contains(&format!("sha={HEAD}")), "{calls}");
-            assert!(calls.contains("merge_method=squash"), "{calls}");
+            assert!(calls.contains("merge_method=merge"), "{calls}");
             assert!(calls.contains("merge_action=direct_merge"), "{calls}");
             assert!(
-                calls.contains("merge-async/630b9d5e-3f2a-4f7e-8b0c-2d5f9a8c1e42"),
+                calls.contains("merge-async/5c3f2693-53bb-4b5a-83c1-08e23438a612"),
                 "{calls}"
             );
             return;
         }
         let dir = tempfile::tempdir().unwrap();
+        // Captured from the private sandbox, 2026-11-07; only async bodies are live.
+        std::fs::write(
+            dir.path().join("pending.json"),
+            include_str!("fixtures/async-stack-pending.json"),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("merged.json"),
+            include_str!("fixtures/async-stack-merged.json"),
+        )
+        .unwrap();
         let gh = dir.path().join("gh");
         std::fs::write(&gh, r##"#!/bin/sh
 echo "$*" >> calls
 case "$*" in
-  *"--method PUT"*) touch merged; echo '{"status":"pending","details":{"uuid":"630b9d5e-3f2a-4f7e-8b0c-2d5f9a8c1e42","merge_method":"squash","merge_action":"direct_merge","expected_head_sha":"1111111111111111111111111111111111111111"}}' ;;
-  *"merge-async/"*) echo '{"status":"merged","details":{"sha":"1111111111111111111111111111111111111111"}}' ;;
+  *"--method PUT"*) touch merged; cat pending.json ;;
+  *"merge-async/"*) cat merged.json ;;
   *"stacks/42"*) echo '{"number":42,"pull_requests":[{"number":7,"state":"open","merged_at":null},{"number":8,"state":"open","merged_at":null}]}' ;;
-  *"pulls/8"*) echo '{"state":"open","head":{"sha":"1111111111111111111111111111111111111111","ref":"upper"},"base":{"sha":"1111111111111111111111111111111111111111","ref":"main"},"merged_at":null,"title":"upper"}' ;;
+  *"pulls/8"*) echo '{"state":"open","head":{"sha":"54ada5f7a8573a53c2b69947e5c41a7e7530999a","ref":"upper"},"base":{"sha":"54ada5f7a8573a53c2b69947e5c41a7e7530999a","ref":"main"},"merged_at":null,"title":"upper"}' ;;
   *"pulls/7"*)
     if test -e merged; then
-      echo '{"state":"closed","head":{"sha":"1111111111111111111111111111111111111111","ref":"lower"},"base":{"sha":"1111111111111111111111111111111111111111","ref":"main"},"merged_at":"2026-01-01T00:00:00Z","merge_commit_sha":"1111111111111111111111111111111111111111","title":"lower"}'
+      echo '{"state":"closed","head":{"sha":"54ada5f7a8573a53c2b69947e5c41a7e7530999a","ref":"lower"},"base":{"sha":"54ada5f7a8573a53c2b69947e5c41a7e7530999a","ref":"main"},"merged_at":"2026-01-01T00:00:00Z","merge_commit_sha":"f9c664e1f37e3afb6e899701acc85805db124757","title":"lower"}'
     else
-      echo '{"state":"open","head":{"sha":"1111111111111111111111111111111111111111","ref":"lower"},"base":{"sha":"1111111111111111111111111111111111111111","ref":"main"},"merged_at":null,"title":"lower","stack":{"number":42,"size":2,"position":1,"base":{"ref":"main"}}}'
+      echo '{"state":"open","head":{"sha":"54ada5f7a8573a53c2b69947e5c41a7e7530999a","ref":"lower"},"base":{"sha":"54ada5f7a8573a53c2b69947e5c41a7e7530999a","ref":"main"},"merged_at":null,"title":"lower","stack":{"number":42,"size":2,"position":1,"base":{"ref":"main"}}}'
     fi ;;
   *) exit 1 ;;
 esac
@@ -1695,7 +1706,7 @@ esac
         let output = Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
-                "pr::landing::adapters::tests::documented_async_stack_responses_drive_real_forge",
+                "pr::landing::adapters::tests::captured_async_stack_responses_drive_real_forge",
                 "--nocapture",
             ])
             .env(MARKER, dir.path())
