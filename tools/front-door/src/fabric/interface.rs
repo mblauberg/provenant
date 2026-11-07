@@ -11,6 +11,16 @@ fn graph_input_reason(reason: impl std::fmt::Display) -> FacadeError {
     FacadeError::invalid(InvalidInputDetail::graph_reason(reason))
 }
 
+/// A compile failure that reached graph admission keeps its typed refusal, so
+/// a template launch reads the same message as the raw document it compiles to.
+/// Failures before admission stay a redacted graph-input reason.
+fn graph_patch_error(error: patch::PatchError) -> FacadeError {
+    match error.admission.clone() {
+        Some(admission) => FacadeError::graph_admission(admission),
+        None => graph_input_reason(error),
+    }
+}
+
 fn relay_error(error: ServiceError) -> FacadeError {
     match error {
         ServiceError::Facade(error) => error,
@@ -871,7 +881,7 @@ impl Factory {
                     ..Default::default()
                 };
                 patch::submit(id, &patch, &context, raw["integration_branch"].as_str())
-                    .map_err(graph_input_reason)?
+                    .map_err(graph_patch_error)?
             } else {
                 serde_json::from_value::<GraphDocument>(raw.clone())
                     .map_err(|_| FacadeError::InvalidInput { detail: None })?
@@ -972,7 +982,7 @@ impl Factory {
                 &context,
                 integration_branch.as_ref().and_then(Value::as_str),
             )
-            .map_err(graph_input_reason)?
+            .map_err(graph_patch_error)?
         };
         document
             .extra
@@ -1057,7 +1067,7 @@ impl Factory {
             &submission_key,
             &self.context.config.graph.limits,
         )
-        .map_err(graph_input_reason)?;
+        .map_err(graph_patch_error)?;
         // Patch admission scans nodes and parameters. Graph-wide metadata is
         // retained separately, so scan the complete bound record before any
         // preview or publication can expose or persist it.
@@ -2260,12 +2270,14 @@ mod tests {
                 &cancel,
             )
             .unwrap_err();
+        // A compiled cycle is an admission failure, so it reads the same safe
+        // plan refusal as the raw document it compiles to.
         assert!(
             error
                 .diagnostic()
                 .detail
                 .ok_or("patch refusal")?
-                .contains("graph input could not be processed")
+                .contains("graph plan is invalid")
         );
         Ok(())
     }

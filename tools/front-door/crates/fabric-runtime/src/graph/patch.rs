@@ -170,6 +170,11 @@ pub struct PatchError {
     pub message: String,
     /// Closed diagnostic fact retained when a planner uses this admission path.
     pub cause: Option<PlanFailureFact>,
+    /// The typed admission refusal when compilation reached
+    /// `GraphDocument::admit`. Keeping the typed value lets the front door
+    /// project it exactly as it projects a raw document, so one compile
+    /// failure reads the same through every entry path.
+    pub admission: Option<AdmissionError>,
 }
 
 impl PatchError {
@@ -178,6 +183,7 @@ impl PatchError {
             code,
             message: message.into(),
             cause: None,
+            admission: None,
         }
     }
     fn invalid(message: impl Into<String>) -> Self {
@@ -919,9 +925,11 @@ pub fn submit(
         serde_json::json!(context.resolvers),
     );
     document.schema_version = u64::from(minimum_schema_version(&document));
-    document
-        .admit(context.limits)
-        .map_err(|error| classify(error.to_string()))?;
+    document.admit(context.limits).map_err(|error| {
+        let mut refusal = classify(error.to_string());
+        refusal.admission = Some(error);
+        refusal
+    })?;
     Ok(document)
 }
 
@@ -1288,6 +1296,7 @@ pub(super) fn prepare(
             code: "invalid",
             message: limit.to_string(),
             cause: Some(PlanFailureFact::Structural(limit)),
+            admission: None,
         });
     }
     let mut expansions = checkpoint.expansions.clone();
@@ -1299,6 +1308,7 @@ pub(super) fn prepare(
             code: "invalid",
             message: limit.to_string(),
             cause: Some(PlanFailureFact::Envelope(limit)),
+            admission: None,
         });
     }
     Ok(Prepared::Ready(Box::new(Admission {
