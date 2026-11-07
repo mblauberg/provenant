@@ -2994,22 +2994,33 @@ fn writer_shell_edits_instructions_and_redacts_logs() -> Result {
         for name in ["AGENTS.md", "CLAUDE.md", "HARNESS.md"] {
             fs::write(rig.project.join(name), "original instructions\n")?;
         }
+        fs::write(rig.project.join(".gitignore"), "setup-assets/\n")?;
         for args in [
-            vec!["add", "AGENTS.md", "CLAUDE.md", "HARNESS.md"],
+            vec!["add", "AGENTS.md", "CLAUDE.md", "HARNESS.md", ".gitignore"],
             vec!["commit", "-qm", "instructions"],
         ] {
             let out = rig.execute(&git, &args, None)?;
             assert_eq!(code(&out), 0, "{out:?}");
         }
-        let created = rig.command(&[
-            "worktree",
-            "create",
-            "shell-evidence",
-            "--base",
-            "HEAD",
-            "--json",
-        ])?;
+        // A plain Git worktree has no Provenant creation receipt. Setup scripts
+        // may leave ignored files and links without making it unsafe to launch.
+        let created = rig.execute(
+            &git,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "shell-evidence",
+                ".worktrees/shell-evidence",
+                "HEAD",
+            ],
+            None,
+        )?;
         assert_eq!(code(&created), 0, "{created:?}");
+        let tree = rig.project.join(".worktrees/shell-evidence");
+        fs::create_dir_all(tree.join("setup-assets"))?;
+        fs::write(tree.join("setup-assets/installed.txt"), "setup output\n")?;
+        std::os::unix::fs::symlink("installed.txt", tree.join("setup-assets/current"))?;
         let mut node = json!({
             "id":"writer", "prompt":"fixture writer shell", "access":"worktree_write",
             "worktree":".worktrees/shell-evidence", "delivery":"none",
@@ -3024,7 +3035,10 @@ fn writer_shell_edits_instructions_and_redacts_logs() -> Result {
         }
         let lane = run_graph_provider_with_wait(&rig, "shell-evidence", node, "30s")?;
         assert_eq!(lane["state"], "succeeded", "{lane}");
-        let tree = rig.project.join(".worktrees/shell-evidence");
+        assert_eq!(
+            fs::read_to_string(tree.join("setup-assets/current"))?,
+            "setup output\n"
+        );
         for name in ["AGENTS.md", "CLAUDE.md", "HARNESS.md"] {
             assert_eq!(
                 fs::read_to_string(tree.join(name))?,

@@ -1283,3 +1283,42 @@ fn fallback_cause_uses_only_unanimous_typed_facts() {
     assert_eq!(unanimous_preparation_cause(&[]), None);
 
 }
+
+#[test]
+fn untyped_dispatch_refusal_retains_projection_or_message_without_secrets() {
+    use provenant_records::diagnostic::Diagnostic;
+    let secret = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
+    for projection in [None, Some(Box::new(Diagnostic::new("fixture")
+        .detail(format!("setup script failed: missing dependency {secret}"))))] {
+        let fail = provenant_cli::run::Fail {
+            status: provenant_cli::Status::Refused,
+            kind: provenant_run::ErrorKind::Refused,
+            message: format!("setup script failed: missing dependency {secret}"),
+            detail: None,
+            projection,
+        };
+        let error = dispatch_refused(fail);
+        let wire = serde_json::to_string(&error).unwrap();
+        let decoded: FacadeError = serde_json::from_str(&wire).unwrap();
+        let diagnostic = decoded.diagnostic();
+        assert!(diagnostic.detail.unwrap().contains("setup script failed: missing dependency"));
+        assert!(!wire.contains(secret));
+        assert!(!diagnostic.next.unwrap().contains("receipt"));
+    }
+}
+
+#[test]
+fn confinement_refusal_keeps_actual_cause_through_cli_and_dispatch() {
+    use provenant_confinement::permissions::PermissionError;
+    let fail = provenant_cli::run::Fail::from(provenant_run::RunError::Confinement(
+        PermissionError::AnchorMismatchAt {
+            path: "/fixture/worktree".into(),
+            stage: "setup anchor changed ghp_abcdefghijklmnopqrstuvwxyz0123456789",
+        },
+    ));
+    assert!(fail.message.contains("setup anchor changed"));
+    assert!(!fail.message.contains("ghp_abcdefghijklmnopqrstuvwxyz0123456789"));
+    let error = dispatch_refused(fail);
+    let decoded: FacadeError = serde_json::from_slice(&serde_json::to_vec(error).unwrap()).unwrap();
+    assert!(decoded.diagnostic().detail.unwrap().contains("setup anchor changed"));
+}

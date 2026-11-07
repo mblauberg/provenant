@@ -1135,15 +1135,15 @@ fn graph_read_only_snapshot_survives_moving_and_replaced_checkout()
 }
 
 #[test]
-fn writer_preparation_refusal_names_setting_and_origin() {
+fn writer_preparation_warning_names_setting_and_origin() {
     let mut profile = provenant_records::run::HarnessProfile::default();
-    let default = super::dependency_preparation_refusal("missing pnpm".into(), true, &profile);
+    let default = super::dependency_preparation_warning("missing pnpm".into(), true, &profile);
     assert!(default.contains("lanes.prepare_deps=true (compiled default)"));
     profile.name = "focused".into();
     profile
         .knobs
         .insert("lanes.prepare_deps".into(), true.into());
-    let configured = super::dependency_preparation_refusal("missing pnpm".into(), true, &profile);
+    let configured = super::dependency_preparation_warning("missing pnpm".into(), true, &profile);
     assert!(configured.contains("lanes.prepare_deps=true (sealed profile focused)"));
     assert!(configured.contains("lanes.prepare_deps=false"));
 }

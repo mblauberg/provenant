@@ -537,8 +537,7 @@ fn submit_lane_refusal_maps_to_dispatch_refused() -> Result<(), Box<dyn std::err
     let kind = fail.kind;
     match super::dispatch_refused(fail) {
         FacadeError::DispatchRefused { reason, .. } => {
-            assert!(reason.contains("inspect"));
-            assert!(!reason.contains("missing-root"));
+            assert!(reason.contains("missing-root"));
         }
         error => panic!("a refused submit kept no reason: {error:?}"),
     }

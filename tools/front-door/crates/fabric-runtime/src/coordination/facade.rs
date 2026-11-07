@@ -324,12 +324,11 @@ pub enum FacadeError {
         access: String,
     },
     #[error("{}", dispatch_message(reason, disk.as_ref()))]
+    #[serde(serialize_with = "dispatch_refused_wire")]
     DispatchRefused {
-        #[serde(serialize_with = "serialise_dispatch_reason")]
         reason: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(default)]
         disk: Option<DiskPressure>,
-        #[serde(skip_serializing_if = "Option::is_none")]
         fact: Option<DispatchRefusalFact>,
     },
     #[error("{reason}")]
@@ -436,7 +435,7 @@ fn dispatch_message(reason: &str, disk: Option<&DiskPressure>) -> String {
             disk.reclaimed,
             disk.floor
         ),
-        None => provenant_records::diagnostic::safe_text(reason),
+        None => provenant_confinement::redact::bounded_line(reason, 4096),
     }
 }
 
@@ -458,14 +457,33 @@ fn serialise_grant_access<S: serde::Serializer>(
     })
 }
 
-const DISPATCH_REFUSED_WIRE_REASON: &str =
-    "dispatch was refused; inspect the request and access policy";
-
-fn serialise_dispatch_reason<S: serde::Serializer>(
-    _: &str,
+/// Keep typed projections authoritative, and retain redacted preparation detail
+/// when no typed fact exists. Persist the same reason used by local diagnostics.
+fn dispatch_refused_wire<S: serde::Serializer>(
+    reason: &str,
+    disk: &Option<DiskPressure>,
+    fact: &Option<DispatchRefusalFact>,
     serializer: S,
 ) -> Result<S::Ok, S::Error> {
-    serializer.serialize_str(DISPATCH_REFUSED_WIRE_REASON)
+    use serde::ser::SerializeStruct;
+    let diagnostic = FacadeError::DispatchRefused {
+        reason: reason.to_owned(),
+        disk: disk.clone(),
+        fact: *fact,
+    }
+    .diagnostic();
+    let mut wire = serializer.serialize_struct("DispatchRefused", 3)?;
+    wire.serialize_field(
+        "reason",
+        &provenant_confinement::redact::bounded_line(&diagnostic.detail.unwrap_or_default(), 4096),
+    )?;
+    if let Some(disk) = disk {
+        wire.serialize_field("disk", disk)?;
+    }
+    if let Some(fact) = fact {
+        wire.serialize_field("fact", fact)?;
+    }
+    wire.end()
 }
 
 fn serialise_unobserved_reason<S: serde::Serializer>(
@@ -580,7 +598,7 @@ impl FacadeError {
         }
     }
 
-    /// Project only facts selected by the owning refusal, never its source text.
+    /// Prefer typed facts; redact untyped refusal reasons before disclosure.
     pub fn diagnostic(&self) -> provenant_records::diagnostic::Diagnostic {
         use provenant_records::diagnostic::Diagnostic;
         let mut projected = Diagnostic::new(self.code());
@@ -620,7 +638,7 @@ impl FacadeError {
                 projected = projected.detail(limit.to_string()).next("reduce the graph or adjust the named graph limit");
             }
             Self::DispatchRefused { fact: Some(DispatchRefusalFact::GraphPlan), reason, .. } => {
-                let reason = safe_graph_plan_reason(reason);
+                let reason = safe_graph_plan_reason(&provenant_confinement::redact::bounded_line(reason, 4096));
                 let next = if reason.contains("writer worktree") {
                     "provide --worktree PATH, or --branch B --base REF"
                 } else {
@@ -651,13 +669,10 @@ impl FacadeError {
                 projected = projected.detail(format!("insufficient disk space on the limiting volume: {} bytes available, floor {} bytes; gc.free_floor from {}; bounded GC reported {} bytes reclaimed", disk.available, disk.floor, disk.origin.description(), disk.reclaimed))
                     .next(format!("run `provenant gc --free-floor {}B` before dispatching a writer", disk.floor));
             }
-            // `reason` can carry a preparation refusal's source text, which the
-            // lane layer deliberately withholds. Project the same fixed text the
-            // wire carries; the attempt's typed cause is on its lane receipt.
-            Self::DispatchRefused { .. } => {
+            Self::DispatchRefused { reason, .. } => {
                 projected = projected
-                    .detail(DISPATCH_REFUSED_WIRE_REASON)
-                    .next("inspect the lane receipt for the typed refusal cause");
+                    .detail(provenant_confinement::redact::bounded_line(reason, 4096))
+                    .next("resolve the reported launch refusal, then retry");
             }
             Self::HostDeliveryLimit { fact } | Self::Io { delivery_limit: Some(fact), .. } => projected = projected.detail(fact.detail()).next("inspect host delivery before retrying"),
             Self::HostDeliveryStage { stage } | Self::Io { delivery_stage: Some(stage), .. } => projected = projected.detail(format!("host writer delivery failed at {stage:?}")).next("inspect host delivery before retrying"),
@@ -1363,18 +1378,48 @@ mod diagnostic_tests {
     }
 
     #[test]
-    fn dispatch_refusal_projection_withholds_source_text() {
+    fn dispatch_refusal_reason_is_redacted_and_survives_transport() {
+        let secret = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
         let error = FacadeError::DispatchRefused {
             fact: None,
             disk: None,
-            reason: "attempt-7: HOST_DISK_ERROR_SENTINEL /private/host\u{1b}".into(),
+            reason: format!("worktree setup failed: missing pnpm; token {secret}\u{1b}"),
         };
         let projected = error.diagnostic();
-        let text = serde_json::to_string(&projected).unwrap();
-        assert!(!text.contains("HOST_DISK_ERROR_SENTINEL"), "{text}");
-        assert!(!text.contains("/private/host"), "{text}");
-        assert_eq!(projected.code, "dispatch_refused");
-        assert!(projected.detail.is_some());
+        let wire = serde_json::to_string(&error).unwrap();
+        let received: FacadeError = serde_json::from_str(&wire).unwrap();
+        assert_eq!(received.diagnostic(), projected);
+        let detail = projected.detail.unwrap();
+        assert!(detail.contains("worktree setup failed: missing pnpm"));
+        assert!(!detail.contains(secret));
+        assert!(!wire.contains(secret));
+        assert!(!detail.chars().any(char::is_control));
+        assert!(!projected.next.unwrap().contains("receipt"));
+    }
+
+    #[test]
+    fn graph_plan_refusal_redacts_token_shaped_node_identifiers() {
+        let secret = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
+        let error = FacadeError::DispatchRefused {
+            fact: Some(super::DispatchRefusalFact::GraphPlan),
+            disk: None,
+            reason: format!("node {secret}: writer worktree is required"),
+        };
+        assert!(
+            !serde_json::to_string(&error.diagnostic())
+                .unwrap()
+                .contains(secret)
+        );
+        let wire = serde_json::to_string(&error).unwrap();
+        assert!(!wire.contains(secret));
+        let received: FacadeError = serde_json::from_str(&wire).unwrap();
+        assert!(
+            received
+                .diagnostic()
+                .detail
+                .unwrap()
+                .contains("writer worktree")
+        );
     }
 
     #[test]
