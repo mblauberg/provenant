@@ -1,6 +1,21 @@
 //! One host continuation for a writer that voluntarily stopped without a commit.
 use super::*;
 
+const STOP_FENCE: &str = "no_work_stop_fence";
+
+pub(super) fn fence_stopped(progress: &mut NodeProgress) {
+    if progress.state == NodeState::Failed
+        && progress.advance_error_code.as_deref() == Some("stopped_no_work")
+    {
+        progress.extra.insert(STOP_FENCE.into(), true.into());
+    }
+}
+
+fn unfenced_stop(progress: &NodeProgress) -> bool {
+    progress.advance_error_code.as_deref() == Some("stopped_no_work")
+        && progress.extra.get(STOP_FENCE) != Some(&serde_json::Value::Bool(true))
+}
+
 pub(super) fn eligible(
     node: &PlannedNode,
     progress: &NodeProgress,
@@ -11,7 +26,7 @@ pub(super) fn eligible(
         && node.access == AccessMode::WorktreeWrite
         && node.auto_continue_no_work.unwrap_or(true)
         && progress.state == NodeState::Failed
-        && progress.advance_error_code.as_deref() == Some("stopped_no_work")
+        && unfenced_stop(progress)
         && !checkpoint
             .expansions
             .iter()
@@ -82,10 +97,7 @@ pub(super) fn continue_stopped(
 pub(super) fn pending(document: &GraphDocument, checkpoint: &GraphCheckpoint) -> bool {
     if checkpoint.cancelled
         || checkpoint.pause_reason.is_some()
-        || !checkpoint
-            .nodes
-            .iter()
-            .any(|row| row.advance_error_code.as_deref() == Some("stopped_no_work"))
+        || !checkpoint.nodes.iter().any(unfenced_stop)
     {
         return false;
     }

@@ -773,6 +773,7 @@ pub fn cancel_subtree(
             result.detached.push(progress.id.clone());
             continue;
         }
+        no_work::fence_stopped(progress);
         let live = progress
             .attempts
             .iter()
