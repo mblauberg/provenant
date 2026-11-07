@@ -219,3 +219,31 @@ slow-timeout = { period = "30s", terminate-after = 4 }
 [[profile.lane.overrides]]
 filter = '(package(=provenant) & binary(=worktrees) & (test(=gc_fetches_default_and_removes_only_clean_merged_worktrees) | test(=pr_contribution_roundtrip) | test(=pr_land_writer_lock_preserves_dirty_and_output_cases))) | (package(=provenant-confinement) & test(=worktrees::lifecycle_tests::remote_creation::doctor_admission_and_list_share_one_inventory_with_100_worktrees))'
 slow-timeout = { period = "30s", terminate-after = 4 }
+
+# Exercise a relay response beyond the former 55-second socket ceiling.
+[[profile.default.overrides]]
+filter = 'package(=provenant) & binary(=fabric_lane) & test(=child_relay_honours_launch_allowance_longer_than_fifty_five_seconds)'
+slow-timeout = { period = "30s", terminate-after = 4 }
+
+[[profile.ci.overrides]]
+filter = 'package(=provenant) & binary(=fabric_lane) & test(=child_relay_honours_launch_allowance_longer_than_fifty_five_seconds)'
+slow-timeout = { period = "30s", terminate-after = 4 }
+
+[[profile.lane.overrides]]
+filter = 'package(=provenant) & binary(=fabric_lane) & test(=child_relay_honours_launch_allowance_longer_than_fifty_five_seconds)'
+slow-timeout = { period = "30s", terminate-after = 4 }
+
+# This real registry-lock fixture crosses the former 55-second socket ceiling.
+[[profile.default.overrides]]
+filter = 'package(=provenant-cli) & test(=fabric::graph_relay::provisioning_tests::child_launch_receipt_and_refusal_follow_the_confirmed_launch_deadline)'
+slow-timeout = { period = "30s", terminate-after = 4 }
+
+# This real registry-lock fixture crosses the former 55-second socket ceiling.
+[[profile.ci.overrides]]
+filter = 'package(=provenant-cli) & test(=fabric::graph_relay::provisioning_tests::child_launch_receipt_and_refusal_follow_the_confirmed_launch_deadline)'
+slow-timeout = { period = "30s", terminate-after = 4 }
+
+# This real registry-lock fixture crosses the former 55-second socket ceiling.
+[[profile.lane.overrides]]
+filter = 'package(=provenant-cli) & test(=fabric::graph_relay::provisioning_tests::child_launch_receipt_and_refusal_follow_the_confirmed_launch_deadline)'
+slow-timeout = { period = "30s", terminate-after = 4 }

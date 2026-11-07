@@ -658,7 +658,8 @@ fn container_redo_accepts_only_host_proven_prelaunch_refusal_of_a_descendant() {
     leaf.advance_error_code = Some("launch_refused".into());
     let attempt = &mut leaf.attempts[0];
     attempt.state = AttemptState::Starting;
-    attempt.launched = false;
+    // Dispatch sets this flag before the host can refuse acceptance.
+    attempt.launched = true;
     attempt.attempt_ref = None;
     attempt
         .extra
@@ -675,7 +676,7 @@ fn container_redo_accepts_only_host_proven_prelaunch_refusal_of_a_descendant() {
             0 => {
                 leaf.attempts[0].extra.remove(PRELAUNCH_REFUSAL_PROOF);
             }
-            1 => leaf.attempts[0].launched = true,
+            1 => leaf.attempts[0].state = AttemptState::Running,
             2 => leaf.attempts[0].attempt_ref = Some("host/uncertain".into()),
             _ => leaf.advance_error_code = Some("launch_retry_exhausted".into()),
         }

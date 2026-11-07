@@ -1,6 +1,6 @@
 //! Lane Fabric observations and the attempt-bound host messaging endpoint.
 mod support;
-use provenant_core::{AttemptId, CancelToken, RootInputs};
+use provenant_core::{AttemptId, CancelToken, Clock, DurationMicros, RootInputs};
 use provenant_fabric_runtime::{
     coordination::{CoordinationService, ThreadPause},
     identity::Address,
@@ -555,10 +555,21 @@ fn lane_cli_and_mcp_share_wait_receipts_and_observation_errors() -> Result {
         },
         move |arguments, _, _| match serde_json::from_value::<RelayOp>(arguments)? {
             RelayOp::Add(child) => {
-                assert_eq!(child.brief, "Observe child");
-                // Admission may outlast the requested observation window.
-                for _ in 0..22 {
-                    provenant_os::sys::wait_pause(std::time::Duration::from_millis(50));
+                assert!(matches!(
+                    child.brief.as_str(),
+                    "Observe child" | "Delayed child"
+                ));
+                if child.brief == "Delayed child" {
+                    // Admission may outlast the original observation deadline.
+                    let clock = SystemClock;
+                    clock
+                        .wait_until(
+                            clock
+                                .mono_now()
+                                .checked_add(DurationMicros::from_micros(1_100_000))
+                                .unwrap(),
+                        )
+                        .unwrap();
                 }
                 Ok(json!({"parent_attempt":attempt.to_string(),"revision":2}))
             }
@@ -586,19 +597,26 @@ fn lane_cli_and_mcp_share_wait_receipts_and_observation_errors() -> Result {
         zero_wait["structuredContent"]["path"],
         "arguments.wait_seconds"
     );
-    for fail in [false, true] {
+    for (brief, fail) in [
+        ("Observe child", false),
+        ("Observe child", true),
+        ("Delayed child", false),
+    ] {
         fail_observation.store(fail, Ordering::SeqCst);
-        let cli = host(&rig, &["run", "Observe child", "--wait=1s", "--json"])?;
+        let cli = host(&rig, &["run", brief, "--wait=1s", "--json"])?;
         let mcp = mcp(
             &rig,
             "fabric_run",
-            json!({"op":"run","brief":"Observe child","wait_seconds":1}),
+            json!({"op":"run","brief":brief,"wait_seconds":1}),
         )?;
         assert_ne!(mcp["isError"], true, "{mcp}");
         let value = &cli["data"];
         assert_eq!(*value, mcp["structuredContent"]);
         assert_eq!(value["receipt"]["revision"], 2);
-        if fail {
+        if brief == "Delayed child" {
+            assert_eq!(value["observation_error"], "child wait timed out");
+            assert!(value.get("children").is_none());
+        } else if fail {
             assert!(
                 value["observation_error"]
                     .as_str()
@@ -629,16 +647,27 @@ fn child_relay_honours_launch_allowance_longer_than_fifty_five_seconds() -> Resu
         provenant_records::Limits::CONFIG,
         |_, _, _| unreachable!("expected graph request"),
         move |arguments, _, within| {
-            assert!(within > std::time::Duration::from_secs(59), "{within:?}");
             match serde_json::from_value::<RelayOp>(arguments)? {
                 RelayOp::Add(child) if child.brief == "Delayed child" => {
+                    assert!(within > std::time::Duration::from_secs(59), "{within:?}");
                     // Model registry contention beyond the former socket ceiling.
-                    provenant_os::sys::wait_pause(std::time::Duration::from_secs(56));
+                    let clock = SystemClock;
+                    clock
+                        .wait_until(
+                            clock
+                                .mono_now()
+                                .checked_add(DurationMicros::from_micros(56_000_000))
+                                .unwrap(),
+                        )
+                        .unwrap();
                     Ok(json!({"parent_attempt":attempt.to_string(),"revision":2}))
                 }
-                RelayOp::Add(_) => Err(provenant_fabric_mcp::tools::ServiceError::Facade(
-                    provenant_fabric_mcp::tools::FacadeError::WriterLockBusy,
-                )),
+                RelayOp::Add(_) => {
+                    assert!(within > std::time::Duration::from_secs(59), "{within:?}");
+                    Err(provenant_fabric_mcp::tools::ServiceError::Facade(
+                        provenant_fabric_mcp::tools::FacadeError::WriterLockBusy,
+                    ))
+                }
                 _ => unreachable!("unexpected graph operation"),
             }
         },
@@ -662,7 +691,7 @@ fn child_relay_honours_launch_allowance_longer_than_fifty_five_seconds() -> Resu
     let refused: Value = serde_json::from_slice(&output.stdout.bytes)?;
     assert_eq!(refused["error"]["code"], "writer_lock_busy", "{refused}");
     assert!(
-        refused["error"]["diagnostic"]["next"]
+        refused["error"]["next"]
             .as_str()
             .is_some_and(|next| next.contains("retry")),
         "{refused}"

@@ -3693,7 +3693,15 @@ mod journal_error_tests {
         )?;
         std::thread::scope(|scope| -> Result<(), Box<dyn std::error::Error>> {
             scope.spawn(move || {
-                std::thread::sleep(std::time::Duration::from_secs(6));
+                let clock = provenant_os::clock::SystemClock;
+                clock
+                    .wait_until(
+                        clock
+                            .mono_now()
+                            .checked_add(provenant_core::DurationMicros::from_micros(6_000_000))
+                            .unwrap(),
+                    )
+                    .unwrap();
                 drop(held);
             });
             owner.fast_forward_writer(

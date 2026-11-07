@@ -1047,7 +1047,8 @@ pub fn while_waiting<T>(
     within: std::time::Duration,
     wait: impl FnOnce() -> Result<T, ServiceError>,
 ) -> Result<T, ServiceError> {
-    let started = std::time::Instant::now();
+    let clock = provenant_os::clock::SystemClock::new();
+    let started = clock.mono_now();
     with_waiting(
         |waiting| {
             let cleanup = CancelToken::new();
@@ -1055,7 +1056,13 @@ pub fn while_waiting<T>(
                 // Yield retries share the observation deadline. Reclaiming the
                 // parent's slot is mandatory cleanup with its own allowance.
                 let remaining = if waiting {
-                    let remaining = within.saturating_sub(started.elapsed());
+                    let elapsed = std::time::Duration::from_micros(
+                        clock
+                            .mono_now()
+                            .as_micros()
+                            .saturating_sub(started.as_micros()),
+                    );
+                    let remaining = within.saturating_sub(elapsed);
                     if remaining.is_zero() {
                         return Err(refused("timeout", "child wait timed out"));
                     }
@@ -1407,7 +1414,15 @@ mod provisioning_tests {
         let short = WaitBudget::cli(clock.mono_now(), 1)?;
         std::thread::scope(|scope| -> Result<(), Box<dyn std::error::Error>> {
             scope.spawn(move || {
-                std::thread::sleep(std::time::Duration::from_secs(2));
+                let clock = provenant_os::clock::SystemClock;
+                clock
+                    .wait_until(
+                        clock
+                            .mono_now()
+                            .checked_add(provenant_core::DurationMicros::from_micros(2_000_000))
+                            .unwrap(),
+                    )
+                    .unwrap();
                 drop(held);
             });
             provision_child(&context, path, &source, short, &cancel)?;
@@ -1718,7 +1733,15 @@ mod provisioning_tests {
         let launch = writer_launch_budget(&context, &clock, settlement);
         let receipt = std::thread::scope(|scope| -> Result<Value, ServiceError> {
             scope.spawn(move || {
-                std::thread::sleep(std::time::Duration::from_secs(56));
+                let clock = provenant_os::clock::SystemClock;
+                clock
+                    .wait_until(
+                        clock
+                            .mono_now()
+                            .checked_add(provenant_core::DurationMicros::from_micros(56_000_000))
+                            .unwrap(),
+                    )
+                    .unwrap();
                 drop(held);
             });
             provenant_fabric_mcp::lane::graph(

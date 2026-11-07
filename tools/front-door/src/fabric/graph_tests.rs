@@ -264,13 +264,13 @@ mod graph_writer_admission_tests {
     }
 
     #[test]
-    fn real_graph_writer_retries_registry_lock_and_launches()
+    fn real_graph_writer_waits_for_registry_lock_and_launches()
     -> Result<(), Box<dyn std::error::Error>> {
         use provenant_confinement::worktrees::{self, Occupancy, WorkerObserver, WorktreeCreate};
         use provenant_fabric_runtime::graph::{self, NodeState};
         use provenant_os::fs::{Directory, LockMode};
         if super::peer_tests::host_test(
-            "fabric::graph_writer_admission_tests::real_graph_writer_retries_registry_lock_and_launches",
+            "fabric::graph_writer_admission_tests::real_graph_writer_waits_for_registry_lock_and_launches",
         )? {
             return Ok(());
         }
@@ -347,7 +347,7 @@ mod graph_writer_admission_tests {
                 "route":{"adapter":"fixture", "model":"fixture/model"}
             }]
         }))?;
-        let budget = WaitBudget::cli(factory.clock.mono_now(), 60)?;
+        let budget = WaitBudget::cli(factory.clock.mono_now(), 1)?;
         let mut owner = BoundGraphOwner { writer_launch_budget: None, admission_timeout: None, launch_warnings: Vec::new(), repo_facts: Default::default(),
             factory: &factory,
             integration_base: None,
@@ -369,24 +369,29 @@ mod graph_writer_admission_tests {
             &cancel,
             &factory.clock,
         )?;
-        let first = advance(&document, &mut owner, &mut journal)?;
-        assert_eq!(first.checkpoint.nodes[0].state, NodeState::Running);
-        let wake = first.checkpoint.nodes[0]
-            .launch_retry
-            .as_ref()
-            .and_then(|retry| retry.wake_at)
-            .ok_or("retry wake")?;
-        drop(guard);
-        let now = factory.clock.wall_now()?;
-        let delay = u64::try_from(wake.as_micros().saturating_sub(now.as_micros()))?;
-        factory.clock.wait_until(factory.clock.mono_now().checked_add(provenant_core::DurationMicros::from_micros(delay))?)?;
-        // This test owns registry admission and its durable attempt target;
-        // native provider preparation is exercised by the provider fixtures.
-        let second = provenant_cli::run::with_deferred_provider_launch(|| {
-            advance(&document, &mut owner, &mut journal)
+        let release_at = factory.clock.mono_now().checked_add(
+            provenant_core::DurationMicros::from_micros(2_000_000),
+        )?;
+        let clock = &factory.clock;
+        // The shared launch allowance now waits through registry contention
+        // instead of returning after the old per-acquisition timeout. Release
+        // the lock independently, after the settlement observation expires.
+        let submitted = std::thread::scope(|scope| {
+            scope.spawn(move || {
+                clock.wait_until(release_at).unwrap();
+                drop(guard);
+            });
+            // Native provider preparation is exercised by the provider fixtures.
+            provenant_cli::run::with_deferred_provider_launch(|| {
+                advance(&document, &mut owner, &mut journal)
+            })
         })?;
-        assert_ne!(second.checkpoint.nodes[0].state, NodeState::Blocked, "{:?}", second.checkpoint.nodes[0].advance_error);
-        assert!(second.checkpoint.nodes[0].attempts[0].attempt_ref.is_some(), "graph must submit the writer");
+        assert_eq!(budget.remaining(factory.clock.mono_now()).as_micros(), 0);
+        assert_eq!(submitted.checkpoint.nodes[0].state, NodeState::Running);
+        assert!(
+            submitted.checkpoint.nodes[0].attempts[0].attempt_ref.is_some(),
+            "graph must submit the writer after the registry lock is released"
+        );
         Ok(())
     }
 
