@@ -1502,7 +1502,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             self.cancel,
         )
         .map(|()| true)
-        .map_err(|_| FacadeError::io("provision writer worktree"))
+        .map_err(super::interface::relay_error)
     }
 
     fn bound_graph_bases(

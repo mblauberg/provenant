@@ -746,6 +746,9 @@ pub fn provision_writer(
                 Some(DispatchRefusalFact::DetachedWriter)
             }
             WorktreeError::CheckedOut => Some(DispatchRefusalFact::CheckedOutWriter),
+            WorktreeError::RegistryLockTimeout => {
+                return ServiceError::Facade(FacadeError::WriterLockBusy);
+            }
             WorktreeError::WriterBusy { holder } => {
                 return ServiceError::Facade(FacadeError::WriterBusy { holder: *holder });
             }
@@ -772,11 +775,21 @@ pub fn provision_writer_checked(
     cancel: &CancelToken,
 ) -> Result<(), provenant_confinement::worktrees::WorktreeError> {
     use provenant_confinement::worktrees;
+    let clock = provenant_os::clock::SystemClock::new();
+    // The single launch rule: each binding gets its own floor, or the remaining
+    // caller allowance if longer. Compute once before opening the context;
+    // registry acquisition and custody reobservation share this deadline. Never
+    // alter the caller's settlement budget or renew the budget between locks.
+    let now = clock.mono_now();
+    let floor =
+        provenant_core::DurationMicros::from_seconds(context.config.graph.writer_launch_seconds)
+            .map_err(|_| worktrees::WorktreeError::InvalidRequest)?;
+    let budget = WaitBudget::up_to(now, floor.max(budget.remaining(now)));
     worktrees::with_context(
         &context.roots,
         &context.home,
         &context.cwd,
-        &provenant_os::clock::SystemClock::new(),
+        &clock,
         cancel,
         |worktree_context| {
             let worktree_context = worktrees::WorktreeContext {
@@ -1276,7 +1289,34 @@ mod provisioning_tests {
             .is_err()
         );
         let path = ".worktrees/graph-parent--child";
-        provision_child(&context, path, &source, budget, &cancel)?;
+        // A child binding must survive registry contention beyond a short
+        // settlement deadline too. The original budget remains expired afterwards.
+        let clock = provenant_os::clock::SystemClock;
+        let directory = provenant_os::fs::Directory::open_anchor(
+            &context
+                .roots
+                .state
+                .as_path()
+                .join("worktrees")
+                .join(context.identity.project.to_string()),
+        )?;
+        let held = directory.lock(
+            std::ffi::OsStr::new("worktrees.lock"),
+            provenant_os::fs::LockMode::Exclusive,
+            WaitBudget::nonblocking(clock.mono_now()),
+            &cancel,
+            &clock,
+        )?;
+        let short = WaitBudget::cli(clock.mono_now(), 1)?;
+        std::thread::scope(|scope| -> Result<(), Box<dyn std::error::Error>> {
+            scope.spawn(move || {
+                std::thread::sleep(std::time::Duration::from_secs(2));
+                drop(held);
+            });
+            provision_child(&context, path, &source, short, &cancel)?;
+            Ok(())
+        })?;
+        assert_eq!(short.remaining(clock.mono_now()).as_micros(), 0);
         let output = provenant_os::fixture::git_command()
             .current_dir(project.join(path))
             .args(["rev-parse", "HEAD"])

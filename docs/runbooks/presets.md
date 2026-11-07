@@ -32,7 +32,15 @@ brief = "Meet the approved acceptance criteria and run the named checks."
 
 `templates` inspects the library. `run [BRIEF]` accepts `--use`, `--tier`,
 `--over`, `--set`, `--file`, `--explain` and `--wait`. Inspect the resolved
-shape and authority before submitting. A wait expiry leaves work running.
+shape and authority before submitting. `--wait` bounds settlement observation;
+expiry leaves work running. Each writer binding, including a child, gets a
+separate launch allowance of at least `domains.fabric.graph.writer_launch_seconds`
+(default 55 seconds), or the remaining caller budget when longer. Binding may
+therefore block beyond a short `--wait=1s` or `--wait=8s`; after binding, an expired
+settlement wait returns the current graph without waiting again. The binding
+allowance is created once per writer provisioning call and shared by registry
+locking and custody checks. A registry held past that allowance returns
+`writer_lock_busy` with retry advice, before creating a branch or worktree.
 Writer nodes default to `auto_continue_no_work = true`. When a writer declares
 unfinished work and its host-pinned head equals its starting head, the graph
 continues it once in the same worktree with the original brief and a short

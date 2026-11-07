@@ -459,15 +459,28 @@ impl Factory {
         if input["explain"] == true {
             return encode(request);
         }
+        let settlement = input
+            .get("wait_seconds")
+            .and_then(Value::as_u64)
+            .map(|seconds| {
+                WaitBudget::cli(self.clock.mono_now(), seconds)
+                    .map(|wait| wait.cap_at(budget.deadline().as_mono_time()))
+            })
+            .transpose()
+            .map_err(|_| FacadeError::InvalidInput { detail: None })?;
         let within =
             std::time::Duration::from_micros(budget.remaining(self.clock.mono_now()).as_micros());
         let receipt = provenant_cli::fabric::graph_relay::from_lane(&request, cancel, within)
             .map_err(relay_error)?;
-        if let Some(seconds) = input.get("wait_seconds").and_then(Value::as_u64) {
+        if let Some(settlement) = settlement {
+            let remaining = settlement.remaining(self.clock.mono_now()).as_micros();
+            if remaining == 0 {
+                return Ok(json!({"receipt":receipt,"observation_error":"child wait timed out"}));
+            }
             return Ok(
                 match provenant_cli::fabric::graph_relay::wait_for_children(
                     cancel,
-                    std::time::Duration::from_secs(seconds),
+                    std::time::Duration::from_micros(remaining),
                 ) {
                     Ok(children) => json!({"receipt":receipt,"children":children}),
                     Err(error) => json!({"receipt":receipt,"observation_error":error.to_string()}),
@@ -1591,21 +1604,15 @@ impl Factory {
                     .zip(now)
                     .is_some_and(|(wake, now)| now >= wake)
             });
-            if !due {
+            if !due || budget.remaining(self.clock.mono_now()).as_micros() == 0 {
                 return Ok(observed);
             }
-            let retry_budget = if budget.remaining(self.clock.mono_now()).as_micros() == 0 {
-                WaitBudget::cli(self.clock.mono_now(), 5)
-                    .map_err(|_| FacadeError::InvalidInput { detail: None })?
-            } else {
-                budget
-            };
             self.graph_with_scratch(
                 GraphInput::Run {
                     extra: Default::default(),
                     document: document.to_owned(),
                 },
-                retry_budget,
+                budget,
                 cancel,
                 Some(scratch),
                 None,
