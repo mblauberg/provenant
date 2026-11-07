@@ -2226,7 +2226,7 @@ impl crate::RunStore {
         let mut found = Vec::new();
         let mut candidates = Vec::new();
         for id in ids {
-            let inspected = (|| -> Result<_> {
+            let inspected = crate::controls::retry_reconcile(&self.db, call, || -> Result<_> {
                 let attempt = self.record(id, call)?;
                 if attempt.run_id != run {
                     return Err(RunError::Validation("writer fence run mismatch"));
@@ -2301,7 +2301,7 @@ impl crate::RunStore {
                     }
                 };
                 Ok((directory, scope, state, eligible))
-            })();
+            });
             match inspected {
                 Ok((directory, scope, state, eligible)) => {
                     if eligible {
@@ -2438,7 +2438,12 @@ impl crate::RunStore {
         Ok(found
             .into_iter()
             .filter(|(id, state)| {
-                !reaction_only.contains(id) || matches!(state, crate::Reconciled::Uncertain { .. })
+                (!reaction_only.contains(id)
+                    || matches!(state, crate::Reconciled::Uncertain { .. }))
+                    && (!matches!(
+                        state,
+                        crate::Reconciled::Uncertain { .. } | crate::Reconciled::Settling { .. }
+                    ) || !self.reconcile_is_settled(run, *id, call).unwrap_or(false))
             })
             .collect())
     }

@@ -1597,10 +1597,45 @@ impl Reconciled {
     }
 }
 
+// Retry idempotent recovery steps inside the existing store contention budget.
+// Short SQLite waits leave time to re-read state after a busy snapshot or a
+// terminal commit that succeeded before a later bookkeeping write was busy.
+pub(crate) fn retry_reconcile<T>(
+    db: &rusqlite::Connection,
+    call: &Request<'_>,
+    mut action: impl FnMut() -> Result<T>,
+) -> Result<T> {
+    struct Restore<'a>(&'a rusqlite::Connection, std::time::Duration);
+    impl Drop for Restore<'_> {
+        fn drop(&mut self) {
+            let _ = self.0.busy_timeout(self.1);
+        }
+    }
+    let timeout = provenant_sqlite::busy_timeout();
+    let _restore = Restore(db, timeout);
+    let started = std::time::Instant::now();
+    loop {
+        call.check()?;
+        let remaining = timeout.saturating_sub(started.elapsed());
+        db.busy_timeout(remaining.min(std::time::Duration::from_millis(100)))?;
+        match action() {
+            Err(RunError::Contention) if started.elapsed() < timeout => {
+                std::thread::sleep(
+                    timeout
+                        .saturating_sub(started.elapsed())
+                        .min(std::time::Duration::from_millis(10)),
+                );
+            }
+            result => return result,
+        }
+    }
+}
+
 // A lock timeout can race a terminal commit by another settlement owner.
 fn reconcile_failure(error: RunError, terminal: impl FnOnce() -> bool) -> Reconciled {
     let timed_out = match &error {
-        RunError::Filesystem(provenant_os::fs::FsError::LockTimeout { .. }) => true,
+        RunError::Contention
+        | RunError::Filesystem(provenant_os::fs::FsError::LockTimeout { .. }) => true,
         // Custody wraps some filesystem errors as I/O errors at its boundary.
         RunError::Io(error) => error.to_string().starts_with("lock acquisition timed out"),
         _ => false,
@@ -1776,7 +1811,12 @@ impl RunStore {
             }
         };
         if !Self::needs_lost_settlement(record) {
-            self.settle_recovered(&attempt, proof.into_recovery())?;
+            let mut recovery = proof.into_recovery();
+            recovery
+                .prepare_settlement()
+                .map_err(|error| RunError::Io(std::io::Error::other(error.to_string())))?;
+            self.settle_failed_import(record, &attempt, &recovery, call)?;
+            self.settle_recovered(&attempt, recovery)?;
             // Recheck custody after release before removing lock-named payloads.
             let cleanup = self.reconcile_terminal_temporary(record, call, observer);
             #[cfg(test)]
@@ -1841,9 +1881,27 @@ impl RunStore {
             .iter()
             .find(|task| task.task_id == record.task_id)
             .ok_or(RunError::Validation("recovery task missing"))?;
-        let directory = match &task.writer {
-            Some(writer) => self.writer_custody_directory(record, writer)?,
-            None => attempt,
+        let failed_import = record.settlement_receipts.as_ref().is_some_and(|receipts| {
+            matches!(receipts.git_import, EffectDisposition::Failed { .. })
+        });
+        let retained = if failed_import {
+            self.writer_fences()?
+                .into_iter()
+                .find(|fence| fence.scope == Self::scope(record))
+        } else {
+            None
+        };
+        let directory = match retained
+            .as_ref()
+            .and_then(|fence| fence.custody_directory())
+        {
+            // Finalising a failed import needs its recorded custody binding,
+            // not a fresh Git inspection of a possibly damaged worktree.
+            Some(path) => provenant_os::fs::Directory::open_anchor(path)?,
+            None => match &task.writer {
+                Some(writer) => self.writer_custody_directory(record, writer)?,
+                None => attempt,
+            },
         };
         custody::acquire_recovery(
             directory,
@@ -2940,11 +2998,12 @@ impl RunStore {
         let mut found = Vec::new();
         for id in ids {
             let id = AttemptId::parse(&id).map_err(|_| RunError::Validation("attempt index ID"))?;
-            let mut state = match self.reconcile_attempt(id, providers, call, observer) {
+            let mut state = match retry_reconcile(&self.db, call, || {
+                self.reconcile_attempt(id, providers, call, observer)
+            }) {
                 Ok(state) => state,
                 Err(error) => Some(reconcile_failure(error, || {
-                    self.record(id, call)
-                        .is_ok_and(|record| matches!(record.state, AttemptState::Terminal { .. }))
+                    self.reconcile_is_settled(run, id, call).unwrap_or(false)
                 })),
             };
             if let Some(error) = &listing_error
@@ -2961,10 +3020,38 @@ impl RunStore {
                 found.push((id, self.track_reconcile_progress(run, id, state, call)));
             }
         }
-        match cutover_error {
-            Some(error) => Err(error),
-            None => Ok(found),
+        if cutover_error.is_some() {
+            // A cutover timeout may already have been resolved by this pass.
+            retry_reconcile(&self.db, call, || self.cutover_writer_reservations(call))?;
         }
+        // A peer may have completed an earlier busy record while this pass
+        // judged the remaining records. Report its final state, not that error.
+        found.retain(|(id, state)| {
+            !matches!(
+                state,
+                Reconciled::Uncertain { .. } | Reconciled::Settling { .. }
+            ) || !self.reconcile_is_settled(run, *id, call).unwrap_or(false)
+        });
+        Ok(found)
+    }
+
+    pub(crate) fn reconcile_is_settled(
+        &self,
+        run: RunId,
+        id: AttemptId,
+        call: &Request<'_>,
+    ) -> Result<bool> {
+        let record = self.record(id, call)?;
+        let temporary: bool = self.db.query_row(
+            "SELECT tmp_retained FROM attempts WHERE id=?1 AND project=?2",
+            params![id.to_string(), self.context.project_id.to_string()],
+            |row| row.get(0),
+        )?;
+        Ok(matches!(record.state, AttemptState::Terminal { .. })
+            && !temporary
+            && self.import_release_permitted(&record, call)?
+            && self.custody_released(&record, call)?
+            && !self.pending_effect_attempts(run, call)?.contains(&id))
     }
     /// Progress is advisory: a broken attempt must not hide its peers' results.
     fn track_reconcile_progress(
@@ -3434,6 +3521,11 @@ impl RunStore {
             return Ok(Some(Reconciled::uncertain(UncertainReason::HostStalled)));
         }
         if matches!(record.state, AttemptState::Terminal { .. }) {
+            if !self.import_release_permitted(&record, call)?
+                && let Some(state) = self.settle_rebooted(&record, call, observer)?
+            {
+                return Ok(Some(state));
+            }
             let directory = self.attempt_dir(record.run_id, id, false)?;
             let scope = Self::scope(&record);
             let effects_retained = read_sealed(&directory, "terminal-effects.json", RECORD_LIMIT)?
@@ -3470,8 +3562,15 @@ impl RunStore {
                     return Ok(Some(crate::settlement::settling(&directory, scope)?));
                 }
             }
-            self.reconcile_terminal_effects(&record, call)?;
-            return self.reconcile_terminal_temporary(&record, call, observer);
+            let current = self.record(id, call)?;
+            self.reconcile_terminal_effects(&current, call)?;
+            if crate::holder::object_import_refused(&directory, scope)?.is_some()
+                && self.custody_released(&current, call)?
+            {
+                self.set_temporary_retained(id, false, call)?;
+                return Ok(Some(Reconciled::Finished));
+            }
+            return self.reconcile_terminal_temporary(&current, call, observer);
         }
         self.reconcile_live_attempt(&record, providers, call, observer)
             .map(Some)
@@ -3535,7 +3634,11 @@ impl RunStore {
                         let attempt = dir()?;
                         let finished = self.finish(id, &attempt, &exit, providers, call)?;
                         if !self.import_release_permitted(&finished, call)? {
-                            return crate::settlement::settling(&attempt, scope);
+                            // The first finish may just have sealed an import
+                            // failure. Settle its receipt in this same pass.
+                            return self
+                                .reconcile_attempt(id, providers, call, observer)
+                                .map(|state| state.unwrap_or(Reconciled::Finished));
                         }
                         custody::publish_release(&attempt, scope)
                             .map_err(|e| RunError::Io(std::io::Error::other(e.to_string())))?;
@@ -3563,9 +3666,8 @@ impl RunStore {
                     Err(CustodyError::Filesystem(
                         error @ provenant_os::fs::FsError::LockTimeout { .. },
                     )) => Ok(reconcile_failure(RunError::Filesystem(error), || {
-                        self.record(id, call).is_ok_and(|current| {
-                            matches!(current.state, AttemptState::Terminal { .. })
-                        })
+                        self.reconcile_is_settled(record.run_id, id, call)
+                            .unwrap_or(false)
                     })),
                     Err(error) => Ok(Reconciled::custody_unavailable(&error)),
                 }

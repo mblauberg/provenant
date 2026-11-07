@@ -54,7 +54,9 @@ pub use git_context::{
     GitContext, continuation_history, ensure_local_branch, resolve_git_base,
     resolve_git_base_with_facts, review_merge_base,
 };
-pub use holder::{HolderContext, HostLaunchContext, RootSeed, RunHolder, SealedTask};
+pub use holder::{
+    HolderContext, HostLaunchContext, RetainedGit, RootSeed, RunHolder, SealedTask, retained_git,
+};
 pub use launch::{
     Decoded, LaunchPaths, PrepareRefusal, PreparedLaunch, PreparedStart, Providers, RefusalKind,
     Started, WriteGrantLimit, access_root_allowed, capture_plan, concurrency,
