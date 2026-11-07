@@ -722,6 +722,11 @@ impl RunStore {
                 .as_ref()
                 .ok_or(RunError::Validation("pending import lacks writer"))?;
             let cancel = driver.cancellation();
+            let budget_stop = record
+                .extra
+                .get("terminal_cause")
+                .and_then(|value| serde_json::from_value::<TerminalCause>(value.clone()).ok())
+                == Some(TerminalCause::TokenBudget);
             let imported = crate::prepare_writer_with_facts(
                 writer,
                 &self.writer_registry,
@@ -735,7 +740,7 @@ impl RunStore {
                         attempt,
                         recovery,
                         &mut driver,
-                        false, // Budget commit was attempted before recording terminal state.
+                        budget_stop,
                     )
                 })
             });
@@ -1359,13 +1364,9 @@ impl RunStore {
             if let Some(p) = provider
                 && !crate::token_budget::enforces(p)
             {
-                let note = if p == "codex" {
-                    "token budget does not stop Codex writers: codex exec reports usage only at its final turn.completed frame; there is no further turn to stop".to_owned()
-                } else {
-                    format!(
-                        "token budget is not enforced for provider {p}: usage is not reported while it runs"
-                    )
-                };
+                let note = format!(
+                    "token budget is not enforced for provider {p}: usage is not reported while it runs"
+                );
                 decoded.reason = Some(match decoded.reason.take() {
                     Some(existing) => format!("{existing}; {note}"),
                     None => note,

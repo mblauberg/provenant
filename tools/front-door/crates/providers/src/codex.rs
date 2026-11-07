@@ -29,8 +29,8 @@ pub const REGISTRATION: crate::Registration = crate::Registration {
 
 crate::adapter!(Codex, "codex", prepare);
 
-/// Completion usage; this is not a mid-turn budget signal. `codex exec --json` reports each
-/// turn's usage in its `turn.completed` event; `input_tokens` holds cached
+/// Completed-turn usage; this cannot stop a turn mid-flight. `codex exec --json`
+/// reports each turn's usage in its `turn.completed` event; `input_tokens` holds cached
 /// reads and writes, so cache reads (`cached_input_tokens`) are subtracted to
 /// count fresh tokens only. Every turn is a distinct call, so each gets its
 /// own key and they add.

@@ -488,7 +488,7 @@ adapter_specs! { $;
         launch_token_refresh: false,
         deduplicate_result: false,
         result_event_usage: false,
-        token_budget_notice: Some("token budget does not stop Codex writers: codex exec reports usage only at its final turn.completed frame; there is no further turn to stop"),
+        token_budget_notice: Some("Codex writer token budgets are checked at completed-turn boundaries; a turn cannot be interrupted mid-flight"),
         exit_route: false,
         stderr_quota: false,
         model_observation: ModelObservation::Rollout,
