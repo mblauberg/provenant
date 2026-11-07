@@ -865,26 +865,21 @@ fn assert_compile_refusal_matches(
 fn oversized_graph_expansion_is_refused_before_journalling() -> Result {
     let rig = GraphProject::new()?;
     prepare_state(&rig)?;
-    let templates = rig.project.join(".provenant/templates");
-    std::fs::create_dir_all(&templates)?;
-    // A compiler-only limit has no document equivalent: it refuses before
-    // admission and stays a redacted graph-input reason through both CLI forms.
-    let swarm = rig.document(&json!({"nodes":[{"id":"swarm","use":"task","over":(0..257).map(|n|format!("area-{n}")).collect::<Vec<_>>()}]}))?;
-    for explain in [false, true] {
-        let mut command = rig.command();
-        command.args(["run", "--file"]).arg(&swarm);
-        if explain {
-            command.arg("--explain");
-        }
-        let output = command.output()?;
-        let value: Value = serde_json::from_slice(&output.stdout)?;
-        assert!(!output.status.success(), "{value}");
-        assert_eq!(
-            value["error"]["message"], "graph input could not be processed",
-            "{value}"
-        );
-    }
-    assert!(graph_records(&rig.state())?.is_empty());
+    // The compiler-only fan-out cap is redacted consistently before admission.
+    let over = (0..257)
+        .map(|number| format!("'area-{number}'"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let template = format!("nodes = [{{ id = 'swarm', use = 'task', over = [{over}] }}]\n");
+    let document = json!({"schema_version":1,"graph_id":"swarm","nodes":[{"id":"swarm","use":"task","over":(0..257).map(|n|format!("area-{n}")).collect::<Vec<_>>()}]});
+    assert_compile_refusal_matches(
+        &rig,
+        &[("swarm", template)],
+        "swarm",
+        &document,
+        "schema_version = 1\n",
+        "graph input could not be processed",
+    )?;
 
     // A graph that compiles to more nodes than the state admits: the template
     // CLI, the raw document CLI and the MCP tool must read the same refusal.
