@@ -678,14 +678,13 @@ mod tests {
         ));
         let dir = tempfile::tempdir().unwrap();
         let wait_for_marker = |marker: &std::path::Path, timeout: Duration| {
-            let until = std::time::Instant::now() + timeout;
-            while std::time::Instant::now() < until {
-                if marker.exists() {
-                    return true;
-                }
-                std::thread::sleep(Duration::from_millis(10));
-            }
-            marker.exists()
+            provenant_test_support::wait_for(
+                "gate background marker",
+                timeout,
+                || marker.exists(),
+                |exists| *exists,
+            )
+            .is_ok()
         };
         let control_trigger = dir.path().join("control-trigger");
         let control_marker = dir.path().join("control-marker");

@@ -959,7 +959,10 @@ fn provision_in_context(
         return Err(WorktreeError::InvalidRequest);
     }
     let expected = context.repo.root_path().join(path);
-    if let Some(existing) = worktrees::list(context, cancel)?
+    // Inspect registration and custody without holding sibling worktrees open
+    // for unrelated Git probes. The selected target's cleanliness is checked
+    // below, under its writer lease.
+    if let Some(existing) = worktrees::list_for_gc(context, cancel)?
         .into_iter()
         .find(|entry| entry.path == expected)
     {
