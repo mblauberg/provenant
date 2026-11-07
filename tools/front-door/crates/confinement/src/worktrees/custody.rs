@@ -466,7 +466,7 @@ fn reobserve_held_path(
             break;
         }
         workers.invalidate();
-        let Some((states, _)) = workers.observe_roots_while(&[root.to_path_buf()], &keep_going)
+        let Some((states, _)) = workers.reobserve_roots_while(&[root.to_path_buf()], &keep_going)
         else {
             if cancel.is_cancelled() {
                 return Err(WorktreeError::Cancelled);

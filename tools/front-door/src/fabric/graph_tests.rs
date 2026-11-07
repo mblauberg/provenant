@@ -2716,8 +2716,36 @@ mod provisioned_writer_submission_tests {
         )? {
             return Ok(());
         }
+        writer_continuation_fixture(false, false)
+    }
+
+    #[test]
+    fn foreign_writer_continues_after_quota_fallback() -> Result<(), Box<dyn std::error::Error>> {
+        if super::peer_tests::host_test(
+            "fabric::provisioned_writer_submission_tests::foreign_writer_continues_after_quota_fallback",
+        )? {
+            return Ok(());
+        }
+        writer_continuation_fixture(true, true)
+    }
+
+    #[test]
+    fn foreign_writer_continues_after_retry_and_replays_delivery()
+    -> Result<(), Box<dyn std::error::Error>> {
+        if super::peer_tests::host_test(
+            "fabric::provisioned_writer_submission_tests::foreign_writer_continues_after_retry_and_replays_delivery",
+        )? {
+            return Ok(());
+        }
+        writer_continuation_fixture(true, false)
+    }
+
+    fn writer_continuation_fixture(
+        foreign: bool,
+        quota: bool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let rig = crate::worktree_tests::repository()?;
-        let head = crate::worktree_tests::git(&rig, &["rev-parse", "HEAD"])?;
+        let mut head = crate::worktree_tests::git(&rig, &["rev-parse", "HEAD"])?;
         let roots = crate::roots::child(&rig.home, &rig.project, rig.state.clone())?;
         let factory = Factory {
             context: Context::open(roots, &rig.home, &rig.project)?,
@@ -2732,7 +2760,27 @@ mod provisioned_writer_submission_tests {
             mcp_project: None,
             workers: &Free,
         };
-        let document: graph::GraphDocument = serde_json::from_value(serde_json::json!({
+        let other = foreign
+            .then(crate::worktree_tests::repository)
+            .transpose()?;
+        let writer_project = other.as_ref().unwrap_or(&rig);
+        if foreign {
+            crate::worktree_tests::git(
+                writer_project,
+                &[
+                    "worktree",
+                    "add",
+                    "-qb",
+                    "topic/fix",
+                    ".worktrees/topic-fix",
+                ],
+            )?;
+        }
+        if foreign {
+            head = crate::worktree_tests::git(writer_project, &["rev-parse", "HEAD"])?;
+        }
+        let writer_path = writer_project.project.join(".worktrees/topic-fix");
+        let mut document: graph::GraphDocument = serde_json::from_value(serde_json::json!({
             "schema_version":2, "graph_id":"provision-and-seal", "nodes":[{
                 "id":"writer", "access":"worktree_write", "worktree":".worktrees/topic-fix",
                 "attempt":{"new_worktree":{"branch":"topic/fix","base":"HEAD"}},
@@ -2740,9 +2788,21 @@ mod provisioned_writer_submission_tests {
                 "template":"implement.fix", "parent_node":"planner"
             }]
         }))?;
+        if foreign {
+            document.nodes[0].worktree =
+                Some(writer_path.to_str().ok_or("writer path")?.to_owned());
+            document.nodes[0].attempt = None;
+            document.nodes[0].delivery = Some(provenant_records::run::DeliveryMode::None);
+            document.nodes[0]
+                .extra
+                .insert("retry".into(), serde_json::json!({"retries":1}));
+        }
         let cancel = CancelToken::new();
         let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
-        let mut owner = BoundGraphOwner { admission_timeout: None, launch_warnings: Vec::new(), repo_facts: Default::default(),
+        let mut owner = BoundGraphOwner {
+            admission_timeout: None,
+            launch_warnings: Vec::new(),
+            repo_facts: Default::default(),
             factory: &factory,
             integration_base: None,
             integration_branch: None,
@@ -2789,7 +2849,7 @@ mod provisioned_writer_submission_tests {
                 .as_ref()
                 .ok_or("sealed writer missing")?
                 .worktree,
-            rig.project.join(".worktrees/topic-fix")
+            writer_path
         );
         assert_eq!(
             task.context
@@ -2817,6 +2877,7 @@ mod provisioned_writer_submission_tests {
         };
         let directory = provenant_os::fs::Directory::open_anchor(&rig.state.join("runs")
             .join(record.run_id.to_string()).join("attempts").join(id))?;
+        drop(directory.try_lock(std::ffi::OsStr::new("custody.lock"), provenant_os::fs::LockMode::Exclusive)?);
         let mut sealed_exit = serde_json::to_value(&exit)?;
         let object = sealed_exit.as_object_mut().ok_or("exit object")?;
         object.remove("publication");
@@ -2833,7 +2894,7 @@ mod provisioned_writer_submission_tests {
         };
         store.publish_terminal(record.attempt_id, record.revision, &provenant_run::TerminalPublication {
             terminal_cause: None, terminal_note: None,
-            outcome: provenant_records::run::Outcome::Succeeded,
+            outcome: if quota { provenant_records::run::Outcome::QuotaLimited } else { provenant_records::run::Outcome::Succeeded },
             started_at: Some(started), finished_at: finished, provider_ms: Some(1000),
             reason: None, result: "OK", complete: true, redacted: false,
             resolved_route: Some(route.clone()), applied_route: Some(route.clone()), observed_route: Some(route),
@@ -2852,7 +2913,7 @@ mod provisioned_writer_submission_tests {
         assert_eq!(fact.usage.output_excluding_reasoning, Some(20));
         assert_eq!(fact.slot_wait_ms, Some(1500));
         assert_eq!(fact.finished_at.as_micros() - fact.started_at.ok_or("start")?.as_micros(), 3_000_000);
-        assert_eq!(fact.terminal_state, provenant_records::AttemptOutcome::Succeeded);
+        assert_eq!(fact.terminal_state, if quota { provenant_records::AttemptOutcome::QuotaLimited } else { provenant_records::AttemptOutcome::Succeeded });
         use graph::AttemptOwner as _;
         let usage = owner.usage(reference)?;
         assert_eq!(usage.tokens, Some(100));
@@ -2861,7 +2922,93 @@ mod provisioned_writer_submission_tests {
         assert_eq!(usage.extra["cache_read_tokens"], 60);
         assert_eq!(usage.extra["tier"], "senior");
         assert_eq!(usage.extra["template"], "implement.fix");
-        assert_eq!(usage.extra["outcome"], "succeeded");
+        assert_eq!(usage.extra["outcome"], if quota { "quota_limited" } else { "succeeded" });
+        if foreign {
+            let advance = |owner: &mut BoundGraphOwner<'_>, journal: &mut Journal| {
+                provenant_cli::run::with_deferred_provider_launch(|| {
+                    graph::advance_with_budget(
+                        &document,
+                        owner,
+                        journal,
+                        &Default::default(),
+                        &Default::default(),
+                    )
+                })
+            };
+            let mut continued = advance(&mut owner, &mut journal)
+                .map_err(|error| format!("observe terminal / quota continuation: {error:?}"))?;
+            if !quota {
+                graph::patch::retry_node(
+                    &mut graph::patch::LiveGraph {
+                        document: &document,
+                        checkpoint: &mut continued.checkpoint,
+                    },
+                    "writer",
+                    None,
+                    &graph::patch::PatchContext {
+                        library: &graph::template::TemplateLibrary::bundled(),
+                        resolvers: &Default::default(),
+                        scan: &|_| Ok(()),
+                        journal: None,
+                        limits: &Default::default(),
+                    },
+                )?;
+                journal.save(&continued.checkpoint)?;
+                continued = advance(&mut owner, &mut journal)
+                    .map_err(|error| format!("retry continuation: {error:?}"))?;
+            }
+            let node = &continued.checkpoint.nodes[0];
+            let successor = node.attempts.last().ok_or("successor")?;
+            assert_eq!(
+                successor.key.extra.get("previous_attempt_ref"),
+                Some(&serde_json::json!(reference)),
+                "{node:?}"
+            );
+            let successor_ref = successor
+                .attempt_ref
+                .clone()
+                .ok_or_else(|| format!("successor missing: {node:?}"))?;
+            assert_ne!(successor_ref, reference);
+            let successor_id = successor_ref
+                .split_once('/')
+                .ok_or("successor reference")?
+                .1
+                .parse()?;
+            let next = store.record(successor_id, &call)?;
+            let next_request = store.request(next.run_id, &call)?;
+            assert_eq!(next_request.tasks[0].writer, task.writer);
+            assert_eq!(
+                next_request.tasks[0]
+                    .context
+                    .as_ref()
+                    .and_then(|context| context.writer_predecessor),
+                Some(record.attempt_id)
+            );
+            assert_eq!(
+                next_request.tasks[0].source_head.as_deref(),
+                Some(head.as_str())
+            );
+            // Simulate a lost checkpoint reply: accepted delivery must resolve
+            // the foreign checkout again and observe the same sealed operation.
+            store.refuse_queued(next.run_id, "fixture settles accepted continuation", &call)?;
+            let mut replay = continued.checkpoint;
+            replay.nodes[0]
+                .attempts
+                .last_mut()
+                .ok_or("replay attempt")?
+                .attempt_ref = None;
+            journal.save(&replay)?;
+            let replayed = advance(&mut owner, &mut journal)
+                .map_err(|error| format!("accepted delivery replay: {error:?}"))?;
+            assert_eq!(
+                replayed.checkpoint.nodes[0]
+                    .attempts
+                    .last()
+                    .and_then(|attempt| attempt.attempt_ref.as_deref()),
+                Some(successor_ref.as_str())
+            );
+            assert_eq!(store.request(next.run_id, &call)?, next_request);
+        }
         Ok(())
     }
 }

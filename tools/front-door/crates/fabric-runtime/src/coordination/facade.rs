@@ -192,11 +192,101 @@ pub enum DispatchRefusalFact {
     Resource(provenant_records::diagnostic::ResourceFact),
 }
 
+/// Host-owned causes safe to return through an attempt's relay.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GraphRelayCause {
+    ParentSettled,
+    ChildDepth,
+    WriterParentRequired,
+    WriterWorktree,
+    WriterComposite,
+    WriteScope,
+    TargetOutsideGraph,
+    RelayUnavailable,
+    InvalidFrame,
+    InvalidChildId,
+    InvalidLaunch,
+    StartedNode,
+    JournalUnavailable,
+    ReadUnavailable,
+    WriterSource,
+    InvalidTemplate,
+    InvalidConfig,
+    InvalidReview,
+    Secret,
+    Cycle,
+    Conflict,
+}
+
+impl GraphRelayCause {
+    fn text(self) -> &'static str {
+        match self {
+            Self::ParentSettled => "the parent node has settled; launch from a running node",
+            Self::ChildDepth => {
+                "the child exceeds limits.child_depth; raise the graph's child depth limit"
+            }
+            Self::WriterParentRequired => {
+                "the writer child needs a registered parent worktree or a graph integration branch and source commit"
+            }
+            Self::WriterWorktree => {
+                "the writer needs a valid registered worktree; pass --worktree or omit it for a host-provisioned checkout"
+            }
+            Self::WriterComposite => {
+                "writer composite children require explicit per-node worktree bindings"
+            }
+            Self::WriteScope => "write_scope requires a writer child; select --mode worktree-write",
+            Self::TargetOutsideGraph => {
+                "the target is outside the calling lane's graph or permitted subtree"
+            }
+            Self::RelayUnavailable => {
+                "this attempt is not a running graph node; launch through a graph host relay"
+            }
+            Self::InvalidFrame => "the graph relay frame does not match the operation schema",
+            Self::InvalidChildId => {
+                "child id must be 1..=64 letters, digits, hyphens or underscores, without a double hyphen"
+            }
+            Self::InvalidLaunch => {
+                "the child launch does not match its template or graph schema; inspect the template and launch overrides with --explain"
+            }
+            Self::StartedNode => {
+                "the selected node has started; edit an unstarted node or launch a new child"
+            }
+            Self::JournalUnavailable => {
+                "the host could not access the graph journal; retry or ask the host operator to check graph state access"
+            }
+            Self::ReadUnavailable => {
+                "the host has no graph reader; upgrade the host and relaunch the parent"
+            }
+            Self::WriterSource => {
+                "the writer source could not be resolved; check the registered checkout and requested source commit"
+            }
+            Self::InvalidTemplate => {
+                "the child template could not be loaded or validated; inspect its template definition"
+            }
+            Self::InvalidConfig => {
+                "the host graph configuration is invalid; correct the configuration before retrying"
+            }
+            Self::InvalidReview => {
+                "the review panel could not be resolved; check the review routing configuration"
+            }
+            Self::Secret => {
+                "the child request contains a potential secret; remove credential material before retrying"
+            }
+            Self::Cycle => "the patch creates a dependency cycle; remove the cyclic dependency",
+            Self::Conflict => {
+                "the patch conflicts with the current graph revision or started nodes; refresh status and revise the patch"
+            }
+        }
+    }
+}
+
 /// Facts the input owner has explicitly approved for disclosure.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "value", rename_all = "snake_case")]
 pub enum InvalidInputDetail {
     GraphReason(String),
+    GraphRelayCause(GraphRelayCause),
     TemplateInvalid,
     UpgradeDrainRequired,
     CutoverFindings(String),
@@ -223,6 +313,7 @@ impl InvalidInputDetail {
             // text. They are not approved facts, even when a secret scanner
             // does not recognise their contents.
             Self::GraphReason(_) => Some("graph input could not be processed".into()),
+            Self::GraphRelayCause(cause) => Some(cause.text().into()),
             Self::UpgradeDrainRequired => Some("Finish or cancel old pending graphs and drain live lanes with the previous release before admitting new work.".into()),
             Self::CutoverFindings(findings) => Some(findings.clone()),
             Self::TemplateInvalid => Some("invalid input field `templates`: template could not be loaded or validated".into()),
@@ -1123,6 +1214,27 @@ impl From<&provenant_fabric_store::Error> for FacadeError {
 #[cfg(test)]
 mod diagnostic_tests {
     use super::FacadeError;
+
+    #[test]
+    fn relay_causes_survive_diagnostics_and_wire_round_trips()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for cause in [
+            super::GraphRelayCause::WriterParentRequired,
+            super::GraphRelayCause::WriterWorktree,
+            super::GraphRelayCause::ChildDepth,
+            super::GraphRelayCause::TargetOutsideGraph,
+        ] {
+            let error = FacadeError::GraphRelayRefused {
+                refusal_code: "refused_child".into(),
+                detail: Some(super::InvalidInputDetail::GraphRelayCause(cause)),
+            };
+            assert_eq!(error.diagnostic().detail.as_deref(), Some(cause.text()));
+            let restored: FacadeError = serde_json::from_value(serde_json::to_value(&error)?)?;
+            assert_eq!(restored, error);
+            assert_eq!(restored.diagnostic(), error.diagnostic());
+        }
+        Ok(())
+    }
 
     #[test]
     fn graph_reason_wire_contains_only_disclosed_text() -> Result<(), Box<dyn std::error::Error>> {

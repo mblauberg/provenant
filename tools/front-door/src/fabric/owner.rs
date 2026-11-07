@@ -101,6 +101,90 @@ impl GraphRefusalScope {
     }
 }
 
+/// A selected read-only checkout uses the ordinary launch root policy.
+fn bind_child_directory(
+    grants: &mut provenant_records::run::LaneAccess,
+    directory: &str,
+    state: &Path,
+    home: &Path,
+    network: Option<provenant_cli::Switch>,
+) -> Result<(), FacadeError> {
+    let directory = PathBuf::from(directory);
+    if !directory.is_absolute() {
+        return Err(FacadeError::invalid(InvalidInputDetail::Field(
+            "attempt.directory".into(),
+        )));
+    }
+    let checked = provenant_cli::run::lane_access(
+        &provenant_cli::Access {
+            mode: None,
+            worktree: None,
+            read_root: vec![directory],
+            attach: Vec::new(),
+            write_root: Vec::new(),
+            network,
+            capability: Vec::new(),
+            no_capability: Vec::new(),
+        },
+        state,
+        home,
+    )
+    .map_err(dispatch_refused)?;
+    let source = checked
+        .read_roots
+        .into_iter()
+        .next()
+        .ok_or(FacadeError::StateCorrupt)?;
+    let directory = provenant_os::fs::Directory::open_anchor(&source)
+        .map_err(|_| FacadeError::ConfinementRefused { resource: None })?;
+    let metadata = directory
+        .metadata()
+        .map_err(|_| FacadeError::ConfinementRefused { resource: None })?;
+    grants.source_identity = Some(provenant_records::run::SourceIdentity {
+        device: metadata.device,
+        inode: metadata.inode,
+    });
+    grants.source_root = Some(source);
+    grants.source_live = true;
+    Ok(())
+}
+
+/// Explicit writer checkouts carry their own repository, while their attempt
+/// remains attributed to the parent graph's project.
+fn selected_writer_project(
+    factory: &Factory,
+    path: &str,
+) -> Result<(PathBuf, provenant_core::ProjectId), FacadeError> {
+    let given = Path::new(path);
+    let selected = if given.is_absolute() {
+        given.to_path_buf()
+    } else {
+        factory.cwd.join(given)
+    };
+    if !selected
+        .try_exists()
+        .map_err(|_| FacadeError::io("inspect writer worktree"))?
+    {
+        return Err(run_error(provenant_run::RunError::WorktreeMissing(
+            selected,
+        )));
+    }
+    let mut checked = provenant_records::run::LaneAccess::default();
+    bind_child_directory(
+        &mut checked,
+        selected
+            .to_str()
+            .ok_or(FacadeError::InvalidInput { detail: None })?,
+        factory.context.roots.state.as_path(),
+        &factory.home,
+        None,
+    )?;
+    let directory = checked.source_root.ok_or(FacadeError::StateCorrupt)?;
+    let context = Context::open(factory.context.roots.clone(), &factory.home, &directory)
+        .map_err(|_| FacadeError::invalid(InvalidInputDetail::Field("worktree".into())))?;
+    Ok((directory, context.identity.project))
+}
+
 fn stored_graph_refusal(
     record: &provenant_run::OperationRecord,
 ) -> Result<FacadeError, FacadeError> {
@@ -1350,10 +1434,11 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
         &mut self,
         path: &str,
     ) -> Result<Option<provenant_fabric_runtime::graph::WriterWorktreeBinding>, Self::Error> {
+        let (directory, _) = selected_writer_project(self.factory, path)?;
         let request = provenant_run::resolve_writer(
             self.factory.context.roots.state.as_path(),
-            &self.factory.cwd,
-            Path::new(path),
+            &directory,
+            &directory,
         )
         .map_err(run_error)?;
         let writer = provenant_run::prepare_writer_with_facts(
@@ -2192,6 +2277,23 @@ impl BoundGraphOwner<'_> {
                         | provenant_run::OperationState::Refused
                 )
             });
+            let writer_project =
+                if access == provenant_fabric_runtime::graph::AccessMode::WorktreeWrite {
+                    worktree
+                        .map(|path| selected_writer_project(self.factory, path))
+                        .transpose()?
+                } else {
+                    None
+                };
+            let writer_directory = writer_project
+                .as_ref()
+                .map_or(self.factory.cwd.as_path(), |(directory, _)| {
+                    directory.as_path()
+                });
+            let foreign_writer = writer_project
+                .as_ref()
+                .is_some_and(|(_, project)| *project != self.factory.context.identity.project);
+
             // A graph retry is a new attempt, but retains the predecessor's
             // original source pin and terminal writer head. Mark continuations
             // even when both heads agree so preparation checks dirty remnants.
@@ -2246,11 +2348,17 @@ impl BoundGraphOwner<'_> {
                     .ok_or(FacadeError::StateCorrupt)?;
                 let writer = provenant_run::resolve_writer(
                     self.factory.context.roots.state.as_path(),
-                    &self.factory.cwd,
+                    writer_directory,
                     Path::new(worktree.ok_or(FacadeError::StateCorrupt)?),
                 )
                 .map_err(run_error)?;
-                if previous_task.writer.as_ref() != Some(&writer) {
+                if !previous_task.writer.as_ref().is_some_and(|previous| {
+                    provenant_run::equivalent_writer(
+                        previous,
+                        &writer,
+                        self.factory.context.identity.project,
+                    )
+                }) {
                     return Err(FacadeError::Conflict);
                 }
                 store
@@ -2404,12 +2512,12 @@ impl BoundGraphOwner<'_> {
             // Preserve the specific detached-writer refusal in node status.
             if !accepted
                 && access == provenant_fabric_runtime::graph::AccessMode::WorktreeWrite
-                && let Some(path) = worktree
+                && worktree.is_some()
             {
                 let writer = provenant_run::resolve_writer(
                     self.factory.context.roots.state.as_path(),
-                    &self.factory.cwd,
-                    Path::new(path),
+                    writer_directory,
+                    writer_directory,
                 )
                 .map_err(|error| match error {
                     provenant_run::RunError::Validation("writer needs a branch") => {
@@ -2511,7 +2619,7 @@ impl BoundGraphOwner<'_> {
                 provenant_confinement::worktrees::with_context_using_facts(
                     &self.factory.context.roots,
                     &self.factory.home,
-                    &self.factory.cwd,
+                    writer_directory,
                     &self.factory.clock,
                     self.cancel,
                     &self.repo_facts,
@@ -2549,7 +2657,7 @@ impl BoundGraphOwner<'_> {
                 let branch = if let Some(path) = worktree {
                     let writer = provenant_run::resolve_writer(
                         self.factory.context.roots.state.as_path(),
-                        &self.factory.cwd,
+                        writer_directory,
                         Path::new(path),
                     )
                     .map_err(run_error)?;
@@ -2641,6 +2749,8 @@ impl BoundGraphOwner<'_> {
                     })
                     // Preserve the prior fallback without requiring origin/HEAD.
                     .or_else(|| source_commit.map(str::to_owned))
+            } else if foreign_writer {
+                source_commit.map(str::to_owned)
             } else {
                 source_commit.map(|head| {
                     self.integration_base
@@ -2899,6 +3009,18 @@ impl BoundGraphOwner<'_> {
             };
             if !accepted {
                 grants.inputs_root = node.inputs_dir.map(Path::to_path_buf);
+                if access == provenant_fabric_runtime::graph::AccessMode::ReadOnly
+                    && source_commit.is_none()
+                    && let Some(directory) = node.attempt.and_then(|spec| spec.directory.as_deref())
+                {
+                    bind_child_directory(
+                        &mut grants,
+                        directory,
+                        self.factory.context.roots.state.as_path(),
+                        &self.factory.home,
+                        self.network,
+                    )?;
+                }
                 if access == provenant_fabric_runtime::graph::AccessMode::ReadOnly
                     && source_commit.is_some()
                 {
@@ -3400,6 +3522,46 @@ pub(crate) fn restore_scratch_source(
 
 #[cfg(test)]
 mod journal_error_tests {
+    #[test]
+    fn child_directory_preserves_scratch_and_refuses_state_and_credentials()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use super::*;
+        let root = tempfile::tempdir()?;
+        let home = root.path().join("home");
+        let state = root.path().join("state");
+        let scratch = root.path().join("scratch");
+        let credentials = home.join(".codex");
+        for path in [&home, &state, &scratch, &credentials] {
+            std::fs::create_dir_all(path)?;
+        }
+        let mut grants = provenant_records::run::LaneAccess::default();
+        bind_child_directory(
+            &mut grants,
+            scratch.to_str().ok_or("scratch")?,
+            &state,
+            &home,
+            None,
+        )?;
+        assert_eq!(
+            grants.source_root,
+            Some(provenant_os::fs::canonicalize(&scratch)?)
+        );
+        assert!(grants.source_live);
+        for path in [&state, &credentials] {
+            assert!(
+                bind_child_directory(
+                    &mut grants,
+                    path.to_str().ok_or("root")?,
+                    &state,
+                    &home,
+                    None
+                )
+                .is_err()
+            );
+        }
+        Ok(())
+    }
+
     #[test]
     fn graph_refusal_replays_before_preparation_and_rejects_changed_intent()
     -> Result<(), Box<dyn std::error::Error>> {

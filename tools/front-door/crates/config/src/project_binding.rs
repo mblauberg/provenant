@@ -177,13 +177,23 @@ pub fn lookup_project(
     roots: &Roots,
     location: &ProjectLocation,
 ) -> Result<Option<ProjectBinding>, ConfigError> {
-    if transient_location(roots, location.common_dir()) {
-        return transient_or_existing(roots, location.clone()).map(Some);
-    }
-    match existing_projects(roots)? {
-        Some(projects) => find_binding(&projects, location.common_dir()),
-        None => Ok(None),
-    }
+    lookup_project_at_state(roots.state.as_path(), location)
+}
+
+/// Resolve an existing host binding when an execution owner retains the state
+/// anchor independently of the graph's attribution project.
+pub fn lookup_project_at_state(
+    state: &Path,
+    location: &ProjectLocation,
+) -> Result<Option<ProjectBinding>, ConfigError> {
+    let binding = match existing_projects_at_state(state)? {
+        Some(projects) => find_binding(&projects, location.common_dir())?,
+        None => None,
+    };
+    Ok(binding.or_else(|| {
+        transient_location_at_state(state, location.common_dir())
+            .then(|| transient_binding(location.clone()))
+    }))
 }
 
 /// Lookup only: every durable registered binding. Scheduled maintenance must
@@ -235,7 +245,10 @@ fn git_location(path: &Path) -> bool {
 
 /// Whether a location is excluded from persistent scheduled collection.
 pub fn transient_location(roots: &Roots, path: &Path) -> bool {
-    let state = roots.state.as_path();
+    transient_location_at_state(roots.state.as_path(), path)
+}
+
+fn transient_location_at_state(state: &Path, path: &Path) -> bool {
     if path.starts_with(state.join("runs")) || path.starts_with(state.join("children")) {
         return true;
     }
@@ -284,7 +297,11 @@ fn transient_binding(location: ProjectLocation) -> ProjectBinding {
 }
 
 fn existing_projects(roots: &Roots) -> Result<Option<Directory>, ConfigError> {
-    let state = match provenant_os::fs::Directory::open_anchor(roots.state.as_path()) {
+    existing_projects_at_state(roots.state.as_path())
+}
+
+fn existing_projects_at_state(state: &Path) -> Result<Option<Directory>, ConfigError> {
+    let state = match provenant_os::fs::Directory::open_anchor(state) {
         Ok(state) => state,
         Err(error) if error.is_not_found() => return Ok(None),
         Err(error) => return Err(error.into()),

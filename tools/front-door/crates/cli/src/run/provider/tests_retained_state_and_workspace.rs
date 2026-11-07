@@ -733,6 +733,43 @@ fn staged_skill_files_are_written_outside_writable_scratch()
 }
 
 #[test]
+fn live_child_source_uses_its_selected_directory_and_rechecks_authority()
+-> Result<(), Box<dyn std::error::Error>> {
+    use provenant_core::{AttemptId, WallTime};
+    let temp = tempfile::tempdir()?;
+    let base = temp.path().canonicalize()?;
+    let home = base.join("home");
+    let state = base.join("state");
+    let project = base.join("parent");
+    let scratch = base.join("scratch");
+    for path in [&home, &state, &project, &scratch] { std::fs::create_dir(path)?; }
+    let registry = Registry {
+        roots: None, home: Some(&home), assets: None, cwd: Some(&project),
+        state_root: Some(&state), project_id: None, host: None, cancel: None,
+        repo_facts: Default::default(),
+    };
+    let mut task = super::super::tests::trace_run(50, AttemptId::from_bytes([51; 16]), WallTime::from_micros(100)?)?
+        .request.tasks.remove(0);
+    task.writer = None;
+    task.head = None;
+    task.access.source_root = Some(scratch.clone());
+    task.access.source_identity = Some(source_identity(&scratch)?);
+    task.access.source_live = true;
+    assert_eq!(source_cwd(&registry, &task)?, scratch);
+    let mut changed_identity = task.clone();
+    changed_identity.access.source_identity.as_mut().ok_or("identity")?.inode ^= 1;
+    assert!(source_cwd(&registry, &changed_identity).is_err());
+    for root in [&state, &home.join(".codex")] {
+        std::fs::create_dir_all(root)?;
+        let mut denied = task.clone();
+        denied.access.source_root = Some(root.clone());
+        denied.access.source_identity = Some(source_identity(root)?);
+        assert!(source_cwd(&registry, &denied).is_err());
+    }
+    Ok(())
+}
+
+#[test]
 fn graph_read_only_snapshot_survives_moving_and_replaced_checkout()
 -> Result<(), Box<dyn std::error::Error>> {
     use provenant_core::{AttemptId, OperationId, RunId, WallTime};
@@ -920,6 +957,21 @@ fn graph_read_only_snapshot_survives_moving_and_replaced_checkout()
     let error = source_cwd(&registry, &protected).unwrap_err().to_string();
     assert!(error.contains("no longer registered"));
     assert!(!error.contains(&foreign.to_string_lossy().into_owned()));
+    // A live child uses the selected scratch checkout, even when it was not
+    // registered and belongs to another project. Immutable snapshots above
+    // retain their stricter source binding.
+    let mut live = task.clone();
+    live.head = None;
+    live.base = None;
+    live.access.source_root = Some(foreign.clone());
+    live.access.source_identity = Some(source_identity(&foreign)?);
+    live.access.source_live = true;
+    assert_eq!(source_cwd(&registry, &live)?, foreign);
+    let prepared_live = prepare_command(&registry, &live, &paths, None,
+        &|_| Ok(fake.clone()), "command", "fake")?;
+    assert_eq!(prepared_live.cwd, foreign);
+    assert!(prepared_live.confinement.as_ref().ok_or("live confinement")?.plan
+        .permissions().protected_roots.iter().any(|root| root.path == foreign));
     let launch = prepare_command(
         &registry,
         &task,

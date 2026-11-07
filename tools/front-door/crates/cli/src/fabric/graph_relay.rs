@@ -18,10 +18,57 @@ use provenant_fabric_runtime::graph::{
 use serde_json::{Value, json};
 
 fn refused(code: &str, message: impl Into<String>) -> ServiceError {
-    ServiceError::Cli {
-        code: code.into(),
-        message: message.into(),
-        data: Value::Null,
+    use provenant_fabric_runtime::coordination::facade::{
+        GraphRelayCause as Cause, InvalidInputDetail,
+    };
+    let message = message.into();
+    let cause = match code {
+        "parent_settled" => Some(Cause::ParentSettled),
+        "child_depth" => Some(Cause::ChildDepth),
+        "writer_parent_required" => Some(Cause::WriterParentRequired),
+        "writer_worktree" => Some(Cause::WriterWorktree),
+        "not_found" | "confinement_refused" => Some(Cause::TargetOutsideGraph),
+        "graph_relay_unavailable" => Some(Cause::RelayUnavailable),
+        "invalid_input" => Some(Cause::InvalidFrame),
+        "graph_read_unavailable" => Some(Cause::ReadUnavailable),
+        "writer_source" => Some(Cause::WriterSource),
+        "started" => Some(Cause::StartedNode),
+        "edit_scope" => Some(Cause::TargetOutsideGraph),
+        "journal" => Some(Cause::JournalUnavailable),
+        "invalid" if message.starts_with("child id must be") => Some(Cause::InvalidChildId),
+        "invalid_template" => Some(Cause::InvalidTemplate),
+        "invalid_config" => Some(Cause::InvalidConfig),
+        "invalid_review" => Some(Cause::InvalidReview),
+        "secret" => Some(Cause::Secret),
+        "cycle" => Some(Cause::Cycle),
+        "conflict" => Some(Cause::Conflict),
+        "invalid" if message.ends_with("writer worktree") => Some(Cause::WriterWorktree),
+        "invalid"
+            if message == "writer composite children require explicit per-node work bindings" =>
+        {
+            Some(Cause::WriterComposite)
+        }
+        "invalid" if message == "write_scope requires a writer child" => Some(Cause::WriteScope),
+        "invalid" | "invalid_graph" => Some(Cause::InvalidLaunch),
+        _ => None,
+    };
+    match cause {
+        Some(cause) => ServiceError::Facade(FacadeError::GraphRelayRefused {
+            refusal_code: code.into(),
+            detail: Some(InvalidInputDetail::GraphRelayCause(cause)),
+        }),
+        None => ServiceError::Cli {
+            code: code.into(),
+            message,
+            data: Value::Null,
+        },
+    }
+}
+
+fn patch_refused(error: provenant_fabric_runtime::graph::patch::PatchError) -> ServiceError {
+    match error.admission {
+        Some(admission) => ServiceError::Facade(FacadeError::graph_admission(admission)),
+        None => refused(error.code, error.message),
     }
 }
 
@@ -45,6 +92,24 @@ pub fn serve(
     budget: WaitBudget,
     cancel: &CancelToken,
     clock: &dyn Clock,
+) -> Result<Value, ServiceError> {
+    serve_with_read(context, attempt, arguments, budget, cancel, clock, &|_| {
+        Err(refused(
+            "graph_read_unavailable",
+            "the host has no graph reader; upgrade the host",
+        ))
+    })
+}
+
+/// Serve reads with the binary's existing graph service after attempt-bound authorisation.
+pub fn serve_with_read(
+    context: &Context,
+    attempt: &str,
+    arguments: Value,
+    budget: WaitBudget,
+    cancel: &CancelToken,
+    clock: &dyn Clock,
+    read: &impl Fn(Value) -> Result<Value, ServiceError>,
 ) -> Result<Value, ServiceError> {
     let op: RelayOp = serde_json::from_value(arguments)
         .map_err(|error| refused("invalid_input", format!("invalid graph frame: {error}")))?;
@@ -71,6 +136,57 @@ pub fn serve(
                 })
         })
         .ok_or_else(not_a_node)?;
+    if let RelayOp::Read { mut input } = op {
+        if !matches!(input["op"].as_str(), Some("status" | "output" | "trace")) {
+            return Err(refused(
+                "invalid_input",
+                "graph reads support status, output and trace",
+            ));
+        }
+        let checkpoint = FileJournal::read_status_checkpoint(state, project, &graph_id)
+            .map_err(journal_error)?
+            .ok_or_else(not_a_node)?;
+        let requested = input["id"]
+            .as_str()
+            .filter(|id| !id.is_empty())
+            .unwrap_or(&graph_id);
+        let selected = if requested == graph_id {
+            graph_id.clone()
+        } else {
+            let node = requested
+                .strip_prefix(&format!("{graph_id}/"))
+                .unwrap_or(requested);
+            let found = checkpoint.nodes.iter().find(|row| {
+                row.id == node || row.recorded_attempts().any(|attempt| {
+                    attempt.attempt_ref.as_deref().is_some_and(|reference| {
+                        reference == requested || reference.rsplit('/').next() == Some(requested)
+                    })
+                })
+            }).ok_or_else(|| refused("not_found", "the target is outside the calling lane's graph; use the graph or child ID from its launch receipt"))?;
+            // Canonicalise node and attempt selectors before calling the ordinary reader.
+            if node == found.id || input["op"] == "trace" || input["trace"] == true {
+                format!("{graph_id}/{}", found.id)
+            } else {
+                found
+                    .recorded_attempts()
+                    .find_map(|attempt| {
+                        attempt.attempt_ref.as_deref().filter(|reference| {
+                            *reference == requested
+                                || reference.rsplit('/').next() == Some(requested)
+                        })
+                    })
+                    .ok_or_else(|| {
+                        refused(
+                            "not_found",
+                            "the attempt is outside the calling lane's graph",
+                        )
+                    })?
+                    .to_owned()
+            }
+        };
+        input["id"] = selected.into();
+        return read(input);
+    }
     let mut journal = match FileJournal::open(state, project, &graph_id, budget, cancel, clock) {
         Ok(journal) => journal,
         Err(provenant_fabric_runtime::graph::JournalError::Filesystem(
@@ -98,7 +214,7 @@ pub fn serve(
             let historical = relay::historical_parent_of_attempt(&checkpoint, &reference)
                 .ok_or_else(not_a_node)?;
             return match relay::replay_child(&document, &checkpoint, historical, request)
-                .map_err(|error| refused(error.code, error.message))?
+                .map_err(patch_refused)?
             {
                 Some(receipt) => Ok(serde_json::to_value(receipt)?),
                 None => Err(not_a_node()),
@@ -107,9 +223,10 @@ pub fn serve(
         (None, _) => return Err(not_a_node()),
     };
     let value = match op {
+        RelayOp::Read { .. } => unreachable!("reads return before journal locking"),
         RelayOp::Add(request) => {
             if let Some(receipt) = relay::replay_child(&document, &checkpoint, &parent, &request)
-                .map_err(|error| refused(error.code, error.message))?
+                .map_err(patch_refused)?
             {
                 return Ok(serde_json::to_value(receipt)?);
             }
@@ -129,7 +246,25 @@ pub fn serve(
                 scan: &scan_for_secrets,
                 limits: &context.config.graph.limits,
             };
-            let writer_base = if request.has_writers() {
+            fn needs_parent_source(node: &Value) -> bool {
+                (node["access"] == "worktree_write"
+                    && (node.get("worktree").and_then(Value::as_str).is_none()
+                        || node["provision_worktree"] == true))
+                    || ["/composite/nodes", "/loop/body"].iter().any(|pointer| {
+                        node.pointer(pointer)
+                            .and_then(Value::as_array)
+                            .is_some_and(|nodes| nodes.iter().any(needs_parent_source))
+                    })
+            }
+            let needs_parent = request.needs_worktree_provisioning()
+                || request
+                    .launch
+                    .as_ref()
+                    .is_some_and(|launch| needs_parent_source(&launch.node));
+            // An explicit checkout can launch independently of a read-only
+            // parent's writer registration. Only new child checkouts need a
+            // parent source. Explicit checkouts retain their own launch bindings.
+            let writer_base = if request.has_writers() && needs_parent {
                 let parent_path = relay::parent_worktree(
                     &document,
                     &checkpoint,
@@ -147,9 +282,13 @@ pub fn serve(
                     let path = parent_path
                         .clone()
                         .unwrap_or_else(|| context.cwd.to_string_lossy().into_owned());
+                    let writer_cwd = parent_path
+                        .as_deref()
+                        .map(std::path::Path::new)
+                        .unwrap_or(&context.cwd);
                     let writer = provenant_run::resolve_writer(
                         state.as_path(),
-                        &context.cwd,
+                        writer_cwd,
                         std::path::Path::new(&path),
                     )
                     .map_err(|error| refused("writer_parent_required", error.to_string()))?;
@@ -192,7 +331,7 @@ pub fn serve(
                     .as_ref()
                     .map(|(branch, commit)| (branch.as_str(), commit.as_str())),
             )
-            .map_err(|error| refused(error.code, error.message))?;
+            .map_err(patch_refused)?;
             if receipt.replayed {
                 // Nothing changed; the earlier admission is already journalled.
                 return Ok(serde_json::to_value(receipt)?);
@@ -260,7 +399,7 @@ pub fn serve(
                     limits: &context.config.graph.limits,
                 },
             )
-            .map_err(|error| refused(error.code, error.message))?;
+            .map_err(patch_refused)?;
             if !admitted.replayed {
                 provenant_fabric_runtime::graph::cutover::pending_guard(state)
                     .map_err(cutover_refusal)?;
@@ -598,8 +737,29 @@ pub fn provision_writer(
     budget: WaitBudget,
     cancel: &CancelToken,
 ) -> Result<(), ServiceError> {
-    provision_writer_checked(context, path, branch, source, budget, cancel)
-        .map_err(|error| refused("writer_worktree", error.to_string()))
+    provision_writer_checked(context, path, branch, source, budget, cancel).map_err(|error| {
+        use provenant_confinement::worktrees::WorktreeError;
+        use provenant_fabric_runtime::coordination::facade::DispatchRefusalFact;
+        let fact = match &error {
+            WorktreeError::Dirty(_) => Some(DispatchRefusalFact::DirtyWriter),
+            WorktreeError::DetachedWorktree { .. } | WorktreeError::DetachedPrimary => {
+                Some(DispatchRefusalFact::DetachedWriter)
+            }
+            WorktreeError::CheckedOut => Some(DispatchRefusalFact::CheckedOutWriter),
+            WorktreeError::WriterBusy { holder } => {
+                return ServiceError::Facade(FacadeError::WriterBusy { holder: *holder });
+            }
+            _ => None,
+        };
+        match fact {
+            Some(fact) => ServiceError::Facade(FacadeError::DispatchRefused {
+                fact: Some(fact),
+                disk: None,
+                reason: String::new(),
+            }),
+            None => refused("writer_worktree", error.to_string()),
+        }
+    })
 }
 
 /// Preserve the typed worktree failure for the graph launch owner.
@@ -1027,6 +1187,35 @@ mod provisioning_tests {
     use super::*;
 
     #[test]
+    fn relay_refusal_cause_reaches_the_lane_without_raw_source_text()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = tempfile::tempdir()?;
+        let socket = root.path().join("relay/socket");
+        let _host = provenant_fabric_mcp::lane::HostRelay::start_with_graph(
+            socket.clone(),
+            Default::default(),
+            |_, _, _| Err(ServiceError::FabricOwnerUnavailable),
+            |_, _, _| Err(refused("writer_parent_required", "PROMPT_SENTINEL")),
+        )?;
+        let error = provenant_fabric_mcp::lane::graph(
+            &socket,
+            json!({"op":"children"}),
+            &CancelToken::new(),
+            std::time::Duration::from_secs(5),
+        )
+        .expect_err("writer parent refusal");
+        assert_eq!(error.code(), "writer_parent_required");
+        let wire = error.structured_error();
+        assert!(
+            wire["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("registered parent worktree"))
+        );
+        assert!(!wire.to_string().contains("PROMPT_SENTINEL"));
+        Ok(())
+    }
+
+    #[test]
     fn writer_child_worktree_is_created_at_source_and_dirty_reuse_is_refused()
     -> Result<(), Box<dyn std::error::Error>> {
         let root = tempfile::tempdir()?;
@@ -1153,9 +1342,12 @@ mod provisioning_tests {
                         &source,
                         &cancel,
                     )?;
+                    // The fixture's TMPDIR may be an alias. Lock the same
+                    // canonical checkout identity that production verifies.
+                    let canonical_worktree = provenant_os::fs::canonicalize(&project.join(path))?;
                     let _held = provenant_confinement::worktrees::cache_writer_guard(
                         ctx.project_state,
-                        &project.join(path),
+                        &canonical_worktree,
                     )
                     .map_err(provenant_confinement::worktrees::custody_refusal)?;
                     let held = provision_in_context(
@@ -1380,7 +1572,7 @@ mod provisioning_tests {
             fresh["idempotency_key"] = json!("new-request");
             assert!(
                 matches!(serve(&context, "caller", fresh, budget, &cancel, &clock),
-                Err(ServiceError::Cli { code, .. }) if code == "graph_relay_unavailable")
+                Err(error) if error.code() == "graph_relay_unavailable")
             );
         }
         Ok(())
@@ -1565,7 +1757,12 @@ mod provisioning_tests {
                 &cancel,
                 &clock,
             );
-            assert!(matches!(result, Err(ServiceError::Cli { code, .. }) if code == "edit_scope"));
+            assert_eq!(
+                result
+                    .expect_err("edits outside the subtree must be refused")
+                    .code(),
+                "edit_scope"
+            );
             let saved = FileJournal::read_checkpoint(
                 &context.roots.state,
                 context.identity.project,

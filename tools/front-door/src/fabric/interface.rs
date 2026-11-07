@@ -21,7 +21,7 @@ fn graph_patch_error(error: patch::PatchError) -> FacadeError {
     }
 }
 
-fn relay_error(error: ServiceError) -> FacadeError {
+pub(super) fn relay_error(error: ServiceError) -> FacadeError {
     match error {
         ServiceError::Facade(error) => error,
         ServiceError::Cli { code, .. } if code == "UPGRADE_DRAIN_REQUIRED" => {
@@ -626,6 +626,29 @@ impl Factory {
         override_launch(&mut typed, input)?;
         self.validate_host_placement(&typed)?;
         compiled = encode(typed)?;
+        // The relay is bound to the parent's graph, while the selected checkout
+        // is an ordinary child launch input. Keep it on every provider leaf.
+        fn bind_directory(node: &mut Value, directory: &Path) {
+            let mut container = false;
+            for pointer in ["/composite/nodes", "/loop/body"] {
+                if let Some(children) = node.pointer_mut(pointer).and_then(Value::as_array_mut) {
+                    container = true;
+                    for child in children {
+                        bind_directory(child, directory);
+                    }
+                }
+            }
+            if !container
+                && (node.get("kind").is_none()
+                    || matches!(node["kind"].as_str(), Some("task" | "plan" | "synthesise")))
+            {
+                if node.get("attempt").is_none_or(Value::is_null) {
+                    node["attempt"] = json!({});
+                }
+                node["attempt"]["directory"] = json!(directory);
+            }
+        }
+        bind_directory(&mut compiled, &self.cwd);
         let writer = compiled["access"] == "worktree_write"
             && compiled.get("composite").is_none()
             && compiled.get("loop").is_none();
@@ -754,6 +777,19 @@ impl Factory {
             return Err(FacadeError::ConfinementRefused { resource: None });
         }
         if self.context.in_lane {
+            if matches!(operation, "status" | "output" | "trace") {
+                let op = provenant_fabric_runtime::graph::relay::RelayOp::Read {
+                    input: input.clone(),
+                };
+                return provenant_cli::fabric::graph_relay::from_lane(
+                    &op,
+                    cancel,
+                    std::time::Duration::from_micros(
+                        budget.remaining(self.clock.mono_now()).as_micros(),
+                    ),
+                )
+                .map_err(relay_error);
+            }
             if operation == "run" {
                 return self.relay_document(&input, budget, cancel);
             }
@@ -1261,7 +1297,13 @@ impl Factory {
                     })
         });
         if !rows.is_empty() {
-            super::unified::enrich_status_rows(&mut rows, &self.context, &self.clock, cancel)?;
+            super::unified::enrich_status_rows_within(
+                &mut rows,
+                &self.context,
+                &self.clock,
+                cancel,
+                budget,
+            )?;
         }
         let mut result = encode(run)?;
         report_launch_refusals(&mut result, &rows);
@@ -1501,7 +1543,13 @@ impl Factory {
             }
         }
         let mut rows = super::unified::status_rows(&run, target);
-        super::unified::enrich_status_rows(&mut rows, &self.context, &self.clock, cancel)?;
+        super::unified::enrich_status_rows_within(
+            &mut rows,
+            &self.context,
+            &self.clock,
+            cancel,
+            budget,
+        )?;
         Ok(json!({"rows":rows,"timed_out":timed_out}))
     }
 
@@ -2864,6 +2912,31 @@ mod tests {
     }
 
     #[test]
+    fn child_launch_preserves_an_unregistered_selected_project_directory() -> Result {
+        let rig = TestRig::new()?;
+        let mut factory = factory(&rig)?;
+        let scratch = rig.root.join("scratch-repository");
+        std::fs::create_dir_all(&scratch)?;
+        let output = provenant_os::fixture::git_command()
+            .arg("init")
+            .arg("-q")
+            .arg(&scratch)
+            .output()?;
+        assert!(output.status.success());
+        factory.cwd = scratch.clone();
+        factory.context =
+            Context::open_inspection(factory.context.roots.clone(), &rig.home, &scratch)?;
+        let request = factory
+            .child_request(&json!({"op":"run","brief":"Read the selected scratch repository"}))?;
+        assert_eq!(
+            request.launch.as_ref().ok_or("child launch")?.node["attempt"]["directory"],
+            json!(scratch)
+        );
+        assert!(!request.writer);
+        Ok(())
+    }
+
+    #[test]
     fn child_launch_retains_writer_access_and_has_a_stable_logical_identity() -> Result {
         let rig = TestRig::new()?;
         let factory = factory(&rig)?;
@@ -3046,127 +3119,257 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn child_launch_crosses_the_lane_transport_and_provisions_writer_fanout() -> Result {
+    fn exercise_child_launch(mut input: Value, count: usize, disjoint: bool) -> Result {
         use provenant_fabric_runtime::graph::{GraphCheckpoint, GraphExecution, relay::RelayOp};
-        fn exercise(input: Value, count: usize, disjoint: bool) -> Result {
-            let rig = TestRig::new()?;
-            crate::worktree_tests::git(&rig, &["commit", "--allow-empty", "-m", "source"])?;
-            let source = crate::worktree_tests::git(&rig, &["rev-parse", "HEAD"])?;
-            let branch = crate::worktree_tests::git(&rig, &["symbolic-ref", "--short", "HEAD"])?;
-            let factory = factory(&rig)?;
-            let cancel = CancelToken::new();
-            let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
-            let document: GraphDocument = serde_json::from_value(json!({
-                "schema_version":2, "graph_id":"g-child-e2e", "template_library":{}, "integration_branch":branch,
-                "nodes":[{"id":"parent", "access":"read_only", "prompt":"Go", "route":{"alias":"senior"}}]
-            }))?;
-            let reference = format!("{}/caller", factory.context.identity.host);
-            let checkpoint: GraphCheckpoint = serde_json::from_value(json!({
-                "schema_version":1, "graph_id":"g-child-e2e", "plan_digest":"fixture", "bound_integration_base":source,
-                "nodes":[{"id":"parent", "state":"running", "attempts":[{
-                    "launched":true, "key":{"graph_id":"g-child-e2e", "node_id":"parent", "route_index":0},
-                    "route":{"alias":"senior"}, "state":"running", "attempt_ref":reference, "outcome":null, "launch_actor":"fixture"
-                }]}]
-            }))?;
-            {
-                let mut journal = FileJournal::open(
-                    &factory.context.roots.state,
-                    factory.context.identity.project,
-                    &document.graph_id,
-                    budget,
-                    &cancel,
-                    &factory.clock,
-                )?;
-                journal.bind(GraphExecution {
-                    review_base: None,
-                    extra: Default::default(),
-                    integration_base: Some(source.parse()?),
-                    directory: rig.project.clone(),
-                    document: document.clone(),
-                })?;
-                journal.save(&checkpoint)?;
+        let rig = TestRig::new()?;
+        crate::worktree_tests::git(&rig, &["commit", "--allow-empty", "-m", "source"])?;
+        let mut source = crate::worktree_tests::git(&rig, &["rev-parse", "HEAD"])?;
+        let branch = crate::worktree_tests::git(&rig, &["symbolic-ref", "--short", "HEAD"])?;
+        let factory = factory(&rig)?;
+        let cancel = CancelToken::new();
+        let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
+        let foreign_checkout = input["worktree"] == "$foreign";
+        let explicit_checkout = foreign_checkout || input["worktree"] == "$registered";
+        if foreign_checkout {
+            let selected = rig.root.join("foreign-project");
+            std::fs::create_dir_all(&selected)?;
+            for args in [
+                vec!["init", "-q"],
+                vec!["commit", "--allow-empty", "-qm", "foreign source"],
+            ] {
+                let result = provenant_os::fixture::git_command()
+                    .current_dir(&selected)
+                    .args(args)
+                    .output()?;
+                assert!(
+                    result.status.success(),
+                    "{}",
+                    String::from_utf8_lossy(&result.stderr)
+                );
             }
-            crate::worktree_tests::git(
-                &rig,
-                &["commit", "--allow-empty", "-m", "host head moved"],
+            let result = provenant_os::fixture::git_command()
+                .current_dir(&selected)
+                .args(["rev-parse", "HEAD"])
+                .output()?;
+            assert!(result.status.success());
+            source = String::from_utf8(result.stdout)?.trim().to_owned();
+            let selected_context =
+                Context::open(factory.context.roots.clone(), &rig.home, &selected)?;
+            provenant_cli::fabric::graph_relay::provision_child(
+                &selected_context,
+                ".worktrees/explicit-child",
+                &source,
+                WaitBudget::cli(factory.clock.mono_now(), 30)?,
+                &cancel,
             )?;
-            let context = Context::open(factory.context.roots.clone(), &rig.home, &rig.project)?;
-            let socket = rig.root.join("child-relay/socket");
-            let _relay = provenant_fabric_mcp::lane::HostRelay::start_with_graph(
-                socket.clone(),
-                Default::default(),
-                |_, _, _| Err(ServiceError::FabricOwnerUnavailable),
-                move |arguments, cancel: &CancelToken, _| {
-                    let clock = SystemClock;
-                    let budget = WaitBudget::cli(clock.mono_now(), 30)
-                        .map_err(|_| ServiceError::FabricOwnerUnavailable)?;
-                    provenant_cli::fabric::graph_relay::serve(
-                        &context, "caller", arguments, budget, cancel, &clock,
-                    )
-                },
+            input["worktree"] = json!(selected.join(".worktrees/explicit-child"));
+        } else if explicit_checkout {
+            provenant_cli::fabric::graph_relay::provision_child(
+                &factory.context,
+                ".worktrees/explicit-child",
+                &source,
+                WaitBudget::cli(factory.clock.mono_now(), 30)?,
+                &cancel,
             )?;
-            {
-                let request = factory.child_request(&input)?;
-                let frame = serde_json::to_value(RelayOp::Add(request))?;
-                let receipt = provenant_fabric_mcp::lane::graph(
-                    &socket,
-                    frame.clone(),
-                    &cancel,
-                    std::time::Duration::from_secs(30),
-                )?;
-                let replay = provenant_fabric_mcp::lane::graph(
-                    &socket,
-                    frame,
-                    &cancel,
-                    std::time::Duration::from_secs(30),
-                )?;
-                assert_eq!(replay["replayed"], true);
-                assert_eq!(replay["node"], receipt["node"]);
-                let checkpoint = FileJournal::read_checkpoint(
-                    &factory.context.roots.state,
-                    factory.context.identity.project,
-                    &document.graph_id,
+            input["worktree"] = json!(rig.project.join(".worktrees/explicit-child"));
+        }
+        let document: GraphDocument = serde_json::from_value(json!({
+            "schema_version":2, "graph_id":"g-child-e2e", "template_library":{}, "integration_branch":if explicit_checkout { None } else { Some(&branch) },
+            "nodes":[{"id":"parent", "access":"read_only", "prompt":"Go", "route":{"alias":"senior"}}]
+        }))?;
+        let reference = format!("{}/caller", factory.context.identity.host);
+        let checkpoint: GraphCheckpoint = serde_json::from_value(json!({
+            "schema_version":1, "graph_id":"g-child-e2e", "plan_digest":"fixture", "bound_integration_base":if explicit_checkout { None } else { Some(&source) },
+            "nodes":[{"id":"parent", "state":"running", "attempts":[{
+                "launched":true, "key":{"graph_id":"g-child-e2e", "node_id":"parent", "route_index":0},
+                "route":{"alias":"senior"}, "state":"running", "attempt_ref":reference, "outcome":null, "launch_actor":"fixture"
+            }]}]
+        }))?;
+        {
+            let mut journal = FileJournal::open(
+                &factory.context.roots.state,
+                factory.context.identity.project,
+                &document.graph_id,
+                budget,
+                &cancel,
+                &factory.clock,
+            )?;
+            journal.bind(GraphExecution {
+                review_base: None,
+                extra: Default::default(),
+                integration_base: Some(source.parse()?),
+                directory: rig.project.clone(),
+                document: document.clone(),
+            })?;
+            journal.save(&checkpoint)?;
+        }
+        crate::worktree_tests::git(&rig, &["commit", "--allow-empty", "-m", "host head moved"])?;
+        let context = Context::open(factory.context.roots.clone(), &rig.home, &rig.project)?;
+        // Retain TMPDIR's short alias: the canonical attempt path can
+        // exceed Unix SUN_LEN even though the owned scratch is writable.
+        let temporary = std::env::temp_dir();
+        let relative = rig.root.strip_prefix(std::fs::canonicalize(&temporary)?)?;
+        let socket = temporary.join(relative).join("r/s");
+        let _relay = provenant_fabric_mcp::lane::HostRelay::start_with_graph(
+            socket.clone(),
+            Default::default(),
+            |_, _, _| Err(ServiceError::FabricOwnerUnavailable),
+            move |arguments, cancel: &CancelToken, _| {
+                let clock = SystemClock;
+                let budget = WaitBudget::cli(clock.mono_now(), 30)
+                    .map_err(|_| ServiceError::FabricOwnerUnavailable)?;
+                provenant_cli::fabric::graph_relay::serve(
+                    &context, "caller", arguments, budget, cancel, &clock,
+                )
+            },
+        )?;
+        {
+            let request = factory.child_request(&input)?;
+            let frame = serde_json::to_value(RelayOp::Add(request))?;
+            let receipt = provenant_fabric_mcp::lane::graph(
+                &socket,
+                frame.clone(),
+                &cancel,
+                std::time::Duration::from_secs(30),
+            )?;
+            let replay = provenant_fabric_mcp::lane::graph(
+                &socket,
+                frame,
+                &cancel,
+                std::time::Duration::from_secs(30),
+            )?;
+            assert_eq!(replay["replayed"], true);
+            assert_eq!(replay["node"], receipt["node"]);
+            let checkpoint = FileJournal::read_checkpoint(
+                &factory.context.roots.state,
+                factory.context.identity.project,
+                &document.graph_id,
+            )?
+            .ok_or("missing checkpoint")?;
+            assert_eq!(checkpoint.expansions.len(), 1);
+            let prefix = receipt["node"].as_str().ok_or("missing child")?;
+            let writers: Vec<_> = checkpoint.expansions[0]
+                .nodes
+                .iter()
+                .filter(|node| {
+                    node.access == provenant_fabric_runtime::graph::AccessMode::WorktreeWrite
+                        && (node.id == prefix || node.id.starts_with(&format!("{prefix}--")))
+                })
+                .collect();
+            assert_eq!(writers.len(), count);
+            let mut paths = std::collections::BTreeSet::new();
+            for writer in writers {
+                let path = writer.worktree.as_ref().ok_or("missing writer worktree")?;
+                let unique = paths.insert(path.clone());
+                if disjoint {
+                    assert!(unique);
+                }
+                assert_eq!(
+                    crate::worktree_tests::git(&rig, &["-C", path, "rev-parse", "HEAD"])?,
+                    source
+                );
+                let mut owner = BoundGraphOwner {
+                    admission_timeout: None,
+                    launch_warnings: Vec::new(),
+                    repo_facts: Default::default(),
+                    factory: &factory,
+                    integration_base: None,
+                    integration_branch: None,
+                    network: None,
+                    capability_overrides: Default::default(),
+                    exclude: Vec::new(),
+                    budget,
+                    cancel: &cancel,
+                    prices: None,
+                    tick: false,
+                };
+                let bound = provenant_fabric_runtime::graph::AttemptOwner::bind_writer_worktree(
+                    &mut owner, path,
                 )?
-                .ok_or("missing checkpoint")?;
-                assert_eq!(checkpoint.expansions.len(), 1);
-                let prefix = receipt["node"].as_str().ok_or("missing child")?;
-                let writers: Vec<_> = checkpoint.expansions[0]
-                    .nodes
-                    .iter()
-                    .filter(|node| {
-                        node.access == provenant_fabric_runtime::graph::AccessMode::WorktreeWrite
-                            && (node.id == prefix || node.id.starts_with(&format!("{prefix}--")))
-                    })
-                    .collect();
-                assert_eq!(writers.len(), count);
-                let mut paths = std::collections::BTreeSet::new();
-                for writer in writers {
-                    let path = writer.worktree.as_ref().ok_or("missing writer worktree")?;
-                    let unique = paths.insert(path.clone());
-                    if disjoint {
-                        assert!(unique);
-                    }
-                    assert_eq!(
-                        crate::worktree_tests::git(&rig, &["-C", path, "rev-parse", "HEAD"])?,
-                        source
+                .ok_or("writer binding")?;
+                assert_eq!(bound.head, source);
+                if foreign_checkout {
+                    let state = factory.context.roots.state.as_path();
+                    let request =
+                        provenant_run::resolve_writer(state, Path::new(path), Path::new(path))?;
+                    let selected: provenant_core::ProjectId = serde_json::from_value(
+                        request
+                            .extra
+                            .get("custody_project")
+                            .cloned()
+                            .ok_or("custody project")?,
+                    )?;
+                    assert_ne!(selected, factory.context.identity.project);
+                    let name = provenant_confinement::worktrees::state_dir_name(Path::new(path));
+                    assert!(
+                        state
+                            .join("worktrees")
+                            .join(selected.to_string())
+                            .join(&name)
+                            .is_dir()
                     );
-                    assert_eq!(
-                        writer.delivery,
-                        Some(provenant_records::run::DeliveryMode::Integrate(
-                            branch.clone()
-                        ))
+                    assert!(
+                        !state
+                            .join("worktrees")
+                            .join(factory.context.identity.project.to_string())
+                            .join(&name)
+                            .exists()
                     );
-                    assert_eq!(
-                        writer.source,
-                        Some(provenant_fabric_runtime::graph::SourceBinding::Commit {
-                            commit: source.clone()
-                        })
+                    assert!(
+                        state
+                            .join("writer-projects")
+                            .join(factory.context.identity.project.to_string())
+                            .join(selected.to_string())
+                            .is_dir()
+                    );
+                    let mut forged = request;
+                    forged.extra.insert(
+                        "custody_project".into(),
+                        json!(factory.context.identity.project),
+                    );
+                    assert!(
+                        provenant_run::prepare_writer(
+                            &forged,
+                            state,
+                            factory.context.identity.project
+                        )
+                        .is_err()
                     );
                 }
+
+                assert_eq!(
+                    writer.delivery,
+                    (!explicit_checkout).then(|| {
+                        provenant_records::run::DeliveryMode::Integrate(branch.clone())
+                    })
+                );
+                assert_eq!(
+                    writer.source,
+                    (!explicit_checkout).then(|| {
+                        provenant_fabric_runtime::graph::SourceBinding::Commit {
+                            commit: source.clone(),
+                        }
+                    })
+                );
             }
-            Ok(())
         }
+        Ok(())
+    }
+
+    #[test]
+    fn explicit_writer_children_use_their_selected_project_custody() -> Result {
+        for worktree in ["$foreign", "$registered"] {
+            exercise_child_launch(
+                json!({"op":"run", "brief":"Write from a read-only parent", "access":"worktree_write", "worktree":worktree}),
+                1,
+                false,
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn child_launch_crosses_the_lane_transport_and_provisions_writer_fanout() -> Result {
         for (input, count, disjoint) in [
             (
                 json!({"op":"run", "use":"implement", "brief":"Fix the parser"}),
@@ -3193,7 +3396,7 @@ mod tests {
                 true,
             ),
         ] {
-            exercise(input, count, disjoint)?;
+            exercise_child_launch(input, count, disjoint)?;
         }
         Ok(())
     }

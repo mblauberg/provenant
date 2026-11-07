@@ -518,6 +518,7 @@ fn lane_prepare_with(cases: &[(&str, bool, bool, u8)], probe: Probe) -> Result {
             attempt_id: paths.attempt_id,
             host_delivery: None,
             launch: Some(provenant_run::HostLaunchContext {
+                graph_directory: None,
                 configuration_root: rig.state.clone(),
                 cwd: launch.cwd.clone(),
                 executables: [("codex".into(), executable.clone())].into(),

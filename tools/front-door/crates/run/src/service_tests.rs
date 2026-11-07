@@ -1,6 +1,6 @@
 use super::tests::{call, clock, context};
 use super::*;
-use provenant_core::{CancelToken, OperationId, TaskId};
+use provenant_core::{CancelToken, Clock, OperationId, TaskId};
 
 type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
 
@@ -1071,6 +1071,149 @@ fn unknown_work_context_fields_are_refused_at_the_request_edge() -> TestResult {
     assert!(matches!(
         Service::new(&store).dispatch(request, temp.path(), &call),
         Err(RunError::Validation("work context"))
+    ));
+    Ok(())
+}
+
+#[test]
+fn legacy_writer_replay_preserves_sealed_request_and_authority() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let root = std::fs::canonicalize(temp.path())?;
+    for args in [
+        vec!["init", "-q"],
+        vec!["commit", "--allow-empty", "-qm", "base"],
+        vec!["worktree", "add", "-qb", "writer", ".worktrees/writer"],
+    ] {
+        assert!(
+            provenant_os::fixture::git_command()
+                .current_dir(&root)
+                .args(args)
+                .status()?
+                .success()
+        );
+    }
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    let mut context = context(&root)?;
+    std::fs::create_dir_all(context.state_root.as_path())?;
+    std::fs::set_permissions(
+        context.state_root.as_path(),
+        std::os::unix::fs::PermissionsExt::from_mode(0o700),
+    )?;
+    let mut roots = provenant_core::RootInputs::new(root.join("home"), root.join("checkout"));
+    roots.state_dir = Some(context.state_root.as_path().to_owned());
+    let roots = roots.resolve(&provenant_os::fs::SystemPathResolver)?;
+    let binding = provenant_config::bind_project(
+        &roots,
+        provenant_config::ProjectLocation::new(root.join(".git"))?,
+    )?;
+    context.project_id = binding.project_id();
+    let store = RunStore::open(&context, &call)?;
+    let head = String::from_utf8(
+        provenant_os::fixture::git_command()
+            .current_dir(&root)
+            .args(["rev-parse", "HEAD"])
+            .output()?
+            .stdout,
+    )?
+    .trim()
+    .to_owned();
+    let make = || {
+        let mut input = submission("writer task");
+        input.tasks[0].worktree = Some(root.join(".worktrees/writer"));
+        input.tasks[0].head = Some(head.clone());
+        input.tasks[0].source_head = Some(head.clone());
+        input.tasks[0].base = Some(head.clone());
+        input.tasks[0].context = Some(WorkContext {
+            graph_id: Some("legacy-graph".into()),
+            node_id: Some("writer".into()),
+            ..Default::default()
+        });
+        input
+    };
+    let run = Service::new(&store).dispatch(make(), &root, &call)?;
+    let mut legacy = store.request(run.run_id, &call)?;
+    let task = &mut legacy.tasks[0];
+    let writer = task.writer.as_mut().ok_or("writer")?;
+    assert_eq!(
+        writer.extra.remove("custody_project"),
+        Some(serde_json::json!(context.project_id))
+    );
+    task.authority_digest = provenant_records::CanonicalV1::record_digest(
+        "run-authority",
+        2,
+        &serde_json::json!({"writer":writer,"cwd":root}),
+    )?;
+    let task_id = task.task_id;
+    let prepared = PreparedRun {
+        run_id: provenant_core::RunId::from_bytes([91; 16]),
+        operation_id: OperationId::parse("legacy-writer")?,
+        request: legacy.clone(),
+        attempts: vec![NewAttempt {
+            attempt_id: provenant_core::AttemptId::from_bytes([92; 16]),
+            task_id,
+            prompt: "writer task".into(),
+        }],
+        created_at: clock.wall_now()?,
+    };
+    store.create(&prepared, &call)?;
+    let saved = store.run(prepared.run_id, &call)?;
+    let mut replay = make();
+    replay.operation_id = prepared.operation_id.clone();
+    let reopened = Service::new(&store).dispatch(replay, &root, &call)?;
+    assert_eq!(reopened.run_id, saved.run_id);
+    assert_eq!(reopened.request_digest, saved.request_digest);
+    assert_eq!(store.request(saved.run_id, &call)?, legacy);
+    store.refuse_queued(saved.run_id, "fixture terminal predecessor", &call)?;
+    let mut retry = make();
+    retry.operation_id = OperationId::parse("legacy-graph-retry")?;
+    retry.tasks[0]
+        .context
+        .as_mut()
+        .ok_or("context")?
+        .writer_predecessor = Some(prepared.attempts[0].attempt_id);
+    let retried = Service::new(&store).dispatch(retry, &root, &call)?;
+    let retry_request = store.request(retried.run_id, &call)?;
+    let retry_task = &retry_request.tasks[0];
+    let launch = prepare_writer(
+        retry_task.writer.as_ref().ok_or("retry writer")?,
+        context.state_root.as_path(),
+        context.project_id,
+    )?;
+    let pending = store.pending_attempts(retried.run_id, &call)?.remove(0);
+    store.check_launch_writer_lineage(&pending, retry_task, &launch.worktree, &call)?;
+    assert_eq!(store.request(saved.run_id, &call)?, legacy);
+    // Legacy predecessor identity defaults only custody to attribution. Paths,
+    // other extension fields and a foreign custody namespace remain fenced.
+    let saved_writer = legacy.tasks[0].writer.as_ref().ok_or("legacy writer")?;
+    let mut resolved = resolve_writer(context.state_root.as_path(), &root, &saved_writer.worktree)?;
+    assert!(equivalent_writer(
+        saved_writer,
+        &resolved,
+        context.project_id
+    ));
+    resolved.extra.insert(
+        "custody_project".into(),
+        serde_json::json!(provenant_core::ProjectId::from_bytes([99; 16])),
+    );
+    assert!(!equivalent_writer(
+        saved_writer,
+        &resolved,
+        context.project_id
+    ));
+    resolved = saved_writer.clone();
+    resolved.extra.insert("unknown".into(), true.into());
+    assert!(!equivalent_writer(
+        saved_writer,
+        &resolved,
+        context.project_id
+    ));
+    resolved = saved_writer.clone();
+    resolved.worktree = root.join("other");
+    assert!(!equivalent_writer(
+        saved_writer,
+        &resolved,
+        context.project_id
     ));
     Ok(())
 }

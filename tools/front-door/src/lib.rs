@@ -573,9 +573,12 @@ fn supervise(descriptors: &[u64], globals: &provenant_cli::Globals, process: &dy
     };
     process.holder(&holder, &mut |holder| {
         let workers = process.workers();
-        let holder =
-            provenant_cli::run::HostHolder::new(holder).with_graph_wake(move |context, id| {
+        let holder = provenant_cli::run::HostHolder::new(holder)
+            .with_graph_wake(move |context, id| {
                 fabric::advance_live_graph(context, id, workers).map_err(|error| error.to_string())
+            })
+            .with_graph_read(move |context, input, cancel, within| {
+                fabric::read_lane_graph(context, input, cancel, within, workers)
             });
         let disk = disk_guard::LaneDisk::default();
         let (Ok(mut stdout_filter), Ok(mut stderr_filter)) = (
@@ -1009,6 +1012,15 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
                 }
                 reply
             })
+        }
+        Command::Status(cmd) if provenant_cli::fabric::in_lane() && cmd.target.is_empty() => {
+            fabric::unified_graph_command(
+                cmd.id.as_deref().unwrap_or(""),
+                fabric::GraphCommand::Status { wait: cmd.wait },
+                globals,
+                process.workers(),
+            )
+            .unwrap_or(3)
         }
         Command::Status(cmd) if cmd.wait.is_some() => status_wait::run(cmd, globals),
         Command::Status(cmd) => {

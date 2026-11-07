@@ -2302,6 +2302,14 @@ mod narrowing {
     /// Observe one process (pid 200) beside the root; returns state, detail
     /// and the audited (pid, condition) pairs.
     fn observe(scripted: Scripted, zombie: bool) -> Result<Observed, Box<dyn Error>> {
+        observe_with_strict_occupancy(scripted, zombie, false)
+    }
+
+    fn observe_with_strict_occupancy(
+        scripted: Scripted,
+        zombie: bool,
+        strict: bool,
+    ) -> Result<Observed, Box<dyn Error>> {
         let fixture = Fixture::new()?;
         let base = canonicalize(fixture._temp.path())?;
         let root = base.join("root");
@@ -2351,19 +2359,50 @@ mod narrowing {
             platform_uids: BTreeMap::new(),
         };
         let mut audit = Vec::new();
-        let (states, _, details) = observe_worker_holders_with_audit(
+        let (states, _, details, _) = observe_worker_holders_while(
             std::slice::from_ref(&root),
             &processes,
             &scripted,
             &current,
             false,
             &mut |pid, condition| audit.push((pid, condition)),
+            (None, strict),
         );
         Ok((
             states[&root].clone(),
             details.get(&root).cloned().unwrap_or_default(),
             audit,
         ))
+    }
+
+    #[test]
+    fn retry_requires_complete_occupancy_even_for_outside_cwd() -> Result<(), Box<dyn Error>> {
+        for gap_kind in [
+            OccupancyGap::DescriptorsDenied,
+            OccupancyGap::DescriptorsUnavailable,
+            OccupancyGap::Churn,
+            OccupancyGap::LimitExceeded,
+        ] {
+            let (initial, _, _) = observe(path_scripted(gap(gap_kind), None), false)?;
+            let (retry, _, _) =
+                observe_with_strict_occupancy(path_scripted(gap(gap_kind), None), false, true)?;
+            assert_eq!(initial, Occupancy::Available, "{gap_kind:?}");
+            assert!(retry.is_unknown(), "{gap_kind:?}: {retry:?}");
+        }
+        let (retry, _, _) = observe_with_strict_occupancy(
+            path_scripted(
+                OccupancyObservation {
+                    paths: vec![],
+                    complete: true,
+                    gap: None,
+                },
+                None,
+            ),
+            false,
+            true,
+        )?;
+        assert_eq!(retry, Occupancy::Available);
+        Ok(())
     }
 
     /// Stands for a path that cannot be canonicalised; `observe` makes it a

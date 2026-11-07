@@ -310,11 +310,18 @@ pub(super) fn source_cwd(
             "graph source checkout is not an allowed read root".into(),
         ));
     }
-    let verified = run::resolve_reader_source(state, cwd, source).map_err(|_| {
-        SourceCwdError::Authority(
-            "graph source checkout is no longer registered with the project".into(),
-        )
-    })?;
+    let verified = if task.access.source_live {
+        // A live child may select another project, just as an ordinary CLI
+        // launch can. The host sealed its canonical root and filesystem identity;
+        // immutable review snapshots still require project registration below.
+        canonical(source).map_err(SourceCwdError::Authority)?
+    } else {
+        run::resolve_reader_source(state, cwd, source).map_err(|_| {
+            SourceCwdError::Authority(
+                "graph source checkout is no longer registered with the project".into(),
+            )
+        })?
+    };
     if verified != *source {
         return Err(SourceCwdError::Authority(
             "graph source checkout changed location".into(),
@@ -441,7 +448,7 @@ pub(super) fn read_only_plan(
     project: ProjectId,
     cwd: &Path,
     git: &Path,
-    request: PlanRequest,
+    mut request: PlanRequest,
     isolated: bool,
     live: bool,
 ) -> Result<PreparedReadPlan, ReadOnlyPlanError> {
@@ -481,12 +488,22 @@ pub(super) fn read_only_plan(
             .map_or(cwd, |repo| repo.common_git_dir()),
     )
     .map_err(|error| error.to_string())?;
-    let binding = provenant_config::lookup_project(roots, &location)
-        .map_err(|error| error.to_string())?
-        .ok_or(ReadOnlyPlanError::MissingBinding)?;
-    if binding.project_id() != project {
-        return Err(ReadOnlyPlanError::BindingMismatch);
-    }
+    let binding = if live {
+        // Graph attribution stays with the parent; the read plan belongs to
+        // the selected checkout, as it does for an ordinary host launch.
+        let binding =
+            provenant_config::bind_project(roots, location).map_err(|error| error.to_string())?;
+        request.scope = WorkScope::Project(binding.project_id());
+        binding
+    } else {
+        let binding = provenant_config::lookup_project(roots, &location)
+            .map_err(|error| error.to_string())?
+            .ok_or(ReadOnlyPlanError::MissingBinding)?;
+        if binding.project_id() != project {
+            return Err(ReadOnlyPlanError::BindingMismatch);
+        }
+        binding
+    };
     match repository {
         Some(repo) => {
             // The host's own read of the checkout HEAD is the only reviewed

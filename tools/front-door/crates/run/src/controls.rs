@@ -1719,13 +1719,7 @@ impl RunStore {
                 .and_then(|task| task.writer.as_ref());
             let (directory, expected_slot) = match writer {
                 Some(writer) => {
-                    let expected = self
-                        .writer_registry
-                        .join("worktrees")
-                        .join(self.context.project_id.to_string())
-                        .join(provenant_confinement::worktrees::state_dir_name(
-                            &writer.worktree,
-                        ));
+                    let expected = self.writer_slot(writer, record.project_id)?;
                     let readable = self
                         .writer_fences()?
                         .into_iter()
@@ -1945,13 +1939,7 @@ impl RunStore {
             .and_then(|task| task.writer.as_ref());
         let directory = match writer {
             Some(writer) => {
-                let slot = self
-                    .writer_registry
-                    .join("worktrees")
-                    .join(self.context.project_id.to_string())
-                    .join(provenant_confinement::worktrees::state_dir_name(
-                        &writer.worktree,
-                    ));
+                let slot = self.writer_slot(writer, record.project_id)?;
                 match provenant_os::fs::Directory::open_anchor(&slot) {
                     Ok(directory) => directory,
                     Err(error) if error.is_not_found() => return Ok(None),
@@ -2009,14 +1997,9 @@ impl RunStore {
                 .iter()
                 .find(|task| task.task_id == record.task_id)
                 .and_then(|task| task.writer.as_ref());
-            let slot = writer.map(|writer| {
-                self.writer_registry
-                    .join("worktrees")
-                    .join(self.context.project_id.to_string())
-                    .join(provenant_confinement::worktrees::state_dir_name(
-                        &writer.worktree,
-                    ))
-            });
+            let slot = writer
+                .map(|writer| self.writer_slot(writer, record.project_id))
+                .transpose()?;
             let custody = match &slot {
                 Some(slot) => match provenant_os::fs::Directory::open_anchor(slot) {
                     Ok(directory) => directory,
@@ -2423,8 +2406,13 @@ impl RunStore {
             .head
             .map(|head| head.to_string())
             .or_else(|| previous_task.head.clone());
-        if task.writer.is_none()
-            || task.writer != previous_task.writer
+        if !task
+            .writer
+            .as_ref()
+            .zip(previous_task.writer.as_ref())
+            .is_some_and(|(writer, previous)| {
+                equivalent_writer(previous, writer, self.context.project_id)
+            })
             || task.source_head.is_none()
             || task.source_head.as_ref() != source
             || task.head.is_none()
