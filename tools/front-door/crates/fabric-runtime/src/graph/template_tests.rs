@@ -784,3 +784,22 @@ fn bundled_template_expansions_match_golden() {
         include_str!("../../assets/template-expansions.json")
     );
 }
+
+#[test]
+fn malformed_review_repair_behaviour_reports_an_error() {
+    let mut library = library();
+    library
+        .insert_toml(
+            Layer::Inline,
+            "broken",
+            r#"
+composite_behaviour = "review_repair"
+nodes = [{ id = "first", use = "task" }]
+"#,
+        )
+        .unwrap();
+    let error = Compiler::new(&library)
+        .compile(&json!({"id":"stage", "use":"broken"}))
+        .unwrap_err();
+    assert!(error.contains("review_repair behaviour"), "{error}");
+}
