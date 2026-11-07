@@ -698,6 +698,8 @@ fn launch_resource_limits(state: &Path) -> ResolvedLaunchLimits {
                 limits: ProfileLimits {
                     grant_limit: config.grant_limit,
                     profile_limit_bytes: config.profile_limit_bytes,
+                    grant_origin: origin("grant_limit"),
+                    profile_origin: origin("profile_limit_bytes"),
                 },
                 grant_origin: origin("grant_limit"),
                 profile_origin: origin("profile_limit_bytes"),

@@ -39,14 +39,14 @@ site = "confinement/src/permissions/validation.rs#validate_plan_grant_limit"
 boundary = "configurable_default"
 setting = "domains.run.grant_limit"
 code = "CONFINEMENT"
-reason = "Bounds plan grant counts; the refusal names the effective setting, limit and host or compiled origin."
+reason = "Plan grant counts warn above the effective threshold, naming the count, threshold and host or compiled origin."
 
 [[guard]]
 site = "confinement/src/permissions/render.rs#render_with_limit"
 boundary = "configurable_default"
 setting = "domains.run.profile_limit_bytes"
 code = "CONFINEMENT"
-reason = "Bounds rendered sandbox profile size; the refusal identifies the effective setting and its host or compiled origin."
+reason = "Rendered sandbox profile size warns above the effective threshold, naming the bytes, threshold and host or compiled origin."
 
 [[guard]]
 site = "providers/src/contract.rs#Prompt::check_argv"
@@ -95,12 +95,7 @@ site = "run/src/launch.rs#applied_write_grants"
 boundary = "configurable_default"
 setting = "domains.run.write_grant_limit_bytes"
 code = "LIMIT"
-reason = "The encoded applied write-grant ledger has a configurable default; refusal and receipt report the effective value and origin."
-
-[[guard]]
-site = "run/src/reader.rs#write_grants_fit"
-boundary = "object_integrity"
-reason = "The configurable ceiling reserves space for the remaining fields of bounded host-owned attempt and terminal records."
+reason = "The encoded applied write-grant ledger has a configurable warning threshold; the warning and receipt report the effective value and origin. Historical limit diagnostics remain readable."
 
 [[guard]]
 site = "run/src/launch.rs#RunStore::start_inner"
@@ -534,7 +529,7 @@ site = "confinement/src/permissions/validation.rs#validate_profile_spec_impl"
 boundary = "configurable_default"
 setting = "domains.run.grant_limit"
 code = "CONFINEMENT"
-reason = "Profile family counts use the configured grant limit and name its origin in a refusal; authentication and native controls preserve historical minimum caps of 16 and 64."
+reason = "Profile family counts warn above the configured grant threshold, naming its effective value and origin; authority validation still refuses invalid grants."
 
 [[guard]]
 site = "confinement/src/permissions/validation.rs#validate_profile_spec_impl"

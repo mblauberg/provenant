@@ -61,11 +61,10 @@ pub struct RunConfig {
     /// Default admission deadline in seconds before launch.
     #[serde(default)]
     pub admission_seconds: Option<u64>,
-    /// Maximum rendered Seatbelt profile size, in bytes.
+    /// Warning threshold for rendered Seatbelt profile size, in bytes.
     #[serde(default = "default_profile_limit_bytes")]
     pub profile_limit_bytes: usize,
-    /// Maximum entries in each profile family and path grants in the plan;
-    /// authentication and native controls retain minimum caps of 16 and 64.
+    /// Warning threshold for profile family entries and plan path grants.
     #[serde(default = "default_grant_limit")]
     pub grant_limit: usize,
     /// Tokens a writer attempt may use before it is ended. 0 turns the budget
@@ -74,7 +73,7 @@ pub struct RunConfig {
     /// number.
     #[serde(default)]
     pub writer_token_budget: Option<u64>,
-    /// Maximum encoded bytes in the applied write-grant ledger.
+    /// Warning threshold for encoded bytes in the applied write-grant ledger.
     #[serde(default = "default_write_grant_limit_bytes")]
     pub write_grant_limit_bytes: u64,
     /// Prompt bytes passed directly to argv before the file-backed fallback.

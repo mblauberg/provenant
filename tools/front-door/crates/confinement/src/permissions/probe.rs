@@ -27,11 +27,13 @@ pub(super) const PROBE_CAPTURE_LIMIT: usize = 1024;
 #[cfg(target_os = "macos")]
 pub(super) const CLEANUP_TIMEOUT: Duration = Duration::from_millis(250);
 
-/// Host-configured resource limits for profile compilation.
+/// Host-configured warning thresholds for profile compilation.
 #[derive(Clone, Copy, Debug)]
 pub struct ProfileLimits {
     pub grant_limit: usize,
     pub profile_limit_bytes: usize,
+    pub grant_origin: provenant_records::diagnostic::SettingSource,
+    pub profile_origin: provenant_records::diagnostic::SettingSource,
 }
 impl Default for ProfileLimits {
     fn default() -> Self {
@@ -39,6 +41,8 @@ impl Default for ProfileLimits {
         Self {
             grant_limit: config.grant_limit,
             profile_limit_bytes: config.profile_limit_bytes,
+            grant_origin: provenant_records::diagnostic::SettingSource::ShippedDefault,
+            profile_origin: provenant_records::diagnostic::SettingSource::ShippedDefault,
         }
     }
 }
@@ -278,4 +282,26 @@ pub(super) fn denied_probe(outcome: &ExecOutcome) -> bool {
         && !outcome.drain_truncated
         && !outcome.stdout.read_failed
         && !outcome.stderr.read_failed
+}
+
+/// A bounded diagnostic: never include grant paths or profile contents.
+#[cfg(any(target_os = "macos", test, feature = "snapshot"))]
+pub(super) fn capacity_warning(
+    setting: &str,
+    actual: usize,
+    threshold: usize,
+    origin: provenant_records::diagnostic::SettingSource,
+) -> Option<String> {
+    (actual > threshold).then(|| format!(
+        "warning: {setting} exceeded: effective value={actual}, warning threshold={threshold} (source: {})",
+        origin.description()
+    ))
+}
+
+#[cfg(any(target_os = "macos", test, feature = "snapshot"))]
+pub(super) fn report_capacity_warning(warning: Option<String>) {
+    use std::io::Write;
+    if let Some(warning) = warning {
+        let _ = writeln!(std::io::stderr().lock(), "{warning}");
+    }
 }

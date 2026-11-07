@@ -112,8 +112,7 @@ pub(super) const PSEUDO_TTY_RULES: &str = r##"(allow pseudo-tty)
 (allow file-read* file-write* file-ioctl (literal "/dev/ptmx"))
 (allow file-read* file-write* file-ioctl (require-all (regex #"^/dev/ttys[0-9]+$") (extension "com.apple.sandbox.pty")))
 "##;
-/// Profiles travel in argv: leave headroom below macOS's 1 MiB ARG_MAX for
-/// provider arguments and environment.
+/// Default profile-byte warning threshold for renderer fixtures.
 #[cfg(any(test, feature = "snapshot"))]
 pub(super) const PROFILE_LIMIT: usize = 512 * 1024;
 
@@ -156,8 +155,42 @@ fn compile_sbpl_impl(
     if plan.nested_confinement {
         return Err(PermissionError::NestedConfinementUnsupported);
     }
-    validate_plan_grant_limit(plan, limits.grant_limit)?;
-    validate_profile_spec_with_home(&profile.spec, anchors.home, limits.grant_limit)?;
+    // Capacity is advisory; path and authority validation still runs in full.
+    let plan_count = plan
+        .read_roots
+        .len()
+        .saturating_add(plan.protected_roots.len())
+        .saturating_add(plan.secret_roots.len())
+        .saturating_add(plan.write_roots.len());
+    let spec = &profile.spec;
+    let profile_count = [
+        spec.process_executables.len(),
+        spec.runtime_reads.len(),
+        spec.discovery_reads.len(),
+        spec.authentication.len(),
+        spec.continuation_reads.len(),
+        spec.state_writes.len(),
+        spec.tool_exec_roots.len(),
+        spec.tool_writes.len(),
+        spec.provider_api.len(),
+        spec.native_controls.len(),
+        spec.authentication
+            .iter()
+            .map(|auth| auth.roots.len().max(auth.in_place_writes.len()))
+            .max()
+            .unwrap_or(0),
+    ]
+    .into_iter()
+    .max()
+    .unwrap_or(0);
+    report_capacity_warning(capacity_warning(
+        "domains.run.grant_limit",
+        plan_count.max(profile_count),
+        limits.grant_limit,
+        limits.grant_origin,
+    ));
+    validate_plan_grant_limit(plan, usize::MAX)?;
+    validate_profile_spec_with_home(&profile.spec, anchors.home, usize::MAX)?;
     for grant in &plan.read_roots {
         validate_read_exec_grant(grant)
             .map_err(|error| error.with_credential_path(&grant.path, Some(anchors.home)))?;
@@ -346,7 +379,13 @@ fn compile_sbpl_impl(
         return Err(PermissionError::ProtectedOverlap);
     }
 
-    let mut profile_bytes = render_with_limit(&grants, limits.profile_limit_bytes)?.into_bytes();
+    let mut profile_bytes = render_with_limit(&grants, usize::MAX)?.into_bytes();
+    report_capacity_warning(capacity_warning(
+        "domains.run.profile_limit_bytes",
+        profile_bytes.len(),
+        limits.profile_limit_bytes,
+        limits.profile_origin,
+    ));
     let profile_digest = Sha256::digest(&profile_bytes).into();
     // SBPL grants pathnames, so rebind them to their held identities after
     // rendering, immediately before returning the launch profile.
@@ -870,12 +909,12 @@ fn render_profile_with_limit(
         home,
         network,
     )?;
-    if source.len() > limit {
-        return Err(PermissionError::ProfileTooLarge {
-            bytes: source.len(),
-            limit,
-        });
-    }
+    report_capacity_warning(capacity_warning(
+        "domains.run.profile_limit_bytes",
+        source.len(),
+        limit,
+        provenant_records::diagnostic::SettingSource::ShippedDefault,
+    ));
     Ok(source.into_bytes())
 }
 

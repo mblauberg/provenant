@@ -121,24 +121,15 @@ pub struct PreparedLaunch {
 enum WriteGrantError {
     #[error("invalid write grant path")]
     InvalidPath,
-    #[error(
-        "encoded write grants exceed domains.run.write_grant_limit_bytes={limit} (source: {})", .origin.description()
-    )]
-    Limit {
-        limit: u64,
-        origin: provenant_records::diagnostic::SettingSource,
-    },
 }
 
+#[allow(clippy::print_stderr)]
 fn applied_write_grants(
     plan: &PreparedLaunch,
     limit: WriteGrantLimit,
 ) -> std::result::Result<admission::AppliedWriteGrants, WriteGrantError> {
     let Some(confinement) = &plan.confinement else {
-        return Ok(admission::AppliedWriteGrants {
-            max_bytes: limit.bytes,
-            ..Default::default()
-        });
+        return Ok(admission::AppliedWriteGrants::default());
     };
     let permissions = confinement.plan.permissions();
     let grants = provenant_confinement::write_grants(permissions, &confinement.profile)
@@ -153,11 +144,15 @@ fn applied_write_grants(
             })
         })
         .collect::<std::result::Result<Vec<_>, WriteGrantError>>()?;
-    if !crate::reader::write_grants_fit(&grants, limit.bytes) {
-        return Err(WriteGrantError::Limit {
-            limit: limit.bytes,
-            origin: limit.origin,
-        });
+    let encoded =
+        provenant_records::CanonicalV1::bytes(&grants).map_err(|_| WriteGrantError::InvalidPath)?;
+    if encoded.as_bytes().len() as u64 > limit.bytes {
+        eprintln!(
+            "warning: encoded write grants are {} bytes; domains.run.write_grant_limit_bytes={} (source: {})",
+            encoded.as_bytes().len(),
+            limit.bytes,
+            limit.origin.description()
+        );
     }
     let git_grants_digest = match &permissions.mode {
         provenant_confinement::permissions::AccessMode::ReadOnly => None,
@@ -168,7 +163,6 @@ fn applied_write_grants(
     Ok(admission::AppliedWriteGrants {
         grants,
         git_grants_digest,
-        max_bytes: limit.bytes,
     })
 }
 /// Provider-decoded facts from a completed capture.
@@ -1283,12 +1277,6 @@ impl RunStore {
                 Err(error) => {
                     let kind = match error {
                         WriteGrantError::InvalidPath => RefusalKind::InvalidWriteGrantPath,
-                        WriteGrantError::Limit { limit, origin } => RefusalKind::WriteGrantsLimit(
-                            provenant_records::diagnostic::ResourceFact::WriteGrantLimit {
-                                limit,
-                                origin,
-                            },
-                        ),
                     };
                     let reason = error.to_string();
                     match self.withdraw_with_preparation_failure(

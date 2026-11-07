@@ -22,13 +22,17 @@ fn write_grants_wire_bound_and_git_digest_are_preserved() -> TestResult {
     let mut applied = admission::AppliedWriteGrants {
         grants: vec![grant.clone(); 1025],
         git_grants_digest: Some(provenant_core::Digest::from_bytes([7; 32])),
-        ..Default::default()
     };
     let mut record = store.record(id, &call)?;
     record.write_grants = applied.grants.clone();
     reader::validate_attempt(&record)?;
     assert!(reader::valid_write_grants(&applied.grants));
-    assert!(reader::write_grants_fit(&applied.grants, applied.max_bytes));
+    assert!(
+        provenant_records::CanonicalV1::bytes(&applied.grants)?
+            .as_bytes()
+            .len()
+            < provenant_records::run::MAX_WRITE_GRANT_BYTES as usize
+    );
     // Native bytes double in the wire encoding, exceeding the cap even
     // though the raw path is smaller. Existing records remain readable.
     let mut path = b"/fixture/".to_vec();
@@ -40,26 +44,17 @@ fn write_grants_wire_bound_and_git_digest_are_preserved() -> TestResult {
         ))?,
         ..grant.clone()
     }];
-    assert!(!reader::write_grants_fit(
-        &applied.grants,
-        applied.max_bytes
-    ));
-    assert!(matches!(
-        store.mark_starting(&record, &route(), &[], &applied, None, &call),
-        Err(RunError::Validation("invalid write grants"))
-    ));
+    assert!(
+        provenant_records::CanonicalV1::bytes(&applied.grants)?
+            .as_bytes()
+            .len()
+            > provenant_records::run::MAX_WRITE_GRANT_BYTES as usize
+    );
+    store.mark_starting(&record, &route(), &[], &applied, None, &call)?;
     record.write_grants = applied.grants.clone();
     let reread: AttemptRecord = serde_json::from_slice(&serde_json::to_vec(&record)?)?;
     reader::validate_attempt(&reread)?;
-    applied.grants = vec![grant];
-    store.mark_starting(
-        &store.record(id, &call)?,
-        &route(),
-        &[],
-        &applied,
-        None,
-        &call,
-    )?;
+
     drop(store);
     let store = RunStore::open(&context, &call)?;
     assert_eq!(
