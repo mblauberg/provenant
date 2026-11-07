@@ -427,7 +427,7 @@ pub fn retry_node_and_dependants(
     brief: Option<&str>,
     context: &PatchContext<'_>,
 ) -> Result<Admitted, PatchError> {
-    retry_node_scope(graph, id, brief, context, true)
+    retry_node_scope(graph, id, brief, context, true, None)
 }
 
 /// Redo a settled node or container, retaining prior attempts and journalling the reset.
@@ -438,7 +438,28 @@ pub fn retry_node(
     brief: Option<&str>,
     context: &PatchContext<'_>,
 ) -> Result<Admitted, PatchError> {
-    retry_node_scope(graph, id, brief, context, false)
+    retry_node_scope(graph, id, brief, context, false, None)
+}
+
+/// Host continuation uses the same checked, journalled reset as an explicit retry.
+pub(super) fn continue_no_work(
+    graph: &mut LiveGraph<'_>,
+    id: &str,
+    brief: &str,
+    context: &PatchContext<'_>,
+) -> Result<Admitted, PatchError> {
+    retry_node_scope(
+        graph,
+        id,
+        Some(brief),
+        context,
+        false,
+        Some(&no_work_reason(id)),
+    )
+}
+
+pub(super) fn no_work_reason(id: &str) -> String {
+    format!("continue node {id} after stop with no work")
 }
 
 fn retry_node_scope(
@@ -447,6 +468,7 @@ fn retry_node_scope(
     brief: Option<&str>,
     context: &PatchContext<'_>,
     dependants: bool,
+    reason: Option<&str>,
 ) -> Result<Admitted, PatchError> {
     let expanded = plans::expand(
         graph.document,
@@ -665,7 +687,11 @@ fn retry_node_scope(
     let patch = Patch {
         schema_version: PATCH_SCHEMA_VERSION,
         expected_revision: Some(revision(graph.checkpoint)),
-        reason: Some(format!("retry node {id}")),
+        reason: Some(
+            reason
+                .map(str::to_owned)
+                .unwrap_or_else(|| format!("retry node {id}")),
+        ),
         replace: vec![serde_json::to_value(node).map_err(|e| PatchError::invalid(e.to_string()))?],
         ..Default::default()
     };

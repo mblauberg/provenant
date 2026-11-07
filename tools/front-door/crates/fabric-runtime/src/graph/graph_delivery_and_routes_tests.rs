@@ -186,6 +186,7 @@ fn tries_routes_in_order_and_persists_each_terminal_attempt() {
         route("fourth"),
     ];
     let document = graph(vec![GraphNode {
+        auto_continue_no_work: None,
         attempt: None,
         attachments: Vec::new(),
         family_group: None,
@@ -463,6 +464,7 @@ fn pending_and_unknown_keep_observing_the_same_route_without_fallback() {
     ] {
         let routes = vec![route("first"), route("second")];
         let document = graph(vec![GraphNode {
+            auto_continue_no_work: None,
             attempt: None,
             attachments: Vec::new(),
             family_group: None,

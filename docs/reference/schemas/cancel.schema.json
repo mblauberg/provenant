@@ -690,7 +690,8 @@
                       "free_pool_quota",
                       "command_unavailable",
                       "host_native_unconfigured",
-                      "identity_unobserved"
+                      "identity_unobserved",
+                      "stopped_no_work"
                     ],
                     "type": "string"
                   },

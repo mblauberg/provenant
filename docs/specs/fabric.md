@@ -100,6 +100,7 @@ claim complete coverage.
   `crates/fabric-store/src/federation.rs::run_event_rows_and_host_cursor_rollback_together_then_deduplicate`
 - Owner: `crates/fabric-store/src/`
 
+
 ## Human requests
 
 Viewer request presentation state is separate from resolution and blocking.
@@ -603,6 +604,20 @@ writers. In a composite, `continues` follows the same local-name rules as
   `crates/run/src/delivery_tests.rs::host_push_delivery_refuses_a_non_fast_forward_and_leaves_the_branch`.
 - Owner: `crates/fabric-runtime/src/graph/land.rs`, `src/fabric.rs`,
   `crates/run/src/delivery.rs`
+
+### Writers that stop without work
+
+A `worktree_write` node with a declared stop and an unchanged host-pinned head
+fails with code `stopped_no_work`; it never satisfies acceptance. Unless
+`auto_continue_no_work = false`, the scheduler retries the node once in its
+existing worktree, retaining its write authority and prior attempt. The retry
+replaces the node through normal patch admission with a continuation brief;
+its automatic reason and replacement are retained in patch history. The
+checkpoint commits the patch before the new attempt can launch, and recovery
+reconsiders a settled stop if that checkpoint was not saved. Patch history
+prevents a second automatic continuation, including after restart. Cancellation,
+pauses and existing graph bounds continue to apply.
+
 
 ### Synthesise agents
 

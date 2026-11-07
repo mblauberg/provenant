@@ -778,7 +778,12 @@ record, including a refusal before launch, carries a `settlement_reason`
 lost). Lane rows expose that settlement classification as `cause`. When a
 specific typed terminal cause was recorded, `terminal_cause` identifies it and
 structured `reason` fields retain the full safe cause, remedy and note in every
-lane response. Only human `status` rows use short labels pointing to
+lane response. A writer's declared stop with no new commit records
+`terminal_cause = "stopped_no_work"`: settlement compares its pinned base and
+head, keeps `cause = "declared_stop"` and `state = "review_required"`, and says
+that it stopped with no work and acceptance remains unmet. Missing Git evidence,
+uncommitted edits and other failure causes do not receive this classification.
+Only human `status` rows use short labels pointing to
 `provenant output ID`. Pre-launch causes distinguish an
 unsupported platform, an unknown pacing account, an unregistered selected
 account, a credential-helper failure at delivery Prepare, a configured command

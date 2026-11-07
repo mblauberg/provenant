@@ -1824,3 +1824,149 @@ fn public_retry_preserves_live_spawn_only_children() {
             .all(|expansion| !expansion.retired())
     );
 }
+
+
+#[test]
+fn no_work_writer_continues_once_in_place_and_records_the_patch() {
+    for final_outcome in [AttemptOutcome::DeclaredStop, AttemptOutcome::Succeeded] {
+        let mut work = node("work", route("first"));
+        work.access = AccessMode::WorktreeWrite;
+        work.worktree = Some(".worktrees/work".into());
+        work.write_scope = vec!["src".into()];
+        work.prompt = "Finish the accepted brief".into();
+        let document = graph(vec![work]);
+        let stopped = || no_work_stop(Some(&"a".repeat(40)));
+        let second = if final_outcome == AttemptOutcome::Succeeded {
+            done_as("finished")
+        } else {
+            stopped()
+        };
+        let mut owner = FakeOwner {
+            observations: [stopped(), second].into(),
+            ..Default::default()
+        };
+        let mut journal = MemoryJournal::default();
+        let run = advance(&document, &mut owner, &mut journal).unwrap();
+        assert_eq!(owner.calls.len(), 2);
+        assert_ne!(owner.calls[0].0, owner.calls[1].0);
+        assert_eq!(owner.permissions[0], owner.permissions[1]);
+        assert!(owner.prompts[1].contains("Finish the accepted brief"));
+        let progress = &run.checkpoint.nodes[0];
+        let expected = if final_outcome == AttemptOutcome::Succeeded {
+            NodeState::Succeeded
+        } else {
+            NodeState::Failed
+        };
+        assert_eq!(progress.state, expected);
+        assert_eq!(progress.previous_attempts.len(), 1);
+        assert_eq!(
+            progress.previous_attempts[0].outcome,
+            Some(AttemptOutcome::DeclaredStop)
+        );
+        let records: Vec<_> = run
+            .checkpoint
+            .expansions
+            .iter()
+            .filter_map(|expansion| expansion.patch.as_ref())
+            .collect();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].replaced[0].id, "work");
+        assert_eq!(records[0].replaced[0].write_scope, ["src"]);
+        assert!(records[0].reason.as_deref().unwrap().contains("no work"));
+        let reloaded = advance(&document, &mut owner, &mut journal).unwrap();
+        assert_eq!(reloaded.checkpoint.nodes[0].state, expected);
+        assert_eq!(owner.calls.len(), 2);
+    }
+}
+
+fn no_work_stop(head: Option<&str>) -> AttemptObservation {
+    AttemptObservation::Terminal {
+        attempt_ref: Some("stopped".into()),
+        outcome: AttemptOutcome::DeclaredStop,
+        launched: true,
+        result: None,
+        result_warning: None,
+        result_path: None,
+        branch: None,
+        commit: head.map(str::to_owned),
+    }
+}
+
+#[test]
+fn no_work_continuation_requires_enabled_writer_and_proven_unchanged_head() {
+    for (access, enabled, head) in [
+        (AccessMode::WorktreeWrite, Some(false), Some("a".repeat(40))),
+        (AccessMode::ReadOnly, None, Some("a".repeat(40))),
+        (AccessMode::WorktreeWrite, None, Some("b".repeat(40))),
+        (AccessMode::WorktreeWrite, None, None),
+    ] {
+        let mut work = node("work", route("first"));
+        work.access = access;
+        work.worktree = (access == AccessMode::WorktreeWrite).then(|| ".worktrees/work".into());
+        work.auto_continue_no_work = enabled;
+        let document = graph(vec![work]);
+        let mut owner = FakeOwner {
+            observations: [no_work_stop(head.as_deref())].into(),
+            ..Default::default()
+        };
+        let mut journal = MemoryJournal::default();
+        let run = advance(&document, &mut owner, &mut journal).unwrap();
+        assert_eq!(run.checkpoint.nodes[0].state, NodeState::Failed);
+        assert_eq!(owner.calls.len(), 1);
+        assert!(run.checkpoint.expansions.is_empty());
+    }
+}
+
+#[test]
+fn no_work_continuation_recovers_after_checkpoint_failure_before_launch() {
+    struct FailPatch {
+        saved: MemoryJournal,
+        fail: bool,
+    }
+    impl GraphJournal for FailPatch {
+        type Error = std::io::Error;
+        fn load(&mut self, id: &str) -> Result<Option<GraphCheckpoint>, Self::Error> {
+            Ok(self.saved.load(id).unwrap())
+        }
+        fn save(&mut self, checkpoint: &GraphCheckpoint) -> Result<(), Self::Error> {
+            if self.fail && !checkpoint.expansions.is_empty() {
+                return Err(std::io::Error::other("injected patch save failure"));
+            }
+            self.saved.save(checkpoint).unwrap();
+            Ok(())
+        }
+    }
+    let mut work = node("work", route("first"));
+    work.access = AccessMode::WorktreeWrite;
+    work.worktree = Some(".worktrees/work".into());
+    let document = graph(vec![work]);
+    let mut owner = FakeOwner {
+        observations: [no_work_stop(Some(&"a".repeat(40))), done_as("finished")].into(),
+        ..Default::default()
+    };
+    let mut journal = FailPatch {
+        saved: MemoryJournal::default(),
+        fail: true,
+    };
+    assert!(matches!(
+        advance(&document, &mut owner, &mut journal),
+        Err(GraphError::Journal(_))
+    ));
+    assert_eq!(owner.calls.len(), 1);
+    assert_eq!(
+        journal.saved.0.as_ref().unwrap().nodes[0].state,
+        NodeState::Failed
+    );
+    journal.fail = false;
+    let run = advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(owner.calls.len(), 2);
+    assert_eq!(run.checkpoint.nodes[0].state, NodeState::Succeeded);
+    assert_eq!(
+        run.checkpoint
+            .expansions
+            .iter()
+            .filter(|e| e.patch.is_some())
+            .count(),
+        1
+    );
+}

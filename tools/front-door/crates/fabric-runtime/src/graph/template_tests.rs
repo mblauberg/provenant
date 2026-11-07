@@ -646,3 +646,33 @@ fn review_behaviour_survives_brief_and_output_overrides() {
     }
     assert!(Template::from_toml("review = 'unknown'").is_err());
 }
+
+#[test]
+fn writer_template_can_disable_no_work_continuation() {
+    let mut templates = library();
+    let custom = Template::from_toml(
+        r#"
+        brief = "Finish the accepted brief"
+        tier = "junior"
+        access = "worktree_write"
+        [node]
+        auto_continue_no_work = false
+    "#,
+    )
+    .unwrap();
+    templates = templates
+        .with(
+            Layer::Repository,
+            &BTreeMap::from([("custom-writer".into(), custom)]),
+        )
+        .unwrap();
+    let compiled = Compiler::new(&templates)
+        .compile(&json!({"id":"work", "use":"custom-writer", "worktree":".worktrees/work"}))
+        .unwrap();
+    assert_eq!(compiled.auto_continue_no_work, Some(false));
+    assert!(
+        Compiler::new(&templates)
+            .compile(&json!({"id":"work", "use":"custom-writer", "auto_continue_no_work":"false"}))
+            .is_err()
+    );
+}

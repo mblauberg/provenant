@@ -211,6 +211,15 @@ pub(super) fn apply_attempt_observation(
                 branch,
                 commit,
             } => {
+                // Compare only host-pinned Git facts. Missing evidence and writers
+                // with uncommitted edits never qualify as stops with no work.
+                let stopped_no_work = launched
+                    && outcome == AttemptOutcome::DeclaredStop
+                    && node.access == AccessMode::WorktreeWrite
+                    && commit
+                        .as_ref()
+                        .zip(progress.writer_binding.as_ref())
+                        .is_some_and(|(head, binding)| *head == binding.head);
                 settled_result = result.clone();
                 attempt.usage = usage;
                 attempt.launched = launched;
@@ -374,6 +383,11 @@ pub(super) fn apply_attempt_observation(
                     AttemptOutcome::TaskFailed
                 } else if outcome == AttemptOutcome::DeclaredStop && review_result && !warned {
                     AttemptOutcome::Succeeded
+                } else if !warned && stopped_no_work {
+                    progress.advance_error_code = Some("stopped_no_work".into());
+                    progress.advance_error =
+                        Some("writer stopped with no work: no new commit".into());
+                    AttemptOutcome::DeclaredStop
                 } else if warned || outcome == AttemptOutcome::DeclaredStop {
                     AttemptOutcome::OtherFailure
                 } else if outcome == AttemptOutcome::Succeeded

@@ -231,7 +231,7 @@ pub(super) struct Fake {
     /// The outcome a decode reports; success when unset.
     pub(super) outcome: Option<Outcome>,
     /// The answer a decode reports, instead of the captured stdout.
-    answer: Option<String>,
+    pub(super) answer: Option<String>,
     /// Partial-finish signals a decode reports.
     partial: Vec<PartialSignal>,
     /// Report `QuotaLimited` only when this exact sealed stderr arrives.

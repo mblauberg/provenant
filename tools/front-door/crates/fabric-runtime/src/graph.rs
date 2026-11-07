@@ -35,6 +35,7 @@ mod land_tests;
 mod loops;
 mod model;
 mod next_attempt;
+mod no_work;
 mod observation;
 mod outputs;
 pub mod patch;
@@ -631,6 +632,8 @@ struct PlannedGraph {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 struct PlannedNode {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    auto_continue_no_work: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     family_group: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1409,6 +1412,22 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
 
     let mut stopped_children = std::collections::BTreeSet::new();
     'schedule: loop {
+        if let Some(next) = no_work::continue_stopped(document, &plan, &checkpoint, limits)
+            .map_err(|error| GraphError::Refused(error.to_string()))?
+        {
+            let next_expanded = plans::expand(document, &next.extensions, &next.expansions, limits)
+                .map_err(|error| GraphError::Invalid(error.to_string()))?;
+            let (next_plan, next_positions) = validate_flat_plan(&next_expanded, limits)
+                .map_err(|error| GraphError::Invalid(error.to_string()))?;
+            owner
+                .validate_expansion(&next_expanded, &next)
+                .map_err(GraphError::Run)?;
+            journal.save(&next).map_err(GraphError::Journal)?;
+            checkpoint = next;
+            (expanded, plan, positions) = (next_expanded, next_plan, next_positions);
+            resume = false;
+            continue 'schedule;
+        }
         plans::remaining(&mut checkpoint, &expanded, limits);
         if checkpoint.cancelled {
             relay::fence_detached_cancellation(document, &mut checkpoint)
@@ -2826,6 +2845,10 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                 journal.save(&checkpoint).map_err(GraphError::Journal)?;
                 if let Some((next_expanded, next_plan, next_positions)) = appended {
                     (expanded, plan, positions) = (next_expanded, next_plan, next_positions);
+                    resume = false;
+                    continue 'schedule;
+                }
+                if no_work::eligible(node, &checkpoint.nodes[node_index], &checkpoint) {
                     resume = false;
                     continue 'schedule;
                 }
