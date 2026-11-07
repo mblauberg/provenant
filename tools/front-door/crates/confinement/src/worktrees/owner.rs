@@ -224,7 +224,7 @@ pub fn prune_owned(
         upstream: None,
         ..*policy
     };
-    collect(context, &lanes, &output_policy, cancel)?;
+    collect_lazy(context, &lanes, &output_policy, cancel)?;
     let _repository = repository_lock(context, LockMode::Exclusive, cancel)?;
     let entries = context.facts.read_inventory(context, cancel)?;
     let entry = entries

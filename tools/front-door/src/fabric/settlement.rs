@@ -489,7 +489,7 @@ pub(crate) fn settle_owned_worktree(
                     .into_iter()
                     .find(|lane| lane.path == writer.worktree)
                     .ok_or(worktrees::WorktreeError::NotFound)?;
-                    worktrees::collect(
+                    worktrees::collect_lazy(
                         context,
                         std::slice::from_ref(&lane),
                         &output_policy,
