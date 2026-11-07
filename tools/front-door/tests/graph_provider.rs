@@ -945,6 +945,8 @@ fn graph_opencode_observes_v2_wal_session() -> Result {
         // committed in the WAL when the guardian's read-only connection opens.
         db.execute_batch(
             r#"PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0;
+            CREATE TABLE session (id TEXT PRIMARY KEY);
+            INSERT INTO session VALUES ('ses_x');
             CREATE TABLE session_message (session_id TEXT, type TEXT, data TEXT);
             INSERT INTO session_message VALUES ('ses_x', 'assistant',
             '{"model":{"providerID":"opencode-go","id":"beam-free"},"finish":"stop"}');"#,

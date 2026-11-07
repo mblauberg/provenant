@@ -30,15 +30,24 @@ pub fn resolve_boundary_path(path: &Path) -> Result<PathBuf, PermissionError> {
                 }
             }
             Ok(_) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error)
+                if error.kind() == std::io::ErrorKind::NotFound
+                    || error.kind() == std::io::ErrorKind::NotADirectory => {}
             Err(_) => return Err(PermissionError::InvalidPath(ancestor.to_owned())),
         }
     }
-    provenant_core::PathResolver::resolve_existing_ancestor(
-        &provenant_os::fs::SystemPathResolver,
-        path,
-    )
-    .map_err(|_| PermissionError::InvalidPath(path.to_owned()))
+    for ancestor in path.ancestors() {
+        match std::fs::canonicalize(ancestor) {
+            Ok(base) => return Ok(base.join(path.strip_prefix(ancestor).expect("ancestor prefix"))),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                ) => {}
+            Err(_) => return Err(PermissionError::InvalidPath(ancestor.to_owned())),
+        }
+    }
+    Err(PermissionError::InvalidPath(path.to_owned()))
 }
 
 /// Tolerant envelope for optional host policy. Decode entries at resolution,
@@ -370,25 +379,38 @@ impl LanePolicy {
         &mut self,
         mut resolve: impl FnMut(&Path) -> Result<PathBuf, PermissionError>,
     ) -> Result<(), PermissionError> {
-        for roots in [&mut self.optional.deny_read, &mut self.optional.deny_write] {
-            let aliases = roots
-                .iter()
-                .map(|root| {
+        for (field, roots) in [
+            ("deny_read", &mut self.optional.deny_read),
+            ("deny_write", &mut self.optional.deny_write),
+        ] {
+            let mut retained = Vec::new();
+            for root in std::mem::take(roots) {
+                let alias = resolve(&root.path).and_then(|path| {
+                    validate_absolute(&path)?;
+                    if !profile_path_representable(&path) {
+                        return Err(PermissionError::InvalidPath(path));
+                    }
                     Ok(PathGrant {
-                        path: resolve(&root.path)?,
+                        path,
                         scope: root.scope,
                     })
-                })
-                .collect::<Result<Vec<_>, PermissionError>>()?;
-            for alias in aliases {
-                validate_absolute(&alias.path)?;
-                if !profile_path_representable(&alias.path) {
-                    return Err(PermissionError::InvalidPath(alias.path));
-                }
-                if !roots.contains(&alias) {
-                    roots.push(alias);
+                });
+                match alias {
+                    Ok(alias) => {
+                        if !retained.contains(&root) {
+                            retained.push(root);
+                        }
+                        if !retained.contains(&alias) {
+                            retained.push(alias);
+                        }
+                    }
+                    Err(_) => self.warnings.push(PolicyWarning {
+                        field: field.into(),
+                        code: "path",
+                    }),
                 }
             }
+            *roots = retained;
         }
         Ok(())
     }
@@ -509,6 +531,72 @@ impl HostPolicySettings {
 #[cfg(test)]
 mod boundary_resolution_tests {
     use super::*;
+
+    #[test]
+    fn non_directory_ancestor_preserves_mandatory_literal() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let temp = tempfile::tempdir()?;
+        let base = temp.path().canonicalize()?;
+        let home = base.join("home");
+        std::fs::create_dir(&home)?;
+        std::fs::write(home.join(".cargo"), b"file")?;
+        let source = base.join("source");
+        std::fs::create_dir(&source)?;
+        let mut inputs = provenant_core::RootInputs::new(home.clone(), source.clone());
+        inputs.state_dir = Some(base.join("state"));
+        let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+        let mandatory = MandatoryRoots::for_host(&roots, &home, &source, &[], &[], &[])?;
+        for name in [".cargo/credentials", ".cargo/credentials.toml"] {
+            let path = home.join(name);
+            assert_eq!(resolve_boundary_path(&path)?, path);
+            assert!(
+                mandatory
+                    .credentials()
+                    .iter()
+                    .any(|g| g.path == path && g.scope == PathScope::Exact)
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn optional_alias_failure_warns_and_retains_valid_siblings()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let base = temp.path().canonicalize()?;
+        let link = base.join("dangling");
+        std::os::unix::fs::symlink(base.join("missing"), &link)?;
+        let valid = base.join("valid");
+        let settings = HostPolicySettings(
+            serde_json::json!({"deny_read": [link.join("secret"), valid], "deny_write": [link.join("write"), valid]}),
+        );
+        let mandatory = MandatoryRoots::new(
+            &base.join("home"),
+            &base.join("state"),
+            &base.join("source"),
+        )?;
+        let mut policy = HostPolicySettings::resolve(Some(&settings), &base, mandatory.clone());
+        policy.resolve_optional_aliases(resolve_boundary_path)?;
+        for roots in [&policy.optional().deny_read, &policy.optional().deny_write] {
+            assert_eq!(roots.len(), 1);
+            assert_eq!(roots[0].path, valid);
+        }
+        assert_eq!(policy.mandatory(), &mandatory);
+        assert_eq!(
+            policy.warnings(),
+            &[
+                PolicyWarning {
+                    field: "deny_read".into(),
+                    code: "path"
+                },
+                PolicyWarning {
+                    field: "deny_write".into(),
+                    code: "path"
+                }
+            ]
+        );
+        Ok(())
+    }
 
     #[test]
     fn typed_state_reads_cannot_open_an_entire_secondary_host_store() -> Result<(), PermissionError>

@@ -862,7 +862,8 @@ fn missing_legacy_sessions_fail_and_retained_codex_remains_resumable() -> Result
                 let data = state.join("candidate-0/data/opencode");
                 std::fs::create_dir_all(&data)?;
                 let db = rusqlite::Connection::open(data.join("opencode.db"))?;
-                db.execute_batch("CREATE TABLE session_message (session_id TEXT, type TEXT, data TEXT)")?;
+                db.execute_batch("CREATE TABLE session (id TEXT PRIMARY KEY); CREATE TABLE session_message (session_id TEXT, type TEXT, data TEXT)")?;
+                db.execute("INSERT INTO session VALUES (?1)", ["fixture-session"])?;
                 db.execute("INSERT INTO session_message VALUES (?1, 'assistant', ?2)", ("fixture-session", r#"{"model":{"providerID":"fixture","id":"model"}}"#))?;
                 drop(db);
                 let copied = root.join("copy");
@@ -870,6 +871,22 @@ fn missing_legacy_sessions_fail_and_retained_codex_remains_resumable() -> Result
                 let resumed = continuation_for(&prior, &route, "fixture", &root, &root, &copied)?;
                 assert_eq!(resumed.session(), "fixture-session");
                 assert_eq!(provenant_providers::opencode::observe_model(&copied.join("data/opencode"), "fixture-session")?, "opencode/fixture/model");
+                let db = rusqlite::Connection::open(data.join("opencode.db"))?;
+                db.execute("INSERT INTO session_message VALUES (?1, 'assistant', ?2)", ("fixture-session", r#"{"model":{"providerID":"other","id":"model"}}"#))?;
+                for case in ["ambiguous", "absent"] {
+                    if case == "absent" { db.execute("DELETE FROM session_message", [])?; }
+                    assert!(provenant_providers::opencode::observe_model(&data, "fixture-session").is_err());
+                    continuation_available(&prior, &root, &root)?;
+                    let target = root.join(format!("copy-{case}"));
+                    assert_eq!(continuation_for(&prior, &route, "fixture", &root, &root, &target)?.session(), "fixture-session");
+                }
+                let other = state.join("candidate-1/data/opencode");
+                std::fs::create_dir_all(&other)?;
+                std::fs::copy(data.join("opencode.db"), other.join("opencode.db"))?;
+                assert!(continuation_available(&prior, &root, &root).is_err());
+                std::fs::remove_dir_all(state.join("candidate-1"))?;
+                db.execute("DELETE FROM session", [])?;
+                assert!(continuation_available(&prior, &root, &root).is_err());
             }
             prior.session = None;
             assert!(continuation_for(&prior, &route, "fixture", state, state, state).is_err());

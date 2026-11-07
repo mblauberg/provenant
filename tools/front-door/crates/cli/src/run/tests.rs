@@ -270,7 +270,8 @@ fn seed_opencode_session(
 ) -> Result<(), Box<dyn std::error::Error>> {
     std::fs::create_dir_all(data)?;
     let db = rusqlite::Connection::open(data.join("opencode.db"))?;
-    db.execute_batch("CREATE TABLE session_message (session_id TEXT, type TEXT, data TEXT)")?;
+    db.execute_batch("CREATE TABLE session (id TEXT PRIMARY KEY); CREATE TABLE session_message (session_id TEXT, type TEXT, data TEXT)")?;
+    db.execute("INSERT INTO session VALUES (?1)", [session])?;
     db.execute(
         "INSERT INTO session_message VALUES (?1, 'assistant', ?2)",
         (

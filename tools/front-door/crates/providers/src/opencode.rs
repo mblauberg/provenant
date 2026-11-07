@@ -85,6 +85,30 @@ crate::adapter!(OpenCode, "opencode", prepare, failure_diagnostic);
 /// The JSON run stream carries no answering-model position.
 const MODEL_ON_WIRE: bool = false;
 
+/// Confirm that the retained database contains the exact session identity.
+pub fn session_exists(data: &std::path::Path, session: &str) -> Result<(), ProviderError> {
+    use rusqlite::{Connection, OpenFlags};
+    let db = Connection::open_with_flags(
+        data.join("opencode.db"),
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(|_| ProviderError::UnknownIdentity)?;
+    db.busy_timeout(std::time::Duration::from_millis(250))
+        .map_err(|_| ProviderError::UnknownIdentity)?;
+    let found: bool = db
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM session WHERE id=?)",
+            [session],
+            |row| row.get(0),
+        )
+        .map_err(|_| ProviderError::UnknownIdentity)?;
+    if found {
+        Ok(())
+    } else {
+        Err(ProviderError::UnknownIdentity)
+    }
+}
+
 /// The answering model from OpenCode's own session record, keyed by the
 /// stream's session id. Missing, ambiguous or unreadable records are unknown.
 pub fn observe_model(data: &std::path::Path, session: &str) -> Result<String, ProviderError> {

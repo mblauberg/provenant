@@ -154,9 +154,7 @@ pub(super) fn continuation_for(
         .join("provider-state");
     let policy = StateCopyPolicy::read(config_root);
     let located = if route.adapter == "opencode" {
-        super::observation::observe_opencode_session(&prior_state, session)
-            .ok()
-            .map(|(path, _)| path)
+        super::observation::find_opencode_session(&prior_state, session).ok()
     } else {
         find_session_state_within(&prior_state, session, policy.limits)
             .map_err(|exhausted| StateCopyError::resource(policy.fact(exhausted.limit(), None)))?
@@ -326,7 +324,7 @@ pub(crate) fn continuation_available(
         .join("provider-state");
     let policy = StateCopyPolicy::read(config_root);
     if provider == "opencode" {
-        return super::observation::observe_opencode_session(&state, session)
+        return super::observation::find_opencode_session(&state, session)
             .map(|_| ())
             .map_err(|_| missing_continuation(provider));
     }

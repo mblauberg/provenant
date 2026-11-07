@@ -45,6 +45,17 @@ pub(crate) fn observe_opencode_session(
     provider_state: &Path,
     session: &str,
 ) -> Result<(PathBuf, String), provenant_providers::ProviderError> {
+    let candidate = find_opencode_session(provider_state, session)?;
+    let model =
+        provenant_providers::opencode::observe_model(&candidate.join("data/opencode"), session)?;
+    Ok((candidate, model))
+}
+
+/// Locate by session identity independently of answering-model telemetry.
+pub(crate) fn find_opencode_session(
+    provider_state: &Path,
+    session: &str,
+) -> Result<PathBuf, provenant_providers::ProviderError> {
     use provenant_providers::ProviderError;
     let entries = std::fs::read_dir(provider_state).map_err(|_| ProviderError::UnknownIdentity)?;
     let mut found = None;
@@ -71,9 +82,9 @@ pub(crate) fn observe_opencode_session(
         {
             continue;
         }
-        match provenant_providers::opencode::observe_model(&data, session) {
-            Ok(model) if found.is_none() => found = Some((candidate, model)),
-            Ok(_) => return Err(ProviderError::IdentityMismatch),
+        match provenant_providers::opencode::session_exists(&data, session) {
+            Ok(()) if found.is_none() => found = Some(candidate),
+            Ok(()) => return Err(ProviderError::IdentityMismatch),
             Err(ProviderError::UnknownIdentity) => {}
             Err(error) => return Err(error),
         }
