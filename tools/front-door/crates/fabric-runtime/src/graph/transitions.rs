@@ -866,16 +866,45 @@ pub(super) fn apply_input_manifest(
     Ok(())
 }
 
+pub(super) struct ObservationRecord {
+    pub node_index: usize,
+    pub retry_was_pending: bool,
+    pub recorded_separation: Option<FamilySeparation>,
+    pub usage_error: Option<String>,
+    pub cost_error: Option<String>,
+}
+
 pub(super) fn record_observation(
     checkpoint: &mut GraphCheckpoint,
-    node_index: usize,
-    retry_was_pending: bool,
-    recorded_separation: Option<FamilySeparation>,
-    usage_error: Option<String>,
-    cost_error: Option<String>,
+    node: &PlannedNode,
+    plan: &PlannedGraph,
+    positions: &std::collections::BTreeMap<String, usize>,
+    record: ObservationRecord,
 ) {
+    let ObservationRecord {
+        node_index,
+        retry_was_pending,
+        recorded_separation,
+        usage_error,
+        cost_error,
+    } = record;
     if retry_was_pending {
         asks::refresh_wake(checkpoint);
+    }
+    if recorded_separation.as_ref().is_some_and(|record| {
+        record.strength == FamilyStrength::Prefer
+            && record.outcome == SeparationOutcome::Unavailable
+    }) && node.access == AccessMode::WorktreeWrite
+        && node.round.as_ref().is_some_and(|round| {
+            round.node_id == "fix"
+                && positions
+                    .get(&round.loop_id)
+                    .is_some_and(|&index| repair::is_repair(&plan.nodes[index]))
+        })
+        && let Some(outputs) = checkpoint.nodes[node_index].outputs.as_mut()
+    {
+        outputs.warnings.truncate(MAX_WARNINGS.saturating_sub(1));
+        outputs.warnings.push("No separate model family was available for the repair writer; the repair continued on an available route.".into());
     }
     if recorded_separation.is_some() {
         checkpoint.nodes[node_index].separation = recorded_separation;

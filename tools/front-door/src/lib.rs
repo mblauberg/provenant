@@ -15,6 +15,7 @@ mod disk;
 mod disk_guard;
 pub mod event_intake;
 mod fabric;
+pub mod pr_service;
 mod tick;
 mod tick_agent;
 mod tracker;

@@ -2181,24 +2181,24 @@ fn peer_dispatch_recovers_receipt_when_probes_fail() -> Result {
         ),
     )?;
     std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o700))?;
-    let launch = |rig: &TestRig, operation| {
-        json_command(
-            rig,
-            &[
-                "run",
-                "fixture",
-                "--host",
-                "workshop",
-                "--model",
-                "codex/gpt-6-luna",
-                "--operation-id",
-                operation,
-                "--wait=15s",
-                "--json",
-            ],
-        )
+    let launch = |rig: &TestRig, operation, wait| {
+        let mut args = vec![
+            "run",
+            "fixture",
+            "--host",
+            "workshop",
+            "--model",
+            "codex/gpt-6-luna",
+            "--operation-id",
+            operation,
+            "--json",
+        ];
+        if wait {
+            args.push("--wait=15s");
+        }
+        json_command(rig, &args)
     };
-    let (_, success) = launch(&rig, "probe-failure-success")?;
+    let (_, success) = launch(&rig, "probe-failure-success", true)?;
     let reference = success["data"]["checkpoint"]["nodes"][0]["attempts"][0]["attempt_ref"]
         .as_str()
         .ok_or_else(|| format!("missing peer attempt: {success}"))?;
@@ -2208,7 +2208,8 @@ fn peer_dispatch_recovers_receipt_when_probes_fail() -> Result {
         .map(|entry| entry.map(|entry| entry.file_name()))
         .collect::<std::io::Result<_>>()?;
     std::fs::write(&lost, "")?;
-    let (_, unknown) = launch(&rig, "probe-failure-retry")?;
+    // Observe the lost receipt before a waited submission advances its due retry.
+    let (_, unknown) = launch(&rig, "probe-failure-retry", false)?;
     assert!(unknown.to_string().contains("LAUNCH_UNKNOWN"), "{unknown}");
     let after_loss: std::collections::HashSet<_> = std::fs::read_dir(&runs)?
         .map(|entry| entry.map(|entry| entry.file_name()))
@@ -2241,7 +2242,7 @@ fn peer_dispatch_recovers_receipt_when_probes_fail() -> Result {
     rig.env.retain(|(key, _)| key != "PROVENANT_AGENT_LABEL");
     rig.env
         .push(("PROVENANT_AGENT_LABEL".into(), "replacement-runner".into()));
-    let (_, recovered) = launch(&rig, "probe-failure-retry")?;
+    let (_, recovered) = launch(&rig, "probe-failure-retry", true)?;
     let reference = recovered["data"]["checkpoint"]["nodes"][0]["attempts"][0]["attempt_ref"]
         .as_str()
         .ok_or_else(|| format!("missing recovered peer attempt: {recovered}"))?;
@@ -2250,7 +2251,7 @@ fn peer_dispatch_recovers_receipt_when_probes_fail() -> Result {
         .map(|entry| entry.map(|entry| entry.file_name()))
         .collect::<std::io::Result<_>>()?;
     assert_eq!(after.difference(&existing).count(), 1, "{recovered}");
-    let (_, replay) = launch(&rig, "probe-failure-retry")?;
+    let (_, replay) = launch(&rig, "probe-failure-retry", true)?;
     assert_eq!(
         replay["data"]["checkpoint"]["nodes"][0]["attempts"][0]["attempt_ref"],
         reference

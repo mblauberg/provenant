@@ -75,7 +75,8 @@ fn graph_writer_initialisation_error(
 ) -> FacadeError {
     use provenant_confinement::worktrees::WorktreeError;
     match error {
-        WorktreeError::RegistryLockTimeout | WorktreeError::LockBusy => FacadeError::WriterLockBusy,
+        WorktreeError::RegistryLockTimeout => FacadeError::WriterLockBusy,
+        WorktreeError::LockBusy => FacadeError::WriterBusy { holder: None },
         WorktreeError::UnknownWriter => FacadeError::WriterUnknown,
         error @ WorktreeError::Dirty(_) => run_error(error.into()),
         error => FacadeError::DispatchRefused {

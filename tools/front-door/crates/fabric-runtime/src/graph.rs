@@ -2773,11 +2773,16 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                 })?;
                 transitions::record_observation(
                     &mut checkpoint,
-                    node_index,
-                    retry_was_pending,
-                    recorded_separation,
-                    usage_error,
-                    cost_error,
+                    node,
+                    &plan,
+                    &positions,
+                    transitions::ObservationRecord {
+                        node_index,
+                        retry_was_pending,
+                        recorded_separation,
+                        usage_error,
+                        cost_error,
+                    },
                 );
                 if quota_redraw {
                     transitions::redraw_quota_alias(

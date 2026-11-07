@@ -2515,6 +2515,18 @@ fn compiled_repair_rechecks_new_panel_lens_after_the_next_fix() {
     assert_eq!(run.status, GraphStatus::Complete);
     assert!(run.checkpoint.successful(), "{:?}", run.checkpoint.nodes.iter().map(|node| (&node.id, node.state, &node.gate, &node.advance_error)).collect::<Vec<_>>());
     assert_eq!(owner.repair_panel_calls, 2);
+    // The first repair receives the complete structured finding, not just the
+    // prose from the review. Later rounds must receive the replanned panel's
+    // finding instead (checked below).
+    let first_writer = owner.calls.iter().position(|call| call.0.node_id == "repair--r1--fix").unwrap();
+    let first_prompt = &owner.prompts[first_writer];
+    for field in [
+        "\"id\":\"F1\"", "\"lens\":\"correctness\"", "\"severity\":\"high\"",
+        "\"file\":\"a.rs\"", "\"line\":1", "\"evidence\":\"counterexample\"",
+        "\"proposed_fix\":\"repair\"",
+    ] {
+        assert!(first_prompt.contains(field), "missing {field} in {first_prompt}");
+    }
     let sources: Vec<_> = owner.calls.iter().zip(&owner.source_commits)
         .filter(|(call, _)| call.0.node_id.ends_with("--lenses--security"))
         .map(|(_, source)| source.clone()).collect();

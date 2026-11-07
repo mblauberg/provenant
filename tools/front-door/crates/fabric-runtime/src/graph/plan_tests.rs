@@ -1521,8 +1521,14 @@ fn assert_pattern_parameter_error(
     case: &str,
     doc: &GraphDocument,
     parameters: Value,
-    _reason: &str,
+    reason: &str,
 ) {
+    // The persisted pause reason is sanitised; check the specific validation
+    // failure at the binding boundary before exercising the planner refusal.
+    let error = doc.nodes[0].plan.as_ref().unwrap().templates[0]
+        .bind("generator", &parameters)
+        .unwrap_err();
+    assert!(error.contains(reason), "{case}: {error}");
     let mut owner = fixture_owner(&[&pattern_result(
         json!({"id":"impl", "pattern":"generator", "parameters":parameters}),
     )]);

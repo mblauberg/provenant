@@ -11,6 +11,17 @@ use std::{
 pub struct Gh {
     next: BTreeMap<String, Instant>,
     retry: Option<Instant>,
+    path: Option<String>,
+}
+impl Gh {
+    /// Explicit launchd/foreground executable search path, without mutating the
+    /// process environment after the webhook thread starts.
+    pub fn with_path(path: String) -> Self {
+        Self {
+            path: Some(path),
+            ..Self::default()
+        }
+    }
 }
 impl Forge for Gh {
     #[allow(clippy::disallowed_methods, reason = "forge transport timing boundary")]
@@ -45,9 +56,14 @@ impl Forge for Gh {
             argv.extend(["-H".into(), format!("If-None-Match: {etag}").into()]);
         }
         argv.push(path.into());
-        let environment: Vec<_> = std::env::vars_os()
-            .filter(|(key, _)| key != "PROVENANT_INTAKE_SECRET")
+        let mut environment: Vec<_> = std::env::vars_os()
+            .filter(|(key, _)| {
+                key != "PROVENANT_INTAKE_SECRET" && !(self.path.is_some() && key == "PATH")
+            })
             .collect();
+        if let Some(path) = &self.path {
+            environment.push(("PATH".into(), path.into()));
+        }
         let cwd = std::env::current_dir()?;
         let mut options = ExecOptions::new(&argv, &cwd, Duration::from_secs(60));
         options.env = Some(&environment);

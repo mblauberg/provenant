@@ -160,10 +160,14 @@ fn is_product_asset(path: &Path) -> bool {
     .any(|root| path.starts_with(root) && path != Path::new(root))
 }
 
+fn is_release_binary(path: &Path) -> bool {
+    matches!(path.to_str(), Some("bin/provenant" | "bin/pr-reconciler"))
+}
+
 /// Asset modes are normalized for installation: executables become 0700 and
-/// other files 0600. The command binary retains its standard 0755 mode.
+/// other files 0600. Release binaries retain their standard 0755 mode.
 fn source_mode(path: &Path, actual: u64) -> Result<u64, InstallError> {
-    if path == Path::new("bin/provenant") {
+    if is_release_binary(path) {
         if actual & 0o111 == 0 || actual & 0o7000 != 0 {
             return Err(InstallError::Manifest("binary must be executable"));
         }
@@ -178,7 +182,7 @@ fn source_mode(path: &Path, actual: u64) -> Result<u64, InstallError> {
     }
 }
 fn validate_name(path: &Path, mode: u64) -> Result<(), InstallError> {
-    let allowed_mode = if path == Path::new("bin/provenant") {
+    let allowed_mode = if is_release_binary(path) {
         mode == 0o755
     } else {
         is_product_asset(path) && matches!(mode, 0o600 | 0o700)
@@ -196,7 +200,9 @@ pub(crate) fn asset_inventory_digest(
 ) -> Result<SourceDigest, InstallError> {
     let mut encoded = Vec::<(String, Vec<u8>)>::new();
     for (path, (bytes, mode)) in files {
-        if path == Path::new("bin/provenant") {
+        // Linked binaries carry their own identity and file digest. Including
+        // their bytes here would make the compiled-in asset digest recursive.
+        if is_release_binary(path) {
             continue;
         }
         if !is_product_asset(path) || !matches!(mode, 0o600 | 0o700) {

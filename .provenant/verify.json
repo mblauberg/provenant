@@ -54,6 +54,26 @@
       ],
       "package": "provenant",
       "binary": "graph_provider"
+    },
+    {
+      "paths": [
+        "tools/front-door/src/pr_service*",
+        "tools/front-door/src/bin/pr-reconciler.rs",
+        "tools/front-door/tests/pr_reconciler_service.rs",
+        "tools/front-door/crates/config/src/release*",
+        "tools/front-door/src/release_smoke.rs"
+      ],
+      "package": "provenant",
+      "binary": "pr_reconciler_service"
+    },
+    {
+      "paths": [
+        "tools/front-door/src/event_intake*",
+        "tools/front-door/src/bin/event-intake.rs",
+        "tools/front-door/tests/event_intake_service.rs"
+      ],
+      "package": "provenant",
+      "binary": "event_intake_service"
     }
   ],
   "runners": {

@@ -1170,7 +1170,7 @@ pub(crate) mod peer_tests {
         )?;
 
         // Now advance with BoundGraphOwner.
-        let mut owner = BoundGraphOwner { launch_warnings: Vec::new(), repo_facts: Default::default(),
+        let mut owner = BoundGraphOwner { admission_timeout: None, launch_warnings: Vec::new(), repo_facts: Default::default(),
             factory: &factory,
             integration_base: Some(BoundGraphBases { integration: Some(node_source), review: None }),
             integration_branch: None,

@@ -31,7 +31,7 @@ fn graph_owner_submits_sibling_families_as_a_preference_and_alias_retry_exclusio
     };
     let cancel = CancelToken::new();
     let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
-    let mut bound = BoundGraphOwner { launch_warnings: Vec::new(), repo_facts: Default::default(),
+    let mut bound = BoundGraphOwner { admission_timeout: None, launch_warnings: Vec::new(), repo_facts: Default::default(),
         factory: &factory,
         integration_base: None,
         integration_branch: None,
@@ -549,7 +549,7 @@ fn graph_submission_pins_the_integration_base_across_replay()
         "graph_id":"pinned-base", "node_id":"later-lens", "route_index":0
     }))?;
     let route = serde_json::from_value(serde_json::json!({"adapter":"fixture", "model":"fixture/model"}))?;
-    let mut bound = BoundGraphOwner { launch_warnings: Vec::new(), repo_facts: Default::default(),
+    let mut bound = BoundGraphOwner { admission_timeout: None, launch_warnings: Vec::new(), repo_facts: Default::default(),
         factory: &factory, integration_base: None, integration_branch: None,
         network: None, capability_overrides: Default::default(), exclude: Vec::new(), budget, cancel: &cancel, prices: None, tick: false,
     };

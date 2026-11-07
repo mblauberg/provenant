@@ -54,15 +54,18 @@ needed. Treat findings and unavailable checks as advice, never a filing gate.
 
 ## File without sprawl
 
-1. Search title keywords, then a symbol or error string, and open PRs. Record what
-   you searched, including no matches.
+1. Search title keywords, then a symbol or error string, and open PRs. Optional
+   hybrid search requires `is:issue`, or GitHub silently falls back to keyword
+   search. Record what you searched, including no matches.
 2. Extend an existing issue only for the same outcome with unchanged acceptance.
    Otherwise file one issue per outcome, not per finding.
 3. Under a non-active epic, add a backlog line; promote it to an issue when it is
    about to be worked.
 4. Dedupe a batch against itself. Cap Ready issues near two to three times the
    active writers; pause filing at the cap, not delivery.
-5. After any create error, timeout or slow response, search for the exact title before any retry; use an existing match instead of filing again. If the result is uncertain, reconcile it before retrying.
+5. After any create error, timeout or slow response, search for the exact title
+   before any retry; use an existing match instead of filing again. If the result
+   is uncertain, reconcile it before retrying.
 6. Never file only to record evidence on delivered work. Agents never approve their
    own filings. Workers report follow-ups; only the chair or steward writes.
 
