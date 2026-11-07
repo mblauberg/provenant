@@ -6,7 +6,7 @@ use crate::repo::GitRefName;
 use provenant_core::CancelToken;
 use provenant_os::exec::SystemExecutor;
 #[cfg(target_os = "macos")]
-use provenant_os::exec::{ExecOutcome, Termination};
+use provenant_os::exec::{ExecOptions, ExecOutcome, Executor, Termination};
 #[cfg(target_os = "macos")]
 use std::collections::BTreeMap;
 #[cfg(any(target_os = "macos", feature = "snapshot"))]
@@ -112,7 +112,7 @@ fn expanded_authentication_family_grants_only_selected_credentials() -> Result<(
 
 #[cfg(any(target_os = "macos", feature = "snapshot"))]
 #[test]
-fn profiles_between_the_old_and_new_limits_compile_and_larger_ones_name_their_size()
+fn profiles_above_former_thresholds_render_without_truncation()
 -> Result<(), Box<dyn std::error::Error>> {
     let (plan, profile) = write_grants_fixture();
     let mut many = plan.clone();
@@ -134,12 +134,37 @@ fn profiles_between_the_old_and_new_limits_compile_and_larger_ones_name_their_si
     let source = render(&grants)?;
     assert!(source.len() > 64 * 1024 && source.len() <= PROFILE_LIMIT);
     grants.reads = (0..4000).map(|index| root(index, 200)).collect();
-    let error = render(&grants).unwrap_err();
-    assert!(
-        matches!(error, PermissionError::ProfileTooLarge { bytes, limit: PROFILE_LIMIT } if bytes > PROFILE_LIMIT)
-    );
-    let expanded = render_with_limit(&grants, 2 * 1024 * 1024)?;
+    let expanded = render(&grants)?;
     assert!(expanded.len() > PROFILE_LIMIT);
+    assert_eq!(expanded, render_with_limit(&grants, usize::MAX)?);
+    for grant in &grants.reads {
+        assert!(expanded.contains(grant.path.to_str().expect("fixture UTF-8")));
+    }
+    for origin in [
+        provenant_records::diagnostic::SettingSource::ShippedDefault,
+        provenant_records::diagnostic::SettingSource::Configuration,
+    ] {
+        let warning = capacity_warning(
+            "domains.run.profile_limit_bytes",
+            expanded.len(),
+            PROFILE_LIMIT,
+            origin,
+        )
+        .expect("warning above threshold");
+        assert!(warning.contains(&expanded.len().to_string()));
+        assert!(warning.contains(&PROFILE_LIMIT.to_string()));
+        assert!(warning.contains(origin.description()));
+        assert!(warning.len() < 256);
+        assert!(
+            capacity_warning(
+                "domains.run.profile_limit_bytes",
+                PROFILE_LIMIT,
+                PROFILE_LIMIT,
+                origin
+            )
+            .is_none()
+        );
+    }
     Ok(())
 }
 
@@ -314,6 +339,72 @@ fn worktree_access_read_only_profile_limits_checkout_writes()
     }
     .compile(plan.permissions(), &profile, &anchors)?;
     let source = String::from_utf8(compiled.profile)?;
+    let over_threshold = MacOsSandboxBackend {
+        ready: true,
+        limits: ProfileLimits {
+            grant_limit: 1,
+            profile_limit_bytes: 1,
+            grant_origin: provenant_records::diagnostic::SettingSource::Configuration,
+            profile_origin: provenant_records::diagnostic::SettingSource::Configuration,
+        },
+    }
+    .compile(plan.permissions(), &profile, &anchors)?;
+    assert_eq!(over_threshold.profile, source.as_bytes());
+    // Medium/native acceptance: real anchors and compiler, above both former
+    // defaults. Exact absent files share an already-held read-only parent.
+    let mut large_profile = ProviderProfile {
+        spec: profile.spec.clone(),
+        observations: profile.observations.clone(),
+    };
+    large_profile
+        .spec
+        .runtime_reads
+        .extend((0..3000).map(|index| {
+            PathGrant {
+                path: listed
+                    .parent()
+                    .expect("fixture parent")
+                    .join(format!("capacity-{index}-{}", "x".repeat(200))),
+                scope: PathScope::Exact,
+            }
+        }));
+    let large = MacOsSandboxBackend {
+        ready: true,
+        limits: ProfileLimits::default(),
+    }
+    .compile(plan.permissions(), &large_profile, &anchors)?;
+    assert!(large.profile.len() > PROFILE_LIMIT);
+    let native = || -> Result<(), Box<dyn std::error::Error>> {
+        let env = [("HOME".into(), home.clone().into_os_string())];
+        let executor = SystemExecutor::new(1)?;
+        let cancel = CancelToken::new();
+        let context = BackendContext {
+            executor: &executor,
+            cancel: &cancel,
+            env: &env,
+        };
+        match system_backend(&context) {
+            Err(PermissionError::BackendNotAvailable(reason)) => {
+                provenant_test_support::skip_sandbox_dependent_test(format!(
+                    "large-profile launch needs native Seatbelt: {reason:?}; ADR 0040 capacity acceptance"
+                ))?;
+                return Ok(());
+            }
+            Err(error) => return Err(error.into()),
+            Ok(_) => {}
+        }
+        let command = large.command(
+            &["/usr/bin/true".into()],
+            &provenant_core::AttemptId::from_bytes([42; 16]),
+        )?;
+        let mut options = ExecOptions::new(&command, &scratch, std::time::Duration::from_secs(5));
+        options.env = Some(&env);
+        options.cancel = Some(&cancel);
+        let outcome = executor.execute(options)?;
+        assert_eq!(outcome.termination, Termination::Exit(0), "{outcome:?}");
+        Ok(())
+    };
+    native()?;
     let mut strict_permissions = plan.permissions().clone();
     strict_permissions.read_only = None;
     strict_permissions.read_roots.clear();

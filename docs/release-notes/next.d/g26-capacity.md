@@ -1,4 +1,4 @@
 ## Behaviour changes
 ### Git and safety
 
-- Large write-grant ledgers now warn at the configured threshold instead of refusing a lane.
+- Lanes with large grant counts, sandbox profiles or write-grant ledgers now warn at the configured thresholds and retain their full diagnostics. Backend and enforcement failures still refuse launch.

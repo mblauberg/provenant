@@ -22,7 +22,6 @@ fn write_grants_wire_bound_and_git_digest_are_preserved() -> TestResult {
     let mut applied = admission::AppliedWriteGrants {
         grants: vec![grant.clone(); 1025],
         git_grants_digest: Some(provenant_core::Digest::from_bytes([7; 32])),
-        ..Default::default()
     };
     let mut record = store.record(id, &call)?;
     record.write_grants = applied.grants.clone();

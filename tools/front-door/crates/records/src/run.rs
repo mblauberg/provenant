@@ -22,13 +22,14 @@ pub fn default_lane_priority(writer: bool, build_heavy: bool) -> u8 {
 }
 
 pub const RECORD_LIMIT: u64 = 1024 * 1024;
-/// Encoded write grants an attempt may record, leaving terminal headroom.
+/// Default warning threshold for the encoded applied write-grant ledger.
 pub const MAX_WRITE_GRANT_BYTES: u64 = 256 * 1024;
-/// Maximum configurable encoded grants; terminal records retain at least the
-/// same amount of headroom for their other fields.
+/// Maximum configurable warning threshold, independent of record capacity.
 pub const MAX_WRITE_GRANT_BYTES_CEILING: u64 = 8 * RECORD_LIMIT;
-/// Host-owned terminal decisions can contain the full applied grant ledger.
-pub const TERMINAL_RECORD_LIMIT: u64 = 16 * RECORD_LIMIT;
+/// Host-owned attempt and terminal decisions retain the complete diagnostic
+/// ledger. Admission thresholds must not become storage refusals. This does
+/// not change bounded request, result, capture or provider-input readers.
+pub const TERMINAL_RECORD_LIMIT: u64 = u64::MAX;
 pub const RESULT_LIMIT: u64 = 4 * 1024 * 1024;
 pub const CAPTURE_LIMIT: u64 = 64 * 1024 * 1024;
 pub const OUTPUT_LIMIT: u64 = 65536;

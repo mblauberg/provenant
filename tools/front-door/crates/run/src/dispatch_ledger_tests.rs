@@ -337,7 +337,7 @@ fn write_grant_warning_threshold_does_not_refuse_large_terminal_ledger() -> Test
     let id = prepared.attempts[0].attempt_id;
     let provider = Raised(Confined {
         writer: false,
-        tool_writes: (0..400)
+        tool_writes: (0..6000)
             .map(|i| PathGrant {
                 path: format!("/fixture/tools/{i}/{}", "x".repeat(3000)).into(),
                 scope: PathScope::Subtree,
@@ -370,13 +370,29 @@ fn write_grant_warning_threshold_does_not_refuse_large_terminal_ledger() -> Test
         provenant_records::CanonicalV1::bytes(&record.write_grants)?
             .as_bytes()
             .len()
-            > RECORD_LIMIT as usize
+            > 16 * RECORD_LIMIT as usize
     );
     let attempt = store.attempt_dir(prepared.run_id, id, false)?;
     let terminal =
         crate::artifacts::read_sealed(&attempt, "terminal-pending.json", TERMINAL_RECORD_LIMIT)?
             .ok_or("terminal decision")?;
-    assert!(terminal.len() > RECORD_LIMIT as usize);
+    assert!(terminal.len() > 16 * RECORD_LIMIT as usize);
+    let terminal_record = crate::db::decode_attempt(&terminal)?;
+    assert_eq!(terminal_record.write_grants, record.write_grants);
+    // The explicit fixture handoff error survives; capacity never masks it.
+    assert!(matches!(&record.state,
+        AttemptState::Terminal { outcome: Outcome::Rejected, reason: Some(reason), .. }
+        if reason.contains("fixture holder")));
+    let expected_tools: Vec<_> = (0..6000)
+        .map(|i| format!("/fixture/tools/{i}/{}", "x".repeat(3000)))
+        .collect();
+    let actual_tools = record
+        .write_grants
+        .iter()
+        .filter(|grant| grant.source == WriteSource::ToolWrite)
+        .map(|grant| Ok(grant.path.to_path_buf()?.to_string_lossy().into_owned()))
+        .collect::<std::result::Result<Vec<_>, provenant_records::PathWireError>>()?;
+    assert_eq!(actual_tools, expected_tools);
     drop(store);
     let reopened = RunStore::open(&context, &call)?;
     assert_eq!(
