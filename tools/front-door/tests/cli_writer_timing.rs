@@ -79,7 +79,11 @@ fn run_wait_admits_after_registry_lock_is_released() -> Result {
         };
         // The later fast_forward registry wait must survive both the one-second
         // settlement deadline and the old five-second context budget.
-        std::thread::sleep(Duration::from_secs(6));
+        clock.wait_until(
+            clock
+                .mono_now()
+                .checked_add(provenant_core::DurationMicros::from_micros(6_000_000))?,
+        )?;
         assert!(!worker.is_finished(), "launch ended before its allowance");
         drop(guard);
         let output = worker
@@ -135,7 +139,7 @@ fn run_wait_reports_the_held_registry_lock() -> Result {
             }]
         }))?,
     )?;
-    let started = std::time::Instant::now();
+    let started = clock.mono_now();
     let output = rig.command(&[
         "run",
         "--file",
@@ -143,11 +147,17 @@ fn run_wait_reports_the_held_registry_lock() -> Result {
         "--wait=1s",
         "--json",
     ])?;
-    assert!(started.elapsed() >= std::time::Duration::from_secs(2));
+    let elapsed = std::time::Duration::from_micros(
+        clock
+            .mono_now()
+            .as_micros()
+            .saturating_sub(started.as_micros()),
+    );
+    assert!(elapsed >= std::time::Duration::from_secs(2));
     assert!(
-        started.elapsed() < std::time::Duration::from_secs(15),
+        elapsed < std::time::Duration::from_secs(15),
         "elapsed={:?} output={output:?}",
-        started.elapsed()
+        elapsed
     );
     let value: Value = serde_json::from_slice(&output.stdout.bytes)?;
     assert_ne!(code(&output), 0, "{value}");
