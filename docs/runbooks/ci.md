@@ -88,6 +88,8 @@ At reviewed head `f99b107d7`, [run 41787629232, attempt 1](https://github.com/mb
 
 After the front door was split into three shards, [run 42330325604](https://github.com/mblauberg/provenant/actions/runs/42330325604) at `7520c4ba` restored the full macOS Rust cache key. The single required macOS test job passed in 13m12s, leaving 1m48s under the 15-minute target and 6m48s under its timeout; the release smoke passed in 4m59s. The test job spent 59s on lint, 3m37s building the archive, 3m05s on custody, 2m04s on dispatch confinement and 1m40s on provider dispatch. This is another warm measurement, not a cold-cache result. A successful cold-cache measurement of this structure is still needed to establish the budget in both conditions.
 
+A cold run of the same structure, [run 42370419585](https://github.com/mblauberg/provenant/actions/runs/42370419585) at `8ed8a9c92`, dispatched with `cold_cache` and confirmed by `No cache found`, passed. The slowest job, the required macOS tests, took 12m51s, 2m09s under the 15-minute target, with the test build at 3m20s. The release smoke took 5m02s, the front door shards 4m07s, 5m18s and 4m03s, and lint 2m50s. The jobs ran for 13m15s; the run also queued for about 12 minutes behind other runs.
+
 The 20 slowest cases in run 41787629232's preserved native JUnit reports (seconds):
 
 | Test (binary) | Seconds |
