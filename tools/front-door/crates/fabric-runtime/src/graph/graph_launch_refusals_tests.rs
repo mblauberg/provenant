@@ -584,3 +584,36 @@ fn launched_reader_fallback_reopens_file_checkpoint() {
     let replay = advance(&document, &mut FakeOwner::default(), &mut journal).unwrap();
     assert_eq!(replay.checkpoint.nodes[0].state, NodeState::Succeeded);
 }
+
+#[test]
+fn untyped_launch_refusal_persists_reason_without_an_attempt() {
+    use crate::coordination::facade::FacadeError;
+    let secret = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
+    let document = graph(vec![node("one", route("first"))]);
+    let mut owner = ErrorLauncher {
+        now: Some(at(0)),
+        errors: [(1, FacadeError::DispatchRefused {
+            reason: format!("worktree setup failed: missing dependency {secret}"),
+            disk: None,
+            fact: None,
+        })].into(),
+        ..Default::default()
+    };
+    let mut journal = MemoryJournal::default();
+    let run = advance(&document, &mut owner, &mut journal).unwrap();
+    let node = &run.checkpoint.nodes[0];
+    assert_eq!(node.state, NodeState::Blocked);
+    assert!(node.attempts.iter().all(|attempt| attempt.attempt_ref.is_none()));
+    assert!(node.attempts.iter().all(|attempt|
+        attempt.extra.get(PRELAUNCH_REFUSAL_PROOF).and_then(serde_json::Value::as_bool) == Some(true)));
+    let reason = node.advance_error.as_deref().unwrap();
+    assert!(reason.contains("worktree setup failed: missing dependency"));
+    assert!(!reason.contains(secret));
+    assert!(!reason.contains("receipt"));
+    // Re-read the persisted checkpoint as a later status request does.
+    let encoded = serde_json::to_vec(journal.0.as_ref().unwrap()).unwrap();
+    let retained: GraphCheckpoint = serde_json::from_slice(&encoded).unwrap();
+    assert_eq!(retained.nodes[0].advance_error, node.advance_error);
+    let later = advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(later.checkpoint.nodes[0].advance_error, node.advance_error);
+}

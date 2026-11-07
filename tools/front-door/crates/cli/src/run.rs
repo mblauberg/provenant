@@ -174,7 +174,14 @@ impl Fail {
 impl From<run::RunError> for Fail {
     fn from(error: run::RunError) -> Self {
         let kind = ErrorKind::from(&error);
-        let projection = error.diagnostic(provenant_records::diagnostic::Destination::Local);
+        let mut projection = error.diagnostic(provenant_records::diagnostic::Destination::Local);
+        if projection.detail.is_none() && projection.fact.is_none() && kind.category() == "refused"
+        {
+            projection = projection.detail(provenant_confinement::redact::bounded_line(
+                &error.to_string(),
+                4096,
+            ));
+        }
         let message = projection.detail.as_ref().map_or_else(
             || kind.summary().to_owned(),
             |detail| {

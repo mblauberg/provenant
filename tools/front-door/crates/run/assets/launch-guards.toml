@@ -130,10 +130,8 @@ reason = "Publishing policy must be read and its selected GitHub credential rest
 
 [[guard]]
 site = "cli/src/run/provider/preparation.rs#prepare_writer_dependencies"
-boundary = "configurable_default"
-setting = "lanes.prepare_deps"
-code = "REFUSED"
-reason = "Automatic writer dependency preparation defaults on; a refusal reports the sealed profile or compiled default and can be disabled with this setting."
+boundary = "warning"
+reason = "Automatic dependency setup warns with a redacted cause and lets the writer continue; cancellation still stops preparation."
 
 [[guard]]
 site = "run/src/launch.rs#lane_port_plan_or_warn"
