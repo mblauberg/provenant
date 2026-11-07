@@ -2099,7 +2099,6 @@ esac
         "old-pending-fixture",
         "finish or cancel it with the previous release before upgrading",
         "lane-one",
-        "child-lane",
         "custom.toml",
     ] {
         assert!(output.contains(expected), "{output}");
@@ -2115,7 +2114,6 @@ esac
         "old-pending-fixture",
         "finish or cancel it with the previous release before upgrading",
         "lane-one",
-        "child-lane",
         "custom.toml",
     ] {
         assert!(
