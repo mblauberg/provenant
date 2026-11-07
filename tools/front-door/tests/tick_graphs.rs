@@ -390,3 +390,45 @@ fn tick_refuses_new_graph_attempts_while_unrelated_legacy_work_is_pending() -> R
     assert_eq!(std::fs::read(&legacy_path)?, legacy);
     Ok(())
 }
+
+// Medium: public catalogue, compilation and idle tick with isolated host state.
+#[test]
+fn steward_is_listed_compiles_and_stays_idle_without_config() -> Result {
+    let rig = TestRig::new()?;
+    let listed = rig.command(&["templates", "--json"])?;
+    assert_eq!(code(&listed), 0, "{listed:?}");
+    let listed: Value = serde_json::from_slice(&listed.stdout.bytes)?;
+    assert!(
+        listed["data"]["templates"]
+            .as_array()
+            .ok_or("templates")?
+            .iter()
+            .any(|template| template["name"] == "steward")
+    );
+    let compiled = rig.command(&["run", "--use", "steward", "--explain", "--json"])?;
+    assert_eq!(code(&compiled), 0, "{compiled:?}");
+    let compiled: Value = serde_json::from_slice(&compiled.stdout.bytes)?;
+    let brief = compiled["data"]["document"]["nodes"][0]["prompt"]
+        .as_str()
+        .ok_or("compiled brief")?;
+    assert!(brief.contains("proposal mode"));
+    assert!(brief.contains("Never close an"));
+    std::fs::create_dir_all(&rig.state)?;
+    std::fs::write(
+        rig.state.join("config.toml"),
+        "schema_version=1\n[gc]\nschedule=false\n",
+    )?;
+    let tick = rig.command(&["tick", "--json"])?;
+    assert_eq!(code(&tick), 0, "{tick:?}");
+    let tick: Value = serde_json::from_slice(&tick.stdout.bytes)?;
+    let steward = tick["data"]["tasks"]
+        .as_array()
+        .ok_or("tasks")?
+        .iter()
+        .find(|task| task["task"] == "steward")
+        .ok_or("steward task")?;
+    assert_eq!(steward["state"], "idle");
+    assert_eq!(tick["data"]["graphs"]["advanced"], 0);
+    assert!(!rig.state.join("tick/steward").exists());
+    Ok(())
+}

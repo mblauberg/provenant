@@ -21,6 +21,29 @@ use `steer` for a message, `stop` for a subtree, `retry` for unfinished work
 and `edit` for unstarted graph nodes. `templates`, `land` and `quota`
 complete the core interface; `help --all` lists advanced commands.
 
+## Scheduled tracker upkeep
+
+Opt in on the scheduling host with one section in `<state>/config.toml`:
+
+```toml
+[domains.steward.repositories.tracker]
+directory = "/absolute/path/to/checkout"
+cadence_seconds = 86400
+```
+
+A new config file also needs `schema_version = 1`. No repository-specific code
+is required. `provenant tick` launches the bundled junior-tier `steward` graph
+when due, keeps one scheduled sweep per project and reports launch failures.
+Without the section it reports `steward=idle`. Use one scheduling host per
+repository; host configurations are independent.
+
+The sweep gathers hybrid-search candidates with `is:issue` and then judges
+them. Proposal mode permits only marked duplicate comments on the newer issue;
+it never closes issues or applies parent links. Parent suggestions and thin
+bodies appear in run output for the chair. See [steward and
+closing](../../skills/tracker/references/steward.md#scheduled-proposal-sweep)
+for inspection, recovery and disabling steps.
+
 ## Statuses
 
 | Status | Meaning |

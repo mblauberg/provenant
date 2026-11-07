@@ -52,6 +52,7 @@ fn every_bundled_template_parses_and_resolves() {
     }
     for expected in [
         "task",
+        "steward",
         "plan",
         "explore",
         "research",
@@ -1064,5 +1065,33 @@ fn shorthand_schema_version_must_be_a_supported_integer() {
         let mut node = json!({"use":"task", "schema_version":version});
         separate_document_fields(&mut node).unwrap();
         assert!(node.get("schema_version").is_none());
+    }
+}
+
+// Small: the bundled catalogue compiles the proposal-mode contract.
+#[test]
+fn steward_compiles_with_junior_route_and_proposal_limits() {
+    let library = library();
+    let node = Compiler::new(&library)
+        .compile(&json!({"id":"sweep", "use":"steward"}))
+        .unwrap();
+    let compiled = serde_json::to_value(&node).unwrap();
+    assert_eq!(compiled["route"]["alias"], "junior");
+    assert_eq!(node.access, AccessMode::ReadOnly);
+    for limit in [
+        "is:issue",
+        "search_type=hybrid",
+        "Never close an",
+        "only permitted tracker write",
+        "newer issue",
+        "High-confidence parent links and thin bodies",
+        "run output only",
+        "<!-- provenant-steward:duplicate-of=",
+        "paginate",
+    ] {
+        assert!(
+            node.prompt.contains(limit),
+            "missing proposal limit: {limit}"
+        );
     }
 }
