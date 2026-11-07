@@ -38,7 +38,12 @@ pub fn resolve_boundary_path(path: &Path) -> Result<PathBuf, PermissionError> {
     }
     for ancestor in path.ancestors() {
         match std::fs::canonicalize(ancestor) {
-            Ok(base) => return Ok(base.join(path.strip_prefix(ancestor).expect("ancestor prefix"))),
+            Ok(base) => {
+                let suffix = path
+                    .strip_prefix(ancestor)
+                    .map_err(|_| PermissionError::InvalidPath(path.to_owned()))?;
+                return Ok(base.join(suffix));
+            }
             Err(error)
                 if matches!(
                     error.kind(),
