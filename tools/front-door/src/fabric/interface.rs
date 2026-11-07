@@ -322,6 +322,9 @@ mod launch_report_tests {
         let mut fallback = json!({"status":"complete","outcome":"succeeded","checkpoint":{"nodes":[{"attempts":[attempt("host/one", false),attempt("host/three", true)]}]}});
         report_launch_refusals(&mut fallback, &rows);
         assert_eq!(fallback["outcome"], "succeeded");
+        let mut failed = json!({"status":"complete","outcome":"failed","checkpoint":{"nodes":[{"state":"failed","attempts":[attempt("host/one", false)]},{"state":"succeeded","attempts":[attempt("host/three", true)]},{"state":"blocked","attempts":[]}]}});
+        report_launch_refusals(&mut failed, &rows);
+        assert_eq!(failed["outcome"], "failed");
     }
 }
 
@@ -346,6 +349,7 @@ fn report_launch_refusals(result: &mut Value, rows: &[Value]) {
             .as_array()
             .and_then(|attempts| attempts.last())
         else {
+            other_failure |= node["state"] == "failed" || node["state"] == "blocked";
             continue;
         };
         if attempt["launched"] == true {
