@@ -140,13 +140,13 @@ route records `domains.fabric.commands.NAME` as its configuration source, with n
 
 Commands use the ordinary supervisor, guardian, deadlines, descendant cleanup
 and operation replay. They run read-only with the shared Rust and Node toolchain
-grants and private build output. Network is on by default, as for every
+grants and private build output. Network is open by default, as for every
 lane. `--network off`, or `"network":"off"` on a manifest task (which overrides
 the flag for that task), runs the command with the recorded `provider` mode,
-which has no provider API endpoints for this adapter. All known credential stores,
-including both GitHub CLI config directories and keychains, stay denied in
-every network mode. Commands have no session, hooks, MCP configuration or
-quota probe.
+which has no provider API endpoints for this adapter. Like other adapters, an
+open-network command may read GitHub CLI configuration; local- and
+provider-network commands may not. The GitHub CLI stores remain immutable.
+Commands have no session, hooks, MCP configuration or quota probe.
 
 `runtimes` is optional and takes absolute interpreter paths. Each path is
 resolved on the host and granted execution only, so a script can use a custom
@@ -164,16 +164,29 @@ An ordinary verdict gate can consume a successful task's result; the gate
 still has no attempt. A failed command fails its task. A missing executable
 settles as adapter unavailable through the existing launch failure path.
 
-## Provider credentials in lane shells
+## Lane filesystem and network policy
 
-On macOS a Seatbelt profile applies to the whole process tree, so a shell
-command a provider runs gets the same file grants as the provider itself.
-OpenCode and Codex lanes can therefore read their own provider's credential:
-OpenCode reads `~/.local/share/opencode/auth.json` for its sign-in and
-connected API keys, and Codex reads and rewrites `~/.codex/auth.json` when it
-refreshes tokens. This is an accepted limit. A lane is not granted other
-providers' credential stores, and GitHub CLI configuration stays denied
-([#2432](https://github.com/mblauberg/provenant/issues/2432)).
+On macOS, Seatbelt starts with ambient filesystem, process and network access.
+The host still denies credential and preservation roots, Provenant state,
+shared Git metadata, read-only source mutations and other owned worktrees.
+Selected authentication receives only its declared credential reads and
+permitted in-place refresh writes. OpenCode's selected host configuration and
+exact account file are read-only authentication inputs. Attempts keep mutable
+provider session state in private attempt storage.
+
+An open-network lane, including a read-only lane, can read the host's GitHub
+CLI configuration at `~/.config/gh` and, on macOS,
+`~/Library/Application Support/GitHub CLI`. The stores remain immutable on the
+host. Their token can still perform GitHub writes, so read-only describes local
+source access, not the remote GitHub account. An explicit credential denial
+wins, and local- or provider-network lanes receive no GitHub CLI access. The
+effective host policy may further restrict reads, writes or network; see
+[run host policy](configuration.md#run-host-policy).
+
+Linux has no enforcing confinement backend and refuses lane launch with the
+typed backend-unavailable result. It never falls back to unconfined execution.
+The native Seatbelt escape probe is enforcement evidence only when it runs on
+macOS; a `ProbeFailed` skip on another host does not prove enforcement.
 
 ## Private session history
 
