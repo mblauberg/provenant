@@ -303,6 +303,17 @@ const PENDING_PROVISIONING: &str = "pending_writer_provisioning";
 /// Fence a writer child's worktree creation in the checkpoint. The caller saves
 /// the checkpoint before any Git effect, so a crash leaves the intent durable.
 pub fn fence_provisioning(checkpoint: &mut GraphCheckpoint, node: &str, path: &str, source: &str) {
+    // Retain creation intent in the child spec too: an explicit retry clears
+    // progress and needs to recreate this checkout after a definitive refusal.
+    for spec in checkpoint
+        .expansions
+        .iter_mut()
+        .flat_map(|expansion| &mut expansion.nodes)
+    {
+        if spec.id == node && spec.worktree.as_deref() == Some(path) {
+            spec.extra.insert("provision_worktree".into(), true.into());
+        }
+    }
     let entry = checkpoint
         .extra
         .entry(PENDING_PROVISIONING.into())
@@ -333,7 +344,7 @@ pub fn pending_provisioning(checkpoint: &GraphCheckpoint) -> Vec<(String, String
         .collect()
 }
 
-/// Clear the fence once the worktree exists.
+/// Clear the fence when recording successful provisioning or a definitive refusal.
 pub fn clear_provisioning(checkpoint: &mut GraphCheckpoint, node: &str) {
     if let Some(map) = checkpoint
         .extra
