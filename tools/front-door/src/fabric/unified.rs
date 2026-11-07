@@ -466,7 +466,7 @@ pub(crate) fn enrich_status_rows(
             &waits,
             context.roots.state.as_path(),
             clock.wall_now().ok(),
-            false,
+            host == context.identity.host,
         );
         let fields = serde_json::to_value(projected).map_err(|_| FacadeError::StateCorrupt)?;
         let reference = row["attempt_id"].clone();
@@ -1780,6 +1780,139 @@ mod tests {
             FileJournal::read_events(&roots.state, project, "g")?,
             events
         );
+        Ok(())
+    }
+
+    #[test]
+    fn pending_attempt_status_and_stop_by_attempt_id_keep_one_launch()
+    -> Result<(), Box<dyn std::error::Error>> {
+        if super::super::peer_tests::host_test(
+            "fabric::unified::tests::pending_attempt_status_and_stop_by_attempt_id_keep_one_launch",
+        )? {
+            return Ok(());
+        }
+        struct FreeWorkers;
+        impl WorkerObserver for FreeWorkers {
+            fn observe_roots(
+                &self,
+                roots: &[PathBuf],
+            ) -> std::collections::BTreeMap<PathBuf, provenant_confinement::worktrees::Occupancy>
+            {
+                roots
+                    .iter()
+                    .cloned()
+                    .map(|path| (path, provenant_confinement::worktrees::Occupancy::Available))
+                    .collect()
+            }
+        }
+        // Medium: real host journal and admitted run store, with only provider
+        // launch deferred. Both public attempt-ID spellings control that run.
+        for qualified in [false, true] {
+            let rig = crate::worktree_tests::repository()?;
+            let roots = crate::roots::child(&rig.home, &rig.project, rig.state.clone())?;
+            let factory = Factory {
+                context: Context::open(roots.clone(), &rig.home, &rig.project)?,
+                project_attribution: false,
+                clock: SystemClock::new(),
+                backoff: ThreadPause,
+                executor: SystemExecutor::new(1)?,
+                home: rig.home.clone(),
+                cwd: rig.project.clone(),
+                assets: rig.project.clone(),
+                host_launch: None,
+                mcp_project: None,
+                workers: &FreeWorkers,
+            };
+            let cancel = CancelToken::new();
+            let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
+            let input = json!({
+                "op":"run", "brief":"Inspect the parser", "operation_id":"stop-by-attempt",
+                "document":{"use":"task", "tier":[
+                    {"adapter":"fixture", "model":"fixture/first"},
+                    {"adapter":"fixture", "model":"fixture/fallback"}
+                ]}
+            });
+            let run = provenant_cli::run::with_deferred_provider_launch(|| {
+                factory.graph_document(input.clone(), budget, &cancel)
+            })?;
+            assert_eq!(run["status"], "pending");
+            assert_eq!(run["timed_out"], false, "submission did not request a wait");
+            let graph = run["checkpoint"]["graph_id"]
+                .as_str()
+                .ok_or("graph ID missing")?;
+            let reference = run["checkpoint"]["nodes"][0]["attempts"][0]["attempt_ref"]
+                .as_str()
+                .ok_or("accepted attempt missing")?;
+            let id = reference.rsplit('/').next().ok_or("attempt ID missing")?;
+            let selector = if qualified { reference } else { id };
+            for selected in [graph, selector] {
+                let status = factory.graph_document(
+                    json!({"op":"status", "id":selected}),
+                    budget,
+                    &cancel,
+                )?;
+                assert_eq!(status["timed_out"], false, "status did not request a wait");
+                assert!(
+                    status["rows"]
+                        .as_array()
+                        .ok_or("status rows missing")?
+                        .iter()
+                        .any(|row| row["kind"] == "attempt" && row["attempt_id"] == reference)
+                );
+            }
+            let stopped = factory.graph_document(
+                json!({"op":"stop", "id":selector, "reason":"stop the task"}),
+                budget,
+                &cancel,
+            )?;
+            assert_eq!(stopped["timed_out"], false);
+            let checkpoint = FileJournal::read_checkpoint(
+                &roots.state,
+                factory.context.identity.project,
+                graph,
+            )?
+            .ok_or("stopped checkpoint missing")?;
+            let node = checkpoint.nodes.first().ok_or("stopped node missing")?;
+            assert_eq!(node.state, NodeState::Skipped);
+            assert_eq!(node.extra.get("subtree_cancel"), Some(&json!(node.id)));
+            assert_eq!(node.attempts.len(), 1);
+            assert_eq!(node.attempts[0].attempt_ref.as_deref(), Some(reference));
+            let owner = BinaryRunOwner {
+                factory: &factory,
+                allow_remote: false,
+                actor: None,
+                chair: None,
+            };
+            let store = owner.store(&cancel)?;
+            let record = store.record(id.parse()?, &owner.call(&cancel))?;
+            assert!(matches!(
+                record.state,
+                provenant_run::AttemptState::Terminal {
+                    outcome: provenant_run::Outcome::Cancelled,
+                    ..
+                }
+            ));
+            // Replaying the original operation advances the stopped graph. Its
+            // unused second route must remain unused after the slot is freed.
+            let replayed = provenant_cli::run::with_deferred_provider_launch(|| {
+                factory.graph_document(input, budget, &cancel)
+            })?;
+            let after: GraphCheckpoint = serde_json::from_value(replayed["checkpoint"].clone())?;
+            assert_eq!(after.nodes[0].state, NodeState::Skipped);
+            assert_eq!(after.nodes[0].attempts, node.attempts);
+            let events =
+                FileJournal::read_events(&roots.state, factory.context.identity.project, graph)?;
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|event| {
+                        event.kind == provenant_fabric_runtime::graph::GraphEventKind::Attempt
+                            && event.code == "started"
+                    })
+                    .count(),
+                1
+            );
+        }
         Ok(())
     }
 

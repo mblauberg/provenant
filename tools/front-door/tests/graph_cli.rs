@@ -260,12 +260,15 @@ fn graph_secrets_are_refused_before_publication() -> Result {
     let rig = GraphProject::new()?;
     let secret = format!("ghp_{}", "a1".repeat(18));
     for explain in [false, true] {
-        for source in ["brief", "parameter", "file", "inline"] {
+        for source in ["brief", "review", "parameter", "file", "inline"] {
             let mut command = rig.command();
             command.arg("run");
             match source {
                 "brief" => {
                     command.arg(&secret);
+                }
+                "review" => {
+                    command.arg(&secret).args(["--use", "review"]);
                 }
                 "parameter" => {
                     let templates = rig.project.join(".provenant/templates");

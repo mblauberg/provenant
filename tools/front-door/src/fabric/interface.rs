@@ -1880,6 +1880,107 @@ mod tests {
     }
 
     #[test]
+    fn reviews_of_the_same_subject_attach_to_the_completed_attempt() -> Result {
+        use provenant_fabric_runtime::graph::{self, AttemptOwner, GraphExecution};
+        struct Reviewer(usize);
+        impl AttemptOwner for Reviewer {
+            type Error = std::convert::Infallible;
+            fn actor(&self) -> String {
+                "review-fixture".into()
+            }
+            fn observe_or_start(
+                &mut self,
+                _: &graph::AttemptKey,
+                _: graph::NodeInput<'_>,
+                _: &graph::GraphRoute,
+                _: graph::AccessMode,
+                _: Option<&str>,
+                _: graph::Replay<'_>,
+            ) -> std::result::Result<graph::AttemptObservation, Self::Error> {
+                self.0 += 1;
+                Ok(graph::AttemptObservation::Terminal {
+                    attempt_ref: Some("fixture/review".into()),
+                    outcome: graph::AttemptOutcome::Succeeded,
+                    launched: true,
+                    result: None,
+                    result_warning: None,
+                    result_path: None,
+                    branch: None,
+                    commit: None,
+                })
+            }
+        }
+        let rig = crate::worktree_tests::repository()?;
+        let factory = factory(&rig)?;
+        let cancel = CancelToken::new();
+        let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
+        let input =
+            json!({"op":"run", "use":"review", "brief":"Review the parser", "tier":"senior"});
+        let mut preview = input.clone();
+        preview["explain"] = json!(true);
+        let document: GraphDocument = serde_json::from_value(
+            factory.graph_document(preview, budget, &cancel)?["document"].clone(),
+        )?;
+        let mut reviewer = Reviewer(0);
+        let first = {
+            let mut journal = FileJournal::open(
+                &factory.context.roots.state,
+                factory.context.identity.project,
+                &document.graph_id,
+                budget,
+                &cancel,
+                &factory.clock,
+            )?;
+            journal.bind(GraphExecution {
+                extra: Default::default(),
+                directory: factory.cwd.clone(),
+                document: document.clone(),
+                review_base: None,
+                integration_base: None,
+            })?;
+            graph::advance_with_budget(
+                &document,
+                &mut reviewer,
+                &mut journal,
+                &factory.context.config.graph.limits,
+                &factory.context.config.graph.budget,
+            )?
+        };
+        assert_eq!(first.status, GraphStatus::Complete);
+        assert_eq!(reviewer.0, 1);
+        // Submit through the real front door, without an operation ID. A
+        // content-identical review must reuse the terminal journal rather than
+        // entering the host's provider-launch path again.
+        for wait in [None, Some(1)] {
+            let mut repeated = input.clone();
+            if let Some(seconds) = wait {
+                repeated["wait_seconds"] = json!(seconds);
+            }
+            let attached = factory.graph_document(repeated, budget, &cancel)?;
+            assert_eq!(attached["status"], "complete");
+            assert_eq!(attached["timed_out"], false);
+            let checkpoint: graph::GraphCheckpoint =
+                serde_json::from_value(attached["checkpoint"].clone())?;
+            assert_eq!(checkpoint, first.checkpoint);
+            let attempts: Vec<_> = checkpoint
+                .nodes
+                .iter()
+                .flat_map(|node| &node.attempts)
+                .collect();
+            assert_eq!(attempts.len(), 1);
+            assert_eq!(attempts[0].attempt_ref.as_deref(), Some("fixture/review"));
+        }
+        assert_eq!(
+            FileJournal::graph_ids(
+                &factory.context.roots.state,
+                factory.context.identity.project,
+            )?,
+            [document.graph_id]
+        );
+        Ok(())
+    }
+
+    #[test]
     fn explicit_operation_replays_terminal_execution_after_head_and_template_changes() -> Result {
         use provenant_fabric_runtime::graph::{self, AttemptOwner, GraphExecution};
         struct Owner;
@@ -2294,6 +2395,154 @@ mod tests {
         ] {
             assert!(bind_launch_controls(&input, &mut json!({"use":"task"}), cwd).is_err());
         }
+        Ok(())
+    }
+
+    #[test]
+    fn eight_lane_composite_with_a_file_brief_fits_the_checkpoint_limit() -> Result {
+        use provenant_fabric_runtime::graph::{self, AttemptOwner, GraphExecution, GraphJournal};
+        #[derive(Default)]
+        struct Snapshot(Option<graph::GraphCheckpoint>);
+        impl GraphJournal for Snapshot {
+            type Error = std::convert::Infallible;
+            fn load(
+                &mut self,
+                _: &str,
+            ) -> std::result::Result<Option<graph::GraphCheckpoint>, Self::Error> {
+                Ok(self.0.clone())
+            }
+            fn save(
+                &mut self,
+                checkpoint: &graph::GraphCheckpoint,
+            ) -> std::result::Result<(), Self::Error> {
+                self.0 = Some(checkpoint.clone());
+                Ok(())
+            }
+        }
+        struct Waiting;
+        impl AttemptOwner for Waiting {
+            type Error = std::convert::Infallible;
+            fn actor(&self) -> String {
+                "checkpoint-fixture".into()
+            }
+            fn observe_or_start(
+                &mut self,
+                key: &graph::AttemptKey,
+                _: graph::NodeInput<'_>,
+                _: &graph::GraphRoute,
+                _: graph::AccessMode,
+                _: Option<&str>,
+                _: graph::Replay<'_>,
+            ) -> std::result::Result<graph::AttemptObservation, Self::Error> {
+                Ok(graph::AttemptObservation::Pending {
+                    attempt_ref: Some(format!("fixture/{}", key.node_id)),
+                })
+            }
+        }
+        let rig = TestRig::new()?;
+        let mut factory = factory(&rig)?;
+        // A large file brief used by eight leaves used to be repeated in every
+        // checkpoint projection. Exercise the bundled replacement for that
+        // workload, including submission metadata and sealed input manifests.
+        let path = rig.root.join("acceptance.txt");
+        std::fs::write(&path, "Acceptance evidence.\n".repeat(38_000))?;
+        let brief = std::fs::read_to_string(&path)?;
+        let limits = &mut factory.context.config.graph.limits;
+        limits.node_prompt_bytes = 1_048_576;
+        limits.graph_prompt_bytes = 8_388_608;
+        limits.concurrency = Some(8);
+        let cancel = CancelToken::new();
+        let budget = WaitBudget::cli(factory.clock.mono_now(), 60)?;
+        let response = factory.graph_document(
+            json!({
+                "op":"run", "use":"task-fan-out", "brief":brief,
+                "set":{"items":(0..8).map(|n|format!("slice-{n}")).collect::<Vec<_>>()},
+                "explain":true,
+            }),
+            budget,
+            &cancel,
+        )?;
+        let document: GraphDocument = serde_json::from_value(response["document"].clone())?;
+        let execution = GraphExecution {
+            extra: Default::default(),
+            directory: factory.cwd.clone(),
+            document: document.clone(),
+            review_base: None,
+            integration_base: None,
+        };
+        // The recovery tests cover publication at each transition. Here the
+        // property is the size and round trip of the fully populated snapshot;
+        // publish it once instead of fsyncing the same large brief per start.
+        let first = graph::advance_with_budget(
+            &document,
+            &mut Waiting,
+            &mut Snapshot::default(),
+            &factory.context.config.graph.limits,
+            &factory.context.config.graph.budget,
+        )?;
+        {
+            let mut journal = FileJournal::open(
+                &factory.context.roots.state,
+                factory.context.identity.project,
+                &document.graph_id,
+                budget,
+                &cancel,
+                &factory.clock,
+            )?;
+            journal.bind(execution.clone())?;
+            journal.save(&first.checkpoint)?;
+        }
+        assert_eq!(first.status, GraphStatus::Pending);
+        assert_eq!(
+            first
+                .checkpoint
+                .nodes
+                .iter()
+                .filter(|node| !node.attempts.is_empty())
+                .count(),
+            8
+        );
+        let inline_bytes =
+            serde_json::to_vec(&json!({"execution":execution,"checkpoint":first.checkpoint}))?
+                .len();
+        let checkpoint_path = rig
+            .state
+            .join("fabric/graphs")
+            .join(factory.context.identity.project.to_string())
+            .join(format!("graph-{}.json", document.graph_id));
+        let stored = std::fs::read(checkpoint_path)?;
+        let limit = 16_777_216;
+        assert!(
+            inline_bytes > limit,
+            "fixture must exceed the former inline limit: {inline_bytes}"
+        );
+        assert!(stored.len() < limit, "checkpoint is {} bytes", stored.len());
+        let envelope: Value = serde_json::from_slice(&stored)?;
+        assert!(
+            !envelope["stored_text"]
+                .as_object()
+                .ok_or("prompt references")?
+                .is_empty()
+        );
+        // Short node titles remain readable; the full file brief belongs only
+        // in the prompt store, including its copies in submission metadata.
+        assert!(!String::from_utf8(stored)?.contains(&brief));
+        assert_eq!(
+            FileJournal::read_checkpoint(
+                &factory.context.roots.state,
+                factory.context.identity.project,
+                &document.graph_id,
+            )?,
+            Some(first.checkpoint)
+        );
+        assert_eq!(
+            FileJournal::execution(
+                &factory.context.roots.state,
+                factory.context.identity.project,
+                &document.graph_id,
+            )?,
+            Some(execution)
+        );
         Ok(())
     }
 
