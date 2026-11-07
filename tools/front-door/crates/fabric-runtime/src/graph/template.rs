@@ -1371,7 +1371,7 @@ impl<'a> Compiler<'a> {
             boundary.insert("access".into(), Value::String("read_only".into()));
             boundary.insert("composite".into(), Value::Object(composite));
             boundary.extend(overrides);
-            return self.finish_shallow(boundary);
+            return self.finish(boundary, stack);
         }
         if overrides.contains_key("min_ok") {
             return Err(format!(
