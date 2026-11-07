@@ -2400,6 +2400,30 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 }
 ```
 
+## `provenant trace`
+
+| Argument | Contract |
+|---|---|
+| `graph` | `{"description": "Graph identifier", "name": "graph", "positional": true, "required": true}` |
+| `--help` | `{"description": "Print help", "name": "help"}` |
+| `--version` | `{"description": "Print version", "name": "version"}` |
+
+```json
+{
+  "description": "Show a graph's recorded revisions and attempt timeline",
+  "groups": [
+    {
+      "arguments": [
+        "graph"
+      ],
+      "multiple": true,
+      "name": "Trace",
+      "required": false
+    }
+  ]
+}
+```
+
 ## `provenant stop`
 
 | Argument | Contract |

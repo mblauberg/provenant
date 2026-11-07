@@ -129,6 +129,11 @@ pub enum Command {
     /// Read graph, node or attempt output
     #[command(add = crate::metadata::CoreCommand(2, "provenant output ID"))]
     Output(Output),
+    /// Show a graph's recorded revisions and attempt timeline
+    Trace {
+        /// Graph identifier
+        graph: String,
+    },
     /// Stop a graph, node or attempt subtree
     #[command(name = "stop", add = crate::metadata::CoreCommand(4, "provenant stop ID"))]
     Stop(Cancel),
