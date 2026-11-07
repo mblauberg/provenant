@@ -704,3 +704,69 @@ the outage drill, stop the receiver or tunnel, make changes including a merge,
 restore it and verify against GitHub that the first successful sweep captured
 all changes. Record times, PRs, status counters and results. Do not claim these
 live checks from fake-forge tests.
+
+To run both checks, use an isolated test repository with no unrelated webhook
+traffic, a running receiver and tunnel, and a completed initial sweep. Prepare
+the PRs, actions and a JSON plan outside the checkout, then run:
+
+```sh
+scripts/event-intake-live-check /private/path/plan.json > /private/path/evidence.json
+```
+
+Set `PROVENANT_INTAKE_DIR` to the worker's state directory and authenticate
+`gh` for the test repository. The plan has this shape (the ellipsis means
+additional entries, not literal JSON):
+
+```json
+{
+  "status": ["/path/to/event-intake", "status"],
+  "timeout_seconds": 900,
+  "samples": [
+    {
+      "kind": "comment",
+      "command": ["gh", "api", "repos/OWNER/REPO/issues/123/comments", "-f", "body=unique-sample-1"],
+      "checks": [{"pr": 123, "resource": "issue_comments", "expect": [{"body": "unique-sample-1"}]}]
+    }
+  ],
+  "drill": {
+    "stop": ["/path/to/stop-worker-and-wait"],
+    "change": ["/path/to/make-outage-changes"],
+    "start": ["/path/to/start-worker-and-return"],
+    "checks": [{"pr": 456, "resource": "pull_request", "expect": {"merged": true}, "github_path": "repos/OWNER/REPO/pulls/456"}]
+  }
+}
+```
+
+Provide at least 20 samples for each `kind`: `push`, `check`, `comment`,
+`review` and `merge`. Each command is an argument array, runs synchronously,
+and must cause one real event. Prepare 20 mergeable PRs for merge samples and
+an appropriate check-producing GitHub App or workflow for check samples.
+For each sample, assert a unique, previously absent change in the corresponding
+PR's `state.json` resource: `pull_request`, `check_runs`, `issue_comments`,
+`reviews` or `review_comments`. Objects are partial matches and arrays require
+each expected element to match an actual element. For example, use a known
+head SHA for a push, a unique check name with `status: completed`, a unique
+comment or review body, and `merged: true` on a previously open PR. Do not
+start another action until its command exits. The test repository must have no
+other traffic: delivery markers contain event type and target, but cannot
+uniquely tie an unrelated event of the same type to the action.
+
+For the drill, `stop` must stop the worker and wait for it to exit; `change`
+makes the missed changes including a merge; `start` restarts the same worker
+and returns promptly. List every change in `checks`, each with its direct,
+unpaginated GitHub REST `github_path` and expected fields in both GitHub's
+response and the corresponding current resource. Use a sufficiently small test
+repository that those endpoints fit on one page. The tool independently queries
+GitHub while the worker is stopped, restarts it even if that comparison fails,
+and checks the first observed successful sweep. Keep the sweep interval long
+enough that another sweep cannot finish before it is observed. Inspect failures
+and retain the plan and output as evidence; rerun with fresh PRs and unique
+values after a failure.
+
+The output records delivery IDs, checks, start and observation times, nearest
+rank p95 per type, and status before and after the drill. Timing starts before
+the action command, so it includes command and observation overhead as well as
+delivery delay; it is a conservative upper bound rather than an exact event
+timestamp. The command exits nonzero on a missing observation, failed drill or
+any p95 of 30 seconds or more. A live run and its retained evidence are still
+required for acceptance.
