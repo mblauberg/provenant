@@ -15,7 +15,7 @@ use provenant_supervisor::custody::{
     CaptureTotals, ExitObservation, PublicationState, Scope, SettlementEvidence,
 };
 use serde_json::{Value, json};
-use std::{ffi::OsString, fs, path::Path};
+use std::{ffi::OsString, fs, io::Write, os::unix::fs::OpenOptionsExt, path::Path};
 use support::{Result, TestRig, code};
 
 const SCENARIOS: &[(&str, &[provenant_run::Outcome])] = &[
@@ -41,6 +41,16 @@ const SCENARIOS: &[(&str, &[provenant_run::Outcome])] = &[
     ("peer", &[provenant_run::Outcome::Succeeded]),
     ("nested", &[provenant_run::Outcome::Succeeded]),
 ];
+
+fn write_sealed_fixture(path: &Path, bytes: &[u8]) -> Result {
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)?
+        .write_all(bytes)?;
+    Ok(())
+}
 
 fn historical(rig: &TestRig, binary: &Path, args: &[&str]) -> Result<Value> {
     let mut arguments = vec![
@@ -190,22 +200,22 @@ fn seed(rig: &TestRig, name: &str, outcomes: &[provenant_run::Outcome]) -> Resul
             .ok_or("sealed exit object")?
             .remove("publication");
         sealed["schema_version"] = json!(1);
-        fs::write(
-            directory.join("process-exit.json"),
-            serde_json::to_vec(&sealed)?,
+        write_sealed_fixture(
+            &directory.join("process-exit.json"),
+            &serde_json::to_vec(&sealed)?,
         )?;
         if name == "writer-continuation" || name == "delivery" {
-            fs::write(
-                directory.join("writer-terminal.json"),
-                serde_json::to_vec(&json!({
+            write_sealed_fixture(
+                &directory.join("writer-terminal.json"),
+                &serde_json::to_vec(&json!({
                     "schema_version":1,"head":"2".repeat(40),"base":"1".repeat(40)
                 }))?,
             )?;
         }
         if name == "delivery" {
-            fs::write(
-                directory.join("delivery.json"),
-                serde_json::to_vec(&json!({
+            write_sealed_fixture(
+                &directory.join("delivery.json"),
+                &serde_json::to_vec(&json!({
                     "schema_version":1,"remote":"origin","branch":"fixture/delivery","head":"2".repeat(40),
                     "state":{"state":"delivered","pull_request":null}
                 }))?,
