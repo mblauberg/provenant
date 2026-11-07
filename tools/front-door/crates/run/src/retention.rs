@@ -577,6 +577,7 @@ fn collect_temporary(
         Err(error) => return Err(error.into()),
     }
     let mut measured = provenant_os::disk::DiskReport::new(path.into(), 0);
+    restore_owned_temporary_directories(attempt, name);
     measured.measure_at("attempt_tmp", attempt, name, path);
     for error in measured.errors {
         report.errors.push(ProviderStateIssue {
@@ -596,6 +597,31 @@ fn collect_temporary(
         bytes,
     });
     Ok(())
+}
+
+/// A directory with no owner read/search bits cannot be traversed by the
+/// estimator. Restore owner rwx through each held parent before measuring;
+/// symlinks and foreign-owned directories are deliberately left alone.
+fn restore_owned_temporary_directories(parent: &Directory, name: &OsStr) {
+    let Ok(metadata) = parent.metadata_at(name, false) else {
+        return;
+    };
+    if metadata.kind != FileKind::Directory
+        || !parent
+            .make_owner_accessible_at(name)
+            .unwrap_or(false)
+    {
+        return;
+    }
+    let Ok(directory) = parent.open_verified_directory(name) else {
+        return;
+    };
+    let Ok(entries) = directory.entries() else {
+        return;
+    };
+    for entry in entries.flatten() {
+        restore_owned_temporary_directories(&directory, &entry);
+    }
 }
 
 pub(crate) fn prune_caches(
@@ -2002,6 +2028,35 @@ mod tests {
         assert!(report.errors.is_empty(), "{:?}", report.errors);
         assert_eq!(report.attempt_tmp.len(), 1);
         assert!(!attempt.join("tmp").exists());
+        assert_eq!(fs::read_to_string(outside.path().join("keep"))?, "outside");
+        Ok(())
+    }
+
+    #[test]
+    fn gc_removes_unreadable_owned_tmp_directories_without_following_links() -> TestResult {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        let (_temp, context, store, input, attempt) = seeded()?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        withdraw(&store, &input, &call)?;
+
+        let temporary = attempt.join("tmp");
+        let nested = temporary.join("candidate-0/.tmpX/child");
+        fs::create_dir_all(&nested)?;
+        fs::write(nested.join("payload"), b"recoverable scratch")?;
+        fs::set_permissions(&nested, fs::Permissions::from_mode(0o000))?;
+
+        let outside = tempfile::tempdir()?;
+        fs::write(outside.path().join("keep"), "outside")?;
+        symlink(outside.path(), temporary.join("candidate-0/.tmpX/escape"))?;
+
+        let report = sweep(&store, &context, 7, DAY_MICROS, false, &call)?;
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        assert_eq!(report.attempt_tmp.len(), 1);
+        assert_eq!(report.attempt_tmp[0].path, temporary);
+        assert!(report.attempt_tmp[0].bytes > 0);
+        assert!(!temporary.exists());
         assert_eq!(fs::read_to_string(outside.path().join("keep"))?, "outside");
         Ok(())
     }
