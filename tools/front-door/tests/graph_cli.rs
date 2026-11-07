@@ -502,6 +502,48 @@ fn every_bundled_template_is_listed_shown_and_explained() -> Result {
 }
 
 #[test]
+fn explain_shows_the_resolved_review_lens_tier() -> Result {
+    fn lenses<'a>(value: &'a Value, found: &mut Vec<&'a Value>) {
+        match value {
+            Value::Object(map) => {
+                if map.contains_key("review_lens") {
+                    found.push(value);
+                }
+                for child in map.values() {
+                    lenses(child, found);
+                }
+            }
+            Value::Array(items) => {
+                for child in items {
+                    lenses(child, found);
+                }
+            }
+            _ => {}
+        }
+    }
+    let rig = GraphProject::new()?;
+    let path = rig.document(&json!({
+        "review": {"shape":"quick", "lenses":[{"name":"tests", "tier":"principal"}]},
+        "nodes": [{"id":"review", "use":"review-panel"}]
+    }))?;
+    let output = rig
+        .command()
+        .args(["run", "--file"])
+        .arg(path)
+        .arg("--explain")
+        .output()?;
+    let result: Value = serde_json::from_slice(&output.stdout)?;
+    assert!(output.status.success(), "{result}");
+    let mut found = Vec::new();
+    lenses(&result["data"]["document"]["nodes"], &mut found);
+    assert_eq!(found.len(), 1, "{result}");
+    assert_eq!(found[0]["review_lens"], "tests");
+    assert_eq!(found[0]["routes"][0]["alias"], "principal");
+    assert!(!found[0].to_string().contains("${tier}"));
+    Ok(())
+}
+
+#[test]
 fn review_shape_selects_the_expected_template_nodes() -> Result {
     fn ids(value: &Value, out: &mut Vec<String>) {
         match value {
