@@ -48,6 +48,29 @@ fn required<'a>(input: &'a Value, field: &str) -> Result<&'a str, FacadeError> {
         .ok_or_else(|| FacadeError::invalid(InvalidInputDetail::Field(field.into())))
 }
 
+/// Observe a submitted graph within the caller's original wait budget.
+pub(super) fn wait_submission(
+    mut run: provenant_fabric_runtime::graph::GraphRun,
+    wait: WaitBudget,
+    clock: &dyn Clock,
+    pause: &dyn provenant_core::Pause,
+    cancel: &CancelToken,
+    mut observe: impl FnMut(&str) -> Result<provenant_fabric_runtime::graph::GraphRun, FacadeError>,
+) -> Result<provenant_fabric_runtime::graph::GraphRun, FacadeError> {
+    while run.status == GraphStatus::Pending && !cancel.is_cancelled() {
+        let remaining = wait.remaining(clock.mono_now());
+        if remaining.as_micros() == 0 {
+            break;
+        }
+        pause.wait(
+            provenant_core::DurationMicros::from_micros(250_000.min(remaining.as_micros())),
+            cancel,
+        );
+        run = observe(&run.checkpoint.graph_id)?;
+    }
+    Ok(run)
+}
+
 /// Attempt settings are reserved launch controls, not template parameters.
 fn launch_input(input: &Value) -> Result<Value, FacadeError> {
     let mut input = input.clone();
@@ -1349,7 +1372,7 @@ impl Factory {
 
     fn wait_document(
         &self,
-        mut run: provenant_fabric_runtime::graph::GraphRun,
+        run: provenant_fabric_runtime::graph::GraphRun,
         input: &Value,
         budget: WaitBudget,
         cancel: &CancelToken,
@@ -1364,26 +1387,16 @@ impl Factory {
         let wait = WaitBudget::cli(now, seconds)
             .map_err(|_| FacadeError::InvalidInput { detail: None })?
             .cap_at(deadline);
-        while run.status == GraphStatus::Pending && !cancel.is_cancelled() {
-            let remaining = wait.remaining(self.clock.mono_now());
-            if remaining.as_micros() == 0 {
-                break;
-            }
-            provenant_core::Pause::wait(
-                &self.backoff,
-                provenant_core::DurationMicros::from_micros(250_000.min(remaining.as_micros())),
-                cancel,
-            );
-            run = self.graph(
+        wait_submission(run, wait, &self.clock, &self.backoff, cancel, |id| {
+            self.graph(
                 GraphInput::Status {
                     extra: Default::default(),
-                    id: run.checkpoint.graph_id.clone(),
+                    id: id.to_owned(),
                 },
                 budget,
                 cancel,
-            )?;
-        }
-        Ok(run)
+            )
+        })
     }
 
     fn graph_trace(&self, selector: &str) -> Result<Value, FacadeError> {

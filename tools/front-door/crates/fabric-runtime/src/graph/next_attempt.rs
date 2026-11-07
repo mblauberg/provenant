@@ -94,6 +94,8 @@ pub(crate) fn apply_launch_disposition(
         let Some(now) = clock else {
             return Err("wall clock unavailable; cannot record a launch retry wake".into());
         };
+        let projected = launch_diagnostic(error);
+        checkpoint.nodes[index].advance_owner_code = Some(projected.code.clone());
         let retry = checkpoint.nodes[index]
             .launch_retry
             .get_or_insert_with(|| LaunchRetry {
@@ -120,7 +122,6 @@ pub(crate) fn apply_launch_disposition(
                 deadline
             }
         };
-        let projected = launch_diagnostic(error);
         retry.reason = Some(bounded(
             &format!(
                 "[{}] {}; {}",
