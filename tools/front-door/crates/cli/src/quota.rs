@@ -305,6 +305,24 @@ pub(crate) fn persist_provider_refusal(
     now_unix_seconds: i64,
     resets_unix_seconds: Option<i64>,
 ) -> Result<(), EdgeError> {
+    persist_provider_refusal_once(
+        state_root,
+        route,
+        pool,
+        now_unix_seconds,
+        resets_unix_seconds,
+        false,
+    )
+}
+
+pub(crate) fn persist_provider_refusal_once(
+    state_root: &Path,
+    route: &provenant_records::run::RouteRecord,
+    pool: Option<&str>,
+    now_unix_seconds: i64,
+    resets_unix_seconds: Option<i64>,
+    replay: bool,
+) -> Result<(), EdgeError> {
     let adapter = route
         .provider
         .as_deref()
@@ -346,6 +364,17 @@ pub(crate) fn persist_provider_refusal(
                 && record.account.account_key == account.account_key
         })
         .cloned();
+    if replay
+        && current.as_ref().is_some_and(|record| {
+            record.refusals.iter().any(|refusal| {
+                refusal.model == model.strip_prefix(&format!("{adapter}/")).unwrap_or(model)
+                    && refusal.pool.as_deref() == pool
+                    && refusal.observed_unix_seconds >= now_unix_seconds
+            })
+        })
+    {
+        return Ok(());
+    }
     let account = current.as_ref().map_or(&account, |record| &record.account);
     let intent = provenant_quota::record_refusal(
         current.as_ref(),

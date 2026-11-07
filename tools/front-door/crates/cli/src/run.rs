@@ -58,6 +58,60 @@ pub use telemetry::*;
 pub use wait::*;
 pub use worktree::*;
 
+/// The first typed refusal is sealed beside the attempt before quota publication.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct QuotaEvidence {
+    pool: Option<String>,
+    observed: i64,
+    resets: Option<i64>,
+    shared: bool,
+}
+impl QuotaEvidence {
+    fn write(&self, attempt: &provenant_os::fs::Directory) -> Result<(), String> {
+        let bytes = serde_json::to_vec(self).map_err(|e| e.to_string())?;
+        attempt
+            .atomic_write(
+                std::ffi::OsStr::new("quota-evidence.json"),
+                ".quota-evidence-",
+                &bytes,
+                provenant_os::fs::PublishMode::NoReplace,
+            )
+            .and_then(|publication| publication.require_durable())
+            .map_err(|e| e.to_string())
+    }
+    fn read(provider_state: &Path) -> Result<Option<Self>, String> {
+        let Some(parent) = provider_state.parent() else {
+            return Ok(None);
+        };
+        let attempt = match provenant_os::fs::Directory::open_anchor(parent) {
+            Ok(attempt) => attempt,
+            Err(error) if error.is_not_found() => return Ok(None),
+            Err(error) => return Err(error.to_string()),
+        };
+        match attempt.read_stable(std::ffi::OsStr::new("quota-evidence.json"), 4096) {
+            Ok(bytes) => serde_json::from_slice(&bytes)
+                .map(Some)
+                .map_err(|e| e.to_string()),
+            Err(error) if error.is_not_found() => Ok(None),
+            Err(error) => Err(error.to_string()),
+        }
+    }
+    fn apply(&self, state: &Path, route: &run::RouteRecord, replay: bool) -> Result<(), String> {
+        if self.shared && (self.pool.is_some() || route.account_key.is_some()) {
+            crate::quota::persist_provider_refusal_once(
+                state,
+                route,
+                self.pool.as_deref(),
+                self.observed,
+                self.resets,
+                replay,
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    }
+}
+
 /// Catalogue family of a provider-qualified model, for family-distinct routing.
 pub fn model_family(model: &str) -> Option<String> {
     let catalogue = provenant_routing::Catalogue::bundled().ok()?;
@@ -584,6 +638,23 @@ impl Registry<'_> {
             return Ok(failed("provider outcome is malformed"));
         };
         events.extend(outcome.final_events().iter().cloned());
+        let quota_evidence = QuotaEvidence::read(provider_state)?;
+        if let Some(evidence) = &quota_evidence {
+            if let Some(state_root) = provider_state.ancestors().nth(5) {
+                evidence.apply(state_root, route, true)?;
+            } else {
+                return Err("quota evidence has no state root".into());
+            }
+            events.insert(
+                0,
+                ProviderEvent::QuotaLimited {
+                    message: String::new(),
+                    pool: evidence.pool.clone(),
+                    resets_in_seconds: None,
+                },
+            );
+        }
+
         // Exit-time stderr quota text is evidence only for a run the adapter
         // did not accept. Live structured refusals trigger cleanup separately.
         if provenant_records::AdapterSpec::get(adapter.id()).is_some_and(|spec| spec.stderr_quota)
@@ -856,7 +927,8 @@ impl Registry<'_> {
             // read nor write: a lane refusal stays in the attempt reason. A
             // refusal without a pool holds only this model on a known account.
             let lane = std::env::var_os(provenant_core::RUN_STATE_DIRECTORY_ENV).is_some();
-            if !lane && (pool.is_some() || route.account_key.is_some()) {
+            if quota_evidence.is_none() && !lane && (pool.is_some() || route.account_key.is_some())
+            {
                 if let Some(state_root) = provider_state.ancestors().nth(5) {
                     let now = SystemClock::new().unix_seconds();
                     let resets = resets_in_seconds

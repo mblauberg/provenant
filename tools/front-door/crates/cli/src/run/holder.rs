@@ -6,27 +6,87 @@ use std::sync::{Arc, Mutex};
 
 /// Bound to the admitted route, never provider-controlled output.
 #[derive(Default)]
-struct QuotaFrames(Mutex<Option<&'static dyn provenant_os::capture::FrameDecoder>>);
+struct QuotaFrames {
+    decoder: Mutex<Option<&'static dyn provenant_os::capture::FrameDecoder>>,
+    evidence: Arc<Mutex<Option<QuotaCapture>>>,
+    stderr: bool,
+}
+struct QuotaCapture {
+    adapter: &'static dyn provenant_providers::Adapter,
+    stream: provenant_providers::StreamState,
+    attempt: Directory,
+    state_root: PathBuf,
+    route: run::RouteRecord,
+    shared: bool,
+    recorded: bool,
+}
 impl provenant_os::capture::FrameDecoder for QuotaFrames {
     fn decode(
         &self,
         frame: &[u8],
     ) -> Result<provenant_os::capture::FrameEvent, provenant_os::capture::DecodeFailure> {
-        match *self
-            .0
-            .lock()
-            .map_err(|_| provenant_os::capture::DecodeFailure)?
-        {
-            Some(decoder) => decoder.decode(frame),
-            None => Ok(provenant_os::capture::FrameEvent::Progress),
+        use provenant_os::capture::{DecodeFailure, FrameEvent};
+        let result = match *self.decoder.lock().map_err(|_| DecodeFailure)? {
+            Some(decoder) => decoder.decode(frame)?,
+            None => FrameEvent::Progress,
+        };
+        let mut guard = self.evidence.lock().map_err(|_| DecodeFailure)?;
+        if let Some(capture) = guard.as_mut().filter(|capture| !capture.recorded) {
+            let events = if self.stderr && result == FrameEvent::Terminal {
+                provenant_providers::opencode::stderr_quota(frame)
+                    .into_iter()
+                    .collect()
+            } else if self.stderr {
+                Vec::new()
+            } else {
+                let mut line = frame.to_vec();
+                line.push(b'\n');
+                capture
+                    .adapter
+                    .observe(&mut capture.stream, &line)
+                    .unwrap_or_default()
+            };
+            if let Some(ProviderEvent::QuotaLimited {
+                pool,
+                resets_in_seconds,
+                ..
+            }) = events
+                .into_iter()
+                .find(|event| matches!(event, ProviderEvent::QuotaLimited { .. }))
+            {
+                let now = SystemClock::new().unix_seconds();
+                let evidence = QuotaEvidence {
+                    pool,
+                    observed: now,
+                    resets: resets_in_seconds
+                        .and_then(|seconds| i64::try_from(seconds).ok())
+                        .and_then(|seconds| now.checked_add(seconds)),
+                    shared: capture.shared,
+                };
+                evidence
+                    .write(&capture.attempt)
+                    .map_err(|_| DecodeFailure)?;
+                evidence
+                    .apply(&capture.state_root, &capture.route, false)
+                    .map_err(|_| DecodeFailure)?;
+                capture.recorded = true;
+            }
         }
+        Ok(result)
     }
     fn partial_terminal(&self, frame: &[u8]) -> bool {
-        self.0
+        self.decoder
             .lock()
             .ok()
             .and_then(|decoder| *decoder)
             .is_some_and(|decoder| decoder.partial_terminal(frame))
+    }
+    fn reports_usage(&self) -> bool {
+        self.decoder
+            .lock()
+            .ok()
+            .and_then(|decoder| *decoder)
+            .is_some_and(|decoder| decoder.reports_usage())
     }
 }
 
@@ -44,11 +104,19 @@ pub struct HostHolder<'a> {
 }
 impl<'a> HostHolder<'a> {
     pub fn new(inner: &'a dyn Holder) -> Self {
+        let evidence = Arc::new(Mutex::new(None));
         Self {
             inner,
             graph_wake: None,
-            stdout_frames: QuotaFrames::default(),
-            stderr_frames: QuotaFrames::default(),
+            stdout_frames: QuotaFrames {
+                evidence: evidence.clone(),
+                ..Default::default()
+            },
+            stderr_frames: QuotaFrames {
+                evidence,
+                stderr: true,
+                ..Default::default()
+            },
             fabric_relay: Mutex::new(None),
             settled: Mutex::new(None),
         }
@@ -173,16 +241,36 @@ impl Holder for HostHolder<'_> {
         });
         *self
             .stdout_frames
-            .0
+            .decoder
             .lock()
             .map_err(|_| custody::CustodyError::InvalidRecord)? =
             registration.and_then(|entry| entry.stdout_decoder);
         *self
             .stderr_frames
-            .0
+            .decoder
             .lock()
             .map_err(|_| custody::CustodyError::InvalidRecord)? =
             registration.and_then(|entry| entry.stderr_decoder);
+        if let (Some(registration), Some(route)) = (registration, record.applied_route.clone()) {
+            let stream = registration
+                .adapter
+                .stream(None)
+                .map_err(|error| custody::CustodyError::Io(std::io::Error::other(error)))?;
+            let (configuration_root, _) = context.disk_roots();
+            *self
+                .stdout_frames
+                .evidence
+                .lock()
+                .map_err(|_| custody::CustodyError::InvalidRecord)? = Some(QuotaCapture {
+                adapter: registration.adapter,
+                stream,
+                attempt: attempt.try_clone()?,
+                state_root: context.roots.state_root.clone(),
+                route,
+                shared: configuration_root == context.roots.state_root,
+                recorded: false,
+            });
+        }
         if context.launch.is_none() {
             return Ok(());
         }
@@ -223,6 +311,133 @@ mod tests {
     use super::*;
     use provenant_core::{ActorId, Digest, OperationId, ProjectId, RootInputs, RunId, TaskId};
     use provenant_records::CanonicalV1;
+
+    #[test]
+    fn quota_event_survives_guardian_death_and_recovery_writes_once()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_os::capture::FrameDecoder;
+        use std::os::unix::fs::PermissionsExt;
+        const CHILD: &str = "PROVENANT_TEST_QUOTA_EVENT_CHILD";
+        let temp = tempfile::tempdir()?;
+        let state = if let Some(path) = std::env::var_os(CHILD) {
+            PathBuf::from(path)
+        } else {
+            let state = temp.path().join("state");
+            std::fs::create_dir(&state)?;
+            std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700))?;
+            use provenant_os::exec::{
+                ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination,
+            };
+            let argv = [
+                std::env::current_exe()?.into_os_string(),
+                "--exact".into(),
+                "run::holder::tests::quota_event_survives_guardian_death_and_recovery_writes_once"
+                    .into(),
+                "--nocapture".into(),
+            ];
+            let mut env: Vec<_> = std::env::vars_os().collect();
+            env.push((CHILD.into(), state.clone().into_os_string()));
+            let cwd = std::env::current_dir()?;
+            let mut options = ExecOptions::new(&argv, &cwd, Duration::from_secs(30));
+            options.env = Some(&env);
+            options.stdout = StreamPolicy::Capture { limit: 65536 };
+            options.stderr = StreamPolicy::Capture { limit: 65536 };
+            let output = SystemExecutor::new(1)?.execute(options)?;
+            assert_eq!(output.termination, Termination::Exit(0), "{output:?}");
+            let path = state.join("quota/key/opencode.json");
+            let before = std::fs::read(&path)?;
+            let provider_state = state.join("runs/run/attempts/attempt/provider-state");
+            let route = quota_test_route();
+            let decoded = run::Providers::decode_captures(
+                &Registry::default(),
+                &route,
+                b"",
+                b"",
+                &super::super::tests::clean_exit(),
+                &provider_state,
+                None,
+            )?;
+            assert_eq!(decoded.outcome, run::Outcome::QuotaLimited);
+            assert_eq!(std::fs::read(&path)?, before);
+            let record = crate::quota::read_cache_at(&state)?;
+            assert_eq!(record[0].refusals.len(), 1);
+            return Ok(());
+        };
+        let attempt_path = state.join("runs/run/attempts/attempt");
+        std::fs::create_dir_all(&attempt_path)?;
+        let registration = &provenant_providers::opencode::REGISTRATION;
+        let frames = QuotaFrames {
+            decoder: Mutex::new(registration.stdout_decoder),
+            evidence: Arc::new(Mutex::new(Some(QuotaCapture {
+                adapter: registration.adapter,
+                stream: registration.adapter.stream(None)?,
+                attempt: Directory::open_anchor(&attempt_path)?,
+                state_root: state.clone(),
+                route: quota_test_route(),
+                shared: true,
+                recorded: false,
+            }))),
+            stderr: false,
+        };
+        frames.decode(br#"{"type":"provider.quota","response":{"body":{"error":{"type":"FreeUsageLimitError","message":"fixture"}}}}"#)?;
+        assert_eq!(crate::quota::read_cache_at(&state)?[0].refusals.len(), 1);
+        // End without settlement or dropping the live holder.
+        std::process::exit(0);
+    }
+
+    #[test]
+    fn recovery_publishes_sealed_quota_evidence_once() -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir()?;
+        let state = temp.path().join("state");
+        let attempt = state.join("runs/run/attempts/attempt");
+        std::fs::create_dir_all(&attempt)?;
+        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700))?;
+        let observed = SystemClock::new().unix_seconds();
+        QuotaEvidence {
+            pool: Some("opencode-free".into()),
+            observed,
+            resets: Some(observed + 60),
+            shared: true,
+        }
+        .write(&Directory::open_anchor(&attempt)?)?;
+        assert!(crate::quota::read_cache_at(&state)?.is_empty());
+        let provider_state = attempt.join("provider-state");
+        let route = quota_test_route();
+        let decode = || {
+            run::Providers::decode_captures(
+                &Registry::default(),
+                &route,
+                b"",
+                b"",
+                &super::super::tests::clean_exit(),
+                &provider_state,
+                None,
+            )
+        };
+        assert_eq!(decode()?.outcome, run::Outcome::QuotaLimited);
+        let path = state.join("quota/key/opencode.json");
+        let before = std::fs::read(&path)?;
+        let records = crate::quota::read_cache_at(&state)?;
+        assert_eq!(records[0].refusals[0].observed_unix_seconds, observed);
+        assert_eq!(
+            records[0].refusals[0].resets_unix_seconds,
+            Some(observed + 60)
+        );
+        assert_eq!(decode()?.outcome, run::Outcome::QuotaLimited);
+        assert_eq!(std::fs::read(path)?, before);
+        Ok(())
+    }
+
+    fn quota_test_route() -> run::RouteRecord {
+        run::RouteRecord {
+            provider: Some("opencode".into()),
+            model: Some("opencode/example".into()),
+            account_key: Some("key".into()),
+            account_label: Some("key".into()),
+            ..Default::default()
+        }
+    }
 
     #[test]
     fn custody_reads_live_graph_children_after_parent_exit()
