@@ -16,6 +16,43 @@ pub enum BoundaryClass {
     Authority,
 }
 
+/// Closed preparation failures; paths and provider output never enter receipts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlanFailure {
+    InvalidRoots,
+    UnconfinedExtensions,
+    ProtectedOverlap,
+    InvalidPath,
+    CredentialRoot,
+    AnchorMismatch,
+    BroadRoot,
+    Permission,
+    ReadOnly,
+    SourceHead,
+    Home,
+}
+
+impl PlanFailure {
+    pub fn detail(self) -> &'static str {
+        match self {
+            Self::InvalidRoots => "confinement plan roots are invalid or overlapping",
+            Self::UnconfinedExtensions => {
+                "read-only confinement requires clean configuration and denied extensions"
+            }
+            Self::ProtectedOverlap => "confinement permission overlaps a protected path",
+            Self::InvalidPath => "confinement permission path is invalid",
+            Self::CredentialRoot => "confinement permission would expose a credential root",
+            Self::AnchorMismatch => "confinement path anchor is missing or changed",
+            Self::BroadRoot => "confinement permission root is too broad",
+            Self::Permission => "confinement permission validation refused the launch",
+            Self::ReadOnly => "read-only source plan validation refused the launch",
+            Self::SourceHead => "source HEAD validation refused the launch",
+            Self::Home => "provider home plan validation refused the launch",
+        }
+    }
+}
+
 /// Where a configurable admission threshold came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
