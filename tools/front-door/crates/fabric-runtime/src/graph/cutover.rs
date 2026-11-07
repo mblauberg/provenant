@@ -205,11 +205,9 @@ pub fn pending_guard(state: &provenant_core::StateRoot) -> Result<(), String> {
 
     const MARKER: &str = "graph-template-cutover-complete";
     let path = state.as_path();
-    if path.join(MARKER).is_file() {
-        return Ok(());
-    }
     // Hold the lock across the scan and publication: another launch must not
-    // start an attempt while a first pass is still examining the old state.
+    // start an attempt until the marker's directory sync has completed. The
+    // marker may be visible just before that sync, so even later passes lock.
     let directory = std::fs::DirBuilder::new()
         .recursive(true)
         .mode(0o700)
