@@ -8,6 +8,8 @@ use std::{ffi::OsString, io, path::Path, time::Duration};
 
 #[derive(Deserialize)]
 struct SmokeVersion {
+    #[serde(default)]
+    binary: Option<String>,
     package_version: String,
     source_digest: String,
     asset_digest: String,
@@ -36,7 +38,8 @@ impl SystemSmoke {
         expected: &VersionInfo,
         cancel: &CancelToken,
     ) -> io::Result<()> {
-        if self.identity(executable, cancel)? != *expected {
+        let (found, binary) = self.identity_details(executable, cancel)?;
+        if found != *expected || binary.as_deref() != Some("pr-reconciler") {
             return Err(io::Error::other(
                 "PR worker identity differs from command binary",
             ));
@@ -112,6 +115,15 @@ impl SystemSmoke {
         executable: &Path,
         cancel: &CancelToken,
     ) -> io::Result<VersionInfo> {
+        self.identity_details(executable, cancel)
+            .map(|(identity, _)| identity)
+    }
+
+    fn identity_details(
+        &self,
+        executable: &Path,
+        cancel: &CancelToken,
+    ) -> io::Result<(VersionInfo, Option<String>)> {
         let version = self.invoke::<SmokeVersion>(executable, &["--version", "--json"], cancel)?;
         if version.schema_version != 1
             || version.command != "version"
@@ -126,17 +138,21 @@ impl SystemSmoke {
             ));
         }
         let data = version.data;
-        Ok(VersionInfo {
-            extra: Default::default(),
-            source_digest: provenant_records::SourceDigest::parse(&data.source_digest)
-                .map_err(|_| io::Error::other("release source digest is invalid"))?,
-            asset_digest: provenant_records::SourceDigest::parse(&data.asset_digest)
-                .map_err(|_| io::Error::other("release asset digest is invalid"))?,
-            target: data.target,
-            toolchain: data.toolchain,
-            record_schema_version: data.record_schema_version,
-            config_schema_version: data.config_schema_version,
-        })
+        let binary = data.binary;
+        Ok((
+            VersionInfo {
+                extra: Default::default(),
+                source_digest: provenant_records::SourceDigest::parse(&data.source_digest)
+                    .map_err(|_| io::Error::other("release source digest is invalid"))?,
+                asset_digest: provenant_records::SourceDigest::parse(&data.asset_digest)
+                    .map_err(|_| io::Error::other("release asset digest is invalid"))?,
+                target: data.target,
+                toolchain: data.toolchain,
+                record_schema_version: data.record_schema_version,
+                config_schema_version: data.config_schema_version,
+            },
+            binary,
+        ))
     }
 }
 impl ReleaseSmoke for SystemSmoke {

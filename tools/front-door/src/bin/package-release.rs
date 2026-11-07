@@ -185,4 +185,50 @@ mod tests {
         assert!(!fresh.exists());
         Ok(())
     }
+
+    #[test]
+    fn worker_smoke_requires_both_build_identity_and_worker_role()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::PermissionsExt;
+        let temporary = tempfile::tempdir()?;
+        let executable = temporary.path().join("worker");
+        let expected = VersionInfo {
+            extra: Default::default(),
+            source_digest: SourceDigest::parse(&format!("sha256:{}", "0".repeat(64)))?,
+            asset_digest: SourceDigest::parse(&format!("sha256:{}", "1".repeat(64)))?,
+            target: "test-target".into(),
+            toolchain: "test-toolchain".into(),
+            record_schema_version: 1,
+            config_schema_version: provenant_config::CONFIG_SCHEMA_VERSION,
+        };
+        let smoke = release_smoke::SystemSmoke::new(None)?;
+        for (role, same_build, passes) in [
+            (None, true, false), // A same-build main CLI is not a worker.
+            (Some("provenant"), true, false),
+            (Some("pr-reconciler"), false, false),
+            (Some("pr-reconciler"), true, true),
+        ] {
+            let mut data = serde_json::to_value(&expected)?;
+            data["package_version"] = env!("CARGO_PKG_VERSION").into();
+            if let Some(role) = role {
+                data["binary"] = role.into();
+            }
+            if !same_build {
+                data["toolchain"] = "other-toolchain".into();
+            }
+            let envelope = serde_json::json!({"schema_version":1,"command":"version","status":"ok","data":data,"error":null});
+            fs::write(
+                &executable,
+                format!("#!/bin/sh\nprintf '%s\\n' '{envelope}'\n"),
+            )?;
+            fs::set_permissions(&executable, fs::Permissions::from_mode(0o700))?;
+            assert_eq!(
+                smoke
+                    .require_matching_identity(&executable, &expected, &CancelToken::new())
+                    .is_ok(),
+                passes
+            );
+        }
+        Ok(())
+    }
 }

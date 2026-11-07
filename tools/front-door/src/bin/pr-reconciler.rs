@@ -69,6 +69,7 @@ fn run() -> io::Result<()> {
                 "command": "version",
                 "status": "ok",
                 "data": {
+                    "binary": "pr-reconciler",
                     "package_version": env!("CARGO_PKG_VERSION"),
                     "source_digest": env!("PROVENANT_SOURCE_DIGEST"),
                     "asset_digest": env!("PROVENANT_ASSET_DIGEST"),
@@ -220,6 +221,10 @@ fn run() -> io::Result<()> {
             }
             Err(error) => {
                 observer.error(now()?);
+                let intake = intake
+                    .lock()
+                    .map_err(|_| io::Error::other("intake lock poisoned"))?;
+                observer.observe_completion(&intake, &reconciler);
                 observer.persist(&settings.directory)?;
                 eprintln!("pr-reconciler: intake reconciliation failed; see report.json");
                 if option == Some("--once") {
@@ -237,7 +242,7 @@ fn generate(args: &[String]) -> io::Result<()> {
     if !args.len().is_multiple_of(2) {
         return Err(io::Error::other("generation options require values"));
     }
-    for pair in args.chunks_exact(2) {
+    for pair in args.as_chunks::<2>().0 {
         let name = match pair[0].as_str() {
             "--repository" => "repository",
             "--directory" => "directory",

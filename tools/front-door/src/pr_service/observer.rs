@@ -210,6 +210,10 @@ impl Observer {
                 {
                     return Err(io::Error::other("incompatible observation checkpoint"));
                 }
+                // The checkpoint commits before its digest projection. Replay
+                // that projection before a new day can replace the recovered
+                // digest, including when the last process died between writes.
+                project_digest(directory, &report.digest)?;
                 report.boots = report.boots.saturating_add(1);
                 report
             }
@@ -308,19 +312,24 @@ impl Observer {
     }
     pub fn persist(&self, directory: &Path) -> io::Result<()> {
         use provenant_os::fs::publish_marker;
-        fs::create_dir_all(directory.join("digests"))?;
+        fs::create_dir_all(directory)?;
         let bytes = serde_json::to_vec_pretty(&self.report).map_err(io::Error::other)?;
         publish_marker(&directory.join("report.json"), &bytes).map_err(io::Error::other)?;
-        let bytes = serde_json::to_vec_pretty(&self.report.digest).map_err(io::Error::other)?;
-        publish_marker(
-            &directory
-                .join("digests")
-                .join(format!("{}.json", self.report.digest.day)),
-            &bytes,
-        )
-        .map_err(io::Error::other)?;
-        Ok(())
+        project_digest(directory, &self.report.digest)
     }
+}
+
+fn project_digest(directory: &Path, digest: &Digest) -> io::Result<()> {
+    fs::create_dir_all(directory.join("digests"))?;
+    let bytes = serde_json::to_vec_pretty(digest).map_err(io::Error::other)?;
+    provenant_os::fs::publish_marker(
+        &directory
+            .join("digests")
+            .join(format!("{}.json", digest.day)),
+        &bytes,
+    )
+    .map(|_| ())
+    .map_err(io::Error::other)
 }
 
 #[cfg(test)]
@@ -349,6 +358,37 @@ mod tests {
     }
     fn action(resources: &BTreeMap<String, Value>) -> Action {
         decide("o/r", "policy", "main", 7, resources).action
+    }
+    #[test]
+    fn restart_replays_checkpoint_digest_before_day_rollover() -> io::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let mut observer = Observer::open(directory.path(), "o/r", "policy")?;
+        observer.error(10 * 86400);
+        observer.persist(directory.path())?;
+
+        // Model death after the next checkpoint write but before projecting it:
+        // day 10's projection still has one error, the checkpoint has two.
+        observer.error(10 * 86400 + 1);
+        fs::write(
+            directory.path().join("report.json"),
+            serde_json::to_vec(&observer.report).map_err(io::Error::other)?,
+        )?;
+        drop(observer);
+        let mut restarted = Observer::open(directory.path(), "o/r", "policy")?;
+        restarted.error(11 * 86400);
+        restarted.persist(directory.path())?;
+
+        let old: Digest =
+            serde_json::from_slice(&fs::read(directory.path().join("digests/10.json"))?)
+                .map_err(io::Error::other)?;
+        let current: Digest =
+            serde_json::from_slice(&fs::read(directory.path().join("digests/11.json"))?)
+                .map_err(io::Error::other)?;
+        assert_eq!((old.day, old.errors), (10, 2));
+        assert_eq!((current.day, current.errors), (11, 1));
+        assert_eq!(restarted.report().boots, 2);
+        assert_eq!(restarted.report().errors, 3);
+        Ok(())
     }
     #[test]
     fn landing_readiness_requires_latest_successful_exact_head_ci_status() {

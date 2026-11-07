@@ -152,9 +152,23 @@ acceptance evidence.
 
 Use the fresh state and polling-only settings above. This foreground drill kills
 only the new child it starts. It neither inspects nor changes existing services.
-Run it in a shell that owns the child PID:
+The subshell owns the child PID and cleans it up if a wait or assertion fails:
 
 ```sh
+(
+set -eu
+drill_pid=
+cleanup_drill() {
+  if [ -n "$drill_pid" ]; then
+    kill -KILL "$drill_pid" 2>/dev/null || true
+    wait "$drill_pid" 2>/dev/null || true
+    drill_pid=
+  fi
+}
+trap cleanup_drill EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 "$worker" --config "$service/settings.json" &
 drill_pid=$!
 python3 - "$service/report.json" "$service/baseline.json" <<'PYWAIT'
@@ -173,6 +187,8 @@ else:
 PYWAIT
 kill -KILL "$drill_pid"
 wait "$drill_pid" || true
+drill_pid=
+trap - EXIT HUP INT TERM
 "$worker" --config "$service/settings.json" --once
 "$worker" --config "$service/settings.json" --status > "$service/after-restart.json"
 python3 - "$service/baseline.json" "$service/after-restart.json" <<'PYASSERT'
@@ -185,6 +201,7 @@ assert b['intake']['oldest_pending_marker'] is None
 assert b['intake']['last_successful_sweep'] >= a['intake']['last_successful_sweep']
 print('Foreground restart passed; compare decisions with the live forge.')
 PYASSERT
+)
 ```
 
 Repeat after moving a test PR head while the worker is stopped; compare its
@@ -202,8 +219,21 @@ PID through launchd, and verify the boot counter increases and launchd has a new
 PID. Keep the status output and timestamps to assess restart throttling.
 
 ```sh
+(
+set -eu
 label=$(python3 -c 'import plistlib,sys; print(plistlib.load(open(sys.argv[1],"rb"))["Label"])' "$service/worker.plist")
 domain="gui/$(id -u)"
+drill_loaded=false
+cleanup_supervisor_drill() {
+  if [ "$drill_loaded" = true ]; then
+    launchctl bootout "$domain" "$service/worker.plist"
+    drill_loaded=false
+  fi
+}
+trap cleanup_supervisor_drill EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 # A loaded label belongs to an existing service: stop the drill if this succeeds.
 if launchctl print "$domain/$label"; then
   echo 'Test service label already loaded; choose a different test repository.' >&2
@@ -226,6 +256,7 @@ PYBOOT
 }
 boots=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["boots"])' "$service/report.json")
 launchctl bootstrap "$domain" "$service/worker.plist"
+drill_loaded=true
 wait_for_boot "$boots"
 launchctl print "$domain/$label" > "$service/launchd-before.txt"
 boots=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["boots"])' "$service/report.json")
@@ -235,6 +266,9 @@ wait_for_boot "$boots"
 launchctl print "$domain/$label" > "$service/launchd-after.txt"
 # Unload only the fresh test service created above.
 launchctl bootout "$domain" "$service/worker.plist"
+drill_loaded=false
+trap - EXIT HUP INT TERM
+)
 ```
 
 A native supervisor drill, live event latency/outage captures and a period of

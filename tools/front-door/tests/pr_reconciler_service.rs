@@ -60,6 +60,10 @@ for arg in "$@"; do
   esac
   last=$arg
 done
+if [ -f "$base/outage" ]; then
+  printf 'HTTP/1.1 503 Unavailable\nRetry-After: 120\nX-RateLimit-Remaining: 17\n\n{}'
+  exit 0
+fi
 case "$last" in
   *'pulls?state=open'*) body='[{"number":12}]' ;;
   *'pulls?state=closed'*) body='[]' ;;
@@ -183,12 +187,14 @@ fn observation_restarts_refresh_heads_and_status_stays_offline() -> Result {
     assert_eq!(first["decisions"][0]["pr"], 12);
     assert_eq!(first["decisions"][0]["head"], HEAD);
     assert_eq!(first["decisions"][0]["action"], "review");
+    assert_eq!(first["digest"]["transitions"], 1);
 
     fixture.once()?;
     let second = fixture.report()?;
     assert_eq!(second["boots"], 2);
     assert_eq!(second["decisions"], first["decisions"]);
     assert!(second["observations"].as_u64() > first["observations"].as_u64());
+    assert_eq!(second["digest"]["transitions"], 1);
 
     fixture.head(NEXT)?;
     fixture.once()?;
@@ -197,6 +203,7 @@ fn observation_restarts_refresh_heads_and_status_stays_offline() -> Result {
     assert_eq!(moved["decisions"][0]["head"], NEXT);
     assert_eq!(moved["decisions"][0]["action"], "review");
     assert_eq!(moved["effect_calls"], 0);
+    assert_eq!(moved["digest"]["transitions"], 2);
     let day = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() / 86400;
     assert!(
         fixture
@@ -245,6 +252,29 @@ fn only_one_worker_owns_state_and_a_stopped_worker_can_restart() -> Result {
 #[test]
 fn launchd_generation_is_offline_and_act_mode_refuses_before_forge_access() -> Result {
     let fixture = Fixture::new()?;
+    let worker_version = Command::new(env!("CARGO_BIN_EXE_pr-reconciler"))
+        .args(["--version", "--json"])
+        .output()?;
+    let main_version = Command::new(env!("CARGO_BIN_EXE_provenant"))
+        .args(["--version", "--json"])
+        .output()?;
+    assert!(worker_version.status.success());
+    assert!(main_version.status.success());
+    let worker_version: Value = serde_json::from_slice(&worker_version.stdout)?;
+    let main_version: Value = serde_json::from_slice(&main_version.stdout)?;
+    assert_eq!(worker_version["data"]["binary"], "pr-reconciler");
+    for field in [
+        "package_version",
+        "source_digest",
+        "asset_digest",
+        "target",
+        "toolchain",
+        "record_schema_version",
+        "config_schema_version",
+    ] {
+        assert!(!worker_version["data"][field].is_null(), "{field}");
+        assert_eq!(worker_version["data"][field], main_version["data"][field]);
+    }
     let generated = fixture.command().arg("--launchd").output()?;
     assert!(
         generated.status.success(),
@@ -268,4 +298,78 @@ fn launchd_generation_is_offline_and_act_mode_refuses_before_forge_access() -> R
     assert!(!fixture.root.path().join("bin/gh-calls").exists());
     assert!(!fixture.directory.exists());
     fixture.no_effects()
+}
+
+#[test]
+fn failed_sweeps_report_live_intake_metrics_without_promoting_freshness() -> Result {
+    use provenant::event_intake::{Admission, Intake};
+    use std::os::unix::fs::DirBuilderExt;
+
+    // Cover a first-boot outage as well as an outage following a good snapshot.
+    for preceding_success in [false, true] {
+        let fixture = Fixture::new()?;
+        if preceding_success {
+            fixture.once()?;
+        } else {
+            fs::DirBuilder::new()
+                .mode(0o700)
+                .create(&fixture.directory)?;
+        }
+        let before = if preceding_success {
+            fixture.report()?
+        } else {
+            json!({"observations":0,"intake":{"requests":0},"decisions":[]})
+        };
+        let started = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+        let received = started - 10;
+        let mut intake = Intake::open(
+            fixture.directory.join("deliveries.json"),
+            "o/r".into(),
+            b"secret".to_vec(),
+        )?;
+        assert_eq!(
+            intake.admit(
+                "pending-during-outage",
+                "pull_request",
+                Some("sha256=db4061419529a8addfd7db7f148ff8677579ec4723d46ba890f9c7c80f8629ab"),
+                br#"{"repository":{"full_name":"o/r"},"pull_request":{"number":12}}"#,
+                received,
+            )?,
+            Admission::Accepted
+        );
+        fs::write(fixture.root.path().join("bin/outage"), "")?;
+        let failed = fixture.command().arg("--once").output()?;
+        assert!(!failed.status.success());
+        let after = fixture.report()?;
+        assert_eq!(after["errors"], 1);
+        assert_eq!(after["digest"]["errors"], 1);
+        assert_eq!(after["effect_calls"], 0);
+        assert_eq!(after["observations"], before["observations"]);
+        assert_eq!(after["decisions"], before["decisions"]);
+        assert_eq!(after["first_observed_at"], before["first_observed_at"]);
+        assert_eq!(after["observed_at"], before["observed_at"]);
+        assert_eq!(
+            after["intake"]["last_successful_sweep"],
+            before["intake"]["last_successful_sweep"]
+        );
+        assert_eq!(
+            after["intake"]["requests"].as_u64(),
+            before["intake"]["requests"].as_u64().map(|n| n + 1)
+        );
+        assert!(
+            after["intake"]["retry_at"]
+                .as_u64()
+                .is_some_and(|at| at >= started + 120)
+        );
+        assert_eq!(after["intake"]["rate_limit"]["x-ratelimit-remaining"], "17");
+        assert_eq!(after["intake"]["oldest_pending_marker"], received);
+        let deliveries: Value =
+            serde_json::from_slice(&fs::read(fixture.directory.join("deliveries.json"))?)?;
+        assert_eq!(
+            deliveries["deliveries"]["pending-during-outage"]["pending"],
+            true
+        );
+        fixture.no_effects()?;
+    }
+    Ok(())
 }
