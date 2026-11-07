@@ -95,12 +95,7 @@ site = "run/src/launch.rs#applied_write_grants"
 boundary = "configurable_default"
 setting = "domains.run.write_grant_limit_bytes"
 code = "LIMIT"
-reason = "The encoded applied write-grant ledger has a configurable default; refusal and receipt report the effective value and origin."
-
-[[guard]]
-site = "run/src/reader.rs#write_grants_fit"
-boundary = "object_integrity"
-reason = "The configurable ceiling reserves space for the remaining fields of bounded host-owned attempt and terminal records."
+reason = "The encoded applied write-grant ledger has a configurable warning threshold; the warning and receipt report the effective value and origin. Historical limit diagnostics remain readable."
 
 [[guard]]
 site = "run/src/launch.rs#RunStore::start_inner"

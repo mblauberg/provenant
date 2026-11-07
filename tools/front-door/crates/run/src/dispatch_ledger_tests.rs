@@ -299,12 +299,12 @@ fn reconcile_backfills_legacy_temporary_without_changing_terminal_records() -> T
     Ok(())
 }
 #[test]
-fn raised_write_grant_limit_preserves_large_terminal_ledger() -> TestResult {
+fn write_grant_warning_threshold_does_not_refuse_large_terminal_ledger() -> TestResult {
     struct Raised(Confined);
     impl Providers for Raised {
         fn write_grant_limit(&self) -> WriteGrantLimit {
             WriteGrantLimit {
-                bytes: 2 * 1024 * 1024,
+                bytes: 256 * 1024,
                 origin: provenant_records::diagnostic::SettingSource::Configuration,
             }
         }
@@ -349,7 +349,7 @@ fn raised_write_grant_limit_preserves_large_terminal_ledger() -> TestResult {
         &provider,
         &|record, _| {
             let route = record.applied_route.as_ref().expect("applied route");
-            assert_eq!(route.extra["write_grant_limit"]["value"], 2 * 1024 * 1024);
+            assert_eq!(route.extra["write_grant_limit"]["value"], 256 * 1024);
             assert_eq!(
                 route.extra["write_grant_limit"]["origin"],
                 "host configuration"
