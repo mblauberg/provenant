@@ -163,11 +163,22 @@ pub(super) fn review_node(node: &PlannedNode) -> bool {
         })
 }
 
+/// Optional compiler behaviour declared by a composite template.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompositeBehaviour {
+    ReviewPanel,
+    Repair,
+    ReviewRepair,
+}
+
 /// One template document. A leaf sets `brief` (and usually `tier`); a
 /// composite sets `nodes`. Nodes stay JSON until their parameters are bound,
 /// because a typed list field such as `write_scope` may be one `${scope}`.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Template {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub composite_behaviour: Option<CompositeBehaviour>,
     /// Top-level run identity. Unspecified templates start fresh work.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub identity: Option<SubmissionIdentity>,
@@ -422,6 +433,7 @@ impl Template {
     /// A flavour over its base: set fields win, parameters and leaf fields merge.
     fn flavour(mut base: Self, own: &Self) -> Self {
         base.extra.extend(own.extra.clone());
+        base.composite_behaviour = own.composite_behaviour.or(base.composite_behaviour);
         base.review = own.review.or(base.review);
         base.identity = own.identity.or(base.identity);
         base.name = own.name.clone().or(base.name);
@@ -800,7 +812,7 @@ impl<'a> Compiler<'a> {
             if let Some(item) = bindings.get(ITEM) {
                 parameters.entry(ITEM).or_insert_with(|| item.clone());
             }
-            if name == "review-repair"
+            if template.composite_behaviour == Some(CompositeBehaviour::ReviewRepair)
                 && with.get("lenses").is_none()
                 && let Some(lenses) = self.resolvers.get("review-panel")
             {
@@ -871,7 +883,11 @@ impl<'a> Compiler<'a> {
         let mut ids = BTreeSet::new();
         let mut children = Vec::with_capacity(items.len());
         let panel_routes = if over.as_str() == Some("@review-panel")
-            && copy.get("use").and_then(Value::as_str) == Some("review")
+            && copy
+                .get("use")
+                .and_then(Value::as_str)
+                .and_then(|name| self.library.resolve(name).ok())
+                .is_some_and(|template| template.review == Some(ReviewBehaviour::Lens))
         {
             self.resolvers.get("review-panel-routes")
         } else {
@@ -992,8 +1008,13 @@ impl<'a> Compiler<'a> {
         let repeat: Repeat =
             serde_json::from_value(repeat).map_err(|error| format!("invalid repeat: {error}"))?;
         let review_repair = repeat.review_repair
-            || (node.get("use").and_then(Value::as_str) == Some("repair")
-                && self.library.layer("repair") == Some(Layer::Bundled));
+            || node
+                .get("use")
+                .and_then(Value::as_str)
+                .and_then(|name| self.library.resolve(name).ok())
+                .is_some_and(|template| {
+                    template.composite_behaviour == Some(CompositeBehaviour::Repair)
+                });
         let mut boundary = Map::new();
         for key in [
             "id",
@@ -1059,9 +1080,7 @@ impl<'a> Compiler<'a> {
             for member in &template.nodes {
                 children.push(self.lower_in(member, parameters, stack)?);
             }
-            let bundled = self.library.layer(name) == Some(Layer::Bundled);
-            if bundled
-                && name == "review-panel"
+            if template.composite_behaviour == Some(CompositeBehaviour::ReviewPanel)
                 && overrides.get("repair_panel") == Some(&Value::Bool(true))
             {
                 // Findings are a completed review, not an unavailable reviewer.
@@ -1087,8 +1106,7 @@ impl<'a> Compiler<'a> {
                 }
             }
 
-            if bundled
-                && name == "repair"
+            if template.composite_behaviour == Some(CompositeBehaviour::Repair)
                 && parameters.get("writer").and_then(Value::as_str) == Some("")
             {
                 // A standalone or integration repair has no PR writer to continue.
@@ -1096,8 +1114,7 @@ impl<'a> Compiler<'a> {
                     fix.remove("continues");
                 }
             }
-            if bundled
-                && name == "repair"
+            if template.composite_behaviour == Some(CompositeBehaviour::Repair)
                 && let Some(branch) = parameters
                     .get("integration_branch")
                     .and_then(Value::as_str)
@@ -1105,7 +1122,7 @@ impl<'a> Compiler<'a> {
             {
                 children[0]["delivery"] = Value::String(format!("integrate:{branch}"));
             }
-            if bundled && name == "review-repair" {
+            if template.composite_behaviour == Some(CompositeBehaviour::ReviewRepair) {
                 // Bind a host-authored slice to the same literal write authority.
                 // The read-only continuation planner cannot invent writer authority.
                 let mut fix = children[0]["loop"]["body"][0].clone();
@@ -1189,7 +1206,14 @@ impl<'a> Compiler<'a> {
         }
         let mut leaf = Map::new();
         for (key, value) in &template.node {
-            leaf.insert(key.clone(), interpolate(value, parameters)?);
+            if key == "extensions" {
+                let fields = value.as_object().ok_or("node extensions must be a table")?;
+                for (field, value) in fields {
+                    leaf.insert(field.clone(), interpolate(value, parameters)?);
+                }
+            } else {
+                leaf.insert(key.clone(), interpolate(value, parameters)?);
+            }
         }
         if let Some(brief) = &template.brief {
             leaf.insert(
@@ -1237,7 +1261,20 @@ impl<'a> Compiler<'a> {
         if let Some(review) = template.review {
             review.apply(&mut leaf);
         }
-        self.finish(leaf, stack)
+        let lowered = self.finish(leaf, stack)?;
+        let parsed: GraphNode = serde_json::from_value(lowered.clone())
+            .map_err(|error| format!("node {}: {error}", lowered["id"]))?;
+        if let Some(field) = template
+            .node
+            .keys()
+            .find(|field| *field != "extensions" && parsed.extra.contains_key(*field))
+        {
+            return Err(format!(
+                "node {}: unknown field {field} in template {name} [node]",
+                parsed.id
+            ));
+        }
+        Ok(lowered)
     }
 
     /// Normalise node spelling and lower nested members.

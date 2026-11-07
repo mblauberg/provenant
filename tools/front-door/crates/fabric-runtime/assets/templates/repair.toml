@@ -1,3 +1,4 @@
+composite_behaviour = "repair"
 doc = "Repair qualified findings and re-review their delta through the raising lenses. Repeat with review_repair = true and at most three rounds."
 nodes = [
   { id = "fix", use = "implement.fix", worktree = "${worktree}", write_scope = "${write_scope}", continues = "${writer}", distinct_from = "dependencies", distinct_strength = "prefer", inputs = [{ node = "previous.synthesis", outputs = ["findings"] }] },

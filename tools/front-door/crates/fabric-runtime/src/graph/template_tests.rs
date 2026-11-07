@@ -646,3 +646,141 @@ fn review_behaviour_survives_brief_and_output_overrides() {
     }
     assert!(Template::from_toml("review = 'unknown'").is_err());
 }
+
+#[test]
+fn template_node_fields_are_checked_and_extensions_are_explicit() {
+    let mut library = library();
+    library
+        .insert_toml(Layer::Inline, "typo", "[node]\nmisspelt_field = true")
+        .unwrap();
+    let error = Compiler::new(&library)
+        .compile(&json!({"id":"stage", "use":"typo"}))
+        .unwrap_err();
+    assert!(
+        error.contains("stage") && error.contains("misspelt_field"),
+        "{error}"
+    );
+    library
+        .insert_toml(
+            Layer::Inline,
+            "extension",
+            "[node.extensions]\ncustom = true",
+        )
+        .unwrap();
+    assert_eq!(
+        Compiler::new(&library)
+            .compile(&json!({"id":"stage", "use":"extension"}))
+            .unwrap()
+            .extra["custom"],
+        true
+    );
+}
+
+#[test]
+fn renamed_composites_keep_their_behaviour_and_bindings() {
+    let mut library = library();
+    for name in ["review-panel", "repair", "review-repair"] {
+        let copy = library.resolve(name).unwrap();
+        library
+            .insert(Layer::Inline, &format!("copy-{name}"), copy)
+            .unwrap();
+    }
+    let resolvers = BTreeMap::from([
+        ("review-topology".into(), vec!["f0-v0-s0".into()]),
+        ("review-panel".into(), vec!["tests".into()]),
+        ("review-advice-tests".into(), vec![String::new()]),
+    ]);
+    let compiler = Compiler {
+        library: &library,
+        resolvers: &resolvers,
+    };
+    for (name, extra) in [
+        ("review-panel", json!({"repair_panel":true})),
+        (
+            "repair",
+            json!({"with":{"worktree":"/fixture", "write_scope":["src"], "integration_branch":"batch/x"}, "repeat":{"until":"accepted", "max_rounds":2}}),
+        ),
+        (
+            "review-repair",
+            json!({"with":{"worktree":"/fixture", "write_scope":["src"]}}),
+        ),
+    ] {
+        let mut original = json!({"id":"stage", "use":name});
+        original
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        let mut renamed = original.clone();
+        renamed["use"] = format!("copy-{name}").into();
+        assert_eq!(
+            compiler.compile(&original).unwrap(),
+            compiler.compile(&renamed).unwrap(),
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn bundled_template_expansions_match_golden() {
+    let library = library();
+    let resolvers = BTreeMap::from([
+        ("review-topology".into(), vec!["f1-v1-s1".into()]),
+        ("review-verifiers".into(), vec!["1".into()]),
+        (
+            "review-panel".into(),
+            vec!["correctness".into(), "tests".into()],
+        ),
+        ("review-advice-correctness".into(), vec![String::new()]),
+        ("review-advice-tests".into(), vec![String::new()]),
+    ]);
+    let compiler = Compiler {
+        library: &library,
+        resolvers: &resolvers,
+    };
+    // Compare against the assets, not just the successfully loaded catalogue.
+    let assets = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/templates");
+    let mut names = std::collections::BTreeSet::new();
+    for entry in std::fs::read_dir(assets).unwrap() {
+        let path = entry.unwrap().path();
+        let name = path.file_stem().unwrap().to_str().unwrap();
+        if name == "composites" {
+            let composites: BTreeMap<String, Template> =
+                toml_edit::de::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            names.extend(composites.into_keys());
+        } else {
+            names.insert(name.to_owned());
+        }
+    }
+    assert_eq!(names, library.names().map(str::to_owned).collect());
+    let mut expansions = BTreeMap::new();
+    for name in library.names() {
+        let template = library.resolve(name).unwrap();
+        let mut bindings = serde_json::Map::new();
+        for (key, parameter) in &template.parameters {
+            if key == "write_scope" {
+                bindings.insert(key.clone(), json!(["src"]));
+            } else if key == "worktree" {
+                bindings.insert(key.clone(), json!("/fixture/writer"));
+            } else if parameter.default.is_none() {
+                let value = match parameter.kind {
+                    ParameterKind::String => json!("/fixture/writer"),
+                    ParameterKind::List => json!(["src"]),
+                    other => panic!("no golden fixture for {name}.{key}: {other:?}"),
+                };
+                bindings.insert(key.clone(), value);
+            }
+        }
+        let node = compiler
+            .compile(&json!({"id":"stage", "use":name, "with":bindings}))
+            .unwrap_or_else(|error| panic!("{name}: {error}"));
+        expansions.insert(name, node);
+    }
+    let actual = serde_json::to_string_pretty(&expansions).unwrap() + "\n";
+    if let Ok(path) = std::env::var("PROVENANT_GOLDEN_OUTPUT") {
+        std::fs::write(path, &actual).unwrap();
+    }
+    assert_eq!(
+        actual,
+        include_str!("../../assets/template-expansions.json")
+    );
+}
