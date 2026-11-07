@@ -1036,5 +1036,10 @@ fn shorthand_document_controls_are_not_node_overrides() {
     separate_document_fields(&mut node);
     assert!(compiler.compile(&node).is_ok());
     node["unknown_node_field"] = json!(true);
-    assert!(compiler.compile(&node).unwrap_err().contains("unknown field unknown_node_field"));
+    assert!(
+        compiler
+            .compile(&node)
+            .unwrap_err()
+            .contains("unknown field unknown_node_field")
+    );
 }

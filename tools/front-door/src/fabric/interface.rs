@@ -541,7 +541,7 @@ impl Factory {
                     let mut node = document.clone();
                     provenant_fabric_runtime::graph::template::separate_document_fields(&mut node);
                     node
-                },
+                }
                 Some(document) => {
                     inline["lane-document"] = document.clone();
                     json!({"use":"lane-document"})
@@ -998,7 +998,7 @@ impl Factory {
                     let mut node = document.clone();
                     provenant_fabric_runtime::graph::template::separate_document_fields(&mut node);
                     node
-                },
+                }
                 Some(_) => json!({"id":"task", "use":"lane-document"}),
                 None => json!({"id":"task", "use":"task"}),
             };

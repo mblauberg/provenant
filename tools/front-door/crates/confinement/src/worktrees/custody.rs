@@ -352,12 +352,15 @@ pub(super) fn lock_worktree(
     // persistent holders and all other evidence still refuse normally.
     if !preview {
         for _ in 0..3 {
-            if !matches!(observations.get(&canonical), Some(Occupancy::Observed { process: Some(process) }) if process.kind == ProcessEvidenceKind::OtherHeldPath) {
+            if !matches!(observations.get(&canonical), Some(Occupancy::Observed { process: Some(process) }) if process.kind == ProcessEvidenceKind::OtherHeldPath)
+            {
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(100));
             context.workers.invalidate();
-            (observations, details) = context.workers.observe_roots_with_details(std::slice::from_ref(&canonical));
+            (observations, details) = context
+                .workers
+                .observe_roots_with_details(std::slice::from_ref(&canonical));
         }
     }
     // The writer lock establishes exclusion.
