@@ -19,6 +19,94 @@ const ITEM: &str = "item";
 /// Node field naming the template a leaf was compiled from; carried to attempts.
 pub const TEMPLATE_FIELD: &str = "template";
 
+/// Ask the compiled schema whether a field is recognised, independently of its
+/// authored value (which may still contain parameter placeholders). Null either
+/// decodes as a known optional field or fails its known type; an unknown field
+/// instead survives in `extra`.
+fn compiled_field(field: &str) -> bool {
+    let mut probe = serde_json::json!({"id":"probe", "access":"read_only"});
+    probe[field] = Value::Null;
+    match serde_json::from_value::<GraphNode>(probe) {
+        Ok(node) => !node.extra.contains_key(field),
+        Err(_) => true,
+    }
+}
+
+fn check_extensions(node: &Map<String, Value>) -> Result<(), String> {
+    if let Some(extensions) = node.get("extensions") {
+        let fields = extensions
+            .as_object()
+            .ok_or("node extensions must be a table")?;
+        for field in fields.keys() {
+            if compiled_field(field) || template_syntax(field) || field == "extensions" {
+                return Err(format!("reserved node field {field} in extensions"));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn flatten_extensions(node: &mut Map<String, Value>) -> Result<(), String> {
+    check_extensions(node)?;
+    if let Some(extensions) = node.remove("extensions") {
+        node.extend(
+            extensions
+                .as_object()
+                .ok_or("node extensions must be a table")?
+                .clone(),
+        );
+    }
+    Ok(())
+}
+
+fn template_syntax(field: &str) -> bool {
+    matches!(
+        field,
+        "use" | "with" | "over" | "repeat" | "after" | "tier" | "min_ok" | "reduce_verdict"
+    )
+}
+
+fn check_authored_fields(node: &Map<String, Value>, stage: &str) -> Result<(), String> {
+    check_extensions(node).map_err(|error| format!("node {stage}: {error}"))?;
+    for field in node.keys() {
+        // This control selects findings collection for review-panel instances.
+        if field != "extensions"
+            && !template_syntax(field)
+            && field != "repair_panel"
+            && !compiled_field(field)
+        {
+            return Err(format!("node {stage}: unknown field {field}"));
+        }
+    }
+    for (container, members) in [("composite", "nodes"), ("loop", "body")] {
+        if let Some(children) = node
+            .get(container)
+            .and_then(|value| value.get(members))
+            .and_then(Value::as_array)
+        {
+            for child in children {
+                let fields = child.as_object().ok_or("template node must be a table")?;
+                let stage = fields.get("id").and_then(Value::as_str).unwrap_or(stage);
+                check_authored_fields(fields, stage)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn merge_node_fields(base: &mut Map<String, Value>, own: &Map<String, Value>) {
+    for (key, value) in own {
+        if key == "extensions"
+            && let Some(inherited) = base.get_mut(key).and_then(Value::as_object_mut)
+            && let Some(entries) = value.as_object()
+        {
+            inherited.extend(entries.clone());
+        } else {
+            base.insert(key.clone(), value.clone());
+        }
+    }
+}
+
 #[path = "template_composites.rs"]
 mod composites;
 
@@ -314,6 +402,9 @@ impl Template {
     /// read root drawn from a closed string enum.
     pub fn check_authority(&self) -> Result<(), String> {
         fn check_node(template: &Template, node: &Value) -> Result<(), String> {
+            if let Some(fields) = node.as_object() {
+                check_extensions(fields)?;
+            }
             for key in [
                 "kind",
                 "access",
@@ -446,7 +537,7 @@ impl Template {
             base.outputs = own.outputs.clone();
         }
         base.kind = own.kind.or(base.kind);
-        base.node.extend(own.node.clone());
+        merge_node_fields(&mut base.node, &own.node);
         if own.is_composite() {
             base.nodes = own.nodes.clone();
             base.exports = own.exports.clone();
@@ -748,6 +839,15 @@ impl<'a> Compiler<'a> {
             ));
         }
         let object = raw.as_object().ok_or("template node must be a table")?;
+        if object.contains_key("use") || !stack.is_empty() {
+            check_authored_fields(
+                object,
+                object
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .unwrap_or("<unknown>"),
+            )?;
+        }
         if let Some(over) = object.get("over") {
             return self.lower_over(object, &interpolate(over, bindings)?, bindings, stack);
         }
@@ -1063,6 +1163,12 @@ impl<'a> Compiler<'a> {
         parameters: &Map<String, Value>,
         stack: &mut Vec<String>,
     ) -> Result<Value, String> {
+        let stage = overrides
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or("<unknown>");
+        check_authored_fields(&template.node, stage)?;
+        check_authored_fields(&overrides, stage)?;
         if template.is_composite() {
             if let Some(key) = ["brief", "goal", "prompt", "tier", "route", "routes"]
                 .into_iter()
@@ -1167,6 +1273,18 @@ impl<'a> Compiler<'a> {
                 fix.as_object_mut()
                     .ok_or("repair writer must be a node")?
                     .remove("id");
+                // Re-authoring a compiled writer must retain its provenance as
+                // explicit metadata, rather than as unknown authored fields.
+                let fields = fix.as_object_mut().ok_or("repair writer must be a node")?;
+                let metadata: Map<String, Value> = fields
+                    .iter()
+                    .filter(|(field, _)| !compiled_field(field))
+                    .map(|(field, value)| (field.clone(), value.clone()))
+                    .collect();
+                for field in metadata.keys() {
+                    fields.remove(field);
+                }
+                fields.insert("extensions".into(), Value::Object(metadata));
                 children[2]["plan"]["max_nodes"] = serde_json::json!(32);
                 children[2]["plan"]["patterns"] = serde_json::json!([{
                     "name": "repair-slice", "brief": prompt, "access": access, "node": fix
@@ -1230,14 +1348,7 @@ impl<'a> Compiler<'a> {
         }
         let mut leaf = Map::new();
         for (key, value) in &template.node {
-            if key == "extensions" {
-                let fields = value.as_object().ok_or("node extensions must be a table")?;
-                for (field, value) in fields {
-                    leaf.insert(field.clone(), interpolate(value, parameters)?);
-                }
-            } else {
-                leaf.insert(key.clone(), interpolate(value, parameters)?);
-            }
+            leaf.insert(key.clone(), interpolate(value, parameters)?);
         }
         if let Some(brief) = &template.brief {
             leaf.insert(
@@ -1275,30 +1386,18 @@ impl<'a> Compiler<'a> {
         if overrides.contains_key("route") || overrides.contains_key("routes") {
             leaf.remove("tier");
         }
-        leaf.extend(overrides);
+        merge_node_fields(&mut leaf, &overrides);
         if template.brief.is_some()
             && !leaf.contains_key("acceptance_checks")
             && let Some(brief) = leaf.get("prompt").cloned()
         {
             leaf.insert("acceptance_checks".into(), Value::Array(vec![brief]));
         }
+        flatten_extensions(&mut leaf)?;
         if let Some(review) = template.review {
             review.apply(&mut leaf);
         }
-        let lowered = self.finish(leaf, stack)?;
-        let parsed: GraphNode = serde_json::from_value(lowered.clone())
-            .map_err(|error| format!("node {}: {error}", lowered["id"]))?;
-        if let Some(field) = template
-            .node
-            .keys()
-            .find(|field| *field != "extensions" && parsed.extra.contains_key(*field))
-        {
-            return Err(format!(
-                "node {}: unknown field {field} in template {name} [node]",
-                parsed.id
-            ));
-        }
-        Ok(lowered)
+        self.finish(leaf, stack)
     }
 
     /// Normalise node spelling and lower nested members.
@@ -1329,6 +1428,7 @@ impl<'a> Compiler<'a> {
     }
 
     fn finish_shallow(&self, mut node: Map<String, Value>) -> Result<Value, String> {
+        flatten_extensions(&mut node)?;
         if let Some(after) = node.remove("after") {
             let after = after.as_array().ok_or("`after` must be a list")?;
             let depends = node
@@ -1364,9 +1464,17 @@ impl<'a> Compiler<'a> {
 /// Raw passthrough nodes (as presets lower them) stay byte-identical.
 fn needs_lowering(node: &Value) -> bool {
     node.as_object().is_some_and(|object| {
-        ["use", "over", "repeat", "after", "tier", "with"]
-            .iter()
-            .any(|key| object.contains_key(*key))
+        [
+            "use",
+            "over",
+            "repeat",
+            "after",
+            "tier",
+            "with",
+            "extensions",
+        ]
+        .iter()
+        .any(|key| object.contains_key(*key))
             || object
                 .get("composite")
                 .and_then(|spec| spec.get("nodes"))

@@ -397,10 +397,12 @@
                         "delivery": "integrate:batch/integration",
                         "distinct_from": "dependencies",
                         "distinct_strength": "prefer",
+                        "extensions": {
+                          "template": "implement.fix"
+                        },
                         "route": {
                           "alias": "senior"
                         },
-                        "template": "implement.fix",
                         "worktree": "/fixture/writer",
                         "write_scope": [
                           "src"
@@ -906,10 +908,12 @@
                         "continues": "implement",
                         "distinct_from": "dependencies",
                         "distinct_strength": "prefer",
+                        "extensions": {
+                          "template": "implement.fix"
+                        },
                         "route": {
                           "alias": "senior"
                         },
-                        "template": "implement.fix",
                         "worktree": "/fixture/writer",
                         "write_scope": [
                           "src"
@@ -2055,10 +2059,12 @@
                               "continues": "implement",
                               "distinct_from": "dependencies",
                               "distinct_strength": "prefer",
+                              "extensions": {
+                                "template": "implement.fix"
+                              },
                               "route": {
                                 "alias": "senior"
                               },
-                              "template": "implement.fix",
                               "worktree": "/fixture/writer",
                               "write_scope": [
                                 "src"
@@ -3246,10 +3252,12 @@
                   ],
                   "distinct_from": "dependencies",
                   "distinct_strength": "prefer",
+                  "extensions": {
+                    "template": "implement.fix"
+                  },
                   "route": {
                     "alias": "senior"
                   },
-                  "template": "implement.fix",
                   "worktree": "/fixture/writer",
                   "write_scope": [
                     "src"

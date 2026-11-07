@@ -578,6 +578,15 @@ fn delivery_templates_admit_bounded_review_repairs() {
         assert_eq!(slice.name.as_deref(), Some("repair-slice"));
         assert_eq!(slice.node["write_scope"], json!(["src"]));
         assert_eq!(slice.node["worktree"], "/fixture/writer");
+        assert_eq!(slice.node["extensions"][TEMPLATE_FIELD], "implement.fix");
+        let mut slices = library();
+        slices
+            .insert(Layer::Inline, "repair-slice", slice.clone())
+            .unwrap();
+        let compiled = Compiler::new(&slices)
+            .compile(&json!({"id":"slice", "use":"repair-slice"}))
+            .unwrap();
+        assert_eq!(compiled.extra[TEMPLATE_FIELD], "implement.fix");
         if template == "deliver" {
             let accept = expanded
                 .nodes
@@ -639,6 +648,9 @@ fn review_behaviour_survives_brief_and_output_overrides() {
         assert_eq!(node.extra["review_behaviour"], behaviour);
         assert!(node.require_findings);
         assert_eq!(node.required_verdict.as_deref(), Some("VERDICT: PASS"));
+        if name != "review.tests" {
+            assert!(!node.extra.contains_key("review_lens"));
+        }
         if name == "review.synthesis" {
             assert_eq!(node.kind, Some(NodeKind::Synthesise));
             assert_eq!(node.dispositions, ["accepted", "rejected", "deferred"]);
@@ -802,4 +814,140 @@ nodes = [{ id = "first", use = "task" }]
         .compile(&json!({"id":"stage", "use":"broken"}))
         .unwrap_err();
     assert!(error.contains("review_repair behaviour"), "{error}");
+}
+
+#[test]
+fn node_overrides_reject_unknown_fields() {
+    let library = library();
+    let error = Compiler::new(&library)
+        .compile(&json!({"id":"stage", "use":"task", "deadine_seconds":30}))
+        .unwrap_err();
+    assert!(
+        error.contains("stage") && error.contains("deadine_seconds"),
+        "{error}"
+    );
+    let node = Compiler::new(&library)
+        .compile(&json!({"id":"stage", "use":"task", "deadline_seconds":30,
+            "extensions":{"custom":true}}))
+        .unwrap();
+    assert_eq!(node.deadline_seconds, Some(30));
+    assert_eq!(node.extra["custom"], true);
+}
+
+#[test]
+fn composite_members_reject_unknown_fields() {
+    for member in [
+        json!({"id":"work", "use":"task", "deadine_seconds":30}),
+        json!({"id":"work", "access":"read_only", "deadine_seconds":30}),
+        json!({"id":"group", "access":"read_only", "composite":{"nodes":[
+            {"id":"work", "access":"read_only", "deadine_seconds":30}
+        ]}}),
+        json!({"id":"group", "access":"read_only", "loop":{"body":[
+            {"id":"work", "access":"read_only", "deadine_seconds":30}
+        ], "until":"work", "max_rounds":1}}),
+    ] {
+        let mut library = library();
+        library
+            .insert(
+                Layer::Repository,
+                "local",
+                serde_json::from_value(json!({
+                    "nodes":[member]
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        let error = Compiler::new(&library)
+            .compile(&json!({"id":"stage", "use":"local"}))
+            .unwrap_err();
+        assert!(
+            error.contains("work") && error.contains("deadine_seconds"),
+            "{error}"
+        );
+    }
+}
+
+#[test]
+fn review_flavour_merges_extension_entries() {
+    let mut library = library();
+    library
+        .insert_toml(
+            Layer::Repository,
+            "review.local",
+            r#"
+[parameters.lens]
+type = "string"
+default = "local"
+[node.extensions]
+custom = true
+"#,
+        )
+        .unwrap();
+    let node = Compiler::new(&library)
+        .compile(&json!({"id":"stage", "use":"review.local"}))
+        .unwrap();
+    assert_eq!(node.extra["custom"], true);
+    assert_eq!(node.extra["review_lens"], "local");
+    library
+        .insert_toml(
+            Layer::Repository,
+            "review.local.explicit",
+            r#"
+[node.extensions]
+review_lens = "explicit"
+"#,
+        )
+        .unwrap();
+    let node = Compiler::new(&library)
+        .compile(&json!({"id":"stage", "use":"review.local.explicit"}))
+        .unwrap();
+    assert_eq!(node.extra["custom"], true);
+    assert_eq!(node.extra["review_lens"], "explicit");
+}
+
+#[test]
+fn extensions_cannot_supply_compiled_node_fields() {
+    for field in [
+        "read_roots",
+        "access",
+        "source",
+        "route",
+        "deadline_seconds",
+        "use",
+    ] {
+        let template: Template = serde_json::from_value(json!({
+            "parameters":{"root":{"type":"string"}},
+            "node":{"extensions":{field:["${root}"]}}
+        }))
+        .unwrap();
+        let error = template.check_authority().unwrap_err();
+        assert!(
+            error.contains(field) && error.contains("extensions"),
+            "{error}"
+        );
+        let mut library = library();
+        library
+            .insert(Layer::Repository, "local", template)
+            .unwrap();
+        let error = Compiler::new(&library)
+            .compile(&json!({"id":"stage", "use":"local", "with":{"root":"/any/root"}}))
+            .unwrap_err();
+        assert!(
+            error.contains(field) && error.contains("extensions"),
+            "{error}"
+        );
+    }
+    let mut template: Template = serde_json::from_value(json!({
+        "parameters":{"root":{"type":"string"}},
+        "nodes":[{"id":"work", "use":"task", "extensions":{"read_roots":["${root}"]}}]
+    }))
+    .unwrap();
+    assert!(
+        template
+            .check_authority()
+            .unwrap_err()
+            .contains("read_roots")
+    );
+    template.nodes[0] = json!({"id":"work", "use":"task", "extensions":{"custom":"${root}"}});
+    template.check_authority().unwrap();
 }

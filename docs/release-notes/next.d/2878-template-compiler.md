@@ -1,4 +1,4 @@
 ## Fixes
 ### Pipelines and graphs
 
-- Reject undeclared template node fields and preserve review and repair behaviour when templates are renamed.
+- Templates reject undeclared node fields, including overrides and composite members. Review flavours preserve their lens when adding metadata, and authorised repair continuations compile successfully (#2878).
