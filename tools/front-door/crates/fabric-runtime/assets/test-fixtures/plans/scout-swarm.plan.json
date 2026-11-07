@@ -227,20 +227,22 @@
                   "Cite the files and evidence behind each claim"
                 ],
                 "access": "read_only",
+                "extensions": {
+                  "references": [
+                    {
+                      "digest": "sha256:043afc79230de1752625fb2253537c323b87fff102099239b70c1abeae9543d2",
+                      "ref": "skill:scope/references/scout-areas.md",
+                      "when": "before choosing your area"
+                    }
+                  ],
+                  "role_digest": "sha256:d8947d98f40446bdba4295a9dbfc154c7a48a30401a7a0c684a342c36a095b57"
+                },
                 "id": "scout",
                 "prompt": "You are a codebase scout. Read, map and cite; never edit.\n\nScout assignment 1. Research read-only for the writers: brief\n\nYour question: ${question}\nThe shared build brief describes their work; do not implement it.\nUse judgement to choose a distinct useful scope. Map call sites, constraints,\nrisks and tests. Cite files and evidence, state uncertainties, and preserve your\nfindings for the senior synthesis. Do not edit files or take Git writer locks.\n\n\n# Scout areas\n\nUse when a scoping stage splits codebase reconnaissance across scouts.\n\nGive each scout one area: a directory, a crate, a subsystem or a question\n(\"where is X decided?\"). Areas do not overlap, together cover the change, and\nname their read roots. A scout reads, never edits.\n\nEach scout returns, in under 300 words:\n- Files and symbols that matter, as `path:line` with a one-line reason.\n- Existing helpers and patterns the change should reuse.\n- Constraints found in code, tests or docs that the spec must respect.\n- What the scout could not determine, stated plainly.\n\nStop at the area boundary. Report an adjacent finding as a pointer for another\nscout rather than following it.\n",
                 "read_roots": [
                   "/repo/extra"
                 ],
-                "references": [
-                  {
-                    "digest": "sha256:043afc79230de1752625fb2253537c323b87fff102099239b70c1abeae9543d2",
-                    "ref": "skill:scope/references/scout-areas.md",
-                    "when": "before choosing your area"
-                  }
-                ],
                 "role": "scout.codebase",
-                "role_digest": "sha256:d8947d98f40446bdba4295a9dbfc154c7a48a30401a7a0c684a342c36a095b57",
                 "routes": [
                   {
                     "alias": "${route}"
@@ -287,17 +289,19 @@
                   "Give each source with its URL and date"
                 ],
                 "access": "read_only",
+                "extensions": {
+                  "references": [
+                    {
+                      "digest": "sha256:e4fa928901af6d26760a39d52b26ce86284b6ffe0a9b662f21139e5437d3bbc9",
+                      "ref": "skill:scope/references/researcher.md",
+                      "when": "always"
+                    }
+                  ],
+                  "role_digest": "sha256:6a06d9ece1c9bb403d70e93ee5fcbfd439f2cbfbb9517f5b8cfc8164f87859bc"
+                },
                 "id": "scout",
                 "prompt": "You are an external scout. Look outward first: documentation, upstream source, standards, competitors and prior art. Cite each source with its URL and date.\n\nExternal scout 1. Research outward for the writers: brief\n\nYour question: ${question}\nThe shared build brief describes their work; do not implement it.\nPrefer primary sources and current documentation over memory, even when\nconfident. Prefer sources from roughly the past two months and label older ones\nas background, unless the assignment sets another window. Report each finding\nwith its source URL and publication or retrieval date, mark vendor-reported\nfigures, and state where sources disagree. Do not edit files.\n\n\n# Researcher\n\nUse when a scope depends on facts outside the repository: standards, vendor\nbehaviour, prior art, competing tools or published evidence.\n\nLook outward first. Search current documentation, upstream source and credible\nwrite-ups before relying on memory, even when confident.\n\nPrefer sources from roughly the past two months. Label older sources as\nbackground, and say when no recent source supports a claim. The brief may\noverride this window.\n\nReturn for each finding:\n- The claim in one sentence.\n- The source URL and its publication or retrieval date.\n- Whether the source is primary (specification, source code, vendor\n  documentation) or secondary, and whether any figure is vendor-reported.\n- How the claim bears on the decision in front of the chair.\n\nSeparate established fact from inference. State disagreement between sources\nrather than resolving it silently. Cite no source you did not read.\n",
-                "references": [
-                  {
-                    "digest": "sha256:e4fa928901af6d26760a39d52b26ce86284b6ffe0a9b662f21139e5437d3bbc9",
-                    "ref": "skill:scope/references/researcher.md",
-                    "when": "always"
-                  }
-                ],
                 "role": "scout.external",
-                "role_digest": "sha256:6a06d9ece1c9bb403d70e93ee5fcbfd439f2cbfbb9517f5b8cfc8164f87859bc",
                 "routes": [
                   {
                     "alias": "junior"

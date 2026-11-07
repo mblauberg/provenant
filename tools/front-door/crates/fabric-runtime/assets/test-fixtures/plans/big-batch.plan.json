@@ -606,10 +606,12 @@
                 "access": "worktree_write",
                 "deadline_seconds": "${budget_seconds}",
                 "delivery": "integrate:batch/graph",
+                "extensions": {
+                  "role_digest": "sha256:66a47c337c54fd277c461a71e017d90f9e2c84410669226509ca05391049b66a"
+                },
                 "id": "implement",
                 "prompt": "You implement one bounded slice inside the write scope, within the authority envelope below.\n\nImplement one bounded slice: brief\n\nLane ${lane}. Time budget: ${budget_seconds} seconds; commit your work and stop with a handoff before it passes.\nSpec (acceptance criteria): \nKeep changes within the supplied write scope. Run targeted checks and commit.\nLocal check policy: run the tests you add or change and the named tests covering\nchanged functions, with a filter (`cargo nextest run -p CRATE -E 'test(NAME)'` or\n`cargo test -p CRATE NAME`). Use `scripts/select-affected-crate-tests` or\n`scripts/find-changed-tests` where they help pick targets. Run fmt, clippy for\ntouched crates and generators for touched generated outputs. Never run a whole\npackage, `--workspace` or the full suite locally, since CI runs those on the PR;\nreviewers reproduce one finding with one targeted test.\n\nAuthority envelope. The objective above and the acceptance criteria are\napproved. You hold authority to make any engineering decision that serves them\nand is reversible: names, structure, tests, helper code and the order of work.\nDo not stop to ask about those. Make the call, state it as an assumption and\nrecord it in your final report under DECISIONS (decision, reason, how to\nreverse). Ask only when the decision belongs to the owner (product direction,\nscope, cost, irreversible or externally visible effects) or when the work needs\nauthority beyond the write scope and this envelope; then report NEEDS-USER\nwith the specific question and the option you would take.\n",
                 "role": "write.implement",
-                "role_digest": "sha256:66a47c337c54fd277c461a71e017d90f9e2c84410669226509ca05391049b66a",
                 "route": {
                   "alias": "${route}"
                 },
@@ -678,6 +680,9 @@
                   "rejected",
                   "deferred"
                 ],
+                "extensions": {
+                  "role_digest": "sha256:2468163ab16ccbef7878c3bac0f4b0ce49c2574d933bc55c0558ef3a34d85041"
+                },
                 "id": "evaluate",
                 "inputs": [
                   {
@@ -700,7 +705,6 @@
                   "${worktree}"
                 ],
                 "role": "review.evaluator",
-                "role_digest": "sha256:2468163ab16ccbef7878c3bac0f4b0ce49c2574d933bc55c0558ef3a34d85041",
                 "routes": [
                   {
                     "alias": "senior"
@@ -776,11 +780,13 @@
                   "Cross-lane conflicts are recorded"
                 ],
                 "access": "read_only",
+                "extensions": {
+                  "role_digest": "sha256:3771fb15867cef6f72b7b35c7dbd6343062982d0cb3f355b34ee937a7bc0d872"
+                },
                 "id": "barrier",
                 "kind": "synthesise",
                 "prompt": "You close one wave of lanes before the next starts.\n\nClose wave ${wave} of: brief\nRead each lane's commit and result. Confirm every lane met the acceptance\nsubset it owns, and record any conflict between lanes before the next wave\nstarts. Do not edit files.\n",
                 "role": "plan.wave",
-                "role_digest": "sha256:3771fb15867cef6f72b7b35c7dbd6343062982d0cb3f355b34ee937a7bc0d872",
                 "routes": [
                   {
                     "alias": "senior"

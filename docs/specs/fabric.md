@@ -390,6 +390,11 @@ repository templates are layered over bundled definitions. The generated
 [CLI reference](../reference/cli.md) owns flags and bounds; the
 [graph design](../adr/0039-graph-of-templates.md) owns template composition.
 
+A leaf template puts compiled node fields in `[node]`; unknown fields fail compilation.
+Put intentional graph metadata in `[node.extensions]`. Composite templates may
+declare `composite_behaviour` as `review_panel`, `repair` or `review_repair`
+to select the corresponding compiler protocol independently of their names.
+
 A template is a leaf or a composite containing nodes. A node selects `use`,
 binds parameters with `with`, and may use `over` to copy work across items.
 `task` handles one assignment, `plan` shapes work, `batch` integrates parallel
