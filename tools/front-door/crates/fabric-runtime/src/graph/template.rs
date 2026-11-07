@@ -1120,12 +1120,35 @@ impl<'a> Compiler<'a> {
                     .and_then(Value::as_str)
                     .filter(|branch| !branch.is_empty())
             {
-                children[0]["delivery"] = Value::String(format!("integrate:{branch}"));
+                let fix = children
+                    .first_mut()
+                    .and_then(Value::as_object_mut)
+                    .ok_or("repair behaviour requires a writer node")?;
+                fix.insert(
+                    "delivery".into(),
+                    Value::String(format!("integrate:{branch}")),
+                );
             }
             if template.composite_behaviour == Some(CompositeBehaviour::ReviewRepair) {
                 // Bind a host-authored slice to the same literal write authority.
                 // The read-only continuation planner cannot invent writer authority.
-                let mut fix = children[0]["loop"]["body"][0].clone();
+                let mut fix = children
+                    .first()
+                    .and_then(|node| node.pointer("/loop/body/0"))
+                    .filter(|node| node.is_object())
+                    .cloned()
+                    .ok_or("review_repair behaviour requires a loop with a writer node")?;
+                let continuation = children
+                    .get_mut(2)
+                    .and_then(Value::as_object_mut)
+                    .ok_or("review_repair behaviour requires a continuation planner at node 3")?;
+                let plan = continuation.entry("plan").or_insert(Value::Null);
+                if plan.is_null() {
+                    *plan = Value::Object(Map::new());
+                }
+                if !plan.is_object() {
+                    return Err("review_repair continuation plan must be a table".into());
+                }
                 fix["id"] = Value::String("fix".into());
                 fix.as_object_mut()
                     .ok_or("repair writer must be a node")?
@@ -1150,8 +1173,9 @@ impl<'a> Compiler<'a> {
                 }]);
                 children[2]["plan"]["wire_exports"] = Value::Bool(true);
                 let mut resolvers = self.resolvers.clone();
-                let lenses = parameters["lenses"]
-                    .as_array()
+                let lenses = parameters
+                    .get("lenses")
+                    .and_then(Value::as_array)
                     .ok_or("repair lenses must be a list")?
                     .iter()
                     .map(|value| {
