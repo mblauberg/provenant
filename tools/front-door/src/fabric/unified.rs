@@ -1602,6 +1602,8 @@ pub(crate) fn read_lane_graph(
             return Err(FacadeError::Timeout.into());
         }
 
+        let clock = SystemClock::new();
+        let budget = provenant_fabric_mcp::lane::host_budget(&clock, within)?;
         let launch = holder
             .launch
             .as_ref()
@@ -1629,7 +1631,12 @@ pub(crate) fn read_lane_graph(
             mcp_project: None,
             workers,
         };
-        let budget = provenant_fabric_mcp::lane::host_budget(&factory.clock, within)?;
+        if cancel.is_cancelled() {
+            return Err(FacadeError::Cancelled.into());
+        }
+        if budget.remaining(factory.clock.mono_now()).as_micros() == 0 {
+            return Err(FacadeError::Timeout.into());
+        }
         if input["op"] != "output" || input["trace"] == true && input["render"] != true {
             return Ok(factory.graph_document(input.clone(), budget, cancel)?);
         }

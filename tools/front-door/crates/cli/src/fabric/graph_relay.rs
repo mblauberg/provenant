@@ -1718,7 +1718,12 @@ mod provisioning_tests {
                 &cancel,
                 &clock,
             );
-            assert!(matches!(result, Err(ServiceError::Cli { code, .. }) if code == "edit_scope"));
+            assert_eq!(
+                result
+                    .expect_err("edits outside the subtree must be refused")
+                    .code(),
+                "edit_scope"
+            );
             let saved = FileJournal::read_checkpoint(
                 &context.roots.state,
                 context.identity.project,

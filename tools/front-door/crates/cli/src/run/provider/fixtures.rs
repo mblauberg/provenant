@@ -79,7 +79,7 @@ pub(crate) fn start_fabric_relay(
     graph_wake: Option<std::sync::Arc<super::super::holder::GraphWake>>,
     graph_read: Option<std::sync::Arc<super::super::holder::GraphRead>>,
 ) -> Result<provenant_fabric_mcp::lane::HostRelay, String> {
-    use provenant_core::CancelToken;
+    use provenant_core::{CancelToken, Clock};
     use provenant_fabric_runtime::{coordination::CoordinationService, identity::Address};
     let launch = context
         .launch
@@ -160,7 +160,14 @@ pub(crate) fn start_fabric_relay(
                         cancel,
                         &graph_clock,
                         &|input| match &graph_read {
-                            Some(read) => read(&graph_holder, input, cancel, within),
+                            Some(read) => read(
+                                &graph_holder,
+                                input,
+                                cancel,
+                                std::time::Duration::from_micros(
+                                    budget.remaining(graph_clock.mono_now()).as_micros(),
+                                ),
+                            ),
                             None => Err(provenant_fabric_mcp::tools::ServiceError::Cli {
                                 code: "graph_read_unavailable".into(),
                                 message: "the host has no graph reader; upgrade the host".into(),
