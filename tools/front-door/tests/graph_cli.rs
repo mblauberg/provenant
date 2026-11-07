@@ -1179,6 +1179,16 @@ fn fake_launch_owner_refusal_reaches_real_graph_status() -> Result {
             Some(InvalidInputDetail::Schema),
             "schema_version",
         ),
+        (
+            "oversized-input-refusal",
+            Some(InvalidInputDetail::InputTooLarge),
+            "1 MiB",
+        ),
+        (
+            "unreadable-input-refusal",
+            Some(InvalidInputDetail::InputUnreadable),
+            "unreadable",
+        ),
         ("code-only-refusal", None, "invalid_input"),
     ] {
         let document: GraphDocument = serde_json::from_value(
