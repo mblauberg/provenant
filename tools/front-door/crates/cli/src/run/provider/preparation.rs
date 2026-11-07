@@ -2337,16 +2337,24 @@ pub(super) fn prepare_candidates(
         // Every lane stages temporary files under tmp for terminal cleanup.
         // A failed setup never poisons the next explicit fallback candidate.
         let staging = &paths.temporary;
-        // Retain the handle opened while claiming fresh scratch: a parent
-        // lane can rename tmp before context is published.
-        let (scratch_directory, scratch_name) =
-            match fresh_scratch_directory(staging, "candidate", Some(current_candidate)) {
-                Ok(scratch) => scratch,
-                Err(error) => {
-                    reasons.push(skip(&label, SkipKind::Setup, error));
-                    continue;
-                }
-            };
+        // Reader snapshots require empty private Git state. Writers retain
+        // their existing candidate directory for idempotent preparation.
+        let scratch_claim = if writer.is_none() {
+            fresh_scratch_directory(staging, "candidate", Some(current_candidate))
+        } else {
+            let name = format!("candidate-{current_candidate}");
+            apply_setup_directory(&[staging], &staging.join(&name))
+                .map(|directory| (directory, name))
+        };
+        // Retain the handle: a parent lane can rename tmp before context is
+        // published, so later writes must still use the held directory.
+        let (scratch_directory, scratch_name) = match scratch_claim {
+            Ok(scratch) => scratch,
+            Err(error) => {
+                reasons.push(skip(&label, SkipKind::Setup, error));
+                continue;
+            }
+        };
         let scratch = scratch_directory
             .current_path()
             .map_err(|error| error.to_string())?;
