@@ -116,6 +116,12 @@ fn existing_git_worktree_with_spaces_has_a_followable_branch_remedy() -> Result 
     assert_eq!(replay["data"]["local_worktree_remedy"], action, "{replay}");
     let (_, status) = rig.run(&["status", graph])?;
     assert!(
+        status["data"]["rows"].as_array().is_some_and(|rows| rows
+            .iter()
+            .any(|row| row["kind"] == "node" && row["cause_code"] == "dispatch_refused")),
+        "{status}"
+    );
+    assert!(
         status["data"]["rows"]
             .as_array()
             .is_some_and(|rows| rows.iter().any(|row| row["next"]

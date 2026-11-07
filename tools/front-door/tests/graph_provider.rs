@@ -1635,6 +1635,31 @@ fn writer_registry_timeout_is_bounded_and_reported() -> Result {
         json!([]),
         "{response}"
     );
+    let graph = response["data"]["checkpoint"]["graph_id"]
+        .as_str()
+        .ok_or("graph id")?;
+    // Reading the failure must not reacquire the registry for branch advice.
+    for command in ["status", "output"] {
+        let start = std::time::Instant::now();
+        let output = rig.command(&[command, graph, "--json"])?;
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(4),
+            "{command} waited for the held registry"
+        );
+        assert_eq!(code(&output), 0, "{output:?}");
+        let reading: Value = serde_json::from_slice(&output.stdout.bytes)?;
+        let rows = if command == "status" {
+            &reading["data"]["rows"]
+        } else {
+            &reading["data"]["graph_failures"]
+        };
+        assert!(
+            rows.as_array().is_some_and(|rows| rows
+                .iter()
+                .any(|row| { row["kind"] == "node" && row["cause_code"] == "writer_lock_busy" })),
+            "{reading}"
+        );
+    }
     Ok(())
 }
 
