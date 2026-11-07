@@ -2709,7 +2709,7 @@ impl crate::RunStore {
 }
 
 /// The live holder calls this only after success and confinement checks. A
-/// sealed start marker prevents repeating external effects after interruption.
+/// sealed start marker lets recovery reconcile an interrupted external effect.
 pub(crate) fn deliver_once(
     host: &HostDeliveryContext,
     writer: &WriterRequest,
@@ -2728,11 +2728,10 @@ pub(crate) fn deliver_once(
     }
     let started =
         crate::artifacts::read_sealed(attempt, "delivery-started.json", crate::RECORD_LIMIT)?;
-    if started.is_none()
-        && host
-            .bound
-            .as_ref()
-            .is_none_or(|bound| bound.destination != *request)
+    if host
+        .bound
+        .as_ref()
+        .is_none_or(|bound| bound.destination != *request)
     {
         return Err(RunError::Validation(
             "delivery destination changed after launch",
@@ -2753,6 +2752,13 @@ pub(crate) fn deliver_once(
             },
         },
     };
+    if started.is_some()
+        && (receipt.remote != request.remote
+            || receipt.branch != request.branch
+            || receipt.head != Some(host.head(writer)?))
+    {
+        return Err(RunError::Validation(HEAD_MISMATCH));
+    }
     if started.is_none() {
         crate::artifacts::seal(
             attempt,
@@ -2760,6 +2766,8 @@ pub(crate) fn deliver_once(
             &crate::db::bytes(&receipt)?,
             crate::RECORD_LIMIT,
         )?;
+    }
+    {
         let unchanged = receipt
             .head
             .zip(host.bound.as_ref())
@@ -2786,12 +2794,23 @@ pub(crate) fn deliver_once(
                     extra: Default::default(),
                     pull_request,
                 },
+                Err(error)
+                    if matches!(error, RunError::Delivery(Stage::Push))
+                        && !matches!(request.mode, crate::DeliveryMode::Integrate(_))
+                        && !host
+                            .cancellation
+                            .as_ref()
+                            .is_some_and(|cancel| cancel.is_cancelled()) =>
+                {
+                    // A failed push command may have reached the remote. Leave
+                    // the start marker unresolved for a bound remote lookup.
+                    return Err(error);
+                }
                 Err(error) => failed_state(&error),
             }
         };
     }
-    // Keep the start marker: an aborted remote command can have an unknown
-    // outcome. Automatic recovery must not repeat it, but explicit pickup may.
+    // Keep the start marker so recovery can reconcile an aborted remote command.
     let name = if matches!(receipt.state, WriterDeliveryState::Failed { .. })
         && host
             .cancellation
