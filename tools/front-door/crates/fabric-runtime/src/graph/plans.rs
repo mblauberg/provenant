@@ -4,7 +4,7 @@ use super::template::Template;
 use super::*;
 use std::collections::{BTreeMap, BTreeSet};
 
-fn set_expansion_pause(
+pub(super) fn set_expansion_pause(
     checkpoint: &mut GraphCheckpoint,
     index: usize,
     reason: String,
@@ -22,7 +22,7 @@ fn set_expansion_pause(
     checkpoint.pause_code = Some("invalid_plan_expansion".into());
 }
 
-fn clear_expansion_pause(checkpoint: &mut GraphCheckpoint, index: usize, refresh: bool) {
+pub(super) fn clear_expansion_pause(checkpoint: &mut GraphCheckpoint, index: usize, refresh: bool) {
     let active_expansion = checkpoint.nodes.iter().any(|node| {
         matches!(
             node.expansion_cause,
@@ -1706,6 +1706,21 @@ pub(super) fn generous() -> crate::config::GraphLimits {
     }
 }
 
+/// Automatic retries and added continuation nodes share the host allowance.
+pub(super) fn continuation_count(checkpoint: &GraphCheckpoint) -> usize {
+    checkpoint
+        .expansions
+        .iter()
+        .filter(|expansion| {
+            expansion.continuation
+                || expansion
+                    .patch
+                    .as_ref()
+                    .is_some_and(patch::is_no_work_continuation)
+        })
+        .count()
+}
+
 fn continuation(
     node: &PlannedNode,
     document: &GraphDocument,
@@ -1713,13 +1728,7 @@ fn continuation(
     note: &str,
     limits: &crate::config::GraphLimits,
 ) -> Result<Expansion, String> {
-    if checkpoint
-        .expansions
-        .iter()
-        .filter(|e| e.continuation)
-        .count()
-        >= limits.continuations
-    {
+    if continuation_count(checkpoint) >= limits.continuations {
         return Err(format!(
             "limits.continuations={} reached; extend the continuation budget",
             limits.continuations
@@ -1796,13 +1805,9 @@ pub(super) fn remaining(
                     .map(|n| n.dependencies().count())
                     .sum(),
             ),
-            continuations: limits.continuations.saturating_sub(
-                checkpoint
-                    .expansions
-                    .iter()
-                    .filter(|e| e.continuation)
-                    .count(),
-            ),
+            continuations: limits
+                .continuations
+                .saturating_sub(continuation_count(checkpoint)),
         });
     }
 }

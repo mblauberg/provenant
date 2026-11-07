@@ -29,14 +29,29 @@ pub(super) fn continue_stopped(
     checkpoint: &GraphCheckpoint,
     limits: &crate::config::GraphLimits,
 ) -> Result<Option<GraphCheckpoint>, PatchError> {
-    let Some((node, _)) = plan
+    let Some((index, (node, progress))) = plan
         .nodes
         .iter()
         .zip(&checkpoint.nodes)
-        .find(|(node, progress)| eligible(node, progress, checkpoint))
+        .enumerate()
+        .find(|(_, (node, progress))| eligible(node, progress, checkpoint))
     else {
         return Ok(None);
     };
+    if plans::continuation_count(checkpoint) >= limits.continuations {
+        let mut next = checkpoint.clone();
+        plans::set_expansion_pause(
+            &mut next,
+            index,
+            format!(
+                "writer {} stopped with no work; limits.continuations={} reached; extend the continuation budget",
+                node.id, limits.continuations
+            ),
+            false,
+            None,
+        );
+        return Ok(Some(next));
+    }
     let brief = format!(
         "{}\n\nContinue the accepted brief in this worktree. The previous attempt stopped with no work and no new commit. Finish the remaining acceptance checks, commit the work and report the result. This is the only automatic continuation.",
         node.prompt
@@ -57,5 +72,39 @@ pub(super) fn continue_stopped(
             limits,
         },
     )?;
+    plans::clear_expansion_pause(&mut next, index, true);
+    transitions::retain_automatic_retry_accounting(progress, &mut next.nodes[index]);
     Ok(Some(next))
+}
+
+/// A stopped writer still owes a continuation checkpoint. Keep it discoverable
+/// by ordinary tick/settlement recovery if a save fails or the host crashes.
+pub(super) fn pending(document: &GraphDocument, checkpoint: &GraphCheckpoint) -> bool {
+    if checkpoint.cancelled
+        || checkpoint.pause_reason.is_some()
+        || !checkpoint
+            .nodes
+            .iter()
+            .any(|row| row.advance_error_code.as_deref() == Some("stopped_no_work"))
+    {
+        return false;
+    }
+    let limits = plans::generous();
+    let expanded = plans::expand(
+        document,
+        &checkpoint.extensions,
+        &checkpoint.expansions,
+        &limits,
+    );
+    expanded
+        .and_then(|expanded| {
+            validate_flat_plan(&expanded, &limits).map_err(|error| error.to_string())
+        })
+        .map(|(plan, _)| {
+            plan.nodes
+                .iter()
+                .zip(&checkpoint.nodes)
+                .any(|(node, row)| eligible(node, row, checkpoint))
+        })
+        .unwrap_or(true)
 }

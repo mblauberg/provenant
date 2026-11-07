@@ -607,7 +607,7 @@ writers. In a composite, `continues` follows the same local-name rules as
 
 ### Writers that stop without work
 
-A `worktree_write` node with a declared stop and an unchanged host-pinned head
+A `worktree_write` node with a host-recorded `stopped_no_work` outcome
 fails with code `stopped_no_work`; it never satisfies acceptance. Unless
 `auto_continue_no_work = false`, the scheduler retries the node once in its
 existing worktree, retaining its write authority and prior attempt. The retry
@@ -616,7 +616,10 @@ its automatic reason and replacement are retained in patch history. The
 checkpoint commits the patch before the new attempt can launch, and recovery
 reconsiders a settled stop if that checkpoint was not saved. Patch history
 prevents a second automatic continuation, including after restart. Cancellation,
-pauses and existing graph bounds continue to apply.
+pauses and existing graph bounds continue to apply. Automatic no-work retries
+consume the shared `continuations` allowance and preserve the sealed route retry
+allowance and quota history. A settled stop that still owes its retry checkpoint
+remains in the pending index, so host restart cannot lose that continuation.
 
 
 ### Synthesise agents

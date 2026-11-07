@@ -462,6 +462,13 @@ pub(super) fn no_work_reason(id: &str) -> String {
     format!("continue node {id} after stop with no work")
 }
 
+pub(super) fn is_no_work_continuation(record: &PatchRecord) -> bool {
+    record
+        .replaced
+        .iter()
+        .any(|node| record.reason.as_deref() == Some(no_work_reason(&node.id).as_str()))
+}
+
 fn retry_node_scope(
     graph: &mut LiveGraph<'_>,
     id: &str,
