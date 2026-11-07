@@ -57,6 +57,7 @@ Accepted by every command, before or after the subcommand.
 | `brief` | `{"description": "Brief for the selected template", "name": "brief", "positional": true}` |
 | `--use` | `{"description": "Select a layered template [default: task]", "name": "template"}` |
 | `--tier` | `{"description": "Override the template's route tier", "name": "tier"}` |
+| `--over` | `{"description": "Copy the node over named items, or a resolver such as @review-panel", "name": "over", "repeatable": true}` |
 | `--set` | `{"description": "Bind a template parameter or attempt.FIELD (NAME=TOML_VALUE); repeatable", "name": "set", "repeatable": true}` |
 | `--file` | `{"description": "Read a graph document (JSON or TOML), or a plain text brief", "name": "file"}` |
 | `--explain` | `{"defaults": ["false"], "description": "Explain the compiled graph without starting work", "name": "explain", "values": ["true", "false"]}` |
@@ -149,6 +150,9 @@ Accepted by every command, before or after the subcommand.
 | Argument | Contract |
 |---|---|
 | `numbers` | `{"bounds": [1, 18446744073709551615], "description": "Pull request numbers in landing order", "name": "numbers", "positional": true, "repeatable": true}` |
+| `--batch` | `{"defaults": ["false"], "description": "Use batch landing even for one pull request", "name": "batch", "values": ["true", "false"]}` |
+| `--shadow` | `{"defaults": ["false"], "description": "Compute the candidate and decisions without publishing", "name": "shadow", "values": ["true", "false"]}` |
+| `--tier` | `{"description": "Apply the named landing risk tier", "name": "tier"}` |
 | `--wait` | `{"bounds": [1, 14400], "description": "Wait for this head's CI (default 1 hour; maximum 4 hours)", "name": "wait"}` |
 | `--explain` | `{"defaults": ["false"], "description": "Show the resolved landing policy without landing", "name": "explain", "values": ["true", "false"]}` |
 

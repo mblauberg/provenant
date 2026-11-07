@@ -97,19 +97,23 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> ParseOutcome {
             }
             return match error.kind() {
                 clap::error::ErrorKind::DisplayHelp => match help_scope(&model, &argv) {
-                    Some(scope) => ParseOutcome::Help {
-                        text: if scope == "provenant" {
-                            core_help(&model)
+                    Some(scope) => {
+                        let (text, catalog) = if scope == "provenant" {
+                            (core_help(&model), catalog(&model))
+                        } else if is_core_scope(&model, &scope) {
+                            (
+                                error.to_string(),
+                                scoped_catalogue(compact_help_model(), &scope),
+                            )
                         } else {
-                            error.to_string()
-                        },
-                        catalog: if scope == "provenant" {
-                            catalog(&model)
-                        } else {
-                            scoped_catalogue(compact_help_model(), &scope)
-                        },
-                        globals,
-                    },
+                            expanded_scoped_help(&scope)
+                        };
+                        ParseOutcome::Help {
+                            text,
+                            catalog,
+                            globals,
+                        }
+                    }
                     None => ParseOutcome::Invalid {
                         error: CliError::Invalid("unknown help command".into()),
                         globals,
@@ -155,7 +159,8 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> ParseOutcome {
         request.bare_wait_value = Some(brief.to_owned());
     }
     if let Command::Help { command, all } = &invocation.command {
-        let mut expanded = if *all {
+        let scope = format!("provenant {}", command.join(" "));
+        let mut expanded = if *all || (!command.is_empty() && !is_core_scope(&model, &scope)) {
             expanded_model()
         } else {
             compact_help_model()
@@ -466,7 +471,7 @@ fn hide_compact_arguments(mut command: clap::Command) -> clap::Command {
     // Day-to-day controls only; visibility never changes the parsing grammar.
     let visible: &[&str] = match command.get_name() {
         "run" => &[
-            "use", "tier", "model", "effort", "file", "set", "wait", "explain",
+            "use", "tier", "model", "effort", "over", "file", "set", "wait", "explain",
         ],
         "status" => &["all", "wait", "target", "until", "follow"],
         "output" => &["part", "tail", "trace"],
@@ -474,7 +479,7 @@ fn hide_compact_arguments(mut command: clap::Command) -> clap::Command {
         "edit" | "templates" => &["file"],
         "stop" => &["wait", "reason"],
         "retry" => &["node", "brief", "extend", "wait"],
-        "land" => &["wait", "explain"],
+        "land" => &["wait", "head", "batch", "shadow", "tier", "explain"],
         "help" => &["all"],
         _ => &[],
     };
@@ -693,6 +698,30 @@ fn help_scope(model: &clap::Command, argv: &[OsString]) -> Option<String> {
         }
     }
     Some(scope)
+}
+fn is_core_scope(model: &clap::Command, scope: &str) -> bool {
+    let mut selected = model;
+    for component in scope.split_whitespace().skip(1) {
+        let Some(child) = selected.find_subcommand(component) else {
+            return false;
+        };
+        selected = child;
+    }
+    selected.get::<metadata::CoreCommand>().is_some()
+}
+fn expanded_scoped_help(scope: &str) -> (String, HelpCatalogue) {
+    let mut model = expanded_model();
+    let mut selected = &mut model;
+    for component in scope.split_whitespace().skip(1) {
+        let Some(child) = selected.find_subcommand_mut(component) else {
+            return (String::new(), scoped(catalog(&model), scope));
+        };
+        *child = child.clone().hide(false);
+        selected = child;
+    }
+    let text = selected.render_long_help().to_string();
+    let catalogue = scoped(catalog(&model), scope);
+    (text, catalogue)
 }
 // Explicit help can address quota maintenance without advertising it in the
 // default catalogue. Only the validated scope is revealed, never its siblings.
@@ -1259,6 +1288,81 @@ mod tests {
                     .any(|argument| argument.name == "operation_id"),
                 expected
             );
+        }
+    }
+    #[test]
+    fn compact_run_help_keeps_skill_prescribed_options_visible() {
+        let ParseOutcome::Help { catalog, .. } = parsed(&["help", "run"]) else {
+            panic!("run help");
+        };
+        let run = catalog
+            .commands
+            .iter()
+            .find(|command| command.command == "provenant run")
+            .unwrap();
+        for flag in ["tier", "over", "file"] {
+            assert!(
+                run.arguments
+                    .iter()
+                    .any(|argument| argument.long.as_deref() == Some(flag)),
+                "run help omits --{flag}"
+            );
+        }
+        let ParseOutcome::Help { catalog, .. } = parsed(&["help", "land"]) else {
+            panic!("land help");
+        };
+        let land = catalog
+            .commands
+            .iter()
+            .find(|command| command.command == "provenant land")
+            .unwrap();
+        for flag in ["head", "batch", "shadow", "tier"] {
+            assert!(
+                land.arguments
+                    .iter()
+                    .any(|argument| argument.long.as_deref() == Some(flag)),
+                "land help omits --{flag}"
+            );
+        }
+    }
+    #[test]
+    fn explicitly_named_non_core_commands_show_everyday_file_options() {
+        for args in [
+            vec!["help", "workflow", "session", "save"],
+            vec!["workflow", "session", "save", "--help"],
+            vec!["help", "tracker", "lint"],
+            vec!["tracker", "lint", "--help"],
+        ] {
+            let ParseOutcome::Help { text, catalog, .. } = parsed(&args) else {
+                panic!("help for {args:?}");
+            };
+            let command_args = if args[0] == "help" {
+                &args[1..]
+            } else {
+                &args[..]
+            };
+            let path = format!(
+                "provenant {}",
+                command_args
+                    .iter()
+                    .take_while(|word| **word != "--help")
+                    .copied()
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            );
+            let command = catalog
+                .commands
+                .iter()
+                .find(|command| command.command == path)
+                .unwrap_or_else(|| panic!("catalogue omits {path}"));
+            assert!(
+                command
+                    .arguments
+                    .iter()
+                    .any(|argument| argument.long.as_deref() == Some("file")),
+                "{path} catalogue omits --file"
+            );
+            assert!(text.contains("--file"), "{path} text omits --file: {text}");
         }
     }
 
