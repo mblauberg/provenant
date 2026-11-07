@@ -1,7 +1,9 @@
 //! Opt-in proposal sweeps, submitted through the ordinary graph service.
 use super::*;
 use provenant_cli::steward::Settings;
-use provenant_fabric_runtime::graph::{FileJournal, NodeState, template::SubmissionIdentity};
+use provenant_fabric_runtime::graph::{
+    FileJournal, GraphCheckpoint, NodeState, template::SubmissionIdentity,
+};
 use serde_json::{Value, json};
 
 #[derive(Default, Serialize, Deserialize)]
@@ -124,6 +126,14 @@ fn task(
     })
 }
 
+fn checkpoint_is_live(checkpoint: &GraphCheckpoint) -> bool {
+    (!checkpoint.cancelled && checkpoint.pause_reason.is_some())
+        || checkpoint
+            .nodes
+            .iter()
+            .any(|node| matches!(node.state, NodeState::Pending | NodeState::Running))
+}
+
 pub(super) fn run(
     settings: &Settings,
     resolved: &crate::roots::Resolved,
@@ -157,12 +167,7 @@ pub(super) fn run(
                 let id = SubmissionIdentity::Fresh.graph_id(&Value::Null, "", Some(operation))?;
                 let checkpoint = FileJournal::read_checkpoint(&resolved.roots.state, project, &id)
                     .map_err(|error| error.to_string())?;
-                Ok(checkpoint.is_some_and(|checkpoint| {
-                    checkpoint.pause_reason.is_some()
-                        || checkpoint.nodes.iter().any(|node| {
-                            matches!(node.state, NodeState::Pending | NodeState::Running)
-                        })
-                }))
+                Ok(checkpoint.as_ref().is_some_and(checkpoint_is_live))
             },
             |operation| {
                 let clock = SystemClock;
@@ -209,6 +214,30 @@ mod tests {
     use super::*;
     use provenant_core::{MonoTime, TestClock};
     use std::cell::RefCell;
+
+    // Small: cancellation retains pause text after all attempts have settled.
+    #[test]
+    fn cancelled_pause_does_not_keep_a_settled_run_live() {
+        for (cancelled, pause_reason, state, expected) in [
+            (false, Some("budget exhausted"), "failed", true),
+            (true, Some("budget exhausted"), "failed", false),
+            (true, Some("budget exhausted"), "running", true),
+            (false, None, "running", true),
+            (false, None, "succeeded", false),
+        ] {
+            let checkpoint: GraphCheckpoint = serde_json::from_value(json!({
+                "schema_version": 1, "graph_id": "steward-live", "plan_digest": "digest",
+                "cancelled": cancelled, "pause_reason": pause_reason,
+                "nodes": [{"id": "sweep", "state": state, "worktree": null, "attempts": []}],
+            }))
+            .unwrap();
+            assert_eq!(
+                checkpoint_is_live(&checkpoint),
+                expected,
+                "cancelled={cancelled}, pause={pause_reason:?}, state={state}"
+            );
+        }
+    }
 
     // Small: absent config must never even resolve a repository or launch.
     #[test]
