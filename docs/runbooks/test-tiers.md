@@ -54,7 +54,7 @@ Build the custody fixture, then run its manual capture outside nextest's
 30-second test timeout. From `tools/front-door`:
 
 ```sh
-cargo test --locked -p provenant-supervisor --test custody -- --capture-idle-cpu
+cargo test --release --locked -p provenant-supervisor --test custody -- --capture-idle-cpu
 ```
 
 The capture launches its own guardian and a provider waiting on a socket. It
@@ -70,3 +70,28 @@ the guardian's event loop and census backstop, without a configured host's disk
 or graph callbacks or a valid sandbox memory snapshot. Use a live waiting lane
 for those additional costs. A result below 3% is evidence for this fixture,
 not a substitute for a production-lane capture when its costs differ.
+
+To include the production `HostHolder` child reader, use the composition
+capture. Build once and run the binary directly so a minute-long capture does
+not hold a shared build slot:
+
+```sh
+cargo build --release --locked -p provenant-cli --example supervisor_cpu \
+  --config 'profile.release.debug="line-tables-only"' \
+  --config 'profile.release.strip=false'
+cpu_capture_bin="$(cargo metadata --format-version 1 --no-deps | python3 -c \
+  'import json,sys; print(json.load(sys.stdin)["target_directory"])')/release/examples/supervisor_cpu"
+"$cpu_capture_bin" idle
+"$cpu_capture_bin" churn
+```
+
+Both modes use the same native CPU counter and ten-second sample as the
+custody capture. `idle` holds its provider on a socket; `churn` loops spawning
+`/usr/bin/true`. Each guardian reads a real pending graph through `HostHolder`
+at the ordinary census cadence. The JSON identifies the workload and whether
+the Fabric child reader was present. The example uses synthetic admission and
+terminal records, with no provider credentials, disk callback or sandbox memory
+snapshot. It verifies cancellation, resolved cleanup, exit publication and
+writer-lock release before returning. Compare identical release builds and
+retain the process counts and native counter deltas with the before/after
+percentages; the sample paths expire with `TMPDIR`.

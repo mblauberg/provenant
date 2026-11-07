@@ -62,6 +62,13 @@ impl ExitPublisher for TrackingPublisher {
         directory: &Directory,
         bytes: &[u8],
     ) -> provenant_supervisor::custody::Result<provenant_os::fs::Publication> {
+        let calls = self.0.join("PROVENANT_STATE_DIR/s2-tracking-calls");
+        if calls.is_file() {
+            std::fs::OpenOptions::new()
+                .append(true)
+                .open(calls)?
+                .write_all(b"T")?;
+        }
         if self
             .0
             .join("tracking-writer")
@@ -713,6 +720,59 @@ fn idle_supervisor_does_no_census_per_wake(root: &Path) -> Result<()> {
     idle_supervisor(root, false)
 }
 
+fn unchanged_census_does_not_publish_tracking(root: &Path) -> Result<()> {
+    let state = root.join("PROVENANT_STATE_DIR");
+    std::fs::create_dir(&state)?;
+    // Failed process watches force an actual full census every 100 ms.
+    std::fs::write(state.join("s2-fail-process-watch"), b"fail")?;
+    let trace = state.join("s2-idle-census-trace");
+    let calls = state.join("s2-tracking-calls");
+    std::fs::write(&trace, b"")?;
+    std::fs::write(&calls, b"")?;
+    let socket = root.join("tracking.sock");
+    let listener = UnixListener::bind(&socket)?;
+    let (_writer, handle) = start(
+        root,
+        "tracking",
+        "wait-on-socket",
+        &[socket.into_os_string()],
+        CapturePlan::default(),
+    )?;
+    let mut held = fixture::fixture_accept(&listener, Duration::from_secs(5))?;
+    byte(&mut held, b'R')?;
+    let wait_for_censuses = |count| -> Result<()> {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while std::fs::read(&trace)?
+            .iter()
+            .filter(|kind| **kind == b'F')
+            .count()
+            < count
+        {
+            if Instant::now() >= deadline {
+                return Err("expected repeated full censuses".into());
+            }
+            std::thread::park_timeout(Duration::from_millis(10));
+        }
+        Ok(())
+    };
+    wait_for_censuses(3)?;
+    let before = std::fs::read(&calls)?;
+    assert!(!before.is_empty(), "publisher was never exercised");
+    wait_for_censuses(8)?;
+    assert_eq!(
+        std::fs::read(&calls)?,
+        before,
+        "unchanged tracking was published"
+    );
+    stop(&handle, StopReason::ExplicitCancellation)?;
+    assert_eq!(
+        exited(&handle)?.stop_reason,
+        Some(StopReason::ExplicitCancellation)
+    );
+    drop(held);
+    Ok(())
+}
+
 fn idle_supervisor(root: &Path, capture_cpu: bool) -> Result<()> {
     let state = root.join("PROVENANT_STATE_DIR");
     std::fs::create_dir(&state)?;
@@ -765,67 +825,11 @@ fn idle_supervisor(root: &Path, capture_cpu: bool) -> Result<()> {
     Ok(())
 }
 
-/// Manual host capture, outside nextest's short test timeout. Only the
-/// guardian launched by this fixture is sampled; cancellation uses custody.
 fn capture_idle_cpu(attempt: &Path) -> Result<()> {
-    let observed: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(attempt.join("process.json"))?)?;
-    let identity: ProcessIdentity = serde_json::from_value(observed["guardian"].clone())?;
-    let observer = fixture::RecordedBootObserver;
-    let cpu = || -> Result<u64> {
-        match observer.observe(identity.pid) {
-            ProcessObservation::Present(fact) if fact.identity == identity => fact
-                .cpu_micros
-                .ok_or("guardian CPU accounting unavailable".into()),
-            other => Err(format!("guardian identity unavailable: {other:?}").into()),
-        }
-    };
-    let sample_path =
-        std::env::temp_dir().join(format!("supervisor-idle-{}.sample.txt", identity.pid));
-    let sample = std::process::Command::new("/usr/bin/sample")
-        .args([
-            identity.pid.to_string(),
-            "10".into(),
-            "-file".into(),
-            sample_path.display().to_string(),
-        ])
-        .output()?;
-    if !sample.status.success() {
-        return Err(format!("sample failed: {}", String::from_utf8_lossy(&sample.stderr)).into());
-    }
-    let before_census = observer.census(65_536)?;
-    let processes_before = before_census.facts().count() + before_census.unknown_pids().len();
-    let cpu_before = cpu()?;
-    let started = Instant::now();
-    let duration = Duration::from_secs(60);
-    while started.elapsed() < duration {
-        std::thread::park_timeout(duration.saturating_sub(started.elapsed()));
-    }
-    let cpu_after = cpu()?;
-    let elapsed = started.elapsed();
-    let after_census = observer.census(65_536)?;
-    let processes_after = after_census.facts().count() + after_census.unknown_pids().len();
-    let cpu_used = cpu_after
-        .checked_sub(cpu_before)
-        .ok_or("CPU counter regressed")?;
-    let percent = cpu_used as f64 / elapsed.as_secs_f64() / 10_000.0;
     writeln!(
         io::stdout().lock(),
         "{}",
-        serde_json::json!({
-            "build": env!("CARGO_PKG_VERSION"),
-            "debug_assertions": cfg!(debug_assertions),
-            "pid": identity.pid,
-            "method": "10-second sample, then native PROC_PIDTASKINFO CPU delta over at least 60 seconds",
-            "processes_before": processes_before,
-            "processes_after": processes_after,
-            "elapsed_seconds": elapsed.as_secs_f64(),
-            "cpu_before_micros": cpu_before,
-            "cpu_after_micros": cpu_after,
-            "percent_of_one_core": percent,
-            "under_three_percent": percent < 3.0,
-            "sample": sample_path,
-        })
+        fixture::capture_guardian_cpu(attempt)?
     )?;
     Ok(())
 }
@@ -3035,6 +3039,10 @@ const CASES: &[Case] = &[
         idle_supervisor_does_no_census_per_wake,
     ),
     (
+        "unchanged_census_does_not_publish_tracking",
+        unchanged_census_does_not_publish_tracking,
+    ),
+    (
         "a_fake_provider_passing_the_token_budget_is_stopped",
         a_fake_provider_passing_the_token_budget_is_stopped,
     ),
@@ -3360,7 +3368,10 @@ fn main() -> Result<()> {
         };
         let tracking_publisher = std::env::var_os("PROVENANT_STATE_DIR")
             .map(PathBuf::from)
-            .filter(|state| state.join("s2-tracking-failure").is_file())
+            .filter(|state| {
+                state.join("s2-tracking-failure").is_file()
+                    || state.join("s2-tracking-calls").is_file()
+            })
             .and_then(|state| {
                 state
                     .parent()
