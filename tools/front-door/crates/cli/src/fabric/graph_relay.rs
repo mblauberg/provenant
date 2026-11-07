@@ -113,6 +113,8 @@ pub fn serve_with_read(
 ) -> Result<Value, ServiceError> {
     let op: RelayOp = serde_json::from_value(arguments)
         .map_err(|error| refused("invalid_input", format!("invalid graph frame: {error}")))?;
+    // The lane has already started the launch allowance. This confirmed
+    // remainder includes queue time; never renew it at the host.
     let state = &context.roots.state;
     let project = context.identity.project;
     let reference = format!("{}/{attempt}", context.identity.host);
@@ -351,8 +353,7 @@ pub fn serve_with_read(
                 // this point is finished by `recover_provisioning`.
                 relay::fence_provisioning(&mut checkpoint, &receipt.node, path, &source);
                 journal.save(&checkpoint).map_err(journal_error)?;
-                provision_child(context, path, &source, budget, cancel)?;
-                relay::clear_provisioning(&mut checkpoint, &receipt.node);
+                recover_provisioning(context, &mut journal, &mut checkpoint, budget, cancel)?;
             }
             provision_added_writers(context, &mut journal, &mut checkpoint, &[], budget, cancel)?;
             serde_json::to_value(receipt)?
@@ -571,7 +572,47 @@ fn recover_provisioning(
         return Ok(());
     }
     for (node, path, source) in pending {
-        provision_child(context, &path, &source, budget, cancel)?;
+        let clock = provenant_os::clock::SystemClock;
+        let now = clock.mono_now();
+        let wall = clock
+            .wall_now()
+            .map_err(|_| ServiceError::Facade(FacadeError::StateCorrupt))?;
+        let prior = checkpoint
+            .nodes
+            .iter()
+            .find(|progress| progress.id == node)
+            .and_then(|progress| progress.launch_retry.as_ref())
+            .and_then(|retry| retry.deadline);
+        let launch = match prior {
+            Some(end) => WaitBudget::up_to(
+                now,
+                provenant_core::DurationMicros::from_micros(
+                    end.as_micros().saturating_sub(wall.as_micros()).max(0) as u64,
+                ),
+            )
+            .cap_at(budget.deadline().as_mono_time()),
+            None => budget,
+        };
+        if prior.is_none()
+            && let Some(progress) = checkpoint
+                .nodes
+                .iter_mut()
+                .find(|progress| progress.id == node)
+        {
+            progress.launch_retry = Some(provenant_fabric_runtime::graph::LaunchRetry {
+                extra: Default::default(),
+                policy: Default::default(),
+                failures: 0,
+                deadline: Some(
+                    wall.checked_add(launch.remaining(now))
+                        .map_err(|_| ServiceError::Facade(FacadeError::StateCorrupt))?,
+                ),
+                wake_at: None,
+                reason: None,
+            });
+            journal.save(checkpoint).map_err(journal_error)?;
+        }
+        provision_child_with_budget(context, &path, &source, launch, cancel)?;
         relay::clear_provisioning(checkpoint, &node);
     }
     journal.save(checkpoint).map_err(journal_error)
@@ -722,6 +763,19 @@ pub fn provision_child(
     budget: WaitBudget,
     cancel: &CancelToken,
 ) -> Result<(), ServiceError> {
+    let clock = provenant_os::clock::SystemClock;
+    let budget = writer_launch_budget(context, &clock, budget);
+    provision_child_with_budget(context, path, source, budget, cancel)
+}
+
+/// Provision against an already-started launch deadline; never renew it.
+pub fn provision_child_with_budget(
+    context: &Context,
+    path: &str,
+    source: &str,
+    budget: WaitBudget,
+    cancel: &CancelToken,
+) -> Result<(), ServiceError> {
     let branch = path
         .strip_prefix(".worktrees/")
         .ok_or_else(|| refused("writer_worktree", "invalid managed worktree path"))?;
@@ -765,6 +819,23 @@ pub fn provision_writer(
     })
 }
 
+/// Start a writer launch once; every later lock and retry uses this deadline.
+pub fn writer_launch_budget(
+    context: &Context,
+    clock: &dyn Clock,
+    caller: WaitBudget,
+) -> WaitBudget {
+    let now = clock.mono_now();
+    let floor = provenant_core::DurationMicros::from_micros(
+        context
+            .config
+            .graph
+            .writer_launch_seconds
+            .saturating_mul(1_000_000),
+    );
+    WaitBudget::up_to(now, floor.max(caller.remaining(now)))
+}
+
 /// Preserve the typed worktree failure for the graph launch owner.
 pub fn provision_writer_checked(
     context: &Context,
@@ -776,15 +847,9 @@ pub fn provision_writer_checked(
 ) -> Result<(), provenant_confinement::worktrees::WorktreeError> {
     use provenant_confinement::worktrees;
     let clock = provenant_os::clock::SystemClock::new();
-    // The single launch rule: each binding gets its own floor, or the remaining
-    // caller allowance if longer. Compute once before opening the context;
-    // registry acquisition and custody reobservation share this deadline. Never
-    // alter the caller's settlement budget or renew the budget between locks.
-    let now = clock.mono_now();
-    let floor =
-        provenant_core::DurationMicros::from_seconds(context.config.graph.writer_launch_seconds)
-            .map_err(|_| worktrees::WorktreeError::InvalidRequest)?;
-    let budget = WaitBudget::up_to(now, floor.max(budget.remaining(now)));
+    if budget.remaining(clock.mono_now()).as_micros() == 0 {
+        return Err(worktrees::WorktreeError::RegistryLockTimeout);
+    }
     worktrees::with_context(
         &context.roots,
         &context.home,
@@ -792,6 +857,9 @@ pub fn provision_writer_checked(
         &clock,
         cancel,
         |worktree_context| {
+            if budget.remaining(clock.mono_now()).as_micros() == 0 {
+                return Err(worktrees::WorktreeError::RegistryLockTimeout);
+            }
             let worktree_context = worktrees::WorktreeContext {
                 lock_budget: budget,
                 ..*worktree_context
@@ -1543,6 +1611,192 @@ mod provisioning_tests {
             ])?,
             source
         );
+        Ok(())
+    }
+
+    #[test]
+    #[allow(clippy::disallowed_methods)] // Exercise real registry waits across the socket deadline.
+    fn child_launch_receipt_and_refusal_follow_the_confirmed_launch_deadline()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_fabric_runtime::graph::{GraphCheckpoint, GraphDocument, GraphExecution};
+        let root = tempfile::tempdir()?;
+        let home = root.path().join("home");
+        let project = home.join("project");
+        std::fs::create_dir_all(&project)?;
+        let git = |args: &[&str]| -> Result<String, Box<dyn std::error::Error>> {
+            let output = provenant_os::fixture::git_command()
+                .current_dir(&project)
+                .args(args)
+                .output()?;
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            Ok(String::from_utf8(output.stdout)?.trim().to_owned())
+        };
+        git(&["init", "-q"])?;
+        git(&["commit", "--allow-empty", "-qm", "base"])?;
+        let source = git(&["rev-parse", "HEAD"])?;
+        let branch = git(&["symbolic-ref", "--short", "HEAD"])?;
+        let mut inputs = provenant_core::RootInputs::new(home.clone(), project.clone());
+        inputs.state_dir = Some(root.path().join("state"));
+        let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+        let mut context = Context::open(roots, &home, &project)?;
+        context.config.graph.writer_launch_seconds = 60;
+        let cancel = CancelToken::new();
+        let clock = provenant_os::clock::SystemClock::new();
+        let budget = WaitBudget::cli(clock.mono_now(), 30)?;
+        let document: GraphDocument = serde_json::from_value(json!({
+            "schema_version":2,"graph_id":"g-writers","integration_branch":branch,"template_library":{},
+            "nodes":[{"id":"parent","access":"read_only","prompt":"Go","route":{"alias":"senior"}}]
+        }))?;
+        let reference = format!("{}/caller", context.identity.host);
+        let checkpoint: GraphCheckpoint = serde_json::from_value(json!({
+            "schema_version":1,"graph_id":"g-writers","plan_digest":"fixture","bound_integration_base":source,
+            "nodes":[{"id":"parent","state":"running","worktree":null,"attempts":[{
+                "launched":true,"key":{"graph_id":"g-writers","node_id":"parent","route_index":0},
+                "route":{"alias":"senior"},"state":"running","attempt_ref":reference,"outcome":null,"launch_actor":"fixture"
+            }]}]
+        }))?;
+        {
+            let mut journal = FileJournal::open(
+                &context.roots.state,
+                context.identity.project,
+                "g-writers",
+                budget,
+                &cancel,
+                &clock,
+            )?;
+            journal.bind(GraphExecution {
+                review_base: None,
+                extra: Default::default(),
+                integration_base: Some(source.parse()?),
+                directory: project.clone(),
+                document,
+            })?;
+            journal.save(&checkpoint)?;
+        }
+
+        use provenant_os::fs::{Directory, LockMode};
+        let registry = context
+            .roots
+            .state
+            .as_path()
+            .join("worktrees")
+            .join(context.identity.project.to_string());
+        std::fs::create_dir_all(&registry)?;
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(
+            registry.parent().ok_or("parent")?,
+            std::fs::Permissions::from_mode(0o700),
+        )?;
+        std::fs::set_permissions(&registry, std::fs::Permissions::from_mode(0o700))?;
+        let directory = Directory::open_anchor(&registry)?;
+        let socket = root.path().join("relay/socket");
+        let context = std::sync::Arc::new(context);
+        let host = std::sync::Arc::clone(&context);
+        let _relay = provenant_fabric_mcp::lane::HostRelay::start_with_graph(
+            socket.clone(),
+            provenant_records::Limits::CONFIG,
+            |_, _, _| unreachable!("graph request expected"),
+            move |arguments, cancel, within| {
+                let clock = provenant_os::clock::SystemClock;
+                let budget = provenant_fabric_mcp::lane::host_budget(&clock, within)?;
+                serve(&host, "caller", arguments, budget, cancel, &clock)
+            },
+        )?;
+        let request = |id: &str| json!({"op":"add","id":id,"use":"implement","brief":"Write","writer":true,"write_scope":["src"],"idempotency_key":id});
+        let held = directory.lock(
+            std::ffi::OsStr::new("worktrees.lock"),
+            LockMode::Exclusive,
+            WaitBudget::nonblocking(clock.mono_now()),
+            &cancel,
+            &clock,
+        )?;
+        let settlement = WaitBudget::cli(clock.mono_now(), 1)?;
+        let launch = writer_launch_budget(&context, &clock, settlement);
+        let receipt = std::thread::scope(|scope| -> Result<Value, ServiceError> {
+            scope.spawn(move || {
+                std::thread::sleep(std::time::Duration::from_secs(56));
+                drop(held);
+            });
+            provenant_fabric_mcp::lane::graph(
+                &socket,
+                request("late"),
+                &cancel,
+                std::time::Duration::from_micros(launch.remaining(clock.mono_now()).as_micros())
+                    + std::time::Duration::from_secs(1),
+            )
+        })?;
+        assert_eq!(settlement.remaining(clock.mono_now()).as_micros(), 0);
+        assert_eq!(
+            git(&[
+                "-C",
+                receipt["worktree"].as_str().ok_or("worktree")?,
+                "rev-parse",
+                "HEAD"
+            ])?,
+            source
+        );
+        // A queued caller confirms only its remainder. The host must return a
+        // named refusal within that remainder instead of starting sixty seconds again.
+        let _held = directory.lock(
+            std::ffi::OsStr::new("worktrees.lock"),
+            LockMode::Exclusive,
+            WaitBudget::nonblocking(clock.mono_now()),
+            &cancel,
+            &clock,
+        )?;
+        let started = std::time::Instant::now();
+        let error = provenant_fabric_mcp::lane::graph(
+            &socket,
+            request("refused"),
+            &cancel,
+            std::time::Duration::from_secs(3),
+        )
+        .expect_err("held registry refusal");
+        assert_eq!(error.code(), "writer_lock_busy");
+        assert!(error.structured_error().to_string().contains("retry"));
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+        assert!(
+            !project
+                .join(".worktrees/g-writers-parent--refused")
+                .exists()
+        );
+        assert!(git(&["branch", "--list", "g-writers-parent--refused"])?.is_empty());
+        let checkpoint = FileJournal::read_checkpoint(
+            &context.roots.state,
+            context.identity.project,
+            "g-writers",
+        )?
+        .ok_or("checkpoint")?;
+        let refused = checkpoint
+            .nodes
+            .iter()
+            .find(|node| node.id.ends_with("--refused"))
+            .ok_or("refused node")?;
+        assert!(refused.attempts.is_empty());
+        // Recovery also consumes the first deadline, even with a fresh caller budget.
+        drop(_held);
+        let started = std::time::Instant::now();
+        let error = serve(
+            &context,
+            "caller",
+            request("another"),
+            WaitBudget::cli(clock.mono_now(), 30)?,
+            &cancel,
+            &clock,
+        )
+        .expect_err("expired recovery");
+        assert_eq!(error.code(), "writer_lock_busy");
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+        assert!(
+            !project
+                .join(".worktrees/g-writers-parent--refused")
+                .exists()
+        );
+        assert!(git(&["branch", "--list", "g-writers-parent--refused"])?.is_empty());
         Ok(())
     }
 

@@ -613,3 +613,59 @@ fn lane_cli_and_mcp_share_wait_receipts_and_observation_errors() -> Result {
     }
     Ok(())
 }
+
+#[test]
+fn child_relay_honours_launch_allowance_longer_than_fifty_five_seconds() -> Result {
+    use provenant_fabric_runtime::graph::relay::RelayOp;
+    let mut rig = TestRig::new()?;
+    host(&rig, &["fabric", "task", "list", "--json"])?;
+    std::fs::write(
+        rig.state.join("config.toml"),
+        "schema_version=1\n[domains.fabric.graph]\nwriter_launch_seconds=60\n",
+    )?;
+    let attempt = AttemptId::from_bytes(provenant_os::fs::entropy_128()?);
+    let relay = provenant_fabric_mcp::lane::HostRelay::start_with_graph(
+        provenant_providers::LaneRuntime::fabric_socket(attempt),
+        provenant_records::Limits::CONFIG,
+        |_, _, _| unreachable!("expected graph request"),
+        move |arguments, _, within| {
+            assert!(within > std::time::Duration::from_secs(59), "{within:?}");
+            match serde_json::from_value::<RelayOp>(arguments)? {
+                RelayOp::Add(child) if child.brief == "Delayed child" => {
+                    // Model registry contention beyond the former socket ceiling.
+                    provenant_os::sys::wait_pause(std::time::Duration::from_secs(56));
+                    Ok(json!({"parent_attempt":attempt.to_string(),"revision":2}))
+                }
+                RelayOp::Add(_) => Err(provenant_fabric_mcp::tools::ServiceError::Facade(
+                    provenant_fabric_mcp::tools::FacadeError::WriterLockBusy,
+                )),
+                _ => unreachable!("unexpected graph operation"),
+            }
+        },
+    );
+    let _relay = match relay {
+        Ok(relay) => relay,
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+            provenant_test_support::skip_sandbox_dependent_test(format!(
+                "child relay socket: {error}"
+            ))?;
+            return Ok(());
+        }
+        Err(error) => return Err(error.into()),
+    };
+    lane_environment(&mut rig, attempt)?;
+    let output = rig.command(&["run", "Delayed child", "--wait=1s", "--json"])?;
+    let receipt: Value = serde_json::from_slice(&output.stdout.bytes)?;
+    assert_eq!(receipt["data"]["receipt"]["revision"], 2, "{receipt}");
+    assert_eq!(receipt["data"]["observation_error"], "child wait timed out");
+    let output = rig.command(&["run", "Refused child", "--wait=1s", "--json"])?;
+    let refused: Value = serde_json::from_slice(&output.stdout.bytes)?;
+    assert_eq!(refused["error"]["code"], "writer_lock_busy", "{refused}");
+    assert!(
+        refused["error"]["diagnostic"]["next"]
+            .as_str()
+            .is_some_and(|next| next.contains("retry")),
+        "{refused}"
+    );
+    Ok(())
+}

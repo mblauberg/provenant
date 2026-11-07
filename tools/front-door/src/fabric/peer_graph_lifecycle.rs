@@ -513,7 +513,7 @@ fn accepted_attempt_observes_stable_host_after_alias_is_renamed()
     assert_eq!(factory.context.peer_host("old_alias"), Some(host));
     let cancel = CancelToken::new();
     let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
-    let mut owner = BoundGraphOwner { admission_timeout: None, launch_warnings: Vec::new(), repo_facts: Default::default(), factory: &factory,
+    let mut owner = BoundGraphOwner { writer_launch_budget: None, admission_timeout: None, launch_warnings: Vec::new(), repo_facts: Default::default(), factory: &factory,
         integration_base: None, integration_branch: None, network: None,
         capability_overrides: Default::default(), exclude: Vec::new(), budget,
         cancel: &cancel, prices: None, tick: false };
@@ -544,7 +544,7 @@ fn accepted_attempt_observes_stable_host_after_alias_is_renamed()
     let renamed = factory.for_graph_directory(&rig.project)?;
     assert_eq!(renamed.context.peer_host("old_alias"), None);
     assert_eq!(renamed.context.peer_host("new_alias"), Some(host));
-    let mut owner = BoundGraphOwner { admission_timeout: None, factory: &renamed, ..owner };
+    let mut owner = BoundGraphOwner { writer_launch_budget: None, admission_timeout: None, factory: &renamed, ..owner };
     let replayed = owner.observe_or_start(&key, node(), &route, graph::AccessMode::ReadOnly, None,
         graph::Replay { delivery: None, branch: None, fast_forward_only: false,
             stored_ref: Some(&reference), launch_actor: &actor })?;
@@ -610,7 +610,7 @@ esac
         };
         let cancel = CancelToken::new();
         let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
-        let mut graph_owner = BoundGraphOwner { admission_timeout: None, launch_warnings: Vec::new(), repo_facts: Default::default(), factory: &factory, integration_base: None,
+        let mut graph_owner = BoundGraphOwner { writer_launch_budget: None, admission_timeout: None, launch_warnings: Vec::new(), repo_facts: Default::default(), factory: &factory, integration_base: None,
             integration_branch: None, network: None, capability_overrides: Default::default(),
             exclude: Vec::new(), budget, cancel: &cancel, prices: None, tick: false };
         let actor = graph_owner.actor();
@@ -707,7 +707,7 @@ fn graph_peer_without_receipt_keeps_launch_and_cancellation_uncertain()
     };
     let cancel = CancelToken::new();
     let budget = WaitBudget::cli(factory.clock.mono_now(), 10)?;
-    let mut owner = BoundGraphOwner { admission_timeout: None, launch_warnings: Vec::new(), repo_facts: Default::default(),
+    let mut owner = BoundGraphOwner { writer_launch_budget: None, admission_timeout: None, launch_warnings: Vec::new(), repo_facts: Default::default(),
         factory: &factory, integration_base: None, integration_branch: None,
         network: None, capability_overrides: Default::default(), exclude: Vec::new(),
         budget, cancel: &cancel, prices: None, tick: false,

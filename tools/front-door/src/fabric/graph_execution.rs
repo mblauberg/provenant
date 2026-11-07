@@ -119,6 +119,7 @@ pub(crate) fn tick_graphs(
                     workers,
                 };
                 let mut owner = BoundGraphOwner {
+                    writer_launch_budget: None,
                     admission_timeout: None,
                     launch_warnings: Vec::new(),
                     repo_facts: Default::default(),
@@ -790,6 +791,7 @@ impl Factory {
                 None
             };
             let mut owner = BoundGraphOwner {
+                writer_launch_budget: None,
                 admission_timeout,
                 launch_warnings: Vec::new(),
                 repo_facts: facts.clone(),
@@ -919,6 +921,7 @@ impl Factory {
                 }
             }
             let mut graph_owner = BoundGraphOwner {
+                writer_launch_budget: None,
                 admission_timeout: None,
                 launch_warnings: Vec::new(),
                 repo_facts: facts.clone(),

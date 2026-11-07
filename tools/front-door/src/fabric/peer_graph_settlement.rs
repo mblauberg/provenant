@@ -23,7 +23,7 @@ fn graph_review_launch_submits_pinned_source_and_base() -> Result<(), Box<dyn st
     };
     let cancel = CancelToken::new();
     let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
-    let mut graph_owner = BoundGraphOwner { admission_timeout: None, launch_warnings: Vec::new(), repo_facts: Default::default(), factory: &factory, integration_base: None,
+    let mut graph_owner = BoundGraphOwner { writer_launch_budget: None, admission_timeout: None, launch_warnings: Vec::new(), repo_facts: Default::default(), factory: &factory, integration_base: None,
         integration_branch: None, network: None, capability_overrides: Default::default(), exclude: Vec::new(), budget, cancel: &cancel,
         prices: None, tick: false };
     let actor = graph_owner.actor();
@@ -84,7 +84,7 @@ fn child_launch_refuses_credential_and_state_roots_at_the_host()
     };
     let cancel = CancelToken::new();
     let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
-    let mut owner = BoundGraphOwner { admission_timeout: None, launch_warnings: Vec::new(), repo_facts: Default::default(), factory: &factory, integration_base: None,
+    let mut owner = BoundGraphOwner { writer_launch_budget: None, admission_timeout: None, launch_warnings: Vec::new(), repo_facts: Default::default(), factory: &factory, integration_base: None,
         integration_branch: None, network: None, capability_overrides: Default::default(),
         exclude: Vec::new(), budget, cancel: &cancel, prices: None, tick: false };
     let actor = owner.actor();
@@ -151,7 +151,7 @@ fn pinned_review_range_survives_moved_ref_and_another_checkout() -> Result<(), B
     };
     let cancel = CancelToken::new();
     let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
-    let mut owner = BoundGraphOwner { admission_timeout: None, launch_warnings: Vec::new(), repo_facts: Default::default(), factory: &factory, integration_base: None,
+    let mut owner = BoundGraphOwner { writer_launch_budget: None, admission_timeout: None, launch_warnings: Vec::new(), repo_facts: Default::default(), factory: &factory, integration_base: None,
         capability_overrides: (Vec::new(), Vec::new()),
         integration_branch: None, network: None, exclude: Vec::new(), budget, cancel: &cancel, prices: None, tick: false };
     let pinned = owner.resolve_review_base("review-pin", Some(rig.project.to_str().ok_or("project")?))?.ok_or("base")?;
@@ -178,7 +178,7 @@ fn pinned_review_range_survives_moved_ref_and_another_checkout() -> Result<(), B
     let replayed = match reattached { graph::AttemptObservation::Pending { attempt_ref } | graph::AttemptObservation::Unknown { attempt_ref } | graph::AttemptObservation::Terminal { attempt_ref, .. } => attempt_ref.ok_or("replay reference")? };
     assert_eq!(replayed, reference);
     let other_factory = factory.for_graph_directory(&other)?;
-    let mut replay_owner = BoundGraphOwner { admission_timeout: None, launch_warnings: Vec::new(), repo_facts: Default::default(), factory: &other_factory, integration_base: None,
+    let mut replay_owner = BoundGraphOwner { writer_launch_budget: None, admission_timeout: None, launch_warnings: Vec::new(), repo_facts: Default::default(), factory: &other_factory, integration_base: None,
         capability_overrides: (Vec::new(), Vec::new()),
         integration_branch: None, network: None, exclude: Vec::new(), budget, cancel: &cancel, prices: None, tick: false };
     replay_owner.observe_or_start(&key, node(), &route, graph::AccessMode::ReadOnly, Some(rig.project.to_str().ok_or("source path")?),
@@ -225,7 +225,7 @@ fn implicit_writer_binding_uses_verified_worktree_head() -> Result<(), Box<dyn s
     };
     let cancel = CancelToken::new();
     let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
-    let mut owner = BoundGraphOwner { admission_timeout: None, launch_warnings: Vec::new(), repo_facts: Default::default(), factory: &factory, integration_base: None,
+    let mut owner = BoundGraphOwner { writer_launch_budget: None, admission_timeout: None, launch_warnings: Vec::new(), repo_facts: Default::default(), factory: &factory, integration_base: None,
         capability_overrides: (Vec::new(), Vec::new()),
         integration_branch: None, network: None, exclude: Vec::new(), budget, cancel: &cancel,
         prices: None, tick: false };
@@ -258,7 +258,7 @@ fn integrating_graph_writer_refuses_a_source_outside_the_pinned_base() -> Result
     };
     let cancel = CancelToken::new();
     let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
-    let mut owner = BoundGraphOwner { admission_timeout: None, launch_warnings: Vec::new(), repo_facts: Default::default(), factory: &factory,
+    let mut owner = BoundGraphOwner { writer_launch_budget: None, admission_timeout: None, launch_warnings: Vec::new(), repo_facts: Default::default(), factory: &factory,
         capability_overrides: (Vec::new(), Vec::new()),
         integration_base: Some(BoundGraphBases { integration: Some(base.parse()?), review: None }),
         integration_branch: Some("batch".into()), network: None, exclude: Vec::new(),
@@ -413,7 +413,7 @@ fn graph_replay_preserves_accepted_context_without_a_checkpoint_reference()
     assert_eq!(graph_task.route, plain_task.route);
     assert_eq!(graph_task.access, plain_task.access);
     assert_eq!(graph_task.prompt_digest, plain_task.prompt_digest);
-    let mut graph_owner = BoundGraphOwner { admission_timeout: None, launch_warnings: Vec::new(), repo_facts: Default::default(),
+    let mut graph_owner = BoundGraphOwner { writer_launch_budget: None, admission_timeout: None, launch_warnings: Vec::new(), repo_facts: Default::default(),
         factory: &factory,
         integration_base: None,
         integration_branch: None,

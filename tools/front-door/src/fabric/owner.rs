@@ -8,6 +8,8 @@ pub(crate) struct BoundGraphBases {
 }
 
 pub(crate) struct BoundGraphOwner<'a> {
+    /// Active node's sealed launch allowance, independent of settlement observation.
+    pub(crate) writer_launch_budget: Option<WaitBudget>,
     /// Optional deadline for initial admission, supplied by a waited submission.
     pub(crate) admission_timeout: Option<WaitBudget>,
     pub(crate) factory: &'a Factory,
@@ -198,6 +200,38 @@ fn stored_graph_refusal(
 }
 
 impl BoundGraphOwner<'_> {
+    fn fast_forward_writer(
+        &self,
+        directory: &Path,
+        path: &Path,
+        head: provenant_core::GitOid,
+    ) -> Result<(), provenant_confinement::worktrees::WorktreeError> {
+        let budget = self.writer_launch_budget.unwrap_or(self.budget);
+        if budget.remaining(self.factory.clock.mono_now()).as_micros() == 0 {
+            return Err(provenant_confinement::worktrees::WorktreeError::RegistryLockTimeout);
+        }
+        provenant_confinement::worktrees::with_context_using_facts(
+            &self.factory.context.roots,
+            &self.factory.home,
+            directory,
+            &self.factory.clock,
+            self.cancel,
+            &self.repo_facts,
+            |context| {
+                if budget.remaining(self.factory.clock.mono_now()).as_micros() == 0 {
+                    return Err(
+                        provenant_confinement::worktrees::WorktreeError::RegistryLockTimeout,
+                    );
+                }
+                let context = provenant_confinement::worktrees::WorktreeContext {
+                    lock_budget: budget,
+                    ..*context
+                };
+                provenant_confinement::worktrees::fast_forward(&context, path, head, self.cancel)
+            },
+        )
+    }
+
     fn refusal_store(
         &self,
         scope: &GraphRefusalScope,
@@ -1184,7 +1218,52 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
         policy
     }
 
+    fn begin_launch(
+        &mut self,
+        access: provenant_fabric_runtime::graph::AccessMode,
+        deadline: Option<provenant_core::WallTime>,
+    ) -> Result<Option<provenant_core::WallTime>, Self::Error> {
+        if access != provenant_fabric_runtime::graph::AccessMode::WorktreeWrite {
+            self.writer_launch_budget = None;
+            return Ok(None);
+        }
+        let now = self.factory.clock.mono_now();
+        let wall = self
+            .factory
+            .clock
+            .wall_now()
+            .map_err(|_| FacadeError::StateCorrupt)?;
+        let budget = match deadline {
+            Some(end) => WaitBudget::up_to(
+                now,
+                provenant_core::DurationMicros::from_micros(
+                    end.as_micros().saturating_sub(wall.as_micros()).max(0) as u64,
+                ),
+            ),
+            None => provenant_cli::fabric::graph_relay::writer_launch_budget(
+                &self.factory.context,
+                &self.factory.clock,
+                self.budget,
+            ),
+        };
+        self.writer_launch_budget = Some(budget);
+        Ok(Some(
+            deadline.unwrap_or(
+                wall.checked_add(budget.remaining(now))
+                    .map_err(|_| FacadeError::StateCorrupt)?,
+            ),
+        ))
+    }
+
     fn admission_timeout_seconds(&self) -> Option<u64> {
+        if let Some(budget) = self.writer_launch_budget {
+            return Some(
+                budget
+                    .remaining(self.factory.clock.mono_now())
+                    .as_micros()
+                    .div_ceil(1_000_000),
+            );
+        }
         let configured = provenant_confinement::run_config::RunConfig::read(
             self.factory.context.roots.state.as_path(),
         )
@@ -1486,7 +1565,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             path,
             branch,
             base,
-            self.budget,
+            self.writer_launch_budget.unwrap_or(self.budget),
             self.cancel,
         )
         .map_err(|error| run_error(error.into()))?;
@@ -1494,11 +1573,11 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
     }
 
     fn provision_child_worktree(&mut self, path: &str, source: &str) -> Result<bool, Self::Error> {
-        provenant_cli::fabric::graph_relay::provision_child(
+        provenant_cli::fabric::graph_relay::provision_child_with_budget(
             &self.factory.context,
             path,
             source,
-            self.budget,
+            self.writer_launch_budget.unwrap_or(self.budget),
             self.cancel,
         )
         .map(|()| true)
@@ -2616,42 +2695,27 @@ impl BoundGraphOwner<'_> {
                 let head = commit
                     .parse()
                     .map_err(|_| FacadeError::InvalidInput { detail: None })?;
-                provenant_confinement::worktrees::with_context_using_facts(
-                    &self.factory.context.roots,
-                    &self.factory.home,
-                    writer_directory,
-                    &self.factory.clock,
-                    self.cancel,
-                    &self.repo_facts,
-                    |context| {
-                        provenant_confinement::worktrees::fast_forward(
-                            context,
-                            Path::new(path),
-                            head,
-                            self.cancel,
+                self.fast_forward_writer(writer_directory, Path::new(path), head)
+                    .map_err(|error| {
+                        let diagnostic = matches!(
+                            error,
+                            provenant_confinement::worktrees::WorktreeError::Dirty(_)
                         )
-                    },
-                )
-                .map_err(|error| {
-                    let diagnostic = matches!(
-                        error,
-                        provenant_confinement::worktrees::WorktreeError::Dirty(_)
-                    )
-                    .then(|| {
-                        provenant_records::diagnostic::Diagnostic::new("WRITER_SCOPE")
-                            .category("refused")
-                            .detail("the writer worktree has uncommitted edits")
-                            .next("commit or preserve the worktree changes before retrying")
-                    });
-                    let error = graph_writer_initialisation_error(commit, error);
-                    match diagnostic {
-                        Some(diagnostic) => self
-                            .retain_graph_refusal(refusal, &error, diagnostic)
-                            .err()
-                            .unwrap_or(error),
-                        None => error,
-                    }
-                })?;
+                        .then(|| {
+                            provenant_records::diagnostic::Diagnostic::new("WRITER_SCOPE")
+                                .category("refused")
+                                .detail("the writer worktree has uncommitted edits")
+                                .next("commit or preserve the worktree changes before retrying")
+                        });
+                        let error = graph_writer_initialisation_error(commit, error);
+                        match diagnostic {
+                            Some(diagnostic) => self
+                                .retain_graph_refusal(refusal, &error, diagnostic)
+                                .err()
+                                .unwrap_or(error),
+                            None => error,
+                        }
+                    })?;
             }
             let delivery = if let Some(mode) = replay.delivery {
                 let branch = if let Some(path) = worktree {
@@ -3130,7 +3194,7 @@ impl BoundGraphOwner<'_> {
             }
             let receipt = owner.submit_with_access(
                 input,
-                self.budget,
+                self.writer_launch_budget.unwrap_or(self.budget),
                 self.cancel,
                 grants,
                 retry_limit,
@@ -3563,6 +3627,127 @@ mod journal_error_tests {
     }
 
     #[test]
+    #[allow(clippy::disallowed_methods)] // Real registry contention across two launch stages.
+    fn provision_and_later_registry_acquisition_share_the_launch_deadline()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use super::*;
+        if super::super::peer_tests::host_test(
+            "fabric::owner::journal_error_tests::provision_and_later_registry_acquisition_share_the_launch_deadline",
+        )? {
+            return Ok(());
+        }
+        use provenant_fabric_runtime::graph::{AccessMode, AttemptOwner};
+        use provenant_os::fs::{Directory, LockMode};
+        let rig = crate::worktree_tests::repository()?;
+        crate::worktree_tests::git(&rig, &["commit", "--allow-empty", "-m", "base"])?;
+        let source = crate::worktree_tests::git(&rig, &["rev-parse", "HEAD"])?;
+        let roots = crate::roots::child(&rig.home, &rig.project, rig.state.clone())?;
+        let mut factory = Factory {
+            context: Context::open(roots, &rig.home, &rig.project)?,
+            project_attribution: false,
+            clock: SystemClock,
+            backoff: ThreadPause,
+            executor: SystemExecutor::new(1)?,
+            home: rig.home.clone(),
+            cwd: rig.project.clone(),
+            assets: rig.project.clone(),
+            host_launch: None,
+            mcp_project: None,
+            workers: &provenant_confinement::worktrees::SystemWorkerObserver,
+        };
+        factory.context.config.graph.writer_launch_seconds = 12;
+        let cancel = CancelToken::new();
+        let settlement = WaitBudget::cli(factory.clock.mono_now(), 1)?;
+        let mut owner = BoundGraphOwner {
+            writer_launch_budget: None,
+            admission_timeout: Some(settlement),
+            factory: &factory,
+            repo_facts: Default::default(),
+            launch_warnings: Vec::new(),
+            integration_base: None,
+            integration_branch: None,
+            network: None,
+            capability_overrides: Default::default(),
+            exclude: Vec::new(),
+            budget: settlement,
+            cancel: &cancel,
+            prices: None,
+            tick: false,
+        };
+        let deadline = owner
+            .begin_launch(AccessMode::WorktreeWrite, None)?
+            .ok_or("deadline")?;
+        owner.provision_writer_worktree(".worktrees/later", "later", source.trim())?;
+        let budget = owner.writer_launch_budget.ok_or("budget")?;
+        let directory = Directory::open_anchor(
+            &rig.state
+                .join("worktrees")
+                .join(factory.context.identity.project.to_string()),
+        )?;
+        let held = directory.lock(
+            std::ffi::OsStr::new("worktrees.lock"),
+            LockMode::Exclusive,
+            WaitBudget::nonblocking(factory.clock.mono_now()),
+            &cancel,
+            &factory.clock,
+        )?;
+        std::thread::scope(|scope| -> Result<(), Box<dyn std::error::Error>> {
+            scope.spawn(move || {
+                std::thread::sleep(std::time::Duration::from_secs(6));
+                drop(held);
+            });
+            owner.fast_forward_writer(
+                &rig.project,
+                &rig.project.join(".worktrees/later"),
+                source.trim().parse()?,
+            )?;
+            Ok(())
+        })?;
+        assert_eq!(
+            settlement.remaining(factory.clock.mono_now()).as_micros(),
+            0
+        );
+        assert_eq!(
+            owner.writer_launch_budget.ok_or("budget")?.deadline(),
+            budget.deadline()
+        );
+        assert_eq!(
+            owner.begin_launch(AccessMode::WorktreeWrite, Some(deadline))?,
+            Some(deadline)
+        );
+        assert!(owner.admission_timeout_seconds().ok_or("remaining")? <= 6);
+        let _held = directory.lock(
+            std::ffi::OsStr::new("worktrees.lock"),
+            LockMode::Exclusive,
+            WaitBudget::nonblocking(factory.clock.mono_now()),
+            &cancel,
+            &factory.clock,
+        )?;
+        assert!(matches!(
+            owner.fast_forward_writer(
+                &rig.project,
+                &rig.project.join(".worktrees/later"),
+                source.trim().parse()?
+            ),
+            Err(provenant_confinement::worktrees::WorktreeError::RegistryLockTimeout)
+        ));
+        assert_eq!(
+            owner
+                .writer_launch_budget
+                .ok_or("budget")?
+                .remaining(factory.clock.mono_now())
+                .as_micros(),
+            0
+        );
+        assert_eq!(
+            crate::worktree_tests::git(&rig, &["-C", ".worktrees/later", "rev-parse", "HEAD"])?
+                .trim(),
+            source.trim()
+        );
+        Ok(())
+    }
+
+    #[test]
     fn graph_refusal_replays_before_preparation_and_rejects_changed_intent()
     -> Result<(), Box<dyn std::error::Error>> {
         use super::*;
@@ -3589,6 +3774,7 @@ mod journal_error_tests {
         };
         let cancel = CancelToken::new();
         let mut owner = BoundGraphOwner {
+            writer_launch_budget: None,
             admission_timeout: None,
             factory: &factory,
             repo_facts: Default::default(),

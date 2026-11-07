@@ -348,7 +348,7 @@ mod graph_writer_admission_tests {
             }]
         }))?;
         let budget = WaitBudget::cli(factory.clock.mono_now(), 60)?;
-        let mut owner = BoundGraphOwner { admission_timeout: None, launch_warnings: Vec::new(), repo_facts: Default::default(),
+        let mut owner = BoundGraphOwner { writer_launch_budget: None, admission_timeout: None, launch_warnings: Vec::new(), repo_facts: Default::default(),
             factory: &factory,
             integration_base: None,
             integration_branch: None,
@@ -565,7 +565,7 @@ mod graph_writer_admission_tests {
             extra: Default::default(), review_base:None, integration_base:None,
             directory:rig.project.clone(), document:document.clone(),
         })?;
-        let mut owner = BoundGraphOwner { admission_timeout: None, launch_warnings: Vec::new(),
+        let mut owner = BoundGraphOwner { writer_launch_budget: None, admission_timeout: None, launch_warnings: Vec::new(),
             repo_facts:Default::default(), factory:&factory, integration_base:None,
             integration_branch:None, network:None, capability_overrides:Default::default(),
             exclude:Vec::new(), budget, cancel:&cancel, prices:None, tick:false,
@@ -1269,7 +1269,7 @@ mod result_tests {
             workers: &FreeWorkers,
         };
         let cancel = CancelToken::new();
-        let mut owner = BoundGraphOwner { admission_timeout: None, launch_warnings: Vec::new(), repo_facts: Default::default(),
+        let mut owner = BoundGraphOwner { writer_launch_budget: None, admission_timeout: None, launch_warnings: Vec::new(), repo_facts: Default::default(),
             capability_overrides: (Vec::new(), Vec::new()),
             factory: &factory,
             integration_base: None,
@@ -2800,7 +2800,7 @@ mod provisioned_writer_submission_tests {
         let cancel = CancelToken::new();
         let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
         let mut owner = BoundGraphOwner {
-            admission_timeout: None,
+            writer_launch_budget: None, admission_timeout: None,
             launch_warnings: Vec::new(),
             repo_facts: Default::default(),
             factory: &factory,

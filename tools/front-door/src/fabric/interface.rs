@@ -468,8 +468,14 @@ impl Factory {
             })
             .transpose()
             .map_err(|_| FacadeError::InvalidInput { detail: None })?;
+        let launch = provenant_cli::fabric::graph_relay::writer_launch_budget(
+            &self.context,
+            &self.clock,
+            budget,
+        );
         let within =
-            std::time::Duration::from_micros(budget.remaining(self.clock.mono_now()).as_micros());
+            std::time::Duration::from_micros(launch.remaining(self.clock.mono_now()).as_micros())
+                .saturating_add(std::time::Duration::from_secs(1));
         let receipt = provenant_cli::fabric::graph_relay::from_lane(&request, cancel, within)
             .map_err(relay_error)?;
         if let Some(settlement) = settlement {
@@ -3276,6 +3282,7 @@ mod tests {
                     source
                 );
                 let mut owner = BoundGraphOwner {
+                    writer_launch_budget: None,
                     admission_timeout: None,
                     launch_warnings: Vec::new(),
                     repo_facts: Default::default(),

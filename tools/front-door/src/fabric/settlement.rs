@@ -215,6 +215,7 @@ fn advance_attempt_graph(
         workers,
     };
     let mut owner = BoundGraphOwner {
+        writer_launch_budget: None,
         admission_timeout: None,
         launch_warnings: Vec::new(),
         repo_facts: Default::default(),
