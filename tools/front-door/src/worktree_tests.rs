@@ -4186,33 +4186,31 @@ if (process.argv[2] === 'child') {
             "native probe failures: {}",
             failures.join("; ")
         );
-        // Remove the writer's scratch-execution grant from the actual
-        // compiled profile. The same table cells must still run independently:
-        // only the temporary-script cell needs this grant.
+        // Deny scratch execution in the actual compiled writer profile. The
+        // same table cells must still run independently: only the temporary
+        // script needs to execute from scratch.
         let path = scratch
             .to_str()
             .ok_or("scratch path is not UTF-8")?
             .replace('\\', "\\\\")
             .replace('"', "\\\"");
-        let grant = format!("(allow process-exec (subpath \"{path}\"))\n");
+        let deny = format!("(deny process-exec (subpath \"{path}\"))\n");
         let selected = ["python3", "here-document", "temporary script"];
         let mut baseline = Vec::new();
-        let mut removed = Vec::new();
+        let mut denied = Vec::new();
         for (name, cell) in cells
             .iter()
             .copied()
             .filter(|(name, _)| selected.contains(name))
         {
-            for (remove, failures) in [(false, &mut baseline), (true, &mut removed)] {
+            for (restrict, failures) in [(false, &mut baseline), (true, &mut denied)] {
                 let argv = [OsString::from("/bin/sh"), OsString::from("-c"), cell.into()];
                 let mut command =
                     compiled.command(&argv, &provenant_core::AttemptId::from_bytes([0; 16]))?;
-                if remove {
+                if restrict {
                     let source = command[2].to_str().ok_or("sandbox profile")?;
-                    if source.matches(grant.as_str()).count() != 1 {
-                        return Err("scratch execution grant was not unique".into());
-                    }
-                    command[2] = source.replacen(grant.as_str(), "", 1).into();
+                    assert!(source.lines().any(|line| line == "(allow process-exec)"));
+                    command[2] = format!("{source}\n{deny}").into();
                 }
                 let mut options = ExecOptions::new(&command, &launch.cwd, Duration::from_secs(30));
                 options.process_group = true;
@@ -4226,9 +4224,9 @@ if (process.argv[2] === 'child') {
         }
         assert!(baseline.is_empty(), "baseline cells failed: {baseline:?}");
         assert_eq!(
-            removed,
+            denied,
             ["temporary script"],
-            "grant removal affected unexpected cells"
+            "scratch execution denial affected unexpected cells"
         );
     }
     // Start the configured MCP inside the compiled profile too: an

@@ -698,6 +698,10 @@ fn remote_only_writer_cli_starts_at_remote_tip() -> Result {
         report["data"]["checkpoint"]["nodes"][0]["source_commit"],
         remote_tip
     );
+    assert_eq!(
+        report["data"]["checkpoint"]["nodes"][0]["new_worktree_base"], remote_tip,
+        "recovery must retain the selected remote tip before provisioning"
+    );
     assert!(combined.contains("warning: ignoring --base"), "{combined}");
 
     let args = vec![
@@ -861,6 +865,8 @@ fn graph_opencode_observes_v2_wal_session() -> Result {
                 "zen"
             };
             assert_eq!(lane["account"], account, "{lane}");
+            // Unlisted models must reach the provider exactly as requested.
+            assert_eq!(lane["applied_route"]["model"], model, "{lane}");
             assert_eq!(lane["applied_route"]["account_label"], account, "{lane}");
             assert_eq!(lane["applied_route"]["account_key"], account, "{lane}");
             if expected == "succeeded" {

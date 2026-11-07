@@ -1122,9 +1122,38 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
 
     fn resolve_creation_base(
         &mut self,
+        branch: &str,
         reference: &str,
         default_base: bool,
     ) -> Result<Option<String>, Self::Error> {
+        // Only a new top-level writer may prefer a remote-only branch. Child
+        // provisioning and recovery always use their checkpointed source.
+        let remote_tip = provenant_confinement::worktrees::with_context_using_facts(
+            &self.factory.context.roots,
+            &self.factory.home,
+            &self.factory.cwd,
+            &self.factory.clock,
+            self.cancel,
+            &self.repo_facts,
+            |context| {
+                provenant_confinement::worktrees::fetch_remote_branch_tip(
+                    context,
+                    branch,
+                    self.cancel,
+                )
+            },
+        )
+        .map_err(landing::repository_fact_error)?;
+        if let Some(tip) = remote_tip {
+            if !default_base && reference != tip.to_string() {
+                let warning = format!(
+                    "ignoring --base {reference} for --branch {branch}; using remote tip {tip}"
+                );
+                let _ = writeln!(std::io::stderr().lock(), "warning: {warning}");
+                self.launch_warnings.push(warning);
+            }
+            return Ok(Some(tip.to_string()));
+        }
         if default_base {
             let (base, warnings) = provenant_confinement::worktrees::with_context_using_facts(
                 &self.factory.context.roots,
@@ -2946,6 +2975,22 @@ impl BoundGraphOwner<'_> {
             // These fields have already been resolved into the sealed access grants.
             attempt.write_roots.clear();
             attempt.capabilities.clear();
+            // Preparation runs in a detached launcher whose stderr is not
+            // inherited. Warn at the graph host and retain it in the checkpoint.
+            if !accepted
+                && let Some(model) = route.model.as_deref()
+                && let Ok(model) =
+                    provenant_routing::ModelId::parse(&exact_model(route.adapter.as_deref(), model))
+                && let Ok(catalogue) = provenant_routing::Catalogue::bundled()
+                && catalogue.model(&model).is_none()
+            {
+                let warning = format!(
+                    "model {} is not in the catalogue; the provider will check it",
+                    model.as_str()
+                );
+                let _ = writeln!(std::io::stderr().lock(), "warning: {warning}");
+                self.launch_warnings.push(warning);
+            }
             let receipt = owner.submit_with_access(
                 input,
                 self.budget,

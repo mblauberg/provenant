@@ -2062,12 +2062,23 @@ Inside a macOS lane, `--root PID --json` returns an owned subtree's `pid`, `ppid
 
 | Argument | Contract |
 |---|---|
+| `--all` | `{"defaults": ["false"], "description": "Include expired overrides", "name": "all", "values": ["true", "false"]}` |
 | `--help` | `{"description": "Print help", "name": "help"}` |
 | `--version` | `{"description": "Print version", "name": "version"}` |
 
 ```json
 {
-  "description": "List recorded schedules, their current activity and remaining time"
+  "description": "List recorded schedules, their current activity and remaining time",
+  "groups": [
+    {
+      "arguments": [
+        "all"
+      ],
+      "multiple": true,
+      "name": "OverrideList",
+      "required": false
+    }
+  ]
 }
 ```
 

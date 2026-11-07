@@ -408,9 +408,10 @@ pub trait AttemptOwner {
         Vec::new()
     }
 
-    /// Resolve an omitted creation base using the host's default-branch policy.
+    /// Resolve a new writer's base before checkpointing any Git effects.
     fn resolve_creation_base(
         &mut self,
+        _branch: &str,
         reference: &str,
         _default_base: bool,
     ) -> Result<Option<String>, Self::Error> {
@@ -2063,6 +2064,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                             None => {
                                 let base = owner
                                     .resolve_creation_base(
+                                        &spec.branch,
                                         &spec.base,
                                         spec.extra
                                             .get("default_base")

@@ -58,6 +58,13 @@ fn remote_only_writer_branch_is_fetched_even_outside_fetch_refspec() -> Result<(
     let context = test.context();
     let tip = fetch_remote_branch_tip(&context, "remote-only", &cancel())?
         .ok_or("remote branch tip was not fetched")?;
+    assert_eq!(tip, source.head()?);
+    let tracking = fixture.run(&[
+        "for-each-ref",
+        "--format=%(refname)",
+        "refs/remotes/origin/remote-only",
+    ])?;
+    assert!(tracking.stdout.bytes.is_empty());
     let created = create(
         &context,
         WorktreeCreate {
@@ -67,6 +74,13 @@ fn remote_only_writer_branch_is_fetched_even_outside_fetch_refspec() -> Result<(
         &cancel(),
     )?;
     assert_eq!(created.head, tip);
+    source.run(&["commit", "--allow-empty", "-m", "move remote"])?;
+    source.run(&["branch", "-f", "remote-only", "HEAD"])?;
+    assert_ne!(source.head()?, tip);
+    assert_eq!(
+        fetch_remote_branch_tip(&context, "remote-only", &cancel())?,
+        None
+    );
     let local_tip = fixture.run(&["rev-parse", "refs/heads/remote-only"])?;
     assert_eq!(
         GitOid::parse(std::str::from_utf8(&local_tip.stdout.bytes)?.trim())?,
