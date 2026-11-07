@@ -442,53 +442,38 @@ Review lanes dispatched with a head also receive `PROVENANT_LANE_HEAD` and
 `PROVENANT_LANE_BASE`, containing the resolved commit SHAs.
 In that environment Fabric refuses coordination mutations
 (`lane_coordination_refused`) and local resume (`continuation_unsupported`);
-reads, and submit, cancel and output on the child store, remain.
+graph submission, subtree stop and graph reads cross the attempt-bound host
+relay. `status`, `output` and `output --trace` select the calling graph or its
+children; journals and credentials stay on the host.
 - Why: a lane must not move shared tasks, claims or leases.
 - Test: `tests/fabric_transport.rs::lane_mcp_refuses_coordination_but_allows_reads_and_child_submission`;
   `crates/providers/src/lane.rs::lane_mcp_entries_have_attempt_unique_agent_labels`
 - Owner: `crates/providers/src/lane.rs`
 
-### Child stores
-
-Each attempt's child run store is `RUN_STATE/children/<AttemptId>/`; the
-launch grants only that subtree, never `STATE/runs/` or the parent
-database. Submission refuses a child above `lanes.max_depth` (default 2); the limit
-bounds recursion and grants no authority.
-- Why: a lane must not read or forge other runs' records.
-- Test: `src/worktree_tests.rs::lane_prepare_isolates_nested_state`;
-  `crates/run/src/dispatch_core_tests.rs::nested_lane_depth_stops_at_the_configured_maximum`
-- Owner: `crates/run/src/plan.rs`
-
 ### The host validates and launches children
 
-A lane's submission only seals queued child records; the host validates and
-launches them. No lane may propose a writer or delivering child. A child's
-network and roots must stay within the parent's, and it cannot continue an
-attempt. The host launches only the request it validated, refuses one whose
-digest changed, and launches at most one attempt per child task.
-The digest and derived IDs identify the canonical request submitted by the
-requester. The host applies inherited network restrictions as launch policy,
-validates the effective access against the parent, and checks the original
-digest again before launch. Every attempt's effective network is sealed in
-its holder context, so grandchildren inherit the bound. Older live contexts
-without this field use the same provider-only profile as other provider-only
-lanes. A child-store continuation
-is bounded by the requesting parent's host-sealed effective network, intersected
-with the requested access. Without a live sealed parent, the host uses
-the same provider-only profile as other provider-only lanes and emits a
-diagnostic. On macOS that profile currently permits outbound TCP 443 beyond
-provider endpoints; see [#2118](https://github.com/mblauberg/provenant/issues/2118).
-The prior lane's writable records do not supply the bound.
-- Why: a writer child could leave scripts that run unconfined, and child
-  storage is lane-writable, so only the host's sealed view counts.
-- Test: `crates/run/src/dispatch_tests.rs::host_refuses_writer_child_after_request_rewrite`;
-  `::host_refuses_child_access_beyond_its_parent_task`;
-  `::host_launches_only_the_validated_child_request`;
-  `::lane_continuation_respects_sealed_parent_or_provider_fallback`;
-  `crates/cli/src/run/children.rs::tests::restricted_parent_launches_child_with_inherited_chair`;
-  `::inherited_network_survives_holder_context_for_grandchildren`;
-  `::launch_seal_records_root_network_and_legacy_defaults_restrictively`
-- Owner: `crates/cli/src/run/children.rs`, `crates/run/src/admission.rs`
+`run` inside a lane submits a revisioned child patch through the host relay.
+The host resolves the parent from its custody-bound attempt, journals admission
+and launches through the ordinary graph owner. Children share the graph's
+budget and cancellation; a waiting parent yields its concurrency slot.
+
+Children may be writers with their own registered worktree or a checkout
+provisioned by the host. A child's roots and capabilities need not be a subset
+of the parent's. Selecting a scratch repository with `--project` preserves the
+read-only child's working directory. Ordinary launch policy still refuses
+credential roots, state roots and write roots overlapping the worktree. A
+refusal carries a safe cause and a repair the caller can act on.
+
+Retained legacy child stores under `RUN_STATE/children/<AttemptId>/` are not
+used for graph child admission. They retain their sealed request validation,
+parent-bound network policy and continuation restrictions when inspected or
+recovered; the graph relay does not widen those old records.
+- Why: any agent can launch nodes as it could call the provider directly,
+  without gaining the ability to write trusted host state.
+- Test: `src/fabric/interface.rs::tests::child_launch_crosses_the_lane_transport_and_provisions_writer_fanout`;
+  `src/fabric/lane_read_tests.rs`;
+  `crates/fabric-runtime/src/graph/relay_tests.rs`
+- Owner: `crates/cli/src/fabric/graph_relay.rs`, `src/fabric/owner.rs`
 
 ### Children run as the parent's requester
 

@@ -12,6 +12,12 @@ pub(super) fn output_with(
     edge: &Edge<'_>,
     local: Option<(&Session, &Target)>,
 ) -> Reply {
+    let read = output_inner(command.clone(), edge, local);
+    render_output(command, read)
+}
+
+/// Render a host-owned read through the same CLI projection.
+pub fn render_output(command: Output, read: Result<(Value, String), Fail>) -> Reply {
     let receipt_tail = matches!(command.part, Part::Receipt)
         .then_some(command.tail)
         .flatten();
@@ -20,7 +26,7 @@ pub(super) fn output_with(
     let to = command.to.clone();
     let mut out = reply(
         "output",
-        output_inner(command, edge, local).and_then(|(mut data, mut text)| {
+        read.and_then(|(mut data, mut text)| {
             if let Some(lines) = receipt_tail {
                 text =
                     text[tail_start(text.as_bytes(), lines.min(limits::TAIL_LINES))..].to_owned();
@@ -62,6 +68,31 @@ pub(super) fn output_with(
         }
     }
     out
+}
+
+/// Read a known local attempt using the caller's cancellation token.
+pub fn output_from_session(
+    command: Output,
+    edge: &Edge<'_>,
+    session: &Session,
+    target: Target,
+    call: &run::Request<'_>,
+) -> Reply {
+    let read = output_read(command.clone(), edge, session, target, call);
+    render_output(command, read)
+}
+
+/// Read a peer attempt using the owning service's budget and cancellation.
+pub fn output_from_host(
+    command: Output,
+    host: provenant_core::HostId,
+    attempt: provenant_core::AttemptId,
+    read: impl FnMut(
+        provenant_fabric_runtime::coordination::facade::OutputInput,
+    ) -> Result<provenant_fabric_runtime::coordination::facade::OutputResult, Fail>,
+) -> Reply {
+    let result = remote::read_output_with(&command, host, attempt, read);
+    render_output(command, result)
 }
 
 /// What an agent needs from a read: how the attempt settled, what it changed,

@@ -148,7 +148,7 @@ pub struct Fail {
     pub projection: Option<Box<provenant_records::diagnostic::Diagnostic>>,
 }
 impl Fail {
-    fn new(status: Status, kind: ErrorKind, message: impl Into<String>) -> Self {
+    pub fn new(status: Status, kind: ErrorKind, message: impl Into<String>) -> Self {
         Self {
             status,
             kind,

@@ -189,8 +189,21 @@ fn resolve_writer_with(
     }
     let worktree = provenant_confinement::verify_worktree(&repo, &path)
         .map_err(worktrees::WorktreeError::from)?;
+    let location = provenant_config::ProjectLocation::new(repo.common_git_dir()).map_err(error(
+        "resolve writer project binding",
+        Some(repo.common_git_dir()),
+    ))?;
+    let mut extra = provenant_records::ExtraFields::default();
+    if let Some(binding) = provenant_config::lookup_project_at_state(state, &location).map_err(
+        error("read writer project binding", Some(repo.common_git_dir())),
+    )? {
+        extra.insert(
+            "custody_project".into(),
+            serde_json::json!(binding.project_id()),
+        );
+    }
     Ok(WriterRequest {
-        extra: Default::default(),
+        extra,
         project: project.to_path_buf(),
         worktree: worktree.path().to_path_buf(),
     })
@@ -491,6 +504,37 @@ fn writer_branch(worktree: &VerifiedWorktree) -> Result<GitRefName> {
 
 /// Reopen the persisted scope and verify current Git worktree membership.
 /// The subsequent supervisor writer flock supplies exclusion.
+/// Persisted source-project custody binding. Older requests keep their original
+/// attribution namespace during recovery.
+pub(crate) fn writer_project_id(
+    request: &WriterRequest,
+    attribution: ProjectId,
+) -> Result<ProjectId> {
+    request
+        .extra
+        .get("custody_project")
+        .map(|value| {
+            serde_json::from_value(value.clone())
+                .map_err(|_| RunError::Validation("invalid writer custody project"))
+        })
+        .transpose()
+        .map(|project| project.unwrap_or(attribution))
+}
+
+impl crate::RunStore {
+    pub(crate) fn writer_slot(
+        &self,
+        writer: &WriterRequest,
+        attribution: ProjectId,
+    ) -> Result<PathBuf> {
+        Ok(self
+            .writer_registry
+            .join("worktrees")
+            .join(writer_project_id(writer, attribution)?.to_string())
+            .join(worktrees::state_dir_name(&writer.worktree)))
+    }
+}
+
 pub fn prepare_writer(
     request: &WriterRequest,
     state: &Path,
@@ -524,7 +568,35 @@ pub fn prepare_writer_with_facts(
         branch.clone(),
         &CancelToken::new(),
     )?;
+    // Run attribution may belong to a graph in another project. Custody must
+    // still share the selected repository's ordinary writer-lock namespace.
+    let location = provenant_config::ProjectLocation::new(repo.common_git_dir()).map_err(error(
+        "resolve writer project binding",
+        Some(repo.common_git_dir()),
+    ))?;
+    let custody_project = writer_project_id(request, project)?;
+    if request.extra.contains_key("custody_project") {
+        let binding = provenant_config::lookup_project_at_state(state, &location)
+            .map_err(error(
+                "read writer project binding",
+                Some(repo.common_git_dir()),
+            ))?
+            .ok_or(RunError::Validation(
+                "writer custody project is not registered",
+            ))?;
+        if binding.project_id() != custody_project {
+            return Err(RunError::Validation(
+                "writer custody project does not match its repository",
+            ));
+        }
+    }
     let state_dir = Directory::open_anchor(state)?;
+    if custody_project != project {
+        let references = crate::artifacts::subdir(&state_dir, OsStr::new("writer-projects"), true)?;
+        let parent = crate::artifacts::subdir(&references, OsStr::new(&project.to_string()), true)?;
+        crate::artifacts::subdir(&parent, OsStr::new(&custody_project.to_string()), true)?;
+    }
+    let project = custody_project;
     let projects = crate::artifacts::subdir(&state_dir, OsStr::new("worktrees"), true)
         .map_err(|error| anchor_filesystem(error, state))?;
     let project_state = crate::artifacts::subdir(&projects, OsStr::new(&project.to_string()), true)
@@ -1867,7 +1939,7 @@ impl crate::RunStore {
         let checked = (|| -> Result<()> {
             call.check()?;
             let metadata = slot.metadata()?;
-            let listing = self.writer_fence_listing()?;
+            let listing = self.writer_fence_listing_for_admission(true)?;
             for issue in listing.issues {
                 for parent in issue.reservation.ancestors().skip(1).take(2) {
                     if let Ok(directory) = Directory::open_anchor(parent) {
@@ -1977,51 +2049,117 @@ impl crate::RunStore {
         Ok(self.writer_fence_listing()?.reservations)
     }
     /// Perform the one-way custody cutover before a recovery scan.
-    pub fn cutover_writer_reservations(&self, call: &crate::Request<'_>) -> Result<()> {
-        let path = self
-            .writer_registry
-            .join("worktrees")
-            .join(self.context.project_id.to_string());
-        let directory = match Directory::open_anchor(&path) {
-            Ok(directory) => directory,
-            // A malformed registry ancestor contains no slot to cut over.
-            // The independent listing reports it while judging known attempts.
-            Err(error)
-                if error.is_not_found()
-                    || error.raw_os_error() == Some(provenant_os::sys::errno::ENOTDIR) =>
-            {
-                return Ok(());
-            }
+    fn writer_registry_projects(&self) -> Result<Vec<ProjectId>> {
+        let mut projects = vec![self.context.project_id];
+        let root = match Directory::open_anchor(&self.writer_registry) {
+            Ok(root) => root,
+            Err(error) if error.is_not_found() => return Ok(projects),
             Err(error) => return Err(error.into()),
         };
-        provenant_supervisor::custody::cutover_writer_reservations(
-            &directory,
-            call.cancel,
-            call.clock,
-        )
-        .map_err(error("cut over writer reservations", Some(&path)))
+        let references = match root.open_verified_directory(OsStr::new("writer-projects")) {
+            Ok(root) => match root
+                .open_verified_directory(OsStr::new(&self.context.project_id.to_string()))
+            {
+                Ok(root) => root,
+                Err(error) if error.is_not_found() => return Ok(projects),
+                Err(error) => return Err(error.into()),
+            },
+            Err(error) if error.is_not_found() => return Ok(projects),
+            Err(error) => return Err(error.into()),
+        };
+        for (index, name) in references.entries()?.enumerate() {
+            if index >= 10_000 {
+                return Err(RunError::Validation(
+                    "writer project reference limit exceeded",
+                ));
+            }
+            let name = name?;
+            references.open_verified_directory(&name)?;
+            let project = name
+                .to_str()
+                .and_then(|name| ProjectId::parse(name).ok())
+                .ok_or(RunError::Validation("invalid writer project reference"))?;
+            if !projects.contains(&project) {
+                projects.push(project);
+            }
+        }
+        Ok(projects)
     }
+
+    pub fn cutover_writer_reservations(&self, call: &crate::Request<'_>) -> Result<()> {
+        for project in self.writer_registry_projects()? {
+            let path = self
+                .writer_registry
+                .join("worktrees")
+                .join(project.to_string());
+            let directory = match Directory::open_anchor(&path) {
+                Ok(directory) => directory,
+                Err(error)
+                    if error.is_not_found()
+                        || error.raw_os_error() == Some(provenant_os::sys::errno::ENOTDIR) =>
+                {
+                    continue;
+                }
+                Err(error) => return Err(error.into()),
+            };
+            provenant_supervisor::custody::cutover_writer_reservations(
+                &directory,
+                call.cancel,
+                call.clock,
+            )
+            .map_err(error("cut over writer reservations", Some(&path)))?;
+        }
+        Ok(())
+    }
+
     pub fn writer_fence_listing(
         &self,
     ) -> Result<provenant_supervisor::custody::ReservationListing> {
-        let path = self
-            .writer_registry
-            .join("worktrees")
-            .join(self.context.project_id.to_string());
-        let directory = match Directory::open_anchor(&path) {
-            Ok(directory) => directory,
-            Err(error) if error.is_not_found() => return Ok(Default::default()),
-            Err(error) => return Err(error.into()),
-        };
-        let mut listing = provenant_supervisor::custody::list_writer_reservations(&directory)
-            .map_err(error("list writer reservations", Some(&path)))?;
-        for reservation in &mut listing.reservations {
-            reservation.reservation = path.join(&reservation.reservation);
+        self.writer_fence_listing_for_admission(false)
+    }
+
+    fn writer_fence_listing_for_admission(
+        &self,
+        all_scopes: bool,
+    ) -> Result<provenant_supervisor::custody::ReservationListing> {
+        let mut result = provenant_supervisor::custody::ReservationListing::default();
+        for project in self.writer_registry_projects()? {
+            let path = self
+                .writer_registry
+                .join("worktrees")
+                .join(project.to_string());
+            let directory = match Directory::open_anchor(&path) {
+                Ok(directory) => directory,
+                Err(error) if error.is_not_found() => continue,
+                Err(error) => return Err(error.into()),
+            };
+            let listing = provenant_supervisor::custody::list_writer_reservations(&directory)
+                .map_err(error("list writer reservations", Some(&path)))?;
+            for mut reservation in listing.reservations {
+                // Referenced projects may also have unrelated runs. Observation
+                // follows only this graph project's accepted run namespace.
+                if !all_scopes && project != self.context.project_id {
+                    let belongs: bool = self.db.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM runs WHERE id=?1 AND project=?2)",
+                        rusqlite::params![
+                            reservation.scope.run.to_string(),
+                            self.context.project_id.to_string()
+                        ],
+                        |row| row.get(0),
+                    )?;
+                    if !belongs {
+                        continue;
+                    }
+                }
+                reservation.reservation = path.join(&reservation.reservation);
+                result.reservations.push(reservation);
+            }
+            for mut issue in listing.issues {
+                issue.reservation = path.join(&issue.reservation);
+                result.issues.push(issue);
+            }
         }
-        for issue in &mut listing.issues {
-            issue.reservation = path.join(&issue.reservation);
-        }
-        Ok(listing)
+        Ok(result)
     }
 }
 

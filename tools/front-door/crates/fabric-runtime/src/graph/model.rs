@@ -178,6 +178,9 @@ impl Eq for TopologyPresence {}
 /// Execution specification for an attempt, carrying what a plain lane expresses.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AttemptSpec {
+    /// Selected checkout for a live read-only child; omitted uses the graph directory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub directory: Option<String>,
     /// Peer name or host ID; omitted means local execution.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host: Option<String>,
@@ -212,6 +215,7 @@ pub struct AttemptSpec {
 impl AttemptSpec {
     pub fn is_empty(&self) -> bool {
         self.host.is_none()
+            && self.directory.is_none()
             && !self.confidential
             && self.provider_timeout.is_none()
             && self.placement.is_none()

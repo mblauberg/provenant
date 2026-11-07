@@ -101,6 +101,8 @@ impl ChildRequest {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum RelayOp {
+    /// Read the calling graph through the host service; never open lane journals.
+    Read { input: Value },
     /// Add a child of the calling node.
     Add(ChildRequest),
     /// Apply a revisioned patch to the calling lane's graph.

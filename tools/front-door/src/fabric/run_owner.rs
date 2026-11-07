@@ -1056,6 +1056,22 @@ impl BinaryRunOwner<'_> {
             )));
         }
         self.guard_graph_admission(&operation_id, host, budget, cancel)?;
+        let launch_directory = tasks
+            .iter()
+            .find_map(|task| {
+                task.worktree
+                    .as_deref()
+                    .map(Path::new)
+                    .filter(|path| path.is_absolute())
+                    .map(Path::to_path_buf)
+            })
+            .or_else(|| {
+                attempt
+                    .as_ref()
+                    .and_then(|spec| spec.directory.as_deref())
+                    .map(PathBuf::from)
+            })
+            .unwrap_or_else(|| self.factory.cwd.clone());
         let mut submitted = Vec::new();
         for (index, task) in tasks.into_iter().enumerate() {
             worktree_access(
@@ -1092,10 +1108,20 @@ impl BinaryRunOwner<'_> {
         }
         let session = self.session_with_facts(cancel, facts)?;
         let call = self.call(cancel);
+        let mut host_launch = self.factory.host_launch.clone();
+        if let Some(host) = &mut host_launch {
+            host.cwd = launch_directory.clone();
+        }
         let submission = self.with_edge(|edge| {
+            let selected_edge = provenant_cli::run::Edge {
+                roots: edge.roots,
+                home: edge.home,
+                assets: edge.assets,
+                cwd: &launch_directory,
+            };
             let submitted = provenant_cli::run::submit_with_host_for_refusal(
                 &session,
-                edge,
+                &selected_edge,
                 Submission {
                     chair: self.chair.clone(),
                     operation_id: operation_id.clone(),
@@ -1104,7 +1130,7 @@ impl BinaryRunOwner<'_> {
                     knobs,
                 },
                 &call,
-                self.factory.host_launch.as_ref(),
+                host_launch.as_ref(),
                 Some(
                     std::time::Instant::now()
                         + std::time::Duration::from_micros(

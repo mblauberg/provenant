@@ -77,6 +77,7 @@ pub fn prepare_fixture(
 pub(crate) fn start_fabric_relay(
     context: &run::HolderContext,
     graph_wake: Option<std::sync::Arc<super::super::holder::GraphWake>>,
+    graph_read: Option<std::sync::Arc<super::super::holder::GraphRead>>,
 ) -> Result<provenant_fabric_mcp::lane::HostRelay, String> {
     use provenant_core::CancelToken;
     use provenant_fabric_runtime::{coordination::CoordinationService, identity::Address};
@@ -90,7 +91,14 @@ pub(crate) fn start_fabric_relay(
     let roots = inputs
         .resolve(&provenant_os::fs::SystemPathResolver)
         .map_err(|e| e.to_string())?;
-    let mut ctx = crate::fabric::Context::open(roots, &context.roots.home, &launch.cwd)
+    let graph_directory = crate::fabric::graph_relay::execution_directory(
+        &roots,
+        context.project_id,
+        context.attempt_id,
+    )
+    .map_err(|error| error.to_string())?;
+    let relay_cwd = graph_directory.as_deref().unwrap_or(&launch.cwd);
+    let mut ctx = crate::fabric::Context::open(roots, &context.roots.home, relay_cwd)
         .map_err(|e| e.to_string())?;
     if ctx.identity.project != context.project_id {
         return Err("Fabric relay project mismatch".into());
@@ -98,7 +106,7 @@ pub(crate) fn start_fabric_relay(
     ctx.identity.inbox = Address::new(ctx.identity.host, &format!("lane-{}", context.attempt_id))
         .map_err(|e| e.to_string())?;
     let home = context.roots.home.clone();
-    let cwd = launch.cwd.clone();
+    let cwd = relay_cwd.to_path_buf();
     let clock = provenant_os::clock::SystemClock::new();
     let executor = provenant_os::exec::SystemExecutor::new(provenant_fabric_mcp::lane::WORKERS)
         .map_err(|e| e.to_string())?;
@@ -147,18 +155,30 @@ pub(crate) fn start_fabric_relay(
         },
         move |arguments, cancel: &CancelToken, within| {
             let budget = provenant_fabric_mcp::lane::host_budget(&graph_clock, within)?;
+            let observe = arguments["op"] == "read";
             serve_graph_frame(
                 || {
-                    crate::fabric::graph_relay::serve(
+                    crate::fabric::graph_relay::serve_with_read(
                         &graph_ctx,
                         &attempt,
                         arguments,
                         budget,
                         cancel,
                         &graph_clock,
+                        &|input| match &graph_read {
+                            Some(read) => read(&graph_holder, input, cancel, within),
+                            None => Err(provenant_fabric_mcp::tools::ServiceError::Cli {
+                                code: "graph_read_unavailable".into(),
+                                message: "the host has no graph reader; upgrade the host".into(),
+                                data: serde_json::Value::Null,
+                            }),
+                        },
                     )
                 },
                 |id| {
+                    if observe {
+                        return Ok(());
+                    }
                     if let Some(wake) = &graph_wake {
                         wake(&graph_holder, id)
                     } else {

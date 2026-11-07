@@ -353,6 +353,17 @@ pub(crate) fn enrich_status_rows(
     clock: &SystemClock,
     cancel: &CancelToken,
 ) -> Result<(), FacadeError> {
+    let budget = WaitBudget::cli(clock.mono_now(), 30).map_err(|_| FacadeError::Timeout)?;
+    enrich_status_rows_within(rows, context, clock, cancel, budget)
+}
+
+pub(crate) fn enrich_status_rows_within(
+    rows: &mut [Value],
+    context: &Context,
+    clock: &SystemClock,
+    cancel: &CancelToken,
+    peer_budget: WaitBudget,
+) -> Result<(), FacadeError> {
     let execution = provenant_run::ExecutionContext {
         state_root: context.roots.state.clone(),
         project_id: context.identity.project,
@@ -361,7 +372,6 @@ pub(crate) fn enrich_status_rows(
     };
     let call = provenant_run::Request { clock, cancel };
     let store = provenant_run::RunStore::open_read_only(&execution, &call).map_err(run_error)?;
-    let peer_budget = WaitBudget::cli(clock.mono_now(), 30).map_err(|_| FacadeError::Timeout)?;
     let mut peer_executor = None;
     for row in rows.iter_mut() {
         if row["kind"] != "attempt" {
@@ -656,7 +666,15 @@ pub(crate) fn unified_graph_command(
         } else {
             factory(globals, workers)?
         };
-        let Some(mut target) = factory.graph_target(selector)? else {
+        let Some(mut target) = (if factory.context.in_lane {
+            Some(GraphTarget {
+                graph: selector.to_owned(),
+                node: None,
+                attempt: None,
+            })
+        } else {
+            factory.graph_target(selector)?
+        }) else {
             return Ok(None);
         };
         if let GraphCommand::Retry { node: Some(id), .. } = &command {
@@ -719,7 +737,9 @@ pub(crate) fn unified_graph_command(
         let budget = WaitBudget::cli(factory.clock.mono_now(), wait_seconds)?;
         let mut data = factory.graph_document(input, budget, &cancel)?;
         let timed_out = data["timed_out"].as_bool().unwrap_or(false);
-        if let Some(rows) = data["rows"].as_array_mut() {
+        if let Some(rows) = data["rows"].as_array_mut()
+            && !factory.context.in_lane
+        {
             localise_worktree_actions(&factory, &target.graph, rows);
         }
         let rows = data["rows"].as_array().ok_or(FacadeError::StateCorrupt)?;
@@ -927,22 +947,114 @@ pub(crate) fn append_graph_status(
     }
 }
 
+/// Read through the host before constructing any journal reader in a lane.
 pub(crate) fn unified_graph_output(
     command: &provenant_cli::Output,
     edge: &provenant_cli::run::Edge<'_>,
     globals: &provenant_cli::Globals,
     workers: &'static dyn WorkerObserver,
 ) -> Option<provenant_cli::run::Reply> {
-    let result = (|| -> Result<Option<provenant_cli::run::Reply>, Box<dyn std::error::Error>> {
-        let factory = match read_factory(globals, workers) {
-            Ok(factory) => factory,
-            Err(error) if missing_graph_context(error.as_ref()) => return Ok(Default::default()),
-            Err(error) => return Err(error),
+    if !provenant_cli::fabric::in_lane() {
+        return match read_factory(globals, workers) {
+            Ok(factory) => {
+                let budget = WaitBudget::cli(factory.clock.mono_now(), 55).ok()?;
+                host_graph_output(command, edge, &factory, budget, &CancelToken::new())
+            }
+            Err(error) if missing_graph_context(error.as_ref()) => None,
+            Err(error) => Some(graph_output_error(error)),
         };
+    }
+    let part = match command.part {
+        provenant_cli::Part::Result => "result",
+        provenant_cli::Part::Prompt => "prompt",
+        provenant_cli::Part::Stderr => "stderr",
+        provenant_cli::Part::Events => "events",
+        provenant_cli::Part::Receipt => "receipt",
+        provenant_cli::Part::Transcript => "transcript",
+    };
+    let result = (|| -> Result<provenant_cli::run::Reply, Box<dyn std::error::Error>> {
+        if command.path || command.host.is_some() {
+            return Err(
+                "lane reads require a graph or child ID and return content; omit --path and --host"
+                    .into(),
+            );
+        }
+        let input = json!({"op":"output", "id":target_text(&command.attempt.0),
+            "render":true,"trace":command.trace,"part":part,"offset":command.offset,"tail":command.tail,"max_bytes":command.max_bytes});
+        let response = provenant_cli::fabric::graph_relay::from_lane(
+            &provenant_fabric_runtime::graph::relay::RelayOp::Read { input },
+            &CancelToken::new(),
+            std::time::Duration::from_secs(55),
+        )?;
+        let mut reply = provenant_cli::run::Reply {
+            result: serde_json::from_value(response["result"].clone())?,
+            human: response["human"].as_str().unwrap_or_default().to_owned(),
+            summary: None,
+            read_only: true,
+        };
+        if let Some(path) = &command.to
+            && reply.result.status == provenant_records::Outcome::Ok
+        {
+            let bytes = returned_output_bytes(&reply.result.data)?;
+            std::fs::write(path, &bytes)?;
+            let written_path = std::fs::canonicalize(path)?;
+            reply.result.data["to"] = json!(provenant_records::StructuredPathWire::from_path(
+                &written_path
+            )?);
+            reply.result.data["written"] = json!(bytes.len());
+            reply.human = format!("wrote {} bytes to {}\n", bytes.len(), path.display());
+        }
+        Ok(reply)
+    })();
+    Some(result.unwrap_or_else(|error| {
+        let message = error
+            .downcast_ref::<ServiceError>()
+            .map(|error| {
+                let diagnostic = error.diagnostic();
+                format!(
+                    "{}: {}",
+                    diagnostic.code,
+                    diagnostic
+                        .detail
+                        .as_deref()
+                        .unwrap_or("host graph read refused")
+                )
+            })
+            .unwrap_or_else(|| error.to_string());
+        graph_output_error(message)
+    }))
+}
+
+fn returned_output_bytes(data: &Value) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    if let Some(outputs) = data["outputs"].as_array() {
+        let mut bytes = Vec::new();
+        for output in outputs {
+            bytes.extend(returned_output_bytes(&output["data"])?);
+        }
+        return Ok(bytes);
+    }
+    let encoded = &data["bytes"];
+    match (encoded["encoding"].as_str(), encoded["data"].as_str()) {
+        (Some("utf8"), Some(text)) => Ok(text.as_bytes().to_vec()),
+        (Some("base64"), Some(text)) => provenant_fabric_runtime::handoff::decode_base64(text)
+            .ok_or_else(|| "invalid output encoding".into()),
+        _ => Err(
+            "--to needs a part that has bytes; select result, transcript, stderr or prompt".into(),
+        ),
+    }
+}
+
+fn host_graph_output(
+    command: &provenant_cli::Output,
+    edge: &provenant_cli::run::Edge<'_>,
+    factory: &Factory,
+    budget: WaitBudget,
+    cancel: &CancelToken,
+) -> Option<provenant_cli::run::Reply> {
+    let result = (|| -> Result<Option<provenant_cli::run::Reply>, Box<dyn std::error::Error>> {
         if command.trace {
             let input = json!({"op":"output","id":target_text(&command.attempt.0),"trace":true});
-            let budget = WaitBudget::cli(factory.clock.mono_now(), 55)?;
-            let data = match factory.graph_document(input, budget, &CancelToken::new()) {
+            let data = match factory.graph_document(input, budget, cancel) {
                 Ok(data) => data,
                 Err(FacadeError::NotFound) => return Ok(None),
                 Err(error) => return Err(error.into()),
@@ -977,13 +1089,8 @@ pub(crate) fn unified_graph_output(
         .ok_or(FacadeError::NotFound)?;
         let failure_rows = if target.attempt.is_none() {
             let mut rows = status_rows(&graph_snapshot(checkpoint.clone()), &target);
-            enrich_status_rows(
-                &mut rows,
-                &factory.context,
-                &factory.clock,
-                &CancelToken::new(),
-            )?;
-            localise_worktree_actions(&factory, &target.graph, &mut rows);
+            enrich_status_rows_within(&mut rows, &factory.context, &factory.clock, cancel, budget)?;
+            localise_worktree_actions(factory, &target.graph, &mut rows);
             rows.retain(|row| {
                 row["kind"] == "node" && matches!(row["state"].as_str(), Some("failed" | "blocked"))
             });
@@ -1020,10 +1127,8 @@ pub(crate) fn unified_graph_output(
         if target.attempt.is_none() {
             // Follow receiver-owned graphs through the same forward SSH status
             // call. Explicit attempt output remains the ordinary byte reader.
-            let budget = WaitBudget::cli(factory.clock.mono_now(), 55)?;
-            let cancel = CancelToken::new();
             let owner = BinaryRunOwner {
-                factory: &factory,
+                factory,
                 allow_remote: true,
                 actor: None,
                 chair: None,
@@ -1049,7 +1154,7 @@ pub(crate) fn unified_graph_output(
                         attempt: attempt.parse().map_err(|_| FacadeError::StateCorrupt)?,
                     },
                     budget,
-                    &cancel,
+                    cancel,
                 )?;
                 let peer_attempt = record.attempt_id;
                 let mut subtree = record.extra.get("peer_subtree").cloned();
@@ -1092,7 +1197,7 @@ pub(crate) fn unified_graph_output(
                             },
                         },
                         budget,
-                        &cancel,
+                        cancel,
                     )? {
                         PeerResult::Run { data, .. } => match *data {
                             RunResult::Status { attempt, .. }
@@ -1136,7 +1241,7 @@ pub(crate) fn unified_graph_output(
                 .parse()
                 .map_err(|_| FacadeError::InvalidInput { detail: None })?;
             return Ok(Some(with_graph_failures(
-                provenant_cli::run::output(selected, edge),
+                graph_attempt_output(selected, edge, factory, budget, cancel)?,
                 &failure_rows,
             )));
         }
@@ -1145,12 +1250,16 @@ pub(crate) fn unified_graph_output(
         let mut bytes = Vec::new();
         let mut outcome = provenant_records::Outcome::Ok;
         for reference in references {
+            if cancel.is_cancelled() || budget.remaining(factory.clock.mono_now()).as_micros() == 0
+            {
+                return Err(FacadeError::Timeout.into());
+            }
             let mut selected = command.clone();
             selected.to = None;
             selected.attempt = reference
                 .parse()
                 .map_err(|_| FacadeError::InvalidInput { detail: None })?;
-            let reply = provenant_cli::run::output(selected, edge);
+            let reply = graph_attempt_output(selected, edge, factory, budget, cancel)?;
             if reply.result.status != provenant_records::Outcome::Ok {
                 if command.to.is_some() {
                     return Err(
@@ -1206,6 +1315,72 @@ pub(crate) fn unified_graph_output(
             summary: None,
             read_only: true,
         }),
+    }
+}
+
+fn graph_attempt_output(
+    command: provenant_cli::Output,
+    edge: &provenant_cli::run::Edge<'_>,
+    factory: &Factory,
+    budget: WaitBudget,
+    cancel: &CancelToken,
+) -> Result<provenant_cli::run::Reply, FacadeError> {
+    if cancel.is_cancelled() || budget.remaining(factory.clock.mono_now()).as_micros() == 0 {
+        return Err(FacadeError::Timeout);
+    }
+    let reference = target_text(&command.attempt.0);
+    let (host, attempt) = reference.split_once('/').ok_or(FacadeError::StateCorrupt)?;
+    let host: provenant_core::HostId = host.parse().map_err(|_| FacadeError::StateCorrupt)?;
+    let attempt: provenant_core::AttemptId =
+        attempt.parse().map_err(|_| FacadeError::StateCorrupt)?;
+    let mut owner = BinaryRunOwner {
+        factory,
+        allow_remote: true,
+        actor: None,
+        chair: None,
+    };
+    if host == factory.context.identity.host {
+        let session = owner.read_session(cancel)?;
+        let target = provenant_cli::Target {
+            selection: None,
+            run: None,
+            task: None,
+            attempt: Some(attempt),
+        };
+        return Ok(provenant_cli::run::output_from_session(
+            command,
+            edge,
+            &session,
+            target,
+            &owner.call(cancel),
+        ));
+    }
+    Ok(provenant_cli::run::output_from_host(
+        command,
+        host,
+        attempt,
+        |input| {
+            owner.output(input, budget, cancel).map_err(|error| {
+                provenant_cli::run::Fail::new(
+                    provenant_records::Outcome::Error,
+                    provenant_run::ErrorKind::Fabric,
+                    error.to_string(),
+                )
+            })
+        },
+    ))
+}
+
+fn graph_output_error(error: impl std::fmt::Display) -> provenant_cli::run::Reply {
+    provenant_cli::run::Reply {
+        result: provenant_records::CommandResult::new(
+            "output",
+            provenant_records::Outcome::Error,
+            json!({"error":error.to_string()}),
+        ),
+        human: format!("{error}\n"),
+        summary: None,
+        read_only: true,
     }
 }
 
@@ -1353,6 +1528,22 @@ pub(crate) fn read_status_rows(
     selector: &str,
     edge: &provenant_cli::run::Edge<'_>,
 ) -> Result<Option<Vec<Value>>, FacadeError> {
+    if provenant_cli::fabric::in_lane() {
+        let value = provenant_cli::fabric::graph_relay::from_lane(
+            &provenant_fabric_runtime::graph::relay::RelayOp::Read {
+                input: json!({"op":"status","id":selector}),
+            },
+            &CancelToken::new(),
+            std::time::Duration::from_secs(55),
+        )
+        .map_err(super::interface::relay_error)?;
+        return Ok(Some(
+            value["rows"]
+                .as_array()
+                .ok_or(FacadeError::StateCorrupt)?
+                .clone(),
+        ));
+    }
     let context = match Context::open_read_only(edge.roots.clone(), edge.home, edge.cwd) {
         Ok(context) => context,
         Err(provenant_cli::fabric::EdgeError::Invalid) => return Ok(None),
@@ -1393,6 +1584,98 @@ fn missing_graph_context(error: &(dyn std::error::Error + 'static)) -> bool {
 )]
 fn read_steering_stdin() -> std::io::Result<Vec<u8>> {
     provenant_os::sys::hook_io::read_stdin(4096, Instant::now() + std::time::Duration::from_secs(5))
+}
+
+/// The relay has already bound this input to the calling attempt's graph.
+pub(crate) fn read_lane_graph(
+    holder: &provenant_run::HolderContext,
+    input: Value,
+    cancel: &CancelToken,
+    within: std::time::Duration,
+    workers: &'static dyn WorkerObserver,
+) -> Result<Value, ServiceError> {
+    let read = || -> Result<Value, Box<dyn std::error::Error>> {
+        if cancel.is_cancelled() {
+            return Err(FacadeError::Cancelled.into());
+        }
+        if within <= std::time::Duration::from_millis(100) {
+            return Err(FacadeError::Timeout.into());
+        }
+
+        let launch = holder
+            .launch
+            .as_ref()
+            .ok_or("host launch context missing")?;
+        let roots = crate::roots::child(
+            &holder.roots.home,
+            &holder.roots.checkout,
+            launch.configuration_root.clone(),
+        )?;
+        let graph_directory = provenant_cli::fabric::graph_relay::execution_directory(
+            &roots,
+            holder.project_id,
+            holder.attempt_id,
+        )?;
+        let graph_directory = graph_directory.unwrap_or_else(|| launch.cwd.clone());
+        let context = Context::open_inspection(roots, &holder.roots.home, &graph_directory)?;
+        if context.identity.project != holder.project_id {
+            return Err("host graph project mismatch".into());
+        }
+        let factory = Factory {
+            project_attribution: false,
+            context,
+            clock: SystemClock::new(),
+            backoff: ThreadPause,
+            executor: SystemExecutor::new(4)?,
+            home: holder.roots.home.clone(),
+            cwd: graph_directory,
+            assets: holder.roots.checkout.clone(),
+            host_launch: Some(launch.clone()),
+            mcp_project: None,
+            workers,
+        };
+        let budget = provenant_fabric_mcp::lane::host_budget(&factory.clock, within)?;
+        if input["op"] != "output" || input["trace"] == true && input["render"] != true {
+            return Ok(factory.graph_document(input.clone(), budget, cancel)?);
+        }
+        let part = match input["part"].as_str().unwrap_or("result") {
+            "result" => provenant_cli::Part::Result,
+            "prompt" => provenant_cli::Part::Prompt,
+            "stderr" => provenant_cli::Part::Stderr,
+            "events" => provenant_cli::Part::Events,
+            "receipt" => provenant_cli::Part::Receipt,
+            "transcript" => provenant_cli::Part::Transcript,
+            _ => return Err("invalid output part".into()),
+        };
+        let command = provenant_cli::Output {
+            attempt: input["id"].as_str().ok_or("missing target")?.parse()?,
+            host: None,
+            part,
+            to: None,
+            path: false,
+            offset: input["offset"].as_u64().unwrap_or(0),
+            tail: input["tail"].as_u64(),
+            max_bytes: input["max_bytes"].as_u64().unwrap_or(65536).clamp(1, 65536),
+            trace: input["trace"] == true,
+        };
+        let edge = provenant_cli::run::Edge {
+            roots: &factory.context.roots,
+            home: &factory.home,
+            assets: &factory.assets,
+            cwd: &factory.cwd,
+        };
+        let reply = host_graph_output(&command, &edge, &factory, budget, cancel)
+            .ok_or("graph target missing")?;
+        if input["render"] == true {
+            Ok(json!({"result":reply.result,"human":reply.human}))
+        } else {
+            Ok(reply.result.data)
+        }
+    };
+    read().map_err(|error| match error.downcast::<FacadeError>() {
+        Ok(error) => ServiceError::Facade(*error),
+        Err(_) => ServiceError::Facade(FacadeError::io("read calling lane graph")),
+    })
 }
 
 #[cfg(test)]

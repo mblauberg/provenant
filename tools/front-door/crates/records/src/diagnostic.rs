@@ -457,7 +457,7 @@ pub struct Diagnostic {
 }
 
 /// Projection fields beside an envelope's established code and message.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DiagnosticFields {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub category: Option<String>,
