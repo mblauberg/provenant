@@ -1,0 +1,127 @@
+#!/usr/bin/env python3
+"""Measure event intake against operator-supplied actions on an isolated test repo."""
+import json
+import math
+import os
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+EVENTS = {"push": "push", "check": "check_run", "comment": "issue_comment",
+          "review": "pull_request_review", "merge": "pull_request"}
+
+
+def read(path):
+    try:
+        return json.loads(path.read_text())
+    except FileNotFoundError:
+        return {}
+
+
+def contains(actual, expected):
+    if isinstance(expected, dict):
+        return isinstance(actual, dict) and all(k in actual and contains(actual[k], v) for k, v in expected.items())
+    if isinstance(expected, list):
+        return isinstance(actual, list) and all(any(contains(a, e) for a in actual) for e in expected)
+    return actual == expected
+
+
+def run(argv):
+    return subprocess.run(argv, check=True, text=True, stdout=subprocess.PIPE).stdout
+
+
+def verify(state, checks):
+    return all(contains(state.get("current", {}).get(str(c["pr"]), {}).get(c["resource"]), c["expect"]) for c in checks)
+
+
+def main():
+    if len(sys.argv) != 2:
+        sys.exit("usage: event-intake-live-check PLAN.json > evidence.json")
+    plan = json.loads(Path(sys.argv[1]).read_text())
+    directory = Path(os.environ["PROVENANT_INTAKE_DIR"])
+    state_path, deliveries_path = directory / "state.json", directory / "deliveries.json"
+    timeout = plan.get("timeout_seconds", 900)
+    evidence = {"samples": [], "drill": {}, "status_before": json.loads(run(plan["status"]))}
+    if not evidence["status_before"].get("last_successful_sweep"):
+        raise ValueError("worker must complete an initial sweep")
+    for sample in plan["samples"]:
+        kind = sample["kind"]
+        event = EVENTS[kind]
+        if not sample["checks"] or any(verify(read(state_path), [c]) for c in sample["checks"]):
+            raise ValueError(f"{kind}: checks must identify a change absent before the action")
+        before = set(read(deliveries_path).get("deliveries", {}))
+        start = time.time()
+        tick = time.monotonic()
+        run(sample["command"])
+        deadline = time.monotonic() + timeout
+        while True:
+            state = read(state_path)
+            markers = read(deliveries_path).get("deliveries", {})
+            matches = [(key, marker) for key, marker in markers.items()
+                       if key not in before and marker.get("event") == event
+                       and (marker.get("target") == "Repository" or
+                            marker.get("target") in [{"PullRequest": c["pr"]} for c in sample["checks"]])
+                       and not marker.get("pending") and marker.get("completed_at") is not None]
+            if matches and verify(state, sample["checks"]):
+                elapsed = time.monotonic() - tick
+                evidence["samples"].append({"kind": kind, "started_at": start, "observed_at": time.time(),
+                                            "seconds": elapsed, "deliveries": [key for key, _ in matches],
+                                            "checks": sample["checks"]})
+                break
+            if time.monotonic() >= deadline:
+                raise TimeoutError(f"{kind}: state and completed delivery not observed")
+            time.sleep(0.2)
+    p95 = {}
+    for kind in EVENTS:
+        samples = sorted(s["seconds"] for s in evidence["samples"] if s["kind"] == kind)
+        if len(samples) < 20:
+            raise ValueError(f"{kind}: need at least 20 samples")
+        p95[kind] = {"count": len(samples), "seconds": samples[math.ceil(.95 * len(samples)) - 1]}
+    evidence["p95"] = p95
+    drill = plan["drill"]
+    run(drill["stop"])
+    baseline = read(state_path).get("status", {}).get("last_successful_sweep")
+    if baseline is None:
+        run(drill["start"])
+        raise ValueError("drill requires an existing sweep watermark")
+    started = time.time()
+    checks = drill["checks"]
+    try:
+        if not checks or any(verify(read(state_path), [c]) for c in checks):
+            raise ValueError("drill checks must identify changes absent before the action")
+        if not any(c["resource"] == "pull_request" and isinstance(c["expect"], dict)
+                   and c["expect"].get("merged") is True for c in checks):
+            raise ValueError("drill must assert a merged PR")
+        run(drill["change"])
+        for check in checks:
+            actual = json.loads(run(["gh", "api", check["github_path"]]))
+            if not contains(actual, check["expect"]):
+                raise ValueError(f"GitHub did not confirm drill check: {check['github_path']}")
+    finally:
+        # Sweep watermarks have one-second resolution.
+        while time.time() <= baseline:
+            time.sleep(0.2)
+        run(drill["start"])
+    deadline = time.monotonic() + timeout
+    while True:
+        state = read(state_path)
+        watermark = state.get("status", {}).get("last_successful_sweep")
+        if watermark is not None and watermark > baseline:
+            if not verify(state, checks):
+                raise ValueError("first successful sweep did not capture all drill checks")
+            break
+        if time.monotonic() >= deadline:
+            raise TimeoutError("first successful sweep not observed")
+        time.sleep(0.2)
+    evidence["drill"] = {"started_at": started, "observed_at": time.time(), "previous_sweep": baseline,
+                         "first_sweep": watermark, "checks": checks, "github_confirmed": True}
+    evidence["status_after"] = json.loads(run(plan["status"]))
+    evidence["passed"] = all(v["seconds"] < 30 for v in p95.values())
+    print(json.dumps(evidence, indent=2))
+    if not evidence["passed"]:
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
