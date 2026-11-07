@@ -572,7 +572,6 @@ pub(super) const NESTED_CREDENTIAL_DIRECTORIES: &[&str] = &[
 
 // Additional provider stores can contain credentials alongside their state.
 // Keep these command-only denials out of model profile validation.
-#[cfg(any(target_os = "macos", feature = "snapshot"))]
 pub(super) const PROVIDER_CREDENTIAL_DIRECTORIES: &[&str] = &[
     ".config/cursor",
     ".config/opencode",

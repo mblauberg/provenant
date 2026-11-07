@@ -1,6 +1,8 @@
 //! `[domains.run]`: host-owned settings for worktree-write lanes: extra write
 //! paths, and the repository paths a writer may change without forcing review.
-use crate::permissions::{PathGrant, PathScope, is_credential_root};
+use crate::permissions::{
+    HostPolicySettings, LanePolicy, MandatoryRoots, PathGrant, PathScope, is_credential_root,
+};
 use crate::review_exempt::{MAX_PATTERNS, ReviewExempt, valid_pattern};
 use provenant_config::{DomainConfig, DomainSection, FieldMetadata, SectionError};
 use serde::{Deserialize, Serialize};
@@ -45,6 +47,10 @@ continuation_copy_depth = 32
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RunConfig {
+    /// Optional host denials. Invalid entries warn during launch resolution;
+    /// they never invalidate the run section or change mandatory boundaries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_policy: Option<HostPolicySettings>,
     #[serde(default)]
     pub writer_writes: Vec<PathBuf>,
     #[serde(default = "default_review_exempt")]
@@ -136,6 +142,7 @@ fn default_review_exempt() -> Vec<String> {
 impl Default for RunConfig {
     fn default() -> Self {
         Self {
+            host_policy: None,
             writer_writes: Vec::new(),
             review_exempt: default_review_exempt(),
             push_conflict_markers: true,
@@ -153,6 +160,13 @@ impl Default for RunConfig {
     }
 }
 impl RunConfig {
+    /// Resolve the host policy once per launch, then report its source and
+    /// warnings with `LanePolicy::report_launch`. The renderer consumes the
+    /// resolved contract; this does not change the current renderer.
+    pub fn policy_for_launch(&self, state: &Path, mandatory: MandatoryRoots) -> LanePolicy {
+        HostPolicySettings::resolve(self.host_policy.as_ref(), state, mandatory)
+    }
+
     /// The project list replaces the host list when present, including when empty.
     pub fn writer_write_roots_for(&self, project: &str) -> impl Iterator<Item = &Path> {
         self.projects
@@ -410,6 +424,9 @@ fn project_key(key: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
 }
 pub const FIELD_METADATA: &[FieldMetadata] = &[
+    FieldMetadata::new("host_policy.deny_read", "array"),
+    FieldMetadata::new("host_policy.deny_write", "array"),
+    FieldMetadata::enumeration("host_policy.network", &["open", "local", "provider"]),
     FieldMetadata::new("profile_limit_bytes", "int"),
     FieldMetadata::new("grant_limit", "int"),
     FieldMetadata::new("writer_token_budget", "int"),
@@ -744,5 +761,279 @@ writer_writes = []
             .admission_seconds = Some(0);
         let fields: Vec<_> = config.validate().into_iter().map(|e| e.field).collect();
         assert_eq!(fields, ["projects.proj-override.admission_seconds"]);
+    }
+}
+
+#[cfg(test)]
+mod policy_tests {
+    use super::*;
+    use crate::permissions::{NetworkAccess, OptionalPolicy, PolicySource};
+
+    fn mandatory() -> MandatoryRoots {
+        let mut roots = MandatoryRoots::new(
+            Path::new("/fixture/home"),
+            Path::new("/fixture/state"),
+            Path::new("/fixture/project/source"),
+        )
+        .expect("mandatory roots");
+        for git in ["/fixture/project/common.git", "/fixture/project/linked.git"] {
+            roots
+                .add_git(PathGrant {
+                    path: git.into(),
+                    scope: PathScope::Subtree,
+                })
+                .expect("Git root");
+        }
+        roots
+            .add_credentials(PathGrant {
+                path: "/fixture/identities/agy-second".into(),
+                scope: PathScope::Subtree,
+            })
+            .expect("identity");
+        roots
+    }
+
+    // Medium: real configuration file; no process or native sandbox.
+    #[test]
+    fn host_policy_defaults_open_and_reports_explicit_source_once()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let state = tempfile::tempdir()?;
+        let ambient = RunConfig::read(state.path())?.policy_for_launch(state.path(), mandatory());
+        assert_eq!(ambient.optional(), &OptionalPolicy::default());
+        assert_eq!(ambient.source(), &PolicySource::Ambient);
+        assert!(ambient.warnings().is_empty());
+        let mut report = Vec::new();
+        ambient.report_launch(&mut report)?;
+        assert_eq!(String::from_utf8(report)?.lines().count(), 1);
+        for settings in [
+            "",
+            "network = 'open'\ndeny_read = []\ndeny_write = []",
+            "network = 'local'\ndeny_read = ['/fixture/private']\ndeny_write = ['/fixture/archive']",
+        ] {
+            std::fs::write(
+                state.path().join("config.toml"),
+                format!("schema_version=1\n[domains.run.host_policy]\n{settings}\n"),
+            )?;
+            let configured =
+                RunConfig::read(state.path())?.policy_for_launch(state.path(), mandatory());
+            assert_eq!(
+                configured.source(),
+                &PolicySource::Host(state.path().join("config.toml"))
+            );
+            assert!(configured.warnings().is_empty());
+            let mut report = Vec::new();
+            configured.report_launch(&mut report)?;
+            let report = String::from_utf8(report)?;
+            assert_eq!(report.lines().count(), 1);
+            assert!(report.contains(&state.path().join("config.toml").display().to_string()));
+            if settings.contains("local") {
+                assert_eq!(configured.optional().network, NetworkAccess::Local);
+                assert_eq!(
+                    configured.optional().deny_read[0].path,
+                    Path::new("/fixture/private")
+                );
+                assert_eq!(
+                    configured.optional().deny_write[0].path,
+                    Path::new("/fixture/archive")
+                );
+            } else {
+                assert_eq!(configured.optional(), &OptionalPolicy::default());
+            }
+        }
+        Ok(())
+    }
+
+    // Medium: exercise the strict domain reader and the aggregate config path.
+    #[test]
+    fn invalid_host_policy_warns_retains_siblings_and_cannot_remove_boundaries()
+    -> Result<(), Box<dyn std::error::Error>> {
+        #[derive(Serialize, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Domains {
+            run: RunConfig,
+        }
+        const SECTIONS: provenant_config::DomainSections<Domains> =
+            provenant_config::DomainSections::new(&[SECTION]);
+        let state = tempfile::tempdir()?;
+        let mut input = provenant_core::RootInputs::new(
+            state.path().join("home"),
+            state.path().join("checkout"),
+        );
+        input.state_dir = Some(state.path().join("state"));
+        let roots = input.resolve(&provenant_os::fs::SystemPathResolver)?;
+        let mandatory = mandatory();
+        for (settings, fields) in [
+            (
+                "deny_read = ['/fixture/read', 7, 'relative-secret-sentinel', '/fixture/../escape']\ndeny_write = ['/fixture/write']\nnetwork = 'invalid-secret-sentinel'\nmandatory = []\nsbpl = '(allow default)'",
+                vec![
+                    "unknown",
+                    "deny_read.1",
+                    "deny_read.2",
+                    "deny_read.3",
+                    "network",
+                ],
+            ),
+            (
+                "deny_read = false\ndeny_write = ['/fixture/write', false]\nnetwork = 9",
+                vec!["deny_read", "deny_write.1", "network"],
+            ),
+        ] {
+            let text = format!(
+                "schema_version=1\n[domains.run]\nwriter_writes=['/fixture/locks']\n[domains.run.host_policy]\n{settings}\n"
+            );
+            std::fs::write(state.path().join("config.toml"), &text)?;
+            let domain = RunConfig::read(state.path())?;
+            let aggregate =
+                provenant_config::load_with_domains(&roots, Some(text.as_bytes()), &SECTIONS)?;
+            assert_eq!(domain, aggregate.domains.run);
+            assert_eq!(domain.writer_writes, [PathBuf::from("/fixture/locks")]);
+            assert!(domain.validate().is_empty());
+            let policy = domain.policy_for_launch(state.path(), mandatory.clone());
+            assert_eq!(policy.mandatory(), &mandatory);
+            assert_eq!(policy.optional().network, NetworkAccess::Open);
+            assert_eq!(
+                policy.optional().deny_write[0].path,
+                Path::new("/fixture/write")
+            );
+            if settings.contains("/fixture/read") {
+                assert_eq!(policy.optional().deny_read.len(), 1);
+                assert_eq!(
+                    policy.optional().deny_read[0].path,
+                    Path::new("/fixture/read")
+                );
+            } else {
+                assert!(policy.optional().deny_read.is_empty());
+            }
+            assert_eq!(
+                policy
+                    .warnings()
+                    .iter()
+                    .map(|w| w.field.as_str())
+                    .collect::<Vec<_>>(),
+                fields
+            );
+            let mut report = Vec::new();
+            policy.report_launch(&mut report)?;
+            let report = String::from_utf8(report)?;
+            assert_eq!(
+                report
+                    .lines()
+                    .filter(|line| line.starts_with("lane policy:"))
+                    .count(),
+                1
+            );
+            assert_eq!(
+                report
+                    .lines()
+                    .filter(|line| line.starts_with("warning:"))
+                    .count(),
+                fields.len()
+            );
+            assert!(!report.contains("secret-sentinel"));
+            assert!(!report.contains("(allow default)"));
+        }
+        for value in ["false", "7", "'invalid-secret-sentinel'", "[]"] {
+            let domain: RunConfig = toml_edit::de::from_str(&format!("host_policy = {value}"))?;
+            let policy = domain.policy_for_launch(state.path(), mandatory.clone());
+            assert_eq!(policy.optional(), &OptionalPolicy::default());
+            assert_eq!(policy.mandatory(), &mandatory);
+            assert_eq!(policy.warnings()[0].code, "type");
+        }
+        // Authority settings retain their existing refusal semantics.
+        std::fs::write(
+            state.path().join("config.toml"),
+            "schema_version=1\n[domains.run]\nwriter_writes=['/fixture/home/.ssh']\n[domains.run.host_policy]\nnetwork='open'\n",
+        )?;
+        assert!(RunConfig::read(state.path()).is_err());
+        Ok(())
+    }
+
+    // Small: lexical host-root contract, including nonexistent credential files.
+    #[test]
+    fn optional_open_policy_retains_every_mandatory_write_boundary() {
+        let mandatory = mandatory();
+        let policy =
+            RunConfig::default().policy_for_launch(Path::new("/fixture/state"), mandatory.clone());
+        let roots = policy.mandatory();
+        assert_eq!(roots, &mandatory);
+        assert!(roots.credentials().iter().any(|g| g.path
+            == Path::new("/fixture/home/.cargo/credentials.toml")
+            && g.scope == PathScope::Exact));
+        assert!(
+            roots
+                .credentials()
+                .iter()
+                .any(|g| g.path == Path::new("/fixture/home/Library/Keychains"))
+        );
+        assert!(
+            roots
+                .credentials()
+                .iter()
+                .any(|g| g.path == Path::new("/fixture/identities/agy-second"))
+        );
+        for root in roots
+            .credentials()
+            .iter()
+            .chain(roots.git())
+            .chain([roots.state(), roots.source()])
+        {
+            for path in [
+                root.path.clone(),
+                root.path.join("child"),
+                root.path.parent().expect("parent").to_owned(),
+            ] {
+                assert!(
+                    roots
+                        .validate_extra_write(&PathGrant {
+                            path: path.clone(),
+                            scope: PathScope::Subtree
+                        })
+                        .is_err(),
+                    "{}",
+                    path.display()
+                );
+            }
+        }
+        for path in [
+            "/fixture/locks",
+            "/fixture/project/source-sibling",
+            "/fixture/state-sibling",
+        ] {
+            assert!(
+                roots
+                    .validate_extra_write(&PathGrant {
+                        path: path.into(),
+                        scope: PathScope::Subtree
+                    })
+                    .is_ok(),
+                "{path}"
+            );
+        }
+    }
+
+    // Small: exhaust all network ceiling/request pairs.
+    #[test]
+    fn host_network_policy_never_widens_lane_authority() {
+        use NetworkAccess::{Local, Open, Provider};
+        for (host, request, expected) in [
+            (Open, Open, Open),
+            (Open, Local, Local),
+            (Open, Provider, Provider),
+            (Local, Open, Local),
+            (Local, Local, Local),
+            (Local, Provider, Provider),
+            (Provider, Open, Provider),
+            (Provider, Local, Provider),
+            (Provider, Provider, Provider),
+        ] {
+            let config: RunConfig = toml_edit::de::from_str(&format!(
+                "[host_policy]\nnetwork = {}",
+                serde_json::to_string(&host).expect("network")
+            ))
+            .expect("host policy");
+            let policy = config.policy_for_launch(Path::new("/fixture/state"), mandatory());
+            assert!(policy.warnings().is_empty());
+            assert_eq!(policy.optional().network_for(request), expected);
+        }
     }
 }
