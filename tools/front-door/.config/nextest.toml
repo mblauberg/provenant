@@ -74,6 +74,16 @@ not (
 [test-groups]
 serial-process = { max-threads = 1 }
 
+# Two data-home variants each launch four real graph providers against an open
+# WAL. Allow for shared-host contention without dropping session-read cases.
+[[profile.default.overrides]]
+filter = 'package(=provenant) & binary(=graph_provider) & test(=graph_opencode_observes_v2_wal_session)'
+slow-timeout = { period = "30s", terminate-after = 4 }
+
+[[profile.ci.overrides]]
+filter = 'package(=provenant) & binary(=graph_provider) & test(=graph_opencode_observes_v2_wal_session)'
+slow-timeout = { period = "30s", terminate-after = 4 }
+
 # These graph fixtures perform durable settlement and, for paging, repeatedly
 # read a large checkpoint. The eight-lane fixture also serialises and checks a
 # large graph and its stored prompts. Allow for shared-runner contention.
