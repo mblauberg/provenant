@@ -218,7 +218,11 @@ fn override_launch(
     Ok(())
 }
 
-fn bind_submission_subject(node: &mut provenant_fabric_runtime::graph::GraphNode, head: &str) {
+fn bind_submission_subject(
+    node: &mut provenant_fabric_runtime::graph::GraphNode,
+    head: &str,
+    subject_missing: bool,
+) {
     // An explicit composite source is inherited by its members. Loops resolve
     // their own subjects as writers advance, rather than freezing every round.
     if node.source.is_some() || node.loop_body.is_some() {
@@ -226,9 +230,13 @@ fn bind_submission_subject(node: &mut provenant_fabric_runtime::graph::GraphNode
     }
     if let Some(composite) = &mut node.composite {
         for child in &mut composite.nodes {
-            bind_submission_subject(child, head);
+            bind_submission_subject(child, head, subject_missing);
         }
     } else if node.extra.contains_key("review_behaviour") {
+        if subject_missing {
+            node.prompt.insert_str(0, "No review subject was supplied on the command line; no host diff range is available. Request a pinned subject and base if the brief requires a diff.\n\n");
+        }
+        node.prompt.push_str("\n\nWhen a review range is supplied, the host pins its commits and supplies Git context. The review lane has read-only Git metadata and cannot fetch; read the supplied commits and context.");
         node.source = Some(provenant_fabric_runtime::graph::SourceBinding::Commit {
             commit: head.into(),
         });
@@ -1042,8 +1050,49 @@ impl Factory {
             "templates": library.snapshot(),
             "resolvers": resolver,
         });
+        // Review ranges are launch controls: resolve them on the host before
+        // admitting a graph, and bind immutable object IDs into its identity.
+        let review_launch = template_name == "review" || template_name.starts_with("review.");
+        let setting = |name: &str| -> Result<Option<&str>, FacadeError> {
+            match input.get("set").and_then(|set| set.get(name)) {
+                None => Ok(None),
+                Some(value) => value
+                    .as_str()
+                    .filter(|value| !value.is_empty())
+                    .map(Some)
+                    .ok_or_else(|| FacadeError::invalid(InvalidInputDetail::Field(name.into()))),
+            }
+        };
+        let subject = if review_launch {
+            setting("subject")?
+        } else {
+            None
+        };
+        let review_base = if review_launch {
+            setting("review_base")?
+        } else {
+            None
+        };
+        if review_launch && subject.is_some() != review_base.is_some() {
+            return Err(FacadeError::invalid(InvalidInputDetail::Field(
+                "review requires both subject and review_base".into(),
+            )));
+        }
         let mut resolved_head = None;
-        if policy == provenant_fabric_runtime::graph::template::SubmissionIdentity::Content
+        let mut resolved_review_base = None;
+        if let (Some(subject), Some(base)) = (subject, review_base) {
+            let git = provenant_os::git::git_executable()
+                .ok_or(FacadeError::InvalidInput { detail: None })?;
+            let head =
+                provenant_run::resolve_git_base(&git, &self.cwd, subject).map_err(run_error)?;
+            let base = provenant_run::resolve_git_base(&git, &self.cwd, base).map_err(run_error)?;
+            identity["head"] = json!(head);
+            identity["review_base"] = json!(base);
+            resolved_head = Some(head);
+            resolved_review_base = Some(base);
+        }
+        if resolved_head.is_none()
+            && policy == provenant_fabric_runtime::graph::template::SubmissionIdentity::Content
             && raw.and_then(|document| document.get("graph_id")).is_none()
         {
             let git = provenant_os::git::git_executable()
@@ -1134,6 +1183,12 @@ impl Factory {
                         })?
                         .clone(),
                 );
+            if review_launch {
+                if let Some(parameters) = parameters.as_object_mut() {
+                    parameters.remove("subject");
+                    parameters.remove("review_base");
+                }
+            }
             if template.parameters.contains_key("brief")
                 && let Some(brief) = input.get("brief").filter(|value| !value.is_null())
             {
@@ -1185,6 +1240,16 @@ impl Factory {
             )
             .map_err(graph_patch_error)?
         };
+        if review_launch {
+            if let Some(base) = resolved_review_base {
+                document.review_base = Some(base);
+                document.schema_version = document.schema_version.max(2);
+            } else {
+                document
+                    .extra
+                    .insert("review_subject_missing".into(), json!(true));
+            }
+        }
         document
             .extra
             .insert("template_layers".into(), json!(library.snapshot_layers()));
@@ -1249,7 +1314,7 @@ impl Factory {
         }
         if let Some(head) = &resolved_head {
             for node in &mut document.nodes {
-                bind_submission_subject(node, head);
+                bind_submission_subject(node, head, review_launch && subject.is_none());
             }
             document.schema_version = document.schema_version.max(u64::from(
                 provenant_fabric_runtime::graph::minimum_schema_version(&document),
@@ -2105,6 +2170,25 @@ mod tests {
             json!({
                 "type":"commit", "commit":crate::worktree_tests::git(&rig, &["rev-parse", "HEAD"])?
             })
+        );
+        assert_eq!(review["document"]["review_subject_missing"], true);
+        assert!(
+            review["document"]["nodes"][0]["prompt"]
+                .as_str()
+                .unwrap()
+                .contains("No review subject was supplied")
+        );
+        let base = crate::worktree_tests::git(&rig, &["rev-parse", "HEAD"])?;
+        crate::worktree_tests::git(&rig, &["commit", "--allow-empty", "-m", "review subject"])?;
+        let head = crate::worktree_tests::git(&rig, &["rev-parse", "HEAD"])?;
+        let pinned = factory.graph_document(
+            json!({"op":"run","use":"review","brief":"Review","set":{"subject":head,"review_base":base},"explain":true}), budget, &cancel,
+        )?;
+        assert_eq!(pinned["document"]["review_base"], base);
+        assert_eq!(pinned["document"]["nodes"][0]["source"]["commit"], head);
+        let error = factory.graph_document(json!({"op":"run","use":"review","set":{"subject":"missing-ref","review_base":base},"explain":true}), budget, &cancel).unwrap_err();
+        assert!(
+            matches!(error, FacadeError::InvalidInput { detail: Some(InvalidInputDetail::UnresolvableBase(ref name)) } if name == "missing-ref")
         );
         for name in ["review", "review.security", "deliver"] {
             let mut input = json!({"op":"run","use":name,"brief":"same brief","explain":true});

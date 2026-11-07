@@ -531,19 +531,24 @@ fn fetch_tracking_ref(
         "--end-of-options",
         root,
     ];
-    let Ok((symbolic, false)) = read_git_with_env(executor, git, cwd, &args, 4096, env) else {
+    let symbolic = read_git_with_env(executor, git, cwd, &args, 4096, env)
+        .ok()
+        .filter(|(_, timed_out)| !timed_out)
+        .and_then(|(out, _)| String::from_utf8(out.bytes).ok());
+    // An explicitly named remote branch need not have a tracking ref yet.
+    let name = symbolic
+        .as_deref()
+        .map(str::trim)
+        .and_then(|name| name.strip_prefix("refs/remotes/"))
+        .or_else(|| root.strip_prefix("refs/remotes/"))
+        .or_else(|| root.strip_prefix("remotes/"))
+        .unwrap_or(root);
+    let Some((remote, branch)) = name.split_once('/') else {
         return false;
     };
-    let Ok(symbolic) = std::str::from_utf8(&symbolic.bytes) else {
+    if branch.is_empty() || branch.starts_with('-') || root.starts_with('-') {
         return false;
-    };
-    let Some((remote, branch)) = symbolic
-        .trim()
-        .strip_prefix("refs/remotes/")
-        .and_then(|name| name.split_once('/'))
-    else {
-        return false;
-    };
+    }
     let Ok((remotes, false)) = read_git_with_env(executor, git, cwd, &["remote"], 16384, env)
     else {
         return false;
@@ -1511,6 +1516,17 @@ mod tests {
             |base: &str| resolve_fetching(&executor, &local.binary, &local.root, base, &env);
 
         assert_eq!(resolve_base("origin/main")?, moved);
+        git(
+            &upstream.executor,
+            &upstream.binary,
+            &upstream.root,
+            &["branch", "remote-only", &moved],
+        )?;
+        assert!(run(&["rev-parse", "--verify", "refs/remotes/origin/remote-only"]).is_err());
+        assert_eq!(resolve_base("origin/remote-only")?, moved);
+        assert!(
+            matches!(resolve_base("origin/missing"), Err(RunError::InvalidBase(named)) if named == "origin/missing")
+        );
         assert!(matches!(
             resolve_base("absent-base"),
             Err(RunError::InvalidBase(named)) if named == "absent-base"
