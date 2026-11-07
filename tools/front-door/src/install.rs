@@ -1394,9 +1394,7 @@ pub(crate) fn cutover_admission_guard(
     use provenant_fabric_runtime::coordination::facade::{FacadeError, InvalidInputDetail};
     cutover_pending_guard(state).map_err(|_| FacadeError::GraphRelayRefused {
         refusal_code: "UPGRADE_DRAIN_REQUIRED".into(),
-        detail: Some(InvalidInputDetail::graph_reason(
-            "Finish or cancel old pending graphs and drain live lanes with the previous release before admitting new work.",
-        )),
+        detail: Some(InvalidInputDetail::UpgradeDrainRequired),
     })
 }
 

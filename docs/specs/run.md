@@ -83,6 +83,29 @@ different digest fails with `operation_conflict` (exit 2).
   `crates/run/src/service_tests.rs::dispatch_replay_output_and_cancel_share_the_service`
 - Owner: `crates/core/src/ids.rs`, `crates/run/src/store.rs`
 
+### Refusal before admission
+
+After an operation identity is assigned, a permanent refusal before a run is
+admitted belongs to that operation, even when writer preparation cannot produce
+a canonical run request. Retain its safe diagnostic and any bound submitting
+chair before reporting the refusal. A storage failure
+returns the storage error; it cannot acknowledge an unrecorded outcome.
+Replaying that operation returns its retained refusal without consulting changed
+worktree state or repeating preparation. A different request under the same
+operation identity still conflicts. Correct the cause and start a new attempt
+through `retry` to try again.
+
+Graph launch refusals use the saved attempt key and launch actor. A proven
+pre-admission refusal is evidence that no provider was accepted, so it can be
+retried or cancelled without treating it as uncertain custody. It never has an
+admitted run to read. Refusal notices reuse one message identity per operation;
+notice recovery cannot create a second message or change the stored outcome.
+- Why: a dirty writer must remain observable after the caller disconnects, and
+  a lost reply must not turn its replay into a second launch.
+- Test: `tests/refused_operation.rs::dirty_writer_refusal_is_durable_visible_and_notified_once`;
+  `src/fabric/owner.rs::graph_refusal_replays_before_preparation_and_rejects_changed_intent`
+- Owner: `src/fabric/owner.rs`, `crates/run/src/store.rs`, `src/settlement.rs`
+
 ## Task titles
 
 Run and dispatch accept an optional human-supplied title, including per-task

@@ -222,6 +222,41 @@ fn hosts_probe_only_the_requested_page() -> Result {
 }
 
 #[test]
+fn peer_health_advertises_graph_submission() -> Result {
+    let mut rig = TestRig::new()?;
+    let identity = federated_identity(&mut rig)?;
+    let host = identity["data"]["host"].as_str().ok_or("host")?;
+    let source = next_host(host.parse()?)?;
+    configure_fixture_peer(&rig, source)?;
+    let request = json!({
+        "version": 1, "protocol": PROTOCOL,
+        "target_host": host, "source_host": source, "agent": "fixture",
+        "project": {
+            "key": identity["data"]["federation"]["key"],
+            "common_dir": "repo/.git"
+        },
+        "action": {"action": "health"}
+    });
+    // Read the real peer response directly: dispatch's short health-probe
+    // deadline may expire and continue without observing the advertisement.
+    let output = rig.execute_os(
+        Path::new(env!("CARGO_BIN_EXE_provenant")),
+        &["fabric".into(), "peer".into()],
+        Some(&serde_json::to_vec(&request)?),
+    )?;
+    assert_eq!(code(&output), 0, "{output:?}");
+    let response: Value = serde_json::from_slice(&output.stdout.bytes)?;
+    assert_eq!(response["result"]["result"], "health", "{response}");
+    let health = &response["result"]["data"];
+    assert_eq!(health["host"], host, "{health}");
+    assert_eq!(health["available"], true, "{health}");
+    assert_eq!(health["execution"], true, "{health}");
+    assert_eq!(health["run_capabilities"]["submit"], true, "{health}");
+    assert!(!rig.state.join("runs").exists());
+    rig.assert_legacy_unchanged()
+}
+
+#[test]
 fn peer_doctor_returns_the_local_report() -> Result {
     let mut rig = TestRig::new()?;
     let identity = federated_identity(&mut rig)?;
@@ -2399,19 +2434,19 @@ fn peer_dispatch_wait_bounds_unanswered_submission() -> Result {
             "codex/gpt-6-luna",
             "--operation-id",
             "held-submit",
-            "--wait=1s",
+            "--wait=3s",
             "--json",
         ],
     )?;
     assert!(
-        start.elapsed() < std::time::Duration::from_secs(6),
+        start.elapsed() < std::time::Duration::from_secs(8),
         "{result}"
     );
-    assert!(result.to_string().contains("LAUNCH_UNKNOWN"), "{result}");
     assert!(
         submitted.exists(),
-        "the mutating submission must reach the peer"
+        "the mutating submission must reach the peer: {result}"
     );
+    assert!(result.to_string().contains("LAUNCH_UNKNOWN"), "{result}");
     assert!(!rig.root.join("peer-state/runs").exists());
     Ok(())
 }

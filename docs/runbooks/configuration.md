@@ -58,8 +58,7 @@ it or none; a stale revision is refused and names the current one. Every edit
 command takes the same lock and appends to a bounded history that `config
 history [--since T] [--limit N]` lists, with secret-looking values redacted;
 `config.history_max_entries`, `config.history_max_age_days` and
-`config.history_max_bytes` set its retention. Dispatch accepts repeated `--knob NAME=VALUE`, and
-`fabric_run` (`op: submit`) accepts `knobs: ["NAME=VALUE"]`; these validated
+`config.history_max_bytes` set its retention. `fabric_run` (`op: submit`) accepts `knobs: ["NAME=VALUE"]`; these validated
 overrides win over configuration. Each sealed task and attempt records the
 profile name, effective knob values and exact dispatch overrides, and
 continuations keep that stamp.
@@ -114,7 +113,7 @@ control characters, empty identities and malformed entries refuse the whole
 configuration. A team identifier is at most 64 ASCII alphanumeric bytes;
 `platform` selects Apple platform signing state instead of a team string.
 
-This knob is host-only: run `--knob` and Fabric task overrides refuse it, even
+This knob is host-only: Fabric task overrides refuse it, even
 for an empty list. The runtime reads the selected state root's host config,
 never project data or a task/attempt's profile stamp. No restart is required.
 Every listed executable still requires actual cwd `EPERM`, valid live signing
@@ -187,7 +186,7 @@ declaration does not make an unlisted process admissible.
 Batch concurrency resolves from the profile by batch class. A batch with any
 `worktree-write` lane uses `lanes.max_concurrency` (registry default 8); a
 batch with none uses `lanes.max_concurrency_read_only` (registry default 16).
-A `lanes.max_concurrency` you set yourself (in `[knobs]` or with `--knob`) also
+A `lanes.max_concurrency` you set yourself in `[knobs]` also
 caps the read-only default unless you set `lanes.max_concurrency_read_only`
 too; a profile default does not. Document concurrency overrides the default.
 The `economy` profile sets 4 and 8 respectively.
@@ -503,7 +502,7 @@ also includes its observed version and the latest update result.
 
 ## Lane runtime deadline
 
-A lane's wall-clock allowance is its dispatch `--provider-timeout` (3600
+A lane's wall-clock allowance is its task provider timeout (3600
 seconds, or 10800 for `worktree-write`; at most 14400). Cap it per provider with
 `runtime_deadline_seconds`; the shorter of the two applies:
 
@@ -825,8 +824,7 @@ writer_writes = ["/Users/me/proj/.agent-run/locks", "/Users/me/proj/.worktrees/f
 
 Each entry is an absolute directory (letters, digits and `/._-` only, no `..`,
 at most 16), granted read, write and exec as a subtree to worktree-write
-lanes only, so build scripts under it run. This is the grant for Fabric,
-manifest, nested and `--host` dispatch, which cannot pass `--write-root`; see
+lanes only, so build scripts under it run. Graph nodes can also declare write roots; see
 [providers](providers.md#writer-lanes).
 Read-only lanes are unchanged. The config is refused if an entry is too broad
 or names a credential directory such as `~/.ssh`; a launch is refused if an

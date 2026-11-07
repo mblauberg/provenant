@@ -90,6 +90,7 @@ fn filled_outputs(composite: bool, writer: bool) -> NodeOutputs {
         Some(worst(4 * OUTPUT_FIELD_BYTES)),
         Some(worst(4 * OUTPUT_FIELD_BYTES)),
     );
+    outputs.extra.insert(review::PARTIAL.into(), true.into());
     outputs.verdict = Some(worst(OUTPUT_FIELD_BYTES));
     outputs.verdict_error = Some("verdict malformed, repeated or not final".into());
     outputs.findings = findings();
@@ -287,6 +288,7 @@ fn filled_checkpoint(document: &GraphDocument, plan: &PlannedGraph) -> GraphChec
                 skip_reason: Some("graph cancelled".into()),
                 advance_error: Some(worst(MAX_ADVANCE_ERROR_BYTES)),
                 advance_error_code: Some("c".repeat(envelope::REFUSAL_CODE_BYTES)),
+                advance_owner_code: Some("c".repeat(envelope::REFUSAL_CODE_BYTES)),
                 launch_retry: None,
                 last_launch_retry: (!boundary
                     && node.composite.is_none()

@@ -1733,6 +1733,235 @@ fn check_continuable_refuses_nonterminal_before_session() -> Result<(), Box<dyn 
 }
 
 #[test]
+fn reconcile_lists_reservation_issues_from_a_selected_project()
+-> Result<(), Box<dyn std::error::Error>> {
+    if reexec_test_in_lane(
+        "run::tests::reconcile_lists_reservation_issues_from_a_selected_project",
+    )? {
+        return Ok(());
+    }
+    let fixture = linked_fixture()?;
+    let other = fixture.root.join("other-project");
+    std::fs::create_dir(&other)?;
+    provenant_os::fixture::run_git(&other, &["init", "-q", "-b", "fixture-base"])?;
+    provenant_os::fixture::run_git(&other, &["commit", "--allow-empty", "-qm", "base"])?;
+    with_edge(
+        &fixture.root,
+        &fixture.project,
+        |edge| -> Result<(), Box<dyn std::error::Error>> {
+            let clock = SystemClock::new();
+            let cancel = CancelToken::new();
+            let call = run::Request {
+                clock: &clock,
+                cancel: &cancel,
+            };
+            let current = open(edge, &call).map_err(|fail| fail.message)?;
+            let other_edge = Edge {
+                cwd: &other,
+                ..*edge
+            };
+            let selected = open(&other_edge, &call).map_err(|fail| fail.message)?;
+            assert_ne!(current.context.project_id, selected.context.project_id);
+            let mut input = trace_run(61, AttemptId::from_bytes([60; 16]), clock.wall_now()?)?;
+            input.request.parent_attempt = None;
+            input.request.lane_depth = None;
+            selected.store.create(&input, &call)?;
+            let id = input.attempts[0].attempt_id;
+            selected.store.cancel(id, "fixture settled", &call)?;
+            // This read-only task never launched a provider. Seed completed
+            // no-effect receipts so only the unrelated orphan needs recovery.
+            let generation = selected.store.record(id, &call)?.generation;
+            for effect in [
+                run::SettlementEffect::GitImport,
+                run::SettlementEffect::ManifestConflict,
+                run::SettlementEffect::CleanupCustodyRelease,
+                run::SettlementEffect::Delivery,
+            ] {
+                selected.store.record_effect(
+                    id,
+                    generation,
+                    effect,
+                    run::EffectDisposition::Done,
+                    &call,
+                )?;
+            }
+            selected
+                .store
+                .drain_reactions(input.run_id, &clock, &cancel, &mut |reaction, _| {
+                    reaction.graph_done = true;
+                    reaction.notice_done = true;
+                    reaction.log_done = true;
+                    Ok(())
+                })?;
+            let baseline = selected
+                .store
+                .reconcile(input.run_id, &Registry::default(), &call);
+            assert!(baseline.is_ok(), "{baseline:?}");
+            let slot = selected
+                .context
+                .state_root
+                .as_path()
+                .join("worktrees")
+                .join(selected.context.project_id.to_string())
+                .join("orphan");
+            std::fs::create_dir_all(&slot)?;
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&slot, std::fs::Permissions::from_mode(0o700))?;
+            let path = slot.join("reservation.json");
+            std::fs::write(&path, b"malformed other-project reservation")?;
+            let target = || Target {
+                selection: None,
+                run: Some(input.run_id),
+                task: None,
+                attempt: None,
+            };
+            let reply = reconcile(
+                Reconcile {
+                    id: vec![target(), target()],
+                    abandon: None,
+                    reason: None,
+                },
+                edge,
+            );
+            assert_eq!(reply.result.status, Status::Failed, "{}", reply.human);
+            assert_eq!(
+                reply.result.error.as_ref().ok_or("missing error")?.code,
+                "RECONCILE_INCOMPLETE"
+            );
+            let rows = reply.result.data["runs"].as_array().ok_or("runs")?;
+            assert!(!rows.is_empty());
+            assert!(
+                rows.iter()
+                    .all(|row| row["run_id"] == json!(input.run_id) && row.get("error").is_none()),
+                "{}",
+                reply.result.data
+            );
+            let issues = reply.result.data["writer_reservation_errors"]
+                .as_array()
+                .ok_or("issues")?;
+            assert_eq!(issues.len(), 1);
+            assert_eq!(issues[0]["reservation"], json!(path));
+            assert_eq!(
+                std::fs::read(&path)?,
+                b"malformed other-project reservation"
+            );
+            assert!(matches!(
+                selected.store.record(id, &call)?.state,
+                run::AttemptState::Terminal {
+                    outcome: run::Outcome::Cancelled,
+                    ..
+                }
+            ));
+            Ok(())
+        },
+    )??;
+    Ok(())
+}
+
+#[test]
+fn reconcile_reports_orphan_reservation_issues() -> Result<(), Box<dyn std::error::Error>> {
+    if reexec_test_in_lane("run::tests::reconcile_reports_orphan_reservation_issues")? {
+        return Ok(());
+    }
+    let fixture = linked_fixture()?;
+    with_edge(
+        &fixture.root,
+        &fixture.project,
+        |edge| -> Result<(), Box<dyn std::error::Error>> {
+            let clock = SystemClock::new();
+            let cancel = CancelToken::new();
+            let call = run::Request {
+                clock: &clock,
+                cancel: &cancel,
+            };
+            let session = open(edge, &call).map_err(|fail| fail.message)?;
+            let slot = session
+                .context
+                .state_root
+                .as_path()
+                .join("worktrees")
+                .join(session.context.project_id.to_string())
+                .join("orphan");
+            std::fs::create_dir_all(&slot)?;
+            let path = slot.join("reservation.json");
+            std::fs::write(&path, b"malformed retained reservation")?;
+            let reply = reconcile(
+                Reconcile {
+                    id: Vec::new(),
+                    abandon: None,
+                    reason: None,
+                },
+                edge,
+            );
+            assert_eq!(reply.result.status, Status::Failed, "{}", reply.human);
+            assert_eq!(
+                reply.result.error.as_ref().ok_or("missing error")?.code,
+                "RECONCILE_INCOMPLETE"
+            );
+            assert_eq!(reply.result.data["runs"], json!([]));
+            assert_eq!(
+                reply.result.data["writer_reservation_errors"][0]["reservation"],
+                json!(path)
+            );
+            assert_eq!(std::fs::read(&path)?, b"malformed retained reservation");
+            // A valid orphan whose destination cannot be published reports the
+            // storage failure too, rather than only a generic retained fence.
+            use provenant_supervisor::custody::{self, Scope};
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::remove_file(&path)?;
+            let directory = provenant_os::fs::Directory::open_anchor(&slot)?;
+            let scope = Scope {
+                run: RunId::from_bytes([6; 16]),
+                attempt: AttemptId::from_bytes([7; 16]),
+                generation: 1,
+            };
+            drop(custody::acquire_reader(
+                directory.try_clone()?,
+                scope,
+                provenant_core::WaitBudget::nonblocking(clock.mono_now()),
+                &cancel,
+                &clock,
+            )?);
+            let child_path = slot.join(scope.attempt.to_string());
+            let child = child_path.join("reservation.json");
+            let mut retained: Value = serde_json::from_slice(&std::fs::read(&child)?)?;
+            let anchor = directory.metadata()?;
+            retained["reservation_device"] = anchor.device.into();
+            retained["reservation_inode"] = anchor.inode.into();
+            std::fs::write(&path, serde_json::to_vec(&retained)?)?;
+            std::fs::remove_file(&child)?;
+            std::fs::set_permissions(&child_path, std::fs::Permissions::from_mode(0o500))?;
+            let reply = reconcile(
+                Reconcile {
+                    id: Vec::new(),
+                    abandon: None,
+                    reason: None,
+                },
+                edge,
+            );
+            std::fs::set_permissions(&child_path, std::fs::Permissions::from_mode(0o700))?;
+            assert_eq!(reply.result.status, Status::Failed, "{}", reply.human);
+            assert!(
+                reply.result.data["writer_reservation_errors"]
+                    .as_array()
+                    .ok_or("issues")?
+                    .iter()
+                    .any(|issue| issue["reason"]
+                        .as_str()
+                        .is_some_and(|reason| reason.contains("cut over writer reservations")))
+            );
+            assert_eq!(
+                serde_json::from_slice::<Value>(&std::fs::read(&path)?)?,
+                retained
+            );
+            assert!(!child.exists());
+            Ok(())
+        },
+    )??;
+    Ok(())
+}
+
+#[test]
 fn cancel_and_reconcile_report_leftover_paths_and_reasons_without_terminal_controls() {
     let state = run::Reconciled::TemporaryRetained {
         path: PathBuf::from("/state/runs/run/attempts/attempt/tmp"),
@@ -5145,6 +5374,33 @@ fn reconcile_reports_publish_error_and_explicitly_abandons_a_writer_fence()
 
 #[test]
 fn projected_cli_error_omits_unsafe_source_and_keeps_bounded_fields() {
+    for source in [
+        "TOKEN_SENTINEL\u{1b}".to_owned(),
+        format!("TOKEN_SENTINEL{}", "é".repeat(2048)),
+    ] {
+        let failure = super::Fail::from(provenant_run::RunError::Io(std::io::Error::other(source)));
+        let reply = super::reply("run", Err(failure));
+        let wire = serde_json::to_value(&reply.result).unwrap();
+        assert_eq!(wire["error"]["code"], "IO");
+        assert!(wire["error"].get("detail").is_none());
+        assert!(!wire.to_string().contains("TOKEN_SENTINEL"));
+        assert!(wire.to_string().len() < 4096);
+        let mut human = Vec::new();
+        crate::render::render(
+            &reply.result,
+            crate::render::RenderMode::Human {
+                text: "",
+                summary: None,
+                read_only: false,
+            },
+            &mut human,
+        )
+        .unwrap();
+        let human = String::from_utf8(human).unwrap();
+        assert!(!human.contains("TOKEN_SENTINEL"));
+        assert!(!human.chars().any(|c| c == '\u{1b}'));
+        assert!(human.len() < 4096);
+    }
     let failure = super::Fail::from(provenant_run::RunError::Io(std::io::Error::other(
         "TOKEN_SENTINEL\u{1b}",
     )));
@@ -5170,6 +5426,96 @@ fn projected_cli_error_omits_unsafe_source_and_keeps_bounded_fields() {
             .unwrap()
             .contains("TOKEN_SENTINEL")
     );
+}
+
+#[test]
+fn cli_safe_local_facts_are_bounded_and_escape_controls() {
+    use provenant_confinement::worktrees::WorktreeError;
+    use provenant_records::diagnostic::MAX_DIAGNOSTIC_BYTES;
+    for evidence in [
+        "é\u{1b}\nend".to_owned(),
+        format!("é\u{1b}{}", "界".repeat(1024)),
+    ] {
+        let failure = super::Fail::from(provenant_run::RunError::Writer(
+            WorktreeError::CensusUnknown {
+                path: "/fixture/tree".into(),
+                detail: evidence,
+            },
+        ));
+        let reply = super::reply("run", Err(failure));
+        let wire = serde_json::to_value(&reply.result).unwrap();
+        let detail = wire["error"]["detail"].as_str().unwrap();
+        assert!(
+            detail.contains("é\\u{1b}\\n") || detail.contains("é\\u{1b}"),
+            "{detail:?}"
+        );
+        assert!(detail.len() <= MAX_DIAGNOSTIC_BYTES);
+        assert!(!detail.chars().any(char::is_control));
+        assert!(wire["error"]["next"].is_string());
+        let mut human = Vec::new();
+        crate::render::render(
+            &reply.result,
+            crate::render::RenderMode::Human {
+                text: "",
+                summary: None,
+                read_only: false,
+            },
+            &mut human,
+        )
+        .unwrap();
+        let human = String::from_utf8(human).unwrap();
+        assert!(!human.contains('\u{1b}'));
+        assert!(human.contains("é\\u{1b}"));
+    }
+}
+
+#[test]
+fn cli_recorded_remedies_preserve_typed_causes() {
+    use provenant_fabric_runtime::coordination::facade::{DispatchRefusalFact, FacadeError};
+    use provenant_records::diagnostic::{ResourceFact, SettingSource};
+    let cases = [
+        (
+            FacadeError::DispatchRefused {
+                fact: Some(DispatchRefusalFact::DirtyWriter),
+                disk: None,
+                reason: "TOKEN_SENTINEL".into(),
+            },
+            "commit",
+        ),
+        (
+            FacadeError::DispatchRefused {
+                fact: Some(DispatchRefusalFact::Resource(ResourceFact::Disk {
+                    free: 1,
+                    floor: 2,
+                    origin: SettingSource::Configuration,
+                })),
+                disk: None,
+                reason: "TOKEN_SENTINEL".into(),
+            },
+            "free disk space",
+        ),
+        (
+            FacadeError::LaunchUnknown {
+                operation_id: OperationId::parse("dispatch-17").unwrap(),
+            },
+            "dispatch-17",
+        ),
+    ];
+    for (error, condition) in cases {
+        let projection = error.diagnostic();
+        let failure = super::Fail::from(provenant_run::RunError::RecordedRefusal(Box::new(
+            projection.clone(),
+        )));
+        let reply = super::reply("run", Err(failure));
+        let wire = serde_json::to_value(&reply.result).unwrap();
+        assert_eq!(wire["error"]["next"], projection.next.unwrap());
+        let action = wire["error"]["next"].as_str().unwrap();
+        assert!(action.contains(condition), "{wire}");
+        if condition == "dispatch-17" {
+            assert!(action.contains("inspect") && action.contains("same operation ID"));
+        }
+        assert!(!wire.to_string().contains("TOKEN_SENTINEL"));
+    }
 }
 
 #[test]

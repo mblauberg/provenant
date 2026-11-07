@@ -40,7 +40,7 @@ printf 'Changed paths since merge base:\n%s\n' "$changed"
 # and native coverage. Treat renames as deletion plus addition.
 prose_only='^(skills/.*\.md|docs/.*\.md|[^/]+\.md)$'
 # A Markdown name proves nothing about an executable or a symlink.
-not_plain=$(git diff --no-renames --raw "$BASE_SHA...$HEAD_SHA" | awk '$2 != "100644" && $2 != "000000"')
+not_plain=$(git diff --no-renames --raw "$BASE_SHA...$HEAD_SHA" | awk '($1 != ":100644" && $1 != ":000000") || ($2 != "100644" && $2 != "000000")')
 if [ -n "$changed" ] && [ -z "$not_plain" ] && ! printf '%s\n' "$changed" | grep -Evq "$prose_only" && ! printf '%s\n' "$changed" | grep -qx 'docs/runbooks/ci.md'; then
   set_output false false
   exit 0

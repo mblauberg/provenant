@@ -34,10 +34,10 @@
     {
       "paths": [
         "tools/front-door/crates/cli/src/run/*",
-        "tools/front-door/tests/dispatch_provider.rs"
+        "tools/front-door/tests/graph_provider.rs"
       ],
       "package": "provenant",
-      "binary": "dispatch_provider"
+      "binary": "graph_provider"
     },
     {
       "paths": [
@@ -47,6 +47,13 @@
       ],
       "package": "provenant",
       "binary": "cloud_adapter"
+    },
+    {
+      "paths": [
+        "tools/front-door/tests/graph_provider.rs"
+      ],
+      "package": "provenant",
+      "binary": "graph_provider"
     }
   ],
   "runners": {

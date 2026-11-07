@@ -27,6 +27,193 @@ pub(crate) struct BoundGraphOwner<'a> {
     pub(crate) tick: bool,
 }
 
+/// Frozen intent for a launch refused before it has a canonical run request.
+/// Only the digest is retained; prompts and host paths stay out of the record.
+struct GraphRefusalScope {
+    operation: provenant_core::OperationId,
+    actor: provenant_core::ActorId,
+    digest: provenant_core::Digest,
+    worktree: Option<String>,
+    chair: Option<provenant_run::ChairBinding>,
+}
+
+impl GraphRefusalScope {
+    fn new(
+        owner: &BoundGraphOwner<'_>,
+        key: &provenant_fabric_runtime::graph::AttemptKey,
+        node: &provenant_fabric_runtime::graph::NodeInput<'_>,
+        route: &provenant_fabric_runtime::graph::GraphRoute,
+        access: provenant_fabric_runtime::graph::AccessMode,
+        worktree: Option<&str>,
+        replay: provenant_fabric_runtime::graph::Replay<'_>,
+    ) -> Result<Self, FacadeError> {
+        let actor = replay
+            .launch_actor
+            .parse()
+            .map_err(|_| FacadeError::StateCorrupt)?;
+        let context = &owner.factory.context;
+        // Use the verified host inbox derivation, never node work labels. A
+        // different launch actor cannot acquire the current chair's binding.
+        let chair = (!provenant_cli::fabric::in_lane()
+            && provenant_cli::workflow::session_actor(context, None).ok() == Some(actor))
+        .then(|| provenant_run::ChairBinding {
+            extra: Default::default(),
+            host: context.identity.inbox.host,
+            actor,
+            session: provenant_workflow::session::chair_session_for(
+                &context.roots.state,
+                context.identity.project,
+                actor,
+            )
+            .map(|session| session.as_str().to_owned()),
+        });
+        let intent = serde_json::json!({
+            "key":key, "route":route, "access":access, "worktree":worktree,
+            "context":node.context, "prompt":node.prompt, "title":node.title,
+            "source_commit":node.source_commit, "review_base":node.review_base,
+            "attempt":node.attempt, "read_roots":node.read_roots,
+            "attachments":node.attachments, "capabilities":node.capabilities,
+            "capability_sources":node.capability_sources,
+            "skill_location":node.require_skill_location,
+            "distinct_from_attempts":node.distinct_from_attempts,
+            "require_distinct":node.require_distinct,
+            "required_verdict":node.required_verdict, "deadline":node.deadline_seconds,
+            "delivery":replay.delivery, "branch":replay.branch,
+            "fast_forward_only":replay.fast_forward_only,
+        });
+        Ok(Self {
+            operation: graph_operation("graph-attempt-operation", key)?,
+            actor,
+            digest: provenant_records::CanonicalV1::record_digest(
+                "graph-dispatch-preflight",
+                1,
+                &intent,
+            )
+            .map_err(|_| FacadeError::StateCorrupt)?,
+            worktree: worktree
+                .and_then(|path| Path::new(path).file_name())
+                .and_then(|name| name.to_str())
+                .map(str::to_owned),
+            chair,
+        })
+    }
+}
+
+fn stored_graph_refusal(
+    record: &provenant_run::OperationRecord,
+) -> Result<FacadeError, FacadeError> {
+    if let Some(error) = record.extra.get("graph_refusal_error") {
+        return serde_json::from_value(error.clone()).map_err(|_| FacadeError::StateCorrupt);
+    }
+    let diagnostic = record.refusal.clone().ok_or(FacadeError::StateCorrupt)?;
+    Ok(run_error(provenant_run::RunError::RecordedRefusal(
+        Box::new(diagnostic),
+    )))
+}
+
+impl BoundGraphOwner<'_> {
+    fn refusal_store(
+        &self,
+        scope: &GraphRefusalScope,
+    ) -> Result<provenant_run::RunStore, FacadeError> {
+        BinaryRunOwner {
+            factory: self.factory,
+            allow_remote: false,
+            actor: Some(scope.actor),
+            chair: None,
+        }
+        .store_with_facts(self.cancel, &self.repo_facts)
+    }
+
+    fn post_graph_refusal(
+        &self,
+        store: &provenant_run::RunStore,
+        operation: &provenant_core::OperationId,
+        call: &provenant_run::Request<'_>,
+    ) {
+        if crate::settlement::post_operation_refusal(operation, &self.factory.context, store, call)
+            .is_err()
+        {
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "refusal notice could not be delivered; run `provenant reconcile`"
+            );
+        }
+    }
+
+    fn retain_graph_refusal(
+        &self,
+        scope: &GraphRefusalScope,
+        error: &FacadeError,
+        diagnostic: provenant_records::diagnostic::Diagnostic,
+    ) -> Result<(), FacadeError> {
+        let store = self.refusal_store(scope)?;
+        let call = provenant_run::Request {
+            clock: &self.factory.clock,
+            cancel: self.cancel,
+        };
+        let config = provenant_config::read_with_domains(
+            &self.factory.context.roots,
+            &provenant_cli::domains::SECTIONS,
+        )
+        .map_err(|_| FacadeError::io("refusal notice configuration"))?;
+        let notice = config
+            .knobs
+            .get("chair.refusal_notice")
+            .map_or_else(|| serde_json::json!("inbox"), |knob| knob.value.clone());
+        // Facade serialisers select safe fields (including a fixed dispatch
+        // reason and redacted worktree paths). Relay codes need the same
+        // grammar check as the facade's public code projection.
+        let replay_error = match error {
+            FacadeError::GraphRelayRefused { detail, .. } => FacadeError::GraphRelayRefused {
+                refusal_code: error.code().to_owned(),
+                detail: detail.clone(),
+            },
+            error => error.clone(),
+        };
+        let record = provenant_run::OperationRecord {
+            extra: [
+                (
+                    "graph_refusal_error".into(),
+                    serde_json::to_value(replay_error).map_err(|_| FacadeError::StateCorrupt)?,
+                ),
+                ("refusal_notice".into(), notice),
+                (
+                    "origin_intent_digest".into(),
+                    serde_json::json!(scope.digest),
+                ),
+            ]
+            .into(),
+            schema_version: 1,
+            project_id: self.factory.context.identity.project,
+            actor_id: scope.actor,
+            operation_id: scope.operation.clone(),
+            kind: provenant_run::OperationKind::Dispatch,
+            request_digest: scope.digest,
+            run_id: provenant_core::RunId::from_bytes(
+                provenant_os::fs::entropy_128().map_err(|_| FacadeError::io("refusal identity"))?,
+            ),
+            state: provenant_run::OperationState::Refused,
+            blocked_reason: None,
+            refusal: Some(diagnostic),
+            worktree: scope.worktree.clone(),
+            refused_at: Some(
+                self.factory
+                    .clock
+                    .wall_now()
+                    .map_err(|_| FacadeError::io("refusal time"))?,
+            ),
+            refusal_chair: scope.chair.clone(),
+        };
+        let saved = store.insert_refusal(record, &call).map_err(run_error)?;
+        if saved.state != provenant_run::OperationState::Refused {
+            return Err(run_error(provenant_run::RunError::OperationConflict));
+        }
+        self.post_graph_refusal(&store, &scope.operation, &call);
+        Ok(())
+    }
+}
+
 /// The inbox request for a stored graph ask. The checkpoint keeps the rendered
 /// text, so a replay sends the identical request under the same operation.
 pub(crate) fn graph_ask_input(
@@ -935,9 +1122,38 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
 
     fn resolve_creation_base(
         &mut self,
+        branch: &str,
         reference: &str,
         default_base: bool,
     ) -> Result<Option<String>, Self::Error> {
+        // Only a new top-level writer may prefer a remote-only branch. Child
+        // provisioning and recovery always use their checkpointed source.
+        let remote_tip = provenant_confinement::worktrees::with_context_using_facts(
+            &self.factory.context.roots,
+            &self.factory.home,
+            &self.factory.cwd,
+            &self.factory.clock,
+            self.cancel,
+            &self.repo_facts,
+            |context| {
+                provenant_confinement::worktrees::fetch_remote_branch_tip(
+                    context,
+                    branch,
+                    self.cancel,
+                )
+            },
+        )
+        .map_err(landing::repository_fact_error)?;
+        if let Some(tip) = remote_tip {
+            if !default_base && reference != tip.to_string() {
+                let warning = format!(
+                    "ignoring --base {reference} for --branch {branch}; using remote tip {tip}"
+                );
+                let _ = writeln!(std::io::stderr().lock(), "warning: {warning}");
+                self.launch_warnings.push(warning);
+            }
+            return Ok(Some(tip.to_string()));
+        }
         if default_base {
             let (base, warnings) = provenant_confinement::worktrees::with_context_using_facts(
                 &self.factory.context.roots,
@@ -1167,18 +1383,14 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
         branch: &str,
         base: &str,
     ) -> Result<Option<provenant_fabric_runtime::graph::WriterWorktreeBinding>, Self::Error> {
-        provenant_cli::fabric::graph_relay::provision_writer(
+        provenant_cli::fabric::graph_relay::provision_writer_checked(
             &self.factory.context,
             path,
             branch,
             base,
             self.cancel,
         )
-        .map_err(|error| FacadeError::DispatchRefused {
-            fact: None,
-            disk: None,
-            reason: error.to_string(),
-        })?;
+        .map_err(|error| run_error(error.into()))?;
         self.bind_writer_worktree(path)
     }
 
@@ -1653,6 +1865,9 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             // Absence in this host's store cannot settle an uncertain peer
             // launch whose accepted target has not reached the graph yet.
             None => Ok(!self.uncertain_peer_placement(attempt)),
+            Some(operation) if operation.state == provenant_run::OperationState::Refused => {
+                Ok(true)
+            }
             Some(operation) => {
                 use provenant_run::{AttemptFilter, AttemptReader};
                 let attempts = store
@@ -1732,7 +1947,13 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
         Ok(store
             .operation(&operation_id, &call)
             .map_err(run_error)?
-            .is_some_and(|operation| operation.state != provenant_run::OperationState::Prepared))
+            .is_some_and(|operation| {
+                !matches!(
+                    operation.state,
+                    provenant_run::OperationState::Prepared
+                        | provenant_run::OperationState::Refused
+                )
+            }))
     }
 
     fn launch_refused_before_acceptance(
@@ -1760,7 +1981,11 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
         // local prelaunch refusals keep their existing cancellation semantics.
         Ok(
             match store.operation(&operation, &call).map_err(run_error)? {
-                Some(operation) => operation.state == provenant_run::OperationState::Prepared,
+                Some(operation) => matches!(
+                    operation.state,
+                    provenant_run::OperationState::Prepared
+                        | provenant_run::OperationState::Refused
+                ),
                 None => !self.uncertain_peer_placement(attempt),
             },
         )
@@ -1775,6 +2000,87 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
         worktree: Option<&str>,
         replay: provenant_fabric_runtime::graph::Replay<'_>,
     ) -> Result<provenant_fabric_runtime::graph::AttemptObservation, Self::Error> {
+        if replay.stored_ref.is_some() {
+            return self.observe_or_start_inner(key, node, route, access, worktree, replay, None);
+        }
+        let refusal = GraphRefusalScope::new(self, key, &node, route, access, worktree, replay)?;
+        // Refusals have no admitted run. Replay them before reading a request,
+        // consulting current writer state, or repeating any preparation effect.
+        if replay.stored_ref.is_none() {
+            let store = self.refusal_store(&refusal)?;
+            let call = provenant_run::Request {
+                clock: &self.factory.clock,
+                cancel: self.cancel,
+            };
+            if let Some(record) = store
+                .operation(&refusal.operation, &call)
+                .map_err(run_error)?
+                && record.state == provenant_run::OperationState::Refused
+            {
+                let intent = record
+                    .extra
+                    .get("origin_intent_digest")
+                    .ok_or(FacadeError::StateCorrupt)?;
+                if intent != &serde_json::json!(refusal.digest) {
+                    return Err(run_error(provenant_run::RunError::OperationConflict));
+                }
+                self.post_graph_refusal(&store, &refusal.operation, &call);
+                return Err(stored_graph_refusal(&record)?);
+            }
+        }
+        let result =
+            self.observe_or_start_inner(key, node, route, access, worktree, replay, Some(&refusal));
+        if replay.stored_ref.is_none()
+            && let Err(error) = &result
+            && matches!(
+                error,
+                FacadeError::DispatchRefused { .. }
+                    | FacadeError::InvalidInput { .. }
+                    | FacadeError::GraphRelayRefused { .. }
+                    | FacadeError::ConfinementRefused { .. }
+                    | FacadeError::CredentialRoot { .. }
+                    | FacadeError::WriterBusy { .. }
+                    | FacadeError::ContinuationUnsupported
+                    | FacadeError::ProviderStateExpired
+                    | FacadeError::LaneDepth
+                    | FacadeError::LaneCoordinationRefused
+                    | FacadeError::WorktreeMissing
+                    | FacadeError::WorktreeUnregistered { .. }
+                    | FacadeError::WorktreeNotApplicable
+                    | FacadeError::BaseUnreachable
+                    | FacadeError::BranchExists
+            )
+        {
+            // Busy/unknown handoffs and storage errors are not terminal
+            // refusals. An admitted operation retains its own custody owner.
+            let store = self.refusal_store(&refusal)?;
+            let call = provenant_run::Request {
+                clock: &self.factory.clock,
+                cancel: self.cancel,
+            };
+            if store
+                .operation(&refusal.operation, &call)
+                .map_err(run_error)?
+                .is_none()
+            {
+                self.retain_graph_refusal(&refusal, error, error.diagnostic())?;
+            }
+        }
+        result
+    }
+}
+impl BoundGraphOwner<'_> {
+    #[allow(clippy::too_many_arguments)] // Launch facts stay outside the kernel's public input shape.
+    fn observe_or_start_inner(
+        &mut self,
+        key: &provenant_fabric_runtime::graph::AttemptKey,
+        node: provenant_fabric_runtime::graph::NodeInput<'_>,
+        route: &provenant_fabric_runtime::graph::GraphRoute,
+        access: provenant_fabric_runtime::graph::AccessMode,
+        worktree: Option<&str>,
+        replay: provenant_fabric_runtime::graph::Replay<'_>,
+        refusal: Option<&GraphRefusalScope>,
+    ) -> Result<provenant_fabric_runtime::graph::AttemptObservation, FacadeError> {
         use provenant_fabric_runtime::graph::{AttemptObservation, AttemptOutcome};
         let mut owner = BinaryRunOwner {
             factory: self.factory,
@@ -1807,6 +2113,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             };
             (target, Some(reference.to_owned()))
         } else {
+            let refusal = refusal.ok_or(FacadeError::StateCorrupt)?;
             let host = node
                 .attempt
                 .and_then(|spec| spec.host.as_deref())
@@ -1864,7 +2171,11 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             let call = owner.call(self.cancel);
             let operation = store.operation(&operation_id, &call).map_err(run_error)?;
             let accepted = operation.as_ref().is_some_and(|operation| {
-                operation.state != provenant_run::OperationState::Prepared
+                !matches!(
+                    operation.state,
+                    provenant_run::OperationState::Prepared
+                        | provenant_run::OperationState::Refused
+                )
             });
             // A graph retry is a new attempt, but retains the predecessor's
             // original source pin and terminal writer head. Mark continuations
@@ -2140,7 +2451,26 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                         )
                     },
                 )
-                .map_err(|error| graph_writer_initialisation_error(commit, error))?;
+                .map_err(|error| {
+                    let diagnostic = matches!(
+                        error,
+                        provenant_confinement::worktrees::WorktreeError::Dirty(_)
+                    )
+                    .then(|| {
+                        provenant_records::diagnostic::Diagnostic::new("WRITER_SCOPE")
+                            .category("refused")
+                            .detail("the writer worktree has uncommitted edits")
+                            .next("commit or preserve the worktree changes before retrying")
+                    });
+                    let error = graph_writer_initialisation_error(commit, error);
+                    match diagnostic {
+                        Some(diagnostic) => self
+                            .retain_graph_refusal(refusal, &error, diagnostic)
+                            .err()
+                            .unwrap_or(error),
+                        None => error,
+                    }
+                })?;
                 if !descends {
                     return Err(FacadeError::DispatchRefused {
                         fact: None,
@@ -2179,7 +2509,26 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                         )
                     },
                 )
-                .map_err(|error| graph_writer_initialisation_error(commit, error))?;
+                .map_err(|error| {
+                    let diagnostic = matches!(
+                        error,
+                        provenant_confinement::worktrees::WorktreeError::Dirty(_)
+                    )
+                    .then(|| {
+                        provenant_records::diagnostic::Diagnostic::new("WRITER_SCOPE")
+                            .category("refused")
+                            .detail("the writer worktree has uncommitted edits")
+                            .next("commit or preserve the worktree changes before retrying")
+                    });
+                    let error = graph_writer_initialisation_error(commit, error);
+                    match diagnostic {
+                        Some(diagnostic) => self
+                            .retain_graph_refusal(refusal, &error, diagnostic)
+                            .err()
+                            .unwrap_or(error),
+                        None => error,
+                    }
+                })?;
             }
             let delivery = if let Some(mode) = replay.delivery {
                 let branch = if let Some(path) = worktree {
@@ -2626,6 +2975,22 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             // These fields have already been resolved into the sealed access grants.
             attempt.write_roots.clear();
             attempt.capabilities.clear();
+            // Preparation runs in a detached launcher whose stderr is not
+            // inherited. Warn at the graph host and retain it in the checkpoint.
+            if !accepted
+                && let Some(model) = route.model.as_deref()
+                && let Ok(model) =
+                    provenant_routing::ModelId::parse(&exact_model(route.adapter.as_deref(), model))
+                && let Ok(catalogue) = provenant_routing::Catalogue::bundled()
+                && catalogue.model(&model).is_none()
+            {
+                let warning = format!(
+                    "model {} is not in the catalogue; the provider will check it",
+                    model.as_str()
+                );
+                let _ = writeln!(std::io::stderr().lock(), "warning: {warning}");
+                self.launch_warnings.push(warning);
+            }
             let receipt = owner.submit_with_access(
                 input,
                 self.budget,
@@ -2634,6 +2999,10 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                 retry_limit,
                 Some(attempt),
                 &self.repo_facts,
+                provenant_run::RefusalContext {
+                    chair: refusal.chair.clone(),
+                    intent_digest: Some(refusal.digest),
+                },
             )?;
             if let Some(reason) = blocked(&owner)? {
                 return Err(FacadeError::DispatchRefused {
@@ -3011,6 +3380,230 @@ pub(crate) fn restore_scratch_source(
 
 #[cfg(test)]
 mod journal_error_tests {
+    #[test]
+    fn graph_refusal_replays_before_preparation_and_rejects_changed_intent()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use super::*;
+        if super::super::peer_tests::host_test(
+            "fabric::owner::journal_error_tests::graph_refusal_replays_before_preparation_and_rejects_changed_intent",
+        )? {
+            return Ok(());
+        }
+        use provenant_fabric_runtime::graph::{self, AttemptOwner};
+        let rig = crate::worktree_tests::repository()?;
+        let roots = crate::roots::child(&rig.home, &rig.project, rig.state.clone())?;
+        let factory = Factory {
+            context: Context::open(roots, &rig.home, &rig.project)?,
+            project_attribution: false,
+            clock: SystemClock,
+            backoff: ThreadPause,
+            executor: SystemExecutor::new(1)?,
+            home: rig.home.clone(),
+            cwd: rig.project.clone(),
+            assets: rig.project.clone(),
+            host_launch: None,
+            mcp_project: None,
+            workers: &provenant_confinement::worktrees::SystemWorkerObserver,
+        };
+        let cancel = CancelToken::new();
+        let mut owner = BoundGraphOwner {
+            factory: &factory,
+            repo_facts: Default::default(),
+            launch_warnings: Vec::new(),
+            integration_base: None,
+            integration_branch: None,
+            network: None,
+            capability_overrides: Default::default(),
+            exclude: Vec::new(),
+            budget: WaitBudget::cli(factory.clock.mono_now(), 30)?,
+            cancel: &cancel,
+            prices: None,
+            tick: false,
+        };
+        let key = graph::AttemptKey {
+            extra: Default::default(),
+            graph_id: "preflight-replay".into(),
+            node_id: "writer".into(),
+            route_index: 0,
+        };
+        let node = |prompt| graph::NodeInput {
+            require_skill_location: false,
+            settlement_retries: Some(1),
+            prior_attempts: &[],
+            family_peers: &[],
+            context: provenant_records::run::WorkContext {
+                graph_id: Some(key.graph_id.clone()),
+                node_id: Some(key.node_id.clone()),
+                ..Default::default()
+            },
+            read_roots: &[],
+            attachments: &[],
+            capabilities: None,
+            capability_sources: None,
+            attempt: None,
+            distinct_from_attempts: &[],
+            require_distinct: false,
+            source_commit: None,
+            review_base: None,
+            title: "writer",
+            prompt,
+            required_verdict: None,
+            deadline_seconds: None,
+            inputs_dir: None,
+        };
+        let route: graph::GraphRoute =
+            serde_json::from_value(serde_json::json!({"alias":"senior"}))?;
+        let actor = owner.actor();
+        let replay = graph::Replay {
+            delivery: None,
+            branch: None,
+            fast_forward_only: false,
+            stored_ref: None,
+            launch_actor: &actor,
+        };
+        let access = graph::AccessMode::WorktreeWrite;
+        let scope = GraphRefusalScope::new(
+            &owner,
+            &key,
+            &node("PROMPT_SENTINEL"),
+            &route,
+            access,
+            Some("/HOST_PATH_SENTINEL/missing"),
+            replay,
+        )?;
+        let original = FacadeError::DispatchRefused {
+            fact: None,
+            disk: None,
+            reason: "/HOST_PATH_SENTINEL uncommitted edits".into(),
+        };
+        owner.retain_graph_refusal(
+            &scope,
+            &original,
+            provenant_records::diagnostic::Diagnostic::new("WRITER_SCOPE")
+                .detail("the writer worktree has uncommitted edits")
+                .next("preserve the edits"),
+        )?;
+        let store = owner.refusal_store(&scope)?;
+        let call = provenant_run::Request {
+            clock: &factory.clock,
+            cancel: &cancel,
+        };
+        let first = store.operation(&scope.operation, &call)?.ok_or("refusal")?;
+        let serialised = serde_json::to_string(&first)?;
+        assert!(!serialised.contains("HOST_PATH_SENTINEL"));
+        assert!(!serialised.contains("PROMPT_SENTINEL"));
+        // This worktree cannot be prepared. The stored dispatch refusal must
+        // win without consulting the filesystem or looking for an admitted run.
+        let repeated = owner
+            .observe_or_start(
+                &key,
+                node("PROMPT_SENTINEL"),
+                &route,
+                access,
+                Some("/HOST_PATH_SENTINEL/missing"),
+                replay,
+            )
+            .unwrap_err();
+        assert_eq!(repeated.code(), original.code());
+        assert_eq!(
+            store
+                .operation(&scope.operation, &call)?
+                .ok_or("refusal")?
+                .run_id,
+            first.run_id
+        );
+        let changed = owner
+            .observe_or_start(
+                &key,
+                node("changed"),
+                &route,
+                access,
+                Some("/HOST_PATH_SENTINEL/missing"),
+                replay,
+            )
+            .unwrap_err();
+        assert_eq!(changed.code(), "operation_conflict");
+        let missing_key = graph::AttemptKey {
+            route_index: 2,
+            ..key.clone()
+        };
+        let mut missing = first.clone();
+        missing.operation_id = graph_operation("graph-attempt-operation", &missing_key)?;
+        missing.run_id = provenant_core::RunId::from_bytes([31; 16]);
+        missing.extra.remove("origin_intent_digest");
+        store.insert_refusal(missing, &call)?;
+        let missing = owner
+            .observe_or_start(
+                &missing_key,
+                node("PROMPT_SENTINEL"),
+                &route,
+                access,
+                Some("/HOST_PATH_SENTINEL/missing"),
+                replay,
+            )
+            .unwrap_err();
+        assert_eq!(missing.code(), "state_corrupt");
+        // Exercise the other record writer too: adapter capability checks
+        // refuse inside RunService, after the graph owner has built its intent.
+        let service_key = graph::AttemptKey {
+            route_index: 1,
+            ..key.clone()
+        };
+        let unsupported: graph::GraphRoute = serde_json::from_value(serde_json::json!({
+            "adapter":"cursor", "model":"cursor/m", "effort":"high"
+        }))?;
+        let service_refusal = owner
+            .observe_or_start(
+                &service_key,
+                node("service preflight"),
+                &unsupported,
+                graph::AccessMode::ReadOnly,
+                None,
+                replay,
+            )
+            .unwrap_err();
+        let operation = graph_operation("graph-attempt-operation", &service_key)?;
+        let saved = store
+            .operation(&operation, &call)?
+            .ok_or("service refusal")?;
+        assert_eq!(
+            saved.extra.get("preflight_digest_version"),
+            Some(&serde_json::json!(1))
+        );
+        assert!(saved.extra.contains_key("origin_intent_digest"));
+        let repeated = owner
+            .observe_or_start(
+                &service_key,
+                node("service preflight"),
+                &unsupported,
+                graph::AccessMode::ReadOnly,
+                None,
+                replay,
+            )
+            .unwrap_err();
+        assert_eq!(repeated.code(), service_refusal.code());
+        let changed = owner
+            .observe_or_start(
+                &service_key,
+                node("changed service input"),
+                &unsupported,
+                graph::AccessMode::ReadOnly,
+                None,
+                replay,
+            )
+            .unwrap_err();
+        assert_eq!(changed.code(), "operation_conflict");
+        let attempt: graph::GraphAttempt = serde_json::from_value(serde_json::json!({
+            "launched":false,"key":key,"route":route,"state":"starting","attempt_ref":null,
+            "outcome":null,"launch_actor":actor,"settled":0
+        }))?;
+        assert!(!owner.launch_accepted(&attempt)?);
+        assert!(owner.launch_refused_before_acceptance(&attempt)?);
+        assert!(owner.cancelled_attempt_settled(&attempt)?);
+        assert!(!store.has_runs(&call)?);
+        Ok(())
+    }
+
     #[test]
     fn repair_scope_comparison_detects_new_paths() {
         let review = provenant_routing::ReviewConfig::default();

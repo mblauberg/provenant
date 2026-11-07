@@ -302,6 +302,7 @@ fn node_bound(
         skip_reason: Some("graph cancelled".into()),
         advance_error: Some(String::new()),
         advance_error_code: Some("c".repeat(REFUSAL_CODE_BYTES)),
+        advance_owner_code: Some("c".repeat(REFUSAL_CODE_BYTES)),
         outputs: Some(if boundary {
             gate_outputs(false)
         } else {
@@ -350,6 +351,7 @@ fn node_bound(
     // `substantial` is the longest accepted risk tier, and false is the
     // longest cached growth boolean. Commit IDs may be SHA-256 (64 bytes).
     if let Some(outputs) = &mut skeleton.outputs {
+        outputs.extra.insert(review::PARTIAL.into(), false.into());
         outputs
             .extra
             .insert("risk_tier".into(), "substantial".into());

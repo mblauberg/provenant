@@ -42,6 +42,19 @@ The `deliver` composite binds implementation, CI, bounded repair, independent
 review and landing to one integrated head. Check every external action against
 the authority envelope; a template grants no publication or promotion authority.
 
+## Review results
+
+Review templates enforce findings, verification, synthesis dispositions and a
+final verdict in code, including when the brief is overridden. An invalid reply
+reports a contract error; a valid FAIL is a completed review. Full details live
+in the [graph output contract](../specs/fabric.md).
+
+Lens and verifier groups accept one successful member (`min_ok = 1`). Missing
+coverage remains partial through verification and synthesis, so a partial panel
+can report findings but cannot approve the change. Shapes without synthesis
+reduce the lens and verifier verdicts together. A composite template may set
+`reduce_verdict = true` to reduce exported verdicts; node overrides take precedence.
+
 ## Host-native repairs
 
 `deliver` and `batch` collect qualified findings before repair: id, raising
@@ -85,6 +98,9 @@ submissions, including the template library, resolved panel, working directory
 and resolved Git HEAD. A new commit therefore starts a new review. An explicit
 `operation_id` on a run document replays that operation; an explicit `graph_id`
 continues to select that graph. Use a new operation ID for new work.
+Reattaching a cancelled graph preserves its cancellation; `retry GRAPH` resumes
+it. A fresh template invocation starts a separate graph, including after a
+cancelled invocation. Neither action bypasses writer custody.
 
 A template is TOML with parameters and either a leaf brief, tier, access and
 outputs, or `nodes`. A composite is a template with nodes; a dotted name such

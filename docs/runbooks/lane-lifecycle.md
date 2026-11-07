@@ -132,12 +132,15 @@ to census observations too.
 A new writer may reuse a registered worktree from a terminal lane when the tree is clean and
 writer custody is free. Dirty trees, held locks and retained import fences still refuse. When
 `--base` is supplied for a branch that already exists, Provenant accepts the branch only when
-it already contains that base (reusing its existing worktree or creating one); otherwise the refusal
-names the branch head and the base, and says to omit `--base` to reuse it.
+it already contains that base; otherwise the refusal names the branch head and
+the base. A branch checked out elsewhere must be selected with `--worktree`.
 If a linked checkout has no Provenant lane-owner record, the worktree list
 shows that fact separately from its observed writer state. It may have been
 created outside Provenant. Inspect custody and use `--worktree <path>` to select
-the checkout explicitly; unknown custody remains refused until checked.
+the checkout explicitly; unknown custody remains refused until checked. When a
+local `--branch` launch finds that branch in a clean unowned linked checkout,
+the refusal and local graph status and output show a shell-quoted absolute path
+for `--worktree`. The checkout is rechecked under the ordinary custody rules.
 
 Use `provenant worktree doctor PATH` after a worktree refusal. It reports the
 checkout's state, the reason and one suggested command for dirty, stale
@@ -162,7 +165,8 @@ waits up to 60 seconds and serialises only upstream configuration writes; origin
 repository verification, branch creation and provider launch run outside it.
 The lock is released before provider launch and custody confirmation.
 
-Choose `--deliver none`, `push`, `integrate:integration` or `pr`. Push and PR
+Use `provenant lane deliver ATTEMPT --deliver` with `none`, `push`,
+`integrate:integration` or `pr`. Push and PR
 use origin and the lane branch. Integration targets must already exist;
 `integrate:origin/integration` selects a remote branch. Local targets must be
 checked out nowhere, including the delivering lane's own worktree. Integration
@@ -189,8 +193,7 @@ paths and keychain-only logins are not mirrored. Hosts without gh or
 `~/.config/gh` continue local work without publishing setup. Merge through `provenant land N --wait`, or hand the merge to the chair. Landing
 verifies green CI at the PR's current head; add `--head SHA` to pin a reviewed
 head. Enable publishing with
-`--knob lanes.publish=true`, Fabric `knobs: ["lanes.publish=true"]`, or host
-configuration `[knobs] "lanes.publish" = true`. Read-only lanes retain their
+Fabric `knobs: ["lanes.publish=true"]` or host configuration `[knobs] "lanes.publish" = true`. Read-only lanes retain their
 existing open-network gh read access.
 
 For a project, the host can configure an advisory GitHub CLI deny list in
@@ -246,6 +249,20 @@ first. Recovery reconciles uncertain launches, reuses finished outputs and
 continues only unfinished work; never launch a second writer while custody
 is uncertain. Do not reset a worktree containing edits.
 
+Choose recovery by the saved cause and the work you intend to retain:
+
+| Intent | Existing command and effect |
+| --- | --- |
+| Resume unfinished work | `provenant retry GRAPH` advances the retained checkpoint, preserving completed outputs and reconciling any uncertain launch under its recorded attempt identity. |
+| Retry a node | `provenant retry GRAPH/NODE` retains prior attempts and reopens dependent work through the graph patch path. |
+| Repair with a changed brief | `provenant retry GRAPH/NODE --brief TEXT` records a replacement brief for the retried work; review and land gates still apply. |
+| Fall back to another route | Let the node's configured routes handle a typed unavailability result after custody release is confirmed. An uncertain handoff or a failed release blocks a route switch; inspect `status` and retained evidence first. |
+| Start fresh work | Submit a template with `identity = "fresh"`, or use a new operation ID in the run document. An unchanged `identity = "content"` submission reattaches even after cancellation; use `retry GRAPH` to resume that graph. |
+
+Template identity replaces the removed preset `--fresh` flag. See
+[composition rules](presets.md#composition-rules) for what participates in replay
+identity. A fresh run never clears an earlier writer's custody fence.
+
 Use `edit` for a patch to unstarted nodes, with the expected graph revision
 and an idempotency key. Started attempts stay immutable. `stop TARGET` stops
 its subtree unless a child is explicitly detached. Put repository templates
@@ -258,8 +275,17 @@ Finish or stop pending graphs and drain writers on every host before
 launches. Preserve unreadable records and report them.
 
 A retained slot-root reservation is carried to its named attempt during locked
-recovery. Unreadable or conflicting evidence continues to fence writers; retain
-it for host investigation.
+recovery. The attempt evidence is synced before the slot-root record is removed;
+a storage failure preserves a custody fence. If the source remains, a later
+recovery checks the same bytes before completing the cutover.
+`provenant reconcile --id RUN` performs this
+cutover before discovering attempts. Unreadable or conflicting evidence remains
+visible as a reservation issue and continues to fence writers; retain it for host
+investigation. Reconcile reports cutover storage errors in
+`writer_reservation_errors`, returns nonzero and continues judging independent
+known runs. The report includes reservations from every project selected by
+`--id`, even when the command starts in another project. Reading status does not
+perform the cutover.
 
 Cancelling a lane that has not launched a provider settles it as cancelled
 with nothing to import, and frees its queue place and its worktree's writer

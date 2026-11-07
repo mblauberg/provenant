@@ -63,6 +63,23 @@ pub(crate) fn launch_diagnostic(
         .unwrap_or_else(|| provenant_records::diagnostic::Diagnostic::new("launch_failed"))
 }
 
+pub(crate) fn writer_binding_reason(id: &str, error: &(dyn Error + 'static)) -> String {
+    let diagnostic = launch_diagnostic(error);
+    bounded(
+        &format!(
+            "node {}: cannot bind writer [{}]: {}; {}",
+            provenant_records::diagnostic::safe_text(id),
+            diagnostic.code,
+            diagnostic
+                .next
+                .as_deref()
+                .unwrap_or("inspect writer custody before retrying"),
+            diagnostic.detail.as_deref().unwrap_or(&diagnostic.code)
+        ),
+        MAX_ADVANCE_ERROR_BYTES,
+    )
+}
+
 /// Pure transition: callers persist the resulting checkpoint before reporting it.
 pub(crate) fn apply_launch_disposition(
     checkpoint: &mut GraphCheckpoint,
@@ -147,6 +164,7 @@ pub(crate) fn apply_launch_disposition(
     };
     progress.advance_error_code = Some(code.into());
     let projected = launch_diagnostic(error);
+    progress.advance_owner_code = Some(projected.code.clone());
     let detail = projected.detail.as_deref().unwrap_or(&projected.code);
     let action = projected
         .next
@@ -183,7 +201,7 @@ pub(crate) fn apply_launch_disposition(
     };
     progress.advance_error = Some(bounded(
         &format!(
-            "node {}: the launch failed [{}]: {detail}; {action}{recovery}",
+            "node {}: the launch failed [{}]: {action}; {detail}{recovery}",
             provenant_records::diagnostic::safe_text(id),
             projected.code
         ),
@@ -410,14 +428,36 @@ pub(super) fn quota_redraw_budget(progress: &NodeProgress) -> bool {
         })
 }
 
-/// Decide the next attempt disposition for a node during graph advancement.
-pub(super) fn decide_next_attempt<R: AttemptOwner>(
+/// Facts are requested lazily: waiting nodes never probe a host or consume a
+/// refusal, and a deadline check precedes fallback evidence exactly as on replay.
+#[derive(Default)]
+pub(super) struct NextAttemptFacts {
+    pub launch_accepted: Option<bool>,
+    pub fallback: Option<PreparationObservation>,
+}
+
+pub(super) struct PreparationObservation {
+    pub evidence: Option<PreparationFallbackEvidence>,
+    pub unreadable: bool,
+    pub cause: Option<provenant_records::RouteExclusionReason>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum NextAttemptDecision {
+    ObserveLaunchAcceptance,
+    ObservePreparationFallback,
+    Ready(NextAttempt),
+}
+
+/// Pure next-attempt transition. The scheduler fulfils any observation request
+/// then reapplies this function; errors from those reads never mutate progress.
+pub(super) fn next_attempt_transition(
     node: &PlannedNode,
     progress: &NodeProgress,
     limits: &crate::config::GraphLimits,
-    owner: &mut R,
     launch_clock: Option<provenant_core::WallTime>,
-) -> Result<NextAttempt, R::Error> {
+    facts: &NextAttemptFacts,
+) -> NextAttemptDecision {
     // 1. A persisted launch wait defers this node until its own wake.
     if progress
         .launch_retry
@@ -425,7 +465,7 @@ pub(super) fn decide_next_attempt<R: AttemptOwner>(
         .and_then(|retry| retry.wake_at)
         .is_some_and(|wake| launch_clock.is_some_and(|now| now < wake))
     {
-        return Ok(NextAttempt::WaitRetryWake);
+        return NextAttemptDecision::Ready(NextAttempt::WaitRetryWake);
     }
 
     // 2. Launch retry deadline expiry check.
@@ -437,11 +477,14 @@ pub(super) fn decide_next_attempt<R: AttemptOwner>(
     {
         let accepted = match progress.attempts.last() {
             Some(attempt) if attempt.attempt_ref.is_some() => true,
-            Some(attempt) => owner.launch_accepted(attempt)?,
+            Some(_) => match facts.launch_accepted {
+                Some(accepted) => accepted,
+                None => return NextAttemptDecision::ObserveLaunchAcceptance,
+            },
             None => false,
         };
         if !accepted {
-            return Ok(NextAttempt::LaunchRetryExhausted {
+            return NextAttemptDecision::Ready(NextAttempt::LaunchRetryExhausted {
                 reason: retry.reason.clone().unwrap_or_else(|| {
                     "inspect the current state before taking further action".into()
                 }),
@@ -467,7 +510,7 @@ pub(super) fn decide_next_attempt<R: AttemptOwner>(
         Some(last) if review_substitution(node, last) => {
             // A lowered limit can withdraw a retry that was saved
             // but had not yet started when the graph stopped.
-            return Ok(NextAttempt::Fail {
+            return NextAttemptDecision::Ready(NextAttempt::Fail {
                 code: None,
                 message: None,
             });
@@ -478,32 +521,20 @@ pub(super) fn decide_next_attempt<R: AttemptOwner>(
                 .is_some_and(|outcome| fallback_candidate(outcome, node.access, last.launched)) =>
         {
             let Some(outcome) = last.outcome else {
-                return Ok(NextAttempt::None);
+                return NextAttemptDecision::Ready(NextAttempt::None);
             };
-            let (evidence, unreadable) = match last.attempt_ref.as_deref() {
-                Some(reference) if !last.launched => {
-                    match owner.preparation_fallback_evidence(&last.key, reference) {
-                        Ok(evidence) => (evidence, false),
-                        Err(_) => (None, true),
-                    }
-                }
-                _ => (None, false),
+            let Some(fallback) = &facts.fallback else {
+                return NextAttemptDecision::ObservePreparationFallback;
             };
-            if !live_fallback_allowed(outcome, last.launched, node.access, evidence) {
-                let cause = last.attempt_ref.as_deref().and_then(|reference| {
-                    owner
-                        .preparation_refusal_cause(&last.key, reference)
-                        .ok()
-                        .flatten()
-                });
+            if !live_fallback_allowed(outcome, last.launched, node.access, fallback.evidence) {
                 let (code, message) = fallback_denial(
                     last.launched,
                     node.access,
-                    unreadable,
+                    fallback.unreadable,
                     outcome,
-                    cause.as_ref(),
+                    fallback.cause.as_ref(),
                 );
-                return Ok(NextAttempt::Fail {
+                return NextAttemptDecision::Ready(NextAttempt::Fail {
                     code: Some(code),
                     message: Some(message),
                 });
@@ -516,14 +547,14 @@ pub(super) fn decide_next_attempt<R: AttemptOwner>(
                     .count()
                     >= limits.review_substitutions
             {
-                return Ok(NextAttempt::Fail {
+                return NextAttemptDecision::Ready(NextAttempt::Fail {
                     code: Some("review_substitution_limit"),
                     message: Some("review substitution limit reached".into()),
                 });
             }
             progress.attempts.len()
         }
-        Some(_) => return Ok(NextAttempt::None),
+        Some(_) => return NextAttemptDecision::Ready(NextAttempt::None),
     };
 
     // 4. Retry accounting. Preparation refusals have not launched a provider
@@ -552,7 +583,7 @@ pub(super) fn decide_next_attempt<R: AttemptOwner>(
                     .is_some_and(|next| next.account.as_ref() != Some(account))
             })
     {
-        return Ok(NextAttempt::Fail {
+        return NextAttemptDecision::Ready(NextAttempt::Fail {
             code: Some("fallback_account_pinned"),
             message: Some("Route fallback cannot change the pinned account.".into()),
         });
@@ -577,15 +608,70 @@ pub(super) fn decide_next_attempt<R: AttemptOwner>(
         .count() as u64;
     let spent = automatic.saturating_add(launched_switches);
     if switching && allowance.is_some_and(|limit| spent > limit) {
-        return Ok(NextAttempt::Fail {
+        return NextAttemptDecision::Ready(NextAttempt::Fail {
             code: Some("fallback_budget_exhausted"),
             message: Some("Route fallback retry budget exhausted.".into()),
         });
     }
-    Ok(NextAttempt::Candidate {
+    NextAttemptDecision::Ready(NextAttempt::Candidate {
         route_index,
         settlement_retries: allowance.map(|limit| limit.saturating_sub(spent) as u8),
     })
+}
+
+/// Observe only the facts requested by the pure next-attempt transition.
+pub(super) fn decide_next_attempt<R: AttemptOwner>(
+    node: &PlannedNode,
+    progress: &NodeProgress,
+    limits: &crate::config::GraphLimits,
+    owner: &mut R,
+    launch_clock: Option<provenant_core::WallTime>,
+) -> Result<NextAttempt, R::Error> {
+    let mut facts = NextAttemptFacts::default();
+    loop {
+        match next_attempt_transition(node, progress, limits, launch_clock, &facts) {
+            NextAttemptDecision::Ready(decision) => return Ok(decision),
+            NextAttemptDecision::ObserveLaunchAcceptance => {
+                facts.launch_accepted = Some(match progress.attempts.last() {
+                    Some(attempt) => owner.launch_accepted(attempt)?,
+                    None => false,
+                });
+            }
+            NextAttemptDecision::ObservePreparationFallback => {
+                let Some(last) = progress.attempts.last() else {
+                    // A missing attempt cannot authorise any further launch.
+                    return Ok(NextAttempt::None);
+                };
+                let (evidence, unreadable) = match last.attempt_ref.as_deref() {
+                    Some(reference) if !last.launched => {
+                        match owner.preparation_fallback_evidence(&last.key, reference) {
+                            Ok(evidence) => (evidence, false),
+                            Err(_) => (None, true),
+                        }
+                    }
+                    _ => (None, false),
+                };
+                let denied = last.outcome.is_some_and(|outcome| {
+                    !live_fallback_allowed(outcome, last.launched, node.access, evidence)
+                });
+                let cause = denied
+                    .then(|| {
+                        last.attempt_ref.as_deref().and_then(|reference| {
+                            owner
+                                .preparation_refusal_cause(&last.key, reference)
+                                .ok()
+                                .flatten()
+                        })
+                    })
+                    .flatten();
+                facts.fallback = Some(PreparationObservation {
+                    evidence,
+                    unreadable,
+                    cause,
+                });
+            }
+        }
+    }
 }
 
 /// Fail a node. A decision without its own code or reason, such as a withdrawn
@@ -598,6 +684,7 @@ pub(super) fn fail_node(
     progress.state = NodeState::Failed;
     if code.is_some() {
         progress.advance_error_code = code;
+        progress.advance_owner_code = None;
     }
     if message.is_some() {
         progress.advance_error = message;

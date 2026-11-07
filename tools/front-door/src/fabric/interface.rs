@@ -14,6 +14,12 @@ fn graph_input_reason(reason: impl std::fmt::Display) -> FacadeError {
 fn relay_error(error: ServiceError) -> FacadeError {
     match error {
         ServiceError::Facade(error) => error,
+        ServiceError::Cli { code, .. } if code == "UPGRADE_DRAIN_REQUIRED" => {
+            FacadeError::GraphRelayRefused {
+                refusal_code: code,
+                detail: Some(InvalidInputDetail::UpgradeDrainRequired),
+            }
+        }
         error => FacadeError::GraphRelayRefused {
             refusal_code: error.code().to_owned(),
             detail: Some(InvalidInputDetail::graph_reason(error)),
@@ -92,11 +98,11 @@ fn run_envelope(input: &Value) -> Result<Value, FacadeError> {
         input["operation_id"] = operation;
     }
     if let Some(operation) = input.get("operation_id").filter(|value| !value.is_null()) {
-        let id = operation
-            .as_str()
-            .ok_or_else(|| graph_input_reason("invalid operation_id"))?;
+        let id = operation.as_str().ok_or_else(|| {
+            FacadeError::invalid(InvalidInputDetail::Field("operation_id".into()))
+        })?;
         provenant_core::OperationId::parse(id)
-            .map_err(|_| graph_input_reason("invalid operation_id"))?;
+            .map_err(|_| FacadeError::invalid(InvalidInputDetail::Field("operation_id".into())))?;
     }
     Ok(input)
 }
@@ -568,16 +574,16 @@ impl Factory {
         let mut library = TemplateLibrary::bundled();
         library
             .load_dir(Layer::User, &config.join("provenant/templates"))
-            .map_err(graph_input_reason)?;
+            .map_err(|_| FacadeError::invalid(InvalidInputDetail::TemplateInvalid))?;
         library
             .load_dir(Layer::Repository, &self.cwd.join(".provenant/templates"))
-            .map_err(graph_input_reason)?;
+            .map_err(|_| FacadeError::invalid(InvalidInputDetail::TemplateInvalid))?;
         if let Some(inline) = inline.filter(|value| !value.is_null()) {
-            let templates: BTreeMap<String, Template> =
-                serde_json::from_value(inline.clone()).map_err(graph_input_reason)?;
+            let templates: BTreeMap<String, Template> = serde_json::from_value(inline.clone())
+                .map_err(|_| FacadeError::invalid(InvalidInputDetail::TemplateInvalid))?;
             library = library
                 .with(Layer::Inline, &templates)
-                .map_err(graph_input_reason)?;
+                .map_err(|_| FacadeError::invalid(InvalidInputDetail::TemplateInvalid))?;
         }
         Ok(library)
     }
@@ -1601,25 +1607,63 @@ mod tests {
                 data: Value::Null,
             });
             assert_eq!(error.code(), code);
+            assert!(matches!(
+                &error,
+                FacadeError::GraphRelayRefused {
+                    detail: Some(InvalidInputDetail::GraphReason(reason)), ..
+                } if reason.contains(detail)
+            ));
             let diagnostic = error.diagnostic();
             assert_eq!(diagnostic.code, code);
-            assert!(
-                diagnostic
-                    .detail
-                    .as_deref()
-                    .is_some_and(|text| text.contains(detail))
+            assert_eq!(
+                diagnostic.detail.as_deref(),
+                Some("graph input could not be processed")
             );
             let restored: FacadeError = serde_json::from_value(serde_json::to_value(&error)?)?;
             assert_eq!(restored.code(), code);
             assert_eq!(restored.diagnostic(), diagnostic);
             let mcp = ServiceError::Facade(error).structured_error();
             assert_eq!(mcp["code"], code);
-            assert!(
-                mcp["message"]
-                    .as_str()
-                    .is_some_and(|text| text.contains(detail))
-            );
+            assert!(!mcp["message"].as_str().unwrap_or_default().contains(detail));
         }
+        Ok(())
+    }
+
+    #[test]
+    fn relay_upgrade_refusal_retains_safe_drain_guidance() -> Result<()> {
+        let error = super::relay_error(ServiceError::Cli {
+            code: "UPGRADE_DRAIN_REQUIRED".into(),
+            message: "PROMPT_SENTINEL private source text".into(),
+            data: json!({"private": "PROMPT_SENTINEL"}),
+        });
+        let wire = serde_json::to_value(&error)?;
+        assert!(!serde_json::to_string(&wire)?.contains("PROMPT_SENTINEL"));
+        let restored: FacadeError = serde_json::from_value(wire)?;
+        assert_eq!(restored, error);
+        let diagnostic = restored.diagnostic();
+        assert_eq!(diagnostic.code, "UPGRADE_DRAIN_REQUIRED");
+        assert_eq!(
+            diagnostic.detail.as_deref(),
+            Some(
+                "Finish or cancel old pending graphs and drain live lanes with the previous release before admitting new work."
+            )
+        );
+        assert!(
+            diagnostic
+                .next
+                .as_deref()
+                .ok_or("drain repair")?
+                .contains("--yes cannot bypass")
+        );
+        let mcp = ServiceError::Facade(restored).structured_error();
+        assert_eq!(mcp["code"], "UPGRADE_DRAIN_REQUIRED");
+        assert!(
+            mcp["message"]
+                .as_str()
+                .ok_or("drain message")?
+                .contains("previous release")
+        );
+        assert!(!serde_json::to_string(&mcp)?.contains("PROMPT_SENTINEL"));
         Ok(())
     }
 
@@ -1662,14 +1706,20 @@ mod tests {
                 "op":"run", "brief":"Inspect", "set":{"bogus":true}
             }))
             .expect_err("task has no bogus parameter");
+        let FacadeError::InvalidInput {
+            detail: Some(InvalidInputDetail::GraphReason(reason)),
+        } = &error
+        else {
+            return Err("missing compiler reason".into());
+        };
+        assert!(reason.contains("task"), "{reason}");
+        assert!(reason.contains("bogus"), "{reason}");
+        assert!(reason.contains("parameter"), "{reason}");
         let diagnostic = error.diagnostic();
-        let detail = diagnostic
-            .detail
-            .as_deref()
-            .ok_or("missing compiler detail")?;
-        assert!(detail.contains("task"), "{detail}");
-        assert!(detail.contains("bogus"), "{detail}");
-        assert!(detail.contains("parameter"), "{detail}");
+        assert_eq!(
+            diagnostic.detail.as_deref(),
+            Some("graph input could not be processed")
+        );
         let restored: FacadeError = serde_json::from_value(serde_json::to_value(&error)?)?;
         assert_eq!(restored.diagnostic(), diagnostic);
         Ok(())
@@ -2131,24 +2181,57 @@ mod tests {
     }
 
     #[test]
-    fn graph_template_errors_reach_the_agent_with_file_and_reason() -> Result {
+    fn graph_template_errors_reach_the_agent_with_safe_diagnostics() -> Result {
         let rig = TestRig::new()?;
-        let factory = factory(&rig)?;
+        // Inspection does not require a previously registered project, including
+        // when the test process itself runs inside a lane.
+        let roots = crate::roots::child(&rig.home, &rig.project, rig.state.clone())?;
+        let mut context = Context::open_inspection(roots, &rig.home, &rig.project)?;
+        context.in_lane = false;
+        let factory = Factory {
+            context,
+            project_attribution: false,
+            clock: SystemClock,
+            backoff: ThreadPause,
+            executor: SystemExecutor::new(1)?,
+            home: rig.home.clone(),
+            cwd: rig.project.clone(),
+            assets: rig.project.clone(),
+            host_launch: None,
+            mcp_project: None,
+            workers: &Workers,
+        };
         let directory = rig.project.join(".provenant/templates");
         std::fs::create_dir_all(&directory)?;
         let path = directory.join("review.typo.toml");
         std::fs::write(&path, "accesz = \"read_only\"\n")?;
         let error = factory.template_library(None).unwrap_err();
+        let structured =
+            provenant_fabric_mcp::tools::ServiceError::Facade(error.clone()).structured_error();
+        assert_eq!(structured["code"], error.diagnostic().code);
+        assert!(
+            structured["detail"]
+                .as_str()
+                .is_some_and(|detail| detail.contains("templates")),
+            "{structured}"
+        );
+        assert_eq!(
+            structured["next"].as_str(),
+            error.diagnostic().next.as_deref()
+        );
         let diagnostic = error.diagnostic();
         let text = diagnostic.detail.ok_or("agent diagnostic")?;
-        assert!(text.contains("review.typo.toml"), "{text}");
-        assert!(text.contains("accesz"), "{text}");
+        assert!(
+            text.contains("templates") && text.contains("validated"),
+            "{text}"
+        );
+        assert!(!text.contains("accesz"), "{text}");
         let wire = serde_json::to_value(&error)?;
         assert!(
             wire["detail"]
                 .as_str()
                 .ok_or("wire detail")?
-                .contains("accesz")
+                .contains("templates")
         );
         std::fs::remove_file(path)?;
         let cancel = CancelToken::new();
@@ -2165,7 +2248,7 @@ mod tests {
                 .diagnostic()
                 .detail
                 .ok_or("template refusal")?
-                .contains("unknown template flavour task.typo")
+                .contains("graph input could not be processed")
         );
         let error = factory
             .graph_document(
@@ -2182,7 +2265,7 @@ mod tests {
                 .diagnostic()
                 .detail
                 .ok_or("patch refusal")?
-                .contains("cycle")
+                .contains("graph input could not be processed")
         );
         Ok(())
     }

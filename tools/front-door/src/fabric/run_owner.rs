@@ -6,6 +6,7 @@ struct SubmissionPolicy<'a> {
     access: provenant_records::run::LaneAccess,
     settlement_retry_limit: Option<u8>,
     attempt: Option<provenant_fabric_runtime::graph::AttemptSpec>,
+    refusal: provenant_run::RefusalContext,
 }
 
 pub(crate) struct BinaryRunOwner<'a> {
@@ -85,6 +86,30 @@ pub(crate) fn events_within<T: serde::Serialize>(
     Ok(events.len())
 }
 pub(crate) fn run_error(error: provenant_run::RunError) -> FacadeError {
+    if matches!(
+        &error,
+        provenant_run::RunError::Writer(
+            provenant_confinement::worktrees::WorktreeError::CheckedOut
+        )
+    ) {
+        return FacadeError::DispatchRefused {
+            fact: Some(provenant_fabric_runtime::coordination::facade::DispatchRefusalFact::CheckedOutWriter),
+            disk: None,
+            reason: String::new(),
+        };
+    }
+    if matches!(
+        &error,
+        provenant_run::RunError::Writer(provenant_confinement::worktrees::WorktreeError::Dirty(_))
+    ) {
+        return FacadeError::DispatchRefused {
+            fact: Some(
+                provenant_fabric_runtime::coordination::facade::DispatchRefusalFact::DirtyWriter,
+            ),
+            disk: None,
+            reason: String::new(),
+        };
+    }
     // The unresolvable ref is the caller's own input; name it instead of
     // collapsing to a bare "invalid input".
     if let provenant_run::RunError::InvalidBase(base) = &error {
@@ -737,7 +762,9 @@ impl BinaryRunOwner<'_> {
 impl BinaryRunOwner<'_> {
     pub(crate) fn capabilities(&self) -> RunCapabilities {
         RunCapabilities {
-            submit: false,
+            // Peer submission admits graph attempts even though the legacy
+            // top-level run mutation tools have been removed.
+            submit: true,
             list: true,
             status: true,
             wait: true,
@@ -758,6 +785,7 @@ impl BinaryRunOwner<'_> {
         settlement_retry_limit: Option<u8>,
         attempt: Option<provenant_fabric_runtime::graph::AttemptSpec>,
         facts: &provenant_confinement::worktrees::RepoFacts,
+        refusal: provenant_run::RefusalContext,
     ) -> Result<SubmissionReceipt, FacadeError> {
         self.launch_graph_attempt(
             input,
@@ -768,6 +796,7 @@ impl BinaryRunOwner<'_> {
                 access,
                 settlement_retry_limit,
                 attempt,
+                refusal,
             },
         )
         .map_err(|error| scope_io(error, "submit"))
@@ -805,7 +834,13 @@ impl BinaryRunOwner<'_> {
             .store
             .operation(operation_id, &call)
             .map_err(run_error)?
-            .filter(|operation| operation.state != provenant_run::OperationState::Prepared)
+            .filter(|operation| {
+                !matches!(
+                    operation.state,
+                    provenant_run::OperationState::Prepared
+                        | provenant_run::OperationState::Refused
+                )
+            })
         else {
             return Ok(None);
         };
@@ -906,6 +941,7 @@ impl BinaryRunOwner<'_> {
             access,
             settlement_retry_limit,
             attempt,
+            refusal,
         } = policy;
         let SubmitInput::Submit {
             operation_id,
@@ -1050,7 +1086,7 @@ impl BinaryRunOwner<'_> {
         let session = self.session_with_facts(cancel, facts)?;
         let call = self.call(cancel);
         let submission = self.with_edge(|edge| {
-            let submitted = provenant_cli::run::submit_with_host_and_wait(
+            let submitted = provenant_cli::run::submit_with_host_for_refusal(
                 &session,
                 edge,
                 Submission {
@@ -1068,6 +1104,7 @@ impl BinaryRunOwner<'_> {
                             budget.remaining(self.factory.clock.mono_now()).as_micros(),
                         ),
                 ),
+                refusal,
             );
             recover_accepted_launch(&session, &operation_id, &call, submitted)
         });

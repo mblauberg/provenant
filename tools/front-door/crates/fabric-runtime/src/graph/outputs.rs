@@ -860,8 +860,16 @@ fn resolved_inputs_inner(
         let upstream = if let Some(cached) = cache.get(&index) {
             cached.clone()
         } else {
-            let resolved =
-                resolved_inputs_inner(&plan.nodes[index], plan, checkpoint, positions, true, cache);
+            // Composite boundaries move their inputs onto members. Follow
+            // exported members as well, so a verifier fan-out preserves the
+            // original finding identity through its aggregation boundary.
+            let composite_source = plan.nodes[index].composite.as_ref().map(|spec| {
+                let mut source = plan.nodes[index].clone();
+                source.inputs = spec.exports.clone();
+                source
+            });
+            let source = composite_source.as_ref().unwrap_or(&plan.nodes[index]);
+            let resolved = resolved_inputs_inner(source, plan, checkpoint, positions, true, cache);
             cache.insert(index, resolved.clone());
             resolved
         };
@@ -871,7 +879,20 @@ fn resolved_inputs_inner(
                 .extra
                 .get("propagates")
                 .and_then(|v| v.as_str())
-                .and_then(|marker| marker_root(marker, &upstream))
+                .and_then(|marker| {
+                    if plan.nodes[index].composite.is_some() {
+                        // The exporting member already resolved propagation
+                        // in its input scope. A raw marker cannot name a sibling.
+                        upstream
+                            .iter()
+                            .find(|item| {
+                                format!("{}:{}", item.source, item.stored_id) == finding.id
+                            })
+                            .map(|item| item.root.clone())
+                    } else {
+                        marker_root(marker, &upstream)
+                    }
+                })
                 .unwrap_or(default);
             selected.push(ResolvedFinding {
                 source: input.node.clone(),
@@ -1019,7 +1040,11 @@ pub(super) fn truncated_finding_ids(
                 };
                 if export.outputs.contains(&OutputKind::Findings)
                     && (spec.min_successful.is_none()
-                        || checkpoint.nodes[member].state == NodeState::Succeeded)
+                        || checkpoint.nodes[member].state == NodeState::Succeeded
+                        || review::retained_findings(
+                            &plan.nodes[member],
+                            &checkpoint.nodes[member],
+                        ))
                 {
                     collect(
                         &export.node,
@@ -1338,7 +1363,12 @@ pub(super) fn upstream_results(
                 let selected_findings = (truncated || include_findings)
                     && export.outputs.contains(&OutputKind::Findings);
                 if (export.outputs.contains(&OutputKind::Result) || selected_findings)
-                    && (!partial || checkpoint.nodes[member].state == NodeState::Succeeded)
+                    && (!partial
+                        || checkpoint.nodes[member].state == NodeState::Succeeded
+                        || review::retained_findings(
+                            &plan.nodes[member],
+                            &checkpoint.nodes[member],
+                        ))
                 {
                     let qualified = selected_findings.then(|| format!("{prefix}{}:", export.node));
                     collect(

@@ -413,6 +413,17 @@ fn refused_operation_is_durable_and_replay_checks_request_identity() -> TestResu
         .category("refused")
         .detail("admission queue is full");
     let store = RunStore::open(&context, &call)?;
+    store.db.execute_batch("CREATE TEMP TRIGGER refusal_write_failure BEFORE INSERT ON operations BEGIN SELECT RAISE(ABORT, 'fixture refusal write'); END")?;
+    assert!(
+        store
+            .record_refusal(&input, diagnostic.clone(), Some("lane".into()), &call)
+            .is_err()
+    );
+    assert!(store.operation(&input.operation_id, &call)?.is_none());
+    assert!(!store.has_runs(&call)?);
+    store
+        .db
+        .execute_batch("DROP TRIGGER refusal_write_failure")?;
     let saved = store.record_refusal(&input, diagnostic.clone(), Some("lane".into()), &call)?;
     assert_eq!(saved.refused_at, Some(input.created_at));
     drop(store);
@@ -428,6 +439,18 @@ fn refused_operation_is_durable_and_replay_checks_request_identity() -> TestResu
     let other = RunStore::open(&other_context, &call)?;
     assert!(other.recent_refusals(10, &call)?.is_empty());
     assert!(store.recent_refusals(0, &call).is_err());
+    let mut changed_kind = replayed.clone();
+    changed_kind.kind = OperationKind::Cancel;
+    assert!(matches!(
+        store.insert_refusal(changed_kind, &call),
+        Err(RunError::OperationConflict)
+    ));
+    let mut wrong_actor = replayed.clone();
+    wrong_actor.actor_id = other_context.actor_id;
+    assert!(matches!(
+        store.insert_refusal(wrong_actor, &call),
+        Err(RunError::Validation("refused operation identity"))
+    ));
     let duplicate = store.record_refusal(
         &input,
         provenant_records::diagnostic::Diagnostic::new("OTHER"),

@@ -162,50 +162,53 @@ fn prepare(
         None => input.route.model.clone(),
     };
     argv.extend(["-m".into(), model.into()]);
-    let edit = match access {
-        Access::ReadOnly => "deny",
-        Access::WorktreeWrite => "allow",
-    };
     let staged_skills = input.stage_user_skills();
     let user_skills = staged_skills.root.clone();
     let skill_reads = user_skills.iter().map(subtree).collect::<Vec<_>>();
     let mut omitted_discovery = Vec::new();
-    let mut permission = serde_json::json!({
-        "edit": edit,
-        "bash": edit,
-        "webfetch": "deny",
-    });
-    let mut external = serde_json::Map::new();
-    let mut reads = serde_json::Map::new();
-    if input.git_context {
-        // Scratch is outside the workspace; headless runs cannot answer the
-        // external-directory prompt. Keep the exception inside its existing grant.
-        // https://opencode.ai/docs/permissions/#external-directories
-        let scratch = format!(
-            "{}/**",
-            plan.scratch
-                .path
-                .to_str()
-                .ok_or(ProviderError::InvalidPath)?
-        );
-        external.insert(scratch.clone(), "allow".into());
-        reads.insert(scratch, "allow".into());
-    }
-    if let Some(skills) = &user_skills {
-        // Keep native paths usable even when the skills root is itself a link.
-        let pattern = format!("{}/**", skills.display());
-        external.insert(pattern.clone(), "allow".into());
-        reads.insert(pattern, "allow".into());
-    }
-    for grant in &skill_reads {
-        let pattern = format!("{}/**", grant.path.display());
-        external.insert(pattern.clone(), "allow".into());
-        reads.insert(pattern, "allow".into());
-    }
-    if !external.is_empty() {
-        permission["external_directory"] = external.into();
-        permission["read"] = reads.into();
-    }
+    let permission = if access == Access::WorktreeWrite {
+        // Confinement enforces path and credential access. Do not add headless
+        // approval prompts for writer tools or directories outside the cwd.
+        serde_json::json!({"*": "allow"})
+    } else {
+        let mut permission = serde_json::json!({
+            "edit": "deny",
+            "bash": "deny",
+            "webfetch": "deny",
+        });
+        let mut external = serde_json::Map::new();
+        let mut reads = serde_json::Map::new();
+        if input.git_context {
+            // Scratch is outside the workspace; headless runs cannot answer the
+            // external-directory prompt. Keep the exception inside its existing grant.
+            // https://opencode.ai/docs/permissions/#external-directories
+            let scratch = format!(
+                "{}/**",
+                plan.scratch
+                    .path
+                    .to_str()
+                    .ok_or(ProviderError::InvalidPath)?
+            );
+            external.insert(scratch.clone(), "allow".into());
+            reads.insert(scratch, "allow".into());
+        }
+        if let Some(skills) = &user_skills {
+            // Keep native paths usable even when the skills root is itself a link.
+            let pattern = format!("{}/**", skills.display());
+            external.insert(pattern.clone(), "allow".into());
+            reads.insert(pattern, "allow".into());
+        }
+        for grant in &skill_reads {
+            let pattern = format!("{}/**", grant.path.display());
+            external.insert(pattern.clone(), "allow".into());
+            reads.insert(pattern, "allow".into());
+        }
+        if !external.is_empty() {
+            permission["external_directory"] = external.into();
+            permission["read"] = reads.into();
+        }
+        permission
+    };
     let config = serde_json::json!({
         "autoupdate": false,
         "share": "disabled",

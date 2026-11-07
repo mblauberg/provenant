@@ -50,6 +50,32 @@ pub(super) fn reconcile_reply(outcome: Result<(Value, String), Fail>, fenced: bo
 
 pub(super) const SCAN: u64 = 320;
 
+fn reservation_root(context: &run::ExecutionContext) -> PathBuf {
+    context
+        .state_root
+        .as_path()
+        .join("worktrees")
+        .join(context.project_id.to_string())
+}
+
+fn prepare_reservations(
+    session: &Session,
+    call: &run::Request<'_>,
+    visited: &mut BTreeMap<provenant_core::ProjectId, run::ExecutionContext>,
+    issues: &mut Vec<provenant_supervisor::custody::ReservationIssue>,
+) {
+    if visited
+        .insert(session.context.project_id, session.context.clone())
+        .is_none()
+        && let Err(error) = session.store.cutover_writer_reservations(call)
+    {
+        issues.push(provenant_supervisor::custody::ReservationIssue {
+            reservation: reservation_root(&session.context),
+            reason: error.to_string(),
+        });
+    }
+}
+
 pub(super) fn reconcile_inner(
     command: Reconcile,
     edge: &Edge<'_>,
@@ -73,10 +99,13 @@ pub(super) fn reconcile_inner(
             format!("{id} {}\n", reconcile_summary(&state)),
         ));
     }
+    let mut visited = BTreeMap::new();
+    let mut cutover_issues = Vec::new();
     let (runs, truncated) = if command.id.is_empty() {
         let session = open(edge, &request(&clock, &cancel)?)?;
         let call = request(&clock, &cancel)?;
-        let initial = session.store.open_runs(SCAN + 1, &call)?;
+        prepare_reservations(&session, &call, &mut visited, &mut cutover_issues);
+        let initial = session.store.open_runs_readonly(SCAN + 1, &call)?;
         let mut finished = Vec::new();
         for run in &initial {
             if cloud_owner::finished_run(&session.store, *run, &call).unwrap_or(false) {
@@ -89,7 +118,7 @@ pub(super) fn reconcile_inner(
         let mut runs = if finished.is_empty() {
             initial
         } else {
-            session.store.open_runs(scan_cap + 1, &call)?
+            session.store.open_runs_readonly(scan_cap + 1, &call)?
         };
         let exhausted = runs.len() as u64 > scan_cap;
         if !finished.is_empty() {
@@ -121,6 +150,12 @@ pub(super) fn reconcile_inner(
     let mut human = String::new();
     for target in runs {
         let (session, selected) = targets::open(edge, &target, true, &request(&clock, &cancel)?)?;
+        prepare_reservations(
+            &session,
+            &request(&clock, &cancel)?,
+            &mut visited,
+            &mut cutover_issues,
+        );
         let run = selected.run.ok_or(run::RunError::NotFound)?;
         let scoped_cwd = targets::cwd(edge, session.context.project_id)?;
         let scoped_edge = Edge {
@@ -257,13 +292,51 @@ pub(super) fn reconcile_inner(
             "more than {SCAN} open runs; name the rest with --id\n"
         ));
     }
-    let reservations = open(edge, &request(&clock, &cancel)?)?
-        .store
-        .writer_fence_listing()?;
+    let session = open(edge, &request(&clock, &cancel)?)?;
+    visited
+        .entry(session.context.project_id)
+        .or_insert(session.context);
+    let mut reservations = provenant_supervisor::custody::ReservationListing::default();
+    for context in visited.values() {
+        let call = request(&clock, &cancel)?;
+        let listing = (|| -> Result<_, run::RunError> {
+            let store = run::RunStore::open_read_only(context, &call)?
+                .ok_or(run::RunError::NotFound)?
+                .with_writer_registry(context.state_root.as_path());
+            store.writer_fence_listing()
+        })();
+        match listing {
+            Ok(listing) => {
+                reservations.reservations.extend(listing.reservations);
+                reservations.issues.extend(listing.issues);
+            }
+            Err(error) => {
+                reservations
+                    .issues
+                    .push(provenant_supervisor::custody::ReservationIssue {
+                        reservation: reservation_root(context),
+                        reason: error.to_string(),
+                    })
+            }
+        }
+    }
+    reservations.issues.extend(cutover_issues);
+    reservations
+        .reservations
+        .sort_by(|left, right| left.reservation.cmp(&right.reservation));
+    reservations
+        .reservations
+        .dedup_by(|left, right| left.scope == right.scope && left.reservation == right.reservation);
+    reservations.issues.sort_by(|left, right| {
+        (&left.reservation, &left.reason).cmp(&(&right.reservation, &right.reason))
+    });
+    reservations.issues.dedup_by(|left, right| {
+        left.reservation == right.reservation && left.reason == right.reason
+    });
     *fenced |= !reservations.issues.is_empty();
     for issue in &reservations.issues {
         human.push_str(&format!(
-            "writer reservation unreadable: {}: {}\n",
+            "writer reservation requires recovery: {}: {}\n",
             issue.reservation.display(),
             issue.reason
         ));

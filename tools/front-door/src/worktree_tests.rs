@@ -564,7 +564,7 @@ fn writer_dispatch_edits_a_linked_worktree() -> Result {
         state: context.state_root.as_path().to_owned(),
         home: fs::canonicalize(&rig.home)?,
         project: context.project_id,
-        mode: "edit",
+        mode: "instruction-edit",
     };
     let holder = holder_context(&rig, &roots, &context);
     let started = start_writer(&store, first_record.run_id, &provider, &holder, &call)?;
@@ -579,15 +579,19 @@ fn writer_dispatch_edits_a_linked_worktree() -> Result {
     assert!(matches!(
         &first_terminal.state,
         provenant_run::AttemptState::Terminal { reason: Some(reason), .. }
-            if reason.contains("uncommitted edits") && reason.contains("writer-edited")
+            if reason.contains("uncommitted edits") && reason.contains("AGENTS.md")
     ));
+    assert_eq!(fs::read(path.join("AGENTS.md"))?, b"writer instructions\n");
     assert_eq!(
         fs::read_to_string(path.join("writer-edited"))?,
         "writer fixture completed"
     );
     wait_for_writer_release(&store)?;
     let path_text = path.to_str().ok_or("fixture worktree encoding")?;
-    git(&rig, &["-C", path_text, "add", "writer-edited"])?;
+    git(
+        &rig,
+        &["-C", path_text, "add", "writer-edited", "AGENTS.md"],
+    )?;
     git(&rig, &["-C", path_text, "commit", "-qm", "Writer edit"])?;
 
     // Fabric supplies absolute paths; the CLI also accepts repo-relative ones.
@@ -1632,6 +1636,9 @@ pub(crate) fn provider(args: &[OsString]) -> Result {
         .ok_or("writer provider worktree missing")?;
     match mode {
         "edit" => {}
+        "instruction-edit" => {
+            fs::write(worktree.join("AGENTS.md"), b"writer instructions\n")?;
+        }
         "control" => {
             for name in [
                 "nested/AGENTS.md",
@@ -4179,33 +4186,31 @@ if (process.argv[2] === 'child') {
             "native probe failures: {}",
             failures.join("; ")
         );
-        // Remove the writer's scratch-execution grant from the actual
-        // compiled profile. The same table cells must still run independently:
-        // only the temporary-script cell needs this grant.
+        // Deny scratch execution in the actual compiled writer profile. The
+        // same table cells must still run independently: only the temporary
+        // script needs to execute from scratch.
         let path = scratch
             .to_str()
             .ok_or("scratch path is not UTF-8")?
             .replace('\\', "\\\\")
             .replace('"', "\\\"");
-        let grant = format!("(allow process-exec (subpath \"{path}\"))\n");
+        let deny = format!("(deny process-exec (subpath \"{path}\"))\n");
         let selected = ["python3", "here-document", "temporary script"];
         let mut baseline = Vec::new();
-        let mut removed = Vec::new();
+        let mut denied = Vec::new();
         for (name, cell) in cells
             .iter()
             .copied()
             .filter(|(name, _)| selected.contains(name))
         {
-            for (remove, failures) in [(false, &mut baseline), (true, &mut removed)] {
+            for (restrict, failures) in [(false, &mut baseline), (true, &mut denied)] {
                 let argv = [OsString::from("/bin/sh"), OsString::from("-c"), cell.into()];
                 let mut command =
                     compiled.command(&argv, &provenant_core::AttemptId::from_bytes([0; 16]))?;
-                if remove {
+                if restrict {
                     let source = command[2].to_str().ok_or("sandbox profile")?;
-                    if source.matches(grant.as_str()).count() != 1 {
-                        return Err("scratch execution grant was not unique".into());
-                    }
-                    command[2] = source.replacen(grant.as_str(), "", 1).into();
+                    assert!(source.lines().any(|line| line == "(allow process-exec)"));
+                    command[2] = format!("{source}\n{deny}").into();
                 }
                 let mut options = ExecOptions::new(&command, &launch.cwd, Duration::from_secs(30));
                 options.process_group = true;
@@ -4219,9 +4224,9 @@ if (process.argv[2] === 'child') {
         }
         assert!(baseline.is_empty(), "baseline cells failed: {baseline:?}");
         assert_eq!(
-            removed,
+            denied,
             ["temporary script"],
-            "grant removal affected unexpected cells"
+            "scratch execution denial affected unexpected cells"
         );
     }
     // Start the configured MCP inside the compiled profile too: an

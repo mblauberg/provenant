@@ -592,7 +592,7 @@ impl LaneRuntime<'_> {
         &self,
         scratch: &Path,
         argv: &mut Vec<OsString>,
-        allowed_tools: &str,
+        allowed_tools: Option<&str>,
         image_rules: &[String],
     ) -> Result<Vec<SetupStep>, ProviderError> {
         let mcp = match self.mcp(Harness::Claude) {
@@ -623,12 +623,10 @@ impl LaneRuntime<'_> {
             steps.push(SetupStep::WriteFile { path, bytes });
         }
         // Settings are explicitly sourced from our generated document only.
-        argv.extend([
-            "--setting-sources".into(),
-            "".into(),
-            "--allowedTools".into(),
-            allowed_tools.into(),
-        ]);
+        argv.extend(["--setting-sources".into(), "".into()]);
+        if let Some(tools) = allowed_tools {
+            argv.extend(["--allowedTools".into(), tools.into()]);
+        }
         Ok(steps)
     }
 
@@ -2408,7 +2406,12 @@ mod tests {
         lane.codex(&mut codex)?;
         assert!(codex.is_empty());
         let mut claude = Vec::new();
-        let setup = lane.claude(Path::new("/fixture/scratch"), &mut claude, "Bash", &[])?;
+        let setup = lane.claude(
+            Path::new("/fixture/scratch"),
+            &mut claude,
+            Some("Bash"),
+            &[],
+        )?;
         let documents: Vec<Value> = setup
             .iter()
             .filter_map(|step| match step {

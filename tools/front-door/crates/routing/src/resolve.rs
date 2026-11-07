@@ -1410,7 +1410,7 @@ fn admissible<'c>(
     }
     if let Some(effort) = effort.filter(|e| {
         !crate::request::effort_valid(e)
-            || entry.is_none_or(|row| !row.efforts.iter().any(|v| v == e))
+            || entry.is_some_and(|row| !row.efforts.iter().any(|v| v == e))
     }) {
         let support = match entry {
             Some(row) if row.efforts.is_empty() => "this model takes no effort".to_owned(),

@@ -115,7 +115,7 @@ impl ReviewBehaviour {
     fn apply(self, node: &mut Map<String, Value>) {
         let instruction = match self {
             Self::Lens => {
-                "Report concrete defects against the pinned subject and base. Include id, severity, file, line, summary, status, evidence and proposed_fix for each finding."
+                "Report concrete defects against the pinned subject and base. Include id, severity, file, summary, status, evidence and proposed_fix for each finding; line is optional."
             }
             Self::Verify => {
                 "Try to falsify every input finding against the pinned subject. Preserve its qualified id and evidence, set verification to upheld, falsified or unverifiable, and give a reason. Mark newly discovered findings verification=new."
@@ -206,6 +206,9 @@ pub struct Template {
     pub exports: Vec<GraphInput>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub min_ok: Option<usize>,
+    /// Reduce exported review verdicts without a synthesis attempt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reduce_verdict: Option<bool>,
 }
 
 impl Template {
@@ -439,6 +442,7 @@ impl Template {
             base.tier = None;
         }
         base.min_ok = own.min_ok.or(base.min_ok);
+        base.reduce_verdict = own.reduce_verdict.or(base.reduce_verdict);
         base
     }
 }
@@ -1164,6 +1168,12 @@ impl<'a> Compiler<'a> {
                 .or_else(|| template.min_ok.map(Value::from))
             {
                 composite.insert("min_successful".into(), min_ok);
+            }
+            if let Some(reduce) = overrides
+                .remove("reduce_verdict")
+                .or_else(|| template.reduce_verdict.map(Value::from))
+            {
+                composite.insert("reduce_verdict".into(), reduce);
             }
             let mut boundary = Map::new();
             boundary.insert("kind".into(), Value::String("composite".into()));

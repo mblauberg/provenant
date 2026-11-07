@@ -2104,19 +2104,29 @@ fn claude_network_on_enables_web_tools_and_codex_toolchain_without_writer_grants
                 home: &home,
                 ..fixture_input(&claude_route, &plan, &prompt, repo, Some(&token))
             })?;
-            for flag in ["--tools", "--allowedTools"] {
-                let list = launch.argv.windows(2).find(|pair| pair[0] == flag).unwrap();
-                let tools: Vec<_> = list[1].to_str().unwrap().split(',').collect();
-                for tool in ["WebFetch", "WebSearch"] {
-                    assert_eq!(
-                        tools.contains(&tool),
-                        network == NetworkAccess::Open,
-                        "{access:?} {network:?} {flag} {tool}"
-                    );
+            if access == Access::ReadOnly {
+                for flag in ["--tools", "--allowedTools"] {
+                    let list = launch.argv.windows(2).find(|pair| pair[0] == flag).unwrap();
+                    let tools: Vec<_> = list[1].to_str().unwrap().split(',').collect();
+                    for tool in ["WebFetch", "WebSearch"] {
+                        assert_eq!(
+                            tools.contains(&tool),
+                            network == NetworkAccess::Open,
+                            "{access:?} {network:?} {flag} {tool}"
+                        );
+                    }
+                    if access == Access::ReadOnly {
+                        assert!(!tools.contains(&"Edit") && !tools.contains(&"Write"));
+                    }
                 }
-                if access == Access::ReadOnly {
-                    assert!(!tools.contains(&"Edit") && !tools.contains(&"Write"));
-                }
+            } else {
+                assert!(
+                    launch
+                        .argv
+                        .windows(2)
+                        .any(|pair| pair[0] == "--tools" && pair[1] == "default")
+                );
+                assert!(!launch.argv.iter().any(|arg| arg == "--allowedTools"));
             }
             assert!(launch.profile.spec.authentication.is_empty());
             assert!(launch.profile.spec.deny_keychain_access);
@@ -2332,7 +2342,11 @@ fn rust_less_hosts_keep_repository_execution_in_the_rendered_profile()
         );
         let profile = render(plan.permissions(), &launch.profile, &home)?;
         assert!(
-            profile.contains("(allow process-exec (subpath \"/fixture/repo\"))"),
+            profile.contains(if access == Access::WorktreeWrite {
+                "(allow process-exec)"
+            } else {
+                "(allow process-exec (subpath \"/fixture/repo\"))"
+            }),
             "{adapter} {access:?}: repository execution missing from\n{profile}"
         );
     }
@@ -2569,7 +2583,8 @@ fn image_attachments_reach_codex_and_claude() -> Result<(), ProviderError> {
 }
 
 #[test]
-fn claude_write_images_do_not_enable_unrestricted_read() -> Result<(), ProviderError> {
+fn claude_writer_uses_confinement_instead_of_native_tool_permissions() -> Result<(), ProviderError>
+{
     let images = vec![Path::new("/outside/image.png").to_owned()];
     let prompt = Prompt::new("Describe the image".into());
     let token = fixture_token();
@@ -2590,17 +2605,14 @@ fn claude_write_images_do_not_enable_unrestricted_read() -> Result<(), ProviderE
         .unwrap()
         .adapter
         .prepare(input)?;
-    let allowed = spec
-        .argv
-        .iter()
-        .position(|arg| arg == "--allowedTools")
-        .unwrap();
+    assert!(!spec.argv.iter().any(|arg| arg == "--allowedTools"));
     assert!(
-        !spec.argv[allowed + 1]
-            .to_string_lossy()
-            .split(',')
-            .any(|tool| tool == "Read")
+        spec.argv
+            .windows(2)
+            .any(|pair| pair[0] == "--permission-mode" && pair[1] == "bypassPermissions")
     );
+    assert!(spec.profile.spec.deny_keychain_access);
+    assert!(spec.profile.spec.authentication.is_empty());
     Ok(())
 }
 
@@ -2762,7 +2774,7 @@ fn claude_requested_permission_modes_are_not_overridden() -> Result<(), Provider
     route.account_key = None;
     for (access, mode) in [
         (Access::ReadOnly, "dontAsk"),
-        (Access::WorktreeWrite, "default"),
+        (Access::WorktreeWrite, "bypassPermissions"),
     ] {
         let plan = fixture_access_plan(access, None, false);
         let mut input = fixture_input(
@@ -3499,23 +3511,22 @@ fn opencode_uses_user_config_and_accounts_with_read_only_permissions() -> Result
                     .to_string_lossy(),
             )
             .expect("JSON config");
-            let permission = if access == Access::ReadOnly {
-                "deny"
+            if access == Access::WorktreeWrite {
+                assert_eq!(config["permission"], serde_json::json!({"*": "allow"}));
             } else {
-                "allow"
-            };
-            assert_eq!(config["permission"]["edit"], permission);
-            assert_eq!(config["permission"]["bash"], permission);
-            let scratch = format!("{}/**", plan.permissions().scratch.path.display());
-            if git_context {
-                assert_eq!(
-                    config["permission"]["external_directory"],
-                    serde_json::json!({ scratch.clone(): "allow" })
-                );
-                assert_eq!(config["permission"]["read"][&scratch], "allow");
-            } else {
-                assert!(config["permission"]["external_directory"].is_null());
-                assert!(config["permission"]["read"].is_null());
+                assert_eq!(config["permission"]["edit"], "deny");
+                assert_eq!(config["permission"]["bash"], "deny");
+                let scratch = format!("{}/**", plan.permissions().scratch.path.display());
+                if git_context {
+                    assert_eq!(
+                        config["permission"]["external_directory"],
+                        serde_json::json!({ scratch.clone(): "allow" })
+                    );
+                    assert_eq!(config["permission"]["read"][&scratch], "allow");
+                } else {
+                    assert!(config["permission"]["external_directory"].is_null());
+                    assert!(config["permission"]["read"].is_null());
+                }
             }
         }
     }
@@ -6343,13 +6354,10 @@ fn claude_writer_shell_has_private_config_and_rust_tools() -> Result<(), Provide
     assert!(
         launch
             .argv
-            .iter()
-            .any(|arg| arg == "Read,Grep,Glob,Edit,Write,Bash,Skill")
+            .windows(2)
+            .any(|pair| pair[0] == "--tools" && pair[1] == "default")
     );
-    assert!(launch.argv.windows(2).any(|pair| {
-        pair[0] == "--allowedTools"
-            && pair[1] == "Read,Grep,Glob,Edit,Write,Bash,Skill,mcp__fabric__*"
-    }));
+    assert!(!launch.argv.iter().any(|arg| arg == "--allowedTools"));
     assert!(
         launch
             .env

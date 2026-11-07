@@ -2794,6 +2794,14 @@ pub(super) fn prepare_candidates(
         if let Some(warning) = image_input_warning(&route.adapter, &task.access.attachments) {
             let _ = writeln!(std::io::stderr().lock(), "{warning}");
         }
+        if route.eligibility == provenant_records::RouteEligibility::UnverifiedModel {
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "warning: model {}/{} is not in the catalogue; the provider will check it",
+                route.adapter,
+                route.model
+            );
+        }
         for warning in config.domains.routing.pool_effort_warnings(&catalogue) {
             let _ = writeln!(std::io::stderr().lock(), "{warning}");
         }
@@ -3491,7 +3499,19 @@ mod user_skills_tests {
     fn user_skills_receipt_reports_each_skipped_reason() {
         let mut staged = provenant_providers::StagedUserSkills::default();
         staged.root = Some(PathBuf::from("/attempt/skills"));
-        for reason in ["credential_root", "cycle", "changed_during_copy"] {
+        // Keep every staging eligibility outcome visible through the stable
+        // user_skill_skipped receipt code, not just the common link cases.
+        let skipped_reasons = [
+            "credential_root",
+            "cycle",
+            "depth_limit",
+            "entry_limit",
+            "size_limit",
+            "staging_failed",
+            "unsupported_type",
+            "changed_during_copy",
+        ];
+        for reason in skipped_reasons {
             staged.warnings.push(provenant_providers::SkillWarning {
                 path: PathBuf::from(reason),
                 reason,
@@ -3503,11 +3523,12 @@ mod user_skills_tests {
             &staged,
         );
         assert_eq!(receipt["exposed"], true);
-        for (warning, reason) in receipt["warnings"].as_array().unwrap().iter().zip([
-            "credential_root",
-            "cycle",
-            "changed_during_copy",
-        ]) {
+        for (warning, reason) in receipt["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .zip(skipped_reasons)
+        {
             assert_eq!(warning["code"], "user_skill_skipped");
             assert_eq!(warning["reason"], reason);
         }

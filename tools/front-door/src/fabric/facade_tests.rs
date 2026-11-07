@@ -324,6 +324,28 @@ fn prompt_limit_refusal_keeps_safe_field_and_existing_code() {
 }
 
 #[test]
+fn dirty_writer_refusal_keeps_safe_cause_and_action_on_the_wire() {
+    let error = run_error(provenant_run::RunError::Writer(
+        provenant_confinement::worktrees::WorktreeError::Dirty("TOKEN_SENTINEL".into()),
+    ));
+    let decoded: FacadeError = serde_json::from_slice(&serde_json::to_vec(&error).unwrap()).unwrap();
+    let diagnostic = decoded.diagnostic();
+    assert!(diagnostic.detail.as_deref().unwrap().contains("uncommitted"));
+    assert!(diagnostic.next.as_deref().unwrap().contains("commit"));
+    assert!(!serde_json::to_string(&diagnostic).unwrap().contains("TOKEN_SENTINEL"));
+
+    let error = run_error(provenant_run::RunError::Writer(
+        provenant_confinement::worktrees::WorktreeError::CheckedOut,
+    ));
+    let decoded: FacadeError = serde_json::from_slice(&serde_json::to_vec(&error).unwrap()).unwrap();
+    let diagnostic = decoded.diagnostic();
+    assert!(diagnostic.detail.as_deref().unwrap().contains("checked out"));
+    let next = diagnostic.next.as_deref().unwrap();
+    assert!(next.contains("provenant worktree list"));
+    assert!(next.contains("--worktree"));
+}
+
+#[test]
 fn memory_pressure_refusal_keeps_source_and_resource_action() {
     use provenant_records::diagnostic::{PressureLevel, PressureThreshold, SettingSource};
     let error = run_error(provenant_run::RunError::Admission(
@@ -1463,9 +1485,20 @@ esac
                 stored_ref: None, launch_actor: &actor });
         assert!(matches!(refused, Err(FacadeError::InvalidInput { .. })));
         let refused_owner = BinaryRunOwner { factory: &factory, allow_remote: false, actor: None, chair: None };
-        assert!(refused_owner.store(&cancel)?.operation(
+        let refusal = refused_owner.store(&cancel)?.operation(
             &graph_operation("graph-attempt-operation", &key)?, &refused_owner.call(&cancel),
-        )?.is_none());
+        )?.ok_or("refusal operation missing")?;
+        assert_eq!(refusal.state, provenant_run::OperationState::Refused);
+        let key: graph::AttemptKey = serde_json::from_value(serde_json::json!({
+            "graph_id":"cloud-owner", "node_id":"verify-read-only", "route_index":0
+        }))?;
+        let node = || graph::NodeInput {
+            attachments: &[], capabilities: None, capability_sources: None, attempt: Some(&spec),
+            require_skill_location: false, settlement_retries: None, prior_attempts: &[], family_peers: &[],
+            context: graph_test_context(&key), read_roots: &[], distinct_from_attempts: &[], require_distinct: false,
+            source_commit: Some(&head), review_base: None, title: "verify", prompt: "Run targeted tests",
+            required_verdict: None, deadline_seconds: None, inputs_dir: None,
+        };
         let first = graph_owner.observe_or_start(&key, node(), &route, graph::AccessMode::ReadOnly,
             None, graph::Replay { delivery: None, branch: None, fast_forward_only: false,
                 stored_ref: None, launch_actor: &actor })?;
@@ -1744,7 +1777,8 @@ esac
                     delivery: None, branch: None, fast_forward_only: false, stored_ref: None, launch_actor: &actor,
                 });
                 assert!(matches!(result, Err(FacadeError::DispatchRefused { .. })), "{name}, write={write}: {result:?}");
-                assert!(store.operation(&graph_operation("graph-attempt-operation", &key)?, &call)?.is_none());
+                let refusal = store.operation(&graph_operation("graph-attempt-operation", &key)?, &call)?.ok_or("refusal operation missing")?;
+                assert_eq!(refusal.state, provenant_run::OperationState::Refused);
             }
         }
         Ok(())
@@ -1909,7 +1943,8 @@ esac
         assert!(error.to_string().contains("lane-outside"));
         assert!(error.to_string().contains(&base));
         let binary = BinaryRunOwner { factory: &factory, allow_remote: true, actor: None, chair: None };
-        assert!(binary.store(&cancel)?.operation(&graph_operation("graph-attempt-operation", &key)?, &binary.call(&cancel))?.is_none());
+        let refusal = binary.store(&cancel)?.operation(&graph_operation("graph-attempt-operation", &key)?, &binary.call(&cancel))?.ok_or("refusal operation missing")?;
+        assert_eq!(refusal.state, provenant_run::OperationState::Refused);
         Ok(())
     }
 
@@ -1974,7 +2009,7 @@ esac
         let execution_store = rig.state.join("run.sqlite3");
         assert!(!execution_store.exists());
         assert!(matches!(
-            run_owner.submit_with_access(input, budget, &cancel, grants.clone(), None, Some(accepted), &provenant_confinement::worktrees::RepoFacts::default()),
+            run_owner.submit_with_access(input, budget, &cancel, grants.clone(), None, Some(accepted), &provenant_confinement::worktrees::RepoFacts::default(), Default::default()),
             Err(FacadeError::InvalidInput { .. })
         ));
         assert!(!execution_store.exists());

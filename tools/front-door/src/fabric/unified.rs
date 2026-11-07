@@ -141,7 +141,7 @@ fn row(
     reason: Option<&str>,
 ) -> Value {
     let reason = reason.map(|text| provenant_fabric_runtime::hosts::plain_text(text, 1024));
-    json!({"id":id,"kind":kind,"graph_id":target.graph,"node_id":node,"attempt_id":attempt,"state":state,"reason":reason,"waiting_for":null,"cause_code":null,"outcome":null,"next":null})
+    json!({"id":id,"kind":kind,"graph_id":target.graph,"node_id":node,"attempt_id":attempt,"state":state,"reason":reason,"waiting_for":null,"cause_code":null,"outcome":null,"next":null,"latest_attempt":null})
 }
 
 pub(crate) fn status_rows(run: &GraphRun, target: &GraphTarget) -> Vec<Value> {
@@ -185,7 +185,7 @@ pub(crate) fn status_rows(run: &GraphRun, target: &GraphTarget) -> Vec<Value> {
             if target.attempt.as_ref().is_some_and(|id| id != reference) {
                 continue;
             }
-            rows.push(row(
+            let mut attempt_row = row(
                 reference.clone(),
                 "attempt",
                 target,
@@ -193,7 +193,13 @@ pub(crate) fn status_rows(run: &GraphRun, target: &GraphTarget) -> Vec<Value> {
                 Some(reference),
                 json!(attempt.state),
                 None,
-            ));
+            );
+            attempt_row["latest_attempt"] = json!(
+                node.recorded_attempts()
+                    .next_back()
+                    .is_some_and(|last| std::ptr::eq(last, attempt))
+            );
+            rows.push(attempt_row);
         }
     }
     for row in &mut rows {
@@ -213,7 +219,11 @@ pub(crate) fn status_rows(run: &GraphRun, target: &GraphTarget) -> Vec<Value> {
         } else {
             json!(attempt.and_then(|attempt| attempt.outcome))
         };
-        row["cause_code"] = json!(node.and_then(|node| node.advance_error_code.as_deref()));
+        row["cause_code"] = json!(node.and_then(|node| {
+            node.advance_owner_code
+                .as_deref()
+                .or(node.advance_error_code.as_deref())
+        }));
         if row["cause_code"].is_null() && !row["outcome"].is_null() {
             row["cause_code"] = row["outcome"].clone();
         }
@@ -237,6 +247,20 @@ pub(crate) fn status_rows(run: &GraphRun, target: &GraphTarget) -> Vec<Value> {
             .as_str()
             .is_some_and(|outcome| outcome != "succeeded");
         row["next"] = json!(match state {
+            // A launch refusal's persisted diagnostic already contains its
+            // owner's action. In particular an uncertain handoff must not be
+            // presented as permission to start a fresh attempt.
+            "blocked" | "failed"
+                if matches!(
+                    node.and_then(|node| node.advance_error_code.as_deref()),
+                    Some(
+                        "launch_refused" | "launch_retry_exhausted" | "writer_binding_unavailable"
+                    )
+                ) =>
+                row["reason"]
+                    .as_str()
+                    .unwrap_or("inspect the launch receipt before retrying")
+                    .to_owned(),
             "terminal" | "complete" if failed_outcome => format!("provenant retry {selection}"),
             "failed" | "blocked" | "paused" => format!("provenant retry {selection}"),
             "pending" | "running" | "starting" | "unresolved" =>
@@ -452,9 +476,67 @@ pub(crate) fn enrich_status_rows(
             .extend(fields.as_object().ok_or(FacadeError::StateCorrupt)?.clone());
         row["attempt_id"] = reference;
         row["graph_state"] = graph_state;
+        project_attempt_failure(row);
     }
     project_node_waits(rows);
+    project_node_failures(rows);
+    for row in rows.iter_mut() {
+        if let Some(object) = row.as_object_mut() {
+            object.remove("latest_attempt");
+        }
+    }
     Ok(())
+}
+
+fn project_attempt_failure(row: &mut Value) {
+    if row["terminal_cause"].is_string() {
+        row["cause_code"] = row["terminal_cause"].clone();
+        if row["reason"].is_string() {
+            row["next"] = row["reason"].clone();
+        }
+    }
+}
+
+/// Surface the latest attempt's typed cause on its failed node as well. The
+/// checkpoint owns launch failures; an accepted attempt owns its terminal cause.
+fn project_node_failures(rows: &mut [Value]) {
+    let failures: std::collections::BTreeMap<_, _> = rows
+        .iter()
+        .filter(|row| row["kind"] == "attempt" && row["latest_attempt"] == true)
+        .filter_map(|row| {
+            Some((
+                (
+                    row["graph_id"].as_str()?.to_owned(),
+                    row["node_id"].as_str()?.to_owned(),
+                ),
+                (
+                    row["graph_state"].clone(),
+                    row["terminal_cause"].clone(),
+                    row["reason"].clone(),
+                ),
+            ))
+        })
+        .collect();
+    for row in rows
+        .iter_mut()
+        .filter(|row| row["kind"] == "node" && row["state"] == "failed" && row["reason"].is_null())
+    {
+        let key = (
+            row["graph_id"].as_str().unwrap_or_default().to_owned(),
+            row["node_id"].as_str().unwrap_or_default().to_owned(),
+        );
+        if let Some((state, cause, reason)) = failures.get(&key)
+            && state == "terminal"
+        {
+            if !cause.is_null() {
+                row["cause_code"] = cause.clone();
+            }
+            if !reason.is_null() {
+                row["reason"] = reason.clone();
+                row["next"] = reason.clone();
+            }
+        }
+    }
 }
 
 /// Collection on a peer must not invalidate the origin's retained checkpoint.
@@ -498,6 +580,7 @@ fn project_node_waits(rows: &mut [Value]) {
         .iter()
         .filter(|row| {
             row["kind"] == "attempt"
+                && row["latest_attempt"] == true
                 && row["state"] == "running"
                 && row["graph_state"] == "running"
                 && row["waiting_for"].is_string()
@@ -631,8 +714,11 @@ pub(crate) fn unified_graph_command(
         let cancel = CancelToken::new();
         let wait_seconds = input["wait_seconds"].as_u64().unwrap_or(55).max(55);
         let budget = WaitBudget::cli(factory.clock.mono_now(), wait_seconds)?;
-        let data = factory.graph_document(input, budget, &cancel)?;
+        let mut data = factory.graph_document(input, budget, &cancel)?;
         let timed_out = data["timed_out"].as_bool().unwrap_or(false);
+        if let Some(rows) = data["rows"].as_array_mut() {
+            localise_worktree_actions(&factory, &target.graph, rows);
+        }
         let rows = data["rows"].as_array().ok_or(FacadeError::StateCorrupt)?;
         let human = render_graph_status(rows);
         Ok(Some((data, human, timed_out)))
@@ -784,6 +870,7 @@ pub(crate) fn append_graph_status(
                         &factory.clock,
                         &CancelToken::new(),
                     )?;
+                    localise_worktree_actions(&factory, &graph, &mut graph_rows);
                     rows.extend(graph_rows);
                 }
                 Ok(None) => {}
@@ -885,6 +972,22 @@ pub(crate) fn unified_graph_output(
             &target.graph,
         )?
         .ok_or(FacadeError::NotFound)?;
+        let failure_rows = if target.attempt.is_none() {
+            let mut rows = status_rows(&graph_snapshot(checkpoint.clone()), &target);
+            enrich_status_rows(
+                &mut rows,
+                &factory.context,
+                &factory.clock,
+                &CancelToken::new(),
+            )?;
+            localise_worktree_actions(&factory, &target.graph, &mut rows);
+            rows.retain(|row| {
+                row["kind"] == "node" && matches!(row["state"].as_str(), Some("failed" | "blocked"))
+            });
+            rows
+        } else {
+            Vec::new()
+        };
         let mut references = checkpoint
             .nodes
             .iter()
@@ -1008,16 +1111,19 @@ pub(crate) fn unified_graph_output(
             }
         }
         if references.is_empty() {
-            return Ok(Some(provenant_cli::run::Reply {
-                result: provenant_records::CommandResult::new(
-                    "output",
-                    provenant_records::Outcome::Ok,
-                    json!({"graph_id":target.graph,"outputs":[]}),
-                ),
-                human: "no attempt output yet\n".into(),
-                summary: None,
-                read_only: true,
-            }));
+            return Ok(Some(with_graph_failures(
+                provenant_cli::run::Reply {
+                    result: provenant_records::CommandResult::new(
+                        "output",
+                        provenant_records::Outcome::Ok,
+                        json!({"graph_id":target.graph,"outputs":[]}),
+                    ),
+                    human: "no attempt output yet\n".into(),
+                    summary: None,
+                    read_only: true,
+                },
+                &failure_rows,
+            )));
         }
         // A single target uses exactly the attempt reader, including binary
         // ranges, paths and destination writes.
@@ -1026,7 +1132,10 @@ pub(crate) fn unified_graph_output(
             selected.attempt = references[0]
                 .parse()
                 .map_err(|_| FacadeError::InvalidInput { detail: None })?;
-            return Ok(Some(provenant_cli::run::output(selected, edge)));
+            return Ok(Some(with_graph_failures(
+                provenant_cli::run::output(selected, edge),
+                &failure_rows,
+            )));
         }
         let mut outputs = Vec::new();
         let mut human = String::new();
@@ -1068,16 +1177,19 @@ pub(crate) fn unified_graph_output(
             std::fs::write(path, &bytes)?;
             human = format!("wrote {} bytes to {}\n", bytes.len(), path.display());
         }
-        Ok(Some(provenant_cli::run::Reply {
-            result: provenant_records::CommandResult::new(
-                "output",
-                outcome,
-                json!({"graph_id":target.graph,"outputs":outputs}),
-            ),
-            human,
-            summary: None,
-            read_only: true,
-        }))
+        Ok(Some(with_graph_failures(
+            provenant_cli::run::Reply {
+                result: provenant_records::CommandResult::new(
+                    "output",
+                    outcome,
+                    json!({"graph_id":target.graph,"outputs":outputs}),
+                ),
+                human,
+                summary: None,
+                read_only: true,
+            },
+            &failure_rows,
+        )))
     })();
     match result {
         Ok(reply) => reply,
@@ -1091,6 +1203,70 @@ pub(crate) fn unified_graph_output(
             summary: None,
             read_only: true,
         }),
+    }
+}
+
+fn with_graph_failures(
+    mut reply: provenant_cli::run::Reply,
+    rows: &[Value],
+) -> provenant_cli::run::Reply {
+    if !rows.is_empty() {
+        reply.result.data["graph_failures"] = json!(rows);
+        let reading = render_graph_status(rows);
+        reply.human.push_str(&reading);
+        if let Some(summary) = &mut reply.summary {
+            summary
+                .lines
+                .splice(0..0, reading.lines().map(str::to_owned));
+            summary.next = None;
+        }
+    }
+    reply
+}
+
+/// Add a current local checkout observation only to CLI readings. Remote and
+/// MCP callers retain the owner's path-free diagnostic.
+fn localise_worktree_actions(factory: &Factory, graph: &str, rows: &mut [Value]) {
+    if !rows.iter().any(|row| {
+        row["kind"] == "node"
+            && row["state"] == "failed"
+            && row["cause_code"] == "writer_binding_unavailable"
+    }) {
+        return;
+    }
+    let Ok(Some(execution)) = FileJournal::execution(
+        &factory.context.roots.state,
+        factory.context.identity.project,
+        graph,
+    ) else {
+        return;
+    };
+    for row in rows.iter_mut().filter(|row| {
+        row["kind"] == "node"
+            && row["state"] == "failed"
+            && row["cause_code"] == "writer_binding_unavailable"
+    }) {
+        let Some(node) = execution
+            .document
+            .nodes
+            .iter()
+            .find(|node| Some(node.id.as_str()) == row["node_id"].as_str())
+        else {
+            continue;
+        };
+        let Some(attempt) = node
+            .attempt
+            .as_ref()
+            .filter(|attempt| attempt.host.is_none() && attempt.placement.is_none())
+        else {
+            continue;
+        };
+        let Some(branch) = attempt.new_worktree.as_ref().map(|new| new.branch.as_str()) else {
+            continue;
+        };
+        if let Some(action) = crate::graph_interface::local_branch_action(factory, branch) {
+            row["next"] = json!(action);
+        }
     }
 }
 
@@ -1354,6 +1530,15 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0]["kind"], "attempt");
         assert_eq!(rows[0]["node_id"], "parent");
+
+        let mut checkpoint = checkpoint("g");
+        let old = checkpoint.nodes[0].attempts[0].clone();
+        let mut latest = old.clone();
+        latest.attempt_ref = None;
+        checkpoint.nodes[0].attempts.push(latest);
+        let rows = status_rows(&graph_snapshot(checkpoint), &graph);
+        let old = rows.iter().find(|row| row["kind"] == "attempt").unwrap();
+        assert_eq!(old["latest_attempt"], false);
     }
 
     #[test]
@@ -1413,6 +1598,102 @@ mod tests {
         assert!(reading.contains("more rows"));
         assert_eq!(rows[1]["cause_code"], "AUTH_REQUIRED");
         assert_eq!(rows[1]["next"], "provenant retry g/parent");
+    }
+
+    #[test]
+    fn graph_failure_rows_prefer_owner_code_and_fall_back_for_old_checkpoints() {
+        let mut checkpoint = checkpoint("g");
+        checkpoint.nodes[0].state = NodeState::Blocked;
+        checkpoint.nodes[0].advance_error_code = Some("launch_refused".into());
+        checkpoint.nodes[0].advance_owner_code = Some("invalid_input".into());
+        let target = GraphTarget {
+            graph: "g".into(),
+            node: None,
+            attempt: None,
+        };
+        let rows = status_rows(&graph_snapshot(checkpoint.clone()), &target);
+        assert_eq!(rows[1]["cause_code"], "invalid_input");
+        let mut old = serde_json::to_value(checkpoint).unwrap();
+        old["nodes"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("advance_owner_code");
+        let old = serde_json::from_value(old).unwrap();
+        let rows = status_rows(&graph_snapshot(old), &target);
+        assert_eq!(rows[1]["cause_code"], "launch_refused");
+    }
+
+    #[test]
+    fn graph_failure_rows_preserve_the_owner_cause_and_action() {
+        let mut checkpoint = checkpoint("g");
+        checkpoint.nodes[0].state = NodeState::Blocked;
+        checkpoint.nodes[0].advance_error_code = Some("launch_retry_exhausted".into());
+        checkpoint.nodes[0].advance_owner_code = Some("LAUNCH_UNKNOWN".into());
+        checkpoint.nodes[0].advance_error = Some("[LAUNCH_UNKNOWN] inspect the receipt for operation op-123 before retrying with the same operation ID".into());
+        let target = GraphTarget {
+            graph: "g".into(),
+            node: None,
+            attempt: None,
+        };
+        let rows = status_rows(&graph_snapshot(checkpoint), &target);
+        let node = &rows[1];
+        assert_eq!(node["cause_code"], "LAUNCH_UNKNOWN");
+        assert!(node["next"].as_str().unwrap().contains("op-123"));
+        assert!(
+            !node["next"]
+                .as_str()
+                .unwrap()
+                .starts_with("provenant retry")
+        );
+        let reply = with_graph_failures(
+            provenant_cli::run::Reply {
+                result: provenant_records::CommandResult::new(
+                    "output",
+                    provenant_records::Outcome::Ok,
+                    json!({"outputs":[]}),
+                ),
+                human: String::new(),
+                summary: Some(provenant_cli::Summary::verbatim("attempt output", None)),
+                read_only: true,
+            },
+            std::slice::from_ref(node),
+        );
+        assert_eq!(
+            reply.result.data["graph_failures"][0]["reason"],
+            node["reason"]
+        );
+        assert!(reply.human.contains("op-123"));
+        assert!(
+            reply
+                .summary
+                .unwrap()
+                .lines
+                .iter()
+                .any(|line| line.contains("op-123"))
+        );
+
+        let mut rows = vec![
+            json!({"kind":"node", "graph_id":"g", "node_id":"a", "state":"failed", "reason":null, "cause_code":"adapter_unavailable"}),
+            json!({"kind":"attempt", "graph_id":"g", "node_id":"a", "graph_state":"terminal", "latest_attempt":true, "terminal_cause":"command_unavailable", "reason":"configure the provider command"}),
+        ];
+        project_attempt_failure(&mut rows[1]);
+        assert_eq!(rows[1]["cause_code"], "command_unavailable");
+        assert_eq!(rows[1]["next"], "configure the provider command");
+        project_node_failures(&mut rows);
+        assert_eq!(rows[0]["cause_code"], "command_unavailable");
+        assert_eq!(rows[0]["reason"], "configure the provider command");
+        assert_eq!(rows[0]["next"], "configure the provider command");
+        assert!(render_graph_status(&rows[..1]).contains("configure the provider command"));
+
+        // An older terminal attempt must not supply the cause for a newer
+        // attempt whose state has not settled or whose record was collected.
+        rows[0]["reason"] = Value::Null;
+        rows[0]["cause_code"] = json!("adapter_unavailable");
+        rows[1]["latest_attempt"] = json!(false);
+        rows.push(json!({"kind":"attempt", "graph_id":"g", "node_id":"a", "graph_state":"starting", "latest_attempt":true, "reason":null}));
+        project_node_failures(&mut rows);
+        assert!(rows[0]["reason"].is_null());
+        assert_eq!(rows[0]["cause_code"], "adapter_unavailable");
     }
 
     #[test]

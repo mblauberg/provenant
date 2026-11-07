@@ -510,6 +510,18 @@ pub fn provision_writer(
     source: &str,
     cancel: &CancelToken,
 ) -> Result<(), ServiceError> {
+    provision_writer_checked(context, path, branch, source, cancel)
+        .map_err(|error| refused("writer_worktree", error.to_string()))
+}
+
+/// Preserve the typed worktree failure for the graph launch owner.
+pub fn provision_writer_checked(
+    context: &Context,
+    path: &str,
+    branch: &str,
+    source: &str,
+    cancel: &CancelToken,
+) -> Result<(), provenant_confinement::worktrees::WorktreeError> {
     use provenant_confinement::worktrees;
     worktrees::with_context(
         &context.roots,
@@ -519,7 +531,6 @@ pub fn provision_writer(
         cancel,
         |worktree_context| provision_in_context(worktree_context, path, branch, source, cancel),
     )
-    .map_err(|error| refused("writer_worktree", error.to_string()))
 }
 
 fn provision_in_context(
@@ -538,7 +549,8 @@ fn provision_in_context(
         .into_iter()
         .find(|entry| entry.path == expected)
     {
-        if existing.branch.as_deref() != Some(format!("refs/heads/{branch}").as_str())
+        let expected_branch = format!("refs/heads/{branch}");
+        if existing.branch.as_deref() != Some(expected_branch.as_str())
             || existing.head.to_string() != source
         {
             return Err(WorktreeError::InvalidRequest);
@@ -571,19 +583,17 @@ fn provision_in_context(
             },
         )?;
         worktrees::check_writer_terminal(tree.repo())?;
-        let reference =
-            provenant_confinement::repo::GitRefName::new(format!("refs/heads/{branch}"))
-                .map_err(|_| WorktreeError::IdentityChanged)?;
+        let reference = provenant_confinement::repo::GitRefName::new(expected_branch)
+            .map_err(|_| WorktreeError::IdentityChanged)?;
         let head = tree
             .repo()
             .private_dir()
             .read_stable(std::ffi::OsStr::new("HEAD"), 4096)?;
+        let branch_tip = context
+            .facts
+            .resolve_commit(context, reference.clone(), cancel)?;
         if head != format!("ref: {}\n", reference.as_str()).as_bytes()
-            || context
-                .facts
-                .resolve_commit(context, reference, cancel)?
-                .to_string()
-                != source
+            || branch_tip.to_string() != source
         {
             return Err(WorktreeError::IdentityChanged);
         }
@@ -1132,6 +1142,20 @@ mod provisioning_tests {
             journal.save(&checkpoint)?;
         }
         git(&["commit", "--allow-empty", "-qm", "move host head"])?;
+        // Remote-only names must not override the children's captured source.
+        let remote = root.path().join("origin.git");
+        let remote = remote.to_str().ok_or("remote path")?;
+        git(&["clone", "--bare", ".", remote])?;
+        for child in ["writer", "edited"] {
+            git(&[
+                "--git-dir",
+                remote,
+                "branch",
+                &format!("g-writers-parent--{child}"),
+                "HEAD",
+            ])?;
+        }
+        git(&["remote", "add", "origin", remote])?;
         git(&["checkout", "--detach", "-q"])?;
         let request = json!({"op":"add","id":"writer","use":"implement","brief":"Write","writer":true,"write_scope":["src"],"idempotency_key":"write"});
         let receipt = serve(&context, "caller", request.clone(), budget, &cancel, &clock)?;

@@ -156,4 +156,30 @@ result=$(run_selector)
 test "$result" = 'run_macos=false
 run_rust=true'
 
+# Both the old and new modes matter, including absent files on either side.
+executable_base=$head
+chmod -x "$repo/skills/run.md"
+git -C "$repo" add .
+git -C "$repo" commit -qm 'remove executable bit'
+head=$(git -C "$repo" rev-parse HEAD)
+base=$executable_base
+result=$(run_selector)
+test "$result" = 'run_macos=false
+run_rust=true'
+git -C "$repo" checkout -q --detach "$executable_base"
+git -C "$repo" rm -q skills/run.md
+git -C "$repo" commit -qm 'delete executable Markdown'
+head=$(git -C "$repo" rev-parse HEAD)
+result=$(run_selector)
+test "$result" = 'run_macos=false
+run_rust=true'
+git -C "$repo" checkout -q --detach "$common"
+git -C "$repo" rm -q skills/base.md
+git -C "$repo" commit -qm 'delete plain Markdown'
+head=$(git -C "$repo" rev-parse HEAD)
+base=$common
+result=$(run_selector)
+test "$result" = 'run_macos=false
+run_rust=false'
+
 echo 'macOS scope selector checks passed'

@@ -51,7 +51,7 @@ catalogue still apply on top.
 
 Command routes have no model and refuse model, effort, resume and write
 requests. Steering (input into a live session) has no request surface yet.
-Repeat `run --attach PATH` to grant a lane read access to image files. Claude
+Declare attachments in the graph document to grant a lane read access to image files. Claude
 receives their paths in the prompt; Codex receives image arguments. Other
 adapters warn that `image_input` is unavailable while retaining the read grant.
 Remote dispatch cannot transfer these files and warns when attachments are omitted.
@@ -79,8 +79,8 @@ The launcher supplies this definition through `--agents` and selects it with
 Model and effort belong to this configured row; the task cannot override them.
 Network defaults to open, as on ordinary model routes; explicit provider-only
 or local reach and access remain the lane's declared permissions. Every launch
-starts fresh: explicit `resume --no-fallback` refuses it, automatic policy retries are
-disabled, and ordinary `retry` can dispatch a fresh lane with the prior result.
+starts fresh: automatic policy retries are disabled, and `retry` can dispatch
+a fresh lane with the prior result.
 Receipts retain the actual provider/model/effort plus `host_native` and the
 configuration `source` in `applied_route`.
 
@@ -452,7 +452,7 @@ PATH is available, `dependency_path_unavailable` reports the probe failure.
 Cancellation stops preparation without falling back.
 The install is bounded, runs outside the sandbox, and is cancelled with the
 dispatch, with its process group cleaned up. Disable it with
-`--knob lanes.prepare_deps=false` or the `lanes.prepare_deps` config key. An
+the `lanes.prepare_deps` config key. An
 install failure refuses the lane and includes the command, the exit status or
 signal, and the end of pnpm's stderr. Corepack neither follows a project's
 `packageManager` field nor downloads a version, so a pinned pnpm cannot arrive
@@ -496,11 +496,10 @@ Keep local checks targeted; full suites run in CI with the `ci` profile,
 which retains these host-only tests.
 
 A writer can exec build scripts and other binaries under its write roots
-(`--write-root DIR` or `writer_writes`) and its own attempt temp subtree.
+(declared in the graph or `writer_writes`) and its own attempt temp subtree.
 Other writable state stays non-executable. An env var alone grants nothing,
-and the lane then fails with "operation not permitted". Fabric, manifest, nested
-and `--host` dispatch cannot pass `--write-root`, so declare the directory in
-`[domains.run] writer_writes` instead, in the peer's own config for `--host`;
+and the lane then fails with "operation not permitted". For host-wide grants, declare the directory in
+`[domains.run] writer_writes` on the executing host;
 see [configuration](configuration.md#writer-extra-write-paths). Its entries are
 used as written and must be real paths (`/private/tmp`, not `/tmp`).
 
@@ -510,7 +509,7 @@ source, scope and absolute path. The path is stored relative to `/`, as
 `{"relative_to_root":{"encoding":"utf8","path":"Users/..."}}`, or with
 `"encoding":"native_bytes"` and a hex `path` when it is not UTF-8. A
 `write_root` source covers both `[domains.run] writer_writes` and
-`--write-root`. Writer Git grants are represented by `git_grants_digest`;
+graph write roots. Writer Git grants are represented by `git_grants_digest`;
 profile deny rules still restrict the listed allowances.
 
 Run refuses an attempt whose grant list exceeds 1,024 entries or 256 KiB
@@ -518,8 +517,8 @@ encoded. The attempt ends Rejected before launch and its siblings still start.
 
 Remote-tracking refs, their reflogs and shared config are read-only in writer
 lanes. The host refreshes origin before launch; a fetch that tries to update a
-tracking ref is denied. Dispatch with `--deliver push` to have run push the verified final commit to
-the lane branch after the lane finishes.
+tracking ref is denied. Use `provenant lane deliver ATTEMPT --deliver push` to push
+the verified final commit to the lane branch.
 
 Network-open profiles can read the existing `~/.config/gh` login and may use
 it to push; profiles deny access to `~/.ssh`. After a successful push,

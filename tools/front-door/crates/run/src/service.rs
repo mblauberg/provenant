@@ -4,8 +4,17 @@ use provenant_core::{AttemptId, CancelToken, OperationId, RunId};
 use provenant_records::CanonicalV1;
 use std::path::Path;
 
+/// Trusted origin facts retained only if submission is refused before admission.
+/// They never enter the canonical request or an accepted operation's identity.
+#[derive(Clone, Debug, Default)]
+pub struct RefusalContext {
+    pub chair: Option<ChairBinding>,
+    pub intent_digest: Option<provenant_core::Digest>,
+}
+
 pub struct Service<'a> {
     store: &'a RunStore,
+    refusal: RefusalContext,
 }
 impl Service<'_> {
     /// Whether the lane access grants any write authority.
@@ -77,7 +86,16 @@ impl Service<'_> {
 }
 impl<'a> Service<'a> {
     pub fn new(store: &'a RunStore) -> Self {
-        Self { store }
+        Self {
+            store,
+            refusal: RefusalContext::default(),
+        }
+    }
+    /// A trusted host may bind refusal notices without changing the canonical
+    /// request, accepted operation digest or ordinary settlement notifications.
+    pub fn with_refusal_context(mut self, context: RefusalContext) -> Self {
+        self.refusal = context;
+        self
     }
     pub fn dispatch(
         &self,
@@ -417,9 +435,13 @@ impl<'a> Service<'a> {
                 .and_then(Path::file_name)
                 .and_then(|name| name.to_str())
                 .map(str::to_owned);
-            let saved = self
-                .store
-                .record_refusal(&prepared, diagnostic, worktree, call)?;
+            let saved = self.store.record_refusal_with_context(
+                &prepared,
+                diagnostic,
+                worktree,
+                &self.refusal,
+                call,
+            )?;
             if saved.state != OperationState::Refused {
                 return Err(RunError::OperationConflict);
             }
@@ -459,6 +481,9 @@ impl<'a> Service<'a> {
         if let Some(notice) = task.profile.knobs.get("chair.refusal_notice") {
             extra.insert("refusal_notice".into(), notice.clone());
         }
+        if let Some(digest) = self.refusal.intent_digest {
+            extra.insert("origin_intent_digest".into(), serde_json::json!(digest));
+        }
         let diagnostic = ErrorKind::from(&error)
             .diagnostic()
             .detail(error.to_string());
@@ -486,7 +511,7 @@ impl<'a> Service<'a> {
                     .wall_now()
                     .map_err(|_| RunError::Validation("wall clock"))?,
             ),
-            refusal_chair: input.chair.clone(),
+            refusal_chair: self.refusal.chair.clone().or_else(|| input.chair.clone()),
         };
         let saved = self.store.insert_refusal(record, call)?;
         if saved.state != OperationState::Refused {

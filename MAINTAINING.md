@@ -288,7 +288,8 @@ protection uses `provenant hook git pre-push REMOTE LOCATION`, and
 Each check returns ordered findings, exits 1 for findings, 2 for malformed
 command input and 3 for unreadable evidence. Use `--limit N` and the returned
 `--cursor TOKEN` for further pages. Changing inputs or rules invalidates a
-cursor. Full test suites and release scans run in hosted CI.
+cursor. Hosted CI runs the full test suites. Run release scans by hand before
+publication.
 
 Before publication, scan an exact nonempty ancestor range as well as the
 tracked working files and raw HEAD. Pin both endpoints:

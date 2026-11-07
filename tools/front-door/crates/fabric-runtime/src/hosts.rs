@@ -1572,9 +1572,40 @@ mod tests {
         assert_eq!(ssh.calls.load(Ordering::SeqCst), 1);
         assert_eq!(
             ssh.request.lock().unwrap().as_ref().unwrap().operation(),
-            Some(operation)
+            Some(operation.clone())
         );
         assert!(request.project.resolve(Path::new("/home/b")).is_ok());
+
+        // Submit has its own operation-id path. An expired deadline must not
+        // contact SSH; once contacted, a lost reply is an unknown launch.
+        let mut submit = request.clone();
+        let task = serde_json::from_value(serde_json::json!({
+            "prompt": "inspect the project",
+            "route": {"kind": "model", "provider": "fixture", "model": "fixture/model"},
+            "timeout_seconds": 30
+        }))
+        .unwrap();
+        submit.action = PeerAction::Submit {
+            extra: Default::default(),
+            input: facade::SubmitInput::Submit {
+                extra: Default::default(),
+                operation_id: operation.clone(),
+                tasks: vec![task],
+                concurrency: None,
+                knobs: Vec::new(),
+                host: None,
+            },
+        };
+        assert!(matches!(
+            transport.exchange_within(&peer, &submit, budget, &CancelToken::new(), Duration::ZERO),
+            Err(PeerError::Unavailable)
+        ));
+        assert_eq!(ssh.calls.load(Ordering::SeqCst), 1);
+        assert!(matches!(
+            transport.exchange(&peer, &submit, budget, &CancelToken::new()),
+            Err(PeerError::Unknown { operation_id }) if operation_id == operation
+        ));
+        assert_eq!(ssh.calls.load(Ordering::SeqCst), 2);
     }
 
     struct Canned(Mutex<Option<Result<ExecOutcome, ExecError>>>);

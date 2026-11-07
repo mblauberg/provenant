@@ -892,6 +892,8 @@ pub(crate) fn fetch_missing_remote_branch(
     if GitRefName::branch(branch).is_err() {
         return Ok(RemoteBase::NotRemote);
     }
+    // Fetch objects without updating any tracking ref, independently of the
+    // configured refspec. The advertisement below owns the returned identity.
     let refspec = format!("refs/heads/{branch}");
     // A failed fetch can mean either a missing remote ref or a transport fault.
     let fetched = run(&[

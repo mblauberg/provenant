@@ -117,6 +117,19 @@ fn resolve_reports_effort_controls_and_nearby_models() -> Result {
     let path = dir.join("codex.json");
     fs::write(&path, serde_json::to_vec(&file)?)?;
     fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
+    let config = rig.state.join("config.toml");
+    let mut text = fs::read_to_string(&config)?;
+    text.push_str("\n[domains.routing.pools]\nwriting=[{model='codex/gpt-6-luna',weight=1,effort='high',efforts=['high']}]\n");
+    fs::write(config, text)?;
+    let writing = call(&rig, &["route", "resolve", "writing"], 0)?;
+    assert_eq!(
+        writing["data"]["recorded_readiness"][0]["observation"]["reason"], "provider_refusal",
+        "{writing}"
+    );
+    let preview = rig.command(&["route", "resolve", "writing"])?;
+    assert!(
+        String::from_utf8_lossy(&preview.stdout.bytes).contains("unavailable (provider refusal)")
+    );
     let known = call(&rig, &["route", "resolve", "codex/gpt-6-luna"], 0)?;
     assert_eq!(
         known["data"]["recorded_readiness"][0]["account_key"],
@@ -176,17 +189,12 @@ fn resolve_reports_effort_controls_and_nearby_models() -> Result {
     let unknown = call(&rig, &["route", "resolve", "codex/gpt-6.1-luna"], 0)?;
     assert!(unknown["data"]["supported_efforts"].is_null());
     assert_eq!(unknown["data"]["nearest_models"][0], "codex/gpt-6-luna");
-    let refused = call(
+    let unlisted = call(
         &rig,
         &["route", "resolve", "codex/gpt-6.1-luna", "--effort", "high"],
-        2,
+        0,
     )?;
-    assert!(
-        refused["error"]["message"]
-            .as_str()
-            .ok_or("message")?
-            .contains("codex/gpt-6-luna")
-    );
+    assert_eq!(unlisted["data"]["eligibility"], "unverified_model");
     let output = rig.command(&["route", "resolve", "opencode/opencode-go/glm-5.3-flash"])?;
     assert!(String::from_utf8_lossy(&output.stdout.bytes).contains("supported efforts: none"));
     Ok(())
@@ -519,7 +527,7 @@ fn override_list_shows_active_future_and_expired_schedules() -> Result {
     fs::write(rig.state.join("config.toml"), config)?;
     let listed = call(&rig, &["route", "override", "list"], 0)?;
     let rows = listed["data"]["overrides"].as_array().ok_or("overrides")?;
-    assert_eq!(rows.len(), 4);
+    assert_eq!(rows.len(), 3);
     assert_eq!(rows[0]["active"], true);
     assert!(
         rows[0]["remaining_seconds"]
@@ -527,14 +535,16 @@ fn override_list_shows_active_future_and_expired_schedules() -> Result {
             .is_some_and(|s| s > 0 && s <= 300)
     );
     assert_eq!(rows[1]["active"], false);
-    assert_eq!(rows[2]["active"], false);
-    assert_eq!(rows[2]["remaining_seconds"], 0);
-    assert_eq!(rows[3]["kind"], "model_policy");
+    assert_eq!(rows[2]["kind"], "model_policy");
     assert_eq!(
-        rows[3]["schedule"]["windows"][0]["weekdays"],
+        rows[2]["schedule"]["windows"][0]["weekdays"],
         serde_json::json!([5, 6])
     );
-    assert!(rows[3]["remaining_seconds"].is_null());
+    assert!(rows[2]["remaining_seconds"].is_null());
+    let all = call(&rig, &["route", "override", "list", "--all"], 0)?;
+    let rows = all["data"]["overrides"].as_array().ok_or("overrides")?;
+    assert_eq!(rows.len(), 4);
+    assert_eq!(rows[2]["remaining_seconds"], 0);
     Ok(())
 }
 
@@ -1135,7 +1145,14 @@ fn invalid_choices_effort_and_old_policy_flags_are_usage_errors() -> Result {
         vec!["route", "resolve", "missing-route"],
         vec!["route", "resolve", "utility", "--route", "utility"],
         vec!["route", "resolve", "utility", "--model", "codex/a"],
-        vec!["route", "resolve", "--model", "codex/a", "--effort", "high"],
+        vec![
+            "route",
+            "resolve",
+            "--model",
+            "codex/gpt-6-luna",
+            "--effort",
+            "max",
+        ],
         vec!["route", "resolve", "--model", "codex/a#high"],
         vec!["route", "list", "--adapter", "invented"],
         vec!["route", "resolve", "--pool", "principal"],
@@ -1152,6 +1169,16 @@ fn invalid_choices_effort_and_old_policy_flags_are_usage_errors() -> Result {
     ] {
         call(&rig, &args, 2)?;
     }
+    // dfa3451da permits valid efforts on exact models outside the catalogue.
+    let unlisted = call(
+        &rig,
+        &["route", "resolve", "--model", "codex/a", "--effort", "high"],
+        0,
+    )?;
+    assert_eq!(unlisted["data"]["eligibility"], "unverified_model");
+    assert_eq!(unlisted["data"]["model"], "a");
+    assert_eq!(unlisted["data"]["effort"], "high");
+    assert!(unlisted["data"]["supported_efforts"].is_null());
     assert!(!rig.state.exists());
     Ok(())
 }

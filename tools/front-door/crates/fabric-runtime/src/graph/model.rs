@@ -1041,6 +1041,9 @@ pub struct NodeProgress {
     /// Stable cause of an admission or settlement failure.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub advance_error_code: Option<String>,
+    /// Code from the owner whose launch refusal produced the disposition.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub advance_owner_code: Option<String>,
     /// Launch retry wait for the current attempt after a transient launch
     /// error. Cleared when the attempt is observed again.
     #[serde(default, skip_serializing_if = "Option::is_none")]
