@@ -335,19 +335,14 @@ fn lane_prepare_with(cases: &[(&str, bool, bool, u8)], probe: Probe) -> Result {
             fs::canonicalize(provenant_os::git::git_executable().ok_or("host Git")?)?;
         let scratch_git = confinement.plan.permissions().scratch.path.join("bin/git");
         let git_entry = fs::symlink_metadata(&scratch_git)?.file_type();
-        let wrapped = writer || adapter == "claude" || publishing;
-        assert_eq!(
+        assert!(
             git_entry.is_file(),
-            wrapped,
-            "Git setup for {adapter} writer={writer} publishing={publishing}"
+            "Git wrapper for {adapter} writer={writer} publishing={publishing}"
         );
-        if !wrapped {
-            assert_eq!(fs::canonicalize(&scratch_git)?, selected_git);
-        }
-        if wrapped {
-            // Claude's env scrub and publishing both need a Git wrapper.
-            // Behaviour: the wrapper runs the selected Git, and host global
-            // config does not reach it.
+        {
+            // Repository lanes bind their private Git directory in a wrapper.
+            // The wrapper runs the selected Git, and host global config does
+            // not reach it.
             let leak = rig.root.join("wrapper-home");
             fs::create_dir_all(&leak)?;
             fs::write(leak.join(".gitconfig"), "[user]\n\tname = host-leak\n")?;
@@ -381,8 +376,20 @@ fn lane_prepare_with(cases: &[(&str, bool, bool, u8)], probe: Probe) -> Result {
             launch
                 .environment
                 .iter()
-                .any(|(key, value)| key == "PROVENANT_GIT" && value == selected_git.as_os_str())
+                .any(|(key, value)| key == "PROVENANT_GIT" && value == scratch_git.as_os_str())
         );
+        for selector in [
+            "GIT_DIR",
+            "GIT_COMMON_DIR",
+            "GIT_WORK_TREE",
+            "GIT_OBJECT_DIRECTORY",
+            "GIT_INDEX_FILE",
+        ] {
+            assert!(
+                launch.environment.iter().all(|(key, _)| key != selector),
+                "private Git binding must stay in the wrapper: {selector}"
+            );
+        }
         assert!(
             confinement
                 .profile

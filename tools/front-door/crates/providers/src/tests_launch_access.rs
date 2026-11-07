@@ -517,7 +517,6 @@ fn prepare_all_adapters_and_pin_launch_controls() -> Result<(), ProviderError> {
             "LANG",
             "PROVENANT_AGENT_LABEL",
             "PROVENANT_ROOT",
-            "PROVENANT_GIT",
             "PROVENANT_STATE_DIR",
             "PROVENANT_LANE_DEPTH",
             "PROVENANT_PARENT_ATTEMPT_ID",
@@ -564,7 +563,15 @@ fn prepare_all_adapters_and_pin_launch_controls() -> Result<(), ProviderError> {
                 ],
             );
         }
+        // Git selection is replaced after the adapter's environment is built.
+        expected.push("PROVENANT_GIT");
         assert_eq!(keys, expected, "{id}");
+        assert!(
+            spec.env.iter().any(|(key, value)| {
+                key == "PROVENANT_GIT" && value == "/fixture/scratch/read-only-git/git"
+            }),
+            "{id} must select its private Git wrapper"
+        );
         assert_eq!(spec.stdin, Stdin::Bytes(b"fixture prompt".to_vec()), "{id}");
         assert!(
             !argv.iter().any(|arg| arg.contains("fixture prompt")),

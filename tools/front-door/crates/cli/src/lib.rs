@@ -1589,7 +1589,7 @@ mod tests {
         ]);
     }
     #[test]
-    fn land_accepts_a_pinned_head_and_hides_it_from_default_help() {
+    fn land_accepts_a_pinned_head_and_shows_it_in_default_help() {
         for length in [40, 64] {
             let sha = "a".repeat(length);
             let inv = valid(&["land", "1953", "--head", &sha]);
@@ -1604,11 +1604,11 @@ mod tests {
         let Some(land) = model.find_subcommand_mut("land") else {
             panic!("land grammar");
         };
-        assert!(!land.render_help().to_string().contains("--head"));
+        assert!(land.render_help().to_string().contains("--head"));
         let ParseOutcome::Help { text, .. } = parsed(&["help", "land"]) else {
-            panic!("advanced land help");
+            panic!("default land help");
         };
-        assert!(!text.contains("--head"), "{text}");
+        assert!(text.contains("--head"), "{text}");
         let ParseOutcome::Help { text, .. } = parsed(&["help", "land", "--all"]) else {
             panic!("all land help");
         };

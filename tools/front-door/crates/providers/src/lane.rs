@@ -897,13 +897,22 @@ mod tests {
 
     #[test]
     fn shell_quote_os_preserves_non_utf8_path_bytes() -> Result<(), Box<dyn std::error::Error>> {
-        use std::os::unix::ffi::OsStrExt;
+        use provenant_os::exec::{ExecOptions, Executor, SystemExecutor, Termination};
+        use std::{os::unix::ffi::OsStrExt, time::Duration};
+
         let value = std::ffi::OsStr::from_bytes(b"/tmp/quote'\xff");
-        let output = std::process::Command::new("/bin/sh")
-            .args(["-c", &format!("printf %s {}", shell_quote_os(value)?)])
-            .output()?;
-        assert!(output.status.success());
-        assert_eq!(output.stdout, value.as_bytes());
+        let argv = [
+            OsString::from("/bin/sh"),
+            OsString::from("-c"),
+            OsString::from(format!("printf %s {}", shell_quote_os(value)?)),
+        ];
+        let output = SystemExecutor::new(1)?.execute(ExecOptions::new(
+            &argv,
+            &std::env::current_dir()?,
+            Duration::from_secs(5),
+        ))?;
+        assert_eq!(output.termination, Termination::Exit(0));
+        assert_eq!(output.stdout.bytes, value.as_bytes());
         Ok(())
     }
 
@@ -2324,10 +2333,23 @@ mod tests {
             run(&outside, &["-c", "a=b", "-C", inside, "log"]),
             bound(&format!("-c a=b -C {inside} log"))
         );
+        // Explicit repository selectors never inherit the lane binding, even
+        // when a later -C points back into the checkout.
+        for option in ["--git-dir", "--work-tree"] {
+            for cwd in [&worktree, &outside] {
+                assert_eq!(
+                    run(cwd, &[option, "v", "-C", inside, "log"]),
+                    unbound(&format!("{option} v -C {inside} log"))
+                );
+                let option = format!("{option}=v");
+                assert_eq!(
+                    run(cwd, &[&option, "-C", inside, "log"]),
+                    unbound(&format!("{option} -C {inside} log"))
+                );
+            }
+        }
         // Options with a separate value do not hide a later -C.
         for option in [
-            "--git-dir",
-            "--work-tree",
             "--namespace",
             "--config-env",
             "--attr-source",
@@ -2349,8 +2371,8 @@ mod tests {
         );
         // Known valueless and `=` options are skipped; unknown ones do not bind.
         assert_eq!(
-            run(&worktree, &["--no-pager", "--git-dir=v", "-p", "log"]),
-            bound("--no-pager --git-dir=v -p log")
+            run(&worktree, &["--no-pager", "--namespace=v", "-p", "log"]),
+            bound("--no-pager --namespace=v -p log")
         );
         for args in [&["--future-option", "log"][..], &["-X", "log"], &["-c"]] {
             assert_eq!(run(&worktree, args), unbound(&args.join(" ")), "{args:?}");

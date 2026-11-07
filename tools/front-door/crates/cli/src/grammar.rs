@@ -114,7 +114,7 @@ pub enum Command {
         #[arg(long, value_parser = parse_landing_tier)]
         tier: Option<String>,
         /// Pin a reviewed head instead of using the current PR head
-        #[arg(long, hide = true)]
+        #[arg(long)]
         head: Option<GitOid>,
         /// Wait for this head's CI (default 1 hour; maximum 4 hours)
         #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "1h", catalog_duration())]

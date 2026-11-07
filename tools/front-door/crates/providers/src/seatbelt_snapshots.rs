@@ -629,7 +629,7 @@ fn agy_read_only_linked_worktree_git_directories_are_not_writable()
     std::fs::create_dir_all(private_common.join("refs"))?;
     std::fs::copy(common.join("config"), private_common.join("config"))?;
     std::fs::copy(private.join("index"), private_common.join("index"))?;
-    let head = std::process::Command::new(git)
+    let head = provenant_os::fixture::git_command_at(git)
         .current_dir(&worktree)
         .args(["rev-parse", "HEAD"])
         .output()?;
