@@ -630,6 +630,18 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
         Command::ProcessTree { root } => return process_tree::run(root, globals),
         command => command,
     };
+    // Inside a lane, account state is out of reach whatever root was selected.
+    if matches!(command, Command::Quota { .. })
+        && std::env::var_os(provenant_run::LANE_DEPTH_ENV).is_some_and(|depth| depth != "0")
+    {
+        return fail(
+            &inv.leaf,
+            Outcome::Error,
+            "QUOTA_UNAVAILABLE_IN_LANE",
+            "account quota is unavailable inside a lane; read it from the chair's session",
+            globals,
+        );
+    }
     let session_save = matches!(
         &command,
         Command::Workflow(provenant_cli::Workflow::Session(
@@ -1278,15 +1290,6 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
         Command::Chair(cmd) => chair::run(cmd, globals),
         Command::Console(cmd) => console::run(cmd, globals),
         Command::Quota { command } => {
-            if std::env::var_os(provenant_run::LANE_DEPTH_ENV).is_some_and(|depth| depth != "0") {
-                return fail(
-                    &inv.leaf,
-                    Outcome::Error,
-                    "QUOTA_UNAVAILABLE_IN_LANE",
-                    "account quota is unavailable inside a lane; read it from the chair's session",
-                    globals,
-                );
-            }
             let cmd = command.unwrap_or(provenant_cli::Quota::Show(provenant_cli::quota::Filter {
                 adapter: None,
             }));
