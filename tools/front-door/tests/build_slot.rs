@@ -537,7 +537,7 @@ fn a_marker_naming_a_live_ancestor_that_is_not_a_shim_does_not_skip_the_gate() -
 }
 
 #[test]
-fn the_cargo_lock_wait_and_the_slot_wait_share_one_deadline() -> Result {
+fn cargo_lock_wait_transitions_to_a_bounded_slot_wait() -> Result {
     let rig = Rig::new()?;
     rig.provision(1)?;
     let mut holder = rig.shim(1, &["check"])?;
@@ -551,14 +551,13 @@ fn the_cargo_lock_wait_and_the_slot_wait_share_one_deadline() -> Result {
     fs::create_dir_all(&profile)?;
     let lock = fs::File::create(profile.join(".cargo-lock"))?;
     lock.try_lock()?;
-    let began = Instant::now();
     let mut waiter = rig
-        .command(1, 5, &["build"])
+        .command(1, 1, &["build"])
         .env("CARGO_TARGET_DIR", rig.state.join("target"))
         .spawn()?;
-    // Wait for the lock marker before consuming part of the shared deadline.
-    // The slot never frees, so resetting its full budget would exceed the
-    // one-budget bound after the Cargo lock is released.
+    // Observe the Cargo-lock wait before releasing it. Exact shared-budget
+    // subtraction and expiry are covered without sleeping by
+    // build_slot::tests::cargo_lock_time_reduces_slot_budget.
     assert!(provenant_test_support::wait_for(
         "build slot readiness",
         Duration::from_secs(20),
@@ -569,20 +568,10 @@ fn the_cargo_lock_wait_and_the_slot_wait_share_one_deadline() -> Result {
         },
         |ready| *ready
     )?);
-    assert!(provenant_test_support::wait_for(
-        "build slot readiness",
-        Duration::from_secs(20),
-        || began.elapsed() >= Duration::from_secs(2),
-        |ready| *ready
-    )?);
     drop(lock);
     assert!(!finish(&mut waiter, Duration::from_secs(30))?);
-    let total = began.elapsed();
-    assert!(
-        total < Duration::from_secs(15),
-        "the two waits shared one budget, took {total:?}"
-    );
     assert!(stderr_of(&mut waiter)?.contains("gave up waiting for a build slot"));
+    assert!(!rig.started("start"), "the build never ran without a slot");
     holder.kill()?;
     holder.wait()?;
     Ok(())
