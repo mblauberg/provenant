@@ -372,7 +372,7 @@ fn fixture() -> Result {
                 "subject framed\nVERDICT: PASS\n".to_owned()
             }
         } else if prompt.contains("fixture writer shell") {
-            writer_shell_probe()?
+            format!("{}{DONE_FENCE}", writer_shell_probe()?)
         } else if prompt.contains("fixture large result") {
             // Far past the 4 KiB excerpt a consuming node's prompt carries.
             let mut text: String = (0..2000)
@@ -572,7 +572,7 @@ fn fixture() -> Result {
         return Ok(());
     }
     let answer = if prompt.contains("fixture writer shell") {
-        writer_shell_probe()?
+        format!("{}{DONE_FENCE}", writer_shell_probe()?)
     } else if prompt.contains("fixture council findings") {
         let entries = if prompt.contains("Frame the immutable review subject for:") {
             json!([])
