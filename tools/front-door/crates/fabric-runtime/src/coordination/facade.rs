@@ -197,6 +197,10 @@ pub enum DispatchRefusalFact {
 #[serde(rename_all = "snake_case")]
 pub enum GraphRelayCause {
     ParentSettled,
+    RetryUnknownNode,
+    RetryUnsettled,
+    RetryContainerBrief,
+    RetryInvalidConfiguration,
     ChildDepth,
     WriterParentRequired,
     WriterWorktree,
@@ -222,6 +226,12 @@ pub enum GraphRelayCause {
 impl GraphRelayCause {
     fn text(self) -> &'static str {
         match self {
+            Self::RetryInvalidConfiguration => {
+                "the selected node cannot be retried with its current graph configuration"
+            }
+            Self::RetryUnknownNode => "the selected node does not exist in the graph",
+            Self::RetryUnsettled => "the selected node or its subtree has unsettled attempts",
+            Self::RetryContainerBrief => "a container retry requires per-leaf brief edits",
             Self::ParentSettled => "the parent node has settled; launch from a running node",
             Self::ChildDepth => {
                 "the child exceeds limits.child_depth; raise the graph's child depth limit"

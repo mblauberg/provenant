@@ -673,7 +673,12 @@ pub(crate) fn unified_graph_command(
                 attempt: None,
             })
         } else {
-            factory.graph_target(selector)?
+            match factory.graph_target(selector) {
+                Err(FacadeError::Conflict) if matches!(command, GraphCommand::Retry { .. }) => {
+                    return Err("retry target matches more than one graph node or attempt; use a qualified target".into());
+                }
+                result => result?,
+            }
         }) else {
             return Ok(None);
         };

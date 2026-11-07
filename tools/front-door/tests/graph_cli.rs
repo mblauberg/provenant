@@ -1259,6 +1259,12 @@ fn fake_launch_owner_refusal_reaches_real_graph_status() -> Result {
     struct RefusingOwner(Option<InvalidInputDetail>);
     impl AttemptOwner for RefusingOwner {
         type Error = FacadeError;
+        fn launch_refused_before_acceptance(
+            &mut self,
+            _: &graph::GraphAttempt,
+        ) -> std::result::Result<bool, Self::Error> {
+            Ok(true)
+        }
         fn actor(&self) -> String {
             "actor".into()
         }
@@ -1318,9 +1324,10 @@ fn fake_launch_owner_refusal_reaches_real_graph_status() -> Result {
         ),
         ("code-only-refusal", None, "invalid_input"),
     ] {
-        let document: GraphDocument = serde_json::from_value(
+        let mut document: GraphDocument = serde_json::from_value(
             json!({"schema_version":1,"graph_id":id,"nodes":[{"id":"one","prompt":"fixture","access":"read_only","route":{"adapter":"fixture","model":"fixture/model"}}]}),
         )?;
+        graph::patch::submission(&mut document, &format!("submit:{id}"), &Default::default())?;
         let mut journal = FileJournal::open(
             &state,
             project,
@@ -1391,6 +1398,30 @@ fn fake_launch_owner_refusal_reaches_real_graph_status() -> Result {
         assert!(human.status.success(), "{human:?}");
         let text = String::from_utf8(human.stdout)?;
         assert!(text.contains(expected) && text.contains("check"), "{text}");
+        if id == "schema-refusal" {
+            let (_, invalid) = rig.run(&["retry", id, "--node", "missing"])?;
+            assert!(
+                invalid["error"]["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("node does not exist"),
+                "{invalid}"
+            );
+            let (output, retried) = rig.run(&["retry", id, "--node", "one"])?;
+            assert!(
+                output.status.success(),
+                "retry: {retried}, stderr: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(
+                retried["data"]["rows"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|row| row["kind"] == "attempt"),
+                "{retried}"
+            );
+        }
     }
     Ok(())
 }
