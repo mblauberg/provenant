@@ -57,7 +57,9 @@ mod tests {
         )
     }
     mod grants;
+    mod host_boundaries;
     mod ipc;
+    mod mach_lookup;
     mod process_info;
     mod process_tree;
     mod render;

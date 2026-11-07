@@ -68,6 +68,7 @@ pub(super) const DYLD_BOOTSTRAP_RULES: &str = r#"
 #[cfg(any(target_os = "macos", feature = "snapshot"))]
 pub(super) const RUNTIME_BASELINE_RULES: &str = r#"(allow sysctl-read)
 (deny sysctl-read (sysctl-name-prefix "kern.procargs"))
+(deny mach-lookup (global-name-prefix "dev.provenant.attempt."))
 (allow file-read-metadata)
 (allow ipc-posix-shm-read* (ipc-posix-name-prefix "apple.cfprefs."))
 (deny signal)
@@ -1087,6 +1088,7 @@ fn push_boundaries(
         if gh {
             credential_reads.extend(mandatory.github().iter().cloned());
         }
+        credential_reads.extend(mandatory.credential_alias_reads(&credential_reads));
     }
     // A package grant passes the existing standalone validator; it never opens
     // the credential/config/session siblings in the enclosing Codex home.

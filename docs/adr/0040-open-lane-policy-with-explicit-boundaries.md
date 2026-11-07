@@ -278,6 +278,13 @@ The renderer slice must pass these checks before flipping the default:
   run Seatbelt report `ProbeFailed`/skip; that is not enforcement evidence.
   Preserve `linux_has_no_confinement_backend` on Linux CI.
 
+## Known limits
+
+Boundaries are enforced by pathname. A hard link to a protected file that already
+exists outside granted roots, such as an object in an earlier `git clone --local`,
+is not covered. New hard links remain denied. The owner accepts this limit;
+launches are not refused merely because a file has multiple links.
+
 ## Consequences
 
 Optional host policy is observable and tolerant, while the boundaries remain

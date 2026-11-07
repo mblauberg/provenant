@@ -265,7 +265,8 @@ fn launch_credential_inventory_includes_unselected_and_host_sealed_stores()
     let settings: provenant_providers::accounts::Settings = serde_json::from_value(
         serde_json::json!({
             "entries": {
-                "unselected": {"adapter":"codex", "label":"unselected", "key":"unselected", "directory":root.join("registered"), "directories":[root.join("other-registration")]}
+                "unselected": {"adapter":"codex", "label":"unselected", "key":"unselected", "directory":root.join("registered"), "directories":[root.join("other-registration")]},
+                "claude": {"adapter":"claude", "label":"claude", "key":"claude", "directory":root.join("claude"), "directories":[root.join("other-claude")]}
             }
         }),
     )?;
@@ -311,7 +312,14 @@ fn launch_credential_inventory_includes_unselected_and_host_sealed_stores()
     let mut inputs = provenant_core::RootInputs::new(home.clone(), root.join("source"));
     inputs.state_dir = Some(root.join("state"));
     let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+    let sibling = root.join("claude.json");
+    let sibling_target = root.join("outside-claude-profile");
+    std::fs::File::create(&sibling_target)?;
+    std::os::unix::fs::symlink(&sibling_target, &sibling)?;
     let mandatory = provenant_confinement::permissions::MandatoryRoots::for_host(&roots, &home, &root.join("source"), &inventory, &[], &[])?;
+    for path in [sibling, sibling_target, root.join("other-claude.json")] {
+        assert!(mandatory.credentials().contains(&PathGrant { path, scope: PathScope::Exact }));
+    }
     assert!(mandatory.credentials().iter().any(|entry| entry.path == home.join(".agy-unselected")));
 
     Ok(())
