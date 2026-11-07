@@ -173,7 +173,7 @@ fn graph_refuses_node_integration_target_mismatch() {
     document.delivery = Some(DeliveryMode::Pr);
     assert_eq!(
         validate_plan(&document).err(),
-        Some("node integration target differs from graph integration branch")
+        Some("node writer: node integration target differs from graph integration branch")
     );
 }
 
@@ -391,7 +391,7 @@ fn route_effort_is_checked_against_the_adapter_table() {
         let document = graph(vec![node("one", leaf)]);
         assert_eq!(
             validate_plan(&document).err(),
-            (!accepted).then_some("effort is not supported by the route's adapter"),
+            (!accepted).then_some("node one: effort is not supported by the route's adapter"),
             "{adapter}"
         );
     }
@@ -407,13 +407,13 @@ fn host_native_requires_a_later_non_native_fallback() {
     repair.worktree = Some("/repo/writer".into());
     assert_eq!(
         validate_plan(&graph(vec![repair.clone()])).err(),
-        Some("host-native route requires a later non-native fallback")
+        Some("node repair: host-native route requires a later non-native fallback")
     );
     repair.route = None;
     repair.routes = Some(vec![host.clone(), host.clone()]);
     assert_eq!(
         validate_plan(&graph(vec![repair.clone()])).err(),
-        Some("host-native route requires a later non-native fallback")
+        Some("node repair: host-native route requires a later non-native fallback")
     );
     repair.routes = Some(vec![host, route("claude")]);
     assert!(validate_plan(&graph(vec![repair])).is_ok());
@@ -437,7 +437,7 @@ fn named_adapter_route_has_no_model_and_rejects_mixed_selectors() {
     leaf.adapter = None;
     assert_eq!(
         validate_plan(&graph(vec![node("check", leaf)])).err(),
-        Some("route requires an adapter or alias")
+        Some("node check: route requires an adapter or alias")
     );
 }
 
@@ -451,7 +451,7 @@ fn route_requires_adapter_or_alias() {
     .unwrap();
     assert_eq!(
         validate_plan(&document).err(),
-        Some("route requires an adapter or alias")
+        Some("node one: route requires an adapter or alias")
     );
 }
 

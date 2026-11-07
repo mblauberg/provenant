@@ -444,7 +444,7 @@ fn gate_reachability_handles_two_gates_and_deep_paths() {
     document.nodes.reverse();
     assert_eq!(
         validate_plan(&document).unwrap_err(),
-        "node requires both gate outcomes"
+        "node join: requires both gate outcomes"
     );
 }
 
@@ -674,7 +674,7 @@ fn gate_rejects_unreachable_joins_of_mutually_exclusive_paths() {
         document.nodes.extend([recovery, success, join]);
         assert_eq!(
             validate_plan(&document).err(),
-            Some("node requires both gate outcomes")
+            Some("node join: requires both gate outcomes")
         );
     }
 }
@@ -687,7 +687,7 @@ fn gate_validation_rejects_agent_fields_bad_thresholds_and_failure_cycles() {
         let expected = match mutation {
             0 => {
                 document.nodes[1].route = Some(route("fixture"));
-                "gate requires a condition and no agent configuration"
+                "node gate: gate requires a condition and no agent configuration"
             }
             1 => {
                 document.nodes[1].condition = Some(GateCondition::Verdict {
@@ -695,26 +695,26 @@ fn gate_validation_rejects_agent_fields_bad_thresholds_and_failure_cycles() {
                     expected: "PASS".into(),
                     threshold: VerdictThreshold::Count(0),
                 });
-                "invalid verdict gate"
+                "node gate: invalid verdict gate"
             }
             2 => {
                 document.nodes[1].on_fail = Some("missing".into());
-                "on_fail target must depend on its gate"
+                "node gate: on_fail target must depend on its gate"
             }
             3 => {
                 document.nodes[1].on_fail = Some("review-0".into());
                 document.nodes[0].depends_on.push("gate".into());
-                "dependency cycle"
+                "node review-0: dependency cycle"
             }
             4 => {
                 document.nodes[0].condition = Some(GateCondition::Budget {
                     extra: Default::default(),
                 });
-                "gate requires a condition and no agent configuration"
+                "node review-0: gate requires a condition and no agent configuration"
             }
             _ => {
                 document.nodes[1].inputs.clear();
-                "invalid verdict gate"
+                "node gate: invalid verdict gate"
             }
         };
         assert_eq!(validate_plan(&document).err(), Some(expected));

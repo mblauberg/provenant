@@ -1118,9 +1118,13 @@ fn login_repair_with_expired_session(
     let Some(spec) = provenant_records::AdapterSpec::get(&entry.adapter) else {
         return "account-specific login remedy unavailable; consult the provider's sign-in instructions".into();
     };
-    if expired && entry.adapter == "claude" {
+    if expired
+        && let (Some(refresh), Some(login)) = (spec.login_refresh_template, spec.login_template)
+    {
         return format!(
-            "try a short interactive session with `CLAUDE_CONFIG_DIR={quoted} claude`; if that does not refresh the login, run `CLAUDE_CONFIG_DIR={quoted} claude auth login` interactively"
+            "try a short interactive session with `{}`; if that does not refresh the login, run `{}` interactively",
+            refresh.replace("{directory}", &quoted),
+            login.replace("{directory}", &quoted),
         );
     }
     if let Some(template) = spec.login_template {

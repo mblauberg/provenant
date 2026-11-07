@@ -545,7 +545,7 @@ fn synthesise_requires_selected_inputs() {
     synthesis.kind = Some(NodeKind::Synthesise);
     assert_eq!(
         validate_plan(&graph(vec![synthesis])).unwrap_err(),
-        "synthesise requires selected inputs"
+        "node synthesis: synthesise requires selected inputs"
     );
 }
 

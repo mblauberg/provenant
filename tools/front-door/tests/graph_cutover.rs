@@ -450,6 +450,19 @@ fn generated_cutover_status_and_output_corpus() -> Result {
                             "missing added field {field}"
                         );
                     }
+                    assert_eq!(
+                        row.as_object_mut().unwrap().remove("preparation_failure"),
+                        Some(Value::Null)
+                    );
+                    let settlement_reason = match outcomes[index] {
+                        provenant_run::Outcome::Succeeded => "completed",
+                        provenant_run::Outcome::Cancelled => "cancelled",
+                        _ => "failed",
+                    };
+                    assert_eq!(
+                        row.as_object_mut().unwrap().remove("settlement_reason"),
+                        Some(json!(settlement_reason))
+                    );
                     let mut before = old["reply"]["data"]["lanes"][0].clone();
                     if args[0] == "lanes" {
                         assert_eq!(
