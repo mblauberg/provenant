@@ -119,10 +119,13 @@ pub fn pending_findings(
                     continue;
                 }
             }
-            findings.push(format!(
-                "Live lane {project}/{run}/{attempt} ({})",
-                store.display()
-            ));
+            let location = store.strip_prefix(state.as_path()).unwrap_or(Path::new(""));
+            let location = if location.as_os_str().is_empty() {
+                "state root".to_owned()
+            } else {
+                location.display().to_string()
+            };
+            findings.push(format!("Live lane {project}/{run}/{attempt} ({location})"));
         }
     }
     findings.sort();
@@ -236,7 +239,9 @@ pub fn pending_guard(state: &provenant_core::StateRoot) -> Result<(), String> {
     if path.join(MARKER).is_file() {
         return Ok(());
     }
-    let findings = pending_findings(state, true)?;
+    let findings = pending_findings(state, true).map_err(|_| {
+        "Unable to inspect pending graphs and lanes; restore access to the state directory and retry.".to_owned()
+    })?;
     if findings.is_empty() {
         if let Some(directory) = &directory
             && let Err(error) = directory.atomic_write(

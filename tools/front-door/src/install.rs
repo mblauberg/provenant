@@ -1900,6 +1900,7 @@ mod tests {
         let error =
             super::cutover_admission_guard(&roots.state).expect_err("legacy admission must refuse");
         assert_eq!(error.code(), "UPGRADE_DRAIN_REQUIRED");
+        assert!(!format!("{error:?}").contains(temp.path().to_str().ok_or("path")?));
         assert!(
             error
                 .diagnostic()
