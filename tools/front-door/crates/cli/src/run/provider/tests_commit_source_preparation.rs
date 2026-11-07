@@ -286,7 +286,21 @@ fn commit_source_preparation_refusal_retains_preselection_permission_diagnostics
                 plan_error
             })),
         );
-        assert!(skipped.diagnostic().detail.is_some());
+        assert_eq!(
+            skipped.cause,
+            Some(provenant_records::RouteExclusionReason::ConfinementUnavailable),
+        );
+        let failure: provenant_records::diagnostic::PlanFailure =
+            serde_json::from_value(skipped.extra["plan_error"].clone())?;
+        assert_eq!(skipped.diagnostic().detail.as_deref(), Some(failure.detail()));
+        assert_eq!(
+            skipped.extra["confinement_guard"],
+            serde_json::json!(if plan_error == "invalid_roots" {
+                "invalid_plan_roots"
+            } else {
+                "credential_root_refused"
+            }),
+        );
     }
     Ok(())
 }

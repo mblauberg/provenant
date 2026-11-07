@@ -158,6 +158,9 @@ pub struct ExecOptions<'a> {
     /// Run in a private session and kill remaining group members on every exit,
     /// including success. Cleanup occurs before the leader's PID is reaped.
     pub cleanup_process_group: bool,
+    /// A process-group watchdog survives this executor's death and enforces
+    /// the timeout. Requires `process_group` and group cleanup on every exit.
+    pub group_watchdog: bool,
     pub stdout: StreamPolicy<'a>,
     pub stderr: StreamPolicy<'a>,
     pub stdout_decoder: Option<&'a dyn FrameSink>,
@@ -182,6 +185,7 @@ impl<'a> ExecOptions<'a> {
             inherited_profile: None,
             process_group: false,
             cleanup_process_group: false,
+            group_watchdog: false,
             stdout: StreamPolicy::default(),
             stderr: StreamPolicy::default(),
             stdout_decoder: None,
@@ -204,6 +208,8 @@ pub enum ExecError {
     DurationOutOfRange,
     #[error("capture or queue limit exceeds its bound")]
     InvalidLimit,
+    #[error("a group watchdog requires process_group and cleanup_process_group")]
+    WatchdogRequiresGroupCleanup,
     #[error("capture stream has already been finished")]
     CaptureFinished,
     #[error("utility cleanup admission is full")]
@@ -405,6 +411,9 @@ fn run(reaper: &Reaper, options: ExecOptions<'_>) -> Result<ExecOutcome, ExecErr
     if options.stdout.limit() > MAX_CAPTURE_LIMIT || options.stderr.limit() > MAX_CAPTURE_LIMIT {
         return Err(ExecError::InvalidLimit);
     }
+    if options.group_watchdog && !(options.process_group && options.cleanup_process_group) {
+        return Err(ExecError::WatchdogRequiresGroupCleanup);
+    }
     if options.cancel.is_some_and(CancelToken::is_cancelled) {
         return Err(ExecError::Cancelled);
     }
@@ -418,7 +427,7 @@ fn run(reaper: &Reaper, options: ExecOptions<'_>) -> Result<ExecOutcome, ExecErr
         .and_then(|at| at.checked_add(options.reap_timeout))
         .ok_or(ExecError::DurationOutOfRange)?;
     let permit = reaper.reserve().ok_or(ExecError::Busy)?;
-    let mut child = RawChild::spawn(
+    let mut child = RawChild::spawn_with_watchdog(
         permit,
         crate::sys::raw_exec::SpawnSpec {
             argv: options.argv,
@@ -433,6 +442,7 @@ fn run(reaper: &Reaper, options: ExecOptions<'_>) -> Result<ExecOutcome, ExecErr
             capture_stdout: options.stdout.piped(),
             capture_stderr: options.stderr.piped(),
         },
+        options.group_watchdog.then_some(options.timeout),
     )
     .map_err(io_error("spawn"))?;
     child.cleanup_process_group_on_exit(options.cleanup_process_group);

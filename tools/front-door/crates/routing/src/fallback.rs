@@ -24,6 +24,7 @@ impl FallbackOutcome {
             // The route cannot run here now and nothing has started, so a later
             // route may. One account with stale evidence must not strand the rest.
             Reason::MissingExecutable
+            | Reason::ProviderUpdating
             | Reason::Disabled
             | Reason::UnknownAvailability
             | Reason::StaleAvailability
@@ -125,6 +126,9 @@ mod tests {
             FallbackOutcome::AuthRequired,
             FallbackOutcome::UsageLimited,
             FallbackOutcome::AdapterUnavailable,
+            FallbackOutcome::from_exclusion(
+                &provenant_records::RouteExclusionReason::ProviderUpdating,
+            ),
         ] {
             assert!(FallbackPolicy { outcome, ..base }.allows_switch());
         }

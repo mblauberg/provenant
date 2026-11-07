@@ -242,6 +242,13 @@ fn availability_gates_disclosure_and_rejects_duplicates() -> Result<(), Box<dyn 
     let records = [availability()];
     let mut context = context(&catalogue, &config, now()?);
     context.availability = &records;
+    // A disclosure denial needs an explicit policy refusal, not absent access.
+    let denied = ["codex", "cursor"].map(|adapter| AccessContext {
+        adapter,
+        disclosure_ref: "",
+        confinement_ref: "grant",
+    });
+    context.access = &denied;
     // Enabled and available, Codex reaches the next gate: disclosure.
     assert!(matches!(
         resolve(&request("codex/test")?, &context)?.readiness,

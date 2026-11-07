@@ -3847,10 +3847,7 @@ fn graph_settlement_records_a_failed_advance_for_status() -> Result {
 }
 
 #[cfg(target_os = "macos")]
-fn graph_launch_proceeds_when_provider_update_is_busy() -> Result {
-    if !graph_fixture_available()? {
-        return Ok(());
-    }
+fn graph_launch_reports_provider_update_after_wait_budget() -> Result {
     let mut rig = TestRig::new()?;
     let _cleanup = rig.process_cleanup();
     let bin = rig.root.join("provider/bin");
@@ -3882,15 +3879,11 @@ fn graph_launch_proceeds_when_provider_update_is_busy() -> Result {
         "1s",
     )?;
     assert!(started.elapsed() < std::time::Duration::from_secs(8));
-    let run = lane["run_id"].as_str().ok_or("run id")?;
-    let lanes = rig.command(&["status", run, "--wait=60s", "--json"])?;
-    assert_eq!(code(&lanes), 0, "{lanes:?}");
-    let output = rig.command(&["output", run, "--json"])?;
-    assert_eq!(code(&output), 0, "{output:?}");
-    assert!(
-        String::from_utf8_lossy(&output.stdout.bytes).contains("lease-free provider started"),
-        "{output:?}"
-    );
+    assert_eq!(lane["state"], "rejected", "{lane}");
+    assert_eq!(lane["cause"], "pre_launch_refusal", "{lane}");
+    assert!(lane["started_at"].is_null(), "{lane}");
+    assert!(lane["applied_route"].is_null(), "{lane}");
+    assert_eq!(lane["skipped_routes"][0]["cause"], "provider_updating", "{lane}");
     drop(lock);
     Ok(())
 }
@@ -4055,8 +4048,8 @@ fn main() -> ExitCode {
             ),
             #[cfg(target_os = "macos")]
             (
-                "graph_launch_proceeds_when_provider_update_is_busy",
-                graph_launch_proceeds_when_provider_update_is_busy,
+                "graph_launch_reports_provider_update_after_wait_budget",
+                graph_launch_reports_provider_update_after_wait_budget,
             ),
             (
                 "graph_settlement_records_a_failed_advance_for_status",
