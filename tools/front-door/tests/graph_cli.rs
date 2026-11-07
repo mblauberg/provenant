@@ -285,6 +285,84 @@ fn graph_records(path: &Path) -> std::io::Result<Vec<PathBuf>> {
 }
 
 #[test]
+fn corrupt_graph_listing_gives_a_working_retirement_command() -> Result {
+    let rig = GraphProject::new()?;
+    for id in ["broken", "healthy"] {
+        let path = rig.document(&json!({"schema_version":1,"graph_id":id,"nodes":[{"id":"gate","kind":"gate","access":"read_only","condition":{"type":"budget"}}]}))?;
+        let output = rig
+            .command()
+            .args(["run", "--file"])
+            .arg(path)
+            .arg("--wait=10s")
+            .output()?;
+        assert!(output.status.success(), "{output:?}");
+    }
+    let broken = graph_records(&rig.state())?
+        .into_iter()
+        .find(|path| {
+            path.file_name()
+                .is_some_and(|name| name == "graph-broken.json")
+        })
+        .ok_or("broken checkpoint")?;
+    std::fs::write(&broken, b"PRIVATE_CONTENT_SENTINEL")?;
+    let (output, listing) = rig.run(&["status"])?;
+    assert!(output.status.success(), "{listing}");
+    let rows = listing["data"]["rows"].as_array().ok_or("rows")?;
+    let bad = rows
+        .iter()
+        .find(|row| row["id"] == "broken")
+        .ok_or("broken row")?;
+    assert_eq!(bad["state"], "unreadable");
+    let reason = bad["reason"].as_str().ok_or("reason")?;
+    assert!(reason.contains("provenant stop -- broken"), "{reason}");
+    assert!(reason.contains("Other graphs"), "{reason}");
+    assert!(rows.iter().any(|row| row["id"] == "healthy"));
+    assert!(!listing.to_string().contains("PRIVATE_CONTENT_SENTINEL"));
+    assert!(
+        !listing
+            .to_string()
+            .contains(&rig.state().display().to_string())
+    );
+    let human = fixture_cli()
+        .current_dir(&rig.project)
+        .env("PROVENANT_ROOT", &rig.root)
+        .env("XDG_CONFIG_HOME", rig.temp.path().join("config"))
+        .arg("--state-dir")
+        .arg(rig.state())
+        .arg("status")
+        .output()?;
+    assert!(human.status.success(), "{human:?}");
+    let text = String::from_utf8(human.stdout)?;
+    assert!(text.contains("provenant stop -- broken"), "{text}");
+    assert!(text.contains("healthy"), "{text}");
+    assert!(!text.contains("PRIVATE_CONTENT_SENTINEL"));
+    assert!(!text.contains(&rig.state().display().to_string()));
+    let (output, status) = rig.run(&["status", "broken"])?;
+    assert!(output.status.success(), "{status}");
+    assert!(
+        status.to_string().contains("provenant stop -- broken"),
+        "{status}"
+    );
+    assert_eq!(
+        status["data"]["rows"][0]["next"],
+        "provenant stop -- broken"
+    );
+    assert!(!status.to_string().contains("PRIVATE_CONTENT_SENTINEL"));
+    assert!(
+        !status
+            .to_string()
+            .contains(&rig.state().display().to_string())
+    );
+    let (output, stopped) = rig.run(&["stop", "--", "broken"])?;
+    assert!(output.status.success(), "{stopped}");
+    let (_, after) = rig.run(&["status"])?;
+    let rows = after["data"]["rows"].as_array().ok_or("rows after stop")?;
+    assert!(!rows.iter().any(|row| row["id"] == "broken"));
+    assert!(rows.iter().any(|row| row["id"] == "healthy"));
+    Ok(())
+}
+
+#[test]
 fn graph_secrets_are_refused_before_publication() -> Result {
     let rig = GraphProject::new()?;
     let secret = format!("ghp_{}", "a1".repeat(18));

@@ -486,6 +486,13 @@ fn paused_graph_status(
         match FileJournal::read_checkpoint(&context.state_root, context.project_id, graph_id) {
             Ok(Some(checkpoint)) => checkpoint,
             Ok(None) => return Ok(None),
+            Err(error) if error.is_unreadable() => {
+                let message = provenant_fabric_runtime::graph::unreadable_graph_guidance(graph_id);
+                return Ok(Some((
+                    json!({"graph_id": graph_id, "status": "unreadable", "reason": message}),
+                    format!("{message}\n"),
+                )));
+            }
             Err(error) => {
                 return Err(Fail::new(Status::Error, ErrorKind::Io, error.to_string()));
             }
