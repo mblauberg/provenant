@@ -10,6 +10,7 @@ use serde_json::{Value, json};
 use support::{Result, TestRig, code};
 
 #[test]
+#[allow(clippy::disallowed_methods)] // The external CLI fixture needs a real watchdog.
 fn run_wait_admits_after_registry_lock_is_released() -> Result {
     use provenant_core::RootInputs;
     use provenant_fabric_runtime::graph::FileJournal;
