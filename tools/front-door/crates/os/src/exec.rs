@@ -151,6 +151,8 @@ pub struct ExecOptions<'a> {
     pub secret_input: Option<&'a SecretInput>,
     /// Pass a lane or updater lease through exec, including to descendants.
     pub inherited_lease: Option<&'a crate::fs::LockGuard>,
+    /// Verified profile custody; prepare a read pipe at the final exec edge.
+    pub inherited_profile: Option<&'a dyn crate::sys::profile::ProfileSource>,
     /// Run in a private session and kill the whole group immediately on timeout.
     pub process_group: bool,
     /// Run in a private session and kill remaining group members on every exit,
@@ -177,6 +179,7 @@ impl<'a> ExecOptions<'a> {
             stdin: None,
             secret_input: None,
             inherited_lease: None,
+            inherited_profile: None,
             process_group: false,
             cleanup_process_group: false,
             stdout: StreamPolicy::default(),
@@ -273,6 +276,7 @@ pub fn spawn_detached(argv: &[OsString], cwd: &Path) -> Result<(), ExecError> {
             input: false,
             secret_input: None,
             inherited_lease: None,
+            inherited_profile: None,
             inherited_ports: None,
             process_group: true,
             capture_stdout: false,
@@ -317,6 +321,7 @@ pub fn detached_receipt(
             input: false,
             secret_input: None,
             inherited_lease: None,
+            inherited_profile: None,
             inherited_ports: None,
             process_group: true,
             capture_stdout: true,
@@ -422,6 +427,7 @@ fn run(reaper: &Reaper, options: ExecOptions<'_>) -> Result<ExecOutcome, ExecErr
             input: options.stdin.is_some(),
             secret_input: options.secret_input,
             inherited_lease: options.inherited_lease,
+            inherited_profile: options.inherited_profile,
             inherited_ports: None,
             process_group: options.process_group || options.cleanup_process_group,
             capture_stdout: options.stdout.piped(),

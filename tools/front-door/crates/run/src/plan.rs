@@ -205,6 +205,7 @@ mod tests {
             extensions: ExtensionPolicy::Deny,
             agy_state: None,
             permissions: PlanPermissions {
+                policy: None,
                 read_only: None,
                 mode: AccessMode::ReadOnly,
                 scratch: PathGrant {

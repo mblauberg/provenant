@@ -3,6 +3,7 @@ pub(crate) mod census;
 pub(crate) mod handoff;
 pub(crate) mod live_census;
 pub(crate) mod process_tree;
+pub mod profile;
 #[cfg(target_os = "macos")]
 pub(crate) mod provider;
 #[cfg(not(target_os = "macos"))]

@@ -40,6 +40,58 @@ pub(crate) fn observe_codex_rollout(
     observed
 }
 
+/// Find the one private OpenCode database that identifies this session.
+pub(crate) fn observe_opencode_session(
+    provider_state: &Path,
+    session: &str,
+) -> Result<(PathBuf, String), provenant_providers::ProviderError> {
+    let candidate = find_opencode_session(provider_state, session)?;
+    let model =
+        provenant_providers::opencode::observe_model(&candidate.join("data/opencode"), session)?;
+    Ok((candidate, model))
+}
+
+/// Locate by session identity independently of answering-model telemetry.
+pub(crate) fn find_opencode_session(
+    provider_state: &Path,
+    session: &str,
+) -> Result<PathBuf, provenant_providers::ProviderError> {
+    use provenant_providers::ProviderError;
+    let entries = std::fs::read_dir(provider_state).map_err(|_| ProviderError::UnknownIdentity)?;
+    let mut found = None;
+    for entry in entries.take(64) {
+        let entry = entry.map_err(|_| ProviderError::UnknownIdentity)?;
+        let name = entry.file_name();
+        let valid = name
+            .to_str()
+            .and_then(|n| n.strip_prefix("candidate-"))
+            .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
+        if !valid || !entry.file_type().is_ok_and(|t| t.is_dir()) {
+            continue;
+        }
+        let candidate = entry.path();
+        let data = candidate.join("data/opencode");
+        if ![
+            candidate.as_path(),
+            candidate.join("data").as_path(),
+            data.as_path(),
+            data.join("opencode.db").as_path(),
+        ]
+        .iter()
+        .all(|p| std::fs::symlink_metadata(p).is_ok_and(|m| !m.file_type().is_symlink()))
+        {
+            continue;
+        }
+        match provenant_providers::opencode::session_exists(&data, session) {
+            Ok(()) if found.is_none() => found = Some(candidate),
+            Ok(()) => return Err(ProviderError::IdentityMismatch),
+            Err(ProviderError::UnknownIdentity) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    found.ok_or(ProviderError::UnknownIdentity)
+}
+
 pub(super) fn detect_failure(
     entry: &provenant_providers::accounts::Registration,
     error: &provenant_providers::ProviderError,

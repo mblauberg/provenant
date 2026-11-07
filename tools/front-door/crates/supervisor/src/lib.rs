@@ -6,6 +6,7 @@
 // Custody-specific syscalls remain alongside the process policy.
 #[allow(unsafe_code, clippy::disallowed_methods)]
 mod process_os;
+pub use process_os::profile::{ProfileFile, ProfileIdentity};
 
 mod build_pause;
 pub mod census;

@@ -532,6 +532,9 @@ fn lane_prepare_with(cases: &[(&str, bool, bool, u8)], probe: Probe) -> Result {
                 executable_search_path: Vec::new(),
                 git: selected_git.clone(),
                 default_account_directories: Default::default(),
+                credential_roots: Default::default(),
+                github_roots: Default::default(),
+                provider_path_environment: Default::default(),
                 cargo_build_jobs: None,
                 fixture_state_write: true,
             }),
@@ -758,7 +761,6 @@ fn verify_lane_profile(
         AccessMode, AnchoredDirectory, Anchors, BackendContext, FixtureOperation, FixtureOutcome,
         prepare_writer_directories, required_anchors, system_backend,
     };
-    use provenant_os::exec::ExecOptions;
     use provenant_os::exec::StreamPolicy;
     use provenant_os::exec::SystemExecutor;
 
@@ -868,8 +870,12 @@ fn verify_lane_profile(
             "set -eu; tmp=$(cd \"$TMPDIR\" && pwd -P); test \"$(command -v swift)\" = \"$tmp/bin/swift\"; cd .swift-probe; swift build; swift test; printf 'lane-swift: PASS\\n'"
         };
         let argv = ["/bin/sh", "-c", command].map(OsString::from);
-        let command = compiled.command(&argv, &provenant_core::AttemptId::from_bytes([0; 16]))?;
-        let mut options = ExecOptions::new(&command, &launch.cwd, Duration::from_secs(120));
+        let command = compiled.command(
+            &argv,
+            &provenant_core::AttemptId::from_bytes([0; 16]),
+            &provenant_os::fs::Directory::open_anchor(&std::env::temp_dir())?,
+        )?;
+        let mut options = command.options(&launch.cwd, Duration::from_secs(120))?;
         options.process_group = true;
         options.cleanup_process_group = true;
         options.env = Some(&launch.environment);
@@ -917,8 +923,12 @@ fn verify_lane_profile(
             "set -eu; tmp=$(cd \"$TMPDIR\" && pwd -P); test \"$CARGO_TARGET_DIR\" = \"$tmp/target\"; cd .cargo-probe; PATH=\"$HOME/.cargo/bin:$PATH\" cargo test -p lane-probe --offline; cmp Cargo.lock \"$TMPDIR/cargo-probe.lock\"; test ! -e target; printf 'lane-cargo-read-only: PASS\\n'",
         ]
         .map(OsString::from);
-        let command = compiled.command(&argv, &provenant_core::AttemptId::from_bytes([0; 16]))?;
-        let mut options = ExecOptions::new(&command, &launch.cwd, Duration::from_secs(120));
+        let command = compiled.command(
+            &argv,
+            &provenant_core::AttemptId::from_bytes([0; 16]),
+            &provenant_os::fs::Directory::open_anchor(&std::env::temp_dir())?,
+        )?;
+        let mut options = command.options(&launch.cwd, Duration::from_secs(120))?;
         options.process_group = true;
         options.cleanup_process_group = true;
         options.env = Some(&launch.environment);
@@ -1111,15 +1121,18 @@ if (process.argv[2] === 'child') {
         let mut failures = Vec::new();
         for (name, cell) in cells.iter().copied() {
             let argv = [OsString::from("/bin/sh"), OsString::from("-c"), cell.into()];
-            let command =
-                match compiled.command(&argv, &provenant_core::AttemptId::from_bytes([0; 16])) {
-                    Ok(command) => command,
-                    Err(error) => {
-                        failures.push(format!("{name}: command preparation failed: {error}"));
-                        continue;
-                    }
-                };
-            let mut options = ExecOptions::new(&command, &launch.cwd, Duration::from_secs(30));
+            let command = match compiled.command(
+                &argv,
+                &provenant_core::AttemptId::from_bytes([0; 16]),
+                &provenant_os::fs::Directory::open_anchor(&std::env::temp_dir())?,
+            ) {
+                Ok(command) => command,
+                Err(error) => {
+                    failures.push(format!("{name}: command preparation failed: {error}"));
+                    continue;
+                }
+            };
+            let mut options = command.options(&launch.cwd, Duration::from_secs(30))?;
             options.process_group = true;
             options.cleanup_process_group = true;
             let mut cell_env = tool_env.clone();
@@ -1184,14 +1197,20 @@ if (process.argv[2] === 'child') {
         {
             for (restrict, failures) in [(false, &mut baseline), (true, &mut denied)] {
                 let argv = [OsString::from("/bin/sh"), OsString::from("-c"), cell.into()];
-                let mut command =
-                    compiled.command(&argv, &provenant_core::AttemptId::from_bytes([0; 16]))?;
+                let mut restricted = compiled.clone();
                 if restrict {
-                    let source = command[2].to_str().ok_or("sandbox profile")?;
+                    let source = std::str::from_utf8(&restricted.profile)?;
                     assert!(source.lines().any(|line| line == "(allow process-exec)"));
-                    command[2] = format!("{source}\n{deny}").into();
+                    restricted.profile.extend_from_slice(deny.as_bytes());
+                    use sha2::Digest;
+                    restricted.profile_digest = sha2::Sha256::digest(&restricted.profile).into();
                 }
-                let mut options = ExecOptions::new(&command, &launch.cwd, Duration::from_secs(30));
+                let command = restricted.command(
+                    &argv,
+                    &provenant_core::AttemptId::from_bytes([0; 16]),
+                    &provenant_os::fs::Directory::open_anchor(&std::env::temp_dir())?,
+                )?;
+                let mut options = command.options(&launch.cwd, Duration::from_secs(30))?;
                 options.process_group = true;
                 options.cleanup_process_group = true;
                 options.env = Some(&tool_env);
@@ -1213,8 +1232,9 @@ if (process.argv[2] === 'child') {
     let mcp_argv = compiled.command(
         &launch.argv,
         &provenant_core::AttemptId::from_bytes([0; 16]),
+        &provenant_os::fs::Directory::open_anchor(&std::env::temp_dir())?,
     )?;
-    let mut options = ExecOptions::new(&mcp_argv, &launch.cwd, Duration::from_secs(10));
+    let mut options = mcp_argv.options(&launch.cwd, Duration::from_secs(10))?;
     options.env = Some(&launch.environment);
     options.stdin = Some(frames);
     let output = executor.execute(options)?;
@@ -1261,8 +1281,12 @@ if (process.argv[2] === 'child') {
     let mut argv: Vec<OsString> = vec!["/bin/sh".into(), "-c".into(),
         "printf allowed > \"$1\" || exit 10; shift; for target in \"$@\"; do if printf changed > \"$target\"; then exit 20; fi; done".into(), "probe".into(), marker.as_os_str().to_owned()];
     argv.extend(denied.iter().map(|path| path.as_os_str().to_owned()));
-    argv = compiled.command(&argv, &provenant_core::AttemptId::from_bytes([0; 16]))?;
-    let mut options = ExecOptions::new(&argv, &launch.cwd, Duration::from_secs(5));
+    let argv = compiled.command(
+        &argv,
+        &provenant_core::AttemptId::from_bytes([0; 16]),
+        &provenant_os::fs::Directory::open_anchor(&std::env::temp_dir())?,
+    )?;
+    let mut options = argv.options(&launch.cwd, Duration::from_secs(5))?;
     options.env = Some(&launch.environment);
     options.stderr = StreamPolicy::Capture { limit: 4096 };
     let output = executor.execute(options)?;

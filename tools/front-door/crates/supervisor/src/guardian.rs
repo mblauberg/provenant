@@ -178,6 +178,7 @@ struct LaunchMessage {
     binding: StoredWriterBinding,
     executable_snapshot: ExecutableSnapshot,
     protected_commands: Vec<String>,
+    profile: Option<crate::ProfileIdentity>,
     argv: Vec<Vec<u8>>,
     environment: Vec<(Vec<u8>, Vec<u8>)>,
     lane_ports: Option<provenant_os::lane_ports::Plan>,
@@ -211,6 +212,7 @@ pub(crate) fn handoff(
     {
         return Err(CustodyError::InvalidRecord);
     }
+    validate_profile_command(owned.command.profile_file.as_ref(), &owned.command.argv)?;
     let executable_snapshot = snapshot_executable(
         owned
             .command
@@ -221,6 +223,11 @@ pub(crate) fn handoff(
     )?;
     let message = LaunchMessage {
         schema_version: 1,
+        profile: owned
+            .command
+            .profile_file
+            .as_ref()
+            .map(|p| p.identity().clone()),
         priority: owned.command.priority,
         scope: owned.lease.scope(),
         resolved_route: owned.command.resolved_route,
@@ -261,6 +268,11 @@ pub(crate) fn handoff(
         &publication.directory,
         owned.lease.lease.as_ref().ok_or(CustodyError::Fenced)?,
         &publication.custody,
+        owned
+            .command
+            .profile_file
+            .as_ref()
+            .map(crate::ProfileFile::file),
         &owned.command.environment,
         &owned.command.config_environment,
         &payload,
@@ -416,14 +428,68 @@ impl RegisteredChild {
         })
     }
 }
+fn adopt_profile(
+    file: Option<std::fs::File>,
+    identity: Option<crate::ProfileIdentity>,
+    argv: &[OsString],
+) -> io::Result<Option<crate::ProfileFile>> {
+    let profile = match (file, identity) {
+        (Some(file), Some(identity)) => Some(crate::ProfileFile::inherit(file, identity)?),
+        (None, None) => None,
+        _ => {
+            return Err(io::Error::other(
+                "sandbox profile descriptor missing from handoff; launch refused",
+            ));
+        }
+    };
+    validate_profile_command(profile.as_ref(), argv)?;
+    Ok(profile)
+}
+
+fn validate_profile_command(
+    profile: Option<&crate::ProfileFile>,
+    argv: &[OsString],
+) -> io::Result<()> {
+    match profile {
+        Some(profile) => profile.verify_command(argv),
+        None if argv.first().is_some_and(|p| p == "/usr/bin/sandbox-exec") => Err(
+            io::Error::other("sandbox profile descriptor missing; launch refused"),
+        ),
+        None => Ok(()),
+    }
+}
+
 /// Only `internal supervise` calls this, with descriptors inherited by handoff.
 /// It cannot read a launch specification from a public file or stdin.
 pub fn supervise(args: &[OsString], hooks: GuardianHooks<'_>) -> Result<()> {
     let mut inherited = crate::process_os::handoff::inherit(args)?;
     let payload =
         crate::process_os::handoff::receive(&mut inherited.channel, Duration::from_secs(10))?;
-    let message: LaunchMessage =
+    let mut message: LaunchMessage =
         decode_v1(payload.as_slice(), LAUNCH_LIMITS).map_err(|_| CustodyError::InvalidRecord)?;
+    let argv_check: Vec<_> = message
+        .argv
+        .iter()
+        .cloned()
+        .map(OsString::from_vec)
+        .collect();
+    let profile_file = adopt_profile(
+        inherited.profile.take(),
+        message.profile.take(),
+        &argv_check,
+    );
+    let profile_file = match profile_file {
+        Ok(profile) => profile,
+        Err(error) => {
+            crate::process_os::handoff::send(
+                &mut inherited.channel,
+                b"sandbox-profile-transport-refused-v1",
+                Duration::from_secs(10),
+                &CancelToken::new(),
+            )?;
+            return Err(error.into());
+        }
+    };
     message.capture.validate()?;
     let evidence = crate::custody::attempt_evidence(&inherited.writer_directory, message.scope)?;
     let mut reservation: Reservation = read_record(&evidence, "reservation.json", RECORD_LIMIT)?;
@@ -487,6 +553,7 @@ pub fn supervise(args: &[OsString], hooks: GuardianHooks<'_>) -> Result<()> {
         requester: provenant_core::ActorId,
         binding: &'a StoredWriterBinding,
         executable_snapshot: ExecutableSnapshot,
+        profile: Option<&'a crate::ProfileIdentity>,
         executable_native_bytes: &'a [u8],
         environment_names_native_bytes: Vec<&'a [u8]>,
         capture: CapturePlan,
@@ -501,6 +568,7 @@ pub fn supervise(args: &[OsString], hooks: GuardianHooks<'_>) -> Result<()> {
         requester: message.requester,
         binding: &message.binding,
         executable_snapshot: message.executable_snapshot,
+        profile: profile_file.as_ref().map(crate::ProfileFile::identity),
         executable_native_bytes: argv
             .first()
             .map(|arg| arg.as_bytes())
@@ -580,6 +648,7 @@ pub fn supervise(args: &[OsString], hooks: GuardianHooks<'_>) -> Result<()> {
         holder_context: message.holder_context,
         lane_ports: message.lane_ports,
         secret_input: message.secret_input,
+        profile_file,
         priority: message.priority,
         #[cfg(feature = "fixture")]
         fixture_owner: std::env::var(crate::FIXTURE_OWNER_ENV)
@@ -611,6 +680,7 @@ struct Driver<'a> {
     lane_ports: Option<provenant_os::lane_ports::Plan>,
     secret_input: Option<provenant_os::exec::SecretInput>,
     priority: u8,
+    profile_file: Option<crate::ProfileFile>,
     #[cfg(feature = "fixture")]
     fixture_owner: Option<ProcessIdentity>,
     spared: crate::census::SparingTracker,
@@ -871,7 +941,9 @@ impl Driver<'_> {
             Ok(child) => child,
             Err(error) => {
                 return self.never_spawned(
-                    if error.kind() == io::ErrorKind::InvalidData {
+                    if crate::process_os::profile::is_transport_error(&error) {
+                        "sandbox profile transport refused before provider launch"
+                    } else if error.kind() == io::ErrorKind::InvalidData {
                         "provider executable snapshot changed"
                     } else {
                         "provider spawn failed"
@@ -1879,6 +1951,7 @@ impl Driver<'_> {
         plan: CapturePlan,
         ports: Option<&provenant_os::fs::LockGuard>,
     ) -> io::Result<crate::process_os::provider::ProviderGroup> {
+        validate_profile_command(self.profile_file.as_ref(), argv)?;
         match argv.first() {
             Some(executable) => match snapshot_executable(executable.as_os_str()) {
                 Ok(snapshot) if snapshot == self.executable_snapshot => {
@@ -1890,6 +1963,9 @@ impl Driver<'_> {
                             input: !input.is_empty(),
                             secret_input: self.secret_input.as_ref(),
                             inherited_lease: None,
+                            inherited_profile: self.profile_file.as_ref().map(|profile| {
+                                profile as &dyn provenant_os::sys::profile::ProfileSource
+                            }),
                             inherited_ports: ports,
                             process_group: false,
                             capture_stdout: plan.stdout.piped(),

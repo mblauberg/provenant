@@ -348,7 +348,7 @@ pub(crate) fn open_database(
 /// Ordered run-store migrations. A step's index is the version it upgrades from,
 /// so the current version follows from this list and a new step cannot be missed
 /// when an existing store opens.
-const SCHEMA_STEPS: [&str; 9] = [
+const SCHEMA_STEPS: [&str; 10] = [
     include_str!("schema.sql"),
     include_str!("schema_v2.sql"),
     include_str!("schema_v3.sql"),
@@ -358,6 +358,7 @@ const SCHEMA_STEPS: [&str; 9] = [
     include_str!("schema_v7.sql"),
     include_str!("schema_v8.sql"),
     include_str!("schema_v9.sql"),
+    include_str!("schema_v10.sql"),
 ];
 const SCHEMA_VERSION: i64 = SCHEMA_STEPS.len() as i64;
 
@@ -425,7 +426,8 @@ pub(crate) fn decode_attempt(bytes: &[u8]) -> Result<AttemptRecord> {
         bytes,
         provenant_records::Limits {
             max_bytes: TERMINAL_RECORD_LIMIT,
-            max_members: 1_000_000,
+            // Bound structural work by the actual document, not a grant-count cap.
+            max_members: bytes.len(),
             ..Default::default()
         },
     )?;

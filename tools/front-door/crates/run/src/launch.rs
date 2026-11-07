@@ -121,24 +121,15 @@ pub struct PreparedLaunch {
 enum WriteGrantError {
     #[error("invalid write grant path")]
     InvalidPath,
-    #[error(
-        "encoded write grants exceed domains.run.write_grant_limit_bytes={limit} (source: {})", .origin.description()
-    )]
-    Limit {
-        limit: u64,
-        origin: provenant_records::diagnostic::SettingSource,
-    },
 }
 
+#[allow(clippy::print_stderr)]
 fn applied_write_grants(
     plan: &PreparedLaunch,
     limit: WriteGrantLimit,
 ) -> std::result::Result<admission::AppliedWriteGrants, WriteGrantError> {
     let Some(confinement) = &plan.confinement else {
-        return Ok(admission::AppliedWriteGrants {
-            max_bytes: limit.bytes,
-            ..Default::default()
-        });
+        return Ok(admission::AppliedWriteGrants::default());
     };
     let permissions = confinement.plan.permissions();
     let grants = provenant_confinement::write_grants(permissions, &confinement.profile)
@@ -153,11 +144,15 @@ fn applied_write_grants(
             })
         })
         .collect::<std::result::Result<Vec<_>, WriteGrantError>>()?;
-    if !crate::reader::write_grants_fit(&grants, limit.bytes) {
-        return Err(WriteGrantError::Limit {
-            limit: limit.bytes,
-            origin: limit.origin,
-        });
+    let encoded =
+        provenant_records::CanonicalV1::bytes(&grants).map_err(|_| WriteGrantError::InvalidPath)?;
+    if encoded.as_bytes().len() as u64 > limit.bytes {
+        eprintln!(
+            "warning: encoded write grants are {} bytes; domains.run.write_grant_limit_bytes={} (source: {})",
+            encoded.as_bytes().len(),
+            limit.bytes,
+            limit.origin.description()
+        );
     }
     let git_grants_digest = match &permissions.mode {
         provenant_confinement::permissions::AccessMode::ReadOnly => None,
@@ -168,7 +163,6 @@ fn applied_write_grants(
     Ok(admission::AppliedWriteGrants {
         grants,
         git_grants_digest,
-        max_bytes: limit.bytes,
     })
 }
 /// Provider-decoded facts from a completed capture.
@@ -497,6 +491,46 @@ fn output_prompt_directs_scratch_outside_worktree() {
 }
 
 impl RunStore {
+    /// Only the launcher that commits Queued -> Starting reports the resolved
+    /// policy. Preparation and sealing can retry or race without duplicating
+    /// this attempt's report, including a retained fresh-start plan.
+    #[allow(clippy::too_many_arguments)]
+    fn claim_launch(
+        &self,
+        expected: &AttemptRecord,
+        plan: &PreparedLaunch,
+        grants: &admission::AppliedWriteGrants,
+        priority: u8,
+        runtime: u64,
+        call: &Request<'_>,
+        output: &mut impl std::io::Write,
+    ) -> Result<AttemptRecord> {
+        let writable = plan
+            .confinement
+            .as_ref()
+            .and_then(|confinement| confinement.plan.permissions().read_only.as_ref())
+            .map(|grants| grants.writable_paths())
+            .unwrap_or_default();
+        let record = self.mark_starting_with_priority(
+            expected,
+            &plan.route,
+            writable,
+            grants,
+            plan.observed_head,
+            Some(priority),
+            runtime,
+            call,
+        )?;
+        if let Some(policy) = plan
+            .confinement
+            .as_ref()
+            .and_then(|confinement| confinement.plan.permissions().policy.as_ref())
+        {
+            let _ = policy.report_launch(output);
+        }
+        Ok(record)
+    }
+
     pub fn effective_launch_task(
         &self,
         request: &CanonicalRequest,
@@ -1233,13 +1267,6 @@ impl RunStore {
                 providers.runtime_cap(plan.route.provider.as_deref().unwrap_or_default()),
             );
             set_lane_environment(&mut plan.environment, request.lane_depth.unwrap_or(1), id);
-            // Record the exact project-relative exceptions of the plan that launches.
-            let writable = plan
-                .confinement
-                .as_ref()
-                .and_then(|c| c.plan.permissions().read_only.as_ref())
-                .map(|g| g.writable_paths())
-                .unwrap_or_default();
             let limit = providers.write_grant_limit().checked();
             plan.route
                 .extra
@@ -1250,12 +1277,6 @@ impl RunStore {
                 Err(error) => {
                     let kind = match error {
                         WriteGrantError::InvalidPath => RefusalKind::InvalidWriteGrantPath,
-                        WriteGrantError::Limit { limit, origin } => RefusalKind::WriteGrantsLimit(
-                            provenant_records::diagnostic::ResourceFact::WriteGrantLimit {
-                                limit,
-                                origin,
-                            },
-                        ),
                     };
                     let reason = error.to_string();
                     match self.withdraw_with_preparation_failure(
@@ -1303,15 +1324,14 @@ impl RunStore {
                 Err(provenant_os::fs::FsError::LockTimeout { .. }) => continue,
                 Err(error) => return Err(error.into()),
             };
-            let record = match self.mark_starting_with_priority(
+            let record = match self.claim_launch(
                 &record,
-                &plan.route,
-                writable,
+                &plan,
                 &write_grants,
-                plan.observed_head,
-                Some(priority),
+                priority,
                 runtime,
                 call,
+                &mut std::io::stderr().lock(),
             ) {
                 Ok(record) => record,
                 // A concurrent start already took this attempt.
@@ -1575,6 +1595,104 @@ mod lane_environment_tests {
                 ),
             ]
         );
+    }
+}
+
+#[cfg(test)]
+mod policy_reporting_tests {
+    use super::*;
+    use crate::tests::{call, clock, context, input, route};
+    use provenant_confinement::permissions::{
+        AccessMode, MandatoryRoots, NetworkAccess, PathGrant, PathScope, PlanPermissions,
+        ProviderProfile, ProviderProfileSpec,
+    };
+    use provenant_confinement::{CodexPolicy, ConfinedPlan, ExtensionPolicy, PlanRequest};
+    use provenant_core::{CancelToken, WorkScope};
+    use std::path::Path;
+
+    #[test]
+    fn claimed_launch_reports_once_when_a_prepared_attempt_is_replayed()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        let store = RunStore::open(&context(temp.path())?, &call)?;
+        let run = input();
+        store.create(&run, &call)?;
+        let expected = store.record(run.attempts[0].attempt_id, &call)?;
+        let grant = |path: &str| PathGrant {
+            path: path.into(),
+            scope: PathScope::Subtree,
+        };
+        let mandatory = MandatoryRoots::new(
+            Path::new("/fixture/home"),
+            Path::new("/fixture/state"),
+            Path::new("/fixture/source"),
+        )?;
+        let policy = provenant_confinement::run_config::RunConfig::default()
+            .policy_for_launch(Path::new("/fixture/state"), mandatory);
+        let plan = ConfinedPlan::new(PlanRequest {
+            scope: WorkScope::Project(store.context.project_id),
+            codex: CodexPolicy::Clean,
+            extensions: ExtensionPolicy::Deny,
+            agy_state: None,
+            permissions: PlanPermissions {
+                policy: Some(policy),
+                read_only: None,
+                mode: AccessMode::ReadOnly,
+                scratch: grant("/fixture/scratch"),
+                private_state: None,
+                read_roots: vec![],
+                protected_roots: vec![],
+                secret_roots: vec![],
+                selected_authentication: None,
+                include_continuation: false,
+                write_roots: vec![],
+                network: NetworkAccess::Open,
+                nested_confinement: false,
+            },
+        })?;
+        let prepared = PreparedLaunch {
+            argv: vec!["fixture".into()],
+            environment: vec![],
+            stdin: vec![],
+            secret_input: None,
+            cwd: "/fixture/source".into(),
+            route: route(),
+            skipped_routes: vec![],
+            observed_head: None,
+            repository: None,
+            confinement: Some(crate::LaunchConfinement {
+                plan,
+                profile: ProviderProfile {
+                    spec: ProviderProfileSpec::default(),
+                    observations: Default::default(),
+                },
+                writer: None,
+                home: "/fixture/home".into(),
+                cargo_registry_seed: false,
+                state_root: "/fixture/state".into(),
+            }),
+        };
+        let grants = applied_write_grants(&prepared, WriteGrantLimit::default())?;
+        let mut output = Vec::new();
+        let claimed =
+            store.claim_launch(&expected, &prepared, &grants, 0, 60, &call, &mut output)?;
+        assert!(matches!(claimed.state, AttemptState::Starting { .. }));
+        // Another launcher can have prepared from the same queued record.
+        // The compare-and-swap must refuse its stale claim before reporting.
+        assert!(matches!(
+            store.claim_launch(&expected, &prepared, &grants, 0, 60, &call, &mut output),
+            Err(RunError::Conflict)
+        ));
+        assert_eq!(
+            String::from_utf8(output)?
+                .lines()
+                .filter(|line| line.starts_with("lane policy:"))
+                .count(),
+            1
+        );
+        Ok(())
     }
 }
 pub(crate) mod hand_off;

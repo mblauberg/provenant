@@ -21,7 +21,7 @@ fn native_sandbox_blocks_path_escape_probes() -> Result<(), Box<dyn std::error::
     let home = root.join("home");
     let state = root.join("state");
     let xdg = root.join("xdg");
-    let provider_state = root.join("provider-state");
+    let provider_state = state.join("runs/r/attempts/a/provider-state/candidate-0");
     for path in [&home, &state, &xdg, &provider_state] {
         std::fs::create_dir_all(path)?;
     }
@@ -57,12 +57,13 @@ fn native_sandbox_blocks_path_escape_probes() -> Result<(), Box<dyn std::error::
         &authority,
         &provenant_os::fs::canonicalize(&fixture.home)?,
     )?;
-    let scratch = root.join("scratch");
-    std::fs::create_dir(&scratch)?;
+    let scratch = state.join("runs/r/attempts/a/tmp/candidate-0");
+    std::fs::create_dir_all(&scratch)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&scratch, std::fs::Permissions::from_mode(0o700))?;
+        std::fs::set_permissions(&provider_state, std::fs::Permissions::from_mode(0o700))?;
     }
     let protected_parent = root.join("protected-parent");
     let protected = protected_parent.join("protected");
@@ -121,10 +122,6 @@ fn native_sandbox_blocks_path_escape_probes() -> Result<(), Box<dyn std::error::
 
     let profile = ProviderProfile {
         spec: ProviderProfileSpec {
-            state_writes: vec![PathGrant {
-                path: provider_state.clone(),
-                scope: PathScope::Subtree,
-            }],
             deny_keychain_access: true,
             allow_process_fork: true,
             allow_database_ipc: true,
@@ -163,8 +160,8 @@ fn native_sandbox_blocks_path_escape_probes() -> Result<(), Box<dyn std::error::
         },
         observations: [
             (FixtureOperation::DeclaredRead, FixtureOutcome::Allowed),
-            (FixtureOperation::UndeclaredRead, FixtureOutcome::Denied),
-            (FixtureOperation::UndeclaredWrite, FixtureOutcome::Denied),
+            (FixtureOperation::UndeclaredRead, FixtureOutcome::Allowed),
+            (FixtureOperation::UndeclaredWrite, FixtureOutcome::Allowed),
             (FixtureOperation::SecretRead, FixtureOutcome::Denied),
             (FixtureOperation::ProtectedWrite, FixtureOutcome::Denied),
             (FixtureOperation::OtherNetwork, FixtureOutcome::Denied),
@@ -174,7 +171,7 @@ fn native_sandbox_blocks_path_escape_probes() -> Result<(), Box<dyn std::error::
             ),
             (
                 FixtureOperation::UndeclaredProcessExec,
-                FixtureOutcome::Denied,
+                FixtureOutcome::Allowed,
             ),
             (FixtureOperation::ProcessFork, FixtureOutcome::Allowed),
             (FixtureOperation::StateWrite, FixtureOutcome::Allowed),
@@ -197,9 +194,70 @@ fn native_sandbox_blocks_path_escape_probes() -> Result<(), Box<dyn std::error::
         .into(),
     };
     let cache = authority.cargo_cache.path.clone();
+    let mut mandatory = MandatoryRoots::new(&home, &state, linked.path())?;
+    let unselected = root.join("unselected-account");
+    std::fs::create_dir(&unselected)?;
+    mandatory.add_credentials(PathGrant {
+        path: unselected.clone(),
+        scope: PathScope::Subtree,
+    })?;
+    // The sealed host inventory also covers agent sockets outside home/state.
+    let ssh_agent_socket = root.join("synthetic-agent.sock");
+    mandatory.add_credentials(PathGrant {
+        path: ssh_agent_socket.clone(),
+        scope: PathScope::Exact,
+    })?;
+    for identity in ["selected", "unselected"] {
+        mandatory.add_credentials(PathGrant {
+            path: state.join("identities").join(identity).join(".codex"),
+            scope: PathScope::Subtree,
+        })?;
+    }
+    for path in [&common, &private] {
+        mandatory.add_git(PathGrant {
+            path: path.clone(),
+            scope: PathScope::Subtree,
+        })?;
+    }
+    let prompt = state.join("runs/r/attempts/a/prompt");
+    let skills = state.join("runs/r/attempts/a/tmp/candidate-0-skills-snapshot");
+    let release = state.join("releases/fixture-digest");
+    std::fs::write(&prompt, "#!/bin/sh\nexit 0\n")?;
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&prompt, std::fs::Permissions::from_mode(0o755))?;
+    }
+    for directory in [&skills, &release] {
+        std::fs::create_dir_all(directory)?;
+        let script = directory.join("tool");
+        std::fs::write(&script, "#!/bin/sh\nexit 0\n")?;
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))?;
+    }
+    for (path, scope) in [
+        (&prompt, PathScope::Exact),
+        (&skills, PathScope::Subtree),
+        (&release, PathScope::Subtree),
+    ] {
+        let grant = PathGrant {
+            path: path.clone(),
+            scope,
+        };
+        if path == &prompt {
+            mandatory.add_state_read(grant)?;
+        } else {
+            mandatory.add_state_read_exec(grant)?;
+        }
+    }
     let plan = PlanPermissions {
+        policy: Some(
+            crate::run_config::RunConfig::default().policy_for_launch(&state, mandatory.clone()),
+        ),
         read_only: None,
-        private_state: None,
+        private_state: Some(PathGrant {
+            path: provider_state.clone(),
+            scope: PathScope::Subtree,
+        }),
         mode: AccessMode::WorktreeWrite(Box::new(authority)),
         scratch: PathGrant {
             path: scratch.clone(),
@@ -259,7 +317,7 @@ fn native_sandbox_blocks_path_escape_probes() -> Result<(), Box<dyn std::error::
     let executor = SystemExecutor::new(2)?;
     let cancel = CancelToken::new();
     let env = [
-        ("HOME".into(), home.into_os_string()),
+        ("HOME".into(), home.clone().into_os_string()),
         ("PROVENANT_STATE_DIR".into(), state.clone().into_os_string()),
         ("XDG_CONFIG_HOME".into(), xdg.into_os_string()),
         ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
@@ -314,7 +372,7 @@ fn native_sandbox_blocks_path_escape_probes() -> Result<(), Box<dyn std::error::
     for alias in &aliases {
         assert!(!sbpl.contains(&alias.display().to_string()));
     }
-    assert!(!sbpl.contains("file-write-unlink"));
+    assert!(sbpl.contains("file-write-unlink"));
     std::fs::remove_file(alias)?;
     // A second name for a Git control file is the one link that refuses.
     // (Repository revalidation already refuses a second name for `config`.)
@@ -366,6 +424,412 @@ fn native_sandbox_blocks_path_escape_probes() -> Result<(), Box<dyn std::error::
         executor.execute(options).expect("bounded sandbox child")
     };
     let run = |program: &Path, args: &[&Path]| run_in(&sbpl, program, args);
+    let connect = |sbpl: &str, socket: &Path| {
+        run_in(
+            sbpl,
+            &executables[6],
+            &[
+                Path::new("-MIO::Socket::UNIX"),
+                Path::new("-e"),
+                Path::new("IO::Socket::UNIX->new(Peer => $ARGV[0]) or die \"connect: $!\\n\""),
+                socket,
+            ],
+        )
+    };
+    let mut socket_profiles = Vec::new();
+    for writer in [false, true] {
+        let open_plan = PlanPermissions {
+            network: NetworkAccess::Open,
+            mode: if writer {
+                plan.mode.clone()
+            } else {
+                AccessMode::ReadOnly
+            },
+            ..plan.clone()
+        };
+        let open_anchors = Anchors {
+            worktree: writer.then_some((&linked, &selected_ref)),
+            ..anchors
+        };
+        let open_sbpl = String::from_utf8(
+            backend
+                .compile(&open_plan, &profile, &open_anchors)?
+                .profile,
+        )?;
+        socket_profiles.push((writer, open_sbpl));
+    }
+    // The named credential socket is absent when both profiles compile.
+    let _ssh_listener = std::os::unix::net::UnixListener::bind(&ssh_agent_socket)?;
+    let ordinary_socket = root.join("ordinary.sock");
+    let _ordinary_listener = std::os::unix::net::UnixListener::bind(&ordinary_socket)?;
+    for socket in [&ssh_agent_socket, &ordinary_socket] {
+        std::os::unix::net::UnixStream::connect(socket)?;
+    }
+    for (writer, open_sbpl) in socket_profiles {
+        let ordinary = connect(&open_sbpl, &ordinary_socket);
+        assert!(
+            successful_probe(&ordinary),
+            "writer={writer}: ambient Unix socket: {ordinary:?}"
+        );
+        let credential = connect(&open_sbpl, &ssh_agent_socket);
+        assert!(
+            denied_probe(&credential),
+            "writer={writer}: exact SSH_AUTH_SOCK credential boundary: {credential:?}"
+        );
+    }
+    let clone_helper = super::process_info::compile_native_boundary_helper(&executor, &scratch)?;
+    let clone_source = root.join("ambient-clone-source");
+    let clone_baseline = root.join("ambient-clone-baseline");
+    std::fs::write(&clone_source, "ordinary clone contents")?;
+    let baseline_argv = [
+        clone_helper.as_os_str().to_owned(),
+        "clone".into(),
+        clone_source.as_os_str().to_owned(),
+        clone_baseline.as_os_str().to_owned(),
+        "allow".into(),
+    ];
+    let clone_outcome = executor.execute(ExecOptions::new(
+        &baseline_argv,
+        &root,
+        Duration::from_secs(3),
+    ))?;
+    let clone_available = if clone_outcome.termination == Termination::Exit(77) {
+        provenant_test_support::skip_sandbox_dependent_test(
+            "native clonefile probe requires filesystem clone support",
+        )?;
+        false
+    } else {
+        assert!(
+            successful_probe(&clone_outcome),
+            "unconfined clone positive control: {clone_outcome:?}"
+        );
+        assert_eq!(std::fs::read(&clone_baseline)?, b"ordinary clone contents");
+        let outcome = run(
+            &clone_helper,
+            &[
+                Path::new("clone"),
+                &clone_source,
+                &scratch.join("ordinary-clone"),
+                Path::new("allow"),
+            ],
+        );
+        assert!(
+            successful_probe(&outcome),
+            "ambient clone without catalogue grants: {outcome:?}"
+        );
+        true
+    };
+    let readonly_alias = scratch.join("readonly-source-alias");
+    symlink(&inside, &readonly_alias)?;
+    for path in [&inside, &readonly_alias] {
+        assert!(denied_probe(&run_in(
+            &read_only_sbpl,
+            &executables[0],
+            &[path]
+        )));
+    }
+    assert!(successful_probe(&run_in(
+        &read_only_sbpl,
+        &executables[4],
+        &[&inside]
+    )));
+    let overlapping_profile = ProviderProfile {
+        spec: ProviderProfileSpec {
+            state_writes: vec![PathGrant {
+                path: linked.path().to_owned(),
+                scope: PathScope::Subtree,
+            }],
+            ..profile.spec.clone()
+        },
+        observations: profile.observations.clone(),
+    };
+    match backend.compile(&read_only_plan, &overlapping_profile, &read_only_anchors) {
+        Ok(compiled) => {
+            let source = String::from_utf8(compiled.profile)?;
+            assert!(denied_probe(&run_in(&source, &executables[0], &[&inside])));
+        }
+        Err(PermissionError::ProtectedOverlap) => {}
+        Err(error) => return Err(error.into()),
+    }
+    assert!(successful_probe(&run(&executables[4], &[&prompt])));
+    assert!(denied_probe(&run(&executables[0], &[&prompt])));
+    assert!(denied_probe(&run(&prompt, &[])));
+    for directory in [&skills, &release] {
+        assert!(successful_probe(&run(&directory.join("tool"), &[])));
+        assert!(denied_probe(&run(
+            &executables[0],
+            &[&directory.join("tool")]
+        )));
+        let sibling = directory.with_file_name("unselected-sibling");
+        std::fs::create_dir_all(&sibling)?;
+        std::fs::write(sibling.join("secret"), "unselected")?;
+        assert!(denied_probe(&run(
+            &executables[4],
+            &[&sibling.join("secret")]
+        )));
+    }
+    // Inventory names compiled while absent must remain protected if the host
+    // creates them later. Read/write/exec and resolved symlink names all agree.
+    for (index, credential) in mandatory.credentials().iter().enumerate() {
+        if credential.path == ssh_agent_socket {
+            // The actual socket and IPC refusal are probed separately below.
+            continue;
+        }
+        let file = match credential.scope {
+            PathScope::Exact => {
+                std::fs::create_dir_all(credential.path.parent().ok_or("credential parent")?)?;
+                credential.path.clone()
+            }
+            PathScope::Subtree => {
+                std::fs::create_dir_all(&credential.path)?;
+                credential.path.join("boundary-probe")
+            }
+        };
+        std::fs::write(&file, "#!/bin/sh\nexit 0\n")?;
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755))?;
+        }
+        let alias = scratch.join(format!("credential-alias-{index}"));
+        symlink(&file, &alias)?;
+        for (operation, outcome) in [
+            ("read", run(&executables[4], &[&file])),
+            ("write", run(&executables[0], &[&file])),
+            ("exec", run(&file, &[])),
+            ("symlink read", run(&executables[4], &[&alias])),
+            ("symlink write", run(&executables[0], &[&alias])),
+            (
+                "hard link",
+                run(
+                    &executables[2],
+                    &[&file, &scratch.join(format!("credential-hardlink-{index}"))],
+                ),
+            ),
+        ] {
+            assert!(
+                denied_probe(&outcome),
+                "mandatory {operation} {}: {outcome:?}",
+                credential.path.display()
+            );
+        }
+        if clone_available {
+            let destination = scratch.join(format!("credential-clone-{index}"));
+            let outcome = run(
+                &clone_helper,
+                &[Path::new("clone"), &file, &destination, Path::new("deny")],
+            );
+            assert!(
+                successful_probe(&outcome) && !destination.exists(),
+                "mandatory credential clone {}: {outcome:?}",
+                credential.path.display()
+            );
+        }
+        let parent = credential.path.parent().ok_or("credential ancestor")?;
+        let moved = parent.with_file_name(format!("moved-credential-parent-{index}"));
+        let outcome = run(&executables[1], &[parent, &moved]);
+        assert!(
+            denied_probe(&outcome),
+            "mandatory ancestor rename {}: {outcome:?}",
+            parent.display()
+        );
+        assert!(parent.exists() && !moved.exists());
+    }
+    let host_private = root.join("host-private");
+    let host_archive = root.join("host-archive");
+    for path in [&host_private, &host_archive] {
+        std::fs::create_dir(path)?;
+        std::fs::write(path.join("file"), "#!/bin/sh\nexit 0\n")?;
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path.join("file"), std::fs::Permissions::from_mode(0o755))?;
+    }
+    let host_config: crate::run_config::RunConfig = serde_json::from_value(serde_json::json!({
+        "host_policy": {
+            "deny_read": [host_private, "relative", 7],
+            "deny_write": [host_archive],
+            "network": "open"
+        }
+    }))?;
+    let host_plan = PlanPermissions {
+        policy: Some(host_config.policy_for_launch(&state, mandatory.clone())),
+        ..plan.clone()
+    };
+    let host_sbpl = String::from_utf8(backend.compile(&host_plan, &profile, &anchors)?.profile)?;
+    for (name, outcome) in [
+        (
+            "host read",
+            run_in(&host_sbpl, &executables[4], &[&host_private.join("file")]),
+        ),
+        (
+            "host exec",
+            run_in(&host_sbpl, &host_private.join("file"), &[]),
+        ),
+        (
+            "host write",
+            run_in(&host_sbpl, &executables[0], &[&host_archive.join("file")]),
+        ),
+    ] {
+        assert!(denied_probe(&outcome), "{name}: {outcome:?}");
+    }
+    assert!(successful_probe(&run_in(
+        &host_sbpl,
+        &executables[4],
+        &[&host_archive.join("file")]
+    )));
+    for auth_parent in [
+        home.join(".codex"),
+        state.join("identities/selected/.codex"),
+    ] {
+        let selected_file = auth_parent.join("selected-login");
+        let unselected_file = auth_parent.join("unselected-login");
+        std::fs::write(&selected_file, "selected")?;
+        std::fs::write(&unselected_file, "unselected")?;
+        let selected_grant = PathGrant {
+            path: selected_file.clone(),
+            scope: PathScope::Exact,
+        };
+        let mut selected_profile = ProviderProfile {
+            spec: profile.spec.clone(),
+            observations: profile.observations.clone(),
+        };
+        selected_profile.spec.authentication = vec![AuthenticationProfile {
+            keychain: None,
+            mechanism: "fixture-selected".into(),
+            roots: vec![selected_grant.clone()],
+            in_place_writes: vec![selected_grant],
+        }];
+        let selected_plan = PlanPermissions {
+            selected_authentication: Some("fixture-selected".into()),
+            ..plan.clone()
+        };
+        let mut selected_anchor_paths = anchor_paths.clone();
+        selected_anchor_paths.push(auth_parent.clone());
+        let selected_directories = selected_anchor_paths
+            .iter()
+            .map(AnchoredDirectory::open_canonical)
+            .collect::<Result<Vec<_>, _>>()?;
+        let selected_anchors = Anchors {
+            directories: &selected_directories,
+            ..anchors
+        };
+        let selected_sbpl = String::from_utf8(
+            backend
+                .compile(&selected_plan, &selected_profile, &selected_anchors)?
+                .profile,
+        )?;
+        assert!(successful_probe(&run_in(
+            &selected_sbpl,
+            &executables[4],
+            &[&selected_file]
+        )));
+        assert!(successful_probe(&run_in(
+            &selected_sbpl,
+            &executables[6],
+            &[
+                Path::new("-e"),
+                Path::new(
+                    "open(my $f, '+<', $ARGV[0]) or die $!; print $f 'refreshed' or die $!; close($f) or die $!;"
+                ),
+                &selected_file,
+            ]
+        )));
+        for (name, outcome) in [
+            (
+                "unselected credential",
+                run_in(&selected_sbpl, &executables[4], &[&unselected_file]),
+            ),
+            (
+                "credential sibling create",
+                run_in(
+                    &selected_sbpl,
+                    &executables[0],
+                    &[&auth_parent.join("new-login")],
+                ),
+            ),
+            (
+                "credential unlink",
+                run_in(&selected_sbpl, Path::new("/bin/rm"), &[&selected_file]),
+            ),
+            (
+                "credential rename",
+                run_in(
+                    &selected_sbpl,
+                    &executables[1],
+                    &[&selected_file, &auth_parent.join("moved-login")],
+                ),
+            ),
+        ] {
+            assert!(denied_probe(&outcome), "{name}: {outcome:?}");
+        }
+    }
+    for writer in [false, true] {
+        let open_plan = PlanPermissions {
+            mode: if writer {
+                plan.mode.clone()
+            } else {
+                AccessMode::ReadOnly
+            },
+            network: NetworkAccess::Open,
+            ..plan.clone()
+        };
+        let gh_anchors = Anchors {
+            worktree: writer.then_some((&linked, &selected_ref)),
+            ..anchors
+        };
+        for (network, deny_credentials, readable) in [
+            (NetworkAccess::Open, false, true),
+            (NetworkAccess::Local, false, false),
+            (NetworkAccess::Open, true, false),
+        ] {
+            let gh_plan = PlanPermissions {
+                network,
+                ..open_plan.clone()
+            };
+            let mut gh_profile = ProviderProfile {
+                spec: profile.spec.clone(),
+                observations: profile.observations.clone(),
+            };
+            gh_profile.spec.deny_credential_access = deny_credentials;
+            let gh_sbpl =
+                String::from_utf8(backend.compile(&gh_plan, &gh_profile, &gh_anchors)?.profile)?;
+            for github in mandatory.github() {
+                let file = github.path.join("boundary-probe");
+                let outcome = run_in(&gh_sbpl, &executables[4], &[&file]);
+                assert_eq!(
+                    successful_probe(&outcome),
+                    readable,
+                    "gh store writer={writer} network={network:?} explicit_deny={deny_credentials}: {outcome:?}"
+                );
+                if !readable {
+                    assert!(denied_probe(&outcome));
+                }
+                assert!(denied_probe(&run_in(&gh_sbpl, &executables[0], &[&file])));
+            }
+        }
+    }
+    for relative in [
+        "host-index",
+        "runs/other/attempts/other/provider-state/secret",
+    ] {
+        let path = state.join(relative);
+        std::fs::create_dir_all(path.parent().ok_or("state file parent")?)?;
+        std::fs::write(&path, "host-private")?;
+        assert!(denied_probe(&run(&executables[4], &[&path])));
+        assert!(denied_probe(&run(&executables[0], &[&path])));
+        if clone_available {
+            let destination = scratch.join(format!(
+                "state-clone-{}",
+                path.file_name().ok_or("state file name")?.to_string_lossy()
+            ));
+            let outcome = run(
+                &clone_helper,
+                &[Path::new("clone"), &path, &destination, Path::new("deny")],
+            );
+            assert!(
+                successful_probe(&outcome) && !destination.exists(),
+                "mandatory state clone: {outcome:?}"
+            );
+        }
+    }
     // The per-user peer agent relays to fresh `fabric peer` children in
     // the login session, so no lane may connect to its socket. The
     // unconfined connection proves the listener; the system DNS socket
@@ -379,18 +843,6 @@ fn native_sandbox_blocks_path_escape_probes() -> Result<(), Box<dyn std::error::
     let peer_socket = agent.join("peer.sock");
     let _peer_listener = std::os::unix::net::UnixListener::bind(&peer_socket)?;
     std::os::unix::net::UnixStream::connect(&peer_socket)?;
-    let connect = |sbpl: &str, socket: &Path| {
-        run_in(
-            sbpl,
-            &executables[6],
-            &[
-                Path::new("-MIO::Socket::UNIX"),
-                Path::new("-e"),
-                Path::new("IO::Socket::UNIX->new(Peer => $ARGV[0]) or die \"connect: $!\\n\""),
-                socket,
-            ],
-        )
-    };
     let system_socket = Path::new("/private/var/run/mDNSResponder");
     for (name, sbpl) in [("writer", &sbpl), ("read-only", &read_only_sbpl)] {
         let outcome = connect(sbpl, system_socket);
@@ -441,9 +893,16 @@ semop($sem, pack("s!3", 0, 1, 0)) or die "semop: $!\n";
             outcome.termination,
             String::from_utf8_lossy(&outcome.stderr.bytes)
         );
-        let outside = root.join("outside-write-roots");
-        assert!(denied_probe(&run_in(sbpl, &executables[0], &[&outside])));
-        assert!(!outside.exists(), "{name} wrote outside its writable roots");
+        let outside = root.join(format!("outside-write-roots-{name}"));
+        assert!(successful_probe(&run_in(
+            sbpl,
+            &executables[0],
+            &[&outside]
+        )));
+        assert!(
+            outside.exists(),
+            "{name} could not write an ordinary ambient path"
+        );
     }
 
     let shell_outcome = run(&executables[3], &[Path::new("-c"), Path::new("printf ok")]);
@@ -551,7 +1010,7 @@ semop($sem, pack("s!3", 0, 1, 0)) or die "semop: $!\n";
             &[&private.join("HEAD")]
         )));
         assert!(successful_probe(&run_in(profile, &configured_script, &[])));
-        assert!(!successful_probe(&run_in(
+        assert!(successful_probe(&run_in(
             profile,
             &executables[0],
             &[&configured_script]
@@ -693,13 +1152,33 @@ semop($sem, pack("s!3", 0, 1, 0)) or die "semop: $!\n";
             outcome.termination
         );
     }
+    for (name, program, args) in [
+        (
+            "undeclared target exec",
+            undeclared_script.as_path(),
+            Vec::new(),
+        ),
+        (
+            "cargo bin write",
+            executables[0].as_path(),
+            vec![cargo.join("bin/cargo")],
+        ),
+        (
+            "ambient sibling cache",
+            executables[0].as_path(),
+            vec![cache.with_file_name("other-lane")],
+        ),
+    ] {
+        let args = args.iter().map(|arg| arg.as_path()).collect::<Vec<_>>();
+        let outcome = run(program, &args);
+        assert!(successful_probe(&outcome), "{name}: {outcome:?}");
+    }
     let mut probes = vec![
         ("writer peer agent socket", connect(&sbpl, &peer_socket)),
         (
             "read-only peer agent socket",
             connect(&read_only_sbpl, &peer_socket),
         ),
-        ("undeclared target exec", run(&undeclared_script, &[])),
         (
             "parent signal probe",
             run(
@@ -742,10 +1221,6 @@ semop($sem, pack("s!3", 0, 1, 0)) or die "semop: $!\n";
             run(&executables[4], &[&cargo_credentials]),
         ),
         (
-            "cargo bin write",
-            run(&executables[0], &[&cargo.join("bin/cargo")]),
-        ),
-        (
             "write through new symlink",
             run(&executables[0], &[&new_link]),
         ),
@@ -754,10 +1229,6 @@ semop($sem, pack("s!3", 0, 1, 0)) or die "semop: $!\n";
             run(Path::new("/usr/bin/security"), &[Path::new("help")]),
         ),
         ("keychain read", run(&executables[4], &[&keychain])),
-        (
-            "sibling cache",
-            run(&executables[0], &[&cache.with_file_name("other-lane")]),
-        ),
         ("protected write", run(&executables[0], &[&protected_file])),
         ("symlink write", run(&executables[0], &[&symlink_path])),
         (

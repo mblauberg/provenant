@@ -175,6 +175,9 @@ impl ConfinedPlan {
             return Err(PermissionError::NestedConfinementUnsupported.into());
         }
         for grant in &p.write_roots {
+            if let Some(policy) = &p.policy {
+                policy.mandatory().validate_extra_write(grant)?;
+            }
             crate::permissions::validate_noncredential_grant(grant)
                 .map_err(|error| error.with_credential_path(&grant.path, None))?;
             if p.protected_roots
@@ -298,6 +301,11 @@ impl ConfinedPlan {
     pub fn scope(&self) -> WorkScope {
         self.scope
     }
+    /// Host-only enrichment after preparing immutable attempt inputs.
+    pub fn policy_mut(&mut self) -> Option<&mut crate::permissions::LanePolicy> {
+        self.permissions.policy.as_mut()
+    }
+
     pub fn permissions(&self) -> &PlanPermissions {
         &self.permissions
     }

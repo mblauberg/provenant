@@ -567,11 +567,10 @@ fn refresh_account(
     Ok(token)
 }
 
-/// Claude uses the selected config directory. The host reads its login token
+/// The host reads the selected Claude login token
 /// and passes it through an inherited pipe, so the keychain stays
 /// unreadable. Both lane types deny keychain services and the security
-/// executable. Writers use private configuration; read-only lanes retain
-/// their transcript location.
+/// executable. Both lane types use attempt-private configuration and transcripts.
 /// Provenant and its hook helpers are added explicitly for lane MCP use.
 fn prepare(
     input: &PrepareInput<'_>,
@@ -659,12 +658,6 @@ fn prepare(
         }
     }
 
-    let config_dir = input.account.map_or_else(
-        || input.home.join(".claude"),
-        |account| account.directory().to_owned(),
-    );
-    let project = config_dir.join("projects").join(project_key(input.cwd));
-    let transcript_dir = project.join(&session_id);
     let mut package_omissions = Vec::new();
     let package = package_grant(input.executable, &mut package_omissions);
     let scratch = &plan.scratch.path;
@@ -722,34 +715,24 @@ fn prepare(
         ]
         .map(|(key, value)| (OsString::from(key), value.to_owned())),
     );
-    if !shell {
-        setup.push(SetupStep::CreateDir(transcript_dir.clone()));
-    }
     let staged_skills = input.stage_user_skills();
     let user_skills = staged_skills.root.clone();
     let skill_reads = user_skills.iter().map(subtree).collect::<Vec<_>>();
     let omitted_discovery = package_omissions;
     let discover_skills = user_skills.is_some();
-    if shell || discover_skills {
-        let private = plan.private_state.as_ref().map_or_else(
-            || {
-                use std::io::Write;
-                let _ = writeln!(std::io::stderr().lock(), "warning: Claude private state is unavailable; using the attempt scratch directory");
-                &plan.scratch.path
-            },
-            |state| &state.path,
-        );
-        let config = private.join("claude-config");
-        env.push(("CLAUDE_CONFIG_DIR".into(), config.clone().into_os_string()));
-        setup.push(SetupStep::CreateDir(config.clone()));
-        if let Some(user_skills) = &user_skills {
-            setup.push(SetupStep::Symlink {
-                link: config.join("skills"),
-                target: user_skills.clone(),
-            });
-        }
-    } else if input.account.is_some() {
-        env.push(("CLAUDE_CONFIG_DIR".into(), config_dir.into_os_string()));
+    let private = &plan
+        .private_state
+        .as_ref()
+        .ok_or(ProviderError::UnsupportedPolicy)?
+        .path;
+    let config = private.join("claude-config");
+    env.push(("CLAUDE_CONFIG_DIR".into(), config.clone().into_os_string()));
+    setup.push(SetupStep::CreateDir(config.clone()));
+    if let Some(user_skills) = &user_skills {
+        setup.push(SetupStep::Symlink {
+            link: config.join("skills"),
+            target: user_skills.clone(),
+        });
     }
     let mut runtime_reads = vec![package.clone()];
     if discover_skills {
@@ -809,14 +792,6 @@ fn prepare(
                 tool_writes,
                 // Never the user's .claude.json, which can hold MCP secrets.
                 runtime_reads,
-                state_writes: if shell {
-                    Vec::new()
-                } else {
-                    vec![
-                        exact(project.join(format!("{session_id}.jsonl"))),
-                        subtree(transcript_dir),
-                    ]
-                },
                 provider_api: vec![NetworkEndpoint {
                     address: "*".into(),
                     port: 443,
@@ -846,14 +821,6 @@ pub(super) fn add_git_dirs<'a>(
     }
 }
 
-/// Claude's per-project transcript directory name: every byte outside ASCII
-/// letters and digits becomes `-`.
-fn project_key(cwd: &Path) -> String {
-    cwd.to_string_lossy()
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-        .collect()
-}
 crate::quota_source!(Claude, "claude");
 #[derive(Deserialize)]
 #[serde(tag = "type")]

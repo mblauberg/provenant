@@ -797,6 +797,7 @@ impl provenant_run::Providers for WriterProvider {
             self.project,
             writer.worktree.path(),
             &self.home,
+            &self.state,
             paths,
             &writer,
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")),
@@ -804,6 +805,7 @@ impl provenant_run::Providers for WriterProvider {
         let profile = provenant_confinement::permissions::ProviderProfile {
             spec: provenant_confinement::permissions::ProviderProfileSpec {
                 authentication: vec![provenant_confinement::permissions::AuthenticationProfile {
+                    keychain: None,
                     mechanism: "login".into(),
                     // A public executable stands in for a login file; no live
                     // credential is read and this adds no write permission.

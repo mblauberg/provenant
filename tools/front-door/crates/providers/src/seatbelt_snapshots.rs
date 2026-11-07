@@ -280,16 +280,23 @@ fn cases() -> Result<Vec<Case>, ProviderError> {
             NetworkAccess::Open,
         ),
     ] {
-        cases.push(Case::new(name, "opencode", access, None, false, |plan| {
-            plan.network = network;
-        })?);
+        cases.push(Case::new(
+            name,
+            "opencode",
+            access,
+            Some("login"),
+            false,
+            |plan| {
+                plan.network = network;
+            },
+        )?);
     }
     Ok(cases)
 }
 
 #[test]
-fn writer_publish_grants_gh_reads_only_with_open_network() -> Result<(), Box<dyn std::error::Error>>
-{
+fn open_network_grants_gh_reads_independently_of_publishing()
+-> Result<(), Box<dyn std::error::Error>> {
     let (mut plan, profile) =
         prepared("codex", Access::WorktreeWrite, login("codex"), false, None)?;
     for network in [
@@ -324,8 +331,8 @@ fn writer_publish_grants_gh_reads_only_with_open_network() -> Result<(), Box<dyn
         authority.set_publishing(false);
     }
     let disabled = render(&plan, &profile, Path::new(HOME))?;
-    assert!(disabled.contains("(deny file-read* (subpath \"/fixture/home/.config/gh\"))"));
-    assert!(!disabled.contains("(allow file-read* (subpath \"/fixture/home/.config/gh\"))"));
+    assert!(!disabled.contains("(deny file-read* (subpath \"/fixture/home/.config/gh\"))"));
+    assert!(disabled.contains("(allow file-read* (subpath \"/fixture/home/.config/gh\"))"));
     Ok(())
 }
 
@@ -530,7 +537,7 @@ fn agy_read_only_compiled_profile_denies_read_root_write() -> Result<(), Box<dyn
     };
     let compiled = compile(plan.permissions(), &spec.profile, &anchors)?;
     let source = std::str::from_utf8(&compiled.profile)?;
-    assert!(source.contains("(deny default)"));
+    assert!(source.contains("(allow default)"));
     assert!(source.contains(&format!(
         "(allow file-read* (subpath \"{}\"))",
         repo.display()
@@ -567,6 +574,21 @@ fn agy_read_only_linked_worktree_git_directories_are_not_writable()
     use provenant_os::exec::{ExecOptions, Executor, SystemExecutor, Termination};
     use std::os::unix::fs::PermissionsExt;
     use std::time::Duration;
+
+    let executor = SystemExecutor::new(1)?;
+    let cancel = provenant_core::CancelToken::new();
+    if let Err(error) = provenant_confinement::permissions::system_backend(
+        &provenant_confinement::permissions::BackendContext {
+            executor: &executor,
+            cancel: &cancel,
+            env: &[],
+        },
+    ) {
+        provenant_test_support::skip_sandbox_dependent_test(format!(
+            "native sandbox unavailable: {error}"
+        ))?;
+        return Ok(());
+    }
 
     let temp = tempfile::tempdir()?;
     let root = temp.path().canonicalize()?;
@@ -704,46 +726,45 @@ fn agy_read_only_linked_worktree_git_directories_are_not_writable()
     };
     let compiled = compile(plan.permissions(), &spec.profile, &anchors)?;
     let sandboxed =
-        |argv: &[std::ffi::OsString]| -> Result<std::process::Command, Box<dyn std::error::Error>> {
-            let command =
-                compiled.command(argv, &provenant_core::AttemptId::from_bytes([1; 16]))?;
-            let mut process = std::process::Command::new(&command[0]);
-            process
-                .args(&command[1..])
-                .current_dir(&worktree)
-                .env_clear()
-                .envs(spec.env.iter().cloned());
-            Ok(process)
+        |argv: &[std::ffi::OsString]| -> Result<provenant_os::exec::ExecOutcome, Box<dyn std::error::Error>> {
+            let command = compiled.command(
+                argv,
+                &provenant_core::AttemptId::from_bytes([1; 16]),
+                &provenant_os::fs::Directory::open_anchor(&root)?,
+            )?;
+            let mut options = command.options(&worktree, Duration::from_secs(10))?;
+            options.env = Some(&spec.env);
+            options.cancel = Some(&cancel);
+            Ok(executor.execute(options)?)
         };
     for args in [&["log", "-1"][..], &["diff", "HEAD~1"][..]] {
         let argv: Vec<std::ffi::OsString> =
             std::iter::once(root.join("scratch/bin/git").into_os_string())
                 .chain(args.iter().map(Into::into))
                 .collect();
-        let output = sandboxed(&argv)?.output()?;
+        let output = sandboxed(&argv)?;
         assert!(
-            output.status.success(),
+            output.termination == Termination::Exit(0),
             "{}",
-            String::from_utf8_lossy(&output.stderr)
+            String::from_utf8_lossy(&output.stderr.bytes)
         );
     }
     std::fs::write(worktree.join("file"), "changed\n")?;
-    let output = sandboxed(&[git.into(), "add".into(), "file".into()])?.output()?;
-    assert!(!output.status.success());
+    let output = sandboxed(&[git.into(), "add".into(), "file".into()])?;
+    assert!(output.termination != Termination::Exit(0));
     assert!(
-        String::from_utf8_lossy(&output.stderr).contains("Operation not permitted"),
+        String::from_utf8_lossy(&output.stderr.bytes).contains("Operation not permitted"),
         "{}",
-        String::from_utf8_lossy(&output.stderr)
+        String::from_utf8_lossy(&output.stderr.bytes)
     );
     let input = root.join("scratch/object-input");
     std::fs::write(&input, b"unique lane object")?;
-    let output =
-        sandboxed(&[git.into(), "hash-object".into(), "-w".into(), input.into()])?.output()?;
-    assert!(!output.status.success());
+    let output = sandboxed(&[git.into(), "hash-object".into(), "-w".into(), input.into()])?;
+    assert!(output.termination != Termination::Exit(0));
     assert!(
-        String::from_utf8_lossy(&output.stderr).contains("Operation not permitted"),
+        String::from_utf8_lossy(&output.stderr.bytes).contains("Operation not permitted"),
         "{}",
-        String::from_utf8_lossy(&output.stderr)
+        String::from_utf8_lossy(&output.stderr.bytes)
     );
     let source = std::str::from_utf8(&compiled.profile)?;
     assert!(source.contains(&format!(

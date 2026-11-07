@@ -677,6 +677,9 @@ fn settlement_advances_only_matching_graph_and_retains_writer()
         graph_directory: None,
             configuration_root: fixture.rig.state.clone(), cwd: fixture.rig.project.clone(), executables: Default::default(),
         executable_search_path: Vec::new(), git: provenant_os::git::git_executable().ok_or("git")?, default_account_directories: Default::default(),
+        credential_roots: Default::default(),
+        github_roots: Default::default(),
+        provider_path_environment: Default::default(),
         cargo_build_jobs: None, fixture_state_write: false,
     });
     advance_graphs_after_settlement(&fixture.settled, &FreeWorkers)?;
@@ -750,6 +753,9 @@ fn settlement_and_tick_read_no_terminal_graphs_at_scale() -> Result<(), Box<dyn 
         graph_directory: None,
             configuration_root: fixture.rig.state.clone(), cwd: fixture.rig.project.clone(), executables: Default::default(),
         executable_search_path: Vec::new(), git: provenant_os::git::git_executable().ok_or("git")?, default_account_directories: Default::default(),
+        credential_roots: Default::default(),
+        github_roots: Default::default(),
+        provider_path_environment: Default::default(),
         cargo_build_jobs: None, fixture_state_write: false,
     });
     advance_graphs_after_settlement(&fixture.settled, &FreeWorkers)?;
@@ -803,6 +809,9 @@ fn incorrect_graph_hints_defer_owning_graph_to_tick() -> Result<(), Box<dyn std:
             graph_directory: None,
             configuration_root: fixture.rig.state.clone(), cwd: fixture.rig.project.clone(), executables: Default::default(),
             executable_search_path: Vec::new(), git: provenant_os::git::git_executable().ok_or("git")?, default_account_directories: Default::default(),
+            credential_roots: Default::default(),
+            github_roots: Default::default(),
+            provider_path_environment: Default::default(),
             cargo_build_jobs: None, fixture_state_write: false,
         });
         advance_graphs_after_settlement(&fixture.settled, &FreeWorkers)?;

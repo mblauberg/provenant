@@ -18,6 +18,7 @@ pub(crate) struct Inherited {
     pub attempt_directory: Directory,
     pub writer: LockGuard,
     pub custody: LockGuard,
+    pub profile: Option<File>,
 }
 fn deadline(timeout: Duration) -> io::Result<Instant> {
     Instant::now()
@@ -118,6 +119,7 @@ pub(crate) fn spawn(
     attempt_directory: &Directory,
     writer: &LockGuard,
     custody: &LockGuard,
+    profile: Option<&File>,
     environment: &[(OsString, OsString)],
     config_environment: &[OsString],
     payload: &[u8],
@@ -131,13 +133,16 @@ pub(crate) fn spawn(
     let reaper = provenant_os::sys::reaper::Reaper::new(1)?;
     let permit = reaper.reserve().ok_or(CustodyError::HandoffUnknown)?;
     let (mut parent, child_channel) = UnixStream::pair()?;
-    let descriptors = vec![
+    let mut descriptors = vec![
         child_channel.as_fd(),
         writer_directory.handoff_file().as_fd(),
         attempt_directory.handoff_file().as_fd(),
         writer.handoff_file().as_fd(),
         custody.handoff_file().as_fd(),
     ];
+    if let Some(profile) = profile {
+        descriptors.push(profile.as_fd());
+    }
     let executable = std::env::current_exe()?;
     let mut command = Command::new(executable);
     command.arg("internal").arg("supervise");
@@ -172,13 +177,32 @@ pub(crate) fn spawn(
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
+    #[cfg(feature = "fixture")]
+    if profile.is_some()
+        && environment
+            .iter()
+            .find(|(name, _)| name == "PROVENANT_STATE_DIR")
+            .is_some_and(|(_, path)| {
+                std::path::Path::new(path)
+                    .join("s2-drop-profile-descriptor")
+                    .is_file()
+            })
+    {
+        descriptors.pop();
+    }
     provenant_os::sys::child::configure_command(
         &mut command,
         &descriptors,
         Some(&guardian_environment),
         true,
     )?;
-    let child = command.spawn()?;
+    let child = command.spawn().map_err(|error| {
+        if profile.is_some() {
+            crate::process_os::profile::failure(error)
+        } else {
+            error
+        }
+    })?;
     // The bounded detached reaper owns this direct guardian child on every path.
     // It never signals, so handoff failure cannot kill a healthy provider.
     permit.transfer(child);
@@ -190,14 +214,25 @@ pub(crate) fn spawn(
         end.saturating_duration_since(Instant::now()),
         cancel,
     )
-    .map_err(|_| CustodyError::HandoffUnknown)?;
+    .map_err(|_| handoff_unknown(profile.is_some()))?;
     let remaining = end.saturating_duration_since(Instant::now());
     let response = receive_cancellable(&mut parent, remaining, cancel)
-        .map_err(|_| CustodyError::HandoffUnknown)?;
+        .map_err(|_| handoff_unknown(profile.is_some()))?;
     if response == b"custody-accepted-v1" {
         Ok(())
     } else {
+        if response == b"sandbox-profile-transport-refused-v1" {
+            return Err(io::Error::other("sandbox profile transport refused by guardian").into());
+        }
         Err(CustodyError::HandoffUnknown)
+    }
+}
+
+fn handoff_unknown(profile: bool) -> CustodyError {
+    if profile {
+        CustodyError::ProfileHandoffUnknown
+    } else {
+        CustodyError::HandoffUnknown
     }
 }
 
@@ -205,7 +240,7 @@ pub(crate) fn spawn(
 /// descriptors or an unlocked/mismatched lock refuse the handshake before exec.
 pub(crate) fn inherit(args: &[OsString]) -> Result<Inherited> {
     let mut descriptors = Vec::with_capacity(args.len());
-    let mut malformed = args.len() != 5;
+    let mut malformed = !matches!(args.len(), 5 | 6);
     for arg in args {
         let Some(fd) = arg
             .to_str()
@@ -343,6 +378,7 @@ pub(crate) fn inherit(args: &[OsString]) -> Result<Inherited> {
         attempt_directory,
         writer,
         custody,
+        profile: files.next(),
     })
 }
 

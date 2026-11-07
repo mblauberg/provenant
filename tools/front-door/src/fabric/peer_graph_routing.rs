@@ -36,6 +36,9 @@ fn unmatched_settlement_hints_wait_for_tick() -> Result<(), Box<dyn std::error::
             graph_directory: None,
             configuration_root: fixture.rig.state.clone(), cwd: fixture.rig.project.clone(), executables: Default::default(),
             executable_search_path: Vec::new(), git: provenant_os::git::git_executable().ok_or("git")?, default_account_directories: Default::default(),
+            credential_roots: Default::default(),
+            github_roots: Default::default(),
+            provider_path_environment: Default::default(),
             cargo_build_jobs: None, fixture_state_write: false,
         });
         advance_graphs_after_settlement(&fixture.settled, &FreeWorkers)?;
@@ -179,6 +182,9 @@ fn settlement_without_hint_does_not_advance_unrelated_graphs()
         executable_search_path: Vec::new(),
         git: provenant_os::git::git_executable().ok_or("git")?,
         default_account_directories: Default::default(),
+        credential_roots: Default::default(),
+        github_roots: Default::default(),
+        provider_path_environment: Default::default(),
         cargo_build_jobs: None,
         fixture_state_write: false,
     });

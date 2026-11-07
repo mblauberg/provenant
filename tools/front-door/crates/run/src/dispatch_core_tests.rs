@@ -475,7 +475,7 @@ fn launch_records_plan_write_grants_and_git_digest() -> TestResult {
     Ok(())
 }
 #[test]
-fn oversized_write_grants_reject_without_stalling_launch() -> TestResult {
+fn oversized_write_grants_reach_handoff_without_stalling_sibling() -> TestResult {
     let temp = tempfile::tempdir()?;
     let (clock, cancel) = (clock(), CancelToken::new());
     let call = call(&clock, &cancel);
@@ -510,12 +510,12 @@ fn oversized_write_grants_reject_without_stalling_launch() -> TestResult {
     assert!(matches!(
         started.as_slice(),
         [
-            Started::Refused { attempt: first, kind: RefusalKind::WriteGrantsLimit(_), .. },
+            Started::Refused { attempt: first, kind: RefusalKind::Handoff, .. },
             Started::Refused { attempt: second, kind: RefusalKind::Handoff, .. },
         ] if *first == id && *second == sibling
     ));
-    // The oversized attempt never reached handoff; its sibling did.
-    assert_eq!(*held.borrow(), [sibling]);
+    // Both attempts reached the fixture handoff.
+    assert_eq!(*held.borrow(), [id, sibling]);
     drop(store);
     let store = RunStore::open(&context, &call)?;
     let record = store.record(id, &call)?;
@@ -526,12 +526,11 @@ fn oversized_write_grants_reject_without_stalling_launch() -> TestResult {
             ..
         }
     ));
-    assert!(record.write_grants.is_empty());
-    let attempt = store.attempt_dir(prepared.run_id, id, false)?;
     assert!(
-        attempt
-            .metadata_at(std::ffi::OsStr::new("scratch"), false)
-            .is_err_and(|e| e.is_not_found())
+        provenant_records::CanonicalV1::bytes(&record.write_grants)?
+            .as_bytes()
+            .len()
+            > provenant_records::run::MAX_WRITE_GRANT_BYTES as usize
     );
     assert!(
         store

@@ -1,4 +1,5 @@
 use super::*;
+use provenant_records::ModelObservation;
 use provenant_records::diagnostic::ContinuationCopyLimit;
 
 #[derive(Debug, thiserror::Error)]
@@ -153,19 +154,34 @@ pub(super) fn continuation_for(
         .join(prior.attempt_id.to_string())
         .join("provider-state");
     let policy = StateCopyPolicy::read(config_root);
-    match find_session_state_within(&prior_state, session, policy.limits) {
+    let located = if AdapterSpec::get(&route.adapter)
+        .is_some_and(|spec| spec.model_observation == ModelObservation::SessionDatabase)
+    {
+        super::observation::find_opencode_session(&prior_state, session).ok()
+    } else {
+        find_session_state_within(&prior_state, session, policy.limits)
+            .map_err(|exhausted| StateCopyError::resource(policy.fact(exhausted.limit(), None)))?
+    };
+    match located {
         // Codex's SQLite index holds absolute rollout paths. Rebuild it from
         // the copied sessions instead of resolving back into settled history.
-        Ok(Some(retained)) => copy_state_classified(&retained, private_state, policy, AdapterSpec::get(&route.adapter).is_some_and(|spec| spec.copy_sessions_only))?,
-        // These adapters retain sessions in their existing user data stores.
-        Ok(None) if AdapterSpec::get(&route.adapter).is_some_and(|spec| spec.user_sessions) => {}
-        Ok(None) => return Err("the prior attempt's retained provider state is missing or has expired; dispatch a new lane with its retained result or transcripts as context".into()),
-        // An unfinished search proves nothing missing, whatever the adapter.
-        Err(exhausted) => {
-            return Err(StateCopyError::resource(policy.fact(exhausted.limit(), None)).into());
-        }
+        Some(retained) => copy_state_classified(
+            &retained,
+            private_state,
+            policy,
+            AdapterSpec::get(&route.adapter).is_some_and(|spec| spec.copy_sessions_only),
+        )?,
+        None => return Err(missing_continuation(&route.adapter)),
     }
     Ok(continuation)
+}
+
+fn missing_continuation(provider: &str) -> ContinuationError {
+    if AdapterSpec::get(provider).is_some_and(|spec| spec.relocated_session_state) {
+        format!("retained provider continuation is missing or expired; {provider} sessions now require attempt-private state, so host-backed sessions from before this release cannot resume; start a new lane").into()
+    } else {
+        "retained provider continuation is missing or expired; start a new lane".into()
+    }
 }
 
 /// Configurable budgets shared by retained-state search and copy. A leftover
@@ -310,9 +326,16 @@ pub(crate) fn continuation_available(
         .join(prior.attempt_id.to_string())
         .join("provider-state");
     let policy = StateCopyPolicy::read(config_root);
+    if AdapterSpec::get(provider)
+        .is_some_and(|spec| spec.model_observation == ModelObservation::SessionDatabase)
+    {
+        return super::observation::find_opencode_session(&state, session)
+            .map(|_| ())
+            .map_err(|_| missing_continuation(provider));
+    }
     match find_session_state_within(&state, session, policy.limits) {
         Ok(Some(_)) => Ok(()),
-        Ok(None) => Err("retained provider continuation is missing or expired".into()),
+        Ok(None) => Err(missing_continuation(provider)),
         Err(exhausted) => {
             Err(StateCopyError::resource(policy.fact(exhausted.limit(), None)).into())
         }

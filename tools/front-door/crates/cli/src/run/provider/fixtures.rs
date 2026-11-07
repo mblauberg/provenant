@@ -12,6 +12,7 @@ pub fn writer_fixture_plan(
     project: ProjectId,
     cwd: &Path,
     home: &Path,
+    state: &Path,
     paths: &run::LaunchPaths,
     writer: &run::WriterLaunch,
     assets: &Path,
@@ -25,8 +26,13 @@ pub fn writer_fixture_plan(
     let request = confinement_request(
         project,
         ConfinementRoots {
+            host_roots: None,
             cwd,
             home,
+            state,
+            credential_roots: &[],
+            github_roots: &[],
+            protected_worktrees: &[],
             scratch: &scratch,
             private_state: &paths.provider_state,
             assets,

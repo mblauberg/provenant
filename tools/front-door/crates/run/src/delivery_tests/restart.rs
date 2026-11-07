@@ -740,6 +740,7 @@ fn writer_revalidation_refusal_settles_before_deferred_pin_cleanup()
                     extensions: provenant_confinement::ExtensionPolicy::Deny,
                     agy_state: None,
                     permissions: PlanPermissions {
+                        policy: None,
                         read_only: None,
                         mode: AccessMode::WorktreeWrite(Box::new(authority)),
                         scratch: grant(paths.scratch.clone()),

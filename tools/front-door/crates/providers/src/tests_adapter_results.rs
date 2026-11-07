@@ -128,7 +128,7 @@ fn command_prepare_preserves_invocation_and_literal_argv_without_a_rust_install(
         Path::new("/fixture/home"),
     )
     .unwrap();
-    assert!(source.contains("(deny default)"));
+    assert!(source.contains("(allow default)"));
     assert!(source.rfind("(deny network*)").unwrap() > source.rfind("(allow network-").unwrap());
     assert!(source.contains("(deny file-read* (subpath \"/fixture/home/.ssh\"))"));
     assert!(source.contains("(deny file-write* (subpath \"/fixture/home/.ssh\"))"));

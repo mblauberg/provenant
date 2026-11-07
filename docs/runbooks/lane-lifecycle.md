@@ -22,6 +22,14 @@ explanation, then submit without `--explain`. One writer owns each worktree;
 parallel slices integrate into one branch before full review. See
 [templates](presets.md) for composition and the default choices.
 
+Run confinement is enforced by Seatbelt on macOS. Linux refuses launch because
+it has no enforcing backend; it does not run a lane unconfined. Optional host
+restrictions in `[domains.run.host_policy]` apply across providers, direct and
+child launches. Open-network lanes can read immutable GitHub CLI configuration,
+including read-only lanes; explicit credential denials and narrower network
+settings remove that exception. See [run host policy](configuration.md#run-host-policy)
+and [provider boundaries](providers.md#lane-filesystem-and-network-policy).
+
 Use `provenant status` for graph, node and attempt rows, `output TARGET` for
 results and `output TARGET --trace` for the timeline. Use `steer` for a message,
 `stop` for a subtree, `retry` to continue or redo work and `edit` for patches to
@@ -325,11 +333,11 @@ write rebase state, stop with `needs_host_rebase`; do not create a clone or
 second checkout to bypass the permission failure. A host-authorised merge of
 `origin/main` is an alternative when rebasing is blocked.
 
-On macOS, existing hard-linked files in the writable worktree no longer refuse
-a launch or become write-denied; only Git control files with another name do.
-See the [writer limits](providers.md#writer-lanes).
-The hard-link fixtures remain enabled in macOS CI because lane sandboxes can
-deny their `hard_link` calls before the launch check runs.
+On macOS, lane profiles still deny creating hard links and pathname Unix socket
+binds outside granted private paths. The lane nextest profile excludes native
+fixtures that need hard links or short socket paths; the `ci` profile retains
+them. Do not treat these exclusions as resolved by ambient access. See the
+[writer limits](providers.md#writer-lanes).
 
 ## Tests and Git
 

@@ -46,6 +46,66 @@ pub fn load_owner(worktree: &VerifiedWorktree) -> Result<Option<WorktreeOwner>, 
     Ok(Some(owner))
 }
 
+/// Denial inventory from a host-registered Git common directory only. Read
+/// bounded ownership records and Git backlinks, without opening checkouts or
+/// probing their processes. `custody_slots` comes from the supervisor's validated
+/// reservation listing. Missing owned checkouts remain protected by name.
+pub fn owned_worktree_paths(
+    common: &Path,
+    custody_slots: &[PathBuf],
+) -> Result<Vec<PathBuf>, WorktreeError> {
+    let directory = match Directory::open_anchor(common) {
+        Ok(directory) => directory,
+        Err(error) if error.is_not_found() => return Ok(Vec::new()),
+        Err(error) => return Err(error.into()),
+    };
+    let registrations = match directory.open_verified_directory(OsStr::new("worktrees")) {
+        Ok(directory) => directory,
+        Err(error) if error.is_not_found() => return Ok(Vec::new()),
+        Err(error) => return Err(error.into()),
+    };
+    let mut paths = Vec::new();
+    for (count, name) in registrations.entries()?.enumerate() {
+        if count >= MAX_WORKTREES {
+            return Err(WorktreeError::InvalidOutput);
+        }
+        let name = name?;
+        if registrations.metadata_at(&name, false)?.kind == provenant_os::fs::FileKind::Regular {
+            continue;
+        }
+        let registration = registrations.open_verified_directory(&name)?;
+        let owner = match read_bounded(&registration, OsStr::new(OWNER), MAX_STATE_RECORD) {
+            Ok(bytes) => Some(
+                serde_json::from_slice::<WorktreeOwner>(&bytes)
+                    .map_err(|_| WorktreeError::InvalidOutput)?,
+            ),
+            Err(error) if error.is_not_found() => None,
+            Err(error) => return Err(error.into()),
+        };
+        if let Some(owner) = &owner {
+            validate(owner)?;
+        }
+        if owner.is_none() && custody_slots.is_empty() {
+            continue;
+        }
+        let bytes = read_bounded(&registration, OsStr::new("gitdir"), 4096)?;
+        let backlink =
+            crate::repo::parse_git_path(&bytes, b"").ok_or(WorktreeError::InvalidOutput)?;
+        let marker =
+            crate::repo::resolve_git_path(&common.join("worktrees").join(name), &backlink)?;
+        if marker.file_name() != Some(OsStr::new(".git")) {
+            return Err(WorktreeError::InvalidOutput);
+        }
+        let path = marker.parent().ok_or(WorktreeError::InvalidOutput)?;
+        let canonical = crate::permissions::resolve_boundary_path(path)
+            .map_err(|_| WorktreeError::InvalidOutput)?;
+        if owner.is_some() || custody_slots.contains(&PathBuf::from(state_dir_name(&canonical))) {
+            paths.push(path.to_owned());
+        }
+    }
+    Ok(paths)
+}
+
 pub fn save_owner(worktree: &VerifiedWorktree, owner: &WorktreeOwner) -> Result<(), WorktreeError> {
     validate(owner)?;
     worktree.repo().revalidate()?;

@@ -817,7 +817,6 @@ fn read_only_exceptions_are_recorded_and_temporary_paths_are_private_per_attempt
         &admission::AppliedWriteGrants {
             grants: write_grants.clone(),
             git_grants_digest: Some(provenant_core::Digest::from_bytes([7; 32])),
-            ..Default::default()
         },
         Some(observed),
         &call,

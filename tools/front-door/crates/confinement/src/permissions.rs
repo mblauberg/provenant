@@ -5,6 +5,7 @@
 
 mod anchors;
 mod grants;
+mod policy;
 mod probe;
 #[cfg(any(target_os = "macos", feature = "snapshot"))]
 mod render;
@@ -17,6 +18,7 @@ use std::path::Path;
 
 pub use self::anchors::*;
 pub use self::grants::*;
+pub use self::policy::*;
 pub use self::probe::*;
 #[cfg(any(target_os = "macos", feature = "snapshot"))]
 use self::render::*;
@@ -55,7 +57,9 @@ mod tests {
         )
     }
     mod grants;
+    mod host_boundaries;
     mod ipc;
+    mod mach_lookup;
     mod process_info;
     mod process_tree;
     mod render;

@@ -1544,6 +1544,9 @@ pub(super) fn prepare_candidates(
             .map_err(|error| error.to_string())?;
     let eligible = |name: &str| provider_leases.is_empty() || provider_leases.contains_key(name);
     let settings = config.domains.accounts.with_derived_accounts();
+    let credential_roots = credential_roots(registry, &home, &settings)?;
+    let github_roots = github_roots(registry);
+    let protected_worktrees = protected_worktrees(registry, &source, &git)?;
     let host_writes = config.domains.run;
     let mut entries: Vec<_> = settings.entries.into_values().collect();
     let mut default_failures = std::collections::BTreeMap::new();
@@ -1557,7 +1560,7 @@ pub(super) fn prepare_candidates(
         let directory = registry
             .host
             .and_then(|host| host.default_account_directories.get(spec.name).cloned())
-            .or_else(|| std::env::var_os(environment).map(PathBuf::from))
+            .or_else(|| host_provider_var(registry, environment).map(PathBuf::from))
             .unwrap_or_else(|| home.join(fallback));
         let mut entry = provenant_providers::accounts::Registration {
             adapter: spec.name.into(),
@@ -1775,8 +1778,13 @@ pub(super) fn prepare_candidates(
         match confinement_request(
             project_id,
             ConfinementRoots {
+                host_roots: Some(roots),
                 cwd: &cwd,
                 home: &home,
+                state: roots.state.as_path(),
+                credential_roots: &credential_roots,
+                github_roots: &github_roots,
+                protected_worktrees: &protected_worktrees,
                 scratch: &paths.scratch,
                 private_state: &paths.provider_state,
                 assets,
@@ -2460,11 +2468,16 @@ pub(super) fn prepare_candidates(
                 continue;
             }
         };
-        let (plan, observed_head, repository, worktree_gitdir) = match confinement_request(
+        let (mut plan, observed_head, repository, worktree_gitdir) = match confinement_request(
             project_id,
             ConfinementRoots {
+                host_roots: Some(roots),
                 cwd: &cwd,
                 home: &home,
+                state: roots.state.as_path(),
+                credential_roots: &credential_roots,
+                github_roots: &github_roots,
+                protected_worktrees: &protected_worktrees,
                 scratch,
                 private_state,
                 assets,
@@ -2622,7 +2635,7 @@ pub(super) fn prepare_candidates(
                 executable: &executable,
                 home: &home,
                 user: &user,
-                host_var: &|key| std::env::var_os(key),
+                host_var: &|key| host_provider_var(registry, key),
                 skill_stage_max_bytes: config.domains.lanes.skill_stage_max_bytes,
                 account: account.as_ref(),
                 token,
@@ -2713,9 +2726,9 @@ pub(super) fn prepare_candidates(
                 project: &project_id_str,
             },
         );
-        configure_process_tree(&mut spec, paths)?;
+        let process_tree_read = configure_process_tree(&mut spec, paths)?;
         let build_settings = config.domains.fabric.lanes.build_settings();
-        configure_build_slots(
+        let coordination_reads = configure_build_slots(
             &mut spec,
             &build_settings,
             &home,
@@ -2723,6 +2736,11 @@ pub(super) fn prepare_candidates(
             &provenant_executable,
             roots.state.as_path(),
         );
+        if let Some(policy) = plan.policy_mut() {
+            for root in std::iter::once(process_tree_read).chain(coordination_reads) {
+                policy.mandatory_mut().add_state_read(root)?;
+            }
+        }
         if !host_indexes_protected(
             roots.state.as_path(),
             &provenant_confinement::write_grants(plan.permissions(), &spec.profile),
@@ -2758,10 +2776,20 @@ pub(super) fn prepare_candidates(
         if let Some(adapter_spec) = adapter_spec {
             spec.configure_shell(scratch, adapter_spec);
         }
-        if let Some(gh) = publishing_gh.as_ref() {
+        if let Some(gh) = publishing_gh
+            .as_ref()
+            .filter(|_| github_auth_permitted(&plan, &spec.profile.spec))
+        {
             // Resolve the login before composing gh's wrapper: token launches
             // use a private empty config directory, independent of host links.
-            super::gh_auth::inject(&executor, gh, &home, cancel, &mut spec.env);
+            super::gh_auth::inject(
+                &executor,
+                gh,
+                &home,
+                &|key| host_provider_var(registry, key),
+                cancel,
+                &mut spec.env,
+            );
             let policy = provenant_config::GithubPolicy::read(&roots.state, project_id)
                 .map_err(|error| error.to_string())?;
             let publishing = spec.configure_publishing(scratch, &git, gh, &home, &policy);
@@ -2956,15 +2984,21 @@ pub(super) fn prepare_candidates(
         };
         // Resolve gh credentials on the host, where a keychain login is
         // available. The token travels only in the live launch environment.
-        let reader_gh = writer.is_none()
-            && task.access.network(true) == NetworkAccess::Open
+        let reader_gh = github_auth_permitted(&plan, &spec.profile.spec)
             && adapter_spec.is_some_and(|spec| spec.github_auth.is_some());
         if let Some(gh) = publishing_gh
             .clone()
             .or_else(|| reader_gh.then(|| locate("gh").ok()).flatten())
         {
-            if writer.is_none() {
-                super::gh_auth::inject(&executor, &gh, &home, cancel, &mut spec.env);
+            if reader_gh {
+                super::gh_auth::inject(
+                    &executor,
+                    &gh,
+                    &home,
+                    &|key| host_provider_var(registry, key),
+                    cancel,
+                    &mut spec.env,
+                );
             }
             if adapter_spec.is_some_and(|spec| {
                 spec.github_auth == Some(provenant_records::GithubAuth::ShellEnvironment)
@@ -2974,6 +3008,21 @@ pub(super) fn prepare_candidates(
             }
         }
         attach_candidate_guard_facts(&mut reasons, &reason_boundaries, &reason_resources)?;
+        if let Some(policy) = plan.policy_mut() {
+            if let Some(stage) = &spec.user_skills.root {
+                policy.mandatory_mut().add_state_read_exec(PathGrant {
+                    path: stage.clone(),
+                    scope: PathScope::Subtree,
+                })?;
+            }
+            if resume.is_some() {
+                // The selected adapter, not optional lane reads, declares the
+                // exact retained inputs needed to continue its prior session.
+                for root in &spec.profile.spec.continuation_reads {
+                    policy.mandatory_mut().add_state_read(root.clone())?;
+                }
+            }
+        }
         return Ok(run::PreparedLaunch {
             skipped_routes: reasons,
             argv: spec.argv,
@@ -3020,9 +3069,8 @@ pub(super) fn prepare_candidates(
             .filter(|(adapter, _)| reported_plan_errors.contains(*adapter))
             .filter_map(|(_, error)| match error {
                 PlanCheckError::Plan(error) => Some(error),
-                PlanCheckError::Permission(_)
-                | PlanCheckError::ReadOnly(_)
-                | PlanCheckError::SourceHead(_) => None,
+                PlanCheckError::Permission(error) => Some(error.into()),
+                PlanCheckError::ReadOnly(_) | PlanCheckError::SourceHead(_) => None,
             })
             .collect(),
         candidate_boundary,
@@ -3334,7 +3382,7 @@ mod user_skills_tests {
                 scope: PathScope::Subtree,
             };
             let auth = match adapter.name {
-                "codex" | "cursor" => Some("login".into()),
+                "codex" | "cursor" | "opencode" => Some("login".into()),
                 "agy" => Some("keychain".into()),
                 _ => None,
             };
@@ -3344,6 +3392,7 @@ mod user_skills_tests {
                 extensions: ExtensionPolicy::Deny,
                 agy_state: None,
                 permissions: PlanPermissions {
+                    policy: None,
                     mode: AccessMode::ReadOnly,
                     read_only: None,
                     scratch: grant(root.join("scratch")),

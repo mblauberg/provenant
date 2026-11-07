@@ -17,8 +17,9 @@
 )]
 use provenant_confinement::permissions::{
     AccessMode, AnchoredDirectory, Anchors, BackendContext, FixtureOperation, FixtureOutcome,
-    NetworkAccess, PathGrant, PathScope, PlanPermissions, ProviderProfile, WorktreeWriteAuthority,
-    required_anchors, system_backend,
+    MandatoryRoots, NetworkAccess, PathGrant, PathScope, PlanPermissions, ProviderProfile,
+    WorktreeWriteAuthority, host_credential_roots, host_github_roots, required_anchors,
+    system_backend,
 };
 use provenant_confinement::repo::GitRefName;
 use provenant_confinement::{
@@ -277,23 +278,16 @@ fn expected(profile: &ProviderProfile, writer: bool) -> BTreeMap<FixtureOperatio
     let spec = &profile.spec;
     let mut map = BTreeMap::from([
         (O::DeclaredRead, Allowed),
-        (O::UndeclaredRead, Denied),
-        (O::UndeclaredWrite, Denied),
+        (O::UndeclaredRead, Allowed),
+        (O::UndeclaredWrite, Allowed),
         (O::SecretRead, Denied),
         (O::ProtectedWrite, Denied),
         (O::ProtectedInstructionRead, Allowed),
         (O::OtherNetwork, Denied),
         (O::ProviderEndpoint, Allowed),
         (O::DeclaredProcessExec, Allowed),
-        (O::UndeclaredProcessExec, Denied),
-        (
-            O::ProcessFork,
-            if spec.allow_process_fork {
-                Allowed
-            } else {
-                Denied
-            },
-        ),
+        (O::UndeclaredProcessExec, Allowed),
+        (O::ProcessFork, Allowed),
     ]);
     if spec.deny_keychain_access {
         map.extend([
@@ -318,7 +312,7 @@ fn expected(profile: &ProviderProfile, writer: bool) -> BTreeMap<FixtureOperatio
     if writer {
         map.extend([
             (O::WorktreeWrite, Allowed),
-            (O::GitIndexWrite, Allowed),
+            (O::GitIndexWrite, Denied),
             (O::GitHeadWrite, Denied),
             (O::GitObjectsWrite, Denied),
             (O::SelectedRefWrite, Denied),
@@ -463,8 +457,12 @@ fn compile(
 fn launch(context: &Context<'_>, plan: &ConfinedPlan, spec: &LaunchSpec) -> Result<Run> {
     setup(&spec.setup)?;
     let compiled = compile(context, plan, &spec.profile)?;
-    let command = compiled.command(&spec.argv, &provenant_core::AttemptId::from_bytes([0; 16]))?;
-    let mut options = ExecOptions::new(&command, &spec.cwd, Duration::from_secs(300));
+    let command = compiled.command(
+        &spec.argv,
+        &provenant_core::AttemptId::from_bytes([0; 16]),
+        &provenant_os::fs::Directory::open_anchor(context.home)?,
+    )?;
+    let mut options = command.options(&spec.cwd, Duration::from_secs(300))?;
     options.env = Some(&spec.env);
     options.secret_input = spec.secret_input.as_ref();
     options.stdin = match &spec.stdin {
@@ -703,14 +701,16 @@ fn narrowed_denials(home: &Path, plan: &ConfinedPlan) -> Vec<(String, Probe)> {
 
 fn observe(
     context: &Context<'_>,
-    command_prefix: &[OsString],
+    command_prefix: &provenant_confinement::permissions::ConfinedCommand,
     cwd: &Path,
     env: &[(OsString, OsString)],
     item: &Probe,
 ) -> Result<(FixtureOutcome, String)> {
+    command_prefix.profile.verify()?;
     let mut argv = command_prefix.to_vec();
     argv.extend(item.argv.iter().cloned());
     let mut options = ExecOptions::new(&argv, cwd, Duration::from_secs(20));
+    options.inherited_profile = Some(&command_prefix.profile);
     options.env = Some(env);
     options.stdin = item.stdin;
     options.stdout = StreamPolicy::Capture { limit: 4096 };
@@ -975,7 +975,7 @@ fn main() -> Result<()> {
         .find(|adapter| adapter.id() == args.adapter)
         .ok_or("adapter")?;
     let layout = layout(&args.root, args.writer)?;
-    let home = PathBuf::from(std::env::var_os("HOME").ok_or("HOME")?);
+    let home = std::fs::canonicalize(PathBuf::from(std::env::var_os("HOME").ok_or("HOME")?))?;
     let user = std::env::var_os("USER").ok_or("USER")?;
     let executor = SystemExecutor::new(4)?;
     let cancel = CancelToken::new();
@@ -1010,6 +1010,86 @@ fn main() -> Result<()> {
     } else {
         &layout.repo
     };
+    let mut inputs = provenant_core::RootInputs::new(home.clone(), std::env::current_dir()?);
+    inputs.environment_state_dir =
+        std::env::var_os(provenant_core::STATE_DIRECTORY_ENV).map(PathBuf::from);
+    let host_roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+    let accounts: provenant_providers::accounts::Settings =
+        provenant_config::read_domain(host_roots.state.as_path(), "accounts")?;
+    let mut credentials = host_credential_roots(|name| std::env::var_os(name));
+    credentials.extend(
+        accounts
+            .entries
+            .values()
+            .flat_map(|entry| std::iter::once(&entry.directory).chain(&entry.directories))
+            .filter(|path| path.as_path() != home)
+            .map(|path| subtree(path)),
+    );
+    // The recorder's selected account can be outside the account registry.
+    let directory = home.join(if args.adapter == "codex" {
+        ".codex"
+    } else {
+        ".claude-pro"
+    });
+    credentials.push(subtree(&directory));
+    let github: Vec<_> = host_github_roots(|name| std::env::var_os(name))
+        .iter()
+        .map(|path| subtree(path))
+        .collect();
+    let protected = if args.writer {
+        vec![subtree(&layout.repo)]
+    } else {
+        Vec::new()
+    };
+    let mut mandatory =
+        MandatoryRoots::for_host(&host_roots, &home, cwd, &credentials, &github, &protected)?;
+    let state = args.root.join("provenant-state");
+    private_dir(&state)?;
+    for child in ["fabric", "projects", "runs", "workflow"] {
+        private_dir(&state.join(child))?;
+    }
+    // The recorder's disposable host runtime is distinct from the selected
+    // real host store. Both stay hidden; provider state remains separate.
+    mandatory.add_state_alias(subtree(&state))?;
+    let source_repo = runtime.open_read_repo(
+        &executor,
+        &layout.repo,
+        UtilityBudget::bounded(Duration::from_secs(10))?,
+        &cancel,
+    )?;
+    for path in [source_repo.common_git_dir(), source_repo.private_git_dir()] {
+        mandatory.add_git(subtree(path))?;
+    }
+    if let Some(tree) = &worktree {
+        mandatory.add_git(subtree(tree.repo().private_git_dir()))?;
+    }
+    let releases = host_roots.state.as_path().join("releases");
+    let mut verified_releases = std::collections::BTreeSet::new();
+    for path in [&args.provenant, &args.assets] {
+        let Ok(relative) = path.strip_prefix(&releases) else {
+            continue;
+        };
+        let Some(Component::Normal(name)) = relative.components().next() else {
+            return Err("release path has no source digest".into());
+        };
+        let digest = provenant_records::SourceDigest::parse(
+            name.to_str().ok_or("release digest encoding")?,
+        )?;
+        let release_root = releases.join(digest.to_string());
+        if verified_releases.insert(release_root.clone()) {
+            if !cfg!(target_os = "macos") {
+                return Err("recording requires the macOS backend".into());
+            }
+            let target = format!("{}-apple-darwin", std::env::consts::ARCH);
+            let release = provenant_config::Release::read(&release_root, &target)?;
+            if release.manifest().source_digest != digest {
+                return Err("release source digest mismatch".into());
+            }
+            mandatory.add_state_read_exec(subtree(release.source()))?;
+        }
+    }
+    let run_config =
+        provenant_confinement::run_config::RunConfig::read(host_roots.state.as_path())?;
     let plan_for = |scratch: &Path| -> Result<ConfinedPlan> {
         private_dir(scratch)?;
         let mode = match &worktree {
@@ -1018,9 +1098,14 @@ fn main() -> Result<()> {
             )),
             None => AccessMode::ReadOnly,
         };
+        let mut policy =
+            run_config.policy_for_launch(host_roots.state.as_path(), mandatory.clone());
+        policy
+            .resolve_optional_aliases(provenant_confinement::permissions::resolve_boundary_path)?;
         Ok(ConfinedPlan::new(PlanRequest {
             scope: WorkScope::Project(ProjectId::from_bytes([7; 16])),
             permissions: PlanPermissions {
+                policy: Some(policy),
                 read_only: None,
                 mode,
                 scratch: subtree(scratch),
@@ -1036,7 +1121,7 @@ fn main() -> Result<()> {
                 // the sandbox. Claude's token arrives in its environment;
                 // OpenCode's free models need none.
                 selected_authentication: match args.adapter.as_str() {
-                    "codex" => Some("login".into()),
+                    "codex" | "cursor" | "opencode" => Some("login".into()),
                     "agy" => Some("keychain".into()),
                     _ => None,
                 },
@@ -1052,11 +1137,6 @@ fn main() -> Result<()> {
     };
     // Claude registrations live at the fixed ~/.claude-<label> directory (the
     // recorder accepts only the pro account); rotating ~/.claude is never one.
-    let directory = home.join(if args.adapter == "codex" {
-        ".codex"
-    } else {
-        ".claude-pro"
-    });
     // Claude binds the token to the signed-in identity, so the key is that
     // identity's fingerprint; Codex recording uses a fixed label.
     // Host probes get a fresh private cwd under the run root, not the
@@ -1115,11 +1195,6 @@ fn main() -> Result<()> {
         }
         _ => None,
     };
-    let state = args.root.join("provenant-state");
-    private_dir(&state)?;
-    for child in ["fabric", "projects", "runs", "workflow"] {
-        private_dir(&state.join(child))?;
-    }
     let route = route(&args, &account_key);
     let mut records = Vec::new();
     let mut continuation = None;
@@ -1140,7 +1215,7 @@ fn main() -> Result<()> {
         RESUME_PROMPT
     };
     for (session, text) in [("fresh", fresh_prompt), ("resume", resume_prompt)] {
-        let plan = plan_for(&args.root.join(format!("scratch-{session}")))?;
+        let mut plan = plan_for(&args.root.join(format!("scratch-{session}")))?;
         let prompt = Prompt::new(text.into());
         let mut nonce = [0u8; 16];
         nonce.copy_from_slice(&Sha256::digest(args.root.as_os_str().as_encoded_bytes())[..16]);
@@ -1172,12 +1247,20 @@ fn main() -> Result<()> {
                 assets: &args.assets,
             },
         })?;
+        if let Some(policy) = plan.policy_mut()
+            && let Some(stage) = &spec.user_skills.root
+        {
+            policy.mandatory_mut().add_state_read_exec(subtree(stage))?;
+        }
         spec.profile.observations = expected(&spec.profile, args.writer);
         if args.skip_live {
             // Probe debugging only: compile and probe without calling the CLI.
             setup(&spec.setup)?;
             last_profile = Some((plan, spec.profile));
             break;
+        }
+        if let Some(policy) = &plan.permissions().policy {
+            policy.report_launch(&mut std::io::stderr().lock())?;
         }
         let run = launch(&context, &plan, &spec)?;
         // Raw stream stays in the private recording root, never in fixtures.
@@ -1248,13 +1331,23 @@ fn main() -> Result<()> {
         observations: profile.observations.clone(),
     };
     let compiled = compile(&context, &plan, &probe_profile)?;
-    let prefix = compiled.command(&[], &provenant_core::AttemptId::from_bytes([0; 16]))?;
+    let prefix = compiled.command(
+        &[],
+        &provenant_core::AttemptId::from_bytes([0; 16]),
+        &provenant_os::fs::Directory::open_anchor(context.home)?,
+    )?;
     if args.skip_live {
         // Debugging aid: the probe profile, for ad hoc sandbox-exec checks.
         std::fs::write(
             args.root.join("probe-profile.sb"),
-            prefix[2].as_encoded_bytes(),
+            std::fs::read(prefix[2].clone())?,
         )?;
+        use std::io::{Seek, SeekFrom};
+        prefix
+            .profile
+            .file()
+            .try_clone()?
+            .seek(SeekFrom::Start(0))?;
     }
     let env = [
         ("HOME".into(), home.clone().into_os_string()),
@@ -1340,7 +1433,7 @@ fn main() -> Result<()> {
             "prompt": if *session == "fresh" { fresh_prompt } else { resume_prompt },
             "writer_shell_proof": writer_shell_proof,
             "subprocess_env_scrub": subprocess_env_scrub,
-            "confinement": format!("sandbox-exec deny-default profile, observations in {}/confinement.json", args.adapter),
+            "confinement": format!("sandbox-exec allow-default profile with explicit boundaries, observations in {}/confinement.json", args.adapter),
             "substitution_classes": ["session_identifier", "local_path", "email", "identifier", "token"],
             "keychain_ipc_proof": false,
             // Claude's token arrives through a pipe, so a successful run with the

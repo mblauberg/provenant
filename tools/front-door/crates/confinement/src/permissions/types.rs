@@ -88,6 +88,8 @@ pub enum PermissionError {
     Cancelled,
     #[error("safe filesystem operation failed: {0}")]
     Filesystem(#[source] provenant_os::fs::FsError),
+    #[error("sandbox profile transport failed: {0}")]
+    ProfileTransport(#[source] std::io::Error),
     #[error("sandbox probe execution failed")]
     Execution(#[source] provenant_os::exec::ExecError),
     #[error("verified repository authority could not be revalidated: {kind}: {0}", kind = .0.variant())]
@@ -263,9 +265,19 @@ pub struct NetworkEndpoint {
     pub port: u64,
 }
 
+/// The keychain IPC service already proven by the selected Agy mechanism.
+/// No free-form Mach service or blanket keychain authority is accepted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KeychainAccess {
+    SecurityServer,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AuthenticationProfile {
+    #[serde(default)]
+    pub keychain: Option<KeychainAccess>,
     pub mechanism: String,
     pub roots: Vec<PathGrant>,
     /// Exact credential files the CLI rewrites in place on token refresh.
@@ -373,6 +385,8 @@ impl WorktreeWriteAuthority {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PlanPermissions {
+    /// Host-resolved ambient policy; never decoded from lane input.
+    pub policy: Option<LanePolicy>,
     pub read_only: Option<crate::plan::ReadOnlyGrants>,
     pub mode: AccessMode,
     pub scratch: PathGrant,

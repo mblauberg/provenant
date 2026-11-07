@@ -81,6 +81,9 @@ fn capacity_guardian_context_records_and_reports_config_failure()
         executable_search_path: Vec::new(),
         git: PathBuf::from("/usr/bin/git"),
         default_account_directories: Default::default(),
+        credential_roots: Default::default(),
+        github_roots: Default::default(),
+        provider_path_environment: Default::default(),
         cargo_build_jobs: None,
         #[cfg(feature = "fixture")]
         fixture_state_write: false,
