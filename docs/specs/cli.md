@@ -8,7 +8,11 @@ crate parses arguments, calls typed library operations and renders typed
 results. The [cross-cutting decisions](README.md#cross-cutting-decisions)
 define the envelope, exit codes and wait budgets. The machine-readable help
 catalogue owns command syntax; the generated [CLI reference](../reference/cli.md)
-lists every leaf, flag and bound. Paths are relative to `tools/front-door/`.
+covers the core verbs and everyday flags. The generated
+[complete CLI reference](../reference/cli-all.md), from `help --all --json`,
+lists every public leaf, flag and bound. Default command help hides specialist
+options; `help COMMAND --all` reveals them without changing what parses.
+Paths are relative to `tools/front-door/`.
 Numeric range and requirement builders in `crates/cli/src/metadata.rs` install
 clap rules and retain their catalogue metadata from the same declaration;
 clap does not expose those rules through public getters. Compact help uses
@@ -359,7 +363,7 @@ may leave uncommitted without that path causing an `uncommitted` outcome.
 
 Output resolves the requested attempt on its owning host. Reads are bounded,
 and a clamped tail reports its effective bound. The generated
-[CLI reference](../reference/cli.md) owns target syntax and read limits.
+[complete CLI reference](../reference/cli-all.md) owns target syntax and read limits.
 - Why: a chair can inspect a precise attempt without copying a full target or
   opening a shell on its host.
 - Test: `tests/parser.rs::run_leaves_accept_control_and_report_work_refused_per_task`;
@@ -476,7 +480,7 @@ and its fallback receipt; account and quota guards still apply.
 
 Every wait has an explicit budget. A lane needing input can satisfy a wait.
 Neither expiry nor cancelling a wait stops the work. The generated
-[CLI](../reference/cli.md) and [MCP](../reference/mcp-tools.md) references
+[CLI](../reference/cli-all.md) and [MCP](../reference/mcp-tools.md) references
 own the accepted bounds.
 - Why: an impatient reader must never kill a healthy lane.
 - Test: `crates/cli/src/lib.rs::bounded_waits_counts_and_byte_windows`;
@@ -645,7 +649,7 @@ attempt and its delivery receipt. The recorded head must match the delivered
 remote branch. The body identifies the head reviewed, route provenance and
 gate evidence; absent evidence is stated explicitly. Missing required template
 sections, unsuitable attempt states and peer-owned records refuse creation.
-The generated [CLI reference](../reference/cli.md) owns invocation syntax.
+The generated [complete CLI reference](../reference/cli-all.md) owns invocation syntax.
 - Why: the chair rebuilt the same body by hand for every pull request, and a
   hand-built body can state a head or route the receipts do not hold.
 - Test: `crates/cli/src/pr_body.rs::the_repository_template_is_filled_from_the_receipts`;

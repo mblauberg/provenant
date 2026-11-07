@@ -162,6 +162,38 @@ Raise either positive integer when a lane needs more capacity. The profile
 travels in an argument, so the operating system can still impose its own
 transport limit. These settings do not bypass path, credential, or Git checks.
 
+## Run host policy
+
+`[domains.run.host_policy]` in the selected state root's `config.toml` adds
+optional read, write and network restrictions to the mandatory lane boundaries:
+
+```toml
+[domains.run.host_policy]
+deny_read = ["/absolute/private-directory"]
+deny_write = ["/absolute/archive"]
+network = "local" # open, local or provider
+```
+
+With no table, effective optional policy is `deny_read = []`,
+`deny_write = []` and `network = "open"` (`ambient`). A configured table has
+no project, lane or child override layer; its effective source identifies the
+exact config file and section. Read and write paths are absolute normalised
+subtrees. The filesystem root is omitted with a warning. Invalid entries warn
+individually and valid siblings still apply; malformed network values fall back
+to `open`. Unknown fields warn and have no effect. These tolerant rules apply
+only to optional host policy, not authority controls or the mandatory
+credential, state, Git and source boundaries.
+
+The effective network is the narrower of this host ceiling and the lane's
+request. Adapter offline requirements still deny all network. Open-network
+lanes may read GitHub CLI stores, including read-only lanes; those stores stay
+immutable, explicit credential denials win, and lanes without open network
+cannot read them. Other selected authentication exceptions are host-derived
+and limited to the selected mechanism's exact inputs and permitted refresh
+files. macOS enforces the policy with Seatbelt. Linux has no enforcing backend
+and refuses launch rather than running unconfined. See
+[lane policy and credential exceptions](providers.md#lane-filesystem-and-network-policy).
+
 Continuation refusals caused by large retained state name the limiting
 `[domains.run]` setting, its value and its source. Increase
 `continuation_copy_limit_bytes`, `continuation_copy_entries` or

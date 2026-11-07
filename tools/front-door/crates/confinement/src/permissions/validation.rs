@@ -296,6 +296,19 @@ fn validate_profile_spec_impl(
                 return Err(PermissionError::BroadRoot);
             }
         }
+        if auth.keychain.is_some()
+            && (auth.roots.len() != 1
+                || auth.roots[0].scope != PathScope::Exact
+                || !auth.roots[0]
+                    .path
+                    .ends_with("Library/Keychains/login.keychain-db")
+                || !auth.in_place_writes.is_empty()
+                || !spec.process_executables.iter().any(|grant| {
+                    grant.scope == PathScope::Exact && grant.path == Path::new("/usr/bin/security")
+                }))
+        {
+            return Err(PermissionError::InvalidFixture);
+        }
         for (family, count) in [
             ("authentication roots", auth.roots.len()),
             ("authentication writes", auth.in_place_writes.len()),
@@ -572,7 +585,6 @@ pub(super) const NESTED_CREDENTIAL_DIRECTORIES: &[&str] = &[
 
 // Additional provider stores can contain credentials alongside their state.
 // Keep these command-only denials out of model profile validation.
-#[cfg(any(target_os = "macos", feature = "snapshot"))]
 pub(super) const PROVIDER_CREDENTIAL_DIRECTORIES: &[&str] = &[
     ".config/cursor",
     ".config/opencode",

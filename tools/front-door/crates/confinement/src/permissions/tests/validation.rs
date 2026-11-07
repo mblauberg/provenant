@@ -227,6 +227,7 @@ fn profile_family_limits_follow_configured_grant_limit() {
         process_executables: vec![grant("/fixture/provider", PathScope::Exact)],
         authentication: (0..17)
             .map(|index| AuthenticationProfile {
+                keychain: None,
                 mechanism: format!("fixture-{index}"),
                 roots: vec![grant(&format!("/fixture/auth/{index}"), PathScope::Exact)],
                 in_place_writes: vec![],
@@ -247,6 +248,7 @@ fn profile_family_limits_follow_configured_grant_limit() {
     assert!(validate_profile_spec_with_home(&spec, Path::new("/fixture/home"), 65).is_ok());
     spec.native_controls.clear();
     spec.authentication.push(AuthenticationProfile {
+        keychain: None,
         mechanism: "fixture-extra".into(),
         roots: vec![grant("/fixture/auth/extra", PathScope::Exact)],
         in_place_writes: vec![],
@@ -489,6 +491,7 @@ fn compiler_refuses_grants_of_or_around_an_unconventional_host_home() {
         observations: BTreeMap::new(),
     };
     let plan = |read_roots: Vec<PathGrant>, write_roots: Vec<PathGrant>| PlanPermissions {
+        policy: None,
         read_only: None,
         mode: AccessMode::ReadOnly,
         scratch: grant(Path::new("/srv/scratch")),
@@ -628,6 +631,7 @@ fn directory_discovery_keeps_literal_scope_and_refuses_symlinks()
         observations: BTreeMap::new(),
     };
     let mut plan = PlanPermissions {
+        policy: None,
         mode: AccessMode::ReadOnly,
         read_only: None,
         read_roots: vec![PathGrant {
@@ -679,7 +683,9 @@ fn directory_discovery_keeps_literal_scope_and_refuses_symlinks()
         assert!(
             matches!(error, PermissionError::AnchorMismatchAt { path, .. } if path == root.join(".agents"))
         );
-        // Only the ancestor's literal directory is readable through discovery.
+        // Discovery grants retain exact scope. Ordinary project configuration
+        // contents are ambient; credential confidentiality is enforced by the
+        // explicit mandatory home roots, covered by the escape probes.
         for grant in profile
             .spec
             .discovery_reads
@@ -704,8 +710,8 @@ fn directory_discovery_keeps_literal_scope_and_refuses_symlinks()
                 )?;
                 break;
             }
-            assert!(denied_probe(&outcome), "{outcome:?}");
-            assert!(outcome.stdout.bytes.is_empty());
+            assert!(successful_probe(&outcome), "{outcome:?}");
+            assert_eq!(outcome.stdout.bytes, b"private config");
         }
         // An exact runtime read may also name a real directory: it stays a
         // literal (entry names only), never a subtree of its children.
@@ -753,6 +759,7 @@ fn credential_writes_stay_inside_auth_roots_and_state_stays_outside() {
     let spec = |in_place: PathGrant, state: PathGrant| ProviderProfileSpec {
         process_executables: vec![grant("/opt/provider/bin/cli", PathScope::Exact)],
         authentication: vec![AuthenticationProfile {
+            keychain: None,
             mechanism: "login".into(),
             roots: vec![grant(
                 "/Users/fixture/.provider/auth.json",

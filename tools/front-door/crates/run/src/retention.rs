@@ -31,6 +31,7 @@ const CREDENTIALS: &[&str] = &[
     "credentials.json",
     "credentials.toml",
     "claude-config/.credentials.json",
+    "data/opencode/auth.json",
     "Library/Keychains/login.keychain-db",
 ];
 
@@ -577,6 +578,7 @@ fn collect_temporary(
         Err(error) => return Err(error.into()),
     }
     let mut measured = provenant_os::disk::DiskReport::new(path.into(), 0);
+    restore_owned_temporary_directories(attempt, name);
     measured.measure_at("attempt_tmp", attempt, name, path);
     for error in measured.errors {
         report.errors.push(ProviderStateIssue {
@@ -596,6 +598,29 @@ fn collect_temporary(
         bytes,
     });
     Ok(())
+}
+
+/// A directory with no owner read/search bits cannot be traversed by the
+/// estimator. Restore owner rwx through each held parent before measuring;
+/// symlinks and foreign-owned directories are deliberately left alone.
+fn restore_owned_temporary_directories(parent: &Directory, name: &OsStr) {
+    let Ok(metadata) = parent.metadata_at(name, false) else {
+        return;
+    };
+    if metadata.kind != FileKind::Directory
+        || !parent.make_owner_accessible_at(name).unwrap_or(false)
+    {
+        return;
+    }
+    let Ok(directory) = parent.open_verified_directory(name) else {
+        return;
+    };
+    let Ok(entries) = directory.entries() else {
+        return;
+    };
+    for entry in entries.flatten() {
+        restore_owned_temporary_directories(&directory, &entry);
+    }
 }
 
 pub(crate) fn prune_caches(
@@ -832,6 +857,37 @@ fn expire(
                     candidate.rename_noreplace(&part, &archive, &part)?;
                     archive.sync()?;
                     candidate.sync()?;
+                }
+            }
+            for (parent, artifact) in [(".cursor", "chats"), ("data", "opencode")] {
+                if let Some(source) = existing(&candidate, parent)? {
+                    match source.metadata_at(OsStr::new(artifact), false) {
+                        Ok(_) => {
+                            if artifact == "opencode"
+                                && let Some(data) = existing(&source, artifact)?
+                            {
+                                // The launcher places an authentication link here.
+                                // Never archive it if earlier credential cleanup was refused.
+                                let first = report.removed.len();
+                                dispose(&data, OsStr::new("auth.json"), false, report)?;
+                                prefix_removals(
+                                    report,
+                                    first,
+                                    &PathBuf::from(STATE).join(name).join(parent).join(artifact),
+                                );
+                            }
+                            let target = subdir(&archive, OsStr::new(parent), true)?;
+                            source.rename_noreplace(
+                                OsStr::new(artifact),
+                                &target,
+                                OsStr::new(artifact),
+                            )?;
+                            target.sync()?;
+                            source.sync()?;
+                        }
+                        Err(error) if error.is_not_found() => {}
+                        Err(error) => return Err(error.into()),
+                    }
                 }
             }
             if let Some(config) = existing_config(&candidate, name, dry_run, report)? {
@@ -1917,6 +1973,82 @@ mod tests {
     }
 
     #[test]
+    fn gc_archives_cursor_chats_before_disposing_private_state() -> TestResult {
+        relocated_history_lifecycle(
+            "cursor",
+            ".cursor/chats",
+            &["project/session/store.db", "project/session/store.db-wal"],
+        )
+    }
+
+    #[test]
+    fn gc_archives_opencode_data_before_disposing_private_state() -> TestResult {
+        relocated_history_lifecycle(
+            "opencode",
+            "data/opencode",
+            &[
+                "opencode.db",
+                "opencode.db-wal",
+                "log/session.log",
+                "storage/message/session.json",
+                "snapshot/project/HEAD",
+                "shell/session.sh",
+            ],
+        )
+    }
+
+    fn relocated_history_lifecycle(provider: &str, layout: &str, artifacts: &[&str]) -> TestResult {
+        let (_temp, context, store, input, attempt) = seeded()?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        withdraw(&store, &input, &call)?;
+        let candidate = attempt.join("provider-state/candidate-0");
+        fs::write(candidate.join("provider.txt"), provider)?;
+        for artifact in artifacts {
+            let path = candidate.join(layout).join(artifact);
+            fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(path.parent().ok_or("parent")?)?;
+            fs::write(path, format!("retained {artifact}"))?;
+        }
+        let host_auth = attempt.join("synthetic-host-credential");
+        if provider == "opencode" {
+            fs::write(&host_auth, "synthetic credential")?;
+            std::os::unix::fs::symlink(&host_auth, candidate.join(layout).join("auth.json"))?;
+        }
+        let disposable = if provider == "cursor" {
+            ".cursor/settings.json"
+        } else {
+            "data/other"
+        };
+        fs::write(candidate.join(disposable), "disposable")?;
+        let preview = sweep(&store, &context, 7, 7 * DAY_MICROS, true, &call)?;
+        assert!(preview.errors.is_empty(), "{:?}", preview.errors);
+        assert!(candidate.join(layout).exists());
+        assert!(!attempt.join(HISTORY).exists());
+        let report = sweep(&store, &context, 7, 7 * DAY_MICROS, false, &call)?;
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        assert!(!attempt.join(STATE).exists());
+        let archive = attempt.join("provider-history/candidate-0");
+        for artifact in artifacts {
+            assert_eq!(
+                fs::read_to_string(archive.join(layout).join(artifact))?,
+                format!("retained {artifact}")
+            );
+        }
+        assert!(!archive.join(disposable).exists());
+        if provider == "opencode" {
+            assert!(fs::symlink_metadata(archive.join(layout).join("auth.json")).is_err());
+            assert_eq!(fs::read_to_string(&host_auth)?, "synthetic credential");
+        }
+        let repeated = sweep(&store, &context, 7, 8 * DAY_MICROS, false, &call)?;
+        assert!(repeated.errors.is_empty(), "{:?}", repeated.errors);
+        assert!(repeated.removed.is_empty());
+        Ok(())
+    }
+
+    #[test]
     fn gc_spares_nonterminal_attempts_and_contention_and_reservations() -> TestResult {
         let (_temp, context, store, input, attempt) = seeded()?;
         let (clock, cancel) = (clock(), CancelToken::new());
@@ -2002,6 +2134,36 @@ mod tests {
         assert!(report.errors.is_empty(), "{:?}", report.errors);
         assert_eq!(report.attempt_tmp.len(), 1);
         assert!(!attempt.join("tmp").exists());
+        assert_eq!(fs::read_to_string(outside.path().join("keep"))?, "outside");
+        Ok(())
+    }
+
+    #[test]
+    fn gc_removes_unreadable_owned_tmp_directories_without_following_links() -> TestResult {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        let (_temp, context, store, input, attempt) = seeded()?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        withdraw(&store, &input, &call)?;
+
+        let temporary = attempt.join("tmp");
+        let nested = temporary.join("candidate-0/.tmpX/child");
+        fs::create_dir_all(&nested)?;
+        fs::write(nested.join("payload"), b"recoverable scratch")?;
+        fs::set_permissions(&temporary, fs::Permissions::from_mode(0o700))?;
+        fs::set_permissions(&nested, fs::Permissions::from_mode(0o000))?;
+
+        let outside = tempfile::tempdir()?;
+        fs::write(outside.path().join("keep"), "outside")?;
+        symlink(outside.path(), temporary.join("candidate-0/.tmpX/escape"))?;
+
+        let report = sweep(&store, &context, 7, DAY_MICROS, false, &call)?;
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        assert_eq!(report.attempt_tmp.len(), 1);
+        assert_eq!(report.attempt_tmp[0].path, temporary);
+        assert!(report.attempt_tmp[0].bytes > 0);
+        assert!(!temporary.exists());
         assert_eq!(fs::read_to_string(outside.path().join("keep"))?, "outside");
         Ok(())
     }

@@ -106,8 +106,14 @@ pub(super) fn prepare_command(
         Some(host) => host.git.clone(),
         None => provenant_os::git::git_executable().ok_or("Git unavailable")?,
     })?;
-    let scratch = paths.temporary.join("command");
-    apply_setup_directory(&[&paths.temporary], &scratch)?;
+    let (scratch_directory, scratch_name) =
+        super::preparation::fresh_scratch_directory(&paths.temporary, provider, None)?;
+    let scratch = scratch_directory
+        .current_path()
+        .map_err(|error| error.to_string())?;
+    let credential_roots = credential_roots(registry, &home, &config.domains.accounts)?;
+    let github_roots = github_roots(registry);
+    let protected_worktrees = protected_worktrees(registry, &source, &git)?;
     let mut access = task.access.clone();
     // With no API endpoints, provider-only reach is network off.
     access.network.get_or_insert(
@@ -119,8 +125,13 @@ pub(super) fn prepare_command(
     let request = confinement_request(
         project,
         ConfinementRoots {
+            host_roots: Some(roots),
             cwd: &cwd,
             home: &home,
+            state: roots.state.as_path(),
+            credential_roots: &credential_roots,
+            github_roots: &github_roots,
+            protected_worktrees: &protected_worktrees,
             scratch: &scratch,
             private_state: &paths.provider_state,
             assets,
@@ -132,10 +143,11 @@ pub(super) fn prepare_command(
         provider,
         false,
     )?;
-    let (plan, mut observed_head, repository, mut worktree_gitdir) = read_only_plan(
+    let (mut plan, mut observed_head, repository, mut worktree_gitdir) = read_only_plan(
         roots,
         project,
         &source,
+        &cwd,
         &git,
         request,
         isolated,
@@ -193,7 +205,7 @@ pub(super) fn prepare_command(
             executable: &executable,
             home: &home,
             user: &user,
-            host_var: &|key| std::env::var_os(key),
+            host_var: &|key| host_provider_var(registry, key),
             skill_stage_max_bytes: config.domains.lanes.skill_stage_max_bytes,
             account: None,
             token: None,
@@ -212,7 +224,7 @@ pub(super) fn prepare_command(
         })
         .map_err(|error| error.to_string())?;
     if let Some(alias) = &paths.temporary_alias {
-        alias_temporary_env(&mut spec.env, &scratch, &alias.join("command"));
+        alias_temporary_env(&mut spec.env, &scratch, &alias.join(&scratch_name));
     }
     if let Some(warning) =
         super::preparation::image_input_warning(provider, &task.access.attachments)
@@ -241,9 +253,9 @@ pub(super) fn prepare_command(
             project: &project_key,
         },
     );
-    configure_process_tree(&mut spec, paths)?;
+    let process_tree_read = configure_process_tree(&mut spec, paths)?;
     let settings = config.domains.fabric.lanes.build_settings();
-    configure_build_slots(
+    let coordination_reads = configure_build_slots(
         &mut spec,
         &settings,
         &home,
@@ -251,6 +263,11 @@ pub(super) fn prepare_command(
         &runtime,
         roots.state.as_path(),
     );
+    if let Some(policy) = plan.policy_mut() {
+        for root in std::iter::once(process_tree_read).chain(coordination_reads) {
+            policy.mandatory_mut().add_state_read(root)?;
+        }
+    }
     set_cargo_profile(&mut spec.env, &settings);
     set_cargo_jobs(
         &mut spec.env,
@@ -336,15 +353,16 @@ fn hold_command_preparation_for_fixture() {
 pub(super) fn configure_process_tree(
     spec: &mut provenant_providers::LaunchSpec,
     paths: &run::LaunchPaths,
-) -> Result<(), String> {
+) -> Result<PathGrant, String> {
     let attempt = paths.scratch.parent().ok_or("attempt directory missing")?;
     let directory = Directory::open_anchor(attempt).map_err(|error| error.to_string())?;
-    spec.profile.spec.runtime_reads.push(PathGrant {
+    let grant = PathGrant {
         path: provenant_supervisor::process_tree::snapshot_path(&directory)
             .map_err(|error| error.to_string())?,
         scope: PathScope::Exact,
-    });
-    Ok(())
+    };
+    spec.profile.spec.runtime_reads.push(grant.clone());
+    Ok(grant)
 }
 
 #[allow(clippy::print_stderr)]
@@ -355,7 +373,7 @@ pub(super) fn configure_build_slots(
     scratch: &Path,
     runtime: &Path,
     state: &Path,
-) {
+) -> Vec<PathGrant> {
     // Builds, not lanes, share the host's build slots: a `cargo` shim takes
     // one around each compiling command. The host (this process, outside
     // the sandbox) creates the slot files; the lane may only read and lock
@@ -382,6 +400,20 @@ pub(super) fn configure_build_slots(
                     eprintln!(
                         "provenant: build slot shim unavailable for this lane, building without it: {error}"
                     );
+                } else {
+                    let directory = state.join(provenant_os::build_slots::DIRECTORY.join("/"));
+                    // BuildSlots opens the directory and each existing slot
+                    // read-only, then takes an advisory lock. The lane cannot
+                    // create, replace or unlink these host coordination files.
+                    return std::iter::once(PathGrant {
+                        path: directory.clone(),
+                        scope: PathScope::Exact,
+                    })
+                    .chain((0..slots).map(|index| PathGrant {
+                        path: directory.join(format!("slot-{index}.lock")),
+                        scope: PathScope::Exact,
+                    }))
+                    .collect();
                 }
             }
             // Build slots are fair sharing, not a boundary: without them
@@ -391,6 +423,7 @@ pub(super) fn configure_build_slots(
             ),
         }
     }
+    Vec::new()
 }
 
 pub(super) fn set_cargo_jobs(

@@ -217,16 +217,6 @@ fn codex_opt_out_skill_scan_succeeds_under_confinement() -> Result<(), Box<dyn s
     }
     assert!(output.status.success(), "private HOME scan: {diagnostic}");
     assert!(output.stdout.ends_with(b"fixture skill"));
-    let host_output = scan(host.as_os_str())?;
-    assert!(
-        !host_output.status.success(),
-        "host skill scan must be denied"
-    );
-    let host_error = String::from_utf8_lossy(&host_output.stderr);
-    assert!(
-        host_error.contains("Operation not permitted"),
-        "{host_error}"
-    );
     Ok(())
 }
 
@@ -616,7 +606,7 @@ fn provider_recipes_cannot_write_user_configuration() -> Result<(), ProviderErro
                 let plan = fixture_access_plan(
                     access,
                     match id {
-                        "codex" | "cursor" => Some("login"),
+                        "codex" | "cursor" | "opencode" => Some("login"),
                         "agy" => Some("keychain"),
                         _ => None,
                     },

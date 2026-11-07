@@ -42,6 +42,8 @@ pub(crate) fn remove_unreserved_terminal_temporary(
     if metadata.kind != FileKind::Directory {
         return attempt.unlink(name);
     }
+    attempt.make_owner_accessible_at(name)?;
+    let metadata = attempt.metadata_at(name, false)?;
     let tree = PayloadTree::claim(attempt, name, &metadata)?;
     remove_payload_contents(&tree)?;
     drop(tree);
@@ -50,12 +52,15 @@ pub(crate) fn remove_unreserved_terminal_temporary(
 }
 
 fn remove_payload_contents(directory: &PayloadTree) -> provenant_os::fs::Result<()> {
-    directory.make_writable()?;
+    if directory.metadata()?.uid == provenant_os::fs::effective_uid() {
+        directory.make_writable()?;
+    }
     let entries = directory
         .entries()?
         .collect::<provenant_os::fs::Result<Vec<_>>>()?;
     for entry in entries {
         if directory.metadata_at(&entry)?.kind == FileKind::Directory {
+            directory.directory().make_owner_accessible_at(&entry)?;
             remove_payload_contents(&directory.child(&entry)?)?;
             directory.rmdir(&entry)?;
         } else {
@@ -74,8 +79,11 @@ pub(crate) fn remove_entry_tree(parent: &Directory, name: &OsStr) -> provenant_o
     if metadata.kind != FileKind::Directory {
         return parent.unlink(name);
     }
+    parent.make_owner_accessible_at(name)?;
     let directory = parent.open_verified_directory(name)?;
-    directory.make_writable()?;
+    if directory.metadata()?.uid == provenant_os::fs::effective_uid() {
+        directory.make_writable()?;
+    }
     let entries = directory
         .entries()?
         .collect::<provenant_os::fs::Result<Vec<_>>>()?;

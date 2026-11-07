@@ -38,6 +38,10 @@ pub enum RepoError {
     },
     #[error("Git common or private directory is unsafe")]
     InvalidGitDirectory,
+    #[error("Git configuration normalisation could not execute: {0}")]
+    ConfigNormalisationExecution(#[source] provenant_os::exec::ExecError),
+    #[error("Git configuration normalisation failed: {0}")]
+    ConfigNormalisation(&'static str),
     #[error("alternate Git object stores are not accepted for protected history")]
     AlternateObjects,
     #[error("verified repository path or Git metadata changed")]
@@ -59,6 +63,8 @@ impl RepoError {
             Self::InvalidRegistration => "InvalidRegistration",
             Self::ForeignProject { .. } => "ForeignProject",
             Self::InvalidGitDirectory => "InvalidGitDirectory",
+            Self::ConfigNormalisationExecution(_) => "ConfigNormalisationExecution",
+            Self::ConfigNormalisation(_) => "ConfigNormalisation",
             Self::AlternateObjects => "AlternateObjects",
             Self::IdentityChanged => "IdentityChanged",
             Self::MetadataTooLarge => "MetadataTooLarge",
@@ -398,6 +404,13 @@ impl VerifiedRepo {
         })
     }
 
+    /// Open the common directory using structural checks only, without reading
+    /// config. Callers can acquire the setup lock before opening a probed repo;
+    /// they must compare its common identity with this directory under the lock.
+    pub fn open_common_directory(path: impl AsRef<Path>) -> Result<Directory, RepoError> {
+        Ok(Self::open_structure(path, false)?.common)
+    }
+
     /// Open and structurally verify the repository, then perform the supplied
     /// fixed Git safety probes before exposing it to callers.
     pub(crate) fn open<E>(
@@ -603,6 +616,14 @@ impl VerifiedRepo {
 /// resolution contract; this wrapper cannot be passed to any mutation service.
 pub struct ReadOnlyRepo(pub(crate) VerifiedRepo);
 impl ReadOnlyRepo {
+    /// Verified metadata directories, for host-side read-only snapshots.
+    pub fn common_dir(&self) -> &Directory {
+        self.0.common_dir()
+    }
+    pub fn private_dir(&self) -> &Directory {
+        self.0.private_dir()
+    }
+
     /// Recheck the repository identity and configuration before using held paths.
     pub fn revalidate(&self) -> Result<(), RepoError> {
         self.0.revalidate()
@@ -725,7 +746,6 @@ fn included_files_digest(files: &[PathBuf]) -> Result<[u8; 32], RepoError> {
 
 // Git parses the bounded snapshot; included files have their own digest.
 fn common_config_digest(common: &Directory, head: &[u8]) -> Result<Option<[u8; 32]>, RepoError> {
-    use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination};
     let Some(bytes) = read_common_config(common)? else {
         return Ok(None);
     };
@@ -739,42 +759,12 @@ fn common_config_digest(common: &Directory, head: &[u8]) -> Result<Option<[u8; 3
         std::str::from_utf8(branch).is_ok_and(|name| GitRefName::branch(name).is_ok())
     });
     let keep_all = branch.is_none() && !detached;
-    let git = provenant_os::git::git_executable().ok_or(RepoError::InvalidGitDirectory)?;
-    let argv = [
-        git.into_os_string(),
-        "config".into(),
-        "--file".into(),
-        "-".into(),
-        // Git refuses relative includes from stdin; included files have their
-        // own digest, so the snapshot is parsed without following them.
-        "--no-includes".into(),
-        "--null".into(),
-        "--list".into(),
-    ];
-    // Parsing needs no repository; running outside the worktree keeps Git's
-    // discovery from failing on the damaged metadata this check exists to report.
-    let mut options = ExecOptions::new(&argv, Path::new("/"), std::time::Duration::from_secs(2));
-    options.stdin = Some(&bytes);
-    options.env = Some(&[]);
-    options.stdout = StreamPolicy::Capture {
-        limit: CONFIG_LIMIT as usize * 2,
-    };
-    options.stop_on_output_limit = true;
-    let output = SystemExecutor::new(1)
-        .and_then(|executor| executor.execute(options))
-        .map_err(|_| RepoError::InvalidGitDirectory)?;
-    if output.termination != Termination::Exit(0)
-        || output.timed_out
-        || output.stdout.truncated
-        || output.stdout.read_failed
-        || output.drain_truncated
-    {
-        return Err(RepoError::InvalidGitDirectory);
-    }
+    let git = provenant_os::git::git_executable()
+        .ok_or(RepoError::ConfigNormalisation("Git executable unavailable"))?;
+    let normalised = COMMON_CONFIG_NORMALISATION
+        .normalise(&git, &bytes, || parse_common_config(&git, &bytes))?;
     let mut digest = Sha256::new();
-    for entry in output
-        .stdout
-        .bytes
+    for entry in normalised
         .split(|byte| *byte == 0)
         .filter(|entry| !entry.is_empty())
     {
@@ -795,6 +785,132 @@ fn common_config_digest(common: &Directory, head: &[u8]) -> Result<Option<[u8; 3
         }
     }
     Ok(Some(digest.finalize().into()))
+}
+
+// One bounded successful listing, shared across repeated snapshots and HEADs.
+// Parsing runs outside the mutex: a slow miss must not queue unrelated readers.
+// Concurrent misses may parse the same snapshot more than once.
+static COMMON_CONFIG_NORMALISATION: ConfigNormalisationCache = ConfigNormalisationCache {
+    entry: std::sync::Mutex::new(None),
+};
+
+#[derive(Default)]
+struct ConfigNormalisationCache {
+    entry: std::sync::Mutex<Option<NormalisedConfig>>,
+}
+
+struct NormalisedConfig {
+    git: PathBuf,
+    executable: Metadata,
+    snapshot: Vec<u8>,
+    listing: Vec<u8>,
+}
+
+impl ConfigNormalisationCache {
+    fn normalise(
+        &self,
+        git: &Path,
+        bytes: &[u8],
+        parse: impl FnOnce() -> Result<Vec<u8>, RepoError>,
+    ) -> Result<Vec<u8>, RepoError> {
+        if bytes.len() > CONFIG_LIMIT as usize {
+            return Err(RepoError::MetadataTooLarge);
+        }
+        let executable = config_parser_metadata(git)?;
+        {
+            let cached = self
+                .entry
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            if let Some(entry) = &*cached
+                && entry.git == git
+                && entry.executable.unchanged(&executable)
+                && entry.snapshot == bytes
+            {
+                return Ok(entry.listing.clone());
+            }
+        }
+        let listing = parse()?;
+        if listing.len() > CONFIG_LIMIT as usize * 2 {
+            return Err(RepoError::ConfigNormalisation(
+                "parser output exceeded its bound",
+            ));
+        }
+        if !executable.unchanged(&config_parser_metadata(git)?) {
+            return Err(RepoError::ConfigNormalisation(
+                "Git executable changed during parsing",
+            ));
+        }
+        *self
+            .entry
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner()) = Some(NormalisedConfig {
+            git: git.to_path_buf(),
+            executable,
+            snapshot: bytes.to_vec(),
+            listing: listing.clone(),
+        });
+        Ok(listing)
+    }
+}
+
+fn config_parser_metadata(git: &Path) -> Result<Metadata, RepoError> {
+    std::fs::metadata(git)
+        .map(Metadata::from_std)
+        .map_err(|source| {
+            RepoError::ConfigNormalisationExecution(provenant_os::exec::ExecError::Io {
+                operation: "stat config parser",
+                source,
+            })
+        })
+}
+
+fn parse_common_config(git: &Path, bytes: &[u8]) -> Result<Vec<u8>, RepoError> {
+    use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor};
+    let argv = [
+        git.as_os_str().to_owned(),
+        "config".into(),
+        "--file".into(),
+        "-".into(),
+        // Git refuses relative includes from stdin; included files have their
+        // own digest, so the snapshot is parsed without following them.
+        "--no-includes".into(),
+        "--null".into(),
+        "--list".into(),
+    ];
+    // Parsing needs no repository; running outside the worktree keeps Git's
+    // discovery from failing on the damaged metadata this check exists to report.
+    let mut options = ExecOptions::new(&argv, Path::new("/"), std::time::Duration::from_secs(2));
+    options.stdin = Some(bytes);
+    options.env = Some(&[]);
+    options.stdout = StreamPolicy::Capture {
+        limit: CONFIG_LIMIT as usize * 2,
+    };
+    options.stop_on_output_limit = true;
+    normalised_config_output(SystemExecutor::new(1).and_then(|executor| executor.execute(options)))
+}
+
+// Operational parser failures say nothing about the directory's ownership,
+// permissions or kind. Keep their cause distinct while still refusing the read.
+fn normalised_config_output(
+    output: Result<provenant_os::exec::ExecOutcome, provenant_os::exec::ExecError>,
+) -> Result<Vec<u8>, RepoError> {
+    use provenant_os::exec::Termination;
+    let output = output.map_err(RepoError::ConfigNormalisationExecution)?;
+    let reason = if output.timed_out {
+        "parser timed out"
+    } else if output.stdout.read_failed {
+        "parser output read failed"
+    } else if output.stdout.truncated {
+        "parser output exceeded its bound"
+    } else if output.drain_truncated {
+        "parser output drain did not complete"
+    } else if output.termination != Termination::Exit(0) {
+        "parser exited unsuccessfully"
+    } else {
+        return Ok(output.stdout.bytes);
+    };
+    Err(RepoError::ConfigNormalisation(reason))
 }
 
 fn verify_git_directory(metadata: Metadata, owner: u32) -> Result<(), RepoError> {
@@ -877,7 +993,7 @@ fn read_common_config(directory: &Directory) -> Result<Option<Vec<u8>>, RepoErro
 
 /// A Git path file contains exactly one `gitdir: ` line, or a one-line path in
 /// `commondir` / a private `gitdir` backlink. Paths remain raw Unix bytes.
-fn parse_git_path(bytes: &[u8], prefix: &[u8]) -> Option<PathBuf> {
+pub(crate) fn parse_git_path(bytes: &[u8], prefix: &[u8]) -> Option<PathBuf> {
     let mut line = match bytes.strip_suffix(b"\n") {
         Some(line) => line,
         None => bytes,
@@ -895,7 +1011,7 @@ fn parse_git_path(bytes: &[u8], prefix: &[u8]) -> Option<PathBuf> {
     Some(PathBuf::from(OsString::from_vec(path_bytes.to_vec())))
 }
 
-fn resolve_git_path(base: &Path, target: &Path) -> Result<PathBuf, RepoError> {
+pub(crate) fn resolve_git_path(base: &Path, target: &Path) -> Result<PathBuf, RepoError> {
     let joined = if target.is_absolute() {
         target.to_path_buf()
     } else {
@@ -1087,6 +1203,214 @@ mod tests {
         assert!(matches!(
             GitRevision::new("origin/main\nHEAD"),
             Err(GitRevisionError)
+        ));
+    }
+
+    #[test]
+    fn normalisation_reuses_only_the_exact_successful_snapshot_and_executable() {
+        use std::cell::Cell;
+        let temp = tempfile::tempdir().unwrap();
+        let git = temp.path().join("git");
+        let other_git = temp.path().join("other-git");
+        fs::write(&git, b"parser").unwrap();
+        fs::hard_link(&git, &other_git).unwrap();
+        let calls = Cell::new(0);
+        let parse = || {
+            calls.set(calls.get() + 1);
+            Ok(b"core.bare\nfalse\0".to_vec())
+        };
+        let cache = super::ConfigNormalisationCache::default();
+        let first = cache.normalise(&git, b"first", parse).unwrap();
+        assert_eq!(cache.normalise(&git, b"first", parse).unwrap(), first);
+        assert_eq!(calls.get(), 1);
+        cache.normalise(&git, b"second", parse).unwrap();
+        // A single-entry cache evicts the first snapshot.
+        cache.normalise(&git, b"first", parse).unwrap();
+        assert_eq!(calls.get(), 3);
+        cache.normalise(&other_git, b"first", parse).unwrap();
+        assert_eq!(calls.get(), 4);
+        fs::remove_file(&other_git).unwrap();
+        fs::write(&other_git, b"replacement parser").unwrap();
+        cache.normalise(&other_git, b"first", parse).unwrap();
+        assert_eq!(calls.get(), 5);
+        for _ in 0..2 {
+            assert!(matches!(
+                cache.normalise(&other_git, b"changed", || {
+                    calls.set(calls.get() + 1);
+                    Err(RepoError::ConfigNormalisation("parser timed out"))
+                }),
+                Err(RepoError::ConfigNormalisation(_))
+            ));
+        }
+        assert_eq!(calls.get(), 7);
+        // A parser replacement during a miss must not publish under its old identity.
+        assert!(matches!(
+            cache.normalise(&other_git, b"changed", || {
+                fs::rename(&other_git, temp.path().join("old-git")).unwrap();
+                fs::write(&other_git, b"new parser").unwrap();
+                parse()
+            }),
+            Err(RepoError::ConfigNormalisation(_))
+        ));
+        cache.normalise(&other_git, b"changed", parse).unwrap();
+        assert_eq!(calls.get(), 9);
+        assert!(matches!(
+            cache.normalise(&git, &vec![0; super::CONFIG_LIMIT as usize + 1], parse),
+            Err(RepoError::MetadataTooLarge)
+        ));
+        assert_eq!(calls.get(), 9);
+        assert!(matches!(
+            cache.normalise(&git, b"oversized", || Ok(vec![
+                0;
+                super::CONFIG_LIMIT as usize
+                    * 2
+                    + 1
+            ])),
+            Err(RepoError::ConfigNormalisation(_))
+        ));
+        cache.normalise(&git, b"oversized", parse).unwrap();
+        assert_eq!(calls.get(), 10);
+    }
+
+    #[test]
+    fn concurrent_cache_misses_do_not_hold_the_cache_lock() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+        let temp = tempfile::tempdir().unwrap();
+        let git = temp.path().join("git");
+        fs::write(&git, b"parser").unwrap();
+        let cache = super::ConfigNormalisationCache::default();
+        let (entered, parsing) = mpsc::channel();
+        std::thread::scope(|scope| {
+            let mut releases = Vec::new();
+            let handles: Vec<_> = (0..8)
+                .map(|_| {
+                    let (release, wait) = mpsc::channel();
+                    releases.push(release);
+                    let entered = entered.clone();
+                    let cache = &cache;
+                    let git = &git;
+                    scope.spawn(move || {
+                        cache
+                            .normalise(git, b"snapshot", || {
+                                entered.send(()).unwrap();
+                                wait.recv_timeout(Duration::from_secs(5)).unwrap();
+                                Ok(b"core.bare\nfalse\0".to_vec())
+                            })
+                            .unwrap()
+                    })
+                })
+                .collect();
+            // A blocked parser must not keep other misses from entering. Release
+            // every worker before asserting, so a regression fails without hanging.
+            let all_entered = (0..8).all(|_| parsing.recv_timeout(Duration::from_secs(2)).is_ok());
+            for release in releases {
+                let _ = release.send(());
+            }
+            for handle in handles {
+                assert_eq!(handle.join().unwrap(), b"core.bare\nfalse\0");
+            }
+            assert!(all_entered, "cache readers queued behind a parser");
+        });
+        assert_eq!(
+            cache
+                .normalise(&git, b"snapshot", || panic!("warm cache miss"))
+                .unwrap(),
+            b"core.bare\nfalse\0"
+        );
+    }
+
+    #[test]
+    fn warm_normalisation_still_refuses_unsafe_git_metadata() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let git = temp.path().join(".git");
+        fs::create_dir(&git).unwrap();
+        fs::write(git.join("config"), b"[core]\nrepositoryformatversion = 0\n").unwrap();
+        fs::write(git.join("HEAD"), b"ref: refs/heads/main\n").unwrap();
+        let repo = VerifiedRepo::open(temp.path(), |_| {
+            Ok::<_, RepoError>(RepoProbeData::without_includes(
+                RepoObjectFormat::Sha1,
+                String::new(),
+                Vec::new(),
+            ))
+        })
+        .unwrap();
+        fs::hard_link(git.join("config"), git.join("alias")).unwrap();
+        assert!(matches!(
+            repo.revalidate(),
+            Err(RepoError::InvalidGitDirectory)
+        ));
+        fs::remove_file(git.join("alias")).unwrap();
+        fs::rename(git.join("config"), git.join("saved-config")).unwrap();
+        std::os::unix::fs::symlink("saved-config", git.join("config")).unwrap();
+        assert!(matches!(
+            repo.revalidate(),
+            Err(RepoError::InvalidGitDirectory)
+        ));
+        fs::remove_file(git.join("config")).unwrap();
+        fs::rename(git.join("saved-config"), git.join("config")).unwrap();
+        fs::set_permissions(&git, fs::Permissions::from_mode(0o720)).unwrap();
+        assert!(matches!(
+            repo.revalidate(),
+            Err(RepoError::InvalidGitMarker)
+        ));
+    }
+
+    #[test]
+    fn normalisation_failures_refuse_without_claiming_unsafe_metadata() {
+        use provenant_os::exec::{CapturedStream, ExecError, ExecOutcome, Termination};
+        let complete = ExecOutcome {
+            termination: Termination::Exit(0),
+            stdout: CapturedStream {
+                bytes: b"core.bare\nfalse\0".to_vec(),
+                ..Default::default()
+            },
+            stderr: CapturedStream::default(),
+            timed_out: false,
+            drain_truncated: false,
+            overflow_stopped: false,
+            cancelled: false,
+            elapsed_micros: 1,
+        };
+        assert_eq!(
+            super::normalised_config_output(Ok(complete.clone())).unwrap(),
+            complete.stdout.bytes
+        );
+        let mut failures = Vec::new();
+        let mut timed_out = complete.clone();
+        timed_out.termination = Termination::Signal(15);
+        timed_out.timed_out = true;
+        failures.push(timed_out);
+        let mut read_failed = complete.clone();
+        read_failed.stdout.read_failed = true;
+        failures.push(read_failed);
+        let mut truncated = complete.clone();
+        truncated.stdout.truncated = true;
+        failures.push(truncated);
+        failures.push(ExecOutcome {
+            drain_truncated: true,
+            ..complete.clone()
+        });
+        failures.push(ExecOutcome {
+            termination: Termination::Exit(128),
+            ..complete
+        });
+        for failure in failures {
+            assert!(matches!(
+                super::normalised_config_output(Ok(failure)),
+                Err(RepoError::ConfigNormalisation(_))
+            ));
+        }
+        assert!(matches!(
+            super::normalised_config_output(Err(ExecError::Io {
+                operation: "spawn",
+                source: std::io::Error::from(std::io::ErrorKind::Interrupted),
+            })),
+            Err(RepoError::ConfigNormalisationExecution(ExecError::Io {
+                operation: "spawn",
+                ..
+            }))
         ));
     }
 

@@ -1,4 +1,4 @@
-//! PostgreSQL and foreign-object checks for explicit database IPC authority.
+//! Ambient database operations and explicit host-state filesystem boundaries.
 #![cfg(target_os = "macos")]
 
 use super::sysv_audit::{PERL_JOURNAL, SysvAudit};
@@ -74,6 +74,14 @@ fn database_profile(
     plan.scratch.path = scratch.clone();
     plan.write_roots.clear();
     plan.network = NetworkAccess::Local;
+    plan.policy = Some(crate::run_config::RunConfig::default().policy_for_launch(
+        &root.join("state"),
+        MandatoryRoots::new(
+            &root.join("home"),
+            &root.join("state"),
+            &root.join("worktree"),
+        )?,
+    ));
     plan.mode = if writer {
         AccessMode::WorktreeWrite(Box::new(WorktreeWriteAuthority {
             git_grants_digest: [7; 32],
@@ -177,12 +185,6 @@ fn postgres_case(database: bool) -> Result<(), Box<dyn std::error::Error>> {
         let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
         let port = listener.local_addr()?.port().to_string();
         drop(listener);
-        let initdb = r#"
-set -eu
-"$AUDIT_POSTGRES" --version >/dev/null
-grep -q '^p ' "$PROVENANT_TEST_IPC_JOURNAL"
-"$AUDIT_INITDB" -L "$PGSHARE" -D "$TMPDIR/data" --no-locale --encoding=UTF8 -A trust -N -n -c dynamic_shared_memory_type=mmap
-"#;
         let lifecycle = r#"
 set -eu
 "$AUDIT_POSTGRES" --version >/dev/null
@@ -203,7 +205,9 @@ test "$("$PGBIN/psql" -X -h 127.0.0.1 -p "$PGPORT" -d postgres -tAc 'SHOW dynami
 if touch "$OUTSIDE" 2> "$TMPDIR/denial"; then exit 1; fi
 grep -q 'Operation not permitted' "$TMPDIR/denial"
 "#;
-        let outside = root.join("outside-write-roots");
+        let outside = root.join("state/run.sqlite3");
+        std::fs::create_dir_all(outside.parent().ok_or("state database parent")?)?;
+        std::fs::write(&outside, "host-owned database")?;
         let env = [
             ("PATH".into(), "/usr/bin:/bin".into()),
             ("LC_ALL".into(), "C".into()),
@@ -232,8 +236,7 @@ grep -q 'Operation not permitted' "$TMPDIR/denial"
             ),
             ("OUTSIDE".into(), outside.clone().into_os_string()),
         ];
-        let script = if database { lifecycle } else { initdb };
-        let argv = [SANDBOX_EXEC, "-p", &source, "/bin/sh", "-c", script].map(OsString::from);
+        let argv = [SANDBOX_EXEC, "-p", &source, "/bin/sh", "-c", lifecycle].map(OsString::from);
         let mut options = ExecOptions::new(&argv, Path::new("/"), Duration::from_secs(30));
         options.env = Some(&env);
         options.cleanup_process_group = true;
@@ -244,49 +247,33 @@ grep -q 'Operation not permitted' "$TMPDIR/denial"
         let allocations = audit.allocation_count()?;
         audit.finish()?;
         let log = std::fs::read_to_string(root.join("scratch/postgres.log")).unwrap_or_default();
-        if database {
-            assert!(
-                successful_probe(&outcome),
-                "writer={writer}: database-on: {:?}; {}; {}; {log}",
-                outcome.termination,
-                String::from_utf8_lossy(&outcome.stdout.bytes),
-                String::from_utf8_lossy(&outcome.stderr.bytes)
-            );
-        } else {
-            assert!(
-                denied_probe(&outcome)
-                    && String::from_utf8_lossy(&outcome.stderr.bytes).contains("shared memory"),
-                "writer={writer}: initdb must fail on SysV IPC without capability: {:?}; {}; {}",
-                outcome.termination,
-                String::from_utf8_lossy(&outcome.stdout.bytes),
-                String::from_utf8_lossy(&outcome.stderr.bytes)
-            );
-        }
-        // Verify that the database-enabled lifecycle allocated IPC objects.
-        if database {
-            assert!(
-                allocations > 0,
-                "PostgreSQL SysV allocation auditing did not run"
-            );
-        }
-        assert!(!outside.exists());
+        assert!(
+            successful_probe(&outcome),
+            "writer={writer} database_grant={database}: ambient lifecycle: {:?}; {}; {}; {log}",
+            outcome.termination,
+            String::from_utf8_lossy(&outcome.stdout.bytes),
+            String::from_utf8_lossy(&outcome.stderr.bytes)
+        );
+        assert!(
+            allocations > 0,
+            "PostgreSQL SysV allocation auditing did not run"
+        );
+        assert_eq!(std::fs::read(&outside)?, b"host-owned database");
     }
     Ok(())
 }
 
 #[test]
-fn postgres_without_database_ipc_refuses_initdb() -> Result<(), Box<dyn std::error::Error>> {
-    postgres_case(false)
-}
-
-#[test]
-fn postgres_database_ipc_allows_mmap_lifecycle_in_both_modes()
+fn postgres_lifecycle_is_ambient_with_and_without_database_grants()
 -> Result<(), Box<dyn std::error::Error>> {
-    postgres_case(true)
+    for database_grant in [false, true] {
+        postgres_case(database_grant)?;
+    }
+    Ok(())
 }
 
 #[test]
-fn database_on_creates_and_removes_own_sysv_segments_and_semaphores()
+fn ambient_database_creates_and_removes_own_sysv_segments_and_semaphores()
 -> Result<(), Box<dyn std::error::Error>> {
     let executor = SystemExecutor::new(2)?;
     if !native_available(&executor)? {
@@ -295,7 +282,7 @@ fn database_on_creates_and_removes_own_sysv_segments_and_semaphores()
     for writer in [false, true] {
         let temp = crate::test_support::tempdir()?;
         let root = provenant_os::fs::canonicalize(temp.path())?;
-        let source = database_profile(&root, Path::new("/usr/bin"), writer, true)?;
+        let source = database_profile(&root, Path::new("/usr/bin"), writer, false)?;
         let mut audit = SysvAudit::new(&executor, &root.join("scratch"))?;
         let script = format!(
             "{PERL_JOURNAL}{}",
@@ -338,7 +325,7 @@ semctl($sem, 0, IPC_RMID, 0) or die "database-on sem removal: $!\n";
 }
 
 #[test]
-fn database_off_cannot_mutate_or_remove_foreign_sysv_objects()
+fn ambient_database_can_use_same_uid_sysv_objects_outside_mandatory_state()
 -> Result<(), Box<dyn std::error::Error>> {
     let executor = SystemExecutor::new(2)?;
     if !native_available(&executor)? {
@@ -365,17 +352,20 @@ semctl($sem, 0, SETVAL, 1) or die "host SETVAL: $!\n";
 printf "%d %d\n", $shm, $sem;
 $transferred = 1;
 "#;
+    // These synthetic same-UID IPC objects are ordinary database resources,
+    // outside the mandatory host state tree. Ambient access includes them.
     let probe = r#"
-sub denied { die "foreign operation was not denied: $!\n" unless !$_[0] && $! == EPERM; }
-denied(shmwrite($ARGV[0], "bad!", 0, 4));
-denied(shmctl($ARGV[0], IPC_RMID, 0));
-denied(semop($ARGV[1], pack("s!3", 0, 1, 0)));
-denied(semctl($ARGV[1], 0, IPC_RMID, 0));
+shmwrite($ARGV[0], "changed", 0, 7) or die "ambient shmwrite: $!\n";
+shmread($ARGV[0], my $value, 0, 7) or die "ambient shmread: $!\n";
+die "shared memory contents\n" unless $value eq "changed";
+semop($ARGV[1], pack("s!3", 0, 1, 0)) or die "ambient semop: $!\n";
+die "semaphore contents\n" unless semctl($ARGV[1], 0, GETVAL, 0) == 2;
+shmctl($ARGV[0], IPC_RMID, 0) or die "ambient shmctl: $!\n";
+semctl($ARGV[1], 0, IPC_RMID, 0) or die "ambient semctl: $!\n";
 "#;
     let verify = r#"
-shmread($ARGV[0], my $value, 0, 4) or die "host shmread: $!\n";
-die "host shared memory changed\n" unless $value eq "safe";
-die "host semaphore changed\n" unless semctl($ARGV[1], 0, GETVAL, 0) == 1;
+die "removed shared memory still readable\n" if shmread($ARGV[0], my $value, 0, 4);
+die "removed semaphore still exists\n" if defined semctl($ARGV[1], 0, GETVAL, 0);
 "#;
     for writer in [false, true] {
         let temp = crate::test_support::tempdir()?;
@@ -410,8 +400,7 @@ die "host semaphore changed\n" unless semctl($ARGV[1], 0, GETVAL, 0) == 1;
             "-p",
             &source,
             "/usr/bin/perl",
-            "-MIPC::SysV=IPC_RMID",
-            "-MErrno=EPERM",
+            "-MIPC::SysV=IPC_RMID,GETVAL",
             "-e",
             probe,
             &ids[0],
@@ -433,16 +422,16 @@ die "host semaphore changed\n" unless semctl($ARGV[1], 0, GETVAL, 0) == 1;
         .map(OsString::from);
         let mut options = ExecOptions::new(&argv, Path::new("/"), Duration::from_secs(3));
         options.stderr = StreamPolicy::Capture { limit: 1024 };
-        let unchanged = executor.execute(options)?;
+        let removed = executor.execute(options)?;
         // The host audit guard removes only journalled test allocations and
         // asserts the before/after inventory contains no leaked test object.
         audit.finish()?;
         assert!(
-            successful_probe(&outcome) && successful_probe(&unchanged),
-            "writer={writer}: foreign SysV: {:?}; {}; {}",
+            successful_probe(&outcome) && successful_probe(&removed),
+            "writer={writer}: ambient same-UID SysV: {:?}; {}; {}",
             outcome.termination,
             String::from_utf8_lossy(&outcome.stderr.bytes),
-            String::from_utf8_lossy(&unchanged.stderr.bytes)
+            String::from_utf8_lossy(&removed.stderr.bytes)
         );
     }
     Ok(())

@@ -12,7 +12,7 @@ Telemetry summarises run's terminal attempt records into per-route outcomes,
 usage and API-equivalent cost (the cost of the same tokens at published API
 prices) using the bundled price table, and exports a trace.
 There is no ledger, store or collector. Grammar is in the generated [CLI
-reference](../reference/cli.md); quota is specified in [routing](routing.md).
+reference](../reference/cli-all.md); quota is specified in [routing](routing.md).
 Paths are relative to `tools/front-door/`.
 
 `telemetry stats --by route` groups attempts by their resolved `model@effort`,

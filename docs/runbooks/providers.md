@@ -140,13 +140,13 @@ route records `domains.fabric.commands.NAME` as its configuration source, with n
 
 Commands use the ordinary supervisor, guardian, deadlines, descendant cleanup
 and operation replay. They run read-only with the shared Rust and Node toolchain
-grants and private build output. Network is on by default, as for every
+grants and private build output. Network is open by default, as for every
 lane. `--network off`, or `"network":"off"` on a manifest task (which overrides
 the flag for that task), runs the command with the recorded `provider` mode,
-which has no provider API endpoints for this adapter. All known credential stores,
-including both GitHub CLI config directories and keychains, stay denied in
-every network mode. Commands have no session, hooks, MCP configuration or
-quota probe.
+which has no provider API endpoints for this adapter. Like other adapters, an
+open-network command may read GitHub CLI configuration; local- and
+provider-network commands may not. The GitHub CLI stores remain immutable.
+Commands have no session, hooks, MCP configuration or quota probe.
 
 `runtimes` is optional and takes absolute interpreter paths. Each path is
 resolved on the host and granted execution only, so a script can use a custom
@@ -164,16 +164,44 @@ An ordinary verdict gate can consume a successful task's result; the gate
 still has no attempt. A failed command fails its task. A missing executable
 settles as adapter unavailable through the existing launch failure path.
 
-## Provider credentials in lane shells
+## Lane filesystem and network policy
 
-On macOS a Seatbelt profile applies to the whole process tree, so a shell
-command a provider runs gets the same file grants as the provider itself.
-OpenCode and Codex lanes can therefore read their own provider's credential:
-OpenCode reads `~/.local/share/opencode/auth.json` for its sign-in and
-connected API keys, and Codex reads and rewrites `~/.codex/auth.json` when it
-refreshes tokens. This is an accepted limit. A lane is not granted other
-providers' credential stores, and GitHub CLI configuration stays denied
-([#2432](https://github.com/mblauberg/provenant/issues/2432)).
+On macOS, Seatbelt starts with ambient filesystem, process and network access.
+The host still denies credential and preservation roots, Provenant state,
+shared Git metadata, read-only source mutations and other owned worktrees.
+Selected authentication receives only its declared credential reads and
+permitted in-place refresh writes. OpenCode's selected host configuration and
+exact account file are read-only authentication inputs. Attempts keep mutable
+provider session state in private attempt storage.
+
+An open-network lane, including a read-only lane, can read the host's GitHub
+CLI configuration at `~/.config/gh` and, on macOS,
+`~/Library/Application Support/GitHub CLI`. The stores remain immutable on the
+host. Their token can still perform GitHub writes, so read-only describes local
+source access, not the remote GitHub account. An explicit credential denial
+wins, and local- or provider-network lanes receive no GitHub CLI access. The
+effective host policy may further restrict reads, writes or network; see
+[run host policy](configuration.md#run-host-policy).
+
+Linux has no enforcing confinement backend and refuses lane launch with the
+typed backend-unavailable result. It never falls back to unconfined execution.
+The native Seatbelt escape probe is enforcement evidence only when it runs on
+macOS; a `ProbeFailed` skip on another host does not prove enforcement.
+
+## Private session history
+
+Settlement scrubs known credential shapes from text files under the attempt's
+`.cursor/chats` and `data/opencode` trees, including text in `log`, `storage`,
+`snapshot` and `shell`. It uses the same bounded traversal and streaming filter
+as Codex and Claude transcripts. This is best effort: an unreadable store or a
+traversal or filter limit does not fail settlement. SQLite databases and their
+journals, and other binary files, remain unscrubbed.
+
+Provider-state expiry archives `.cursor/chats` and `data/opencode` under the
+attempt's `provider-history/candidate-N`, alongside retained Codex and Claude
+history, before disposing of the private provider state. OpenCode's
+authentication entry is removed rather than archived; a link's host target
+stays untouched.
 
 ## Project paths and host checkout identity
 
@@ -460,14 +488,19 @@ retained in the route record under `dependency_preparation`. Corepack neither fo
 as a non-executable `@pnpm/exe` placeholder. The native install uses the host's
 shared pnpm store; a lane cannot write that store from inside its sandbox.
 
-Read-only lanes with a verified Git checkout use a private scratch object
-directory, with the host's common object store as a read-only alternate. The
-shell Git wrapper selects it only for the bound repository and its linked
-worktrees, for `show`, `log`, `diff`, `merge-tree` and `hash-object`; other
-repositories retain their own stores. Aliases and external subcommands receive
-no override; direct absolute-path Git calls bypass the wrapper. Git can create
-temporary objects for commands such as `show --remerge-diff` without writing
-the shared store. Scratch objects
+Repository lanes use a private scratch Git directory, index and object store,
+with the host's common object store as a read-only alternate. The PATH Git
+wrapper binds commands targeting the lane checkout to that private state,
+including fetches in read-only lanes. Other repositories and scratch clones
+retain normal Git selection and their own stores. Repository selectors
+(`GIT_DIR`, `GIT_COMMON_DIR`, `GIT_WORK_TREE` and `GIT_OBJECT_DIRECTORY`) are
+absent from the launch environment. `PROVENANT_GIT` names the wrapper; the
+wrapper embeds the real executable path so it cannot call itself in a loop.
+
+A deliberate absolute call to the real Git binary bypasses that binding. On
+the lane checkout it discovers the host `.git`; confinement denies its writes
+and host metadata stays unchanged. Such calls are outside the private Git
+contract: use PATH Git or `PROVENANT_GIT` for lane operations. Scratch objects
 and alternates are lane-controlled, so lane Git output is not trusted host
 evidence. Scratch is removed at normal settlement; lost attempts retain it
 until later cleanup.

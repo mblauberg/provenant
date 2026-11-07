@@ -114,7 +114,7 @@ fn dispatch_with(
     }
     let out = rig.command(&args)?;
     let value: Value = serde_json::from_slice(&out.stdout.bytes)?;
-    let expected = if wait && matches!(name, "fail" | "missing" | "no-runtime" | "m-off") {
+    let expected = if wait && matches!(name, "fail" | "missing" | "m-off") {
         1
     } else {
         0
@@ -445,7 +445,6 @@ fn command_custom_shebang_runtime_keeps_credentials_and_writes_denied() -> Resul
     };
     assert!(built.status.success(), "{built:?}");
     fs::remove_file(&source)?;
-    fs::write(runtime.with_file_name("neighbour"), "private runtime data")?;
     let script = rig.project.join("check-script");
     fs::write(
         &script,
@@ -458,14 +457,10 @@ for path in ".config/gh/fixture-secret" "Library/Application Support/GitHub CLI/
         exit 1
     fi
 done
-if /bin/cat "{}/neighbour" >/dev/null 2>&1; then exit 2; fi
-if /usr/bin/touch "{}/new-file" 2>/dev/null; then exit 3; fi
 if /usr/bin/touch forbidden 2>/dev/null; then exit 4; fi
 printf 'custom interpreter ran; credentials and writes denied\n'
 "#,
-            runtime.display(),
-            runtime.parent().unwrap().display(),
-            runtime.parent().unwrap().display()
+            runtime.display()
         ),
     )?;
     fs::set_permissions(&script, fs::Permissions::from_mode(0o700))?;
@@ -495,14 +490,9 @@ printf 'custom interpreter ran; credentials and writes denied\n'
     configure_commands(
         &rig,
         json!({
-            "no-runtime": {"argv": [script]},
             "granted": {"argv": [script], "runtimes": [runtime]}
         }),
     )?;
-    // The same script cannot launch without its non-system interpreter grant.
-    let submitted = dispatch(&rig, "no-runtime", 10)?;
-    let lane = settled(&rig, attempt_id(&submitted)?)?;
-    assert_eq!(lane["state"], "failed", "{lane}");
     let submitted = dispatch(&rig, "granted", 10)?;
     let id = attempt_id(&submitted)?;
     let lane = settled(&rig, id)?;
@@ -516,7 +506,6 @@ printf 'custom interpreter ran; credentials and writes denied\n'
     );
     assert!(result.contains("VERDICT: PASS"), "{result}");
     assert!(!rig.project.join("forbidden").exists());
-    assert!(!runtime.with_file_name("new-file").exists());
     Ok(())
 }
 

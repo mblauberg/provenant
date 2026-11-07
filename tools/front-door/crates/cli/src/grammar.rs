@@ -114,7 +114,7 @@ pub enum Command {
         #[arg(long, value_parser = parse_landing_tier)]
         tier: Option<String>,
         /// Pin a reviewed head instead of using the current PR head
-        #[arg(long, hide = true)]
+        #[arg(long)]
         head: Option<GitOid>,
         /// Wait for this head's CI (default 1 hour; maximum 4 hours)
         #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "1h", catalog_duration())]
@@ -141,7 +141,7 @@ pub enum Command {
     #[command(name = "retry", add = crate::metadata::CoreCommand(5, "provenant retry ID"))]
     Retry(Resume),
     /// Queue a steering message for a lane when its provider supports control
-    #[command(add = crate::metadata::CoreCommand(3, "provenant steer ID --file message.md"))]
+    #[command(add = crate::metadata::CoreCommand(3, "provenant steer ID --text-stdin < message.md"))]
     Steer(crate::inbox::Steer),
     /// Apply a patch to unstarted graph nodes
     #[command(add = crate::metadata::CoreCommand(6, "provenant edit ID --file patch.json"))]

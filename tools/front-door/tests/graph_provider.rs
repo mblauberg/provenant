@@ -115,7 +115,7 @@ fn handoff_recovery_provider(prompt: &str, args: &[String], auth: &Value) -> Res
             .lines()
             .find_map(|line| {
                 line.strip_prefix("Progress handoff JSON: ")?
-                    .split_once(". Update this file atomically")
+                    .split_once(". Update this file throughout")
                     .map(|(path, _)| PathBuf::from(path))
             })
             .ok_or("supplied progress path")?;
@@ -251,6 +251,9 @@ fn fixture() -> Result {
             r#""text":"OK""#,
             r###""text":"## Findings\nOK\n## Evidence\nFixture checked.\n```handoff\n{\"schema_version\":2,\"status\":\"done\",\"note\":\"finished\",\"remaining\":[],\"decisions\":[],\"verify\":[]}\n```""###,
         );
+        if !prompt.contains("free limit") && !prompt.contains("model unavailable") {
+            write_opencode_session(&args)?;
+        }
         io::stdout().write_all(frames.as_bytes())?;
         io::stdout().flush()?;
         if prompt.contains("free limit then hang") {
@@ -730,6 +733,15 @@ fn writer_cli_launches_from_cwd(location: &str) -> Result {
     }
     assert_eq!(code(&output), 0, "{location}: {response}");
     assert_eq!(node["state"], "succeeded", "{location}: {response}");
+    let stderr = String::from_utf8_lossy(&output.stderr.bytes);
+    assert_eq!(
+        stderr
+            .lines()
+            .filter(|line| line.starts_with("lane policy: "))
+            .count(),
+        1,
+        "direct launch must report policy once: {stderr}"
+    );
     for name in ["AGENTS.md", "CLAUDE.md", "HARNESS.md"] {
         assert_eq!(
             fs::read_to_string(tree.join(name))?,
@@ -921,26 +933,12 @@ fn graph_opencode_observes_v2_wal_session() -> Result {
     for custom_data_home in [false, true] {
         let mut rig = TestRig::new()?;
         let cleanup = rig.process_cleanup();
-        let data_home = if custom_data_home {
+        // The lane's session store stays private whichever host data home is set.
+        if custom_data_home {
             let path = rig.root.join("custom-data");
             rig.env
-                .push(("XDG_DATA_HOME".into(), path.clone().into_os_string()));
-            path
-        } else {
-            rig.home.join(".local/share")
-        };
-        let data = data_home.join("opencode");
-        fs::create_dir_all(&data)?;
-        let db = rusqlite::Connection::open(data.join("opencode.db"))?;
-        // Keep the writer open and disable checkpoints: the assistant row is
-        // committed in the WAL when the guardian's read-only connection opens.
-        db.execute_batch(
-            r#"PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0;
-            CREATE TABLE session_message (session_id TEXT, type TEXT, data TEXT);
-            INSERT INTO session_message VALUES ('ses_x', 'assistant',
-            '{"model":{"providerID":"opencode-go","id":"beam-free"},"finish":"stop"}');"#,
-        )?;
-        assert!(fs::metadata(data.join("opencode.db-wal"))?.len() > 0);
+                .push(("XDG_DATA_HOME".into(), path.into_os_string()));
+        }
         let bin = rig.root.join("provider/bin");
         fs::create_dir_all(&bin)?;
         rig.copy_executable(&std::env::current_exe()?, &bin.join("opencode"))?;
@@ -959,28 +957,13 @@ fn graph_opencode_observes_v2_wal_session() -> Result {
             ),
             ("opencode-limit", "free limit", "quota_limited"),
         ] {
-            let (model, provider, session_model) = if expected == "model_unavailable" {
-                (
-                    "opencode/opencode/uncatalogued-fixture-model",
-                    "opencode",
-                    "misspelt-free",
-                )
+            let (model, provider) = if expected == "model_unavailable" {
+                ("opencode/opencode/uncatalogued-fixture-model", "opencode")
             } else if operation == "opencode-zen" {
-                (
-                    "opencode/opencode/glm-5.3-flash-free",
-                    "opencode",
-                    "glm-5.3-flash-free",
-                )
+                ("opencode/opencode/glm-5.3-flash-free", "opencode")
             } else {
-                (
-                    "opencode/opencode-go/glm-5.3-flash",
-                    "opencode-go",
-                    "glm-5.3-flash",
-                )
+                ("opencode/opencode-go/glm-5.3-flash", "opencode-go")
             };
-            db.execute("UPDATE session_message SET data = ?1", [
-                serde_json::to_string(&json!({"model": {"providerID": provider, "id": session_model}, "finish": "stop"}))?
-            ])?;
             let lane = run_graph_provider(
                 &rig,
                 operation,
@@ -1024,6 +1007,37 @@ fn graph_opencode_observes_v2_wal_session() -> Result {
         rig.assert_legacy_unchanged()?;
         cleanup.disarm();
     }
+    Ok(())
+}
+
+/// Record the session in the lane's private store as OpenCode does. The process
+/// exits without closing the connection, so the rows stay committed in the WAL
+/// when the guardian's read-only connection opens.
+fn write_opencode_session(args: &[String]) -> Result {
+    let model = args
+        .iter()
+        .position(|arg| arg == "-m")
+        .and_then(|position| args.get(position + 1))
+        .ok_or("fixture model")?;
+    let (provider, id) = model.split_once('/').ok_or("fixture model provider")?;
+    let data =
+        PathBuf::from(std::env::var_os("XDG_DATA_HOME").ok_or("XDG_DATA_HOME")?).join("opencode");
+    fs::create_dir_all(&data)?;
+    let db = rusqlite::Connection::open(data.join("opencode.db"))?;
+    db.execute_batch(
+        "PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0;
+        CREATE TABLE session (id TEXT PRIMARY KEY);
+        INSERT INTO session VALUES ('ses_x');
+        CREATE TABLE session_message (session_id TEXT, type TEXT, data TEXT);",
+    )?;
+    db.execute(
+        "INSERT INTO session_message VALUES ('ses_x', 'assistant', ?1)",
+        [serde_json::to_string(
+            &json!({"model": {"providerID": provider, "id": id}, "finish": "stop"}),
+        )?],
+    )?;
+    assert!(fs::metadata(data.join("opencode.db-wal"))?.len() > 0);
+    std::mem::forget(db);
     Ok(())
 }
 
@@ -3288,13 +3302,25 @@ fn run_graph_provider_with_wait(
     };
     let store = provenant_run::RunStore::open(&context, &call)?;
     let record = store.record(attempt.parse()?, &call)?;
-    Ok(serde_json::to_value(provenant_cli::run::project_lane(
+    let lane = serde_json::to_value(provenant_cli::run::project_lane(
         &record,
         &[],
         rig.state.as_path(),
         None,
         false,
-    ))?)
+    ))?;
+    if graph_id == "fixture-claude" && !lane["started_at"].is_null() {
+        let stderr = String::from_utf8_lossy(&out.stderr.bytes);
+        assert_eq!(
+            stderr
+                .lines()
+                .filter(|line| line.starts_with("lane policy: "))
+                .count(),
+            1,
+            "host graph child launch must report once, including candidate fallback: {stderr}"
+        );
+    }
+    Ok(lane)
 }
 
 fn opencode_usage_limit_stops_hanging_provider() -> Result {
@@ -3354,14 +3380,6 @@ fn opencode_stderr_live_quota() -> Result {
     ] {
         let mut rig = TestRig::new()?;
         let cleanup = rig.process_cleanup();
-        let data = rig.home.join(".local/share/opencode");
-        fs::create_dir_all(&data)?;
-        let db = rusqlite::Connection::open(data.join("opencode.db"))?;
-        db.execute_batch(
-            r#"CREATE TABLE session_message (session_id TEXT, type TEXT, data TEXT);
-            INSERT INTO session_message VALUES ('ses_x', 'assistant',
-            '{"model":{"providerID":"opencode","id":"glm-5.3-flash-free"},"finish":"stop"}');"#,
-        )?;
         let bin = rig.root.join("provider/bin");
         fs::create_dir_all(&bin)?;
         rig.copy_executable(&std::env::current_exe()?, &bin.join("opencode"))?;

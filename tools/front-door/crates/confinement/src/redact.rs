@@ -587,6 +587,7 @@ static SESSION_STAGING_COUNTER: AtomicU64 = AtomicU64::new(0);
 struct Scrub {
     rewritten: usize,
     failed: bool,
+    text_only: bool,
 }
 
 impl Scrub {
@@ -596,7 +597,7 @@ impl Scrub {
     }
 
     fn file(&mut self, dir: &Directory, name: &OsStr) {
-        match scrub_file(dir, name) {
+        match scrub_file(dir, name, self.text_only) {
             Ok(rewritten) => self.rewritten += usize::from(rewritten),
             Err(_) => self.failed = true,
         }
@@ -618,7 +619,10 @@ impl Scrub {
 /// captures and the result are filtered. `.jsonl` transcripts in the known
 /// session layouts are rewritten in place. Claude's `projects` roots also hold
 /// large tool output as regular `.txt` and `.json` files, so those are scrubbed
-/// too. Binary stores, credentials, cache trees and links are never touched. A
+/// too. Cursor chats and OpenCode data text are scrubbed best effort with the
+/// same traversal bounds; failures there do not fail settlement. SQLite files
+/// (including journals) and other binary stores remain unscrubbed.
+/// Credentials, cache trees and links are never touched. A
 /// file without a known shape is only read and left as it is.
 ///
 /// Every entry is visited even when another one is refused: a link, a hard
@@ -673,6 +677,20 @@ fn scrub_layout(dir: &Directory, scrub: &mut Scrub) {
             scrub_tree(&sessions, 0, is_jsonl, scrub);
         }
     }
+    // These formerly host-backed stores are best effort: an unreadable or
+    // over-bound store must not turn a successful settlement into a failure.
+    let mut stores = Scrub {
+        text_only: true,
+        ..Scrub::default()
+    };
+    for (parent, child) in [(".cursor", "chats"), ("data", "opencode")] {
+        if let Some(Some(parent)) = stores.keep(subdirectory(dir, parent))
+            && let Some(Some(tree)) = stores.keep(subdirectory(&parent, child))
+        {
+            scrub_tree(&tree, 0, is_store_candidate, &mut stores);
+        }
+    }
+    scrub.rewritten += stores.rewritten;
     scrub_files(dir, scrub);
     if let Some(Some(config)) = scrub.keep(subdirectory(dir, "claude-config")) {
         if let Some(Some(projects)) = scrub.keep(subdirectory(&config, "projects")) {
@@ -757,25 +775,39 @@ fn is_projects_text(name: &OsStr) -> bool {
             .is_some_and(|name| name.ends_with(".txt") || name.ends_with(".json"))
 }
 
+// SQLite and its sidecars remain binary stores even if a fixture or empty
+// journal happens to contain only text. Other files are checked as streamed UTF-8.
+fn is_store_candidate(name: &OsStr) -> bool {
+    !name.to_str().is_some_and(|name| {
+        name == "auth.json"
+            || name.starts_with(SESSION_STAGING)
+            || [".sqlite", ".sqlite3", ".db"].iter().any(|extension| {
+                name.rsplit_once(extension)
+                    .is_some_and(|(_, tail)| matches!(tail, "" | "-wal" | "-shm" | "-journal"))
+            })
+    })
+}
+
 /// Rewrite one transcript through the streaming filter, replacing the entry
 /// only when a shape matched. A clean file is read once and never staged,
 /// copied or synced. A file that changes while it is read fails closed; a link
 /// or hard link is refused rather than followed.
-fn scrub_file(dir: &Directory, name: &OsStr) -> Result<bool, FilterError> {
+fn scrub_file(dir: &Directory, name: &OsStr, text_only: bool) -> Result<bool, FilterError> {
     let before = dir.metadata_at(name, false).map_err(|_| FilterError)?;
     if before.kind != FileKind::Regular || before.links != 1 {
         return Err(FilterError);
     }
-    if !filter_pass(dir, name, &before, None)? {
+    if !filter_pass(dir, name, &before, None, text_only)? {
         return Ok(false);
     }
     let staging = staging_name();
     let staging = OsStr::new(&staging);
     let mut target = dir.create_new(staging).map_err(|_| FilterError)?;
-    let staged = filter_pass(dir, name, &before, Some(&mut target)).and_then(|matched| {
-        target.sync().map_err(|_| FilterError)?;
-        Ok(matched)
-    });
+    let staged =
+        filter_pass(dir, name, &before, Some(&mut target), text_only).and_then(|matched| {
+            target.sync().map_err(|_| FilterError)?;
+            Ok(matched)
+        });
     if !matches!(staged, Ok(true)) {
         let _ = dir.unlink(staging);
         return staged;
@@ -796,6 +828,7 @@ fn filter_pass(
     name: &OsStr,
     before: &Metadata,
     mut staged: Option<&mut FileHandle>,
+    text_only: bool,
 ) -> Result<bool, FilterError> {
     let mut source = dir.open_read(name).map_err(|_| FilterError)?;
     let opened = source.metadata().map_err(|_| FilterError)?;
@@ -803,14 +836,33 @@ fn filter_pass(
         return Err(FilterError);
     }
     let mut redactor = Redactor::new([]).map_err(|_| FilterError)?;
+    let mut utf8_tail = Vec::new();
     let mut buffer = [0_u8; SESSION_CHUNK];
     loop {
         let read = source.read(&mut buffer).map_err(|_| FilterError)?;
         if read == 0 {
             break;
         }
+        if text_only {
+            let bytes = &buffer[..read];
+            if bytes.contains(&0) {
+                return Ok(false);
+            }
+            utf8_tail.extend_from_slice(bytes);
+            match std::str::from_utf8(&utf8_tail) {
+                Ok(_) => utf8_tail.clear(),
+                Err(error) if error.error_len().is_none() => {
+                    let valid = error.valid_up_to();
+                    utf8_tail.drain(..valid);
+                }
+                Err(_) => return Ok(false),
+            }
+        }
         let filtered = redactor.filter(&buffer[..read])?;
         write_staged(staged.as_deref_mut(), &filtered)?;
+    }
+    if !utf8_tail.is_empty() {
+        return Ok(false);
     }
     let tail = redactor.finish()?;
     write_staged(staged, &tail)?;
@@ -1239,6 +1291,58 @@ mod tests {
         assert!(std::fs::read_to_string(&rollout)?.contains("and kept"));
         assert_eq!(std::fs::read(&database)?, token.as_bytes());
         serde_json::from_str::<serde_json::Value>(std::fs::read_to_string(&rollout)?.trim())?;
+        Ok(())
+    }
+
+    #[test]
+    fn session_scrub_reaches_relocated_text_and_preserves_binary_stores()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path();
+        let token = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
+        let candidate = root.join("candidate-0");
+        let texts = [
+            ".cursor/chats/project/session/messages.json",
+            "data/opencode/log/session.log",
+            "data/opencode/storage/message/session/message.json",
+            "data/opencode/snapshot/project/HEAD",
+            "data/opencode/shell/session.sh",
+        ];
+        for name in texts {
+            let path = candidate.join(name);
+            std::fs::create_dir_all(path.parent().ok_or("parent")?)?;
+            // Split a multibyte character across reads and retain ANSI text.
+            let prefix = " ".repeat(SESSION_CHUNK - 1);
+            std::fs::write(path, format!("{prefix}🦀 \x1b[32m {token}\x1b[0m\n"))?;
+        }
+        let binaries = [
+            ".cursor/chats/project/session/store.db",
+            ".cursor/chats/project/session/store.db-wal",
+            "data/opencode/opencode.db",
+            "data/opencode/opencode.db-shm",
+            "data/opencode/snapshot/project/blob",
+        ];
+        for name in binaries {
+            let bytes = if name.ends_with("blob") {
+                format!("{token}{}\0binary", " ".repeat(SESSION_CHUNK)).into_bytes()
+            } else {
+                token.as_bytes().to_vec()
+            };
+            std::fs::write(candidate.join(name), bytes)?;
+        }
+        assert_eq!(scrub_session_history(root)?, texts.len());
+        for name in texts {
+            assert_eq!(
+                std::fs::read_to_string(candidate.join(name))?,
+                format!(
+                    "{}🦀 \x1b[32m [REDACTED]\x1b[0m\n",
+                    " ".repeat(SESSION_CHUNK - 1)
+                )
+            );
+        }
+        for name in binaries {
+            assert!(std::fs::read(candidate.join(name))?.starts_with(token.as_bytes()));
+        }
         Ok(())
     }
 

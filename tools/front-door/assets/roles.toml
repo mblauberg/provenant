@@ -305,29 +305,10 @@ family = "cross_preferred"
 worktree = "${worktree}"
 card = "You falsify review findings. A finding stands only if you cannot break it."
 prompt = """
-Verify the lens findings for: ${prompt}
-Try to falsify every finding against the pinned commit: reproduce it, look for
-the code or test that contradicts it, and check it against the spec. Re-emit
-every finding verbatim with one of UPHELD, FALSIFIED or UNVERIFIABLE and your
-evidence. Add any finding the lenses missed and mark it NEW. Do not edit files.
+Verify the lens findings against the pinned commit and spec. Try to reproduce
+each issue and assess evidence that could falsify it. Identify material defects
+the lenses missed. Judge coverage in light of unavailable or truncated evidence.
 ${local_check_policy}
-Include a findings block (schema_version 1) whose entries keep each finding's
-id and add "verification": "upheld", "falsified" or "unverifiable". For each
-propagated finding add "propagates": "<input-node-id>:<finding-id>" naming
-the selected input node and the finding ID as shown to you (or its stored ID).
-Do not add it to new findings.
-Carry any listed unavailable lenses into your result. If composite findings are
-truncated, read every listed full member result and verify every finding, including
-those omitted from the bounded export. Apply the listed finding ID prefix to each
-member's IDs. Read the complete input index when listed.
-If any full result is capped or unavailable, report the coverage gap and source
-references from the index; do not claim a complete review. Preserve the
-truncation notice and paths in your result. If more than 32 findings exist, the
-required DISPOSITION lines can carry the extra verifications and evidence; keep
-the structured findings block within its limit.
-After all findings and prose, end with exactly one final non-empty line:
-VERDICT: PASS, VERDICT: FAIL, or VERDICT: INCONCLUSIVE. A closed handoff
-fence may follow.
 """
 
 [roles."review.synthesis"]
@@ -339,37 +320,9 @@ worktree = "${worktree}"
 source = { type = "node", node = "subject" }
 card = "You reconcile review findings into one verdict with a disposition for each."
 prompt = """
-Reconcile independent review findings against evidence for: ${prompt}
-Do not take a majority vote. Weigh each finding by its evidence and, where a
-verifier ran, by its UPHELD or FALSIFIED mark. Give every finding exactly one
-disposition with a one-line reason: accepted (must be fixed), rejected
-(evidence refutes it) or deferred (valid, not for this change). Include a
-fenced findings block (schema_version 1) with up to 32 finding ids; each
-entry carries "id", "disposition" (accepted, rejected or deferred) and "reason".
-Copy the upstream qualified id exactly; a bare id works only when unambiguous.
-These three fields suffice for upstream findings; descriptive fields are inherited.
-New findings require severity, file, summary, status, evidence and proposed_fix
-as structured fields as well.
-If the verifier's findings block is missing, empty or truncated, use its prose
-UPHELD/FALSIFIED marks together with the original lens findings. Record each
-upheld finding as accepted, with a reason citing the verifier's evidence.
-If composite findings are truncated, read every listed full member result and
-dispose of every finding, including those omitted from the bounded export. Apply
-the listed finding ID prefix to each member's IDs. Read the complete input index
-when listed. If any full result is capped or unavailable, report the coverage
-gap and source references from the index; do not claim a complete review.
-When more than 32 findings exist, the required DISPOSITION lines can carry the
-additional dispositions and reasons; keep the structured block within its
-32-entry limit. Name the truncation and full result paths in your result.
-A finding without a disposition is incomplete. Use this canonical array form:
-```findings
-{"schema_version":1,"findings":[{"id":"member:F1","disposition":"accepted","reason":"Evidence supports it"}]}
-```
-If the input lists unavailable lenses, state that the review is degraded and name
-them with their reasons. After all findings and prose, end with exactly one final
-non-empty verdict line: VERDICT: PASS only when no accepted finding remains and
-acceptance evidence is satisfied, otherwise VERDICT: FAIL. Use VERDICT: INCONCLUSIVE
-when the evidence cannot support a decision. A closed handoff fence may follow.
+Reconcile the independent findings against the available evidence. Do not decide
+by majority vote; judge the strength of each claim and whether it affects
+acceptance. Account for gaps in the evidence when assessing the review.
 """
 
 [roles."review.evaluator"]

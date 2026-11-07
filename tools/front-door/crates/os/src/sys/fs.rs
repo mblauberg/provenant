@@ -252,6 +252,24 @@ pub fn metadata_at(dir: &File, name: &OsStr, follow: bool) -> io::Result<Metadat
         mode: stat.st_mode as u32,
     })
 }
+
+/// Change permissions on a directory entry relative to a held parent. The
+/// caller must first inspect the entry without following links. Platforms with
+/// `AT_SYMLINK_NOFOLLOW` reject links instead of changing their targets.
+pub fn chmod_at(dir: &File, name: &OsStr, mode: u32) -> io::Result<()> {
+    let name = string(name)?;
+    // SAFETY: dir is borrowed and live, the name is NUL-terminated, and the
+    // operation is anchored to dir. AT_SYMLINK_NOFOLLOW prevents link targets
+    // from receiving the permission change.
+    status(unsafe {
+        libc::fchmodat(
+            dir.as_raw_fd(),
+            name.as_ptr(),
+            mode as libc::mode_t,
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    })
+}
 /// APFS exclusive allocation. Unsupported filesystems omit this attribute.
 #[cfg(target_os = "macos")]
 pub fn private_size_at(dir: &File, name: &OsStr) -> io::Result<Option<u64>> {

@@ -141,6 +141,7 @@ impl Providers for Confined {
             extensions: ExtensionPolicy::Deny,
             agy_state: None,
             permissions: PlanPermissions {
+                policy: None,
                 read_only: None,
                 mode,
                 scratch: grant("/fixture/scratch", PathScope::Subtree),

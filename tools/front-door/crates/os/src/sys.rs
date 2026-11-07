@@ -270,6 +270,8 @@ pub mod child;
 pub(crate) mod clock;
 pub(crate) mod pid;
 #[doc(hidden)]
+pub mod profile;
+#[doc(hidden)]
 pub mod raw_exec;
 
 #[doc(hidden)]

@@ -9,7 +9,7 @@ This spec owns how a dispatch becomes one exact provider model, how adapters
 build and decode launches, and how quota decides readiness. Run owns
 admission and publication ([run](run.md)); supervisor and confinement own
 custody and grants ([supervisor](supervisor.md)). Grammar is in the
-generated [CLI reference](../reference/cli.md), keys in the [config
+generated [CLI reference](../reference/cli-all.md), keys in the [config
 reference](../reference/config-keys.md), and bundled pools in
 `provenant route list`. Paths are relative to `tools/front-door/`.
 

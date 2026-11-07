@@ -742,31 +742,29 @@ fn capacity_store_failure_does_not_change_settlement() -> Result<(), Box<dyn std
     Ok(())
 }
 #[test]
-fn opencode_decode_with_context_reads_home_data_when_xdg_is_unset()
+fn opencode_decode_observes_private_session_instead_of_host()
 -> Result<(), Box<dyn std::error::Error>> {
-    if std::env::var_os(OPENCODE_DECODE_XDG_MARKER).is_none() {
-        run_opencode_decode_child(
-            "opencode_decode_with_context_reads_home_data_when_xdg_is_unset",
-            None,
-        )?;
-        return Ok(());
-    }
     let temp = tempfile::tempdir()?;
     let context = opencode_decode_holder_context(temp.path())?;
+    let state = temp.path().join("provider-state");
     seed_opencode_session(
-        &context.roots.home.join(".local/share/opencode"),
+        &state.join("candidate-0/data/opencode"),
         "ses_x",
         "opencode",
         "glm-5.3-flash-free",
     )?;
-    // The success fixture's stream reports no model; the session record
-    // beside the holder home supplies it through `decode_captures`.
+    seed_opencode_session(
+        &context.roots.home.join(".local/share/opencode"),
+        "ses_x",
+        "opencode",
+        "host-decoy",
+    )?;
     let decoded = Registry::default().decode_captures(
         &opencode_decode_route(),
         include_bytes!("../../../../tests/fixtures/providers/opencode/v2.2.0-success.jsonl"),
         &[],
         &clean_exit(),
-        Path::new("/nonexistent"),
+        &state,
         Some(&context),
     )?;
     assert_eq!(decoded.outcome, run::Outcome::Succeeded);
@@ -777,50 +775,6 @@ fn opencode_decode_with_context_reads_home_data_when_xdg_is_unset()
             .as_ref()
             .and_then(|r| r.model.as_deref()),
         Some("opencode/opencode/glm-5.3-flash-free")
-    );
-    Ok(())
-}
-#[test]
-fn absolute_xdg_data_home_wins_over_home_for_decode_with_context()
--> Result<(), Box<dyn std::error::Error>> {
-    if std::env::var_os(OPENCODE_DECODE_XDG_MARKER).is_none() {
-        let xdg = tempfile::tempdir()?;
-        seed_opencode_session(
-            &xdg.path().join("opencode"),
-            "ses_x",
-            "opencode",
-            "beam-free",
-        )?;
-        run_opencode_decode_child(
-            "absolute_xdg_data_home_wins_over_home_for_decode_with_context",
-            Some(xdg.path()),
-        )?;
-        return Ok(());
-    }
-    let temp = tempfile::tempdir()?;
-    let context = opencode_decode_holder_context(temp.path())?;
-    // A differing home record proves `XDG_DATA_HOME` took precedence.
-    seed_opencode_session(
-        &context.roots.home.join(".local/share/opencode"),
-        "ses_x",
-        "opencode",
-        "home-decoy",
-    )?;
-    let decoded = Registry::default().decode_captures(
-        &opencode_decode_route(),
-        include_bytes!("../../../../tests/fixtures/providers/opencode/v2.2.0-success.jsonl"),
-        &[],
-        &clean_exit(),
-        Path::new("/nonexistent"),
-        Some(&context),
-    )?;
-    assert_eq!(decoded.outcome, run::Outcome::Succeeded);
-    assert_eq!(
-        decoded
-            .observed_route
-            .as_ref()
-            .and_then(|r| r.model.as_deref()),
-        Some("opencode/opencode/beam-free")
     );
     Ok(())
 }

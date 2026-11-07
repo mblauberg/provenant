@@ -375,6 +375,7 @@ fn read_only_plan_runs_host_git_with_a_private_home_outside_the_child_store()
     let request = PlanRequest {
         scope: WorkScope::Project(ProjectId::from_bytes([1; 16])),
         permissions: PlanPermissions {
+            policy: None,
             read_only: None,
             mode: AccessMode::ReadOnly,
             scratch: grant("scratch"),
@@ -396,6 +397,7 @@ fn read_only_plan_runs_host_git_with_a_private_home_outside_the_child_store()
     let result = read_only_plan(
         &roots,
         ProjectId::from_bytes([1; 16]),
+        &repo,
         &repo,
         &git,
         request,
@@ -486,13 +488,13 @@ fn credential_authority_never_follows_links_below_the_host_root()
 }
 
 #[test]
-fn user_sessions_and_pruned_codex_state_remain_resumable() -> Result<(), Box<dyn std::error::Error>>
+fn missing_legacy_sessions_fail_and_retained_codex_remains_resumable() -> Result<(), Box<dyn std::error::Error>>
 {
     use provenant_core::{AttemptId, Digest, RunId, TaskId};
     use provenant_records::{
         FileDigest, RouteAlternatives, RouteConfidentiality, RouteEligibility, RouteReadiness,
     };
-    for adapter in ["cursor", "opencode", "codex"] {
+    for adapter in ["cursor", "opencode", "claude", "codex"] {
         let route = ResolvedRoute {
             extra: Default::default(),
             adapter: adapter.into(),
@@ -528,8 +530,8 @@ fn user_sessions_and_pruned_codex_state_remain_resumable() -> Result<(), Box<dyn
         }))?;
         let state = Path::new("/fixture/missing-state");
         let result = continuation_for(&prior, &route, "fixture", state, state, state);
+        assert!(result.is_err(), "retained state is required for {adapter}");
         if adapter == "codex" {
-            assert!(result.is_err(), "Codex still requires its retained state");
             let session = "01234567-89ab-cdef-0123-456789abcdef";
             prior.session = Some(session.into());
             let rollout =
@@ -669,8 +671,13 @@ fn user_sessions_and_pruned_codex_state_remain_resumable() -> Result<(), Box<dyn
             let plan = ConfinedPlan::new(confinement_request(
                 prior.project_id,
                 ConfinementRoots {
+                    host_roots: None,
                     cwd: &cwd,
                     home: &home,
+                    state: Path::new("/fixture-host-state"),
+                    credential_roots: &[],
+                    github_roots: &[],
+                    protected_worktrees: &[],
                     scratch: &scratch,
                     private_state: &copied,
                     assets: &assets,
@@ -842,7 +849,46 @@ fn user_sessions_and_pruned_codex_state_remain_resumable() -> Result<(), Box<dyn
                 transcript
             );
         } else {
-            assert_eq!(result?.session(), "fixture-session");
+            let error = result.unwrap_err().to_string();
+            assert!(error.contains("retained provider continuation is missing or expired"));
+            assert!(error.contains("attempt-private state"));
+            assert!(error.contains("start a new lane"));
+            let error = continuation_available(&prior, state, state).unwrap_err().to_string();
+            assert!(error.contains("host-backed sessions from before this release cannot resume"));
+            assert!(error.contains("start a new lane"));
+            if adapter == "opencode" {
+                let temp = tempfile::tempdir()?;
+                let root = temp.path().canonicalize()?;
+                let state = root.join(format!("runs/{}/attempts/{}/provider-state", prior.run_id, prior.attempt_id));
+                let data = state.join("candidate-0/data/opencode");
+                std::fs::create_dir_all(&data)?;
+                let db = rusqlite::Connection::open(data.join("opencode.db"))?;
+                db.execute_batch("CREATE TABLE session (id TEXT PRIMARY KEY); CREATE TABLE session_message (session_id TEXT, type TEXT, data TEXT)")?;
+                db.execute("INSERT INTO session VALUES (?1)", ["fixture-session"])?;
+                db.execute("INSERT INTO session_message VALUES (?1, 'assistant', ?2)", ("fixture-session", r#"{"model":{"providerID":"fixture","id":"model"}}"#))?;
+                drop(db);
+                let copied = root.join("copy");
+                continuation_available(&prior, &root, &root)?;
+                let resumed = continuation_for(&prior, &route, "fixture", &root, &root, &copied)?;
+                assert_eq!(resumed.session(), "fixture-session");
+                assert_eq!(provenant_providers::opencode::observe_model(&copied.join("data/opencode"), "fixture-session")?, "opencode/fixture/model");
+                let db = rusqlite::Connection::open(data.join("opencode.db"))?;
+                db.execute("INSERT INTO session_message VALUES (?1, 'assistant', ?2)", ("fixture-session", r#"{"model":{"providerID":"other","id":"model"}}"#))?;
+                for case in ["ambiguous", "absent"] {
+                    if case == "absent" { db.execute("DELETE FROM session_message", [])?; }
+                    assert!(provenant_providers::opencode::observe_model(&data, "fixture-session").is_err());
+                    continuation_available(&prior, &root, &root)?;
+                    let target = root.join(format!("copy-{case}"));
+                    assert_eq!(continuation_for(&prior, &route, "fixture", &root, &root, &target)?.session(), "fixture-session");
+                }
+                let other = state.join("candidate-1/data/opencode");
+                std::fs::create_dir_all(&other)?;
+                std::fs::copy(data.join("opencode.db"), other.join("opencode.db"))?;
+                assert!(continuation_available(&prior, &root, &root).is_err());
+                std::fs::remove_dir_all(state.join("candidate-1"))?;
+                db.execute("DELETE FROM session", [])?;
+                assert!(continuation_available(&prior, &root, &root).is_err());
+            }
             prior.session = None;
             assert!(continuation_for(&prior, &route, "fixture", state, state, state).is_err());
         }

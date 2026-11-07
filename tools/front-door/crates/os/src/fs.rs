@@ -672,6 +672,31 @@ impl Directory {
         )?;
         Ok(child)
     }
+    /// Restore owner rwx on an owned directory entry using this held parent.
+    /// Links and directories owned by another user are left untouched. The
+    /// caller can then open the directory normally and report any remaining
+    /// access failure through its usual path.
+    pub fn make_owner_accessible_at(&self, name: &OsStr) -> Result<bool> {
+        let name = component(name)?;
+        let before = self.metadata_at(name, false)?;
+        if before.kind != FileKind::Directory || before.uid != effective_uid() {
+            return Ok(false);
+        }
+        if before.mode & 0o700 == 0o700 {
+            return Ok(true);
+        }
+        os::chmod_at(&self.file, name, before.mode | 0o700)
+            .map_err(error("fchmodat directory", &self.path.join(name)))?;
+        let after = self.metadata_at(name, false)?;
+        if !before.same_identity(&after)
+            || after.kind != FileKind::Directory
+            || after.uid != effective_uid()
+            || after.mode & 0o700 != 0o700
+        {
+            return Err(FsError::RaceRefused { name: name.into() });
+        }
+        Ok(true)
+    }
     pub fn open_read(&self, name: &OsStr) -> Result<FileHandle> {
         let name = component(name)?;
         FileHandle::regular(

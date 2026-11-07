@@ -183,7 +183,7 @@ pub fn lane_preamble(model_guidance: &str, writer: bool, handoff: &Path) -> Stri
 
 pub fn handoff_progress_guidance(path: &Path) -> String {
     format!(
-        "Progress handoff JSON: {}. Update this file atomically throughout the task and repeat its current value in the final handoff fence. It is lane state, never a repository file or a commit.\n",
+        "Progress handoff JSON: {}. Update this file throughout the task by writing a temporary file beside it and renaming it into place (hard links are denied), and repeat its current value in the final handoff fence. A failed update never blocks the work: carry on and report the value in the fence. It is lane state, never a repository file or a commit.\n",
         path.display()
     )
 }

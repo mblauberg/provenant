@@ -346,6 +346,16 @@ fn lane_git_supports_stash_rebase_and_merge_with_shared_metadata_read_only()
         observations: Default::default(),
     };
     let plan = PlanPermissions {
+        policy: Some(
+            provenant_confinement::run_config::RunConfig::default().policy_for_launch(
+                &root.join("state"),
+                provenant_confinement::permissions::MandatoryRoots::new(
+                    &home,
+                    &root.join("state"),
+                    &lane,
+                )?,
+            ),
+        ),
         read_only: None,
         mode: AccessMode::WorktreeWrite(Box::new(authority)),
         scratch: grant(scratch.clone()),
@@ -881,5 +891,337 @@ fn lane_git_supports_stash_rebase_and_merge_with_shared_metadata_read_only()
         ok(run(&["rev-parse", "FETCH_HEAD"]))
     );
     assert_eq!(fs::read(private.join("index"))?, shared_index);
+    Ok(())
+}
+
+#[test]
+fn read_only_lane_fetches_into_private_git_with_host_metadata_denied() -> Result<(), Box<dyn Error>>
+{
+    use provenant_confinement::plan::ReadOnlyPolicy;
+    use provenant_confinement::{CodexPolicy, ExtensionPolicy, PlanRequest};
+    use provenant_core::{RootInputs, WorkScope};
+    let temp = tempfile::tempdir()?;
+    let root = fs::canonicalize(temp.path())?;
+    let home = root.join("home");
+    let source = root.join("source");
+    let lane = root.join("lane");
+    let scratch = root.join("scratch");
+    for path in [&home, &source, &scratch] {
+        fs::create_dir(path)?;
+    }
+    fs::set_permissions(&home, fs::Permissions::from_mode(0o700))?;
+    fs::set_permissions(&scratch, fs::Permissions::from_mode(0o700))?;
+    let git_path = provenant_os::git::git_executable()
+        .ok_or("Git unavailable")?
+        .canonicalize()?;
+    let source_git = source.join(".git");
+    ok(git(
+        &git_path,
+        &source_git,
+        &source,
+        &home,
+        &["init", "-q", "-b", "main"],
+    ));
+    ok(git(
+        &git_path,
+        &source_git,
+        &source,
+        &home,
+        &["config", "user.name", "Fixture"],
+    ));
+    ok(git(
+        &git_path,
+        &source_git,
+        &source,
+        &home,
+        &["config", "user.email", "fixture@example.invalid"],
+    ));
+    fs::write(source.join("file"), "base\n")?;
+    ok(git(
+        &git_path,
+        &source_git,
+        &source,
+        &home,
+        &["add", "file"],
+    ));
+    ok(git(
+        &git_path,
+        &source_git,
+        &source,
+        &home,
+        &["commit", "-qm", "base"],
+    ));
+    ok(git(
+        &git_path,
+        &source_git,
+        &source,
+        &home,
+        &[
+            "worktree",
+            "add",
+            "-qb",
+            "review",
+            lane.to_str().ok_or("lane")?,
+        ],
+    ));
+    let executor = SystemExecutor::new(2)?;
+    let cancel = CancelToken::new();
+    let runtime = UtilityRuntime::new(&git_path, &home)?;
+    let repo = runtime.open_read_repo(
+        &executor,
+        &lane,
+        UtilityBudget::bounded(Duration::from_secs(10))?,
+        &cancel,
+    )?;
+    let mut inputs = RootInputs::new(home.clone(), lane.clone());
+    inputs.state_dir = Some(root.join("state"));
+    fs::create_dir_all(root.join("state"))?;
+    let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+    let binding = provenant_config::bind_project(
+        &roots,
+        provenant_config::ProjectLocation::new(repo.common_git_dir())?,
+    )?;
+    let grant = |path: PathBuf| PathGrant {
+        path,
+        scope: PathScope::Subtree,
+    };
+    let request = PlanRequest {
+        scope: WorkScope::Project(binding.project_id()),
+        codex: CodexPolicy::Clean,
+        extensions: ExtensionPolicy::Deny,
+        agy_state: None,
+        permissions: PlanPermissions {
+            policy: Some(
+                provenant_confinement::run_config::RunConfig::default().policy_for_launch(
+                    &root.join("state"),
+                    provenant_confinement::permissions::MandatoryRoots::new(
+                        &home,
+                        &root.join("state"),
+                        &lane,
+                    )?,
+                ),
+            ),
+            read_only: None,
+            mode: AccessMode::ReadOnly,
+            scratch: grant(scratch.clone()),
+            private_state: None,
+            read_roots: vec![grant(source.clone())],
+            protected_roots: vec![],
+            secret_roots: vec![],
+            selected_authentication: None,
+            include_continuation: false,
+            write_roots: vec![],
+            network: NetworkAccess::Provider,
+            nested_confinement: false,
+        },
+    }
+    .with_read_only_repo(&repo, &binding, &ReadOnlyPolicy::default())?;
+    let plan = request.permissions;
+    let exec_path = fs::canonicalize(
+        ok(git(
+            &git_path,
+            &source_git,
+            &source,
+            &home,
+            &["--exec-path"],
+        ))
+        .trim(),
+    )?;
+    let mut runtime_reads = vec![grant(exec_path.clone())];
+    for prefix in ["/opt/homebrew", "/usr/local"] {
+        if let Ok(prefix) = fs::canonicalize(prefix)
+            && git_path.starts_with(&prefix)
+        {
+            runtime_reads.push(grant(prefix));
+        }
+    }
+    let profile = ProviderProfile {
+        spec: ProviderProfileSpec {
+            allow_process_fork: true,
+            runtime_reads,
+            tool_exec_roots: ["/bin", "/usr/bin", "/usr/libexec"]
+                .iter()
+                .map(|p| grant(PathBuf::from(p)))
+                .chain([grant(exec_path)])
+                .collect(),
+            process_executables: vec![PathGrant {
+                path: git_path.clone(),
+                scope: PathScope::Exact,
+            }],
+            ..ProviderProfileSpec::default()
+        },
+        observations: Default::default(),
+    };
+    let objects = scratch.join("git-objects");
+    fs::create_dir_all(objects.join("info"))?;
+    fs::write(
+        objects.join("info/alternates"),
+        format!("{}\n", source_git.join("objects").display()),
+    )?;
+    let private = scratch.join("git-common");
+    fs::create_dir_all(private.join("objects"))?;
+    fs::create_dir_all(private.join("refs"))?;
+    fs::copy(source_git.join("config"), private.join("config"))?;
+    let head = ok(git(
+        &git_path,
+        repo.private_git_dir(),
+        &lane,
+        &home,
+        &["rev-parse", "HEAD"],
+    ));
+    fs::write(private.join("HEAD"), &head)?;
+    fs::copy(repo.private_git_dir().join("index"), private.join("index"))?;
+    let before_config = fs::read(source_git.join("config"))?;
+    let before_index = fs::read(repo.private_git_dir().join("index"))?;
+    let before_head = fs::read(repo.private_git_dir().join("HEAD"))?;
+    let paths = required_anchors(&plan, &profile, None);
+    let directories = paths
+        .iter()
+        .map(AnchoredDirectory::open_canonical)
+        .collect::<Result<Vec<_>, _>>()?;
+    let anchors = Anchors {
+        home: &home,
+        directories: &directories,
+        worktree: None,
+    };
+    let env: Vec<(OsString, OsString)> = vec![
+        ("HOME".into(), home.clone().into_os_string()),
+        ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
+    ];
+    let backend = match system_backend(&BackendContext {
+        executor: &executor,
+        cancel: &cancel,
+        env: &env,
+    }) {
+        Ok(backend) => backend,
+        Err(error) => {
+            provenant_test_support::skip_sandbox_dependent_test(format!(
+                "native sandbox unavailable: {error}"
+            ))?;
+            return Ok(());
+        }
+    };
+    let launch = backend.compile(&plan, &profile, &anchors)?;
+    let sbpl = std::str::from_utf8(&launch.profile)?;
+    fs::write(source.join("new"), "upstream\n")?;
+    ok(git(&git_path, &source_git, &source, &home, &["add", "new"]));
+    ok(git(
+        &git_path,
+        &source_git,
+        &source,
+        &home,
+        &["commit", "-qm", "upstream"],
+    ));
+    let upstream = ok(git(
+        &git_path,
+        &source_git,
+        &source,
+        &home,
+        &["rev-parse", "HEAD"],
+    ));
+    let run = |git_dir: &Path, args: &[&str]| {
+        let mut cmd = Command::new("/usr/bin/sandbox-exec");
+        provenant_os::fixture::scrub_git_env(&mut cmd);
+        cmd.args(["-p", sbpl])
+            .arg(&git_path)
+            .args(args)
+            .current_dir(&lane)
+            .env("GIT_DIR", git_dir)
+            .env("GIT_WORK_TREE", &lane)
+            .env("HOME", &home)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_OBJECT_DIRECTORY", &objects)
+            .output()
+            .expect("run Git")
+    };
+    let remote = source.to_str().ok_or("source")?;
+    ok(run(
+        &private,
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "fetch",
+            remote,
+            "refs/heads/main:refs/remotes/origin/main",
+        ],
+    ));
+    assert_eq!(ok(run(&private, &["rev-parse", "FETCH_HEAD"])), upstream);
+    assert_eq!(
+        ok(run(&private, &["rev-parse", "refs/remotes/origin/main"])),
+        upstream
+    );
+    assert_eq!(ok(run(&private, &["rev-parse", "HEAD"])), head);
+    // An absolute call bypasses the wrapper and discovers the host .git marker.
+    // Confinement must deny its writes rather than redirecting them to scratch.
+    fn metadata_tree(
+        path: &Path,
+    ) -> std::io::Result<std::collections::BTreeMap<PathBuf, Option<Vec<u8>>>> {
+        let mut tree = std::collections::BTreeMap::new();
+        for entry in fs::read_dir(path)? {
+            let path = entry?.path();
+            if path.is_dir() {
+                tree.insert(path.clone(), None);
+                tree.extend(metadata_tree(&path)?);
+            } else {
+                tree.insert(path.clone(), Some(fs::read(path)?));
+            }
+        }
+        Ok(tree)
+    }
+    let before_metadata = metadata_tree(&source_git)?;
+    let absolute = |args: &[&str]| {
+        let mut cmd = Command::new("/usr/bin/sandbox-exec");
+        provenant_os::fixture::scrub_git_env(&mut cmd);
+        cmd.args(["-p", sbpl])
+            .arg(&git_path)
+            .args(args)
+            .current_dir(&lane)
+            .env("HOME", &home)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .output()
+            .expect("absolute Git")
+    };
+    assert_eq!(
+        ok(absolute(&["rev-parse", "--absolute-git-dir"])).trim(),
+        repo.private_git_dir()
+            .to_str()
+            .ok_or("host Git directory")?
+    );
+    let denied = absolute(&[
+        "-c",
+        "protocol.file.allow=always",
+        "fetch",
+        remote,
+        "refs/heads/main:refs/remotes/origin/absolute",
+    ]);
+    assert!(
+        !denied.status.success(),
+        "absolute Git unexpectedly wrote host metadata"
+    );
+    assert_eq!(metadata_tree(&source_git)?, before_metadata);
+
+    assert!(
+        !run(
+            repo.private_git_dir(),
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "fetch",
+                remote,
+                "refs/heads/main:refs/remotes/origin/main"
+            ]
+        )
+        .status
+        .success()
+    );
+    assert_eq!(fs::read(source_git.join("config"))?, before_config);
+    assert_eq!(
+        fs::read(repo.private_git_dir().join("index"))?,
+        before_index
+    );
+    assert_eq!(fs::read(repo.private_git_dir().join("HEAD"))?, before_head);
+    assert_eq!(fs::read(lane.join("file"))?, b"base\n");
     Ok(())
 }

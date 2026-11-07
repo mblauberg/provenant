@@ -39,7 +39,7 @@ pub(super) use continuation::continuation_available;
 pub(super) use fixtures::start_fabric_relay;
 #[cfg(feature = "fixture")]
 pub use fixtures::{apply_fixture_setup, prepare_fixture, writer_fixture_plan};
-pub(super) use observation::observe_codex_rollout;
+pub(super) use observation::{observe_codex_rollout, observe_opencode_session};
 use preparation::PrepareError;
 pub(super) use preparation::prepare;
 

@@ -238,7 +238,7 @@ fn unrepresentable_library_target_reports_incomplete_closure()
     let alias = root.join("library-link");
     std::os::unix::fs::symlink(&library, &alias)?;
     std::fs::write(&executable, test_macho(&[alias.to_str().ok_or("alias")?]))?;
-    let plan = fixture_access_plan(Access::ReadOnly, None, false);
+    let plan = fixture_access_plan(Access::ReadOnly, Some("login"), false);
     let mut route = route("opencode", "fixture-model");
     route.account_key = None;
     let prompt = Prompt::new("fixture".into());
@@ -354,7 +354,7 @@ fn opencode_skill_and_provider_config_omissions_keep_both_sources()
     std::os::unix::fs::symlink(&secret, secret.join("skills"))?;
     let mut route = route("opencode", "fixture-model");
     route.account_key = None;
-    let plan = fixture_access_plan(Access::ReadOnly, None, false);
+    let plan = fixture_access_plan(Access::ReadOnly, Some("login"), false);
     let prompt = Prompt::new("fixture".into());
     let mut input = fixture_input(&route, &plan, &prompt, Path::new("/fixture/repo"), None);
     input.home = &home;
@@ -451,7 +451,7 @@ fn assert_lane_user_skills(adapter: &str) -> Result<(), Box<dyn std::error::Erro
     let prompt = Prompt::new("fixture".into());
     let token = fixture_token();
     let authentication = match adapter {
-        "codex" | "cursor" => Some("login"),
+        "codex" | "cursor" | "opencode" => Some("login"),
         "agy" => Some("keychain"),
         _ => None,
     };
@@ -582,7 +582,7 @@ fn assert_lane_user_skills(adapter: &str) -> Result<(), Box<dyn std::error::Erro
                 assert!(
                     spec.profile
                         .spec
-                        .runtime_reads
+                        .authentication[0].roots
                         .contains(&crate::launch::exact(&opencode_config))
                 );
             }
@@ -868,7 +868,7 @@ fn staged_skills_native_probes() -> Result<(), Box<dyn std::error::Error>> {
             std::fs::copy(std::env::current_exe()?, &executable)?;
             let authentication = match adapter {
                 "agy" => Some("keychain"),
-                "codex" | "cursor" => Some("login"),
+                "codex" | "cursor" | "opencode" => Some("login"),
                 _ => None,
             };
             let base = read_only_plan(fixture.to_str().ok_or("fixture path")?, authentication);
@@ -882,7 +882,14 @@ fn staged_skills_native_probes() -> Result<(), Box<dyn std::error::Error>> {
                     }))?;
                 permissions.mode = AccessMode::WorktreeWrite(Box::new(authority));
             }
-            let plan = ConfinedPlan::new(PlanRequest {
+            let state = fixture.join("state");
+            permissions.policy = Some(
+                provenant_confinement::run_config::RunConfig::default().policy_for_launch(
+                    &state,
+                    provenant_confinement::permissions::MandatoryRoots::new(&home, &state, &repo)?,
+                ),
+            );
+            let mut plan = ConfinedPlan::new(PlanRequest {
                 scope: base.scope(),
                 permissions,
                 codex: CodexPolicy::Clean,
@@ -912,16 +919,28 @@ fn staged_skills_native_probes() -> Result<(), Box<dyn std::error::Error>> {
                     _ => return Err("unexpected staged setup".into()),
                 }
             }
+            // Preparation binds the stage as an immutable mandatory read.
+            plan.policy_mut()
+                .ok_or("missing lane policy")?
+                .mandatory_mut()
+                .add_state_read_exec(provenant_confinement::permissions::PathGrant {
+                    path: stage.clone(),
+                    scope: provenant_confinement::permissions::PathScope::Subtree,
+                })?;
             let profile = render(plan.permissions(), &launch.profile, &home)?;
-            let output = std::process::Command::new("/usr/bin/sandbox-exec")
+            let mut probe = std::process::Command::new("/usr/bin/sandbox-exec");
+            probe
                 .args(["-p", &profile])
                 .arg(&executable)
                 .args(["--exact", "tests::staged_skills_probe_child", "--ignored", "--nocapture"])
                 .env_clear()
                 .env("PROVENANT_PROBE_STAGE", stage.join("SKILL.md"))
-                .env("PROVENANT_PROBE_HOST", skills.join("SKILL.md"))
-                .env("PROVENANT_PROBE_SECRET", &secret)
-                .output()?;
+                .env("PROVENANT_PROBE_SECRET", &secret);
+            // Codex's host skills sit outside the mandatory credential roots.
+            if adapter != "codex" {
+                probe.env("PROVENANT_PROBE_HOST", skills.join("SKILL.md"));
+            }
+            let output = probe.output()?;
             let error = String::from_utf8_lossy(&output.stderr);
             if error.contains("sandbox_apply: Operation not permitted") {
                 provenant_test_support::skip_sandbox_dependent_test(error.to_string())?;
@@ -947,13 +966,15 @@ fn staged_skills_native_probes() -> Result<(), Box<dyn std::error::Error>> {
 #[ignore = "invoked by staged_skills_native_probes"]
 fn staged_skills_probe_child() {
     let stage = std::env::var_os("PROVENANT_PROBE_STAGE").expect("stage path");
-    let host = std::env::var_os("PROVENANT_PROBE_HOST").expect("host path");
     let secret = std::env::var_os("PROVENANT_PROBE_SECRET").expect("secret path");
     assert_eq!(std::fs::read(&stage).unwrap(), b"fixture skill");
-    assert!(std::fs::read(&host).is_err());
     assert!(std::fs::read(&secret).is_err());
     assert!(std::fs::write(&stage, b"x").is_err());
-    assert!(std::fs::write(&host, b"x").is_err());
+    assert!(std::fs::write(&secret, b"x").is_err());
+    if let Some(host) = std::env::var_os("PROVENANT_PROBE_HOST") {
+        assert!(std::fs::read(&host).is_err());
+        assert!(std::fs::write(&host, b"x").is_err());
+    }
     std::io::Write::write_all(
         &mut std::io::stdout(),
         b"staged skills assertions completed\n",
@@ -999,7 +1020,7 @@ fn tool_search_path_preserves_native_home_and_omits_unusable_entry() {
 }
 
 #[test]
-fn claude_writer_uses_scratch_when_private_state_is_absent() -> Result<(), ProviderError> {
+fn claude_writer_requires_private_state() -> Result<(), ProviderError> {
     use provenant_confinement::{CodexPolicy, ConfinedPlan, ExtensionPolicy, PlanRequest};
     let original = fixture_access_plan(Access::WorktreeWrite, None, false);
     let mut permissions = original.permissions().clone();
@@ -1016,31 +1037,19 @@ fn claude_writer_uses_scratch_when_private_state_is_absent() -> Result<(), Provi
     route.account_key = None;
     let prompt = Prompt::new("fixture".into());
     let token = fixture_token();
-    let launch = claude::Claude.prepare(fixture_input(
-        &route,
-        &plan,
-        &prompt,
-        Path::new("/fixture/repo"),
-        Some(&token),
-    ))?;
-    let config = plan.permissions().scratch.path.join("claude-config");
-    assert!(
-        launch
-            .env
-            .iter()
-            .any(|(key, value)| key == "CLAUDE_CONFIG_DIR" && value == config.as_os_str())
-    );
-    assert!(launch.setup.contains(&SetupStep::CreateDir(config)));
+    assert!(matches!(claude::Claude.prepare(fixture_input(
+        &route, &plan, &prompt, Path::new("/fixture/repo"), Some(&token),
+    )), Err(ProviderError::UnsupportedPolicy)));
     Ok(())
 }
 
 #[test]
-fn opencode_uses_scratch_when_private_state_is_absent() -> Result<(), ProviderError> {
+fn opencode_requires_private_state() -> Result<(), ProviderError> {
     use provenant_confinement::{CodexPolicy, ConfinedPlan, ExtensionPolicy, PlanRequest};
     let route = route("opencode", "fixture-model");
     let prompt = Prompt::new("fixture".into());
     for access in [Access::ReadOnly, Access::WorktreeWrite] {
-        let original = fixture_access_plan(access, None, false);
+        let original = fixture_access_plan(access, Some("login"), false);
         let mut permissions = original.permissions().clone();
         permissions.private_state = None;
         let plan = ConfinedPlan::new(PlanRequest {
@@ -1051,21 +1060,10 @@ fn opencode_uses_scratch_when_private_state_is_absent() -> Result<(), ProviderEr
             agy_state: None,
         })
         .expect("fixture plan");
-        let launch = opencode::OpenCode.prepare(fixture_input(
-            &route,
-            &plan,
-            &prompt,
-            Path::new("/fixture/repo"),
-            None,
-        ))?;
-        let scratch = &plan.permissions().scratch.path;
-        for (key, relative) in [
-            ("XDG_CONFIG_HOME", "config"),
-            ("XDG_CACHE_HOME", "cache"),
-            ("XDG_STATE_HOME", "state"),
-        ] {
-            assert!(launch.env.iter().any(|(name, value)| name == key && value == scratch.join(relative).as_os_str()));
-        }
+        assert!(matches!(opencode::OpenCode.prepare(fixture_input(
+            &route, &plan, &prompt, Path::new("/fixture/repo"), None,
+        )), Err(ProviderError::UnsupportedPolicy)));
+
     }
     Ok(())
 }

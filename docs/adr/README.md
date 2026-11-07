@@ -25,5 +25,6 @@ stable.
 | [0037](0037-batched-exact-candidate-landing.md) | Gate an exact batched landing candidate |
 | [0038](0038-cloud-job-ownership.md) | Own cloud jobs without a local process |
 | [0039](0039-graph-of-templates.md) | One graph of template nodes: a plain lane is one node, composites are data, one patch path changes a graph |
+| [0040](0040-open-lane-policy-with-explicit-boundaries.md) | Ambient lane access with explicit mandatory boundaries |
 
 Run `scripts/check-adr-index` to check file coverage and index targets.

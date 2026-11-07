@@ -473,8 +473,8 @@ printf 'agy 1.0.0\n'
             } else {
                 environment.push(("IDENTITY_PROBE".into(), "reader".into()));
             }
-            let argv = compiled.command(&prepared.argv, &attempt_id)?;
-            let mut options = ExecOptions::new(&argv, &prepared.cwd, Duration::from_secs(10));
+            let argv = compiled.command(&prepared.argv, &attempt_id, &provenant_os::fs::Directory::open_anchor(&std::env::temp_dir())?)?;
+            let mut options = argv.options(&prepared.cwd, Duration::from_secs(10))?;
             options.env = Some(&environment);
             let result = executor.execute(options)?;
             assert_eq!(result.termination, Termination::Exit(0), "{result:?}");
@@ -726,7 +726,7 @@ printf 'agy 1.0.0\n'
         codex.env.iter().any(|(key, _)| key == "CARGO_TARGET_DIR"),
         "the lane builds into its own target"
     );
-    configure_build_slots(
+    let coordination_reads = configure_build_slots(
         &mut codex,
         &provenant_config::LaneBuildSettings::default(),
         &home,
@@ -734,11 +734,21 @@ printf 'agy 1.0.0\n'
         &codex_runtime,
         &state,
     );
+    assert!(
+        coordination_reads
+            .iter()
+            .all(|root| root.scope == PathScope::Exact)
+    );
+    assert!(
+        coordination_reads
+            .iter()
+            .any(|root| root.path.ends_with("slot-0.lock"))
+    );
     // An unrepresentable shim input warns and leaves the prepared lane intact.
     let env_before = codex.env.clone();
     let profile_before = codex.profile.spec.clone();
     let setup_count = codex.setup.len();
-    configure_build_slots(
+    let refused_coordination_reads = configure_build_slots(
         &mut codex,
         &provenant_config::LaneBuildSettings::default(),
         &home,
@@ -746,6 +756,7 @@ printf 'agy 1.0.0\n'
         Path::new("relative-runtime"),
         &state,
     );
+    assert!(refused_coordination_reads.is_empty());
     assert_eq!(codex.env, env_before);
     assert_eq!(codex.profile.spec, profile_before);
     assert_eq!(codex.setup.len(), setup_count);
@@ -1007,7 +1018,7 @@ printf 'agy 1.0.0\n'
             &confinement.profile,
             &anchors,
         )?;
-        let confined_command = compiled.command(&publishing.argv, &attempt_id)?;
+        let confined_command = compiled.command(&publishing.argv, &attempt_id, &provenant_os::fs::Directory::open_anchor(&std::env::temp_dir())?)?;
         assert!(!confined_command.is_empty());
     }
     for name in ["ignore", "attributes"] {
@@ -1381,6 +1392,10 @@ printf 'agy 1.0.0\n'
     };
     prior.applied_route = Some(launch.route.clone());
     prior.session = Some("fixture-session".into());
+    // Cursor continuation is retained in the settled attempt, never the host home.
+    let retained_session = paths.provider_state.join("candidate-0/chats/fixture-session");
+    std::fs::create_dir_all(&retained_session)?;
+    std::fs::write(retained_session.join("transcript"), b"retained fixture session")?;
     let mut continued_task = task.clone();
     continued_task.route = prior.requested_route.clone();
     continued_task.account = Some("retired-account-alias".into());
@@ -1420,6 +1435,10 @@ printf 'agy 1.0.0\n'
     assert_eq!(continued.route.account_key, launch.route.account_key);
     assert!(continued.route.pool_selection.is_none());
     assert!(continued.argv.iter().any(|arg| arg == "--resume"));
+    assert_eq!(
+        std::fs::read(continued_paths.provider_state.join("candidate-0/chats/fixture-session/transcript"))?,
+        b"retained fixture session"
+    );
     let confinement = launch.confinement.ok_or("writer confinement missing")?;
     assert!(confinement.writer.is_some());
     // Exercise the actual request builder with two distinct project overrides.
@@ -1448,8 +1467,13 @@ printf 'agy 1.0.0\n'
     let request = confinement_request(
         project_a,
         ConfinementRoots {
+            host_roots: None,
             cwd: &project,
             home: &home,
+            state: Path::new("/fixture-host-state"),
+            credential_roots: &[],
+            github_roots: &[],
+            protected_worktrees: &[],
             scratch: &paths.scratch,
             private_state: &paths.provider_state,
             assets: &assets,
@@ -1525,7 +1549,7 @@ printf 'agy 1.0.0\n'
     .err()
     .ok_or("unconfinable worktree accepted")?;
     assert!(
-        matches!(error, PrepareError::Candidates { ref plans, .. } if plans.iter().any(|plan| matches!(plan, provenant_confinement::PlanError::InvalidRoots))),
+        matches!(error, PrepareError::Candidates { ref plans, .. } if plans.iter().any(|plan| matches!(plan, provenant_confinement::PlanError::Permission(provenant_confinement::permissions::PermissionError::ProtectedOverlap)))),
         "{error}"
     );
     Ok(())

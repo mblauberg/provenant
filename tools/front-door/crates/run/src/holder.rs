@@ -1,6 +1,7 @@
 //! The attempt holder: Run's admission and terminal transaction, composed into
 //! the same-binary guardian. It runs while the guardian still holds custody.
 use crate::{artifacts::read_sealed, launch::Providers, *};
+use provenant_confinement::permissions::PathGrant;
 use provenant_core::{ActorId, AttemptId, CancelToken, Clock, ProjectId, RootInputs, RunId};
 use provenant_os::{clock::SystemClock, exec::Termination, fs::Directory};
 use provenant_supervisor::{
@@ -48,6 +49,14 @@ pub struct HostLaunchContext {
     /// Trusted environment overrides for adapter default account directories.
     #[serde(default)]
     pub default_account_directories: std::collections::BTreeMap<String, PathBuf>,
+    /// Host-resolved relocated credential stores, inherited unchanged by children.
+    /// Required on the handoff pipe: an older host must not silently omit the
+    /// inventory needed by the ambient renderer.
+    pub credential_roots: Vec<PathGrant>,
+    pub github_roots: Vec<PathBuf>,
+    /// Trusted path overrides needed to select the same host authentication
+    /// mechanism after the guardian clears its process environment.
+    pub provider_path_environment: std::collections::BTreeMap<String, std::ffi::OsString>,
     #[serde(default)]
     pub cargo_build_jobs: Option<String>,
     /// Synthetic fake-provider evidence; absent from installed builds.
@@ -56,6 +65,24 @@ pub struct HostLaunchContext {
     pub fixture_state_write: bool,
 }
 impl HostLaunchContext {
+    pub fn provider_path_environment() -> std::collections::BTreeMap<String, std::ffi::OsString> {
+        [
+            "CODEX_HOME",
+            "CLAUDE_CONFIG_DIR",
+            "GH_CONFIG_DIR",
+            "XDG_CONFIG_HOME",
+            "XDG_DATA_HOME",
+        ]
+        .into_iter()
+        .filter_map(|name| std::env::var_os(name).map(|value| (name.into(), value)))
+        .collect()
+    }
+    pub fn github_roots() -> Vec<PathBuf> {
+        provenant_confinement::permissions::host_github_roots(|name| std::env::var_os(name))
+    }
+    pub fn credential_roots() -> Vec<PathGrant> {
+        provenant_confinement::permissions::host_credential_roots(|name| std::env::var_os(name))
+    }
     pub fn default_account_directories() -> std::collections::BTreeMap<String, PathBuf> {
         account_directories(provenant_records::ADAPTER_SPECS, |name| {
             std::env::var_os(name)
@@ -83,6 +110,9 @@ impl HostLaunchContext {
                 .unwrap_or_default(),
             git,
             default_account_directories: Self::default_account_directories(),
+            credential_roots: Self::credential_roots(),
+            github_roots: Self::github_roots(),
+            provider_path_environment: Self::provider_path_environment(),
             cargo_build_jobs: std::env::var("CARGO_BUILD_JOBS").ok(),
             #[cfg(feature = "fixture")]
             fixture_state_write: false,
@@ -2305,6 +2335,71 @@ mod host_clock_tests {
     use super::*;
 
     #[test]
+    fn credential_environment_seals_an_exact_ssh_agent_socket() {
+        use provenant_confinement::permissions::{PathScope, host_credential_roots};
+        let roots = host_credential_roots(|name| match name {
+            "SSH_AUTH_SOCK" => Some("/private/tmp/fixture-agent/socket".into()),
+            "XDG_CONFIG_HOME" => Some("/fixture/config".into()),
+            _ => None,
+        });
+        assert!(roots.contains(&PathGrant {
+            path: "/private/tmp/fixture-agent/socket".into(),
+            scope: PathScope::Exact
+        }));
+        assert!(roots.contains(&PathGrant {
+            path: "/fixture/config/opencode".into(),
+            scope: PathScope::Subtree
+        }));
+        assert!(
+            !roots
+                .iter()
+                .any(|root| root.path == std::path::Path::new("/private/tmp/fixture-agent"))
+        );
+        assert!(
+            host_credential_roots(
+                |name| (name == "SSH_AUTH_SOCK").then(|| "relative/socket".into())
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn host_launch_decode_requires_explicit_boundary_inventory()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let context: HostLaunchContext = serde_json::from_value(serde_json::json!({
+            "configuration_root": "/fixture/state",
+            "cwd": "/fixture/source",
+            "executables": {},
+            "git": "/fixture/git",
+            "credential_roots": [],
+            "github_roots": [],
+            "provider_path_environment": {}
+        }))?;
+        assert!(context.credential_roots.is_empty());
+        assert!(context.github_roots.is_empty());
+        assert!(context.provider_path_environment.is_empty());
+        let encoded = serde_json::to_value(&context)?;
+        for field in [
+            "credential_roots",
+            "github_roots",
+            "provider_path_environment",
+        ] {
+            let mut incomplete = encoded.clone();
+            incomplete
+                .as_object_mut()
+                .ok_or("host context object")?
+                .remove(field);
+            assert!(
+                serde_json::from_value::<HostLaunchContext>(incomplete).is_err(),
+                "missing {field} accepted"
+            );
+        }
+        let retained: HostLaunchContext = serde_json::from_value(encoded)?;
+        assert_eq!(retained, context);
+        Ok(())
+    }
+
+    #[test]
     fn account_directory_overrides_follow_registry_entries() {
         let mut fixture = provenant_records::ADAPTER_SPECS[0];
         fixture.name = "fixture";
@@ -2499,6 +2594,9 @@ mod disk_admission_tests {
                 executable_search_path: Vec::new(),
                 git: "/usr/bin/git".into(),
                 default_account_directories: Default::default(),
+                credential_roots: Default::default(),
+                github_roots: Default::default(),
+                provider_path_environment: Default::default(),
                 cargo_build_jobs: None,
                 #[cfg(feature = "fixture")]
                 fixture_state_write: false,

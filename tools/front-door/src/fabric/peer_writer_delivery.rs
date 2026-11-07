@@ -419,11 +419,7 @@ fn writer_repository_open_failure_hides_unanchored_project_path()
     };
     assert_eq!(
         serde_json::to_value(error)?,
-        serde_json::json!({
-            "code": "io",
-            "operation": "I/O operation",
-            "path": null,
-        })
+        serde_json::json!({"code": "confinement_refused"})
     );
     Ok(())
 }

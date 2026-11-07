@@ -104,7 +104,8 @@ fn custody_local(phase: &str, error: &custody::CustodyError) -> HandOff {
         custody::CustodyError::Fenced
         | custody::CustodyError::UnknownIdentity
         | custody::CustodyError::InvalidRecord
-        | custody::CustodyError::HandoffUnknown => HandOff::Boundary {
+        | custody::CustodyError::HandoffUnknown
+        | custody::CustodyError::ProfileHandoffUnknown => HandOff::Boundary {
             message,
             class: provenant_records::diagnostic::BoundaryClass::Authority,
             cause: None,
@@ -320,6 +321,7 @@ impl RunStore {
         if local_or_withdraw!(cancel_requested()) {
             local_or_withdraw!(Err::<(), _>(local("launch", &CANCELLED_BEFORE_LAUNCH)));
         }
+        let mut profile_file = None;
         if let Some(confinement) = &mut plan.confinement {
             let prepared = confinement.prepare_git(&setup_cancel);
             if let Err(error) = prepared {
@@ -368,7 +370,10 @@ impl RunStore {
                 local_or_withdraw!(Err::<(), _>(typed_local("lane Git objects", &error)));
             }
             match confinement.command(&plan.argv, &id, call.cancel) {
-                Ok(argv) => plan.argv = argv,
+                Ok(command) => {
+                    plan.argv = command.argv;
+                    profile_file = Some(command.profile);
+                }
                 Err(error) => {
                     local_or_withdraw!(Err::<(), _>(typed_local("confinement command", &error)));
                 }
@@ -388,6 +393,7 @@ impl RunStore {
             .filter(|c| c.writer.is_some())
             .and_then(|c| lane_port_plan_or_warn(&c.state_root));
         let command = ProviderCommand {
+            profile_file,
             lane_ports,
             resolved_route: route,
             permission_plan_digest: task.authority_digest,

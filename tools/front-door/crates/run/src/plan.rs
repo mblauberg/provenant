@@ -54,6 +54,17 @@ pub fn read_only_plan(
     read_only_plan_for_view(state, repo, binding, request, false)
 }
 
+/// Snapshot a read-only lane's Git state into its private scratch directory.
+pub fn prepare_read_only_git(
+    git: &std::path::Path,
+    repo: &ReadOnlyRepo,
+    scratch: &std::path::Path,
+    view_git: Option<&std::path::Path>,
+    head: Option<provenant_core::GitOid>,
+) -> Result<()> {
+    crate::objects::prepare_read_only(git, repo, scratch, view_git, head)
+}
+
 /// A live checkout with no checkout write exceptions or writer lease.
 pub fn live_read_only_plan(
     repo: &ReadOnlyRepo,
@@ -194,6 +205,7 @@ mod tests {
             extensions: ExtensionPolicy::Deny,
             agy_state: None,
             permissions: PlanPermissions {
+                policy: None,
                 read_only: None,
                 mode: AccessMode::ReadOnly,
                 scratch: PathGrant {

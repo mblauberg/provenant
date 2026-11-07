@@ -502,18 +502,17 @@ pub(crate) fn base_env(
     env
 }
 
-/// Writer Git uses a complete private directory, including its index and all
-/// operation state. Shared metadata is read-only. The Git launcher applies
+/// Repository lanes use a complete private Git directory, including its index
+/// and operation state. Shared metadata is read-only. The Git launcher applies
 /// this binding inside the worktree, even when a provider's subprocess clears
 /// its environment, and nowhere else.
 pub(crate) fn private_git_objects(
     input: &PrepareInput<'_>,
     spec: &mut LaunchSpec,
 ) -> Result<(), ProviderError> {
-    if !matches!(
-        input.confined.permissions().mode,
-        AccessMode::WorktreeWrite(_)
-    ) {
+    if matches!(input.confined.permissions().mode, AccessMode::ReadOnly)
+        && input.confined.permissions().read_only.is_none()
+    {
         let git = input.provenant.git;
         let bin = input
             .confined
@@ -526,6 +525,9 @@ pub(crate) fn private_git_objects(
             path: bin.join("git"),
             bytes: crate::lane::git_wrapper(git, &Default::default())?,
         });
+        spec.env.retain(|(key, _)| key != "PROVENANT_GIT");
+        spec.env
+            .push(("PROVENANT_GIT".into(), bin.join("git").into()));
         grant_exec_path(git, spec);
         spec.profile.spec.tool_exec_roots.push(subtree(&bin));
         spec.profile
@@ -609,15 +611,23 @@ pub(crate) fn private_git_objects(
         spec.env
             .push(("GIT_CONFIG_GLOBAL".into(), config.as_os_str().to_owned()));
     }
-    // The repository binding and explicit identity variables stay out of the
-    // ambient environment. Git's private global config carries the host
+    // The repository binding stays out of the ambient environment.
+    // Git's private global config carries the host
     // identity to any Git executable, while `useConfigOnly` prevents fallback
-    // to a generated hostname identity. The wrapper keeps the private binding
-    // limited to this worktree.
+    // to a generated hostname identity. The wrapper limits the private binding
+    // to this worktree.
+    let worktree = input
+        .confined
+        .permissions()
+        .read_only
+        .as_ref()
+        .map(|grants| grants.root())
+        .filter(|root| input.cwd.starts_with(root))
+        .unwrap_or(input.cwd);
     let mut bound = vec![
         ("GIT_DIR".into(), private.clone().into()),
         ("GIT_COMMON_DIR".into(), private.into()),
-        ("GIT_WORK_TREE".into(), input.cwd.into()),
+        ("GIT_WORK_TREE".into(), worktree.into()),
         (
             "GIT_OBJECT_DIRECTORY".into(),
             scratch.join("git-objects").into(),
@@ -640,12 +650,16 @@ pub(crate) fn private_git_objects(
         !identity
     });
     spec.git_wrapper.bound = Some(crate::lane::BoundGit {
-        worktree: input.cwd.to_owned(),
+        worktree: worktree.to_owned(),
         env: bound,
     });
     // A single source generates every Git shim, including Claude's scrub shim.
     spec.git_wrapper.scrub = true;
     spec.write_git_wrapper(&scratch.join("bin"), input.provenant.git)?;
+    // The generated wrapper embeds the real executable, so this cannot recurse.
+    spec.env.retain(|(key, _)| key != "PROVENANT_GIT");
+    spec.env
+        .push(("PROVENANT_GIT".into(), scratch.join("bin/git").into()));
     grant_exec_path(input.provenant.git, spec);
     spec.profile
         .spec

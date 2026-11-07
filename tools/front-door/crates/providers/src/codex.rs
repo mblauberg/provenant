@@ -204,6 +204,7 @@ fn prepare(
                 allow_process_fork: true,
                 runtime_reads,
                 authentication: vec![AuthenticationProfile {
+                    keychain: None,
                     mechanism: "login".into(),
                     roots: vec![exact(&credential)],
                     // Token refresh rewrites auth.json through the link.

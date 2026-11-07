@@ -42,22 +42,11 @@ fn claude_network_on_native_tls_files_are_readable() -> Result<(), Box<dyn std::
                 ))?;
                 return Ok(());
             }
-            assert_eq!(
-                output.status.success(),
-                network == NetworkAccess::Open,
-                "{network:?} {file}: {diagnostic}"
+            assert!(output.status.success(), "{network:?} {file}: {diagnostic}");
+            assert!(
+                !output.stdout.is_empty(),
+                "{file} must have been opened and read"
             );
-            if network == NetworkAccess::Open {
-                assert!(
-                    !output.stdout.is_empty(),
-                    "{file} must have been opened and read"
-                );
-            } else {
-                assert!(
-                    diagnostic.contains("Operation not permitted"),
-                    "{diagnostic}"
-                );
-            }
         }
     }
     Ok(())
@@ -275,7 +264,11 @@ fn stdin_adapters_receive_oversized_prompts_in_full() -> Result<(), ProviderErro
             .filter(|entry| matches!(entry.adapter.id(), "claude" | "codex" | "opencode"))
         {
             let id = entry.adapter.id();
-            let plan = fixture_access_plan(access, (id == "codex").then_some("login"), false);
+            let plan = fixture_access_plan(
+                access,
+                matches!(id, "codex" | "opencode").then_some("login"),
+                false,
+            );
             let mut route = route(id, "fixture-model");
             route.account_key = None;
             let spec = entry.adapter.prepare(fixture_input(
@@ -303,7 +296,7 @@ fn temporary_environment_follows_the_plan_for_readers_and_writers() -> Result<()
         }) {
             let id = entry.adapter.id();
             let authentication = match id {
-                "codex" | "cursor" => Some("login"),
+                "codex" | "cursor" | "opencode" => Some("login"),
                 "agy" => Some("keychain"),
                 _ => None,
             };
@@ -462,7 +455,7 @@ fn prepare_all_adapters_and_pin_launch_controls() -> Result<(), ProviderError> {
         route.account_key = None;
         // Codex and Agy read a credential inside the sandbox.
         let authentication = match id {
-            "codex" | "cursor" => Some("login"),
+            "codex" | "cursor" | "opencode" => Some("login"),
             "agy" => Some("keychain"),
             _ => None,
         };
@@ -503,6 +496,7 @@ fn prepare_all_adapters_and_pin_launch_controls() -> Result<(), ProviderError> {
                 "CLAUDE_CODE_TMPDIR",
                 "DISABLE_AUTOUPDATER",
                 "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+                "CLAUDE_CONFIG_DIR",
                 "GIT_CONFIG_GLOBAL",
                 "GIT_CONFIG_NOSYSTEM",
             ],
@@ -517,7 +511,6 @@ fn prepare_all_adapters_and_pin_launch_controls() -> Result<(), ProviderError> {
             "LANG",
             "PROVENANT_AGENT_LABEL",
             "PROVENANT_ROOT",
-            "PROVENANT_GIT",
             "PROVENANT_STATE_DIR",
             "PROVENANT_LANE_DEPTH",
             "PROVENANT_PARENT_ATTEMPT_ID",
@@ -564,7 +557,15 @@ fn prepare_all_adapters_and_pin_launch_controls() -> Result<(), ProviderError> {
                 ],
             );
         }
+        // Git selection is replaced after the adapter's environment is built.
+        expected.push("PROVENANT_GIT");
         assert_eq!(keys, expected, "{id}");
+        assert!(
+            spec.env.iter().any(|(key, value)| {
+                key == "PROVENANT_GIT" && value == "/fixture/scratch/read-only-git/git"
+            }),
+            "{id} must select its private Git wrapper"
+        );
         assert_eq!(spec.stdin, Stdin::Bytes(b"fixture prompt".to_vec()), "{id}");
         assert!(
             !argv.iter().any(|arg| arg.contains("fixture prompt")),
@@ -580,6 +581,10 @@ fn prepare_all_adapters_and_pin_launch_controls() -> Result<(), ProviderError> {
                 );
             }
             "claude" => {
+                assert_eq!(
+                    spec.env.iter().find(|(key, _)| key == "CLAUDE_CONFIG_DIR").map(|(_, value)| Path::new(value)),
+                    Some(confined.permissions().private_state.as_ref().unwrap().path.join("claude-config").as_path())
+                );
                 assert!(argv.iter().any(|arg| arg == "--mcp-config"));
                 assert!(argv.iter().any(|arg| arg == "--settings"));
                 assert!(!argv.iter().any(|arg| arg == "--safe-mode"));
@@ -1108,7 +1113,7 @@ fn opencode_uses_user_config_and_accounts_with_read_only_permissions() -> Result
     let route = route("opencode", "configured/model");
     for access in [Access::ReadOnly, Access::WorktreeWrite] {
         for git_context in [false, true] {
-            let plan = fixture_access_plan(access, None, false);
+            let plan = fixture_access_plan(access, Some("login"), false);
             let input = fixture_input(&route, &plan, &prompt, Path::new("/fixture/repo"), None);
             let spec = opencode::OpenCode.prepare(PrepareInput {
                 git_context,
@@ -1127,7 +1132,7 @@ fn opencode_uses_user_config_and_accounts_with_read_only_permissions() -> Result
             let config_home = Path::new(env("XDG_CONFIG_HOME").expect("config home"));
             let data_home = Path::new(env("XDG_DATA_HOME").expect("data home"));
             assert_eq!(config_home, Path::new("/fixture/state/config"));
-            assert!(!data_home.starts_with("/fixture/state"));
+            assert_eq!(data_home, Path::new("/fixture/state/data"));
             if config_home.join("opencode/skills").is_dir() {
                 assert!(
                     spec.profile
@@ -1136,12 +1141,7 @@ fn opencode_uses_user_config_and_accounts_with_read_only_permissions() -> Result
                         .contains(&crate::launch::subtree(config_home.join("opencode/skills")))
                 );
             }
-            assert!(
-                spec.profile
-                    .spec
-                    .runtime_reads
-                    .contains(&crate::launch::subtree(data_home.join("opencode")))
-            );
+            assert!(spec.profile.spec.authentication[0].roots.contains(&crate::launch::exact("/fixture/home/.local/share/opencode/auth.json")));
             let auth = data_home.join("opencode/auth.json");
             assert!(spec.profile.spec.state_writes.iter().all(|grant| {
                 match grant.scope {
@@ -1172,6 +1172,33 @@ fn opencode_uses_user_config_and_accounts_with_read_only_permissions() -> Result
                 } else {
                     assert!(config["permission"]["external_directory"].is_null());
                     assert!(config["permission"]["read"].is_null());
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn cursor_and_claude_keep_sessions_private_with_or_without_skills() -> Result<(), ProviderError> {
+    let prompt = Prompt::new("fixture".into());
+    let token = fixture_token();
+    for id in ["cursor", "claude"] {
+        for skills in [false, true] {
+            for access in [Access::ReadOnly, Access::WorktreeWrite] {
+                let mut route = route(id, "fixture-model");
+                route.account_key = None;
+                route.set_user_skills(skills);
+                let plan = fixture_access_plan(access, (id == "cursor").then_some("login"), false);
+                let input = fixture_input(&route, &plan, &prompt, Path::new("/fixture/repo"), (id == "claude").then_some(&token));
+                let adapter = REGISTRY.iter().find(|entry| entry.adapter.id() == id).unwrap().adapter;
+                let spec = adapter.prepare(input)?;
+                let key = if id == "claude" { "CLAUDE_CONFIG_DIR" } else { "HOME" };
+                let expected = if id == "claude" { "/fixture/state/claude-config" } else { "/fixture/state" };
+                assert!(spec.env.iter().any(|(name, value)| name == key && value == expected));
+                assert!(spec.profile.spec.state_writes.iter().all(|grant| !grant.path.starts_with("/fixture/home")));
+                if id == "cursor" {
+                    assert!(spec.setup.contains(&SetupStep::CreateDir("/fixture/state/.cursor/chats".into())));
                 }
             }
         }

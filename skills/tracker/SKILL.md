@@ -99,7 +99,12 @@ provenant run --use explore --route junior --file sweep.md --explain
 ```
 
 See [steward and closing](references/steward.md) and [filing detail](references/filing.md).
-Prefer REST over GraphQL; on a rate limit, stop and report the reset time.
+Prefer REST over GraphQL. Before hybrid searches, read `.resources.search` with
+`gh api rate_limit`; pace requests one at a time against its remaining quota and
+reset time. Hybrid search may have a lower limit than the bucket reports, so
+treat a limit error as authoritative. Record each result as it returns. If its
+reset is within two minutes, wait and continue; otherwise stop and report the
+reset time. Include assessed issues in a partial report.
 
 ## Authority
 

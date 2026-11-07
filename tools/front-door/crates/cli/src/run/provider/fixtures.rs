@@ -8,10 +8,13 @@ pub fn apply_fixture_setup(steps: &[SetupStep], roots: &[&Path]) -> Result<(), S
 
 /// Fixture access to the production plan builder; installed builds omit it.
 #[cfg(feature = "fixture")]
+#[allow(clippy::too_many_arguments)]
 pub fn writer_fixture_plan(
     project: ProjectId,
     cwd: &Path,
     home: &Path,
+    state: &Path,
+    protected_worktrees: &[PathGrant],
     paths: &run::LaunchPaths,
     writer: &run::WriterLaunch,
     assets: &Path,
@@ -25,8 +28,13 @@ pub fn writer_fixture_plan(
     let request = confinement_request(
         project,
         ConfinementRoots {
+            host_roots: None,
             cwd,
             home,
+            state,
+            credential_roots: &[],
+            github_roots: &[],
+            protected_worktrees,
             scratch: &scratch,
             private_state: &paths.provider_state,
             assets,
