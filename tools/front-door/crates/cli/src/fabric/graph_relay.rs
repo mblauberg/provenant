@@ -206,9 +206,9 @@ pub fn serve_with_read(
         .map_err(journal_error)?
         .ok_or_else(not_a_node)?
         .document;
-    // Finish provisioning fenced by an earlier crashed call before anything else.
-    // Its settled refusal belongs to that child, not to this new operation.
-    let _ = recover_provisioning(context, &mut journal, &mut checkpoint, budget, cancel)?;
+    // Reconcile older Git effects without making their refusal a refusal of
+    // this unrelated operation. Unresolved effects retain their fence.
+    let _ = recover_provisioning(context, &mut journal, &mut checkpoint, &[], budget, cancel)?;
     // A settled parent or superseded attempt may only replay an earlier receipt.
     let live = relay::parent_of_attempt(&checkpoint, &reference).map(str::to_owned);
     let parent = match (&live, &op) {
@@ -354,9 +354,14 @@ pub fn serve_with_read(
                 // this point is finished by `recover_provisioning`.
                 relay::fence_provisioning(&mut checkpoint, &receipt.node, path, &source);
                 journal.save(&checkpoint).map_err(journal_error)?;
-                if let Some(error) =
-                    recover_provisioning(context, &mut journal, &mut checkpoint, budget, cancel)?
-                {
+                if let Some(error) = recover_provisioning(
+                    context,
+                    &mut journal,
+                    &mut checkpoint,
+                    std::slice::from_ref(&receipt.node),
+                    budget,
+                    cancel,
+                )? {
                     return Err(error);
                 }
             }
@@ -489,12 +494,15 @@ fn provision_added_writers(
     cancel: &CancelToken,
 ) -> Result<(), ServiceError> {
     use provenant_fabric_runtime::graph::{AccessMode, NodeState, SourceBinding};
+    let pending = relay::pending_provisioning(checkpoint);
+    let mut fresh = Vec::new();
     let writers: Vec<_> = checkpoint
         .expansions
         .iter()
         .flat_map(|expansion| &expansion.nodes)
         .filter(|node| {
             (added.is_empty() || added.contains(&node.id))
+                && !pending.iter().any(|(id, _, _)| id == &node.id)
                 && node.access == AccessMode::WorktreeWrite
                 && node
                     .extra
@@ -561,23 +569,27 @@ fn provision_added_writers(
                 .insert("provisioned_source".into(), source.clone().into());
         }
         relay::fence_provisioning(checkpoint, &node.id, path, &source);
+        fresh.push(node.id.clone());
     }
     if !relay::pending_provisioning(checkpoint).is_empty() {
         journal.save(checkpoint).map_err(journal_error)?;
-        if let Some(error) = recover_provisioning(context, journal, checkpoint, budget, cancel)? {
+        if let Some(error) =
+            recover_provisioning(context, journal, checkpoint, &fresh, budget, cancel)?
+        {
             return Err(error);
         }
     }
     Ok(())
 }
 
-/// Recover fenced provisioning, durably settling definitive refusals too.
-/// Return a settled refusal to the admitting call; recovery of an older call
-/// leaves that refusal on the child and allows unrelated operations to proceed.
+/// Provision newly fenced writers and reconcile older, uncertain Git effects.
+/// Only a fresh admission can settle on a refusal before mutation: an older
+/// fence needs successful reconciliation, regardless of a later refusal.
 fn recover_provisioning(
     context: &Context,
     journal: &mut FileJournal,
     checkpoint: &mut provenant_fabric_runtime::graph::GraphCheckpoint,
+    fresh: &[String],
     budget: WaitBudget,
     cancel: &CancelToken,
 ) -> Result<Option<ServiceError>, ServiceError> {
@@ -600,7 +612,11 @@ fn recover_provisioning(
             .find(|progress| progress.id == node)
             .and_then(|progress| progress.launch_retry.as_ref())
             .and_then(|retry| retry.deadline);
+        let recovering = !fresh.contains(&node);
+        // Reconciliation is a new bounded operation, not another share of an
+        // expired launch. Keep the original launch deadline for diagnostics.
         let launch = match prior {
+            _ if recovering => budget,
             Some(end) => WaitBudget::up_to(
                 now,
                 provenant_core::DurationMicros::from_micros(
@@ -636,6 +652,11 @@ fn recover_provisioning(
             None => Err(provenant_confinement::worktrees::WorktreeError::InvalidRequest),
         };
         if let Err(error) = result {
+            if recovering {
+                // This call did not resolve the effects left by the earlier
+                // call. Keep the fence and let other relay work proceed.
+                continue;
+            }
             use provenant_confinement::worktrees::WorktreeError;
             // These failures precede any Git mutation, or prove its rollback.
             // Uncertain effects keep the fence for exact-path/source recovery.
@@ -1022,7 +1043,18 @@ fn provision_in_context(
         },
         cancel,
     )
-    .map(|_| ())
+    .and_then(|created| {
+        // A failed earlier add may have left only a branch. The general
+        // create path accepts descendants of its base; this fence requires
+        // the checkpointed commit exactly, even for a newly recreated path.
+        if created.path != expected
+            || created.head.to_string() != source
+            || created.branch.as_deref() != Some(format!("refs/heads/{branch}").as_str())
+        {
+            return Err(WorktreeError::IdentityChanged);
+        }
+        Ok(())
+    })
 }
 
 /// Lane side: send `op` to the host relay of the attempt this lane runs as.
@@ -2379,7 +2411,8 @@ mod provisioning_tests {
         )?;
         let mut reloaded = journal.load("g-crash")?.expect("checkpoint");
         assert!(
-            recover_provisioning(&context, &mut journal, &mut reloaded, budget, &cancel)?.is_none()
+            recover_provisioning(&context, &mut journal, &mut reloaded, &[], budget, &cancel)?
+                .is_none()
         );
         assert_eq!(git(&["-C", path, "rev-parse", "HEAD"])?, source);
         assert!(relay::pending_provisioning(&reloaded).is_empty());
@@ -2402,16 +2435,17 @@ mod provisioning_tests {
         )?;
         let mut reloaded = journal.load("g-crash")?.expect("checkpoint");
         assert!(
-            recover_provisioning(&context, &mut journal, &mut reloaded, budget, &cancel)?.is_none()
+            recover_provisioning(&context, &mut journal, &mut reloaded, &[], budget, &cancel)?
+                .is_none()
         );
         assert_eq!(git(&["worktree", "list", "--porcelain"])?, before);
         assert_eq!(git(&["-C", path, "rev-parse", "HEAD"])?, source);
         let saved = journal.load("g-crash")?.expect("checkpoint");
         assert!(relay::pending_provisioning(&saved).is_empty());
 
-        // A host can also die after Git succeeds but before it records a
-        // definitive refusal. Expired recovery settles without deleting or
-        // duplicating those effects, and the triggering operation still works.
+        // A crash after Git succeeds leaves uncertain effects even when the
+        // original launch deadline has expired. A later pre-mutation refusal
+        // cannot settle that fence, and must not block unrelated relay reads.
         reloaded.nodes[1]
             .launch_retry
             .as_mut()
@@ -2420,7 +2454,51 @@ mod provisioning_tests {
         relay::fence_provisioning(&mut reloaded, "a--w", path, &source);
         journal.save(&reloaded)?;
         drop(journal);
+        use provenant_os::fs::{Directory, LockMode};
+        let registry = context
+            .roots
+            .state
+            .as_path()
+            .join("worktrees")
+            .join(context.identity.project.to_string());
+        let directory = Directory::open_anchor(&registry)?;
+        let held = directory.lock(
+            std::ffi::OsStr::new("worktrees.lock"),
+            LockMode::Exclusive,
+            WaitBudget::nonblocking(clock.mono_now()),
+            &cancel,
+            &clock,
+        )?;
         let restarted = Context::open(context.roots.clone(), &home, &project)?;
+        let short = WaitBudget::up_to(
+            clock.mono_now(),
+            provenant_core::DurationMicros::from_micros(100_000),
+        );
+        serve(
+            &restarted,
+            "caller",
+            json!({"op":"children"}),
+            short,
+            &cancel,
+            &clock,
+        )?;
+        let saved = FileJournal::read_checkpoint(
+            &restarted.roots.state,
+            restarted.identity.project,
+            "g-crash",
+        )?
+        .ok_or("checkpoint")?;
+        assert_eq!(
+            relay::pending_provisioning(&saved),
+            vec![("a--w".into(), path.into(), source.clone())]
+        );
+        assert_eq!(saved.nodes[1].state, NodeState::Pending);
+        assert!(saved.nodes[1].advance_owner_code.is_none());
+        drop(held);
+
+        // A mismatched source is another refusal before mutation; it cannot
+        // reconcile the original checkout either.
+        git(&["-C", path, "commit", "--allow-empty", "-qm", "later"])?;
         serve(
             &restarted,
             "caller",
@@ -2429,6 +2507,42 @@ mod provisioning_tests {
             &cancel,
             &clock,
         )?;
+        let saved = FileJournal::read_checkpoint(
+            &restarted.roots.state,
+            restarted.identity.project,
+            "g-crash",
+        )?
+        .ok_or("checkpoint")?;
+        assert_eq!(
+            relay::pending_provisioning(&saved),
+            vec![("a--w".into(), path.into(), source.clone())]
+        );
+        git(&["-C", path, "reset", "--hard", &source])?;
+
+        // With the lock free and identity restored, a fresh bounded recovery
+        // budget verifies the exact checkout despite the expired launch.
+        let budget = WaitBudget::cli(clock.mono_now(), 5)?;
+        serve(
+            &restarted,
+            "caller",
+            json!({"op":"children"}),
+            budget,
+            &cancel,
+            &clock,
+        )?;
+        let saved = FileJournal::read_checkpoint(
+            &restarted.roots.state,
+            restarted.identity.project,
+            "g-crash",
+        )?
+        .ok_or("checkpoint")?;
+        assert!(relay::pending_provisioning(&saved).is_empty());
+        assert_eq!(saved.nodes[1].state, NodeState::Pending);
+        assert_eq!(git(&["worktree", "list", "--porcelain"])?, before);
+        assert_eq!(git(&["-C", path, "rev-parse", "HEAD"])?, source);
+
+        // A partial add may leave only a branch. General worktree creation
+        // accepts a descendant base; recovery must still require exact source.
         let mut journal = FileJournal::open(
             &restarted.roots.state,
             restarted.identity.project,
@@ -2438,39 +2552,47 @@ mod provisioning_tests {
             &clock,
         )?;
         let mut saved = journal.load("g-crash")?.ok_or("checkpoint")?;
-        assert_eq!(saved.nodes[1].state, NodeState::Blocked);
-        assert_eq!(
-            saved.nodes[1].advance_owner_code.as_deref(),
-            Some("writer_lock_busy")
-        );
-        assert!(relay::pending_provisioning(&saved).is_empty());
-        assert_eq!(git(&["worktree", "list", "--porcelain"])?, before);
-        provenant_fabric_runtime::graph::patch::retry_node(
-            &mut LiveGraph {
-                document: &document,
-                checkpoint: &mut saved,
-            },
-            "a--w",
-            None,
-            &PatchContext {
-                journal: None,
-                library: &TemplateLibrary::bundled(),
-                resolvers: &Default::default(),
-                scan: &scan_for_secrets,
-                limits: &restarted.config.graph.limits,
-            },
-        )?;
-        assert!(saved.nodes[1].launch_retry.is_none());
         relay::fence_provisioning(&mut saved, "a--w", path, &source);
         journal.save(&saved)?;
-        assert!(
-            recover_provisioning(&restarted, &mut journal, &mut saved, budget, &cancel)?.is_none()
+        drop(journal);
+        git(&["-C", path, "commit", "--allow-empty", "-qm", "later"])?;
+        git(&["worktree", "remove", path])?;
+        let budget = WaitBudget::cli(clock.mono_now(), 5)?;
+        serve(
+            &restarted,
+            "caller",
+            json!({"op":"children"}),
+            budget,
+            &cancel,
+            &clock,
+        )?;
+        let saved = FileJournal::read_checkpoint(
+            &restarted.roots.state,
+            restarted.identity.project,
+            "g-crash",
+        )?
+        .ok_or("checkpoint")?;
+        assert_eq!(
+            relay::pending_provisioning(&saved),
+            vec![("a--w".into(), path.into(), source.clone())]
         );
+        git(&["-C", path, "reset", "--hard", &source])?;
+        serve(
+            &restarted,
+            "caller",
+            json!({"op":"children"}),
+            WaitBudget::cli(clock.mono_now(), 5)?,
+            &cancel,
+            &clock,
+        )?;
+        let saved = FileJournal::read_checkpoint(
+            &restarted.roots.state,
+            restarted.identity.project,
+            "g-crash",
+        )?
+        .ok_or("checkpoint")?;
+        assert!(relay::pending_provisioning(&saved).is_empty());
         assert_eq!(git(&["worktree", "list", "--porcelain"])?, before);
-        assert_eq!(git(&["-C", path, "rev-parse", "HEAD"])?, source);
-        assert!(
-            relay::pending_provisioning(&journal.load("g-crash")?.ok_or("checkpoint")?).is_empty()
-        );
         Ok(())
     }
 }
