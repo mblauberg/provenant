@@ -300,8 +300,9 @@ fn validate_set_path(key: &str) -> Result<(), Box<provenant_records::diagnostic:
         "branch" | "base" | "new_worktree" => Err(cli_input_error(
             "use --branch B --base REF for a new writer worktree",
         )),
-        "host" | "account" | "confidential" | "provider_timeout" | "placement" | "capabilities"
-        | "capability" | "build_heavy" | "build_weight" | "write_roots" | "write_root" => Ok(()),
+        "host" | "account" | "confidential" | "provider_timeout" | "placement" | "cloud"
+        | "capabilities" | "capability" | "build_heavy" | "build_weight" | "write_roots"
+        | "write_root" => Ok(()),
         _ if path.starts_with("mode.") => {
             Err(cli_input_error("use --mode for attempt access mode"))
         }
@@ -510,6 +511,25 @@ mod tests {
                     .is_some_and(|detail| detail.contains(flag)),
                 "{setting}: {error:?}"
             );
+        }
+    }
+
+    #[test]
+    fn attempt_cloud_alias_passes_in_both_set_forms() {
+        let cloud = "{target='t',provider='p',environment='e',repository='r',branch='b',model='m',deadline_seconds=60}";
+        for setting in [
+            format!("attempt.cloud={cloud}"),
+            format!("attempt={{cloud={cloud}}}"),
+        ] {
+            let mut request = run_request();
+            request.set.push(setting);
+            let input = run_input(request).expect("cloud placement is applied");
+            let value = input["set"]
+                .get("attempt.cloud")
+                .unwrap_or(&input["set"]["attempt"]["cloud"]);
+            let attempt: provenant_fabric_runtime::graph::AttemptSpec =
+                serde_json::from_value(serde_json::json!({"cloud": value})).unwrap();
+            assert_eq!(attempt.placement.unwrap().target, "t");
         }
     }
 

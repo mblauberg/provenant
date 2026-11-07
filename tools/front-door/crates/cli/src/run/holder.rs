@@ -66,10 +66,10 @@ impl provenant_os::capture::FrameDecoder for QuotaFrames {
                 evidence
                     .write(&capture.attempt)
                     .map_err(|_| DecodeFailure)?;
-                evidence
-                    .apply(&capture.state_root, &capture.route, false)
-                    .map_err(|_| DecodeFailure)?;
                 capture.recorded = true;
+                // Settlement replays the sealed evidence if publication fails.
+                // A busy cache must not suppress the provider's terminal event.
+                let _ = evidence.apply(&capture.state_root, &capture.route, false);
             }
         }
         Ok(result)
@@ -426,6 +426,74 @@ mod tests {
         );
         assert_eq!(decode()?.outcome, run::Outcome::QuotaLimited);
         assert_eq!(std::fs::read(path)?, before);
+        Ok(())
+    }
+
+    #[test]
+    fn busy_quota_cache_preserves_terminal_and_sealed_evidence()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_core::WaitBudget;
+        use provenant_os::{
+            capture::{FrameDecoder, FrameEvent},
+            fs::LockMode,
+        };
+        use std::{ffi::OsStr, os::unix::fs::PermissionsExt};
+
+        let temp = tempfile::tempdir()?;
+        let state = temp.path().join("state");
+        let attempt = state.join("runs/run/attempts/attempt");
+        let quota = state.join("quota");
+        std::fs::create_dir_all(&attempt)?;
+        std::fs::create_dir(&quota)?;
+        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700))?;
+        std::fs::set_permissions(&quota, std::fs::Permissions::from_mode(0o700))?;
+        let clock = SystemClock::new();
+        let cancel = CancelToken::new();
+        let directory = Directory::open_anchor(&quota)?;
+        let lock = directory.lock(
+            OsStr::new("quota.lock"),
+            LockMode::Exclusive,
+            WaitBudget::cli(clock.mono_now(), 5)?,
+            &cancel,
+            &clock,
+        )?;
+        let registration = &provenant_providers::opencode::REGISTRATION;
+        let frames = QuotaFrames {
+            decoder: Mutex::new(registration.stdout_decoder),
+            evidence: Arc::new(Mutex::new(Some(QuotaCapture {
+                adapter: registration.adapter,
+                stream: registration.adapter.stream(None)?,
+                attempt: Directory::open_anchor(&attempt)?,
+                state_root: state.clone(),
+                route: quota_test_route(),
+                shared: true,
+                recorded: false,
+            }))),
+            stderr: false,
+        };
+        let frame = br#"{"type":"provider.quota","response":{"body":{"error":{"type":"FreeUsageLimitError","message":"fixture"}}}}"#;
+        assert_eq!(frames.decode(frame), Ok(FrameEvent::Terminal));
+        let evidence = std::fs::read(attempt.join("quota-evidence.json"))?;
+        drop(lock);
+        assert_eq!(frames.decode(frame), Ok(FrameEvent::Terminal));
+        assert_eq!(
+            std::fs::read(attempt.join("quota-evidence.json"))?,
+            evidence
+        );
+        let provider_state = attempt.join("provider-state");
+        for _ in 0..2 {
+            let decoded = run::Providers::decode_captures(
+                &Registry::default(),
+                &quota_test_route(),
+                b"",
+                b"",
+                &super::super::tests::clean_exit(),
+                &provider_state,
+                None,
+            )?;
+            assert_eq!(decoded.outcome, run::Outcome::QuotaLimited);
+        }
+        assert_eq!(crate::quota::read_cache_at(&state)?[0].refusals.len(), 1);
         Ok(())
     }
 
