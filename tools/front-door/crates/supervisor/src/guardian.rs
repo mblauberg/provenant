@@ -81,6 +81,31 @@ fn census_turn_due(
         && (last_walk.is_none() || reason_to_walk || census_full_due(now, last_full, false))
 }
 
+/// Custody retains zombies until absence is proven, but dead processes cannot
+/// fork. Re-adding their one-shot exit filters can manufacture a new event and
+/// another census. Unknown rows still require a watch or full-scan fallback.
+fn census_watch_pids<'a>(
+    census: &crate::census::Census,
+    identities: impl Iterator<Item = &'a ProcessIdentity>,
+) -> std::collections::BTreeSet<i64> {
+    identities
+        .filter(|identity| match census.process(identity.pid) {
+            crate::census::ProcessLookup::Present(fact) => {
+                fact.identity == **identity && !fact.zombie
+            }
+            crate::census::ProcessLookup::Absent => false,
+            crate::census::ProcessLookup::Unknown => true,
+        })
+        .map(|identity| identity.pid)
+        .collect()
+}
+
+// Directory notifications wake cancellation promptly. The periodic read also
+// covers in-place writes to an existing cancel file and lost notifications.
+fn cancel_poll_interval(watched: bool) -> u64 {
+    if watched { 1_000 } else { 100 }
+}
+
 // Provider CPU only feeds progress evidence published by the one-second
 // checkpoint, and silence is never a stop reason; sampling faster than the
 // checkpoint only repeated `proc_pidinfo`.
@@ -939,6 +964,11 @@ impl Driver<'_> {
         let mut disk_paused = false;
         let mut disk_warning_active = false;
         let mut last_cancel_ms = None;
+        let mut cancel_pending = false;
+        let mut cancel_watched = self
+            .reactor
+            .watch_cancellation_directory(&self.attempt)
+            .is_ok();
         let mut signal_pending = false;
         let mut last_stdout_bytes = 0_u64;
         let mut last_stderr_bytes = 0_u64;
@@ -1052,7 +1082,33 @@ impl Driver<'_> {
                     }
                 }
             }
-            let cancel_due = last_cancel_ms.is_none_or(|last| now.saturating_sub(last) >= 100);
+            let polled_signal = match self.reactor.wait(&[], Duration::ZERO) {
+                Ok(event) => {
+                    cancel_pending |= event.cancel_changed;
+                    cancel_watched &= !event.cancel_watch_failed;
+                    census_event_pending |= event.process_changed;
+                    census_event_failed |= event.process_overflow;
+                    event.supervisor_signal
+                }
+                Err(_) => {
+                    cancel_watched = false;
+                    census_event_failed = true;
+                    census_reactor_failed = true;
+                    if !reactor_warning_recorded {
+                        warn(
+                            &mut warnings,
+                            &mut omitted_warnings,
+                            "signal observation failed",
+                        );
+                        reactor_warning_recorded = true;
+                    }
+                    false
+                }
+            };
+            let cancel_due = std::mem::take(&mut cancel_pending)
+                || last_cancel_ms.is_none_or(|last| {
+                    now.saturating_sub(last) >= cancel_poll_interval(cancel_watched)
+                });
             #[cfg(feature = "fixture")]
             let fixture_owner_gone = self.fixture_owner.as_ref().is_some_and(|owner| {
                 match self.observer.observe(owner.pid) {
@@ -1077,26 +1133,6 @@ impl Driver<'_> {
                 self.read_cancel(&mut warnings, &mut omitted_warnings)
             } else {
                 None
-            };
-            let polled_signal = match self.reactor.wait(&[], Duration::ZERO) {
-                Ok(event) => {
-                    census_event_pending |= event.process_changed;
-                    census_event_failed |= event.process_overflow;
-                    event.supervisor_signal
-                }
-                Err(_) => {
-                    census_event_failed = true;
-                    census_reactor_failed = true;
-                    if !reactor_warning_recorded {
-                        warn(
-                            &mut warnings,
-                            &mut omitted_warnings,
-                            "signal observation failed",
-                        );
-                        reactor_warning_recorded = true;
-                    }
-                    false
-                }
             };
             let signal = std::mem::replace(&mut signal_pending, false) || polled_signal;
             use std::sync::atomic::Ordering;
@@ -1358,12 +1394,17 @@ impl Driver<'_> {
                 // A saturated drain is normal during a burst; only failed watches
                 // and failed scoped walks produce a fallback warning.
                 fallback |= process_watch_unavailable || std::mem::take(&mut census_reactor_failed);
-                if census.is_some() {
-                    let mut pids = std::collections::BTreeSet::from([child.id()]);
-                    pids.extend(self.history.iter().map(|identity| identity.pid));
-                    pids.extend(self.tracked.iter().map(|identity| identity.pid));
-                    pids.extend(self.protected.iter().map(|identity| identity.pid));
-                    pids.extend(self.spared.spared_identities().map(|identity| identity.pid));
+                if let Some(snapshot) = census.as_ref() {
+                    let pids = census_watch_pids(
+                        snapshot,
+                        self.reservation
+                            .provider
+                            .iter()
+                            .chain(self.history.iter())
+                            .chain(self.tracked.iter())
+                            .chain(self.protected.iter())
+                            .chain(self.spared.spared_identities()),
+                    );
                     match self.reactor.watch_processes(&pids) {
                         Ok((added, failures)) => {
                             process_watch_unavailable = failures != 0;
@@ -1506,7 +1547,7 @@ impl Driver<'_> {
             }
             let watches = child.watches();
             // Pipes, signals and process events wake the reactor. Timer-only
-            // work wakes at its next deadline: the 100 ms cancellation read,
+            // work wakes at its next deadline: the cancellation backstop,
             // the one-second CPU sample and the five-second full census.
             let wait_now = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
             let wall_ms = wall_started.zip(wall_now()).map_or(0, |(began, current)| {
@@ -1523,7 +1564,10 @@ impl Driver<'_> {
                 );
             }
             if let Some(last) = last_cancel_ms {
-                wait_ms = wait_ms.min(last.saturating_add(100).saturating_sub(wait_now));
+                wait_ms = wait_ms.min(
+                    last.saturating_add(cancel_poll_interval(cancel_watched))
+                        .saturating_sub(wait_now),
+                );
             }
             if let Some(deadline) = state.deadline_in_ms(wait_now, wall_ms) {
                 wait_ms = wait_ms.min(deadline);
@@ -1559,6 +1603,8 @@ impl Driver<'_> {
             }
             match self.reactor.wait(&watches, Duration::from_millis(wait_ms)) {
                 Ok(event) => {
+                    cancel_pending |= event.cancel_changed;
+                    cancel_watched &= !event.cancel_watch_failed;
                     signal_pending |= event.supervisor_signal;
                     census_event_pending |= event.process_changed;
                     census_event_failed |= event.process_overflow;
@@ -1569,6 +1615,7 @@ impl Driver<'_> {
                     }
                 }
                 Err(_) => {
+                    cancel_watched = false;
                     census_event_failed = true;
                     census_reactor_failed = true;
                     provenant_os::sys::wait_pause(Duration::from_millis(CENSUS_INTERVAL_MS));

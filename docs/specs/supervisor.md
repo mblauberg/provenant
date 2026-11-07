@@ -207,10 +207,23 @@ is an unknown launch, never permission to launch again.
   The unknown-launch rule has no test (gap).
 - Owner: `crates/supervisor/src/guardian/`, `crates/run/src/launch.rs`
 
-While a provider is live, the guardian walks its scoped process tree at most
-once per 100 ms, coalescing process events. A full census backs up missed
-notifications every five seconds and follows an overflow or observation
-failure on the next walk. Cleanup and lease release always use full censuses.
+While a provider is live, the guardian walks its scoped process tree only
+when process events or failed observations require it, at most once per 100 ms.
+A full census backs up missed notifications every five seconds and follows an
+overflow or observation failure on the next walk. Zombies remain in custody
+history but receive no fork/exit watch. Topology observations omit task CPU
+accounting; only the provider's one-second progress sample requests it.
+
+Pipes, signals and process events wake the guardian. An attempt-directory
+notification also wakes cancellation reads without requesting a census. With
+that watch installed, idle timers back off to one second; cancellation falls
+back to 100 ms polling if the directory watch fails. The one-second read also
+covers in-place changes and missed directory notifications. Cleanup and lease
+release always use fresh full censuses owned by that guardian: another
+supervisor's older snapshot cannot establish this attempt's quiescence.
+- Test: `crates/supervisor/tests/custody.rs::idle_supervisor_does_no_census_per_wake`;
+  `crates/supervisor/src/guardian/tests.rs::census_watches_only_possible_live_identities_without_discarding_custody_history`
+- Owner: `crates/supervisor/src/guardian/`, `crates/supervisor/src/process_os/`
 
 ### Quiescence before release
 

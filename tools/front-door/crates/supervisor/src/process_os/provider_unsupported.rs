@@ -26,12 +26,21 @@ pub(crate) struct Watch<'a>(PhantomData<BorrowedFd<'a>>);
 #[derive(Default)]
 pub(crate) struct ReactorEvent {
     pub(crate) supervisor_signal: bool,
+    pub(crate) cancel_changed: bool,
+    pub(crate) cancel_watch_failed: bool,
     pub(crate) process_changed: bool,
     pub(crate) process_overflow: bool,
 }
 
 pub(crate) struct GuardianReactor;
 impl GuardianReactor {
+    pub(crate) fn watch_cancellation_directory(
+        &mut self,
+        _: &provenant_os::fs::Directory,
+    ) -> io::Result<()> {
+        Err(unsupported())
+    }
+
     pub(crate) fn watch_processes(&mut self, _: &BTreeSet<i64>) -> io::Result<(bool, usize)> {
         Err(unsupported())
     }

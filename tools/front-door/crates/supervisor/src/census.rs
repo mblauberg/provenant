@@ -331,46 +331,31 @@ impl Census {
             ProcessLookup::Present(_) | ProcessLookup::Absent => return Ancestry::No,
             ProcessLookup::Unknown => return Ancestry::Unknown,
         }
-        match self.lineage(child, ancestor) {
-            Some(lineage) if lineage.last() == Some(ancestor) => Ancestry::Yes,
-            Some(_) => Ancestry::No,
-            None => Ancestry::Unknown,
-        }
-    }
-
-    fn lineage(
-        &self,
-        child: &ProcessIdentity,
-        ancestor: &ProcessIdentity,
-    ) -> Option<Vec<ProcessIdentity>> {
-        let mut chain = vec![child.clone()];
-        let mut current = child.clone();
-        let mut seen = BTreeSet::from([child.pid]);
+        // Every accepted edge strictly decreases the start stamp, so a
+        // cycle is impossible. Borrow rows rather than cloning a lineage and
+        // allocating a visited set for every host-process/ancestor pair.
+        let mut current = child;
         loop {
             let fact = match self.process(current.pid) {
-                ProcessLookup::Present(fact) if fact.identity == current => fact,
-                ProcessLookup::Present(_) | ProcessLookup::Absent | ProcessLookup::Unknown => {
-                    return None;
-                }
+                ProcessLookup::Present(fact) if fact.identity == *current => fact,
+                _ => return Ancestry::Unknown,
             };
             if fact.parent_pid <= 0 {
-                return Some(chain);
+                return Ancestry::No;
             }
             let parent = match self.process(fact.parent_pid) {
                 ProcessLookup::Present(parent) => parent,
-                ProcessLookup::Absent => return Some(chain),
-                ProcessLookup::Unknown => return None,
+                ProcessLookup::Absent => return Ancestry::No,
+                ProcessLookup::Unknown => return Ancestry::Unknown,
             };
             if parent.identity.boot != current.boot
                 || parent.identity.native_start >= current.native_start
-                || !seen.insert(parent.identity.pid)
             {
-                return None;
+                return Ancestry::Unknown;
             }
-            current = parent.identity.clone();
-            chain.push(current.clone());
-            if current == *ancestor {
-                return Some(chain);
+            current = &parent.identity;
+            if current == ancestor {
+                return Ancestry::Yes;
             }
         }
     }
@@ -554,6 +539,11 @@ pub fn current_process() -> ProcessObservation {
 pub trait ProcessObserver {
     fn boot_identity(&self) -> Result<String, CensusError>;
     fn observe(&self, pid: i64) -> ProcessObservation;
+    /// Identity and topology only. Native observers can omit task accounting;
+    /// custody history never consumes per-process CPU samples.
+    fn observe_topology(&self, pid: i64) -> ProcessObservation {
+        self.observe(pid)
+    }
     fn census(&self, max_entries: usize) -> Result<Census, CensusError>;
     /// A scoped live-history observation. `None` requests the full census.
     /// This is never evidence that the host census is complete.

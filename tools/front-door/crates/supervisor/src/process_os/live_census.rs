@@ -27,7 +27,7 @@ struct Native<'a>(&'a dyn ProcessObserver);
 #[cfg(target_os = "macos")]
 impl Source for Native<'_> {
     fn observe(&self, pid: i64) -> ProcessObservation {
-        self.0.observe(pid)
+        self.0.observe_topology(pid)
     }
     fn children(&self, pid: i64) -> Result<Vec<i64>, CensusError> {
         let pid = u32::try_from(pid).map_err(|_| unavailable())?;

@@ -97,6 +97,22 @@ impl ExitPublisher for TrackingPublisher {
     }
 }
 
+// Opt-in observer spy: these calls come from the real guardian driver, not
+// from a duplicate of its scheduling predicate.
+fn trace_idle_census(kind: u8) -> std::result::Result<(), CensusError> {
+    if let Some(root) = std::env::var_os("PROVENANT_STATE_DIR") {
+        let path = PathBuf::from(root).join("s2-idle-census-trace");
+        if path.is_file() {
+            std::fs::OpenOptions::new()
+                .append(true)
+                .open(path)
+                .and_then(|mut file| file.write_all(&[kind]))
+                .map_err(CensusError::ProcessList)?;
+        }
+    }
+    Ok(())
+}
+
 impl ProcessObserver for CensusGateObserver {
     fn boot_identity(&self) -> std::result::Result<String, CensusError> {
         fixture::RecordedBootObserver.boot_identity()
@@ -145,6 +161,7 @@ impl ProcessObserver for CensusGateObserver {
         known: &[ProcessIdentity],
         limit: usize,
     ) -> std::result::Result<Option<Census>, CensusError> {
+        trace_idle_census(b'L')?;
         let state = std::env::var_os("PROVENANT_STATE_DIR").map(PathBuf::from);
         if !state
             .as_ref()
@@ -163,6 +180,7 @@ impl ProcessObserver for CensusGateObserver {
     }
 
     fn census(&self, max_entries: usize) -> std::result::Result<Census, CensusError> {
+        trace_idle_census(b'F')?;
         if let Some(root) = std::env::var_os("PROVENANT_STATE_DIR") {
             let counter = PathBuf::from(root).join("s2-census-errors-left");
             if let Ok(bytes) = std::fs::read(&counter) {
@@ -675,6 +693,55 @@ fn live_census_failure_warns_once(root: &Path) -> Result<()> {
     );
     Ok(())
 }
+fn idle_supervisor_does_no_census_per_wake(root: &Path) -> Result<()> {
+    let state = root.join("PROVENANT_STATE_DIR");
+    std::fs::create_dir(&state)?;
+    std::fs::write(state.join("s2-live-tree"), b"enabled")?;
+    let trace = state.join("s2-idle-census-trace");
+    std::fs::write(&trace, b"")?;
+    let socket = root.join("idle-census.sock");
+    let listener = UnixListener::bind(&socket)?;
+    let (_writer, handle) = start(
+        root,
+        "idle-census",
+        "wait-on-socket",
+        &[socket.into_os_string()],
+        CapturePlan::default(),
+    )?;
+    let mut held = fixture::fixture_accept(&listener, Duration::from_secs(5))?;
+    byte(&mut held, b'R')?;
+    // The first walk installs filters and the confirmation walk closes that
+    // registration gap. No process forks or exits after this point.
+    wait_for_file(&state.join("s2-live-tree-seen"))?;
+    let before = std::fs::read(&trace)?.len();
+    let began = Instant::now();
+    let attempt = root.join("idle-census-attempt");
+    for index in 0..30 {
+        // Wake the actual reactor repeatedly without changing process state.
+        // This is also the event emitted by atomic cancellation publication.
+        std::fs::write(attempt.join(format!("idle-wake-{index}")), b"wake")?;
+        std::thread::park_timeout(Duration::from_millis(20));
+    }
+    let calls = std::fs::read(&trace)?;
+    let elapsed = began.elapsed();
+    assert!(
+        !calls[before..].contains(&b'L'),
+        "idle scoped walks: {calls:?}"
+    );
+    // Permit the mandatory five-second backstop even on a slow native host.
+    let full = calls[before..].iter().filter(|kind| **kind == b'F').count();
+    assert!(
+        full as u128 <= 1 + elapsed.as_millis() / 5_000,
+        "census per idle wake: {calls:?}"
+    );
+    // A valid atomic cancel still wakes and stops the sleeping driver.
+    stop(&handle, StopReason::ExplicitCancellation)?;
+    let exit = exited(&handle)?;
+    drop(held);
+    assert_eq!(exit.stop_reason, Some(StopReason::ExplicitCancellation));
+    Ok(())
+}
+
 fn process_watch_failure_records_one_fallback(root: &Path) -> Result<()> {
     let state = root.join("PROVENANT_STATE_DIR");
     std::fs::create_dir(&state)?;
@@ -2743,6 +2810,10 @@ fn a_host_sleep_cannot_extend_the_wall_deadline(root: &Path) -> Result<()> {
 
 type Case = (&'static str, fn(&Path) -> Result<()>);
 const CASES: &[Case] = &[
+    (
+        "idle_supervisor_does_no_census_per_wake",
+        idle_supervisor_does_no_census_per_wake,
+    ),
     (
         "a_fake_provider_passing_the_token_budget_is_stopped",
         a_fake_provider_passing_the_token_budget_is_stopped,
