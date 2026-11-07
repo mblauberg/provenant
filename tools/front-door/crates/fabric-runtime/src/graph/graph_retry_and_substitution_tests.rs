@@ -86,6 +86,7 @@ fn resume_after_a_crash_before_the_reference_save_replays_under_the_launch_actor
 #[test]
 fn terminal_task_failure_does_not_try_a_fallback_route() {
     let document = graph(vec![GraphNode {
+        auto_continue_no_work: None,
         attempt: None,
         attachments: Vec::new(),
         family_group: None,

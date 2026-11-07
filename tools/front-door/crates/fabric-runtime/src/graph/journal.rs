@@ -853,10 +853,11 @@ impl GraphJournal for FileJournal {
 
 fn stored_pending(stored: &StoredCheckpoint) -> bool {
     let checkpoint = &stored.checkpoint;
-    checkpoint
-        .nodes
-        .iter()
-        .any(|node| matches!(node.state, NodeState::Pending | NodeState::Running))
+    no_work::pending(&stored.execution.document, checkpoint)
+        || checkpoint
+            .nodes
+            .iter()
+            .any(|node| matches!(node.state, NodeState::Pending | NodeState::Running))
         || !checkpoint.cancelled
             && !checkpoint.delivered
             && stored.execution.document.delivery == Some(provenant_records::run::DeliveryMode::Pr)

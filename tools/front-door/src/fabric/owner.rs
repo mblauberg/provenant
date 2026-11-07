@@ -3203,6 +3203,11 @@ impl BoundGraphOwner<'_> {
                             // A route refused before launch leaves the next route free to try.
                             Outcome::ModelUnavailable => AttemptOutcome::AdapterUnavailable,
                             Outcome::Rejected if !launched => AttemptOutcome::AdapterUnavailable,
+                            Outcome::ReviewRequired if matches!(
+                                &attempt.state,
+                                AttemptState::Terminal { extra, .. }
+                                    if extra.get("terminal_cause") == Some(&serde_json::json!(provenant_records::run::TerminalCause::StoppedNoWork))
+                            ) => AttemptOutcome::StoppedNoWork,
                             Outcome::ReviewRequired
                                 if attempt.partial_signals.as_slice() == [provenant_records::run::PartialSignal::DeclaredStop] =>
                             {

@@ -66,7 +66,7 @@ lane_row! {
     optional {
         git_import_failure: Value => object(&[("reason", string()), ("head", nullable(string())), ("retained_objects", nullable(super::schema::worktree_path()))], &[]);
         write_grants: Value => nullable(array(grant_schema()));
-        terminal_cause: crate::run::TerminalCause => choices(&["preparation_refused", "account_login_required", "route_resolution_refused", "access_policy_refused", "disk_floor", "disk_observation_unavailable", "stored_prompt_unreadable", "write_grants_refused", "worktree_busy", "handoff_refused", "retained_writer_import", "unsupported_platform", "unknown_pacing_account", "unregistered_account", "delivery_prepare_credential_helper", "spawn_failure", "process_crash", "token_budget", "settlement_failure", "provider_early_stop", "free_pool_quota", "command_unavailable", "host_native_unconfigured", "identity_unobserved"]);
+        terminal_cause: crate::run::TerminalCause => choices(&["preparation_refused", "account_login_required", "route_resolution_refused", "access_policy_refused", "disk_floor", "disk_observation_unavailable", "stored_prompt_unreadable", "write_grants_refused", "worktree_busy", "handoff_refused", "retained_writer_import", "unsupported_platform", "unknown_pacing_account", "unregistered_account", "delivery_prepare_credential_helper", "spawn_failure", "process_crash", "token_budget", "settlement_failure", "provider_early_stop", "free_pool_quota", "command_unavailable", "host_native_unconfigured", "identity_unobserved", "stopped_no_work"]);
         host: String => string();
         resolved_route: Value => any();
         title: String => string();
@@ -237,9 +237,15 @@ impl LaneRow {
                 SettlementReason::HandoffMissing => {
                     Some("the lane finished without a handoff; inspect its result")
                 }
-                SettlementReason::DeclaredStop => {
-                    Some("the lane stopped with work remaining; inspect its result")
-                }
+                SettlementReason::DeclaredStop => match &lane.state {
+                    AttemptState::Terminal { extra, .. }
+                        if extra.get("terminal_cause")
+                            == Some(&json!(crate::run::TerminalCause::StoppedNoWork)) =>
+                    {
+                        Some(crate::run::TerminalCause::StoppedNoWork.detail())
+                    }
+                    _ => Some("the lane stopped with work remaining; inspect its result"),
+                },
                 SettlementReason::ProviderStop => {
                     Some("the provider stopped early; inspect its result and resume if needed")
                 }
@@ -555,6 +561,7 @@ mod terminal_cause_tests {
             TerminalCause::CommandUnavailable,
             TerminalCause::HostNativeUnconfigured,
             TerminalCause::IdentityUnobserved,
+            TerminalCause::StoppedNoWork,
         ] {
             let mut extra = crate::ExtraFields::default();
             extra.insert(
