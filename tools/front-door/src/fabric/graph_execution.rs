@@ -119,6 +119,7 @@ pub(crate) fn tick_graphs(
                     workers,
                 };
                 let mut owner = BoundGraphOwner {
+                    admission_timeout: None,
                     launch_warnings: Vec::new(),
                     repo_facts: Default::default(),
                     factory: &factory,
@@ -354,7 +355,7 @@ impl Factory {
         budget: WaitBudget,
         cancel: &CancelToken,
     ) -> Result<provenant_fabric_runtime::graph::GraphRun, FacadeError> {
-        self.graph_with_scratch(input, budget, cancel, None)
+        self.graph_with_scratch(input, budget, cancel, None, None)
     }
 
     pub(crate) fn graph_with_scratch(
@@ -363,6 +364,7 @@ impl Factory {
         budget: WaitBudget,
         cancel: &CancelToken,
         prepared_scratch: Option<&Path>,
+        admission_timeout: Option<WaitBudget>,
     ) -> Result<provenant_fabric_runtime::graph::GraphRun, FacadeError> {
         let facts = provenant_confinement::worktrees::RepoFacts::default();
         use provenant_fabric_runtime::coordination::input::ValidateInput;
@@ -776,6 +778,7 @@ impl Factory {
                 None
             };
             let mut owner = BoundGraphOwner {
+                admission_timeout,
                 launch_warnings: Vec::new(),
                 repo_facts: facts.clone(),
                 factory: rebound.as_ref().unwrap_or(self),
@@ -904,6 +907,7 @@ impl Factory {
                 }
             }
             let mut graph_owner = BoundGraphOwner {
+                admission_timeout: None,
                 launch_warnings: Vec::new(),
                 repo_facts: facts.clone(),
                 factory: self,

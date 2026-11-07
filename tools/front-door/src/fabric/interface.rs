@@ -1124,6 +1124,10 @@ impl Factory {
             budget,
             cancel,
             Some(&scratch),
+            input
+                .get("wait_seconds")
+                .and_then(Value::as_u64)
+                .map(|_| budget),
         )?;
         let run = self.wait_document(run, input, budget, cancel)?;
         let timed_out = input.get("wait_seconds").and_then(Value::as_u64).is_some()

@@ -21,7 +21,7 @@ mod graph_writer_admission_tests {
         ));
         assert!(matches!(
             graph_writer_initialisation_error("head", WorktreeError::LockBusy),
-            FacadeError::WriterLockBusy
+            FacadeError::WriterBusy { holder: None }
         ));
         assert!(matches!(
             graph_writer_initialisation_error("head", WorktreeError::UnknownWriter),
@@ -172,7 +172,7 @@ mod graph_writer_admission_tests {
         }))
         .unwrap();
 
-        let lock_timeout = WorktreeError::LockBusy;
+        let lock_timeout = WorktreeError::RegistryLockTimeout;
 
         let mut owner = MockWriterOwner {
             errors: std::collections::VecDeque::from([lock_timeout]),
@@ -222,8 +222,8 @@ mod graph_writer_admission_tests {
             let cancel = CancelToken::new();
             let budget = WaitBudget::cli(clock.mono_now(), 60).unwrap();
             let errors = match scenario {
-                "release" => vec![WorktreeError::LockBusy, WorktreeError::LockBusy],
-                "held" => std::iter::repeat_with(|| WorktreeError::LockBusy).take(10).collect(),
+                "release" => std::iter::repeat_with(|| WorktreeError::RegistryLockTimeout).take(10).collect(),
+                "held" => std::iter::repeat_with(|| WorktreeError::RegistryLockTimeout).take(10).collect(),
                 _ => vec![WorktreeError::LiveWriter],
             };
             let mut owner = MockWriterOwner {
@@ -234,6 +234,9 @@ mod graph_writer_admission_tests {
             let first = advance(&document, &mut owner, &mut journal).unwrap();
             let waited = super::interface::wait_submission(first, budget, &clock, &Advance(&clock), &cancel, |_| {
                 owner.now = Some(clock.wall_now().unwrap());
+                if scenario == "release" && clock.mono_now().as_micros() >= 7_000_000 {
+                    owner.errors.clear();
+                }
                 Ok(advance(&document, &mut owner, &mut journal).unwrap())
             }).unwrap();
             let node = &waited.checkpoint.nodes[0];
@@ -345,7 +348,7 @@ mod graph_writer_admission_tests {
             }]
         }))?;
         let budget = WaitBudget::cli(factory.clock.mono_now(), 60)?;
-        let mut owner = BoundGraphOwner { launch_warnings: Vec::new(), repo_facts: Default::default(),
+        let mut owner = BoundGraphOwner { admission_timeout: None, launch_warnings: Vec::new(), repo_facts: Default::default(),
             factory: &factory,
             integration_base: None,
             integration_branch: None,
@@ -440,7 +443,7 @@ mod graph_writer_admission_tests {
             }]
         })).unwrap();
         let mut owner = MockWriterOwner {
-            errors: std::iter::repeat_with(|| WorktreeError::LockBusy).take(8).collect(),
+            errors: std::iter::repeat_with(|| WorktreeError::RegistryLockTimeout).take(8).collect(),
             calls: 0,
             now: Some(provenant_core::WallTime::from_micros(0).unwrap()),
             admission_seconds: Some(60),
@@ -562,7 +565,7 @@ mod graph_writer_admission_tests {
             extra: Default::default(), review_base:None, integration_base:None,
             directory:rig.project.clone(), document:document.clone(),
         })?;
-        let mut owner = BoundGraphOwner { launch_warnings: Vec::new(),
+        let mut owner = BoundGraphOwner { admission_timeout: None, launch_warnings: Vec::new(),
             repo_facts:Default::default(), factory:&factory, integration_base:None,
             integration_branch:None, network:None, capability_overrides:Default::default(),
             exclude:Vec::new(), budget, cancel:&cancel, prices:None, tick:false,
@@ -1266,7 +1269,7 @@ mod result_tests {
             workers: &FreeWorkers,
         };
         let cancel = CancelToken::new();
-        let mut owner = BoundGraphOwner { launch_warnings: Vec::new(), repo_facts: Default::default(),
+        let mut owner = BoundGraphOwner { admission_timeout: None, launch_warnings: Vec::new(), repo_facts: Default::default(),
             capability_overrides: (Vec::new(), Vec::new()),
             factory: &factory,
             integration_base: None,
@@ -2721,7 +2724,7 @@ mod provisioned_writer_submission_tests {
         }))?;
         let cancel = CancelToken::new();
         let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
-        let mut owner = BoundGraphOwner { launch_warnings: Vec::new(), repo_facts: Default::default(),
+        let mut owner = BoundGraphOwner { admission_timeout: None, launch_warnings: Vec::new(), repo_facts: Default::default(),
             factory: &factory,
             integration_base: None,
             integration_branch: None,
