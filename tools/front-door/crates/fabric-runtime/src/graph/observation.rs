@@ -16,6 +16,8 @@ pub enum AttemptOutcome {
     TaskFailed,
     /// A lane reported a declared stop; review roles may accept its result.
     DeclaredStop,
+    /// The host settled a writer against its attempt-level unchanged Git head.
+    StoppedNoWork,
     OtherFailure,
     ReviewRequired,
     AuthRequired,

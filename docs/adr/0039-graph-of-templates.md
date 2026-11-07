@@ -146,7 +146,8 @@ tier and template without counting composite descendants twice.
 ## Interface
 
 `run`, `status`, `output`, `steer`, `stop`, `retry`, `edit`, `templates`, `land`,
-`quota`. Everything else sits behind `--all`. `output --trace` shows the timeline;
+`quota`. Everything else sits behind `--all`. `trace GRAPH` shows the retained graph
+timeline with recorded attempt measurements; `output --trace` also shows the timeline;
 `edit` applies a patch. `status` has one row schema for graph, node and attempt.
 `run [BRIEF] [--use T] [--tier T | --model ADAPTER/MODEL] [--effort LEVEL]
 [--account NAME] [--host NAME] [--over] [--set] [--file] [--explain] [--wait]` starts

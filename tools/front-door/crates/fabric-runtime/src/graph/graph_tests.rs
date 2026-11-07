@@ -449,6 +449,7 @@ fn route(adapter: &str) -> GraphRoute {
 
 fn node(id: &str, route: GraphRoute) -> GraphNode {
     GraphNode {
+        auto_continue_no_work: None,
         attempt: None,
         attachments: Vec::new(),
         family_group: None,

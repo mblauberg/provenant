@@ -225,6 +225,10 @@ impl AttemptSpec {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GraphNode {
+    /// Continue once automatically when this writer stops without a new commit.
+    /// Omission enables continuation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_continue_no_work: Option<bool>,
     /// Attempt specification carrying placement, new worktree, account, capability, build weight and write roots.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attempt: Option<AttemptSpec>,

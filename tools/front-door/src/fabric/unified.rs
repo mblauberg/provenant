@@ -927,6 +927,77 @@ pub(crate) fn append_graph_status(
     }
 }
 
+/// Read the retained graph journal without consulting live providers.
+pub(crate) fn unified_graph_trace(
+    graph: &str,
+    globals: &provenant_cli::Globals,
+    workers: &'static dyn WorkerObserver,
+) -> u8 {
+    let result = (|| -> Result<Value, Box<dyn std::error::Error>> {
+        let factory = read_factory(globals, workers)?;
+        let budget = WaitBudget::cli(factory.clock.mono_now(), 55)?;
+        let mut data = factory.graph_document(
+            json!({"op":"trace", "id":graph}),
+            budget,
+            &CancelToken::new(),
+        )?;
+        add_cache_share(&mut data);
+        Ok(data)
+    })();
+    match result {
+        Ok(data) => {
+            let human = data["events"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(Value::to_string)
+                .collect::<Vec<_>>()
+                .join("\n")
+                + "\n";
+            let display_globals = provenant_cli::Globals {
+                json: globals.json,
+                full: true,
+                state_dir: globals.state_dir.clone(),
+                project: globals.project.clone(),
+            };
+            crate::emit(
+                &provenant_records::CommandResult::new(
+                    "trace",
+                    provenant_records::Outcome::Ok,
+                    data,
+                ),
+                &display_globals,
+                &human,
+                true,
+            )
+        }
+        Err(error) => crate::fail(
+            "trace",
+            provenant_records::Outcome::Error,
+            "graph_target",
+            &error.to_string(),
+            globals,
+        ),
+    }
+}
+
+fn add_cache_share(data: &mut Value) {
+    if let Some(events) = data["events"].as_array_mut() {
+        for event in events {
+            if let Some(attempt) = event.get_mut("attempt").and_then(Value::as_object_mut) {
+                let share = attempt
+                    .get("cache_read_tokens")
+                    .and_then(Value::as_u64)
+                    .zip(attempt.get("input_tokens").and_then(Value::as_u64))
+                    .and_then(|(cached, input)| {
+                        (input > 0).then_some(cached as f64 / input as f64)
+                    });
+                attempt.insert("cache_read_share".into(), json!(share));
+            }
+        }
+    }
+}
+
 pub(crate) fn unified_graph_output(
     command: &provenant_cli::Output,
     edge: &provenant_cli::run::Edge<'_>,

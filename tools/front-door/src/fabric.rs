@@ -6,7 +6,7 @@ mod interface;
 mod unified;
 pub(crate) use unified::{
     GraphCommand, append_graph_status, read_status_rows, target_text, unified_graph_command,
-    unified_graph_output, unified_graph_steer,
+    unified_graph_output, unified_graph_steer, unified_graph_trace,
 };
 mod graph_document;
 pub(crate) mod landing;

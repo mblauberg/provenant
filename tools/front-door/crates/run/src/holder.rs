@@ -2011,6 +2011,26 @@ impl RunStore {
         } else {
             partial.clear();
         }
+        // No-work is a host Git fact, never inferred from provider prose or a
+        // missing head. Keep failures and uncommitted work distinct.
+        if task.writer.is_some()
+            && decoded.outcome == Outcome::ReviewRequired
+            && partial.as_slice() == [PartialSignal::DeclaredStop]
+            && decoded.terminal_cause.is_none()
+            && settlement.as_ref().is_some_and(|driver| {
+                driver
+                    .base()
+                    .zip(driver.head())
+                    .is_some_and(|(base, head)| base == head)
+            })
+        {
+            decoded.terminal_cause = Some(TerminalCause::StoppedNoWork);
+            decoded.reason = Some(format!(
+                "{}; {}",
+                TerminalCause::StoppedNoWork.detail(),
+                decoded.reason.take().unwrap_or_default()
+            ));
+        }
         // A denial is a diagnostic, not part of the provider's answer: the
         // handoff, findings and verdict blocks must stay as the provider wrote them.
         if let Some(denial) = denial {
@@ -2938,6 +2958,148 @@ mod writer_recovery_tests {
             assert!(!receipt.support.delivers());
             assert_eq!(receipt.transport, None);
             assert_eq!(receipt.message_id, None);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn declared_stop_without_a_commit_reports_no_work_in_outcome_and_status()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        use crate::delivery_tests::{PrepareFixture, registered_landed_writer_fixture};
+        use provenant_records::wire::lane::{LaneProjectionFacts, LaneRow};
+        for changed in [false, true] {
+            let fixture = PrepareFixture::new()?;
+            let execution = registered_landed_writer_fixture(&fixture)?;
+            let (clock, cancel) = (clock(), CancelToken::new());
+            let call = call(&clock, &cancel);
+            let store = RunStore::open(&execution, &call)?;
+            let mut run = input();
+            run.request.tasks[0].writer = Some(fixture.writer.clone());
+            store.create(&run, &call)?;
+            let id = run.attempts[0].attempt_id;
+            store.mark_starting(
+                &store.record(id, &call)?,
+                &route(),
+                &[],
+                &Default::default(),
+                None,
+                &call,
+            )?;
+            let record = store.claim(id, &clock, &call)?.ok_or("not admitted")?;
+            let scope = RunStore::scope(&record);
+            let attempt = store.attempt_dir(run.run_id, id, false)?;
+            let mut launch = crate::prepare_writer(
+                &fixture.writer,
+                execution.state_root.as_path(),
+                execution.project_id,
+            )?;
+            launch.snapshot(execution.state_root.as_path(), &attempt, scope)?;
+            let candidate = store.temporary_path(id, &call)?.join("candidate-0");
+            std::fs::create_dir_all(&candidate)?;
+            let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
+            crate::objects::prepare_bound(
+                &git,
+                launch.worktree.repo(),
+                &attempt,
+                &candidate,
+                launch.branch.as_str(),
+                launch.base,
+            )?;
+            let pin = format!("refs/provenant/import/{}", launch.base);
+            fixture.git(&["update-ref", &pin, &launch.base.to_string()])?;
+            let (directory, binding) = launch.custody.take().ok_or("writer custody")?;
+            let lease = provenant_supervisor::fixture::acquire_writer_with_binding(
+                directory,
+                scope,
+                binding,
+                call.lock_budget(),
+                &cancel,
+                &clock,
+            )?;
+            drop(provenant_supervisor::fixture::bind_writer_attempt(
+                lease, &attempt,
+            )?);
+            if changed {
+                let objects = candidate.join("git-objects");
+                let private_git = |args: &[std::ffi::OsString]| {
+                    crate::objects::execute_bounded(
+                        &git,
+                        &candidate.join("git-common"),
+                        &fixture.writer.worktree,
+                        args,
+                        None,
+                        crate::objects::Execution {
+                            object_directory: Some(&objects),
+                            ..Default::default()
+                        },
+                    )
+                };
+                let head = private_git(&[
+                    "-c".into(),
+                    "user.name=Fixture".into(),
+                    "-c".into(),
+                    "user.email=fixture@example.invalid".into(),
+                    "commit-tree".into(),
+                    format!("{}^{{tree}}", launch.base).into(),
+                    "-p".into(),
+                    launch.base.to_string().into(),
+                    "-m".into(),
+                    "Partial work".into(),
+                ])?;
+                let head = std::str::from_utf8(&head)?.trim();
+                private_git(&[
+                    "update-ref".into(),
+                    launch.branch.as_str().into(),
+                    head.into(),
+                ])?;
+            }
+            let mut observed = crate::tests::exit();
+            observed.scope = scope;
+            crate::dispatch_tests::seal_exit(&store, &observed)?;
+            let mut fake =
+                crate::dispatch_tests::Fake::with_observed(Some(route()), Some(Outcome::Succeeded));
+            fake.answer = Some("```handoff\n{\"schema_version\":2,\"status\":\"stopped_early\",\"note\":\"Acceptance remains unfinished\",\"remaining\":[\"Finish work\"],\"decisions\":[],\"verify\":[]}\n```".into());
+            let finished = store.finish(id, &attempt, &observed, &fake, &call)?;
+            assert_eq!(
+                finished.settlement_reason,
+                Some(provenant_records::run::SettlementReason::DeclaredStop)
+            );
+            let AttemptState::Terminal {
+                extra,
+                outcome,
+                reason,
+                ..
+            } = &finished.state
+            else {
+                panic!("not terminal")
+            };
+            assert_eq!(*outcome, Outcome::ReviewRequired);
+            assert_eq!(
+                extra.get("terminal_cause"),
+                (!changed)
+                    .then(|| serde_json::json!(TerminalCause::StoppedNoWork))
+                    .as_ref()
+            );
+            let row = LaneRow::project(&finished, LaneProjectionFacts::default());
+            assert_eq!(
+                row.terminal_cause,
+                (!changed).then_some(TerminalCause::StoppedNoWork)
+            );
+            if !changed {
+                assert!(reason.as_deref().unwrap().contains("no new commit"));
+                assert_eq!(
+                    LaneRow::state_and_label(&finished.state).1.as_deref(),
+                    Some(TerminalCause::StoppedNoWork.reason())
+                );
+                assert_eq!(
+                    row.reason.as_deref(),
+                    Some(TerminalCause::StoppedNoWork.detail())
+                );
+                assert_eq!(
+                    row.settlement.unwrap().reason.as_deref(),
+                    Some(TerminalCause::StoppedNoWork.detail())
+                );
+            }
         }
         Ok(())
     }

@@ -3251,11 +3251,8 @@ fn printed_credentials_leave_no_plaintext_in_run_files() -> Result {
             b"diagnostic [REDACTED]"
         );
         let stdout = fs::read_to_string(attempt.join("stdout.log"))?;
-        assert!(stdout.contains(if mode == "plain" {
-            "[REDACTED]"
-        } else {
-            r"\u0067hp_"
-        }));
+        assert!(stdout.contains("[REDACTED]"), "{stdout}");
+        assert!(!stdout.contains(r"\u0067hp_"), "{stdout}");
         assert_no_printed_credential(&run_dir)?;
     }
     cleanup.disarm();

@@ -38,6 +38,7 @@ mod provider_retention;
 mod release_smoke;
 mod roots;
 mod settlement;
+mod staging_gc;
 mod status_wait;
 mod target_seed_build;
 mod usage;
@@ -981,6 +982,7 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
         Command::Run(cmd) => graph_interface::run(*cmd, globals, process.workers()),
         Command::Edit(cmd) => graph_interface::edit(cmd, globals, process.workers()),
         Command::Templates(cmd) => graph_interface::templates(cmd, globals, process.workers()),
+        Command::Trace { graph } => fabric::unified_graph_trace(&graph, globals, process.workers()),
         Command::Stats(cmd) => {
             graph_interface::stats("stats", cmd.id, cmd.by, globals, process.workers())
         }

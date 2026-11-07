@@ -368,12 +368,23 @@ pub(super) fn apply_attempt_observation(
                     && disposition_error.is_none();
                 let outcome = if matches!(
                     outcome,
-                    AttemptOutcome::Succeeded | AttemptOutcome::DeclaredStop
+                    AttemptOutcome::Succeeded
+                        | AttemptOutcome::DeclaredStop
+                        | AttemptOutcome::StoppedNoWork
                 ) && disposition_error.is_some()
                 {
                     AttemptOutcome::TaskFailed
                 } else if outcome == AttemptOutcome::DeclaredStop && review_result && !warned {
                     AttemptOutcome::Succeeded
+                } else if !warned
+                    && launched
+                    && node.access == AccessMode::WorktreeWrite
+                    && outcome == AttemptOutcome::StoppedNoWork
+                {
+                    progress.advance_error_code = Some("stopped_no_work".into());
+                    progress.advance_error =
+                        Some("writer stopped with no work: no new commit".into());
+                    AttemptOutcome::StoppedNoWork
                 } else if warned || outcome == AttemptOutcome::DeclaredStop {
                     AttemptOutcome::OtherFailure
                 } else if outcome == AttemptOutcome::Succeeded
@@ -462,7 +473,8 @@ pub(super) fn apply_attempt_observation(
                     AttemptOutcome::TaskFailed
                     | AttemptOutcome::OtherFailure
                     | AttemptOutcome::ReviewRequired
-                    | AttemptOutcome::DeclaredStop => {
+                    | AttemptOutcome::DeclaredStop
+                    | AttemptOutcome::StoppedNoWork => {
                         progress.state = NodeState::Failed;
                         false
                     }
@@ -932,31 +944,7 @@ pub(super) fn redraw_quota_alias(
     // Same-alias redraw takes precedence over a different configured
     // route, and the retry patch requires the old execution settled.
     checkpoint.nodes[node_index].state = NodeState::Failed;
-    let retry_policy = checkpoint.nodes[node_index].extra.get("retry").cloned();
-    let spent = checkpoint.nodes[node_index]
-        .extra
-        .get("quota_redraw_spent")
-        .and_then(serde_json::Value::as_u64)
-        .unwrap_or(0)
-        .saturating_add(
-            checkpoint.nodes[node_index]
-                .attempts
-                .iter()
-                .filter(|attempt| attempt.launched)
-                .count() as u64,
-        )
-        .saturating_add(u64::from(
-            checkpoint.nodes[node_index]
-                .attempts
-                .last()
-                .is_some_and(|attempt| !attempt.launched),
-        ));
-    let archived = checkpoint.nodes[node_index]
-        .extra
-        .get("quota_redraw_archived")
-        .and_then(serde_json::Value::as_u64)
-        .unwrap_or(0)
-        .saturating_add(checkpoint.nodes[node_index].attempts.len() as u64);
+    let prior = checkpoint.nodes[node_index].clone();
     let library = template::TemplateLibrary::bundled();
     let resolvers = Default::default();
     patch::retry_node(
@@ -975,18 +963,43 @@ pub(super) fn redraw_quota_alias(
         },
     )
     .map_err(|error| error.to_string())?;
-    if let Some(policy) = retry_policy {
-        checkpoint.nodes[node_index]
-            .extra
-            .insert("retry".into(), policy);
-    }
-    checkpoint.nodes[node_index]
-        .extra
-        .insert("quota_redraw_spent".into(), spent.into());
-    checkpoint.nodes[node_index]
-        .extra
-        .insert("quota_redraw_archived".into(), archived.into());
+    retain_automatic_retry_accounting(&prior, &mut checkpoint.nodes[node_index]);
     Ok(())
+}
+
+/// An automatic reset must retain the sealed allowance and all spent launches.
+pub(super) fn retain_automatic_retry_accounting(prior: &NodeProgress, next: &mut NodeProgress) {
+    let retry_policy = prior.extra.get("retry").cloned();
+    let spent = prior
+        .extra
+        .get("quota_redraw_spent")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0)
+        .saturating_add(
+            prior
+                .attempts
+                .iter()
+                .filter(|attempt| attempt.launched)
+                .count() as u64,
+        )
+        .saturating_add(u64::from(
+            prior
+                .attempts
+                .last()
+                .is_some_and(|attempt| !attempt.launched),
+        ));
+    let archived = prior
+        .extra
+        .get("quota_redraw_archived")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0)
+        .saturating_add(prior.attempts.len() as u64);
+    if let Some(policy) = retry_policy {
+        next.extra.insert("retry".into(), policy);
+    }
+    next.extra.insert("quota_redraw_spent".into(), spent.into());
+    next.extra
+        .insert("quota_redraw_archived".into(), archived.into());
 }
 
 fn attribute_blocker(

@@ -33,6 +33,15 @@ brief = "Meet the approved acceptance criteria and run the named checks."
 `templates` inspects the library. `run [BRIEF]` accepts `--use`, `--tier`,
 `--over`, `--set`, `--file`, `--explain` and `--wait`. Inspect the resolved
 shape and authority before submitting. A wait expiry leaves work running.
+Writer nodes default to `auto_continue_no_work = true`. When a writer declares
+unfinished work and its host-pinned head equals its starting head, the graph
+continues it once in the same worktree with the original brief and a short
+continuation instruction. The graph retains the first attempt and records the
+continuation in patch history before launching. A second stop stays failed.
+Set `auto_continue_no_work = false` on a writer node, or in a leaf template's
+`[node]` table, to disable this continuation. A stop with commits, uncommitted
+edits, missing Git evidence, cancellation or a graph pause does not trigger it.
+
 The core verbs are `run`, `status`, `output`, `steer`, `stop`, `retry`, `edit`,
 `templates`, `land` and `quota`; `help --all` reveals the rest.
 

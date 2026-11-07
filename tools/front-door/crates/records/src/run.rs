@@ -843,6 +843,8 @@ pub enum TerminalCause {
     CommandUnavailable,
     HostNativeUnconfigured,
     IdentityUnobserved,
+    /// A writer declared unfinished work and its pinned head equals its base.
+    StoppedNoWork,
 }
 
 impl TerminalCause {
@@ -875,6 +877,7 @@ impl TerminalCause {
             Self::CommandUnavailable => "command unavailable; provenant output ID",
             Self::HostNativeUnconfigured => "host-native unconfigured; provenant output ID",
             Self::IdentityUnobserved => "provider identity unobserved; provenant output ID",
+            Self::StoppedNoWork => "stopped with no work (no new commit); provenant output ID",
         }
     }
 
@@ -948,6 +951,9 @@ impl TerminalCause {
             }
             Self::IdentityUnobserved => {
                 "provider identity was not observed; inspect the local session evidence"
+            }
+            Self::StoppedNoWork => {
+                "the writer stopped with no work: its branch has no new commit; acceptance remains unmet"
             }
         }
     }

@@ -778,7 +778,12 @@ record, including a refusal before launch, carries a `settlement_reason`
 lost). Lane rows expose that settlement classification as `cause`. When a
 specific typed terminal cause was recorded, `terminal_cause` identifies it and
 structured `reason` fields retain the full safe cause, remedy and note in every
-lane response. Only human `status` rows use short labels pointing to
+lane response. A writer's declared stop with no new commit records
+`terminal_cause = "stopped_no_work"`: settlement compares its pinned base and
+head, keeps `cause = "declared_stop"` and `state = "review_required"`, and says
+that it stopped with no work and acceptance remains unmet. Missing Git evidence,
+uncommitted edits and other failure causes do not receive this classification.
+Only human `status` rows use short labels pointing to
 `provenant output ID`. Pre-launch causes distinguish an
 unsupported platform, an unknown pacing account, an unregistered selected
 account, a credential-helper failure at delivery Prepare, a configured command
@@ -856,10 +861,13 @@ enforces the budget from live usage. Codex reports usage in each
 `turn.completed` frame, so the guardian can stop it after a completed turn
 passes the budget; it cannot interrupt a turn mid-flight. Completed-turn
 accounting subtracts cached input. Other providers without live usage are also
-not enforced, and launch warnings or receipt notes report this. An authenticated
-long-turn capture is still needed to establish whether Codex can be stopped
-during a turn. A cherry-pick, revert or rebase in progress is left uncommitted
-like a merge, with a settlement note.
+not enforced, and launch warnings or receipt notes report this. A real Codex
+writer given a budget of 1 finished its whole first turn (about 149,000 tokens
+over 132 seconds and ten commits) before the host stopped it with
+`terminal_cause: token_budget`, so a Codex lane can overrun its budget by up to
+one turn. Publishing the branch here means importing the lane's commits to the
+local branch; the stop itself does not push to the remote. A cherry-pick, revert
+or rebase in progress is left uncommitted like a merge, with a settlement note.
 Time a lane spends queued for
 a build slot stays off the wall deadline, up to `lanes.slot_wait_seconds`
 (default 7200) in total.

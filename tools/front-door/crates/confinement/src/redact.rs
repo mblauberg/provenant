@@ -163,9 +163,10 @@ const TOKEN_MARKERS: &[(&[u8], TokenKind)] = &[
 const MAX_MARKER_LENGTH: usize = 11;
 
 struct ActiveToken {
-    marker: &'static [u8],
+    marker: Vec<u8>,
     kind: TokenKind,
     body: Vec<u8>,
+    body_length: usize,
     emitted: bool,
 }
 
@@ -248,13 +249,35 @@ impl TokenScanner {
 
             if let Some(kind) = self.active.as_ref().map(|active| active.kind) {
                 let byte = input[index];
-                if token_byte(kind, byte) {
+                let remaining = &input[index..];
+                if byte == b'\\'
+                    && !eof
+                    && remaining.len() < 6
+                    && (remaining.len() == 1
+                        || (remaining[1] == b'u'
+                            && remaining[2..].iter().all(u8::is_ascii_hexdigit)))
+                {
+                    self.tail.extend_from_slice(remaining);
+                    return Ok(());
+                }
+                let escaped = if remaining.len() >= 6 && remaining.starts_with(b"\\u") {
+                    std::str::from_utf8(&remaining[2..6])
+                        .ok()
+                        .and_then(|digits| u16::from_str_radix(digits, 16).ok())
+                        .filter(|value| *value <= 127 && token_byte(kind, *value as u8))
+                        .map(|_| 6)
+                } else {
+                    None
+                };
+                if token_byte(kind, byte) || escaped.is_some() {
+                    let width = escaped.unwrap_or(1);
                     let mut became_secret = false;
                     if let Some(active) = self.active.as_mut()
                         && !active.emitted
                     {
-                        active.body.push(byte);
-                        if active.body.len() >= minimum_token_length(kind) {
+                        active.body.extend_from_slice(&remaining[..width]);
+                        active.body_length += 1;
+                        if active.body_length >= minimum_token_length(kind) {
                             active.body.clear();
                             active.emitted = true;
                             became_secret = true;
@@ -267,8 +290,10 @@ impl TokenScanner {
                         output.extend_from_slice(REDACTED);
                         self.matched = true;
                     }
-                    self.observe(byte);
-                    index += 1;
+                    for byte in &remaining[..width] {
+                        self.observe(*byte);
+                    }
+                    index += width;
                     continue;
                 }
                 self.finish_active(output);
@@ -289,18 +314,22 @@ impl TokenScanner {
                 return Ok(());
             }
 
-            if self.boundary {
-                if let Some((marker, kind)) = token_marker_at(&input[index..]) {
+            // Only an escaped opening backslash disables a Unicode marker.
+            // Raw ASCII markers still match immediately after a backslash.
+            if self.boundary && !(input[index] == b'\\' && matches!(self.escape, Escape::Slash)) {
+                if let Some((length, kind)) = token_marker_at(&input[index..]) {
+                    let marker = &input[index..index + length];
                     for byte in marker {
                         self.observe(*byte);
                     }
                     self.active = Some(ActiveToken {
-                        marker,
+                        marker: marker.to_vec(),
                         kind,
                         body: Vec::with_capacity(minimum_token_length(kind)),
+                        body_length: 0,
                         emitted: false,
                     });
-                    index += marker.len();
+                    index += length;
                     continue;
                 }
                 if !eof && token_marker_prefix(&input[index..]) {
@@ -349,7 +378,7 @@ impl TokenScanner {
         if let Some(active) = self.active.take()
             && !active.emitted
         {
-            output.extend_from_slice(active.marker);
+            output.extend_from_slice(&active.marker);
             output.extend_from_slice(&active.body);
         }
     }
@@ -387,16 +416,53 @@ fn token_byte(kind: TokenKind, byte: u8) -> bool {
     }
 }
 
-fn token_marker_at(bytes: &[u8]) -> Option<(&'static [u8], TokenKind)> {
+enum MarkerMatch {
+    Complete(usize),
+    Partial,
+    Mismatch,
+}
+
+fn marker_match(bytes: &[u8], marker: &[u8]) -> MarkerMatch {
+    let mut index = 0;
+    for expected in marker {
+        if index == bytes.len() {
+            return MarkerMatch::Partial;
+        }
+        if bytes[index] == b'\\' {
+            let remaining = &bytes[index..];
+            let encoded = format!("\\u{:04x}", expected);
+            let width = remaining.len().min(6);
+            if remaining[..width].get(1).is_some_and(|byte| *byte != b'u')
+                || !remaining[..width].eq_ignore_ascii_case(&encoded.as_bytes()[..width])
+            {
+                return MarkerMatch::Mismatch;
+            }
+            if width < 6 {
+                return MarkerMatch::Partial;
+            }
+            index += 6;
+        } else if bytes[index] == *expected {
+            index += 1;
+        } else {
+            return MarkerMatch::Mismatch;
+        }
+    }
+    MarkerMatch::Complete(index)
+}
+
+fn token_marker_at(bytes: &[u8]) -> Option<(usize, TokenKind)> {
     TOKEN_MARKERS
         .iter()
-        .find_map(|(marker, kind)| bytes.starts_with(marker).then_some((*marker, *kind)))
+        .find_map(|(marker, kind)| match marker_match(bytes, marker) {
+            MarkerMatch::Complete(length) => Some((length, *kind)),
+            _ => None,
+        })
 }
 
 fn token_marker_prefix(bytes: &[u8]) -> bool {
     TOKEN_MARKERS
         .iter()
-        .any(|(marker, _)| bytes.len() < marker.len() && marker.starts_with(bytes))
+        .any(|(marker, _)| matches!(marker_match(bytes, marker), MarkerMatch::Partial))
 }
 
 fn word_byte(byte: u8) -> bool {
@@ -962,6 +1028,99 @@ mod tests {
                 let mut redactor = Redactor::new([]).expect("empty secret set");
                 assert_eq!(joined(&mut redactor, &[input.as_bytes()]), input.as_bytes());
             }
+        }
+    }
+
+    #[test]
+    fn raw_backslashes_before_tokens_do_not_disable_redaction_across_chunks() {
+        for (marker, kind) in TOKEN_MARKERS {
+            let bodies: &[&str] = match kind {
+                TokenKind::AwsAccessKey => &["0123456789ABCDEF", r"01234567\u00389ABCDEF"],
+                _ => &["abcdefghijklmnopqrst", r"abcdefghij\u006blmnopqrst"],
+            };
+            for body in bodies {
+                for prefix in [r"\", r"\\", r"\\\"] {
+                    let input = format!("{prefix}{}{body}!", String::from_utf8_lossy(marker));
+                    let expected = if matches!(kind, TokenKind::Bearer) {
+                        format!("{prefix}Bearer [REDACTED]!")
+                    } else {
+                        format!("{prefix}[REDACTED]!")
+                    };
+                    for split in 0..=input.len() {
+                        let mut redactor = Redactor::new([]).expect("empty secret set");
+                        assert_eq!(
+                            joined(
+                                &mut redactor,
+                                &[&input.as_bytes()[..split], &input.as_bytes()[split..]]
+                            ),
+                            expected.as_bytes(),
+                            "prefix {prefix:?}, marker {marker:?}, body {body:?}, split {split}"
+                        );
+                    }
+                    let chunks: Vec<&[u8]> = input.as_bytes().chunks(1).collect();
+                    let mut redactor = Redactor::new([]).expect("empty secret set");
+                    assert_eq!(joined(&mut redactor, &chunks), expected.as_bytes());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn unicode_escapes_inside_tokens_are_redacted_across_chunks() {
+        for (marker, kind) in TOKEN_MARKERS {
+            let body = match kind {
+                TokenKind::AwsAccessKey => r"01234567\u00389ABCDEF",
+                _ => r"abcdefghij\u006blmnopqrst",
+            };
+            let input = format!("{}{}!", String::from_utf8_lossy(marker), body);
+            let expected = if matches!(kind, TokenKind::Bearer) {
+                "Bearer [REDACTED]!"
+            } else {
+                "[REDACTED]!"
+            };
+            for split in 0..=input.len() {
+                let mut redactor = Redactor::new([]).expect("empty secret set");
+                assert_eq!(
+                    joined(
+                        &mut redactor,
+                        &[&input.as_bytes()[..split], &input.as_bytes()[split..]]
+                    ),
+                    expected.as_bytes(),
+                    "marker {marker:?}, split {split}"
+                );
+            }
+            let first = marker[0];
+            for prefix in ["", r"\", r"\\"] {
+                let input = format!(
+                    "{prefix}\\u{first:04x}{}{}!",
+                    String::from_utf8_lossy(&marker[1..]),
+                    body
+                );
+                let expected = if prefix == r"\" {
+                    // The Unicode marker's opening backslash is itself escaped.
+                    input.clone()
+                } else {
+                    format!("{prefix}{expected}")
+                };
+                for split in 0..=input.len() {
+                    let mut redactor = Redactor::new([]).expect("empty secret set");
+                    assert_eq!(
+                        joined(
+                            &mut redactor,
+                            &[&input.as_bytes()[..split], &input.as_bytes()[split..]]
+                        ),
+                        expected.as_bytes(),
+                        "prefix {prefix:?}, escaped marker {marker:?}, split {split}"
+                    );
+                }
+                let chunks: Vec<&[u8]> = input.as_bytes().chunks(1).collect();
+                let mut redactor = Redactor::new([]).expect("empty secret set");
+                assert_eq!(joined(&mut redactor, &chunks), expected.as_bytes());
+            }
+        }
+        for input in [r"sk-short\u0061!", r"sk-short\u0021!", r"sk-short\u00xz!"] {
+            let mut redactor = Redactor::new([]).expect("empty secret set");
+            assert_eq!(joined(&mut redactor, &[input.as_bytes()]), input.as_bytes());
         }
     }
 

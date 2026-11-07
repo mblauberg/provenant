@@ -1824,3 +1824,449 @@ fn public_retry_preserves_live_spawn_only_children() {
             .all(|expansion| !expansion.retired())
     );
 }
+
+
+#[test]
+fn no_work_writer_continues_once_in_place_and_records_the_patch() {
+    for final_outcome in [AttemptOutcome::StoppedNoWork, AttemptOutcome::Succeeded] {
+        let mut work = node("work", route("first"));
+        work.access = AccessMode::WorktreeWrite;
+        work.worktree = Some(".worktrees/work".into());
+        work.write_scope = vec!["src".into()];
+        work.prompt = "Finish the accepted brief".into();
+        let document = graph(vec![work]);
+        // A prior writer or explicit retry may already have advanced the
+        // branch beyond this graph's admission binding at A. Settlement proves
+        // that this attempt started and stopped at B.
+        let stopped = || no_work_stop(Some(&"b".repeat(40)));
+        let second = if final_outcome == AttemptOutcome::Succeeded {
+            done_as("finished")
+        } else {
+            stopped()
+        };
+        let mut owner = FakeOwner {
+            observations: [stopped(), second].into(),
+            ..Default::default()
+        };
+        let mut journal = MemoryJournal::default();
+        let run = advance(&document, &mut owner, &mut journal).unwrap();
+        assert_eq!(owner.calls.len(), 2);
+        assert_ne!(owner.calls[0].0, owner.calls[1].0);
+        assert_eq!(owner.permissions[0], owner.permissions[1]);
+        assert!(owner.prompts[1].contains("Finish the accepted brief"));
+        let progress = &run.checkpoint.nodes[0];
+        let expected = if final_outcome == AttemptOutcome::Succeeded {
+            NodeState::Succeeded
+        } else {
+            NodeState::Failed
+        };
+        assert_eq!(progress.state, expected);
+        assert_eq!(progress.previous_attempts.len(), 1);
+        assert_eq!(
+            progress.previous_attempts[0].outcome,
+            Some(AttemptOutcome::StoppedNoWork)
+        );
+        let records: Vec<_> = run
+            .checkpoint
+            .expansions
+            .iter()
+            .filter_map(|expansion| expansion.patch.as_ref())
+            .collect();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].replaced[0].id, "work");
+        assert_eq!(records[0].replaced[0].write_scope, ["src"]);
+        assert!(records[0].reason.as_deref().unwrap().contains("no work"));
+        let reloaded = advance(&document, &mut owner, &mut journal).unwrap();
+        assert_eq!(reloaded.checkpoint.nodes[0].state, expected);
+        assert_eq!(owner.calls.len(), 2);
+    }
+}
+
+fn no_work_stop(head: Option<&str>) -> AttemptObservation {
+    AttemptObservation::Terminal {
+        attempt_ref: Some("stopped".into()),
+        outcome: AttemptOutcome::StoppedNoWork,
+        launched: true,
+        result: None,
+        result_warning: None,
+        result_path: None,
+        branch: None,
+        commit: head.map(str::to_owned),
+    }
+}
+
+#[test]
+fn no_work_continuation_requires_enabled_writer_and_proven_unchanged_head() {
+    for (access, enabled, head) in [
+        (AccessMode::WorktreeWrite, Some(false), Some("a".repeat(40))),
+        (AccessMode::ReadOnly, None, Some("a".repeat(40))),
+        (AccessMode::WorktreeWrite, None, Some("b".repeat(40))),
+        (AccessMode::WorktreeWrite, None, None),
+    ] {
+        let mut work = node("work", route("first"));
+        work.access = access;
+        work.worktree = (access == AccessMode::WorktreeWrite).then(|| ".worktrees/work".into());
+        work.auto_continue_no_work = enabled;
+        let document = graph(vec![work]);
+        let mut stopped = no_work_stop(head.as_deref());
+        if head.as_deref() != Some("a".repeat(40).as_str())
+            && let AttemptObservation::Terminal { outcome, .. } = &mut stopped
+        {
+            *outcome = AttemptOutcome::DeclaredStop;
+        }
+        let mut owner = FakeOwner {
+            observations: [stopped].into(),
+            ..Default::default()
+        };
+        let mut journal = MemoryJournal::default();
+        let run = advance(&document, &mut owner, &mut journal).unwrap();
+        assert_eq!(run.checkpoint.nodes[0].state, NodeState::Failed);
+        assert_eq!(owner.calls.len(), 1);
+        assert!(run.checkpoint.expansions.is_empty());
+    }
+}
+
+#[test]
+fn no_work_continuation_recovers_after_checkpoint_failure_before_launch() {
+    struct FailPatch {
+        saved: FileJournal,
+        fail: bool,
+    }
+    impl GraphJournal for FailPatch {
+        type Error = std::io::Error;
+        fn load(&mut self, id: &str) -> Result<Option<GraphCheckpoint>, Self::Error> {
+            self.saved.load(id).map_err(std::io::Error::other)
+        }
+        fn save(&mut self, checkpoint: &GraphCheckpoint) -> Result<(), Self::Error> {
+            if self.fail && !checkpoint.expansions.is_empty() {
+                return Err(std::io::Error::other("injected patch save failure"));
+            }
+            self.saved.save(checkpoint).map_err(std::io::Error::other)?;
+            Ok(())
+        }
+    }
+    let mut work = node("work", route("first"));
+    work.access = AccessMode::WorktreeWrite;
+    work.worktree = Some(".worktrees/work".into());
+    let document = graph(vec![work]);
+    let mut owner = FakeOwner {
+        observations: [no_work_stop(Some(&"a".repeat(40))), done_as("finished")].into(),
+        ..Default::default()
+    };
+    use provenant_os::{clock::SystemClock, fs::SystemPathResolver};
+    use std::os::unix::fs::PermissionsExt;
+    let temp = crate::test_support::tempdir().unwrap();
+    std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let base = std::fs::canonicalize(temp.path()).unwrap();
+    let mut inputs = provenant_core::RootInputs::new(base.join("home"), base.join("checkout"));
+    inputs.state_dir = Some(base.clone());
+    let root = StateRoot::resolve(&inputs, &SystemPathResolver).unwrap();
+    let project = ProjectId::from_bytes([42; 16]);
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let budget = WaitBudget::cli(clock.mono_now(), 5).unwrap();
+    let open =
+        || FileJournal::open(&root, project, &document.graph_id, budget, &cancel, &clock).unwrap();
+    let mut saved = open();
+    saved
+        .bind(GraphExecution {
+            review_base: None,
+            extra: Default::default(),
+            integration_base: None,
+            directory: base,
+            document: document.clone(),
+        })
+        .unwrap();
+    let mut journal = FailPatch { saved, fail: true };
+    assert!(matches!(
+        advance(&document, &mut owner, &mut journal),
+        Err(GraphError::Journal(_))
+    ));
+    assert_eq!(owner.calls.len(), 1);
+    assert_eq!(
+        journal
+            .saved
+            .load(&document.graph_id)
+            .unwrap()
+            .unwrap()
+            .nodes[0]
+            .state,
+        NodeState::Failed
+    );
+    drop(journal);
+    // Ordinary tick and settlement replay use this API to discover work.
+    // The failed node must remain pending even before its retry patch exists.
+    assert!(
+        FileJournal::pending_execution(&root, project, &document.graph_id)
+            .unwrap()
+            .is_some()
+    );
+    let mut journal = open();
+    let run = advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(owner.calls.len(), 2);
+    assert_eq!(run.checkpoint.nodes[0].state, NodeState::Succeeded);
+    assert_eq!(
+        run.checkpoint
+            .expansions
+            .iter()
+            .filter(|e| e.patch.is_some())
+            .count(),
+        1
+    );
+    drop(journal);
+    assert!(
+        FileJournal::pending_execution(&root, project, &document.graph_id)
+            .unwrap()
+            .is_none()
+    );
+    let events = FileJournal::read_events(&root, project, &document.graph_id).unwrap();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event.kind == GraphEventKind::Patch)
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn stopping_settled_no_work_fences_failed_checkpoint_recovery() {
+    struct FailPatch {
+        saved: FileJournal,
+        fail: bool,
+    }
+    impl GraphJournal for FailPatch {
+        type Error = std::io::Error;
+        fn load(&mut self, id: &str) -> Result<Option<GraphCheckpoint>, Self::Error> {
+            self.saved.load(id).map_err(std::io::Error::other)
+        }
+        fn save(&mut self, checkpoint: &GraphCheckpoint) -> Result<(), Self::Error> {
+            if self.fail && !checkpoint.expansions.is_empty() {
+                return Err(std::io::Error::other("injected patch save failure"));
+            }
+            self.saved.save(checkpoint).map_err(std::io::Error::other)?;
+            Ok(())
+        }
+    }
+    let mut work = node("work", route("first"));
+    work.access = AccessMode::WorktreeWrite;
+    work.worktree = Some(".worktrees/work".into());
+    let document = graph(vec![work]);
+    let mut owner = FakeOwner {
+        observations: [no_work_stop(Some(&"a".repeat(40))), done_as("finished")].into(),
+        ..Default::default()
+    };
+    use provenant_os::{clock::SystemClock, fs::SystemPathResolver};
+    use std::os::unix::fs::PermissionsExt;
+    let temp = crate::test_support::tempdir().unwrap();
+    std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let base = std::fs::canonicalize(temp.path()).unwrap();
+    let mut inputs = provenant_core::RootInputs::new(base.join("home"), base.join("checkout"));
+    inputs.state_dir = Some(base.clone());
+    let root = StateRoot::resolve(&inputs, &SystemPathResolver).unwrap();
+    let project = ProjectId::from_bytes([42; 16]);
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let budget = WaitBudget::cli(clock.mono_now(), 5).unwrap();
+    let open =
+        || FileJournal::open(&root, project, &document.graph_id, budget, &cancel, &clock).unwrap();
+    let mut saved = open();
+    saved
+        .bind(GraphExecution {
+            review_base: None,
+            extra: Default::default(),
+            integration_base: None,
+            directory: base,
+            document: document.clone(),
+        })
+        .unwrap();
+    let mut journal = FailPatch { saved, fail: true };
+    assert!(matches!(
+        advance(&document, &mut owner, &mut journal),
+        Err(GraphError::Journal(_))
+    ));
+    assert_eq!(owner.calls.len(), 1);
+    assert_eq!(
+        journal
+            .saved
+            .load(&document.graph_id)
+            .unwrap()
+            .unwrap()
+            .nodes[0]
+            .state,
+        NodeState::Failed
+    );
+    let mut checkpoint = journal.saved.load(&document.graph_id).unwrap().unwrap();
+    let original = checkpoint.nodes[0].clone();
+    assert_eq!(original.advance_error_code.as_deref(), Some("stopped_no_work"));
+    assert!(no_work::pending(&document, &checkpoint));
+    cancel_node_subtree(&document, &mut checkpoint, "work", Some("chair stop")).unwrap();
+    assert_eq!(checkpoint.nodes[0].attempts, original.attempts);
+    assert_eq!(checkpoint.nodes[0].state, original.state);
+    assert_eq!(checkpoint.nodes[0].advance_error, original.advance_error);
+    assert_eq!(checkpoint.nodes[0].advance_error_code, original.advance_error_code);
+    journal.saved.save(&checkpoint).unwrap();
+    drop(journal);
+
+    assert!(FileJournal::pending_execution(&root, project, &document.graph_id)
+        .unwrap().is_none());
+    let mut journal = open();
+    let checkpoint = journal.load(&document.graph_id).unwrap().unwrap();
+    let limits = plans::generous();
+    let expanded = plans::expand(&document, &checkpoint.extensions, &checkpoint.expansions, &limits).unwrap();
+    let (plan, _) = validate_flat_plan(&expanded, &limits).unwrap();
+    assert!(!no_work::eligible(&plan.nodes[0], &checkpoint.nodes[0], &checkpoint));
+    assert!(!no_work::pending(&document, &checkpoint));
+    assert_eq!(checkpoint.nodes[0].attempts, original.attempts);
+    assert_eq!(checkpoint.nodes[0].advance_error, original.advance_error);
+    assert_eq!(checkpoint.nodes[0].advance_error_code, original.advance_error_code);
+    let mut recovery_owner = FakeOwner::default();
+    let run = advance(&document, &mut recovery_owner, &mut journal).unwrap();
+    assert!(recovery_owner.calls.is_empty());
+    assert_eq!(run.checkpoint.nodes[0].attempts, original.attempts);
+    assert_eq!(run.checkpoint.nodes[0].state, NodeState::Failed);
+}
+
+#[test]
+fn no_work_continuations_share_the_graph_budget_and_resume_after_extension() {
+    let writer = |id| {
+        let mut work = node(id, route("first"));
+        work.access = AccessMode::WorktreeWrite;
+        work.worktree = Some(format!(".worktrees/{id}"));
+        work
+    };
+    for allowance in [0, 1] {
+        let document = graph(vec![writer("first"), writer("second")]);
+        let mut owner = FakeOwner {
+            observations: [
+                no_work_stop(Some(&"a".repeat(40))),
+                done_as("first-done"),
+                no_work_stop(Some(&"a".repeat(40))),
+                done_as("second-done"),
+            ]
+            .into(),
+            ..Default::default()
+        };
+        let mut limits = crate::config::GraphLimits {
+            continuations: allowance,
+            ..Default::default()
+        };
+        let mut journal = MemoryJournal::default();
+        let run = advance_with_budget(
+            &document,
+            &mut owner,
+            &mut journal,
+            &limits,
+            &Default::default(),
+        )
+        .unwrap();
+        assert_eq!(run.status, GraphStatus::Paused);
+        assert_eq!(owner.calls.len(), if allowance == 0 { 1 } else { 3 });
+        assert_eq!(run.checkpoint.remaining.as_ref().unwrap().continuations, 0);
+        limits.continuations = 2;
+        let run = resume_with_budget(
+            &document,
+            &mut owner,
+            &mut journal,
+            &limits,
+            &Default::default(),
+            &[],
+        )
+        .unwrap();
+        assert!(run.checkpoint.successful());
+        assert_eq!(owner.calls.len(), 4);
+        assert_eq!(run.checkpoint.remaining.as_ref().unwrap().continuations, 0);
+    }
+}
+
+#[test]
+fn no_work_continuation_retains_sealed_quota_retry_spending_and_models() {
+    let mut alias = route("first");
+    alias.adapter = None;
+    alias.model = None;
+    alias.alias = Some("junior".into());
+    let mut work = node("work", alias);
+    work.access = AccessMode::WorktreeWrite;
+    work.worktree = Some(".worktrees/work".into());
+    let document = graph(vec![work]);
+    let quota = |reference: &str| {
+        let mut observation = terminal(AttemptOutcome::UsageLimited);
+        if let AttemptObservation::Terminal { attempt_ref, .. } = &mut observation {
+            *attempt_ref = Some(reference.into());
+        }
+        observation
+    };
+    let mut owner = FakeOwner {
+        quota_redraw: true,
+        retry_limit: Some(1),
+        observations: [
+            quota("quota/first"),
+            no_work_stop(Some(&"a".repeat(40))),
+            quota("quota/last"),
+        ]
+        .into(),
+        models: [
+            ("quota/first".into(), "codex/limited".into()),
+            ("stopped".into(), "claude/stopped".into()),
+        ]
+        .into(),
+        ..Default::default()
+    };
+    let mut journal = MemoryJournal::default();
+    let run = advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(owner.calls.len(), 3);
+    assert_eq!(run.checkpoint.nodes[0].state, NodeState::Failed);
+    assert_eq!(run.checkpoint.nodes[0].extra["retry"]["retries"], 1);
+    assert_eq!(owner.prior_attempts[2], ["codex/limited", "claude/stopped"]);
+    assert_eq!(
+        advance(&document, &mut owner, &mut journal)
+            .unwrap()
+            .checkpoint
+            .nodes[0]
+            .state,
+        NodeState::Failed
+    );
+    assert_eq!(owner.calls.len(), 3);
+}
+
+#[test]
+fn no_work_repair_continues_after_upstream_advanced_its_worktree() {
+    use provenant_records::run::DeliveryMode;
+    let mut write = node("write", route("first"));
+    write.access = AccessMode::WorktreeWrite;
+    write.worktree = Some(".worktrees/work".into());
+    write.delivery = Some(DeliveryMode::Push);
+    let mut repair = node("repair", route("first"));
+    repair.access = AccessMode::WorktreeWrite;
+    repair.worktree = write.worktree.clone();
+    repair.continues = Some("write".into());
+    repair.depends_on = vec!["write".into()];
+    let document = graph(vec![write, repair]);
+    let mut committed = done_as("upstream");
+    if let AttemptObservation::Terminal { commit, branch, .. } = &mut committed {
+        *commit = Some("b".repeat(40));
+        *branch = Some("topic/work".into());
+    }
+    let mut owner = FakeOwner {
+        observations: [
+            committed,
+            no_work_stop(Some(&"b".repeat(40))),
+            done_as("repaired"),
+        ]
+        .into(),
+        ..Default::default()
+    };
+    let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
+    assert!(run.checkpoint.successful());
+    assert_eq!(
+        owner
+            .calls
+            .iter()
+            .map(|(key, _)| key.node_id.as_str())
+            .collect::<Vec<_>>(),
+        ["write", "repair", "repair"]
+    );
+    assert_eq!(owner.permissions[1], owner.permissions[2]);
+    assert!(owner.fast_forward_only[2]);
+    assert_eq!(run.checkpoint.nodes[1].previous_attempts.len(), 1);
+}
