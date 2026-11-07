@@ -115,7 +115,7 @@ fn handoff_recovery_provider(prompt: &str, args: &[String], auth: &Value) -> Res
             .lines()
             .find_map(|line| {
                 line.strip_prefix("Progress handoff JSON: ")?
-                    .split_once(". Update this file atomically")
+                    .split_once(". Update this file throughout")
                     .map(|(path, _)| PathBuf::from(path))
             })
             .ok_or("supplied progress path")?;
