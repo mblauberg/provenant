@@ -3311,13 +3311,17 @@ fn opencode_usage_limit_stops_hanging_provider() -> Result {
         "PATH".into(),
         format!("{}:/usr/bin:/bin", bin.display()).into(),
     ));
-    let lane = run_graph_provider(
+    // Settlement takes about as long as the helper's default wait, so a slow
+    // runner can see the lane still running. The stop reason below is the
+    // real bound; this wait only has to outlast settlement.
+    let lane = run_graph_provider_with_wait(
         &rig,
         "opencode-hanging-limit",
         json!({
             "id":"provider", "prompt":"free limit then hang", "access":"read_only",
             "route":{"adapter":"opencode","model":"opencode/glm-5.3-flash-free"}
         }),
+        "60s",
     )?;
     let run = lane["run_id"].as_str().ok_or("run")?;
     assert_eq!(lane["state"], "quota_limited", "{lane}");
@@ -3329,7 +3333,7 @@ fn opencode_usage_limit_stops_hanging_provider() -> Result {
         .join(lane["attempt_id"].as_str().ok_or("attempt")?);
     let exit: Value = serde_json::from_slice(&fs::read(attempt.join("process-exit.json"))?)?;
     // Cleanup, rather than a natural exit or the attempt wall deadline, must
-    // have ended the provider. The dispatch wait bounds the settlement above.
+    // have ended the provider.
     assert_eq!(exit["stop_reason"], "post_terminal_cleanup", "{exit}");
     assert_eq!(exit["terminal_observed"], true, "{exit}");
     cleanup.disarm();
