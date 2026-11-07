@@ -1409,6 +1409,13 @@ mod provisioning_tests {
         }
         let request = json!({"op":"add","id":"child","use":"task","brief":"Read","idempotency_key":"receipt"});
         let receipt = serve(&context, "caller", request.clone(), budget, &cancel, &clock)?;
+        std::fs::remove_file(
+            context
+                .roots
+                .state
+                .as_path()
+                .join("graph-template-cutover-complete"),
+        )?;
         {
             let mut journal = FileJournal::open(
                 &context.roots.state,
@@ -1443,8 +1450,18 @@ mod provisioning_tests {
             fresh,
             json!({"op":"edit","id":"current","patch":{"schema_version":1,"idempotency_key":"new-edit","nodes":[{"id":"another","use":"task","brief":"More"}]}}),
         ] {
+            let error = serve(&context, "caller", request, budget, &cancel, &clock)
+                .expect_err("new relay work must be refused");
+            assert_eq!(error.code(), "UPGRADE_DRAIN_REQUIRED");
+            let ServiceError::Facade(error) = error else {
+                return Err("expected a facade refusal".into());
+            };
             assert!(
-                matches!(serve(&context, "caller", request, budget, &cancel, &clock), Err(ServiceError::Cli { code, .. }) if code == "UPGRADE_DRAIN_REQUIRED")
+                error
+                    .diagnostic()
+                    .detail
+                    .unwrap_or_default()
+                    .contains("/legacy")
             );
             assert_eq!(
                 FileJournal::read_checkpoint(
