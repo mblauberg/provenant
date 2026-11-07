@@ -793,24 +793,39 @@ impl provenant_run::Providers for WriterProvider {
             OsString::from(self.mode),
             writer.worktree.path().as_os_str().to_owned(),
         ];
+        // Production lists every other checkout of the repository; the primary
+        // subtree covers each sibling here.
+        let primary = writer
+            .worktree
+            .path()
+            .parent()
+            .and_then(Path::parent)
+            .ok_or("fixture primary")?;
+        let protected = [provenant_confinement::permissions::PathGrant {
+            path: primary.to_owned(),
+            scope: provenant_confinement::permissions::PathScope::Subtree,
+        }];
         let plan = provenant_cli::run::writer_fixture_plan(
             self.project,
             writer.worktree.path(),
             &self.home,
             &self.state,
+            &protected,
             paths,
             &writer,
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")),
         )?;
+        let login = self.home.join(".fixture-login");
+        fs::write(&login, b"").map_err(|error| error.to_string())?;
         let profile = provenant_confinement::permissions::ProviderProfile {
             spec: provenant_confinement::permissions::ProviderProfileSpec {
                 authentication: vec![provenant_confinement::permissions::AuthenticationProfile {
                     keychain: None,
                     mechanism: "login".into(),
-                    // A public executable stands in for a login file; no live
+                    // A placeholder stands in for a login file; no live
                     // credential is read and this adds no write permission.
                     roots: vec![provenant_confinement::permissions::PathGrant {
-                        path: executable.clone(),
+                        path: login,
                         scope: provenant_confinement::permissions::PathScope::Exact,
                     }],
                     in_place_writes: Vec::new(),

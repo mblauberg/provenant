@@ -2151,6 +2151,7 @@ mod tests {
         let nested = temporary.join("candidate-0/.tmpX/child");
         fs::create_dir_all(&nested)?;
         fs::write(nested.join("payload"), b"recoverable scratch")?;
+        fs::set_permissions(&temporary, fs::Permissions::from_mode(0o700))?;
         fs::set_permissions(&nested, fs::Permissions::from_mode(0o000))?;
 
         let outside = tempfile::tempdir()?;

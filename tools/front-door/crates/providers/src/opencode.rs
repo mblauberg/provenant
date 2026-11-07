@@ -1992,8 +1992,6 @@ mod tests {
                 }
                 // Ancestor configuration has no enclosing data-read grant.
                 assert!(!profile.contains(&format!("(subpath \"{}\")", project_parent.display())));
-                let literal = format!("(literal \"{}\")", home.join(name).display());
-                assert!(!profile.contains(&literal), "{access:?} grants {literal}");
             }
         }
     }

@@ -741,21 +741,23 @@ impl LaneRuntime<'_> {
             exact(self.executable),
             exact(self.git),
             exact(self.assets.join("release.json")),
-            exact(self.state.join("config.toml")),
-            exact(self.state.join("host-id")),
         ]);
         // Homebrew Git links pcre2 and gettext from sibling kegs.
-        profile
-            .runtime_reads
-            .push(subtree(self.state.join("projects")));
+        let mut fabric_reads = vec![
+            exact(self.state.join("config.toml")),
+            exact(self.state.join("host-id")),
+            subtree(self.state.join("projects")),
+        ];
         for name in [
             "fabric/fabric.sqlite3",
             "fabric/fabric.sqlite3-wal",
             "fabric/fabric.sqlite3-shm",
             "fabric/fabric.sqlite3-journal",
         ] {
-            profile.runtime_reads.push(exact(self.state.join(name)));
+            fabric_reads.push(exact(self.state.join(name)));
         }
+        profile.runtime_reads.extend(fabric_reads.iter().cloned());
+        profile.fabric_state_reads.extend(fabric_reads);
         profile.fabric_socket = Some(exact(Self::fabric_socket(self.attempt)));
         if hooks {
             // Claude executes command hooks through its shell. This does not

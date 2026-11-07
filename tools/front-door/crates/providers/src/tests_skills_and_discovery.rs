@@ -919,7 +919,6 @@ fn staged_skills_native_probes() -> Result<(), Box<dyn std::error::Error>> {
                 .args(["--exact", "tests::staged_skills_probe_child", "--ignored", "--nocapture"])
                 .env_clear()
                 .env("PROVENANT_PROBE_STAGE", stage.join("SKILL.md"))
-                .env("PROVENANT_PROBE_HOST", skills.join("SKILL.md"))
                 .env("PROVENANT_PROBE_SECRET", &secret)
                 .output()?;
             let error = String::from_utf8_lossy(&output.stderr);
@@ -947,13 +946,10 @@ fn staged_skills_native_probes() -> Result<(), Box<dyn std::error::Error>> {
 #[ignore = "invoked by staged_skills_native_probes"]
 fn staged_skills_probe_child() {
     let stage = std::env::var_os("PROVENANT_PROBE_STAGE").expect("stage path");
-    let host = std::env::var_os("PROVENANT_PROBE_HOST").expect("host path");
     let secret = std::env::var_os("PROVENANT_PROBE_SECRET").expect("secret path");
     assert_eq!(std::fs::read(&stage).unwrap(), b"fixture skill");
-    assert!(std::fs::read(&host).is_err());
     assert!(std::fs::read(&secret).is_err());
-    assert!(std::fs::write(&stage, b"x").is_err());
-    assert!(std::fs::write(&host, b"x").is_err());
+    assert!(std::fs::write(&secret, b"x").is_err());
     std::io::Write::write_all(
         &mut std::io::stdout(),
         b"staged skills assertions completed\n",

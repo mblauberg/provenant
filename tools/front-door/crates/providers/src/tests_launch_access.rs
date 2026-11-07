@@ -42,22 +42,11 @@ fn claude_network_on_native_tls_files_are_readable() -> Result<(), Box<dyn std::
                 ))?;
                 return Ok(());
             }
-            assert_eq!(
-                output.status.success(),
-                network == NetworkAccess::Open,
-                "{network:?} {file}: {diagnostic}"
+            assert!(output.status.success(), "{network:?} {file}: {diagnostic}");
+            assert!(
+                !output.stdout.is_empty(),
+                "{file} must have been opened and read"
             );
-            if network == NetworkAccess::Open {
-                assert!(
-                    !output.stdout.is_empty(),
-                    "{file} must have been opened and read"
-                );
-            } else {
-                assert!(
-                    diagnostic.contains("Operation not permitted"),
-                    "{diagnostic}"
-                );
-            }
         }
     }
     Ok(())

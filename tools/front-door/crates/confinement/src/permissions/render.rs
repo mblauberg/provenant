@@ -1191,6 +1191,7 @@ fn push_boundaries(
     if let Some(socket) = &profile.spec.fabric_socket {
         state_reads.push(socket.clone());
     }
+    state_reads.extend(profile.spec.fabric_state_reads.iter().cloned());
     for root in std::iter::once(mandatory.state()).chain(mandatory.state_aliases()) {
         push_denial(source, "file-read*", root, &state_reads)?;
         push_denial(source, "file-clone", root, &state_reads)?;
@@ -1233,9 +1234,16 @@ fn push_boundaries(
             push_ancestor_guards(source, root, &mut ancestors)?;
         }
     }
+    // A lane's own checkout can be a protected worktree: its writer grant and a
+    // read-only lane's configured project writes stay usable.
     let writer_exception: Vec<_> = worktree
         .map(|grants| grants.worktree.clone())
         .into_iter()
+        .chain(
+            plan.read_only
+                .iter()
+                .flat_map(|grants| grants.writes.iter().cloned()),
+        )
         .collect();
     for root in mandatory.protected().iter().chain(&plan.protected_roots) {
         let exceptions = if mandatory.protected().contains(root) {

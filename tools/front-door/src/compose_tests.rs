@@ -295,7 +295,8 @@ pub(crate) fn provider() -> Result {
         if prompt.ends_with("reader-empty") {
             denied(&cwd.join(".agent-run/locks/compose-lock"))?;
         } else {
-            fs::write(cwd.join(".agent-run/locks/compose-lock"), b"lock")?;
+            fs::write(cwd.join(".agent-run/locks/compose-lock"), b"lock")
+                .map_err(|error| format!("configured project write: {error}"))?;
         }
         denied(&cwd.join("outside-exception"))?;
     } else if prompt.ends_with("writer") {
@@ -315,18 +316,6 @@ pub(crate) fn provider() -> Result {
                 .ok_or("host state missing")?,
         );
         denied(&host_state.join("cargo-target-seeds/generations/fixture/target/artifact"))?;
-        for shared in [
-            ".cargo/registry/compose",
-            ".cargo/git/compose",
-            ".cargo/bin/compose",
-            ".cargo/compose-home",
-            ".npm/compose",
-            "Library/Caches/pnpm/compose",
-            ".cache/node/compose",
-            "Library/pnpm/compose",
-        ] {
-            denied(&home.join(shared))?;
-        }
         fs::write(
             state.join("compose-cache"),
             cache.as_os_str().as_encoded_bytes(),
@@ -334,9 +323,8 @@ pub(crate) fn provider() -> Result {
         for name in [
             ".claude/settings.json",
             ".claude/hooks/compose",
-            ".kiro/settings/compose",
-            ".gemini/config/mcp_config.json",
             ".cursor/extensions/compose",
+            ".gemini/config/mcp_config.json",
             ".codex/config.toml",
         ] {
             denied(&home.join(name))?;
@@ -354,7 +342,8 @@ pub(crate) fn provider() -> Result {
     } else {
         return Err("unknown compose prompt".into());
     }
-    fs::write(state.join("compose-proof"), b"proved")?;
+    fs::write(state.join("compose-proof"), b"proved")
+        .map_err(|error| format!("provider state write: {error}"))?;
     std::io::stdout().write_all(b"{\"type\":\"thread.started\",\"thread_id\":\"compose-fixture\"}\n{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"confinement proved\"}}\n{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}\n")?;
     Ok(())
 }

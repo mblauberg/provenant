@@ -165,6 +165,10 @@ fn launch_policy_binds_mandatory_aliases_and_all_network_ceilings()
     for path in [&home, &source, &state, &relocated, &gh, &credential_target] {
         std::fs::create_dir(path)?;
     }
+    std::fs::set_permissions(
+        &state,
+        std::os::unix::fs::PermissionsExt::from_mode(0o700),
+    )?;
     std::os::unix::fs::symlink(&credential_target, home.join(".ssh"))?;
     let subtree = |path: &Path| PathGrant {
         path: path.to_owned(),
@@ -339,6 +343,10 @@ fn launch_inventory_protects_owned_worktrees_in_another_registered_project()
     for path in [&home, &source, &state, &foreign, &foreign_common.join("objects")] {
         std::fs::create_dir_all(path)?;
     }
+    std::fs::set_permissions(
+        &state,
+        std::os::unix::fs::PermissionsExt::from_mode(0o700),
+    )?;
     std::fs::write(foreign_common.join("HEAD"), "ref: refs/heads/main\n")?;
     let mut inputs = provenant_core::RootInputs::new(home.clone(), source.clone());
     inputs.state_dir = Some(state.clone());
