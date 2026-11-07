@@ -537,7 +537,11 @@ impl Factory {
             json!({"access":"read_only", "composite":{"nodes":document["nodes"], "exports":[]}})
         } else {
             match raw {
-                Some(document) if document.get("use").is_some() => document.clone(),
+                Some(document) if document.get("use").is_some() => {
+                    let mut node = document.clone();
+                    provenant_fabric_runtime::graph::template::separate_document_fields(&mut node);
+                    node
+                },
                 Some(document) => {
                     inline["lane-document"] = document.clone();
                     json!({"use":"lane-document"})
@@ -990,7 +994,11 @@ impl Factory {
             }
         } else {
             let mut node = match lane_document {
-                Some(document) if document.get("use").is_some() => document.clone(),
+                Some(document) if document.get("use").is_some() => {
+                    let mut node = document.clone();
+                    provenant_fabric_runtime::graph::template::separate_document_fields(&mut node);
+                    node
+                },
                 Some(_) => json!({"id":"task", "use":"lane-document"}),
                 None => json!({"id":"task", "use":"task"}),
             };

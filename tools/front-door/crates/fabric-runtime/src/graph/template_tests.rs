@@ -1027,3 +1027,14 @@ fn parameterised_composite_members_reject_unknown_fields() {
         "{error}"
     );
 }
+
+#[test]
+fn shorthand_document_controls_are_not_node_overrides() {
+    let library = TemplateLibrary::bundled();
+    let compiler = Compiler::new(&library);
+    let mut node = json!({"id":"task", "use":"task", "limits":{"nodes":10}, "templates":{}});
+    separate_document_fields(&mut node);
+    assert!(compiler.compile(&node).is_ok());
+    node["unknown_node_field"] = json!(true);
+    assert!(compiler.compile(&node).unwrap_err().contains("unknown field unknown_node_field"));
+}

@@ -59,6 +59,15 @@ fn flatten_extensions(node: &mut Map<String, Value>) -> Result<(), String> {
     Ok(())
 }
 
+/// Remove graph-document controls before validating a shorthand node.
+pub fn separate_document_fields(node: &mut Value) {
+    if let Some(fields) = node.as_object_mut() {
+        for key in ["schema_version", "graph_id", "templates", "integration_branch", "limits", "delivery", "review_base", "context", "decision_session", "review", "retry", "exclude", "network", "capability", "no_capability"] {
+            fields.remove(key);
+        }
+    }
+}
+
 fn template_syntax(field: &str) -> bool {
     matches!(
         field,
