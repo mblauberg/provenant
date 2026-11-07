@@ -1364,6 +1364,60 @@ fn graph_fixture_available() -> Result<bool> {
     Ok(true)
 }
 
+fn simultaneous_first_launches_pass_cutover_guard() -> Result {
+    if !graph_fixture_available()? {
+        return Ok(());
+    }
+    let rig = claude_fixture()?;
+    let _cleanup = rig.process_cleanup();
+    fs::write(
+        rig.home.join(".claude-pro/.credentials.json"),
+        br#"{"claudeAiOauth":{"accessToken":"fixture-token","expiresAt":4102444800000}}"#,
+    )?;
+    writeln!(
+        OpenOptions::new()
+            .append(true)
+            .open(rig.state.join("config.toml"))?,
+        "\n[domains.routing.pools]\njunior = [{{ model = 'claude/claude-sonnet-5-5', effort = 'medium' }}]"
+    )?;
+    let binary = option_env!("CARGO_BIN_EXE_provenant").ok_or("binary")?;
+    let mut children = Vec::new();
+    for index in 0..4 {
+        children.push(
+            std::process::Command::new(binary)
+                .current_dir(&rig.project)
+                .env_clear()
+                .envs(rig.env.iter().cloned())
+                .arg("--state-dir")
+                .arg(&rig.state)
+                .args([
+                    "run",
+                    &format!("parallel fixture {index}"),
+                    "--tier",
+                    "junior",
+                    "--wait=30s",
+                    "--json",
+                ])
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()?,
+        );
+    }
+    for child in children {
+        let output = child.wait_with_output()?;
+        let text = format!(
+            "{} {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(!text.contains("UPGRADE_DRAIN_REQUIRED"), "{text}");
+        assert!(output.status.success(), "{text}");
+        let result: Value = serde_json::from_slice(&output.stdout)?;
+        assert_eq!(result["data"]["status"], "complete", "{result}");
+    }
+    Ok(())
+}
+
 /// A quota refusal with no generated work redraws the same alias in the graph.
 fn graph_read_only_alias_retries_another_member_after_empty_launch_quota() -> Result {
     if !graph_fixture_available()? {
@@ -3417,6 +3471,10 @@ fn main() -> ExitCode {
     } else {
         type NamedTest = (&'static str, fn() -> Result);
         let tests: &[NamedTest] = &[
+            (
+                "simultaneous_first_launches_pass_cutover_guard",
+                simultaneous_first_launches_pass_cutover_guard,
+            ),
             (
                 "writer_shell_edits_instructions_and_redacts_logs",
                 writer_shell_edits_instructions_and_redacts_logs,

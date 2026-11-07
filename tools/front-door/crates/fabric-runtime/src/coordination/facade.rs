@@ -199,6 +199,7 @@ pub enum InvalidInputDetail {
     GraphReason(String),
     TemplateInvalid,
     UpgradeDrainRequired,
+    CutoverFindings(String),
     Schema,
     LandingLock,
     UnresolvableBase(String),
@@ -223,6 +224,7 @@ impl InvalidInputDetail {
             // does not recognise their contents.
             Self::GraphReason(_) => Some("graph input could not be processed".into()),
             Self::UpgradeDrainRequired => Some("Finish or cancel old pending graphs and drain live lanes with the previous release before admitting new work.".into()),
+            Self::CutoverFindings(findings) => Some(findings.clone()),
             Self::TemplateInvalid => Some("invalid input field `templates`: template could not be loaded or validated".into()),
             Self::Schema => Some("graph document schema_version is invalid".into()),
             Self::LandingLock => Some("landing lock required".into()),
@@ -588,6 +590,9 @@ impl FacadeError {
                     projected = projected.detail(detail);
                 }
                 projected = projected.next("run the previous release against this state directory, finish or cancel pending graphs and drain live lanes, then retry; --yes cannot bypass this check");
+            }
+            Self::GraphRelayRefused { detail: Some(InvalidInputDetail::CutoverFindings(findings)), .. } => {
+                projected = projected.detail(findings.clone()).next("finish or cancel pending graphs and drain live lanes with the previous release, then retry");
             }
             Self::InvalidInput { detail: Some(InvalidInputDetail::GraphReason(_)) }
             | Self::GraphRelayRefused { detail: Some(InvalidInputDetail::GraphReason(_)), .. } => {

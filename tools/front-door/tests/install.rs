@@ -1654,9 +1654,21 @@ fn upgrade_preflight_preserves_old_checkpoint_and_names_the_drain_step() -> Resu
         refusal["error"]["message"]
             .as_str()
             .ok_or("refusal message")?
-            .contains("previous release")
+            .contains(&format!("Pending graph {project}/old-pending-fixture"))
     );
     assert_eq!(fs::read(path)?, checkpoint);
+    fs::write(
+        rig.state.join("graph-template-cutover-complete"),
+        b"complete\n",
+    )?;
+    let preflight = rig.command(&[
+        "install",
+        "--source",
+        rig.root.to_str().ok_or("fixture source")?,
+        "--upgrade-preflight",
+    ])?;
+    assert_eq!(code(&preflight), 2, "{preflight:?}");
+    assert!(String::from_utf8(preflight.stdout.bytes)?.contains("old-pending-fixture"));
     let presets = rig.project.join(".provenant/presets");
     fs::create_dir_all(&presets)?;
     let preset = presets.join("local.toml");

@@ -25,6 +25,14 @@ fn refused(code: &str, message: impl Into<String>) -> ServiceError {
     }
 }
 
+fn cutover_refusal(findings: String) -> ServiceError {
+    use provenant_fabric_runtime::coordination::facade::InvalidInputDetail;
+    ServiceError::Facade(FacadeError::GraphRelayRefused {
+        refusal_code: "UPGRADE_DRAIN_REQUIRED".into(),
+        detail: Some(InvalidInputDetail::CutoverFindings(findings)),
+    })
+}
+
 fn journal_error<E>(_: E) -> ServiceError {
     ServiceError::Facade(FacadeError::io("access graph journal"))
 }
@@ -106,7 +114,7 @@ pub fn serve(
                 return Ok(serde_json::to_value(receipt)?);
             }
             provenant_fabric_runtime::graph::cutover::pending_guard(state)
-                .map_err(|_| refused("UPGRADE_DRAIN_REQUIRED", "Drain legacy graphs and lanes with the previous release before admitting new work"))?;
+                .map_err(cutover_refusal)?;
             let library = template_library(&context.home, &context.cwd)
                 .map_err(|error| refused("invalid_template", error))?;
             let config =
@@ -255,7 +263,7 @@ pub fn serve(
             .map_err(|error| refused(error.code, error.message))?;
             if !admitted.replayed {
                 provenant_fabric_runtime::graph::cutover::pending_guard(state)
-                    .map_err(|_| refused("UPGRADE_DRAIN_REQUIRED", "Drain legacy graphs and lanes with the previous release before admitting new work"))?;
+                    .map_err(cutover_refusal)?;
             }
             provision_added_writers(
                 context,

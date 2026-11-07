@@ -1387,14 +1387,14 @@ fn pending_upgrade_findings(
     provenant_fabric_runtime::graph::cutover::pending_findings(state, legacy_only)
 }
 
-/// Keep protocol diagnostics independent of private state paths and row contents.
+/// Carry the cutover guard's bounded findings into admission diagnostics.
 pub(crate) fn cutover_admission_guard(
     state: &provenant_core::StateRoot,
 ) -> Result<(), provenant_fabric_runtime::coordination::facade::FacadeError> {
     use provenant_fabric_runtime::coordination::facade::{FacadeError, InvalidInputDetail};
-    cutover_pending_guard(state).map_err(|_| FacadeError::GraphRelayRefused {
+    cutover_pending_guard(state).map_err(|error| FacadeError::GraphRelayRefused {
         refusal_code: "UPGRADE_DRAIN_REQUIRED".into(),
-        detail: Some(InvalidInputDetail::UpgradeDrainRequired),
+        detail: Some(InvalidInputDetail::CutoverFindings(error)),
     })
 }
 
@@ -1777,11 +1777,17 @@ mod tests {
     }
 
     #[test]
-    fn cutover_empty_state_is_read_only() -> Result<(), Box<dyn std::error::Error>> {
+    fn cutover_empty_state_is_marked() -> Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
         let roots = cutover_roots(temp.path())?;
         super::cutover_pending_guard(&roots.state)?;
-        assert!(!roots.state.as_path().exists());
+        assert!(
+            roots
+                .state
+                .as_path()
+                .join("graph-template-cutover-complete")
+                .is_file()
+        );
         Ok(())
     }
 
@@ -1885,10 +1891,22 @@ mod tests {
             "UPDATE attempts SET record=?1",
             [serde_json::to_vec(&legacy)?],
         )?;
+        std::fs::remove_file(
+            roots
+                .state
+                .as_path()
+                .join("graph-template-cutover-complete"),
+        )?;
         let error =
             super::cutover_admission_guard(&roots.state).expect_err("legacy admission must refuse");
         assert_eq!(error.code(), "UPGRADE_DRAIN_REQUIRED");
-        assert!(!format!("{error:?}").contains(temp.path().to_str().ok_or("path")?));
+        assert!(
+            error
+                .diagnostic()
+                .detail
+                .unwrap_or_default()
+                .contains("Live lane project/run/attempt")
+        );
         assert_eq!(
             super::pending_upgrade_findings(&roots.state, true)?.len(),
             1
@@ -1977,6 +1995,12 @@ mod tests {
         let child_database = child.join("run.sqlite3");
         let db = rusqlite::Connection::open(&child_database)?;
         db.execute_batch("CREATE TABLE attempts (project TEXT, run TEXT, id TEXT, record BLOB, terminal INTEGER); INSERT INTO attempts VALUES ('project', 'run', 'attempt', X'7b7d', 0);")?;
+        std::fs::remove_file(
+            roots
+                .state
+                .as_path()
+                .join("graph-template-cutover-complete"),
+        )?;
         assert!(super::cutover_pending_guard(&roots.state).is_err());
         assert!(child_database.exists());
         db.execute("UPDATE attempts SET terminal=1", [])?;

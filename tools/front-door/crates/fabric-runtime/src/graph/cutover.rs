@@ -1,4 +1,4 @@
-//! Read-only cutover checks shared by host admission and staged upgrades.
+//! Cutover checks shared by host admission and staged upgrades.
 use std::{io, path::Path};
 
 /// Read-only drain check, shared by staged preflight and the first new launch.
@@ -191,13 +191,73 @@ pub fn read_connection(path: &Path) -> rusqlite::Result<rusqlite::Connection> {
 
 /// Refuse new admission while legacy graphs or lanes still require draining.
 pub fn pending_guard(state: &provenant_core::StateRoot) -> Result<(), String> {
+    use provenant_os::fs::{Directory, FsError, LockMode, PublishMode};
+    use std::{ffi::OsStr, os::unix::fs::DirBuilderExt};
+
+    const MARKER: &str = "graph-template-cutover-complete";
+    let path = state.as_path();
+    if path.join(MARKER).is_file() {
+        return Ok(());
+    }
+    // Hold the lock across the scan and publication: another launch must not
+    // start an attempt while a first pass is still examining the old state.
+    let directory = std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(path)
+        .map_err(|e| e.to_string())
+        .and_then(|()| Directory::open_anchor(path).map_err(|e| e.to_string()));
+    let directory = match directory {
+        Ok(directory) => Some(directory),
+        Err(error) => {
+            eprintln!("Warning: cannot write cutover marker: {error}");
+            None
+        }
+    };
+    let _lock = if let Some(directory) = &directory {
+        loop {
+            match directory.try_lock(
+                OsStr::new("graph-template-cutover.lock"),
+                LockMode::Exclusive,
+            ) {
+                Ok(lock) => break Some(lock),
+                Err(FsError::LockTimeout { .. }) => {
+                    std::thread::sleep(std::time::Duration::from_millis(50))
+                }
+                Err(error) => {
+                    eprintln!("Warning: cannot lock cutover marker: {error}");
+                    break None;
+                }
+            }
+        }
+    } else {
+        None
+    };
+    if path.join(MARKER).is_file() {
+        return Ok(());
+    }
     let findings = pending_findings(state, true)?;
     if findings.is_empty() {
+        if let Some(directory) = &directory
+            && let Err(error) = directory.atomic_write(
+                OsStr::new(MARKER),
+                ".cutover-",
+                b"complete\n",
+                PublishMode::Replace,
+            )
+        {
+            eprintln!("Warning: cannot write cutover marker: {error}");
+        }
         return Ok(());
+    }
+    let rest = findings.len().saturating_sub(5);
+    let mut summary = findings.into_iter().take(5).collect::<Vec<_>>().join("\n");
+    if rest > 0 {
+        summary.push_str(&format!("\n... and {rest} more finding(s)"));
     }
     Err(format!(
         "Graph-template cutover refused: old pending state remains. Run the previous release against this state directory, finish or cancel its pending graphs and drain its live lanes, then launch this release again. --yes cannot bypass this check. No child stores have been deleted.\n{}",
-        findings.join("\n")
+        summary
     ))
 }
 
@@ -210,6 +270,71 @@ mod tests {
         fs::{Directory, LockMode, SystemPathResolver},
     };
     use std::{ffi::OsStr, os::unix::fs::PermissionsExt};
+
+    fn fresh_guard(state: &StateRoot) -> Result<(), String> {
+        let _ = std::fs::remove_file(state.as_path().join("graph-template-cutover-complete"));
+        pending_guard(state)
+    }
+
+    #[test]
+    fn marker_skips_all_scans_but_preflight_still_reads_state() {
+        let temp = crate::test_support::tempdir().unwrap();
+        let base = std::fs::canonicalize(temp.path()).unwrap();
+        let mut inputs = RootInputs::new(base.join("home"), base.join("checkout"));
+        inputs.state_dir = Some(base.clone());
+        let state = StateRoot::resolve(&inputs, &SystemPathResolver).unwrap();
+        pending_guard(&state).unwrap();
+        std::fs::create_dir_all(base.join("fabric")).unwrap();
+        std::fs::write(base.join("fabric/graphs"), b"not a directory").unwrap();
+        std::fs::write(base.join("children"), b"not a directory").unwrap();
+        assert!(pending_guard(&state).is_ok());
+        assert!(pending_findings(&state, false).is_err());
+    }
+
+    #[test]
+    fn marker_write_failure_does_not_refuse_clean_state() {
+        let temp = crate::test_support::tempdir().unwrap();
+        let base = std::fs::canonicalize(temp.path()).unwrap();
+        let mut inputs = RootInputs::new(base.join("home"), base.join("checkout"));
+        inputs.state_dir = Some(base.clone());
+        let state = StateRoot::resolve(&inputs, &SystemPathResolver).unwrap();
+        std::fs::create_dir(base.join("graph-template-cutover-complete")).unwrap();
+        assert!(pending_guard(&state).is_ok());
+    }
+
+    #[test]
+    fn refusal_limits_findings_and_marker_is_not_written() {
+        let temp = crate::test_support::tempdir().unwrap();
+        let base = std::fs::canonicalize(temp.path()).unwrap();
+        let mut inputs = RootInputs::new(base.join("home"), base.join("checkout"));
+        inputs.state_dir = Some(base.clone());
+        let state = StateRoot::resolve(&inputs, &SystemPathResolver).unwrap();
+        let db = rusqlite::Connection::open(base.join("run.sqlite3")).unwrap();
+        db.execute_batch("CREATE TABLE attempts (project TEXT, run TEXT, id TEXT, record BLOB, terminal INTEGER)").unwrap();
+        let mut locks = Vec::new();
+        for id in 0..7 {
+            let attempt = format!("attempt{id}");
+            db.execute(
+                "INSERT INTO attempts VALUES ('project','run',?1,X'7b7d',0)",
+                [&attempt],
+            )
+            .unwrap();
+            let path = base.join("runs/run/attempts").join(&attempt);
+            std::fs::create_dir_all(&path).unwrap();
+            let dir = Directory::open_anchor(&path).unwrap();
+            locks.push(
+                dir.try_lock(OsStr::new("custody.lock"), LockMode::Exclusive)
+                    .unwrap(),
+            );
+        }
+        let refusal = pending_guard(&state).unwrap_err();
+        assert!(refusal.contains("Live lane project/run/attempt0"));
+        assert!(refusal.contains("Live lane project/run/attempt4"));
+        assert!(!refusal.contains("attempt5"));
+        assert!(refusal.contains("2 more"));
+        assert!(!base.join("graph-template-cutover-complete").exists());
+        assert_eq!(pending_findings(&state, false).unwrap().len(), 7);
+    }
 
     #[test]
     fn legacy_checkpoint_lifecycle_controls_both_cutover_checks() {
@@ -254,7 +379,7 @@ mod tests {
         ] {
             write(checkpoint);
             assert!(pending_findings(&state, false).unwrap().is_empty());
-            assert!(pending_guard(&state).is_ok());
+            assert!(fresh_guard(&state).is_ok());
             assert!(
                 super::super::FileJournal::read_checkpoint_for_tick(&state, project, "old")
                     .unwrap()
@@ -281,46 +406,46 @@ mod tests {
         ] {
             write(checkpoint);
             assert_eq!(pending_findings(&state, false).unwrap().len(), 1);
-            assert!(pending_guard(&state).is_err());
+            assert!(fresh_guard(&state).is_err());
         }
         write_delivery(
             serde_json::json!({"cancelled":false,"delivered":false,"nodes":[{"state":"succeeded"}]}),
             Some("pr"),
         );
         assert_eq!(pending_findings(&state, false).unwrap().len(), 1);
-        assert!(pending_guard(&state).is_err());
+        assert!(fresh_guard(&state).is_err());
 
         write_delivery(
             serde_json::json!({"cancelled":false,"delivered":true,"nodes":[{"state":"succeeded"}]}),
             Some("pr"),
         );
         assert!(pending_findings(&state, false).unwrap().is_empty());
-        assert!(pending_guard(&state).is_ok());
+        assert!(fresh_guard(&state).is_ok());
 
         write_delivery(
             serde_json::json!({"cancelled":true,"delivered":false,"nodes":[{"state":"running"}]}),
             Some("pr"),
         );
         assert!(pending_findings(&state, false).unwrap().is_empty());
-        assert!(pending_guard(&state).is_ok());
+        assert!(fresh_guard(&state).is_ok());
 
         write_delivery(
             serde_json::json!({"cancelled":false,"nodes":[{"state":"succeeded"}],"asks":[{"resolved":true,"closed":false}]}),
             Some("pr"),
         );
         assert_eq!(pending_findings(&state, false).unwrap().len(), 1);
-        assert!(pending_guard(&state).is_err());
+        assert!(fresh_guard(&state).is_err());
 
         write_delivery(
             serde_json::json!({"cancelled":false,"nodes":[{"state":"succeeded"}]}),
             None,
         );
         assert!(pending_findings(&state, false).unwrap().is_empty());
-        assert!(pending_guard(&state).is_ok());
+        assert!(fresh_guard(&state).is_ok());
 
         std::fs::write(&path, b"not json").unwrap();
         assert_eq!(pending_findings(&state, false).unwrap().len(), 1);
-        assert!(pending_guard(&state).is_err());
+        assert!(fresh_guard(&state).is_err());
     }
 
     #[test]
@@ -343,7 +468,7 @@ mod tests {
             .try_lock(OsStr::new("custody.lock"), LockMode::Exclusive)
             .unwrap();
         assert_eq!(pending_findings(&state, false).unwrap().len(), 1);
-        assert!(pending_guard(&state).is_err());
+        assert!(fresh_guard(&state).is_err());
         drop(lock);
         assert!(pending_findings(&state, false).unwrap().is_empty());
         let db = rusqlite::Connection::open(base.join("run.sqlite3")).unwrap();
@@ -352,7 +477,7 @@ mod tests {
         for legacy_only in [false, true] {
             assert!(pending_findings(&state, legacy_only).unwrap().is_empty());
         }
-        assert!(pending_guard(&state).is_ok());
+        assert!(fresh_guard(&state).is_ok());
         let root_attempt = base.join("runs/run/attempts/root");
         std::fs::create_dir_all(&root_attempt).unwrap();
         let directory = Directory::open_anchor(&root_attempt).unwrap();
@@ -364,8 +489,8 @@ mod tests {
             assert_eq!(findings.len(), 1);
             assert!(findings[0].contains("/root "));
         }
-        assert!(pending_guard(&state).is_err());
+        assert!(fresh_guard(&state).is_err());
         drop(lock);
-        assert!(pending_guard(&state).is_ok());
+        assert!(fresh_guard(&state).is_ok());
     }
 }
