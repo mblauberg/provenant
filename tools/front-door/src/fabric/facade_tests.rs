@@ -493,7 +493,13 @@ pub(crate) mod peer_tests {
             environment.push(("HOME".into(), fixture_home.path().as_os_str().to_owned()));
         }
         let cwd = std::env::current_dir()?;
-        let mut options = ExecOptions::new(&argv, &cwd, std::time::Duration::from_secs(30));
+        // The graph-controls fixture now provisions and replays four variants.
+        let timeout = if name.ends_with("graph_run_controls_reach_the_sealed_attempt") {
+            120
+        } else {
+            30
+        };
+        let mut options = ExecOptions::new(&argv, &cwd, std::time::Duration::from_secs(timeout));
         options.env = Some(&environment);
         let output = SystemExecutor::new(1)?.execute(options)?;
         // Keep native-backend skip evidence visible through host isolation.

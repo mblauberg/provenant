@@ -84,6 +84,15 @@ slow-timeout = { period = "30s", terminate-after = 4 }
 filter = 'package(=provenant) & (test(=fabric::peer_tests::peer_graph_submission::graph_submission_pins_the_integration_base_across_replay) | test(=fabric::peer_tests::peer_graph_tests::peer_hosted_lane_collection_preserves_origin_status) | test(=fabric::peer_tests::peer_graph_tests::peer_hosted_lane_subtree_pages_are_bounded_complete_and_private))'
 slow-timeout = { period = "30s", terminate-after = 4 }
 
+# This fixture provisions and replays four graph-control variants.
+[[profile.default.overrides]]
+filter = 'package(=provenant) & test(=fabric::peer_tests::peer_graph_lifecycle::graph_run_controls_reach_the_sealed_attempt)'
+slow-timeout = { period = "30s", terminate-after = 4 }
+
+[[profile.ci.overrides]]
+filter = 'package(=provenant) & test(=fabric::peer_tests::peer_graph_lifecycle::graph_run_controls_reach_the_sealed_attempt)'
+slow-timeout = { period = "30s", terminate-after = 4 }
+
 # Nextest runs each test in its own process, so this group orders only state
 # shared across processes. The supervisor suites launch child processes, bind
 # Unix sockets and observe the live process table. The worktree driver copies
