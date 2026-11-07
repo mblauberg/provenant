@@ -110,11 +110,14 @@ pub(super) fn account_observation_error(
             | ProviderError::CredentialNotFound
             | ProviderError::CredentialExpired
     ) {
+        let repair = if matches!(error, ProviderError::CredentialExpired) {
+            crate::quota::login_expired_repair(Some(entry))
+        } else {
+            crate::quota::login_repair(Some(entry))
+        };
         AccountObservationError::AuthRequired(format!(
-            "{} account {} needs sign-in; {}",
-            entry.adapter,
-            entry.label,
-            crate::quota::login_repair(Some(entry)),
+            "{} account {} needs sign-in; {repair}",
+            entry.adapter, entry.label,
         ))
     } else {
         AccountObservationError::Other(detect_failure(entry, error))

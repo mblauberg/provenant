@@ -34,6 +34,20 @@ impl Summary {
             omitted,
         }
     }
+    /// Keep every record visible when omission would hide configured capacity.
+    pub fn complete(headline: impl Into<String>, rows: Vec<String>, next: Option<String>) -> Self {
+        let lines = std::iter::once(headline.into())
+            .chain(
+                rows.iter()
+                    .map(|row| bounded_text(row, limits::SUMMARY_ROW_BYTES)),
+            )
+            .collect();
+        Self {
+            lines,
+            next,
+            omitted: 0,
+        }
+    }
     /// Text the owner has already bounded; shown as it is.
     pub fn verbatim(text: &str, next: Option<String>) -> Self {
         Self {
