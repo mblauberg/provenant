@@ -148,7 +148,7 @@ which independent review legs count. The bundled pools include `utility`,
 weighted choice, not an ordered model list. Explicit route lists and
 zero-weight fallbacks have their own ordering semantics.
 
-Use `provenant run --use review --file brief.md --explain`
+Use `provenant run --use review --file brief.md --set subject='"origin/branch"' --set review_base='"origin/main"' --explain`
 to inspect roles and sources before dispatch. Inspect the recorded separation
 and substitutions after dispatch. Different model names or requested families
 alone do not establish independent answering families. Bind the resolved
@@ -289,8 +289,8 @@ the verdict. This evidence is optional and never gates delivery.
 Pin the base, subject SHA, criteria, risk and required lenses in a brief:
 
 ```sh
-provenant run --use review --file review-brief.md --explain
-provenant run --use review --file review-brief.md
+provenant run --use review --file review-brief.md --set subject='"origin/branch"' --set review_base='"origin/main"' --explain
+provenant run --use review --file review-brief.md --set subject='"origin/branch"' --set review_base='"origin/main"'
 provenant status GRAPH
 provenant output GRAPH
 ```

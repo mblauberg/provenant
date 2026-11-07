@@ -2760,6 +2760,25 @@ impl BoundGraphOwner<'_> {
             } else {
                 None
             };
+            let review_subject_missing = provenant_fabric_runtime::graph::FileJournal::execution(
+                &self.factory.context.roots.state,
+                self.factory.context.identity.project,
+                &key.graph_id,
+            )
+            .map_err(graph_journal_error)?
+            .is_some_and(|execution| {
+                execution
+                    .document
+                    .extra
+                    .get("review_subject_missing")
+                    .and_then(|v| v.as_bool())
+                    == Some(true)
+            });
+            if review_subject_missing {
+                submission_prompt = format!(
+                    "No review subject was supplied on the command line; no host diff range is available. Review lanes have read-only Git metadata and cannot fetch. Request a pinned subject and base if the brief requires a diff.\n\n{submission_prompt}"
+                );
+            }
             let review_base = if access == provenant_fabric_runtime::graph::AccessMode::ReadOnly {
                 provenant_fabric_runtime::graph::FileJournal::execution(
                     &self.factory.context.roots.state,
@@ -2798,6 +2817,8 @@ impl BoundGraphOwner<'_> {
                     .ok_or(FacadeError::StateCorrupt)?
                     .base_ref
                     .clone()
+            } else if review_subject_missing {
+                None
             } else if access == provenant_fabric_runtime::graph::AccessMode::ReadOnly
                 && source_commit.is_some()
             {
