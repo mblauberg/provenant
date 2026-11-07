@@ -1,5 +1,7 @@
 //! Dev-only fixtures: dispatch scenario arguments before the test suite.
 use crate::census::ProcessObserver;
+mod cpu;
+pub use cpu::capture_guardian_cpu;
 use std::ffi::OsString;
 use std::io::{self, Read, Write};
 use std::ops::{Deref, DerefMut};

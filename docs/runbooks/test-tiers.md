@@ -47,3 +47,54 @@ Set `test_threads` to a positive integer in `.provenant/verify.json` to cap
 test threads for tier runs. The default is unset. A cap reduces concurrent test
 load across lanes but can make each run slower; it does not reserve a shared
 execution slot.
+
+## Capture idle supervisor CPU on macOS
+
+Build the custody fixture, then run its manual capture outside nextest's
+30-second test timeout. From `tools/front-door`:
+
+```sh
+cargo test --release --locked -p provenant-supervisor --test custody -- --capture-idle-cpu
+```
+
+The capture launches its own guardian and a provider waiting on a socket. It
+runs `/usr/bin/sample` against that guardian for ten seconds, then measures its
+native `PROC_PIDTASKINFO` CPU counter over at least one minute. The JSON output
+includes the build version, process counts, elapsed time, CPU counters and
+percentage of one core. The sample stays in `TMPDIR`; retain findings in the
+report before that directory expires. Finish by cancelling through custody and
+settling the fixture's writer. No existing lane is stopped or signalled.
+
+This uses the custody fixture's recorded boot identity and observer. It measures
+the guardian's event loop and census backstop, without a configured host's disk
+or graph callbacks or a valid sandbox memory snapshot. Use a live waiting lane
+for those additional costs. A result below 3% is evidence for this fixture,
+not a substitute for a production-lane capture when its costs differ.
+
+To include the production `HostHolder` child reader, use the composition
+capture. Build once and run the binary directly so a minute-long capture does
+not hold a shared build slot:
+
+```sh
+cargo build --release --locked -p provenant-cli --example supervisor_cpu \
+  --config 'profile.release.debug="line-tables-only"' \
+  --config 'profile.release.strip=false'
+cpu_capture_bin="$(cargo metadata --format-version 1 --no-deps | python3 -c \
+  'import json,sys; print(json.load(sys.stdin)["target_directory"])')/release/examples/supervisor_cpu"
+"$cpu_capture_bin" idle
+"$cpu_capture_bin" churn
+```
+
+Both modes use the same native CPU counter and ten-second sample as the
+custody capture. `idle` holds its provider on a socket; `churn` loops spawning
+`/usr/bin/true`. Each guardian reads a real pending graph through `HostHolder`
+at the ordinary census cadence. The JSON identifies the workload and whether
+the Fabric child reader was present. The example uses synthetic admission and
+terminal records, with no provider credentials, disk callback or sandbox memory
+snapshot. Its directory project has no `.git` or `config.toml`, so these numbers
+exclude Git probes and user TOML parsing. Measure those costs in a live Git lane
+on a host that permits the native utility sandbox. The example verifies
+cancellation, resolved cleanup, exit publication and
+writer-lock release before returning. Compare identical release builds and
+retain the process counts and native counter deltas with the before/after
+percentages; the sample paths expire with `TMPDIR`.

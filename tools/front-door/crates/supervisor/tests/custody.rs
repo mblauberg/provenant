@@ -62,6 +62,13 @@ impl ExitPublisher for TrackingPublisher {
         directory: &Directory,
         bytes: &[u8],
     ) -> provenant_supervisor::custody::Result<provenant_os::fs::Publication> {
+        let calls = self.0.join("PROVENANT_STATE_DIR/s2-tracking-calls");
+        if calls.is_file() {
+            std::fs::OpenOptions::new()
+                .append(true)
+                .open(calls)?
+                .write_all(b"T")?;
+        }
         if self
             .0
             .join("tracking-writer")
@@ -710,6 +717,63 @@ fn live_census_failure_warns_once(root: &Path) -> Result<()> {
     Ok(())
 }
 fn idle_supervisor_does_no_census_per_wake(root: &Path) -> Result<()> {
+    idle_supervisor(root, false)
+}
+
+fn unchanged_census_does_not_publish_tracking(root: &Path) -> Result<()> {
+    let state = root.join("PROVENANT_STATE_DIR");
+    std::fs::create_dir(&state)?;
+    // Failed process watches force an actual full census every 100 ms.
+    std::fs::write(state.join("s2-fail-process-watch"), b"fail")?;
+    let trace = state.join("s2-idle-census-trace");
+    let calls = state.join("s2-tracking-calls");
+    std::fs::write(&trace, b"")?;
+    std::fs::write(&calls, b"")?;
+    let socket = root.join("tracking.sock");
+    let listener = UnixListener::bind(&socket)?;
+    let (_writer, handle) = start(
+        root,
+        "tracking",
+        "wait-on-socket",
+        &[socket.into_os_string()],
+        CapturePlan::default(),
+    )?;
+    let mut held = fixture::fixture_accept(&listener, Duration::from_secs(5))?;
+    byte(&mut held, b'R')?;
+    let wait_for_censuses = |count| -> Result<()> {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while std::fs::read(&trace)?
+            .iter()
+            .filter(|kind| **kind == b'F')
+            .count()
+            < count
+        {
+            if Instant::now() >= deadline {
+                return Err("expected repeated full censuses".into());
+            }
+            std::thread::park_timeout(Duration::from_millis(10));
+        }
+        Ok(())
+    };
+    wait_for_censuses(3)?;
+    let before = std::fs::read(&calls)?;
+    assert!(!before.is_empty(), "publisher was never exercised");
+    wait_for_censuses(8)?;
+    assert_eq!(
+        std::fs::read(&calls)?,
+        before,
+        "unchanged tracking was published"
+    );
+    stop(&handle, StopReason::ExplicitCancellation)?;
+    assert_eq!(
+        exited(&handle)?.stop_reason,
+        Some(StopReason::ExplicitCancellation)
+    );
+    drop(held);
+    Ok(())
+}
+
+fn idle_supervisor(root: &Path, capture_cpu: bool) -> Result<()> {
     let state = root.join("PROVENANT_STATE_DIR");
     std::fs::create_dir(&state)?;
     std::fs::write(state.join("s2-live-tree"), b"enabled")?;
@@ -750,11 +814,23 @@ fn idle_supervisor_does_no_census_per_wake(root: &Path) -> Result<()> {
         full as u128 <= 1 + elapsed.as_millis() / 5_000,
         "census per idle wake: {calls:?}"
     );
+    if capture_cpu {
+        capture_idle_cpu(&attempt)?;
+    }
     // A valid atomic cancel still wakes and stops the sleeping driver.
     stop(&handle, StopReason::ExplicitCancellation)?;
     let exit = exited(&handle)?;
     drop(held);
     assert_eq!(exit.stop_reason, Some(StopReason::ExplicitCancellation));
+    Ok(())
+}
+
+fn capture_idle_cpu(attempt: &Path) -> Result<()> {
+    writeln!(
+        io::stdout().lock(),
+        "{}",
+        fixture::capture_guardian_cpu(attempt)?
+    )?;
     Ok(())
 }
 
@@ -2963,6 +3039,10 @@ const CASES: &[Case] = &[
         idle_supervisor_does_no_census_per_wake,
     ),
     (
+        "unchanged_census_does_not_publish_tracking",
+        unchanged_census_does_not_publish_tracking,
+    ),
+    (
         "a_fake_provider_passing_the_token_budget_is_stopped",
         a_fake_provider_passing_the_token_budget_is_stopped,
     ),
@@ -3245,6 +3325,16 @@ impl provenant_core::Clock for JumpingClock {
 
 fn main() -> Result<()> {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
+    if args.as_slice() == [OsString::from("--capture-idle-cpu")] {
+        let root = provenant_os::fixture::short_tempdir("idle-census.sock", |root| {
+            tempfile::Builder::new().prefix("cpu").tempdir_in(root)
+        })?;
+        let cleanup = fixture::ProcessCleanupGuard::new(root.path());
+        idle_supervisor(root.path(), true)?;
+        settle_writers(root.path())?;
+        cleanup.disarm();
+        return Ok(());
+    }
     if args.first().is_some_and(|a| a == "internal")
         && args.get(1).is_some_and(|a| a == "supervise")
     {
@@ -3278,7 +3368,10 @@ fn main() -> Result<()> {
         };
         let tracking_publisher = std::env::var_os("PROVENANT_STATE_DIR")
             .map(PathBuf::from)
-            .filter(|state| state.join("s2-tracking-failure").is_file())
+            .filter(|state| {
+                state.join("s2-tracking-failure").is_file()
+                    || state.join("s2-tracking-calls").is_file()
+            })
             .and_then(|state| {
                 state
                     .parent()
