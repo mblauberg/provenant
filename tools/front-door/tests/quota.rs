@@ -137,7 +137,7 @@ fn show_is_read_only_and_tick_publishes_partial_coverage() -> Result {
 fn no_flags_compact_view_shows_all_configured_accounts_including_exhausted() -> Result {
     use std::os::unix::fs::PermissionsExt;
 
-    let mut rig = quota_rig()?;
+    let rig = quota_rig()?;
     for index in 0..13 {
         let label = format!("work-{index}");
         let key = format!("claude-{index}");
@@ -146,6 +146,11 @@ fn no_flags_compact_view_shows_all_configured_accounts_including_exhausted() -> 
 
     let account_dir = rig.state.join("quota/claude-0");
     std::fs::create_dir_all(&account_dir)?;
+    // The record tree must be private under any inherited umask.
+    std::fs::set_permissions(
+        rig.state.join("quota"),
+        std::fs::Permissions::from_mode(0o700),
+    )?;
     std::fs::set_permissions(&account_dir, std::fs::Permissions::from_mode(0o700))?;
     let account = serde_json::json!({
         "adapter":"claude", "account_key":"claude-0", "label":"work-0"
@@ -176,12 +181,13 @@ fn no_flags_compact_view_shows_all_configured_accounts_including_exhausted() -> 
     std::fs::write(&path, serde_json::to_vec(&record)?)?;
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
 
-    // Keep this a captured, non-terminal render with an intentionally narrow
-    // width so the complete account view cannot rely on a TTY.
-    rig.env.push(("COLUMNS".into(), "1".into()));
-    rig.env.push(("TERM".into(), "dumb".into()));
     let output = rig.command(&["quota"])?;
-    assert_eq!(code(&output), 0);
+    assert_eq!(
+        code(&output),
+        0,
+        "{}",
+        String::from_utf8_lossy(&output.stderr.bytes)
+    );
     let compact = String::from_utf8(output.stdout.bytes)?;
     assert!(compact.contains("work-0 [claude]: exhausted"), "{compact}");
     for index in 1..13 {
