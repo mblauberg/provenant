@@ -38,6 +38,10 @@ pub enum RepoError {
     },
     #[error("Git common or private directory is unsafe")]
     InvalidGitDirectory,
+    #[error("Git configuration normalisation could not execute: {0}")]
+    ConfigNormalisationExecution(#[source] provenant_os::exec::ExecError),
+    #[error("Git configuration normalisation failed: {0}")]
+    ConfigNormalisation(&'static str),
     #[error("alternate Git object stores are not accepted for protected history")]
     AlternateObjects,
     #[error("verified repository path or Git metadata changed")]
@@ -59,6 +63,8 @@ impl RepoError {
             Self::InvalidRegistration => "InvalidRegistration",
             Self::ForeignProject { .. } => "ForeignProject",
             Self::InvalidGitDirectory => "InvalidGitDirectory",
+            Self::ConfigNormalisationExecution(_) => "ConfigNormalisationExecution",
+            Self::ConfigNormalisation(_) => "ConfigNormalisation",
             Self::AlternateObjects => "AlternateObjects",
             Self::IdentityChanged => "IdentityChanged",
             Self::MetadataTooLarge => "MetadataTooLarge",
@@ -725,7 +731,7 @@ fn included_files_digest(files: &[PathBuf]) -> Result<[u8; 32], RepoError> {
 
 // Git parses the bounded snapshot; included files have their own digest.
 fn common_config_digest(common: &Directory, head: &[u8]) -> Result<Option<[u8; 32]>, RepoError> {
-    use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination};
+    use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor};
     let Some(bytes) = read_common_config(common)? else {
         return Ok(None);
     };
@@ -739,7 +745,8 @@ fn common_config_digest(common: &Directory, head: &[u8]) -> Result<Option<[u8; 3
         std::str::from_utf8(branch).is_ok_and(|name| GitRefName::branch(name).is_ok())
     });
     let keep_all = branch.is_none() && !detached;
-    let git = provenant_os::git::git_executable().ok_or(RepoError::InvalidGitDirectory)?;
+    let git = provenant_os::git::git_executable()
+        .ok_or(RepoError::ConfigNormalisation("Git executable unavailable"))?;
     let argv = [
         git.into_os_string(),
         "config".into(),
@@ -760,21 +767,11 @@ fn common_config_digest(common: &Directory, head: &[u8]) -> Result<Option<[u8; 3
         limit: CONFIG_LIMIT as usize * 2,
     };
     options.stop_on_output_limit = true;
-    let output = SystemExecutor::new(1)
-        .and_then(|executor| executor.execute(options))
-        .map_err(|_| RepoError::InvalidGitDirectory)?;
-    if output.termination != Termination::Exit(0)
-        || output.timed_out
-        || output.stdout.truncated
-        || output.stdout.read_failed
-        || output.drain_truncated
-    {
-        return Err(RepoError::InvalidGitDirectory);
-    }
+    let normalised = normalised_config_output(
+        SystemExecutor::new(1).and_then(|executor| executor.execute(options)),
+    )?;
     let mut digest = Sha256::new();
-    for entry in output
-        .stdout
-        .bytes
+    for entry in normalised
         .split(|byte| *byte == 0)
         .filter(|entry| !entry.is_empty())
     {
@@ -795,6 +792,29 @@ fn common_config_digest(common: &Directory, head: &[u8]) -> Result<Option<[u8; 3
         }
     }
     Ok(Some(digest.finalize().into()))
+}
+
+// Operational parser failures say nothing about the directory's ownership,
+// permissions or kind. Keep their cause distinct while still refusing the read.
+fn normalised_config_output(
+    output: Result<provenant_os::exec::ExecOutcome, provenant_os::exec::ExecError>,
+) -> Result<Vec<u8>, RepoError> {
+    use provenant_os::exec::Termination;
+    let output = output.map_err(RepoError::ConfigNormalisationExecution)?;
+    let reason = if output.timed_out {
+        "parser timed out"
+    } else if output.stdout.read_failed {
+        "parser output read failed"
+    } else if output.stdout.truncated {
+        "parser output exceeded its bound"
+    } else if output.drain_truncated {
+        "parser output drain did not complete"
+    } else if output.termination != Termination::Exit(0) {
+        "parser exited unsuccessfully"
+    } else {
+        return Ok(output.stdout.bytes);
+    };
+    Err(RepoError::ConfigNormalisation(reason))
 }
 
 fn verify_git_directory(metadata: Metadata, owner: u32) -> Result<(), RepoError> {
@@ -1087,6 +1107,63 @@ mod tests {
         assert!(matches!(
             GitRevision::new("origin/main\nHEAD"),
             Err(GitRevisionError)
+        ));
+    }
+
+    #[test]
+    fn normalisation_failures_refuse_without_claiming_unsafe_metadata() {
+        use provenant_os::exec::{CapturedStream, ExecError, ExecOutcome, Termination};
+        let complete = ExecOutcome {
+            termination: Termination::Exit(0),
+            stdout: CapturedStream {
+                bytes: b"core.bare\nfalse\0".to_vec(),
+                ..Default::default()
+            },
+            stderr: CapturedStream::default(),
+            timed_out: false,
+            drain_truncated: false,
+            overflow_stopped: false,
+            cancelled: false,
+            elapsed_micros: 1,
+        };
+        assert_eq!(
+            super::normalised_config_output(Ok(complete.clone())).unwrap(),
+            complete.stdout.bytes
+        );
+        let mut failures = Vec::new();
+        let mut timed_out = complete.clone();
+        timed_out.termination = Termination::Signal(15);
+        timed_out.timed_out = true;
+        failures.push(timed_out);
+        let mut read_failed = complete.clone();
+        read_failed.stdout.read_failed = true;
+        failures.push(read_failed);
+        let mut truncated = complete.clone();
+        truncated.stdout.truncated = true;
+        failures.push(truncated);
+        failures.push(ExecOutcome {
+            drain_truncated: true,
+            ..complete.clone()
+        });
+        failures.push(ExecOutcome {
+            termination: Termination::Exit(128),
+            ..complete
+        });
+        for failure in failures {
+            assert!(matches!(
+                super::normalised_config_output(Ok(failure)),
+                Err(RepoError::ConfigNormalisation(_))
+            ));
+        }
+        assert!(matches!(
+            super::normalised_config_output(Err(ExecError::Io {
+                operation: "spawn",
+                source: std::io::Error::from(std::io::ErrorKind::Interrupted),
+            })),
+            Err(RepoError::ConfigNormalisationExecution(ExecError::Io {
+                operation: "spawn",
+                ..
+            }))
         ));
     }
 
