@@ -27,6 +27,11 @@ fn save(directory: &Directory, schedule: &Schedule) -> Result<(), String> {
         .map_err(|error| error.to_string())
 }
 
+enum LaunchError {
+    Uncertain(String),
+    Terminal(String),
+}
+
 /// Hold project custody across observation, recording identity and submission.
 /// Retrying an uncertain launch replays its operation, including after a crash.
 fn queue(
@@ -35,7 +40,7 @@ fn queue(
     cadence_seconds: u64,
     clock: &dyn Clock,
     live: impl FnOnce(&str) -> Result<bool, String>,
-    launch: impl FnOnce(&str) -> Result<(), String>,
+    launch: impl FnOnce(&str) -> Result<(), LaunchError>,
 ) -> Result<&'static str, String> {
     let _lock = match directory.try_lock("schedule.lock".as_ref(), LockMode::Exclusive) {
         Ok(lock) => lock,
@@ -75,7 +80,11 @@ fn queue(
         .operation
         .as_deref()
         .ok_or("missing steward operation")?;
-    if let Err(error) = launch(operation) {
+    if let Err(failure) = launch(operation) {
+        let (error, terminal) = match failure {
+            LaunchError::Uncertain(error) => (error, false),
+            LaunchError::Terminal(error) => (error, true),
+        };
         write_result(
             directory,
             "result.json",
@@ -84,6 +93,10 @@ fn queue(
             "failed",
             Some(error.clone()),
         )?;
+        if terminal {
+            schedule.submitting = false;
+            save(directory, &schedule)?;
+        }
         return Err(error);
     }
     schedule.submitting = false;
@@ -134,6 +147,61 @@ fn checkpoint_is_live(checkpoint: &GraphCheckpoint) -> bool {
             .any(|node| matches!(node.state, NodeState::Pending | NodeState::Running))
 }
 
+fn classify_launch(result: &Value) -> Result<(), LaunchError> {
+    if result["status"] == "paused"
+        || result["outcome"] == "failed"
+        || result["advance_error"].is_string()
+    {
+        let reason = result
+            .get("advance_error")
+            .and_then(Value::as_str)
+            .or_else(|| {
+                result
+                    .pointer("/checkpoint/pause_reason")
+                    .and_then(Value::as_str)
+            })
+            .or_else(|| {
+                result
+                    .pointer("/checkpoint/nodes")
+                    .and_then(Value::as_array)
+                    .and_then(|nodes| {
+                        nodes
+                            .iter()
+                            .find_map(|node| node.get("advance_error").and_then(Value::as_str))
+                    })
+            });
+        let attempt_reason = result
+            .pointer("/checkpoint/nodes")
+            .and_then(Value::as_array)
+            .and_then(|nodes| {
+                nodes
+                    .iter()
+                    .filter(|node| node["state"] == "failed")
+                    .find_map(|node| {
+                        node.get("attempts")
+                            .and_then(Value::as_array)
+                            .and_then(|attempts| attempts.last())
+                            .and_then(|attempt| attempt.get("outcome"))
+                            .and_then(Value::as_str)
+                    })
+            })
+            .map(|outcome| format!("steward graph failed: {outcome}"));
+        let reason = reason
+            .map(str::to_owned)
+            .or(attempt_reason)
+            .unwrap_or_else(|| "steward graph launch failed; inspect graph output".into());
+        let terminal = result["outcome"] == "failed"
+            && serde_json::from_value::<GraphCheckpoint>(result["checkpoint"].clone())
+                .is_ok_and(|checkpoint| !checkpoint_is_live(&checkpoint));
+        return Err(if terminal {
+            LaunchError::Terminal(reason)
+        } else {
+            LaunchError::Uncertain(reason)
+        });
+    }
+    Ok(())
+}
+
 pub(super) fn run(
     settings: &Settings,
     resolved: &crate::roots::Resolved,
@@ -171,8 +239,8 @@ pub(super) fn run(
             },
             |operation| {
                 let clock = SystemClock;
-                let budget =
-                    WaitBudget::cli(clock.mono_now(), 55).map_err(|error| error.to_string())?;
+                let budget = WaitBudget::cli(clock.mono_now(), 55)
+                    .map_err(|error| LaunchError::Uncertain(error.to_string()))?;
                 let result = factory
                     .graph_document(
                         json!({
@@ -181,28 +249,8 @@ pub(super) fn run(
                         budget,
                         &CancelToken::new(),
                     )
-                    .map_err(|error| error.to_string())?;
-                if result["status"] == "paused"
-                    || result["outcome"] == "failed"
-                    || result["advance_error"].is_string()
-                {
-                    let reason = result
-                        .get("advance_error")
-                        .and_then(Value::as_str)
-                        .or_else(|| {
-                            result
-                                .pointer("/checkpoint/pause_reason")
-                                .and_then(Value::as_str)
-                        })
-                        .or_else(|| {
-                            result
-                                .pointer("/checkpoint/nodes/0/advance_error")
-                                .and_then(Value::as_str)
-                        })
-                        .unwrap_or("steward graph launch failed; inspect graph output");
-                    return Err(reason.into());
-                }
-                Ok(())
+                    .map_err(|error| LaunchError::Uncertain(error.to_string()))?;
+                classify_launch(&result)
             },
         )
     })
@@ -325,7 +373,7 @@ mod tests {
                 |_| Ok(false),
                 |id| {
                     *operation.borrow_mut() = id.into();
-                    Err("receipt unavailable".into())
+                    Err(LaunchError::Uncertain("receipt unavailable".into()))
                 },
             )
         });
@@ -365,5 +413,112 @@ mod tests {
             )
             .is_err()
         );
+    }
+    // Exercise the real graph advance replay against an admitted failed checkpoint.
+    #[test]
+    fn terminal_failure_replay_retires_generation() {
+        use provenant_fabric_runtime::graph::{
+            self, AccessMode, AttemptKey, AttemptObservation, AttemptOutcome, AttemptOwner,
+            GraphDocument, GraphJournal, GraphRoute, NodeInput, Replay,
+        };
+        use std::{collections::HashMap, convert::Infallible};
+        struct FailedOwner;
+        impl AttemptOwner for FailedOwner {
+            type Error = Infallible;
+            fn actor(&self) -> String {
+                "fixture".into()
+            }
+            fn observe_or_start(
+                &mut self,
+                _: &AttemptKey,
+                _: NodeInput<'_>,
+                _: &GraphRoute,
+                _: AccessMode,
+                _: Option<&str>,
+                _: Replay<'_>,
+            ) -> Result<AttemptObservation, Infallible> {
+                Ok(AttemptObservation::Terminal {
+                    attempt_ref: Some("attempt".into()),
+                    outcome: AttemptOutcome::TaskFailed,
+                    launched: true,
+                    result: None,
+                    result_warning: None,
+                    result_path: None,
+                    branch: None,
+                    commit: None,
+                })
+            }
+        }
+        #[derive(Default)]
+        struct Journal(Option<GraphCheckpoint>);
+        impl GraphJournal for Journal {
+            type Error = Infallible;
+            fn load(&mut self, _: &str) -> Result<Option<GraphCheckpoint>, Infallible> {
+                Ok(self.0.clone())
+            }
+            fn save(&mut self, checkpoint: &GraphCheckpoint) -> Result<(), Infallible> {
+                self.0 = Some(checkpoint.clone());
+                Ok(())
+            }
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let path = std::fs::canonicalize(temp.path()).unwrap();
+        let directory = provenant_config::private_directory(&path, true).unwrap();
+        let clock = TestClock::new(
+            WallTime::from_micros(1_000_000).unwrap(),
+            MonoTime::from_micros(0),
+        );
+        let journals = RefCell::new(HashMap::<String, Journal>::new());
+        let operations = RefCell::new(Vec::new());
+        let launch = |id: &str| {
+            operations.borrow_mut().push(id.to_owned());
+            let document: GraphDocument = serde_json::from_value(json!({
+                "schema_version":1,"graph_id":id,"nodes":[{"id":"one","prompt":"work",
+                "access":"read_only","route":{"adapter":"fixture","model":"fixture/model"}}]
+            }))
+            .unwrap();
+            let mut journals = journals.borrow_mut();
+            let journal = journals.entry(id.to_owned()).or_default();
+            let run = graph::advance_with_budget(
+                &document,
+                &mut FailedOwner,
+                journal,
+                &Default::default(),
+                &Default::default(),
+            )
+            .unwrap();
+            let result = serde_json::to_value(run).unwrap();
+            classify_launch(&result)
+        };
+        // Simulate a lost receipt after admission, then replay the same journal.
+        assert!(
+            queue(
+                &directory,
+                "project",
+                60,
+                &clock,
+                |_| Ok(false),
+                |id| {
+                    let _ = launch(id);
+                    Err(LaunchError::Uncertain("receipt unavailable".into()))
+                }
+            )
+            .is_err()
+        );
+        assert!(queue(&directory, "project", 60, &clock, |_| Ok(false), launch).is_err());
+        let saved: GcResult = serde_json::from_slice(
+            &directory
+                .read_bounded("result.json".as_ref(), 65536)
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            saved.error.as_deref(),
+            Some("steward graph failed: task_failed")
+        );
+        assert!(queue(&directory, "project", 60, &clock, |_| Ok(false), launch).is_err());
+        let ids = operations.borrow();
+        assert_eq!(ids[0], ids[1]);
+        assert_ne!(ids[1], ids[2]);
     }
 }
