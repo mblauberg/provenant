@@ -211,8 +211,8 @@ While a provider is live, the guardian walks its scoped process tree only
 when process events or failed observations require it, at most once per 100 ms.
 A full census backs up missed notifications every five seconds and follows an
 overflow or observation failure on the next walk. Zombies remain in custody
-history but receive no fork/exit watch. Topology observations omit task CPU
-accounting; only the provider's one-second progress sample requests it.
+history but receive no fork/exit watch. Darwin census topology reads omit task
+CPU accounting; the provider's one-second progress sample still requests it.
 
 Pipes, signals and process events wake the guardian. An attempt-directory
 notification also wakes cancellation reads without requesting a census. With

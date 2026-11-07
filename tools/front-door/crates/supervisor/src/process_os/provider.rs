@@ -1286,18 +1286,26 @@ mod tests {
     #[test]
     fn cancellation_directory_events_do_not_request_a_process_census() -> io::Result<()> {
         let root = tempfile::tempdir()?;
+        let watched = root.path().join("attempt");
+        std::fs::create_dir(&watched)?;
         let directory =
-            provenant_os::fs::Directory::open_anchor(root.path()).map_err(io::Error::other)?;
+            provenant_os::fs::Directory::open_anchor(&watched).map_err(io::Error::other)?;
         let mut reactor = GuardianReactor::install()?;
         reactor.watch_cancellation_directory(&directory)?;
-        std::fs::write(root.path().join("cancel.new"), b"request")?;
-        std::fs::rename(
-            root.path().join("cancel.new"),
-            root.path().join("cancel.json"),
-        )?;
+        std::fs::write(watched.join("cancel.new"), b"request")?;
+        std::fs::rename(watched.join("cancel.new"), watched.join("cancel.json"))?;
         let event = reactor.wait(&[], Duration::ZERO)?;
         assert!(event.cancel_changed);
         assert!(!event.cancel_watch_failed);
+        assert!(!event.process_changed);
+        assert!(!event.process_overflow);
+
+        // Losing the watched pathname requests the cancellation polling
+        // fallback without triggering a process census.
+        std::fs::rename(&watched, root.path().join("moved-attempt"))?;
+        let event = reactor.wait(&[], Duration::ZERO)?;
+        assert!(event.cancel_changed);
+        assert!(event.cancel_watch_failed);
         assert!(!event.process_changed);
         assert!(!event.process_overflow);
         Ok(())
