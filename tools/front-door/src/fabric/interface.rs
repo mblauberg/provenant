@@ -1183,11 +1183,9 @@ impl Factory {
                         })?
                         .clone(),
                 );
-            if review_launch {
-                if let Some(parameters) = parameters.as_object_mut() {
-                    parameters.remove("subject");
-                    parameters.remove("review_base");
-                }
+            if review_launch && let Some(parameters) = parameters.as_object_mut() {
+                parameters.remove("subject");
+                parameters.remove("review_base");
             }
             if template.parameters.contains_key("brief")
                 && let Some(brief) = input.get("brief").filter(|value| !value.is_null())
