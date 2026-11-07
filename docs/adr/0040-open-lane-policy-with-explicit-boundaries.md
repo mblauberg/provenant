@@ -184,8 +184,9 @@ Exceptions are host-derived typed grants, never optional configuration:
    `S/runs/<run>/attempts/<attempt>/tmp/candidate-<n>-skills-<nonce>`, may be
    read/executed and stay immutable; their original host credential/config
    parents are not opened. The exact attempt-bound Fabric socket remains
-   usable without exposing Fabric databases. Host indexes, target seeds,
-   credential authority and config stay inaccessible and immutable. Scratch
+   usable. Target seeds and credential authority stay inaccessible and
+   immutable. Config, project indexes and Fabric databases stay immutable and
+   are readable for the lane's Fabric MCP server (see Known limits). Scratch
    remains private to the owner; ancestor mutation, hard links and path swaps
    must not expand it.
    Before flipping, relocate Cursor's current `H/.cursor/chats` writes and
@@ -285,6 +286,12 @@ the zsh and bash files in the home directory or `ZDOTDIR`. They reorder `PATH`,
 which puts a system Git ahead of the lane's Git wrapper, and a writer's ordinary
 `git add` then fails on the protected Git directory. They can also source
 secrets. A lane keeps the `PATH` of the environment that launched it.
+
+A lane's Fabric MCP server runs inside its sandbox and reads the state directory's
+`config.toml`, `host-id`, `projects` and Fabric database directly, so the lane's
+other commands can read them too, as on earlier releases. Nested Fabric and nested
+launches need these reads. Serving them through the Fabric socket would close this
+gap and let those files become inaccessible.
 
 Boundaries are enforced by pathname. A hard link to a protected file that already
 exists outside granted roots, such as an object in an earlier `git clone --local`,

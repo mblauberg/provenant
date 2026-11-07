@@ -882,7 +882,14 @@ fn staged_skills_native_probes() -> Result<(), Box<dyn std::error::Error>> {
                     }))?;
                 permissions.mode = AccessMode::WorktreeWrite(Box::new(authority));
             }
-            let plan = ConfinedPlan::new(PlanRequest {
+            let state = fixture.join("state");
+            permissions.policy = Some(
+                provenant_confinement::run_config::RunConfig::default().policy_for_launch(
+                    &state,
+                    provenant_confinement::permissions::MandatoryRoots::new(&home, &state, &repo)?,
+                ),
+            );
+            let mut plan = ConfinedPlan::new(PlanRequest {
                 scope: base.scope(),
                 permissions,
                 codex: CodexPolicy::Clean,
@@ -912,15 +919,28 @@ fn staged_skills_native_probes() -> Result<(), Box<dyn std::error::Error>> {
                     _ => return Err("unexpected staged setup".into()),
                 }
             }
+            // Preparation binds the stage as an immutable mandatory read.
+            plan.policy_mut()
+                .ok_or("missing lane policy")?
+                .mandatory_mut()
+                .add_state_read_exec(provenant_confinement::permissions::PathGrant {
+                    path: stage.clone(),
+                    scope: provenant_confinement::permissions::PathScope::Subtree,
+                })?;
             let profile = render(plan.permissions(), &launch.profile, &home)?;
-            let output = std::process::Command::new("/usr/bin/sandbox-exec")
+            let mut probe = std::process::Command::new("/usr/bin/sandbox-exec");
+            probe
                 .args(["-p", &profile])
                 .arg(&executable)
                 .args(["--exact", "tests::staged_skills_probe_child", "--ignored", "--nocapture"])
                 .env_clear()
                 .env("PROVENANT_PROBE_STAGE", stage.join("SKILL.md"))
-                .env("PROVENANT_PROBE_SECRET", &secret)
-                .output()?;
+                .env("PROVENANT_PROBE_SECRET", &secret);
+            // Codex's host skills sit outside the mandatory credential roots.
+            if adapter != "codex" {
+                probe.env("PROVENANT_PROBE_HOST", skills.join("SKILL.md"));
+            }
+            let output = probe.output()?;
             let error = String::from_utf8_lossy(&output.stderr);
             if error.contains("sandbox_apply: Operation not permitted") {
                 provenant_test_support::skip_sandbox_dependent_test(error.to_string())?;
@@ -949,7 +969,12 @@ fn staged_skills_probe_child() {
     let secret = std::env::var_os("PROVENANT_PROBE_SECRET").expect("secret path");
     assert_eq!(std::fs::read(&stage).unwrap(), b"fixture skill");
     assert!(std::fs::read(&secret).is_err());
+    assert!(std::fs::write(&stage, b"x").is_err());
     assert!(std::fs::write(&secret, b"x").is_err());
+    if let Some(host) = std::env::var_os("PROVENANT_PROBE_HOST") {
+        assert!(std::fs::read(&host).is_err());
+        assert!(std::fs::write(&host, b"x").is_err());
+    }
     std::io::Write::write_all(
         &mut std::io::stdout(),
         b"staged skills assertions completed\n",
