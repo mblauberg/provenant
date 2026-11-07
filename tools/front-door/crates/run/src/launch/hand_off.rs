@@ -3,6 +3,7 @@ use super::*;
 #[cfg(test)]
 thread_local! {
     static TEST_UNCERTAIN_HANDOFF: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static TEST_LOCAL_HANDOFF: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 fn typed_local(phase: &str, error: &RunError) -> HandOff {
@@ -237,6 +238,12 @@ impl RunStore {
                     }
                 }
             };
+        }
+        #[cfg(test)]
+        if TEST_LOCAL_HANDOFF.with(|fault| fault.replace(false)) {
+            local_or_withdraw!(Err::<(), _>(HandOff::Local(
+                "injected local handoff".into()
+            )));
         }
         if let Some(writer) = plan
             .confinement
@@ -1051,6 +1058,55 @@ mod tests {
         assert!(start()?.is_empty());
         assert_eq!(acquisitions.get(), 1);
         assert_eq!(store.record(record.attempt_id, &call)?, record);
+        Ok(())
+    }
+
+    #[test]
+    fn local_handoff_write_failure_returns_error_without_reporting_withdrawal()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let (clock, cancel) = (clock(), CancelToken::new());
+        let call = call(&clock, &cancel);
+        let store = RunStore::open(&context(temp.path())?, &call)?;
+        let request = input();
+        store.create(&request, &call)?;
+        let before = std::cell::RefCell::new(None);
+        let acquire = |directory, scope: Scope, binding| {
+            let lease = custody::acquire_writer(
+                directory,
+                scope,
+                binding,
+                call.lock_budget(),
+                call.cancel,
+                call.clock,
+            )?;
+            *before.borrow_mut() =
+                Some(store.record(scope.attempt, &call).expect("starting record"));
+            store.db.execute_batch("CREATE TEMP TRIGGER fail_handoff_withdraw BEFORE UPDATE ON attempts BEGIN SELECT RAISE(ABORT, 'injected withdrawal write'); END;").expect("inject write failure");
+            Ok(lease)
+        };
+        TEST_LOCAL_HANDOFF.with(|fault| fault.set(true));
+        let result = store.start_inner(
+            request.run_id,
+            &crate::dispatch_tests::Ready,
+            &|_, _| Ok(Vec::new()),
+            &acquire,
+            None,
+            &call,
+        );
+        assert!(matches!(result, Err(RunError::Sqlite(_))));
+        let before = before.into_inner().ok_or("starting record")?;
+        assert!(matches!(before.state, AttemptState::Starting { .. }));
+        assert_eq!(store.record(before.attempt_id, &call)?, before);
+        let reopened = RunStore::open(&context(temp.path())?, &call)?;
+        assert_eq!(reopened.record(before.attempt_id, &call)?, before);
+        assert_eq!(
+            reopened
+                .operation(&request.operation_id, &call)?
+                .ok_or("operation")?
+                .state,
+            OperationState::Accepted
+        );
         Ok(())
     }
 
