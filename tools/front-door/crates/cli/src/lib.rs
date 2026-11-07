@@ -471,7 +471,11 @@ fn expanded_model() -> clap::Command {
 fn hide_compact_arguments(mut command: clap::Command) -> clap::Command {
     let hidden: Vec<_> = command
         .get_arguments()
-        .filter(|arg| !arg.is_positional() && !COMPACT_ARGUMENTS.contains(&arg.get_id().as_str()))
+        .filter(|arg| {
+            !arg.is_positional()
+                && !COMPACT_ARGUMENTS.contains(&arg.get_id().as_str())
+                && !(command.get_name() == "retry" && arg.get_id() == "node")
+        })
         .map(|arg| arg.get_id().clone())
         .collect();
     for id in hidden {
@@ -1392,6 +1396,14 @@ mod tests {
                 .iter()
                 .any(|c| c.contains("newline-delimited"))
         );
+    }
+    #[test]
+    fn retry_help_shows_graph_node_selector() {
+        let ParseOutcome::Help { text, .. } = parsed(&["help", "retry"]) else {
+            panic!("retry help");
+        };
+        assert!(text.contains("--node"), "{text}");
+        assert!(text.contains("GRAPH/NODE"), "{text}");
     }
     #[test]
     fn chair_log_help_explains_generated_retry_keys() {
