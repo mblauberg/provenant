@@ -18,8 +18,8 @@ use view::object_binding;
 #[cfg(test)]
 pub(crate) use view::{bind, prepare_refs};
 pub(crate) use view::{
-    bound_source, merge_head, merge_objects, prepare_bound, private_tip, restore_index,
-    set_private_tip,
+    bound_source, merge_head, merge_objects, prepare_bound, prepare_read_only, private_tip,
+    restore_index, set_private_tip,
 };
 
 fn invalid() -> RunError {

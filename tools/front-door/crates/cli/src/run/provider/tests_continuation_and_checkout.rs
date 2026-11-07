@@ -397,6 +397,7 @@ fn read_only_plan_runs_host_git_with_a_private_home_outside_the_child_store()
         &roots,
         ProjectId::from_bytes([1; 16]),
         &repo,
+        &repo,
         &git,
         request,
         false,

@@ -1775,3 +1775,169 @@ fn import_sweeps_only_aged_quarantine_and_staging_directories() -> TestResult {
     }
     Ok(())
 }
+
+#[test]
+fn read_only_preparation_materialises_split_index() -> TestResult {
+    for format in ["sha1", "sha256"] {
+        let mut fixture = Fixture::new(format)?;
+        fs::write(fixture.lane.join("staged"), "staged content")?;
+        git(
+            &fixture.git,
+            &fixture.home,
+            &fixture.lane,
+            None,
+            &["add", "staged"],
+        )?;
+        git(
+            &fixture.git,
+            &fixture.home,
+            &fixture.lane,
+            None,
+            &["update-index", "--split-index"],
+        )?;
+        let runtime = UtilityRuntime::new(&fixture.git, &fixture.home)?;
+        let repo = runtime.open_read_repo(
+            &SystemExecutor::new(1)?,
+            &fixture.lane,
+            UtilityBudget::bounded(Duration::from_secs(10))?,
+            &CancelToken::new(),
+        )?;
+        let host_index = fs::read(repo.private_git_dir().join("index"))?;
+        let scratch = fixture.root.join("reader-split");
+        fs::create_dir(&scratch)?;
+        super::prepare_read_only(&fixture.git, &repo, &scratch, None, Some(fixture.base))?;
+        fixture.source = scratch.join("git-objects");
+        let status = fixture.git_overlay(&scratch, &["status", "--porcelain"])?;
+        assert!(
+            String::from_utf8(status.stdout)?.contains("A  staged"),
+            "{format}"
+        );
+        let shared = fixture.git_overlay(&scratch, &["rev-parse", "--shared-index-path"])?;
+        assert!(
+            String::from_utf8(shared.stdout)?.trim().is_empty(),
+            "{format}"
+        );
+        assert_eq!(fs::read(repo.private_git_dir().join("index"))?, host_index);
+    }
+    Ok(())
+}
+
+#[test]
+fn read_only_private_git_fetches_without_changing_linked_checkout() -> TestResult {
+    let mut fixture = Fixture::new("sha1")?;
+    let remote = fixture.root.join("remote");
+    git(
+        &fixture.git,
+        &fixture.home,
+        &fixture.root,
+        None,
+        &[
+            "clone",
+            "-q",
+            "--no-local",
+            fixture.project.to_str().ok_or("project")?,
+            remote.to_str().ok_or("remote")?,
+        ],
+    )?;
+    git(
+        &fixture.git,
+        &fixture.home,
+        &fixture.project,
+        None,
+        &["remote", "add", "origin", remote.to_str().ok_or("remote")?],
+    )?;
+    fs::write(remote.join("upstream"), "remote-only content\n")?;
+    git(
+        &fixture.git,
+        &fixture.home,
+        &remote,
+        None,
+        &["add", "upstream"],
+    )?;
+    git(
+        &fixture.git,
+        &fixture.home,
+        &remote,
+        None,
+        &["commit", "-qm", "upstream"],
+    )?;
+    let remote_head = oid(git(
+        &fixture.git,
+        &fixture.home,
+        &remote,
+        None,
+        &["rev-parse", "HEAD"],
+    )?)?;
+    let runtime = UtilityRuntime::new(&fixture.git, &fixture.home)?;
+    let executor = SystemExecutor::new(1)?;
+    let repo = runtime.open_read_repo(
+        &executor,
+        &fixture.lane,
+        UtilityBudget::bounded(Duration::from_secs(10))?,
+        &CancelToken::new(),
+    )?;
+    fn files(root: &Path) -> TestResult<Vec<(PathBuf, Vec<u8>)>> {
+        fn walk(root: &Path, path: &Path, out: &mut Vec<(PathBuf, Vec<u8>)>) -> TestResult {
+            for entry in fs::read_dir(path)? {
+                let entry = entry?;
+                let path = entry.path();
+                if entry.file_type()?.is_dir() {
+                    walk(root, &path, out)?;
+                } else {
+                    out.push((path.strip_prefix(root)?.to_owned(), fs::read(&path)?));
+                }
+            }
+            Ok(())
+        }
+        let mut out = Vec::new();
+        walk(root, root, &mut out)?;
+        out.sort();
+        Ok(out)
+    }
+    let host_objects = files(&fixture.common_objects())?;
+    let host_refs = files(&repo.common_git_dir().join("refs"))?;
+    let host_config = fs::read(repo.common_git_dir().join("config"))?;
+    let host_head = fs::read(repo.private_git_dir().join("HEAD"))?;
+    let host_index = fs::read(repo.private_git_dir().join("index"))?;
+    let host_ref = fs::read(repo.common_git_dir().join("refs/heads/lane"))?;
+    let checkout = fs::read(fixture.lane.join("file"))?;
+    let scratch = fixture.root.join("reader-scratch");
+    fs::create_dir(&scratch)?;
+    super::prepare_read_only(&fixture.git, &repo, &scratch, None, Some(fixture.base))?;
+    fixture.source = scratch.join("git-objects");
+    fixture.git_overlay(
+        &scratch,
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "fetch",
+            "origin",
+            "+refs/heads/main:refs/remotes/origin/main",
+        ],
+    )?;
+    assert_eq!(
+        oid(fixture.git_overlay(&scratch, &["rev-parse", "FETCH_HEAD"])?)?,
+        remote_head
+    );
+    assert_eq!(
+        oid(fixture.git_overlay(&scratch, &["rev-parse", "refs/remotes/origin/main"])?)?,
+        remote_head
+    );
+    assert_eq!(
+        oid(fixture.git_overlay(&scratch, &["rev-parse", "HEAD"])?)?,
+        fixture.base
+    );
+    fixture.git_overlay(&scratch, &["cat-file", "-e", &remote_head.to_string()])?;
+    assert!(!object_path(&fixture.common_objects(), remote_head).exists());
+    assert_eq!(files(&fixture.common_objects())?, host_objects);
+    assert_eq!(files(&repo.common_git_dir().join("refs"))?, host_refs);
+    assert_eq!(fs::read(repo.common_git_dir().join("config"))?, host_config);
+    assert_eq!(fs::read(repo.private_git_dir().join("HEAD"))?, host_head);
+    assert_eq!(fs::read(repo.private_git_dir().join("index"))?, host_index);
+    assert_eq!(
+        fs::read(repo.common_git_dir().join("refs/heads/lane"))?,
+        host_ref
+    );
+    assert_eq!(fs::read(fixture.lane.join("file"))?, checkout);
+    Ok(())
+}

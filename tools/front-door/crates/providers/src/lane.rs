@@ -365,11 +365,7 @@ pub(crate) fn git_wrapper(git: &Path, options: &GitWrapper) -> Result<Vec<u8>, P
     let mut bytes = b"#!/bin/sh\n".to_vec();
     if options.scrub {
         let global = if let Some(config) = &options.identity_config {
-            let config = config.to_str().ok_or(ProviderError::InvalidPath)?;
-            if config.chars().any(char::is_control) {
-                return Err(ProviderError::InvalidPath);
-            }
-            shell_quote(config)
+            shell_quote_os(config.as_os_str())?
         } else {
             "'/dev/null'".to_owned()
         };
@@ -805,18 +801,35 @@ fn claude_shell(env: &[(OsString, OsString)]) -> Vec<u8> {
 /// so they never bind. The leading global options are Git's own list (`git help
 /// git`); an option the parser does not know, or a missing value, means it
 /// cannot tell where the subcommand starts, so it does not bind.
-fn bound_exports(bound: &BoundGit) -> Result<String, ProviderError> {
-    let worktree = bound.worktree.to_str().ok_or(ProviderError::InvalidPath)?;
-    if worktree.chars().any(char::is_control) {
+fn shell_quote_os(value: &std::ffi::OsStr) -> Result<String, ProviderError> {
+    use std::os::unix::ffi::OsStrExt;
+    if value
+        .to_str()
+        .is_some_and(|text| text.chars().any(char::is_control))
+    {
         return Err(ProviderError::InvalidPath);
     }
+    let mut quoted = String::from("'");
+    for &byte in value.as_bytes() {
+        match byte {
+            0..=31 | 127 => return Err(ProviderError::InvalidPath),
+            b'\'' => quoted.push_str("'\\''"),
+            32..=126 => quoted.push(char::from(byte)),
+            _ => quoted.push_str(&format!("'$(printf '\\{byte:03o}')'")),
+        }
+    }
+    quoted.push('\'');
+    Ok(quoted)
+}
+
+fn bound_exports(bound: &BoundGit) -> Result<String, ProviderError> {
+    let worktree = shell_quote_os(bound.worktree.as_os_str())?;
     let mut exports = String::new();
     let mut names = Vec::new();
     for (key, value) in &bound.env {
-        let value = value.to_str().ok_or(ProviderError::InvalidPath)?;
         let key = key.to_str().ok_or(ProviderError::InvalidPath)?;
         names.push(key);
-        exports.push_str(&format!("  export {key}={}\n", shell_quote(value)));
+        exports.push_str(&format!("  export {key}={}\n", shell_quote_os(value)?));
     }
     // Whatever the lane does not bind is cleared in both branches, so an
     // inherited index or identity cannot redirect Git inside the checkout.
@@ -834,8 +847,9 @@ fn bound_exports(bound: &BoundGit) -> Result<String, ProviderError> {
             "  while [ \"$#\" -gt 0 ]; do\n",
             "    case \"$1\" in\n",
             "      -C) [ \"$#\" -ge 2 ] || break; lane_d=$(cd \"$lane_d\" 2>/dev/null && cd \"$2\" 2>/dev/null && pwd -P) || return 1; shift 2 ;;\n",
-            "      -c|--git-dir|--work-tree|--namespace|--config-env|--attr-source|--super-prefix) [ \"$#\" -ge 2 ] || return 1; shift 2 ;;\n",
-            "      --git-dir=*|--work-tree=*|--namespace=*|--config-env=*|--attr-source=*|--super-prefix=*|--exec-path|--exec-path=*|--list-cmds=*) shift ;;\n",
+            "      --git-dir|--work-tree|--git-dir=*|--work-tree=*) return 1 ;;\n",
+            "      -c|--namespace|--config-env|--attr-source|--super-prefix) [ \"$#\" -ge 2 ] || return 1; shift 2 ;;\n",
+            "      --namespace=*|--config-env=*|--attr-source=*|--super-prefix=*|--exec-path|--exec-path=*|--list-cmds=*) shift ;;\n",
             "      -v|--version|-h|--help|--html-path|--man-path|--info-path|-p|--paginate|-P|--no-pager) shift ;;\n",
             "      --no-replace-objects|--no-lazy-fetch|--no-optional-locks|--no-advice|--bare) shift ;;\n",
             "      --literal-pathspecs|--glob-pathspecs|--noglob-pathspecs|--icase-pathspecs) shift ;;\n",
@@ -857,7 +871,7 @@ fn bound_exports(bound: &BoundGit) -> Result<String, ProviderError> {
             "  unset {}\n",
             "fi\n",
         ),
-        shell_quote(worktree),
+        worktree,
         others,
         exports,
         names.join(" "),
@@ -880,6 +894,18 @@ const UNBOUND: [&str; 9] = [
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shell_quote_os_preserves_non_utf8_path_bytes() -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::ffi::OsStrExt;
+        let value = std::ffi::OsStr::from_bytes(b"/tmp/quote'\xff");
+        let output = std::process::Command::new("/bin/sh")
+            .args(["-c", &format!("printf %s {}", shell_quote_os(value)?)])
+            .output()?;
+        assert!(output.status.success());
+        assert_eq!(output.stdout, value.as_bytes());
+        Ok(())
+    }
 
     #[test]
     fn exec_path_probe_rejects_failed_or_incomplete_captures() {

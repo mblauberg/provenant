@@ -624,6 +624,22 @@ fn agy_read_only_linked_worktree_git_directories_are_not_writable()
     let common = repo.join(".git");
     let private = common.join("worktrees/linked");
     assert!(private.is_dir());
+    let private_common = root.join("scratch/git-common");
+    std::fs::create_dir_all(private_common.join("objects"))?;
+    std::fs::create_dir_all(private_common.join("refs"))?;
+    std::fs::copy(common.join("config"), private_common.join("config"))?;
+    std::fs::copy(private.join("index"), private_common.join("index"))?;
+    let head = std::process::Command::new(git)
+        .current_dir(&worktree)
+        .args(["rev-parse", "HEAD"])
+        .output()?;
+    assert!(head.status.success());
+    std::fs::write(private_common.join("HEAD"), head.stdout)?;
+    std::fs::create_dir_all(root.join("scratch/git-objects/info"))?;
+    std::fs::write(
+        root.join("scratch/git-objects/info/alternates"),
+        format!("{}\n", common.join("objects").display()),
+    )?;
     let executable = root.join("bin/agy");
     std::fs::write(&executable, "fixture")?;
     let base = super::tests::read_only_plan(root.to_str().unwrap(), Some("keychain"));
@@ -662,7 +678,8 @@ fn agy_read_only_linked_worktree_git_directories_are_not_writable()
                 std::fs::create_dir_all(path)?
             }
             SetupStep::WriteFile { path, bytes }
-                if path.starts_with(root.join("scratch/git-objects")) =>
+                if path.starts_with(root.join("scratch/git-objects"))
+                    || path == &root.join("scratch/gitconfig") =>
             {
                 std::fs::write(path, bytes)?
             }
@@ -700,7 +717,7 @@ fn agy_read_only_linked_worktree_git_directories_are_not_writable()
         };
     for args in [&["log", "-1"][..], &["diff", "HEAD~1"][..]] {
         let argv: Vec<std::ffi::OsString> =
-            std::iter::once(root.join("scratch/read-only-git/git").into_os_string())
+            std::iter::once(root.join("scratch/bin/git").into_os_string())
                 .chain(args.iter().map(Into::into))
                 .collect();
         let output = sandboxed(&argv)?.output()?;
