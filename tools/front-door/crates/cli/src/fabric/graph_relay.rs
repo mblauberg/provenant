@@ -505,6 +505,9 @@ fn provision_added_writers(
                     (progress.worktree == node.worktree && progress.writer_binding.is_some())
                         || (progress.id == node.id
                             && (!matches!(progress.state, NodeState::Pending | NodeState::Running)
+                                // Recovery owns an already-started launch. An
+                                // unrelated add must not provision it again.
+                                || progress.launch_retry.is_some()
                                 || !progress.attempts.is_empty()))
                 })
         })
