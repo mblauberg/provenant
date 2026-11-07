@@ -240,6 +240,17 @@ pub(crate) fn status_rows(run: &GraphRun, target: &GraphTarget) -> Vec<Value> {
                 }
             }));
         }
+        if row["kind"] == "graph"
+            && run.advance_error.as_deref()
+                == Some(
+                    provenant_fabric_runtime::graph::unreadable_graph_guidance(&target.graph)
+                        .as_str(),
+                )
+        {
+            row["state"] = json!("unreadable");
+            row["next"] = json!(format!("provenant stop -- {}", target.graph));
+            continue;
+        }
         let state = row["state"].as_str().unwrap_or("");
         let selection = node.map_or_else(
             || target.graph.clone(),
@@ -920,7 +931,9 @@ pub(crate) fn append_graph_status(
                     None,
                     None,
                     json!("unreadable"),
-                    Some(&error.to_string()),
+                    Some(&provenant_fabric_runtime::graph::unreadable_graph_guidance(
+                        &graph,
+                    )),
                 )),
                 Err(error) => return Err(error.into()),
             }
@@ -939,6 +952,11 @@ pub(crate) fn append_graph_status(
                     row["id"].as_str().unwrap_or(""),
                     row["state"].as_str().unwrap_or("")
                 ));
+                if row["state"] == "unreadable"
+                    && let Some(reason) = row["reason"].as_str()
+                {
+                    reply.human.push_str(&format!("{reason}\n"));
+                }
             }
             if let Some(output) = reply.result.data["rows"].as_array_mut() {
                 output.retain(|existing| {

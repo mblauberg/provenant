@@ -806,7 +806,7 @@ fn tick_reports_undecodable_checkpoint_once_and_recovers() {
     // The ordinary read reproduces the same error on every tick.
     assert!(FileJournal::read_checkpoint(&root, project, "g-test").is_err());
     let first = FileJournal::read_checkpoint_for_tick(&root, project, "g-test").unwrap_err();
-    assert!(first.to_string().contains("cancel it"));
+    assert!(first.to_string().contains("provenant stop -- g-test"));
     assert!(
         FileJournal::read_checkpoint_for_tick(&root, project, "g-test")
             .unwrap()
